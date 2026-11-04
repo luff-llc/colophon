@@ -21,7 +21,7 @@ from [0.1](colophon-0.1.md), not an upgrade reader. MUST and SHOULD express prot
 The model is unchanged: a library has a root, recovery identity, invited members, scoped grants,
 a signed authority history, encrypted operations and deterministic views. Revocation keeps
 acknowledged operations. Unseen writes claiming pre-revocation authority are held, never folded.
-No wall-clock timestamp decides conflict or display order.
+No wall-clock timestamp decides conflict order. Ledger display uses claimed dates only within an authority sequence.
 
 ## 2. Records and identity
 
@@ -30,6 +30,18 @@ object keys sorted recursively and slashes unescaped. Wire bytes use standard pa
 Readers MUST verify the exact decoded `body` bytes, without re-encoding them. The signature is
 ECDSA P-256 with SHA-256, raw 64-byte `r || s`. No WebAuthn assertions, cosignatures or keyrings
 are supported in this version.
+
+Canonical numbers follow the pinned serde_json 1.0.145 writer (Ryū binary64 formatting).
+Integer tokens within signed/unsigned 64-bit range are encoded in decimal without leading
+zeros (integer-token `-0` is parsed as floating negative zero). Out-of-range integer tokens,
+fractional or exponent tokens are parsed as IEEE-754 binary64 with correct rounding
+(`float_roundtrip`); writers use the shortest round-tripping decimal, with lowercase `e`, no
+exponent leading zeros or positive sign, and `.0` for integral floats in fixed notation.
+Negative floating zero is `-0.0`. Ryū's fixed/scientific notation choice is normative (for
+example `1.0`, `1e-6`, `0.00001`, `6.713554789312184e-10`, `123456789.12345679`).
+Integer and float representations remain distinct: `1` and `1.0` have different canonical
+bytes. Non-finite numbers are forbidden. Hosts MUST retain binary64 values through JSON
+serialization; readers MUST use correctly rounded parsing before recomputing operation IDs.
 
 A public identity is `{"signing":"<base64>","agreement":"<base64>"}`: two valid, uncompressed
 65-byte SEC1/X9.63 P-256 points. Key IDs are the first 32 lowercase hex characters of SHA-256
@@ -103,7 +115,7 @@ and these action fields:
 | `genesis` | `label`, `ownerLabel`, `root`, `recovery`, `namespaces` | Initializes the library. Creation then introduces every initial epoch with `rekey`. |
 | `rekey` | `epochs` | Introduces consecutive epochs with complete eligible recipient sets. |
 | `grant` | `request`, `grant`, `shares` | Verifies the embedded self-signed request, admits the member and shares every historical epoch in scope. |
-| `revoke` | `memberID`, `kept`, `epochs` | Ends the grant, preserves acknowledged operation IDs, and rotates every readable namespace in the same record. |
+| `revoke` | `memberID`, `kept`, `epochs` | Ends the grant, preserves acknowledged signed-body digests, and rotates every readable namespace in the same record. |
 | `reshare` | `recipient`, `label`, `shares` | Shares all historical epochs before planned root transfer. |
 | `handover` | `root`, `kept`, `epochs` | Requires a prior matching reshare of every epoch; ends the former root's access and rotates all namespaces. |
 | `recover` | `root`, `label`, `kept`, `shares`, `epochs` | Recovery-signed atomic authority replacement, all historical data-key shares and rotation of all namespaces. |
@@ -138,7 +150,10 @@ The plaintext is exactly the extensible payload model:
 An operation ID binds its content: first 32 hex SHA-256 characters of canonical JSON containing
 `purpose:"colophon/operation-id/2"`, `namespace`, `author`, `epoch`, `nonce` (an array of twelve
 integer octets for this digest preimage), and `operation` (the complete plaintext with `id:""`).
-This prevents an author replacing a kept operation's payload while reusing its ID.
+The `kept` set contains full lowercase SHA-256 digests of the exact authenticated signed
+header body bytes, not operation IDs or envelope/signature encodings. Revocation, handover and
+recovery preserve only admitted records whose payload and content-derived ID authenticated.
+A changed header cannot inherit preservation by copying an ID.
 
 The signed header body contains `protocol:"colophon/operation/2"`, `library`, `namespace`,
 `author`, `epoch`, `id`, `clock`, `authority`, `created`, `nonce`, and `ciphertext`.
@@ -147,21 +162,33 @@ AES-256-GCM associated data. `nonce` is 12 bytes and `ciphertext` includes the 1
 The author signs the entire header. Plaintext ID, clock, authority and date MUST match the
 header, and the content-derived ID MUST verify after opening. Kind and payload are encrypted.
 
-**Order is `(clock, author, id)`, never `created`.** An honest writer increments the highest
-non-refused clock it has seen in the namespace. Clocks must be positive and no greater than
-JavaScript's exact integer limit, 2^53−1. Budget accounting uses the same order across namespaces.
-Same-author duplicate operation IDs are refused to avoid equivocation.
+**Fold order is `(clock, author, id)`, never `created`.** A writer increments the highest
+clock of an admitted, successfully authenticated operation in its namespace (zero if none).
+Held, refused, unavailable and invalid-payload records MUST NOT advance the local write clock.
+Clocks are positive integers at most 2^53−1. In sorted header order, an otherwise admissible
+header MUST be no more than 1,024 above the highest earlier admitted header clock in its
+namespace (initially zero); larger jumps are refused as `clockJump` without reserving budget.
+This allows bounded gaps for partial replicas without letting a single header exhaust the
+interoperable integer range. Budget accounting uses the same order across namespaces.
+Only authenticated, admissible payloads compete for a same-author operation ID; the first in
+fold order wins, and later authenticated competitors are refused as `duplicateID`. Invalid,
+held or out-of-scope competitors never disqualify a valid or kept record. Signed header budget
+reservations count distinct `(author, id)` pairs, so an invalid copy cannot consume an extra
+slot ahead of its authentic record.
 
 After validating the header's signature, library binding, format and storage path, admission is:
 
-1. Authority is newer than this replica: held, `authorityBehind`.
-2. No grant/root authority at the cited sequence, or no write scope: refused, `notGranted`.
-3. Epoch was not current at that sequence: refused, `wrongEpoch`.
-4. Author's `created` is later than its grant expiry: refused, `expired`.
-5. Author is revoked and ID is not in `kept`: refused, `revoked`, if citing revocation or later;
+1. Check author membership, grant start, declared namespace and write scope using verified
+   authority (the latest verified sequence for a future claim): refused, `notGranted`.
+2. Author's `created` is later than its grant expiry: refused, `expired`.
+3. Author is revoked and the signed-body digest is not in `kept`: refused, `revoked`, if citing revocation or later;
    otherwise held, `revokedBackdated`.
-6. Earlier admitted signed headers have spent the write budget: refused, `budgetSpent`.
-7. Otherwise the signed header is admitted and reserves one budget slot.
+4. Authority is newer than this replica: held, `authorityBehind`. A future claim cannot bypass
+   restrictions already established by the verified authority prefix.
+5. Epoch was not current at that sequence: refused, `wrongEpoch`.
+6. Clock exceeds the forward-jump bound: refused, `clockJump`.
+7. Earlier admitted signed headers have spent the write budget: refused, `budgetSpent`.
+8. Otherwise the signed header is admitted and reserves one budget slot per distinct author/ID pair.
 
 A reader missing a historical key holds the corresponding content as `unavailable`. A present
 key which cannot authenticate the ciphertext, plaintext metadata or content-derived ID yields
@@ -179,9 +206,13 @@ Revocation cannot erase keys or content already obtained by a member.
 
 ## 6. Modules, views and tools
 
-`DomainModule` supplies deterministic folds and operation/query specs containing a name,
+`DomainModule` supplies a display name, per-kind ledger phrases, deterministic folds and operation/query specs containing a name,
 description and JSON Schema. Known inputs are validated both by generated tools and when
-folding received payloads. Unknown kinds are skipped; unknown payload fields survive edits.
+folding received payloads. Unknown kinds are skipped. Each kind applies only its defined mutations: payload properties
+outside that kind's schema are preserved in the projected object's `extensions` bag and
+survive edits. They MUST NOT overwrite defined domain state or authenticated projection fields.
+An input property named `extensions` is itself stored under `extensions.extensions`; it is
+never flattened. `expect` and `seek` are command controls, not persisted object properties.
 An optional stale `expect` records a complete attributed alternative in `conflicts`. Edits
 without `expect` apply in agreed order. All built-in queries currently expose only `read`.
 
@@ -216,10 +247,26 @@ Tools are `<namespace>__read` and `<namespace>__<kind>`, retaining namespace dot
 expiry and budget; `call` independently enforces the same restrictions. Removing a tool from
 a list is never the authorization mechanism.
 
-The ledger is derived, not separately signed: authority events in chain order, verified requests
-(including those embedded in grants) in member-ID order, then signed operations in agreed order, followed by malformed-record notices.
-Its sequence is one-based display order. It reports creation, requests, grants, revocation,
-rekeying, writes, held writes and refusals. Timestamps do not sort it.
+The ledger is derived, not separately signed. Authority entries retain chain order. Operations
+citing authority N appear after entry N and before N+1, sorted within that group by normalized
+`(created, author, id)`. This is display order only; folds and admission still use logical clocks.
+A verified access request (including one embedded in a grant) appears immediately before its
+grant. Pending requests appear after the latest verified authority's writes, sorted by normalized
+`(created, memberID)`; future-authority operations follow in their cited sequence groups.
+Malformed-record notices come last, ordered by author and ID. Sequence is one-based display
+order and is recomputed after merging records. The ledger reports creation, requests, grants,
+revocation, rekeying, writes, held writes and refusals. User-facing text uses module display
+names (`listening`, `notes`, `reading`) and per-kind phrases such as “saved a link” and “added
+a note”. Grant/request descriptions reflect the actual Cartesian-product access scope; this
+version cannot grant read-only access in one namespace and write access in another to the same
+identity. Standing facts use present tense. Revocation describes distinct preserved contributions
+(edits to the same object do not inflate the count) and the fact that prior reading cannot be
+undone. Each rotation action produces one combined namespace rekey summary. Initial epoch
+lines are hidden because the creation entry explains that the namespaces are sealed with keys
+only members hold. Write ledger entries expose optional `namespace`, `kind` and `origin`
+(`person` or `ai`) for UI grouping. Namespace and origin come from verified headers and member
+metadata; kind is included only when the encrypted payload authenticates. Other event types
+omit these grouping fields. Payload-provided attribution cannot override them.
 
 ## 7. Host contract and boundaries
 

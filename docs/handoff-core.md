@@ -30,7 +30,7 @@ npm --prefix js run build
 npm --prefix js test
 ```
 
-Passed: 12 Rust tests (2 crypto, 9 protocol/domain, 1 conformance), Clippy with warnings denied
+Initial milestone passed: 12 Rust tests (2 crypto, 9 protocol/domain, 1 conformance), Clippy with warnings denied
 (including `--workspace --all-targets`), wasm32 core build, release wasm build, TypeScript
 compilation, Node 24.12.0 smoke and fixed-fixture parity, `cargo fmt --check`, and public API
 documentation builds. Both crates deny missing public docs and forbid unsafe code. Source checks
@@ -55,19 +55,76 @@ build artifacts and caches are ignored.
 
 ## Commit restriction
 
-The first milestone commit was blocked: the linked worktree's Git metadata is outside the
-sandbox's writable roots, so Git could not create `index.lock`. No approval escalation is
-available in this session. All changes therefore remain uncommitted for the coordinator.
+The review-fix commit attempt failed because Git could not create
+`/Users/mikelxc/projects/colophon/.git/worktrees/core/index.lock` (`Operation not permitted`).
+All review fixes remain uncommitted, as requested when Git cannot write. Nothing was pushed.
+The worktree was clean at the start of this review pass.
 
-Suggested descriptive commit groups, in dependency order:
+Intended separate commit subjects, in review-finding order:
 
-1. Add pure Rust protocol engine and wasm host steps (workspace manifests, lockfile, crate sources).
-2. Add deterministic conformance and adversarial protocol tests (tests and 0.2 vectors).
-3. Add WebCrypto TypeScript package and cross-runtime smoke (js).
-4. Document Colophon 0.2 and core integration (README, spec and docs).
+1. Prevent hostile headers from poisoning namespace write clocks
+2. Preserve authenticated records across invalid duplicate IDs
+3. Round-trip fractional payloads when deriving operation IDs
+4. Isolate domain extensions from controlled state
+5. Compare and clear temporary ECDH secrets
+6. Interleave ledger writes with authority history
+7. Tell the library ledger story in plain English
+8. Expose authenticated ledger grouping metadata
 
-End each commit message with:
+Each commit should end with `Co-Authored-By: Codex <noreply@openai.com>`.
 
+## Review fixes (November 4)
+
+1. Write clocks now use only admitted, authenticated content. Known scope, expiry and revocation
+   precede future-authority holding; admitted headers have a 1,024-step forward-jump bound.
+   The hostile-header regression failed before the fix and passes afterward. Spec §5 updated.
+2. `kept` now binds full SHA-256 signed-body digests of authenticated operations. Invalid
+   copies cannot disqualify originals or spend extra duplicate-ID budget slots. The regression
+   failed before the fix, including an earlier-clock duplicate, and passes after it. Authority
+   records and conformance expectations were regenerated for this wire-rule change.
+3. Enabled `float_roundtrip` on the unchanged serde_json =1.0.145 pin. Both reported fractional
+   values now survive writing and replay with their IDs intact; the new regression failed
+   before the feature was enabled. Spec §2 defines canonical number encoding.
+4. All three modules now project only each kind's defined fields. Unknown fields live in
+   `extensions`, including attempted playback, tombstone and attribution overrides. Command
+   controls are not persisted as state. The new cross-module regression failed on playback
+   overwrite before the fix; existing extension tests now assert the bag shape. Spec §6 and
+   conformance projections were updated.
+5. WebCrypto key-pair validation compares every ECDH byte with XOR accumulation and clears
+   both temporary buffers in `finally`, including mismatch and partial-failure paths. The new
+   JS regression observed the original early exit and now checks full reads plus zeroization.
+6. Ledger authority and operations now interleave by cited authority, with `(created, author,
+   id)` display order inside each sequence and requests before their grants. Dates normalize
+   equivalent UTC encodings. The story-order regression failed before the fix and now also
+   checks replay after operations arrive before authority. Spec §6 updated.
+7. Ledger copy now comes from module display names and kind phrases, uses plain English and
+   present tense for standing facts, counts distinct preserved contributions, and combines
+   each rotation into one rekey summary. Creation describes sealing instead of epoch-one lines.
+   The wording regression failed before the rewrite. Existing grant semantics are unchanged:
+   access applies uniformly to every listed namespace, so text accurately says “read and write
+   listening and notes” for that scope. Spec §6 documents this boundary.
+8. `LedgerEntry` exposes optional `namespace`, `kind` and authenticated `origin` on write
+   entries in Rust, TypeScript and docs/js-api.md. Locked content omits kind. The grouping
+   regression failed before these fields existed and checks that payload attribution cannot
+   spoof them. Ledger conformance expectations were regenerated for ordering, copy and fields.
+
+## Review validation
+
+Each of the eight review findings has a regression that was observed failing before its fix:
+seven new Rust protocol tests and a JavaScript key-validation regression. Rust now runs 19 tests
+(16 protocol/domain, two crypto, one conformance). The JavaScript smoke additionally writes and
+replays both reported fractional values and checks the ledger grouping fields through WASM.
+
+Passed after the fixes:
+
+```sh
+cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --check
+npm --prefix js run build
+npm --prefix js test
 ```
-Co-Authored-By: Codex <noreply@openai.com>
-```
+
+Regenerated `conformance/0.2/`: revoke/recovery kept digests changed authority records 6–8 and
+the aggregate record map; extension projections and ledger ordering, wording and metadata
+changed expected output. Operation record bytes and all 0.1 vectors remain unchanged.

@@ -19,6 +19,12 @@ pub struct Spec {
 pub trait DomainModule {
     /// Stable namespace name.
     fn namespace(&self) -> &'static str;
+    /// Human-facing module name used in the library ledger.
+    fn display_name(&self) -> &'static str;
+    /// Past-tense phrase for a known operation kind.
+    fn write_phrase(&self, kind: &str) -> Option<&'static str>;
+    /// Singular and plural names for a preserved contribution, grouped by payload ID.
+    fn contribution_names(&self, kind: &str) -> (&'static str, &'static str);
     /// Supported operations and their input contracts.
     fn operations(&self) -> Vec<Spec>;
     /// Read-only queries. Every built-in domain exposes `read`.
@@ -46,6 +52,21 @@ fn spec(name: &str, description: &str, required: &[&str], properties: Value) -> 
     }
 }
 impl DomainModule for ReadingSaved {
+    fn display_name(&self) -> &'static str {
+        "reading"
+    }
+    fn write_phrase(&self, kind: &str) -> Option<&'static str> {
+        match kind {
+            "capture" => Some("saved a link"),
+            "setState" => Some("updated reading progress"),
+            "editMetadata" => Some("edited a link"),
+            "delete" => Some("removed a link"),
+            _ => None,
+        }
+    }
+    fn contribution_names(&self, _kind: &str) -> (&'static str, &'static str) {
+        ("link", "links")
+    }
     fn namespace(&self) -> &'static str {
         "reading.saved"
     }
@@ -87,13 +108,13 @@ impl DomainModule for ReadingSaved {
             }
             let id = string(&op.payload, "id");
             if op.kind == "capture" {
-                create(&mut items, id, op, &mut conflicts);
+                create(self, &mut items, id, op, &mut conflicts);
             } else if let Some(item) = items.get_mut(id) {
                 if conflict(item, op) || item["deleted"] == true {
                     conflicts.push(json!(op));
                     continue;
                 }
-                merge(item, op);
+                merge(self, item, op);
                 if op.kind == "delete" {
                     item["deleted"] = json!(true);
                 }
@@ -105,6 +126,26 @@ impl DomainModule for ReadingSaved {
     }
 }
 impl DomainModule for ListeningPodcasts {
+    fn display_name(&self) -> &'static str {
+        "listening"
+    }
+    fn write_phrase(&self, kind: &str) -> Option<&'static str> {
+        match kind {
+            "follow" => Some("followed a show"),
+            "unfollow" => Some("unfollowed a show"),
+            "episode" => Some("added an episode"),
+            "position" => Some("updated playback"),
+            "queue" => Some("updated the listening queue"),
+            _ => None,
+        }
+    }
+    fn contribution_names(&self, kind: &str) -> (&'static str, &'static str) {
+        match kind {
+            "follow" | "unfollow" => ("show", "shows"),
+            "episode" | "position" => ("episode", "episodes"),
+            _ => ("queue update", "queue updates"),
+        }
+    }
     fn namespace(&self) -> &'static str {
         "listening.podcasts"
     }
@@ -156,12 +197,12 @@ impl DomainModule for ListeningPodcasts {
             match op.kind.as_str() {
                 "follow" | "unfollow" => {
                     let show = shows.entry(id.to_owned()).or_insert_with(|| json!({}));
-                    merge(show, op);
+                    merge(self, show, op);
                     show["followed"] = json!(op.kind == "follow");
                 }
                 "episode" => {
                     let episode = episodes.entry(id.to_owned()).or_insert_with(|| json!({}));
-                    merge(episode, op);
+                    merge(self, episode, op);
                 }
                 "position" => {
                     let episode = episodes
@@ -173,7 +214,7 @@ impl DomainModule for ListeningPodcasts {
                         .as_str()
                         .is_some_and(|s| Some(s) == episode["positionRevision"].as_str());
                     if ahead || op.payload["seek"] == true || saw_position {
-                        merge(episode, op);
+                        merge(self, episode, op);
                         episode["positionRevision"] = json!(op.id);
                     }
                 }
@@ -181,7 +222,7 @@ impl DomainModule for ListeningPodcasts {
                     if conflict(&queue, op) {
                         conflicts.push(json!(op));
                     } else {
-                        merge(&mut queue, op);
+                        merge(self, &mut queue, op);
                     }
                 }
                 _ => {}
@@ -191,6 +232,23 @@ impl DomainModule for ListeningPodcasts {
     }
 }
 impl DomainModule for Notes {
+    fn display_name(&self) -> &'static str {
+        "notes"
+    }
+    fn write_phrase(&self, kind: &str) -> Option<&'static str> {
+        match kind {
+            "createNotebook" => Some("started a notebook"),
+            "addNote" => Some("added a note"),
+            "editNote" => Some("edited a note"),
+            _ => None,
+        }
+    }
+    fn contribution_names(&self, kind: &str) -> (&'static str, &'static str) {
+        match kind {
+            "createNotebook" => ("notebook", "notebooks"),
+            _ => ("note", "notes"),
+        }
+    }
     fn namespace(&self) -> &'static str {
         "notes"
     }
@@ -227,9 +285,9 @@ impl DomainModule for Notes {
             }
             let id = string(&op.payload, "id");
             match op.kind.as_str() {
-                "createNotebook" => create(&mut notebooks, id, op, &mut conflicts),
+                "createNotebook" => create(self, &mut notebooks, id, op, &mut conflicts),
                 "addNote" if notebooks.contains_key(string(&op.payload, "notebook")) => {
-                    create(&mut notes, id, op, &mut conflicts)
+                    create(self, &mut notes, id, op, &mut conflicts)
                 }
                 "editNote" => {
                     if let Some(note) = notes.get_mut(id) {
@@ -238,7 +296,7 @@ impl DomainModule for Notes {
                         } else if conflict(note, op) {
                             conflicts.push(json!(op));
                         } else {
-                            merge(note, op);
+                            merge(self, note, op);
                         }
                     } else {
                         invalid.push(op.id.clone());
@@ -259,6 +317,7 @@ fn conflict(value: &Value, op: &OperationView) -> bool {
         .is_some_and(|e| e != &value["revision"])
 }
 fn create(
+    module: &dyn DomainModule,
     items: &mut BTreeMap<String, Value>,
     id: &str,
     op: &OperationView,
@@ -268,13 +327,27 @@ fn create(
         conflicts.push(json!(op));
     } else {
         let mut value = json!({});
-        merge(&mut value, op);
+        merge(module, &mut value, op);
         items.insert(id.into(), value);
     }
 }
-fn merge(value: &mut Value, op: &OperationView) {
+fn merge(module: &dyn DomainModule, value: &mut Value, op: &OperationView) {
     if let (Some(target), Some(payload)) = (value.as_object_mut(), op.payload.as_object()) {
-        target.extend(payload.clone());
+        let specs = module.operations();
+        let Some(spec) = specs.iter().find(|spec| spec.name == op.kind) else {
+            return;
+        };
+        for (key, field) in payload {
+            if spec.input_schema["properties"].get(key).is_some() {
+                // Preconditions and command flags influence the fold, not the stored object.
+                if key != "expect" && key != "seek" {
+                    target.insert(key.clone(), field.clone());
+                }
+            } else {
+                let extensions = target.entry("extensions").or_insert_with(|| json!({}));
+                extensions[key] = field.clone();
+            }
+        }
         // Reserved projection fields always come from authenticated metadata.
         target.insert("revision".into(), json!(op.id));
         target.insert("author".into(), json!(op.author));

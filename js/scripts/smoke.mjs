@@ -39,7 +39,7 @@ const notes = root.view('notes');
 assert.equal(notes.ok, true);
 assert.equal(notes.value.state.notes.length, 1);
 assert.equal(notes.value.state.notes[0].origin, 'ai');
-assert.equal(notes.value.state.notes[0].extension.retained, true);
+assert.equal(notes.value.state.notes[0].extensions.extension.retained, true);
 assert(notes.value.admitted.some(op => op.id === written.value.id));
 assert(root.ledger().some(entry => entry.event === 'revoked'));
 assert.equal((await agentLibrary.call('reading.saved__read', {})).reason, 'notGranted');
@@ -76,4 +76,17 @@ const fixture = await Library.open(new Map(Object.entries(encoded).map(([path,b6
 assert.equal(fixture.id, expected.libraryID);
 for (const [namespace, view] of Object.entries(expected.views)) assert.deepEqual(fixture.view(namespace).value, view);
 assert.deepEqual(fixture.ledger(), expected.ledger);
+// Exercise fractional IDs through the JSON host boundary as well as native Rust.
+for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entries()) {
+  const result = await restored.write('listening.podcasts', 'position', { id: `fraction-${index}`, seconds });
+  assert.equal(result.ok, true);
+  assert.equal(result.value.payload.seconds, seconds);
+  const replayed = await Library.open(restored.records, restoredKeys);
+  const operation = replayed.view('listening.podcasts').value.admitted.find(op => op.id === result.value.id);
+  assert.equal(operation.payload.seconds, seconds);
+  const entry = replayed.ledger().find(entry => entry.subject === result.value.id);
+  assert.equal(entry.namespace, 'listening.podcasts');
+  assert.equal(entry.kind, 'position');
+  assert.equal(entry.origin, 'person');
+}
 console.log('Node 24 smoke passed: non-extractable keys, narrowed grants, tools, AI attribution, budget, revoke/keep, rekey, recovery, and Rust/WASM fixture parity.');

@@ -76,7 +76,10 @@ export interface LedgerEntry {
   actor: string; actorLabel: string;
   event: 'created' | 'requested' | 'granted' | 'revoked' | 'rekeyed' | 'wrote' | 'held' | 'refused';
   subject?: string;             // member or operation ID
-  text: string;                 // e.g. "Muse on MacBook could read listening and write notes"
+  namespace?: string;          // wrote entries: authenticated namespace for grouping
+  kind?: string;               // wrote entries: absent when encrypted content is unavailable
+  origin?: 'person' | 'ai';    // wrote entries: authenticated member kind, never payload claims
+  text: string;                // e.g. "Muse on MacBook added a note."
 }
 
 export class Library {
@@ -139,7 +142,7 @@ Mutating the `records` map alone does not import records; call `merge` to apply 
 
 Write implies read because writers have the encryption key. A partial approval fills omitted
 `namespaces` and `access` from the request; explicitly supplied arrays must narrow its scope.
-Grant-wide `writeBudget` counts admitted signed headers across namespaces. A malformed encrypted
+Grant-wide `writeBudget` counts distinct admitted signed author/ID reservations across namespaces. A malformed encrypted
 payload can reserve a slot without entering the domain fold; this keeps accounting independent
 of which namespace keys the reader holds. Unknown restriction fields fail closed.
 
@@ -154,5 +157,12 @@ Tools retain namespace dots and use these exact clean 0.2 operation kinds:
 Examples: `reading.saved__read`, `reading.saved__capture`, `notes__addNote`.
 Use `tools()` for descriptions and input schemas; [the spec](../spec/colophon-0.2.md#6-modules-views-and-tools)
 lists payload fields. Every state also has `conflicts` and `invalid`. Projected items retain unknown
-payload fields while `origin`, `author`, `authorLabel`, `revision` and `clock` come from authenticated
+payload fields in `extensions` while `origin`, `author`, `authorLabel`, `revision` and `clock` come from authenticated
 operations. Deleted saved items remain explicit tombstones (`deleted: true`) in `items`.
+
+Ledger writes are interleaved with authority: writes citing sequence N follow authority N and
+precede N+1, ordered by `(created, author, id)` within the group. Requests precede their grants.
+A UI may group consecutive `wrote` entries by actor, namespace, kind and origin (for example,
+“Ada saved 3 links”). Omitted kinds must not be inferred from encrypted content. This display
+order does not change the logical-clock order used by domain folds. Unknown payload fields
+appear in projected objects' `extensions` bags; `OperationView.payload` remains unchanged.

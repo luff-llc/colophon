@@ -59,8 +59,14 @@ export class WebCryptoKeys implements KeyProvider {
     const peer = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
     const peerBytes = new Uint8Array(await crypto.subtle.exportKey('raw', peer.publicKey));
     const left = await result.agree(peerBytes);
-    const right = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: agreement.publicKey }, peer.privateKey, 256));
-    if (!equal(left, right)) throw new Error('Agreement key pair mismatch');
+    let right: Uint8Array | undefined;
+    try {
+      right = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: agreement.publicKey }, peer.privateKey, 256));
+      if (!equal(left, right)) throw new Error('Agreement key pair mismatch');
+    } finally {
+      left.fill(0);
+      right?.fill(0);
+    }
     return result;
   }
   /** Host storage handle: CryptoKey private halves remain non-extractable. */
@@ -76,7 +82,11 @@ export class WebCryptoKeys implements KeyProvider {
   }
 }
 function copy(value: Uint8Array): Uint8Array<ArrayBuffer> { return new Uint8Array(value); }
-function equal(a: Uint8Array, b: Uint8Array): boolean { return a.length === b.length && a.every((v, i) => v === b[i]); }
+function equal(a: Uint8Array, b: Uint8Array): boolean {
+  let difference = a.length ^ b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) difference |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return difference === 0;
+}
 function entropy(): Uint8Array { return crypto.getRandomValues(new Uint8Array(32)); }
 function now(): string { return new Date().toISOString(); }
 function json(value: unknown): string { const result = JSON.stringify(value); if (result === undefined) throw new Error('Expected JSON input'); return result; }
@@ -90,7 +100,7 @@ export interface AccessRequest { id: string; label: string; kind: MemberKind; na
 export type Outcome<T> = { ok: true; value: T } | { ok: false; reason: 'notGranted' | 'revoked' | 'expired' | 'budgetSpent' | 'notReadable' | 'unavailable'; detail: string };
 export interface OperationView { id: string; kind: string; author: string; authorLabel: string; origin: 'person' | 'ai'; clock: number; created: string; payload: unknown }
 export interface NamespaceView<State = unknown> { namespace: string; admitted: OperationView[]; held: { id: string; author: string; reason: string }[]; refused: { id: string; author: string; reason: string }[]; state: State }
-export interface LedgerEntry { sequence: number; at: string; actor: string; actorLabel: string; event: 'created' | 'requested' | 'granted' | 'revoked' | 'rekeyed' | 'wrote' | 'held' | 'refused'; subject?: string; text: string }
+export interface LedgerEntry { sequence: number; at: string; actor: string; actorLabel: string; event: 'created' | 'requested' | 'granted' | 'revoked' | 'rekeyed' | 'wrote' | 'held' | 'refused'; subject?: string; namespace?: string; kind?: string; origin?: 'person' | 'ai'; text: string }
 export interface Tool { name: string; description: string; inputSchema: unknown }
 
 /** An in-memory library. Hosts persist and sync records; no storage backend is assumed. */
