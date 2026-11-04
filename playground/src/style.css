@@ -75,6 +75,7 @@ body {
   font-size: 16px;
   line-height: 1.55;
   min-height: 100vh;
+  overflow-x: clip;
 }
 
 .sr-only {
@@ -147,13 +148,13 @@ body {
 }
 
 .badge {
-  font-size: 0.72rem;
-  font-weight: 600;
+  font-size: 0.7rem;
+  font-weight: 500;
   letter-spacing: 0.04em;
   padding: 0.15rem 0.55rem;
   border: 1px solid var(--line);
   border-radius: 999px;
-  color: var(--ink-soft);
+  color: var(--ink-faint);
   background: var(--paper-raised);
   white-space: nowrap;
 }
@@ -426,7 +427,14 @@ html[data-theme='lamplight'] .demo-bar .next {
   background: var(--teal-soft);
   border-radius: 4px;
   padding: 0.05rem 0.35rem;
+  margin-inline-start: 0.45rem;
   vertical-align: 1px;
+  white-space: nowrap;
+}
+
+/* The note head is already a flex row with a gap; don't double it. */
+.note-head .ai-mark {
+  margin-inline-start: 0;
 }
 
 .note-cell p.text {
@@ -609,8 +617,25 @@ html[data-theme='lamplight'] .demo-bar .next {
   margin-bottom: 0.5rem;
 }
 
-.ledger li .ai-tag {
-  margin-left: 0.4rem;
+.ledger .group-sum {
+  cursor: pointer;
+}
+
+.ledger .group-sum::marker {
+  color: var(--plum);
+}
+
+.ledger .group-entries {
+  list-style: none;
+  margin: 0.5rem 0 0.1rem;
+  padding: 0 0 0 1rem;
+  border-left: 2px solid var(--line-soft);
+}
+
+.ledger .group-entries li {
+  font-size: 0.9rem;
+  padding: 0.3rem 0;
+  border-bottom: none;
 }
 
 .verbs {
@@ -701,6 +726,29 @@ html[data-theme='lamplight'] .verb.done .n {
   color: var(--ink-soft);
   margin: 0.7rem 0 0;
   min-height: 1.4em;
+}
+
+/* Moments sit above the ledger. On desktop the whole block sticks under the
+ * top bar so the verbs and the active card stay visible while the ledger
+ * grows; on narrow screens the wrapper dissolves and the verbs alone stick
+ * to the bottom as a thumb bar (see the responsive section). */
+.moments-sticky {
+  background: var(--paper-raised);
+}
+
+@media (min-width: 76.01rem) {
+  .moments-sticky {
+    position: sticky;
+    top: 4rem;
+    z-index: 5;
+  }
+}
+
+.recovered-line {
+  margin: 0.8rem 0 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--teal-deep);
 }
 
 /* consent card */
@@ -1208,6 +1256,20 @@ dialog.settings::backdrop {
   pointer-events: none;
 }
 
+/* The page fades in while the intro fades out: one continuous crossfade. */
+#app.revealed > *:not(.intro):not(.sr-only) {
+  animation: page-in 0.7s ease both;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .intro .stage {
   text-align: center;
   max-width: 40rem;
@@ -1366,8 +1428,23 @@ dialog.settings::backdrop {
 /* Three columns need room: below 76rem the agent and library become sheets. */
 @media (max-width: 76rem) {
   .layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     max-width: 46rem;
+  }
+
+  .moments-sticky {
+    display: contents;
+  }
+
+  .verbs {
+    position: sticky;
+    bottom: 0.75rem;
+    z-index: 5;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.7rem 0.8rem 0.8rem;
+    box-shadow: var(--shadow);
   }
 
   .sheets-nav {
@@ -1428,6 +1505,22 @@ dialog.settings::backdrop {
 
   .agent-log {
     max-height: 26rem;
+  }
+
+  .verb {
+    min-height: 44px;
+    font-size: 1rem;
+    padding: 0.65rem 1.1rem 0.65rem 0.6rem;
+  }
+
+  .verb-row {
+    gap: 0.6rem;
+  }
+
+  .consent .actions .button-primary,
+  .consent .actions .button-ghost,
+  .demo-bar .next {
+    min-height: 44px;
   }
 }
 

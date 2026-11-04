@@ -13,6 +13,7 @@ import {
 } from './agent';
 import { DEMO_QUESTION, seedLibrary } from './seed';
 import { loadKeys, loadRecords, saveKeys, saveRecords } from './storage';
+import { groupLedger, groupSeq, summarizeWrites, type LedgerEntryLike } from './ledger';
 
 const NAMESPACES = ['listening.podcasts', 'notes', 'reading.saved'];
 /** Short display names for the consent card's plain-words scope. */
@@ -83,10 +84,16 @@ function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/** The small AI mark: always gapped from the words, read as "written by AI". */
+function aiBadge(): HTMLElement {
+  return el('span', { class: 'ai-mark', role: 'img', 'aria-label': 'written by AI' }, ['AI']);
+}
+
 /* ------------------------- app ------------------------- */
 
 export async function boot(root: HTMLElement | null): Promise<void> {
   if (!root) throw new Error('missing #app');
+  const appRoot: HTMLElement = root;
   await core.init();
 
   const settings: AgentSettings = loadSettings();
@@ -114,6 +121,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     introDone: false,
   };
   const seenLedger = new Set<string>();
+  let ledgerPrimed = false;
   const recordCache = new Map<string, RecordInspection | null>();
   let lastToolCard: HTMLElement | null = null;
 
@@ -150,7 +158,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     const header = el('header', { class: 'topbar' });
     const h1 = el('h1', { class: 'brand' }, ['Colophon', el('span', { class: 'sub' }, ['playground'])]);
     const badge = el('span', { class: 'badge' }, ['WebAssembly core']);
-    badge.title = 'Running the real @colophon/core';
+    badge.title = 'The Colophon Rust core, compiled to WebAssembly, running in this tab.';
     const spacer = el('span', { class: 'spacer' });
     const themeBtn = el('button', { class: 'icon-button', id: 'btn-theme', type: 'button' }, [`Theme: ${themeName()}`]);
     themeBtn.addEventListener('click', () => {
@@ -411,6 +419,9 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     state.introDone = true;
     clearIntroTimers();
     const intro = $('intro');
+    // The page fades in on the same beat the book fades out: one continuous
+    // crossfade, no blank moment. Reduced motion skips both sides.
+    appRoot.classList.add('revealed');
     intro.classList.add('leaving');
     setTimeout(() => intro.remove(), REDUCED() ? 50 : 750);
     renderAll();
@@ -582,7 +593,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     await persist();
     // Drop every in-memory key and replica. The agent's keys stay: they live
     // on its own device, which never closed.
-    const dropped = state.library.records.size;
+    const ledgerBefore = state.library.ledger().map((e) => e.text).join('\n');
     const ownerBackup = state.ownerKeys;
     const recoveryBackup = state.recoveryKeys;
     state.library = null;
@@ -599,12 +610,10 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       // storage, falling back to this tab's keys when storage is unavailable.
       let ownerKeys: core.KeyProvider = ownerBackup;
       let recoveryKeys: core.KeyProvider | null = recoveryBackup;
-      let keysFromStore = false;
       const keys = await loadKeys().catch(() => null);
       if (keys) {
         ownerKeys = await core.WebCryptoKeys.fromKeyPairs(keys.owner.signing, keys.owner.agreement);
         recoveryKeys = await core.WebCryptoKeys.fromKeyPairs(keys.recovery.signing, keys.recovery.agreement);
-        keysFromStore = true;
       }
       const library = await core.Library.open(stored, ownerKeys);
       state.ownerKeys = ownerKeys;
@@ -612,9 +621,10 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       state.library = library;
       if (state.agentKeys) state.agentLibrary = await core.Library.open(stored, state.agentKeys);
       state.verbsDone.recover = true;
-      state.recoveredNote =
-        `Rebuilt from ${stored.size} stored records (dropped ${dropped} in-memory). ` +
-        (keysFromStore ? 'Owner and recovery keys restored from this browser’s separate storage.' : 'Same page, same keys.');
+      const identical = library.ledger().map((e) => e.text).join('\n') === ledgerBefore;
+      state.recoveredNote = identical
+        ? `✓ The same page, rebuilt from ${stored.size} stored records.`
+        : `Rebuilt from ${stored.size} stored records — the page differs.`;
       state.statusMsg = null;
       announce(state.recoveredNote);
     } catch (err) {
@@ -996,21 +1006,24 @@ export async function boot(root: HTMLElement | null): Promise<void> {
         '. It lives in this browser tab.',
       ]),
     );
-    if (state.recoveredNote) page.append(el('p', { class: 'status-line' }, [state.recoveredNote]));
+    if (state.recoveredNote) page.append(el('p', { class: 'recovered-line', role: 'status' }, [state.recoveredNote]));
 
     const ledger = el('ol', { class: 'ledger', id: 'ledger', 'aria-label': 'Library ledger' });
-    for (const e of state.library.ledger()) {
+    const markSeen = (e: LedgerEntryLike): boolean => {
       const key = `${e.sequence}|${e.event}|${e.subject ?? ''}|${e.text}`;
       const fresh = !seenLedger.has(key);
       seenLedger.add(key);
+      return fresh;
+    };
+    const singleLine = (e: LedgerEntryLike, text: string): HTMLElement => {
       const cls: string[] = [];
-      if (fresh) cls.push('fresh');
+      if (markSeen(e)) cls.push('fresh');
       if (e.event === 'granted' && e.subject && revoked.has(e.subject)) cls.push('struck');
       if (e.event === 'revoked') cls.push('revoked-line');
       if (e.event === 'rekeyed') cls.push('rekey');
       const li = el('li', { class: cls.join(' ') });
       li.append(el('span', { class: 'seq', 'aria-hidden': 'true' }, [String(e.sequence).padStart(2, '0')]));
-      const words = el('span', { class: 'words' }, [e.text]);
+      const words = el('span', { class: 'words' }, [text]);
       const actor = members.get(e.actor);
       const subject = e.subject ? members.get(e.subject) : undefined;
       // Writes and requests are marked by their author; grants and revocations
@@ -1018,15 +1031,49 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       const agentLine =
         ((e.event === 'wrote' || e.event === 'requested') && actor?.kind === 'agent') ||
         ((e.event === 'granted' || e.event === 'revoked') && subject?.kind === 'agent');
-      if (agentLine) {
-        words.append(el('span', { class: 'ai-mark ai-tag' }, ['AI']));
-      }
+      if (agentLine) words.append(aiBadge());
       li.append(words);
       const when = fmtTime(e.at);
       if (when) li.append(el('span', { class: 'when' }, [when]));
+      return li;
+    };
+    const freshRows: HTMLElement[] = [];
+    for (const row of groupLedger(state.library.ledger(), members, displayName)) {
+      if (row.type === 'entry' || row.group.entries.length === 1) {
+        const e = row.type === 'entry' ? row.entry : (row.group.entries[0] as LedgerEntryLike);
+        const text = row.type === 'entry' ? e.text : summarizeWrites(row.group);
+        const li = singleLine(e, text);
+        if (li.classList.contains('fresh')) freshRows.push(li);
+        ledger.append(li);
+        continue;
+      }
+      const g = row.group;
+      const fresh = g.entries.map((e) => markSeen(e)).some(Boolean);
+      const li = el('li', { class: fresh ? 'group fresh' : 'group' });
+      if (fresh) freshRows.push(li);
+      li.append(el('span', { class: 'seq', 'aria-hidden': 'true' }, [groupSeq(g)]));
+      const details = el('details', { class: 'group' });
+      const summary = el('summary', { class: 'group-sum' });
+      summary.append(el('span', { class: 'words' }, [summarizeWrites(g)]));
+      if (g.ai) summary.append(aiBadge());
+      details.append(summary);
+      const inner = el('ol', { class: 'group-entries', 'aria-label': 'Each entry' });
+      for (const e of g.entries) {
+        const item = el('li', {}, [el('span', { class: 'words' }, [e.text])]);
+        const when = fmtTime(e.at);
+        if (when) item.append(el('span', { class: 'when' }, [when]));
+        inner.append(item);
+      }
+      details.append(inner);
+      li.append(details);
+      const when = fmtTime(g.at);
+      if (when) li.append(el('span', { class: 'when' }, [when]));
       ledger.append(li);
     }
-    page.append(ledger);
+
+    // Moments (verbs + the active moment's card) sit above the ledger and stick,
+    // so the presenter never scrolls past a growing ledger to reach them.
+    const moments = el('div', { class: 'moments-sticky', id: 'moments' });
 
     // Verbs
     const verbs = el('div', { class: 'verbs' });
@@ -1062,23 +1109,38 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     if (Object.values(state.verbsDone).every(Boolean)) {
       verbs.append(el('p', {}, [el('button', { type: 'button', class: 'button-ghost', id: 'replay' }, ['Replay the tour'])]));
     }
-    page.append(verbs);
+    moments.append(verbs);
 
     // Consent
-    if (state.pending && !state.verbsDone.grant && state.consentOpen) page.append(consentCard());
+    if (state.pending && !state.verbsDone.grant && state.consentOpen) moments.append(consentCard());
     else if (state.pending && !state.verbsDone.grant) {
-      page.append(
+      moments.append(
         el('p', { class: 'pending-chip' }, [
           `A request from ${state.pending.label} is waiting. `,
           el('button', { type: 'button', id: 'pending-review' }, ['Review request']),
         ]),
       );
     }
-    if (state.statusMsg) page.append(el('p', { class: 'status-line' }, [state.statusMsg]));
-    if (state.statusErr) page.append(el('p', { class: 'status-line error' }, [state.statusErr]));
+    if (state.statusMsg) moments.append(el('p', { class: 'status-line' }, [state.statusMsg]));
+    if (state.statusErr) moments.append(el('p', { class: 'status-line error' }, [state.statusErr]));
     if (state.busy && state.busy !== 'intro') {
-      const last = page.querySelector('#verb-hint');
+      const last = moments.querySelector('#verb-hint');
       if (last) last.textContent = `${verbLabel(state.busy)}…`;
+    }
+    page.append(moments, ledger);
+    // Keep the presenter on the action: the moments bar sticks, and the newest
+    // ledger line (or the open consent card) glides into view.
+    const gentle = REDUCED() ? 'auto' : 'smooth';
+    if (!ledgerPrimed) {
+      ledgerPrimed = true;
+    } else if (state.consentOpen && state.pending) {
+      const card = document.getElementById('consent');
+      if (card && typeof card.scrollIntoView === 'function') card.scrollIntoView({ block: 'nearest', behavior: gentle });
+    } else if (freshRows.length > 0) {
+      // The ledger sorts authority lines before writes, so the newest line is
+      // not the last row: glide to the newest fresh one instead.
+      const last = freshRows[freshRows.length - 1] as HTMLElement;
+      if (typeof last.scrollIntoView === 'function') last.scrollIntoView({ block: 'nearest', behavior: gentle });
     }
   }
 
@@ -1243,7 +1305,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
         const cell = el('article', { class: 'note-cell' });
         const head = el('div', { class: 'note-head' });
         head.append(el('span', { class: 'note-title' }, [c.title || 'Untitled note']));
-        if (c.origin === 'ai') head.append(el('span', { class: 'ai-mark' }, ['AI']));
+        if (c.origin === 'ai') head.append(aiBadge());
         cell.append(head);
         cell.append(el('p', { class: 'byline' }, [`by ${c.authorLabel}${fmtTime(c.created) ? ` · ${fmtTime(c.created)}` : ''}`]));
         if (c.text) cell.append(el('p', { class: 'text' }, [c.text]));
@@ -1282,7 +1344,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     }
     if (insp.verified === true) {
       const line = el('p', { class: 'verified' }, [`✓ Signature verified. Written by ${insp.authorLabel || authorLabel}.`]);
-      if ((insp.origin || origin) === 'ai') line.append(' ', el('span', { class: 'ai-mark' }, ['AI']));
+      if ((insp.origin || origin) === 'ai') line.append(aiBadge());
       box.append(line);
     } else if (insp.verified === false) {
       box.append(el('p', {}, ['✕ The signature did not verify.']));

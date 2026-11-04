@@ -47,6 +47,27 @@ branch `integrate`. It runs the actual Rust core as WebAssembly
   the scripted stand-in performs the same tool calls through `Library.call()`.
   All wire-format details stay in `agent.ts`.
 - **Guided demo** (`?demo`): step bar with Next through intro → five verbs.
+- **Review fixes (demo video):** the moments bar + active card sit above the
+  ledger and stick on desktop (a floating thumb bar on narrow screens), while
+  the newest fresh ledger line — or the open consent card — glides into view
+  (`block: nearest`, smooth unless reduced motion). Consecutive-write grouping
+  became whole-ledger grouping by actor+namespace (`src/ledger.ts`, pure, no
+  DOM): the core clocks each namespace separately and sorts by
+  (clock, author, id), so namespaces interleave and even the agent's 3 notes
+  are never adjacent. Seed now reads as creation + 3 write lines ("Ada added
+  6 to listening", "Ada saved 3 links", "Ada created 1 notebook"; the 3
+  epoch-1 lines above them vanish with the core's ledger change). Groups are
+  expandable, carry the AI badge, and group on `namespace`/`kind`/`origin`
+  when present, falling back to parsing the current write sentences —
+  nothing matches grant/revoke/rekey text. The AI badge is gapped everywhere
+  and reads "written by AI". Intro → page is one crossfade (page fades in on
+  the same beat, skipped under reduced motion). The header keeps a small
+  quiet "WebAssembly core" badge with the tooltip "The Colophon Rust core,
+  compiled to WebAssembly, running in this tab." Recover snapshots the ledger
+  text before dropping state and reports "✓ The same page, rebuilt from N
+  stored records." only when the rebuild is identical. Phone width: narrow
+  grid uses `minmax(0, 1fr)`, `overflow-x: clip` backstop, 44px verb/consent
+  targets.
 
 ## How to run
 
@@ -73,13 +94,32 @@ live model, copy `playground/.env.example` to `playground/.env.local`, set
   `notGranted`, revoke → next agent call `revoked` with notes kept, reopen
   from records with identical views, recovery keys open, read-only narrowing
   enforced. Passing.
-- No committed test runner for the playground itself; the walkthrough above is
-  the integration check. No browser was available in the sandbox (as before),
-  so the UI itself is code-reviewed only — see gaps.
+- `/tmp/pg-verify.mjs` (scratch) — grouping against the real core: full seed
+  folds to exactly 3 write lines, agent's 3 notes group with the AI flag,
+  new-field entries (`namespace`/`kind`/`origin`, no member lookup) group
+  identically, new plain grant/rekey sentences pass through untouched,
+  unparseable writes never merge, identical reopen, and bundle-content checks
+  for every UI fix. Passing.
+- `/tmp/pgbtest/dom-verify.mjs` (scratch; `jsdom` installed in /tmp only,
+  repo deps untouched) — boots the real `src/app.ts` in jsdom with an
+  in-memory storage stub and drives all five verbs through the DOM: crossfade
+  classes, badge tooltip, moments above ledger, seed groups expand, matching
+  consent codes, AI badge names, reading `notGranted`, ruled-through grant,
+  identical rebuild with the recovered line. Passing.
+- No committed test runner for the playground itself; the walkthroughs above
+  are the integration check. No browser was available in the sandbox (as
+  before), so layout and motion are verified through the DOM walkthrough plus
+  static CSS checks — see gaps.
 
 ## Known gaps
 
-- No screenshots taken — visual polish is code-reviewed only.
+- No screenshots taken — visual polish is DOM-walkthrough plus static-check
+  only. Phone 390px (no h-scroll, thumb bar) is reasoned from CSS
+  (`minmax(0, 1fr)`, `overflow-x: clip`, 44px targets), not measured; check
+  on a real phone before the video if one is handy.
+- Until the core's ledger change lands, creation still shows 3 epoch-1 lines
+  above the 3 seed groups; grouping deliberately leaves non-write events
+  alone, so those lines disappear only with the core change.
 - The live-Muse path is written but untested against the real Meta API (no key
   in the sandbox); on failure it announces the error and the scripted
   stand-in takes over, so the demo can't strand. If the API's chat-completions
