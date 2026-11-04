@@ -1,0 +1,12 @@
+{
+  "name": "@colophon/core",
+  "version": "0.2.0",
+  "description": "Colophon 0.2 pure Rust core with host-owned WebCrypto keys",
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": { "build": "bash scripts/build.sh", "test": "node scripts/smoke.mjs" },
+  "engines": { "node": ">=24" },
+  "devDependencies": { "typescript": "5.9.3" }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "colophon-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+colophon-core = { path = "../colophon-core", version = "=0.2.0" }
+wasm-bindgen.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

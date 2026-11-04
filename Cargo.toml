@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/colophon-core", "crates/colophon-wasm"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+p256 = { version = "=0.13.2", default-features = false, features = ["ecdsa", "ecdh", "alloc"] }
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "alloc"] }
+hkdf = { version = "=0.12.4", default-features = false }
+sha2 = { version = "=0.10.9", default-features = false }
+serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "=1.0.145", default-features = false, features = ["std"] }
+base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+wasm-bindgen = { version = "=0.2.130", default-features = false, features = ["std"] }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
+[profile.release]
+lto = true
+opt-level = "s"

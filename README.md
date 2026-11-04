@@ -11,8 +11,8 @@ signed, encrypted operations, and every client folds the admitted operations int
 state. Storage and transport never grant access: a folder, iCloud Drive or a relay only
 moves bytes it can't read. There is no vendor account.
 
-This repository holds the 0.1 specification, conformance vectors and the Swift reference
-implementation.
+This repository holds the Colophon 0.2 Rust core and JavaScript package, plus the 0.1
+specification, conformance vectors and shipped Swift reference implementation.
 
 ## Why
 
@@ -30,7 +30,41 @@ makes access explicit instead:
 - **Honest.** Missing history, keys or files remain visible, retryable states. Nothing
   is reported as an empty library because a member lacks permission.
 
-## Modules: take only what you need
+## Rust core and JavaScript package (0.2)
+
+The pure Rust core implements records, P-256 host key steps, HPKE, grants, admission, epoch
+rotation, recovery, three domain folds, the ledger and generated agent tools. It performs no
+I/O and takes time and entropy explicitly. `colophon-wasm` and `@colophon/core` run the same
+implementation with non-extractable WebCrypto keys.
+
+```sh
+# Rust stable; on Homebrew installations:
+export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+cargo test
+cargo clippy -- -D warnings
+cargo build -p colophon-core --target wasm32-unknown-unknown
+
+# Install wasm32 target and wasm-bindgen-cli 0.2.130 if not already available.
+# Node 24+, npm; TypeScript is the only npm build dependency.
+npm ci --prefix js
+npm --prefix js run build       # cargo release + wasm-bindgen --target web + tsc
+npm --prefix js test            # WebCrypto smoke and Rust/WASM fixture parity
+```
+
+`js/dist/` is the distributable `@colophon/core` package output; serve its wasm alongside its
+ES modules. Build artifacts and local dependency caches are not committed. No package has been
+published by this worktree.
+
+See the [0.2 spec](spec/colophon-0.2.md), [JavaScript contract](docs/js-api.md),
+[architecture and dependency pins](docs/architecture.md), and [0.2 conformance library](conformance/0.2/).
+Regenerate the deterministic fixture with
+`COLOPHON_UPDATE_VECTORS=1 cargo test -p colophon-core --test conformance`.
+
+Version 0.2 is an implemented preview with clean kinds and no 0.1 compatibility. Persistence,
+sync, hardware custody, an online budget sequencer, native FFI and an executable CLI/MCP transport
+remain host or follow-up work. The sections below describe the historical Swift 0.1 package.
+
+## Swift modules: take only what you need
 
 | Module | What it is | Depends on |
 | --- | --- | --- |
@@ -47,7 +81,7 @@ makes access explicit instead:
 
 Cryptography is P-256 ECDSA and ECDH, HKDF-SHA256 and AES-GCM: the primitives built into
 CryptoKit, WebCrypto and Android Keystore, so other implementations need no third-party
-crypto. The package has no dependencies.
+crypto. The Swift package has no dependencies.
 
 ## Connect an agent
 
@@ -91,13 +125,13 @@ implementation conforms if it reproduces `expected.json` from the records and ke
 `conformance/` are test keys, published so anyone can check the vectors; never use them for
 a real library.
 
-## Status and limits
+## Swift 0.1 status and limits
 
 Colophon 0.1 is the protocol baseline, and this is its reference implementation, the one inside
 LUFF's apps. It is a preview, not yet a stable SDK:
 
 - **Apple platforms only** for now (macOS 14, iOS 17, visionOS 26). The kernel uses only
-  primitives other platforms provide; TypeScript and Kotlin implementations are planned.
+  primitives other platforms provide. The 0.2 Rust/wasm implementation above is separate.
 - **`ColophonSaved` is a subset of `reading.saved`.** It folds capture, state and metadata.
   Deletion and the reading extensions (content, feeds, annotations, browser checkpoints) are
   kept in history but not folded yet, so a shelf here can still list a deleted item.

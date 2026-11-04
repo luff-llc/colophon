@@ -104,3 +104,29 @@ stay as the record of what shipped.
 6. Signed checkpoints for long histories and capability negotiation between module versions.
 7. Delegation research for agent swarms (attenuating grants, approval laundering, tamper-evident
    forensics).
+
+## Implemented dependency pins (0.2)
+
+The workspace pins direct dependencies exactly and commits `Cargo.lock`. Runtime dependencies
+remain within the allowlist above:
+
+| Crate | Version | Enabled features |
+| --- | --- | --- |
+| `p256` | 0.13.2 | `ecdsa`, `ecdh`, `alloc`; defaults off (no OS RNG) |
+| `aes-gcm` | 0.10.3 | `aes`, `alloc`; defaults off |
+| `hkdf` | 0.12.4 | defaults off |
+| `sha2` | 0.10.9 | defaults off |
+| `serde` | 1.0.228 | `derive`, `std`; defaults off |
+| `serde_json` | 1.0.145 | `std`; defaults off |
+| `base64` | 0.22.1 | `std`; defaults off |
+| `wasm-bindgen` | 0.2.130 | `std`; defaults off, bindings only; matches the CLI |
+
+Neither `getrandom` nor `js-sys` is needed by this implementation. WebCrypto and host-generated
+seeds provide randomness. The JavaScript package's sole build dependency is exact-pinned
+TypeScript 5.9.3; there are no bundler or runtime npm dependencies.
+
+Revocation embeds replacement epochs in its authority record. Recovery embeds historical
+reshares and fresh epochs in its recovery-signed record. Planned handover writes historical
+reshares first, then transfers authority with fresh epochs excluding the former root. These
+atomic transitions prevent a verified prefix from ending access without advancing encryption.
+See the [0.2 specification](../spec/colophon-0.2.md) for the precise wire fields.

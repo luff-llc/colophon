@@ -110,3 +110,49 @@ export class Library {
 
 The `colophon` CLI and the MCP server use the same tool list, so an agent sees identical tools in a
 browser, a terminal and an MCP client.
+
+## Implemented 0.2 additions and domain names
+
+The surface above is unchanged. The package additionally provides:
+
+```ts
+// Optional recovery provider at creation; otherwise a separate WebCrypto identity is generated.
+// Keep this provider independently from the owner's keys. It is not stored in Records.
+Library.create({ owner, label, ownerLabel, namespaces, recovery });
+library.recoveryKeys; // KeyProvider | undefined; present on the newly created Library
+
+await library.ready(); // wait for ECDH steps after merge(records)
+await library.handover(newRoot, label); // Outcome<void>; historical shares precede transfer
+await recoveryLibrary.recover(newRoot, label); // Outcome<void>; open using recovery keys first
+
+// CryptoKey handles can be structured-cloned into IndexedDB without exporting private bytes.
+const pairs = webCryptoKeys.keyPairs();
+const restored = await WebCryptoKeys.fromKeyPairs(pairs.signing, pairs.agreement);
+```
+
+`merge()` verifies and applies authority synchronously, so revoked access ends immediately.
+New epoch keys require async ECDH: call `await ready()` before a synchronous `view()` after
+receiving new shares. Until then it may report `notReadable`. `open`, `write`, `approve`,
+`revoke` and `call` already drive the host steps. Malformed records, immutable-path conflicts,
+invalid tool inputs, or host signing/ECDH failures throw; expected access refusals use `Outcome`.
+Mutating the `records` map alone does not import records; call `merge` to apply them to the core.
+
+Write implies read because writers have the encryption key. A partial approval fills omitted
+`namespaces` and `access` from the request; explicitly supplied arrays must narrow its scope.
+Grant-wide `writeBudget` counts admitted signed headers across namespaces. A malformed encrypted
+payload can reserve a slot without entering the domain fold; this keeps accounting independent
+of which namespace keys the reader holds. Unknown restriction fields fail closed.
+
+Tools retain namespace dots and use these exact clean 0.2 operation kinds:
+
+| Namespace | Kinds | State collections |
+| --- | --- | --- |
+| `reading.saved` | `capture`, `setState`, `editMetadata`, `delete` | `items` |
+| `listening.podcasts` | `follow`, `unfollow`, `position`, `queue`, `episode` | `shows`, `episodes`, `queue` |
+| `notes` | `createNotebook`, `addNote`, `editNote` | `notebooks`, `notes` |
+
+Examples: `reading.saved__read`, `reading.saved__capture`, `notes__addNote`.
+Use `tools()` for descriptions and input schemas; [the spec](../spec/colophon-0.2.md#6-modules-views-and-tools)
+lists payload fields. Every state also has `conflicts` and `invalid`. Projected items retain unknown
+payload fields while `origin`, `author`, `authorLabel`, `revision` and `clock` come from authenticated
+operations. Deleted saved items remain explicit tombstones (`deleted: true`) in `items`.
