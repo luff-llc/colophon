@@ -64,8 +64,10 @@
           "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
           "authorLabel": "Owner",
           "clock": 1,
-          "futureField": {
-            "kept": true
+          "extensions": {
+            "futureField": {
+              "kept": true
+            }
           },
           "id": "inbox",
           "origin": "person",
@@ -78,6 +80,9 @@
           "author": "20d7bfe152532d0cbccd2143db7644ac",
           "authorLabel": "Research agent",
           "clock": 3,
+          "extensions": {
+            "origin": "person"
+          },
           "id": "ai-note",
           "notebook": "inbox",
           "origin": "ai",
@@ -94,31 +99,34 @@
       "at": "2026-11-04T12:00:00.000Z",
       "event": "created",
       "sequence": 1,
-      "text": "Owner created Conformance Library"
+      "text": "Owner created this library. Listening, notes and reading are sealed with keys only its members hold."
     },
     {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
+      "actor": "391a33c8613333b0e8f9fbab293e057d",
+      "actorLabel": "Laptop",
       "at": "2026-11-04T12:00:00.000Z",
-      "event": "rekeyed",
+      "event": "requested",
       "sequence": 2,
-      "text": "reading.saved started epoch 1"
+      "subject": "391a33c8613333b0e8f9fbab293e057d",
+      "text": "Laptop asked to read and write listening, notes and reading."
     },
     {
       "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
       "actorLabel": "Owner",
       "at": "2026-11-04T12:00:00.000Z",
-      "event": "rekeyed",
+      "event": "granted",
       "sequence": 3,
-      "text": "listening.podcasts started epoch 1"
+      "subject": "391a33c8613333b0e8f9fbab293e057d",
+      "text": "Owner let Laptop read and write listening, notes and reading."
     },
     {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
+      "actor": "ba9026f3d6d8ef13a12eb8f680c096a7",
+      "actorLabel": "Reader app",
       "at": "2026-11-04T12:00:00.000Z",
-      "event": "rekeyed",
+      "event": "requested",
       "sequence": 4,
-      "text": "notes started epoch 1"
+      "subject": "ba9026f3d6d8ef13a12eb8f680c096a7",
+      "text": "Reader app asked to read and write listening, notes and reading."
     },
     {
       "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
@@ -126,17 +134,17 @@
       "at": "2026-11-04T12:00:00.000Z",
       "event": "granted",
       "sequence": 5,
-      "subject": "391a33c8613333b0e8f9fbab293e057d",
-      "text": "Laptop could read and write reading.saved, listening.podcasts, notes"
+      "subject": "ba9026f3d6d8ef13a12eb8f680c096a7",
+      "text": "Owner let Reader app read and write reading."
     },
     {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
+      "actor": "20d7bfe152532d0cbccd2143db7644ac",
+      "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
-      "event": "granted",
+      "event": "requested",
       "sequence": 6,
-      "subject": "ba9026f3d6d8ef13a12eb8f680c096a7",
-      "text": "Reader app could read and write reading.saved"
+      "subject": "20d7bfe152532d0cbccd2143db7644ac",
+      "text": "Research agent asked to read and write listening, notes and reading."
     },
     {
       "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
@@ -145,226 +153,209 @@
       "event": "granted",
       "sequence": 7,
       "subject": "20d7bfe152532d0cbccd2143db7644ac",
-      "text": "Research agent could read and write notes with a budget of 2 writes"
+      "text": "Owner let Research agent read and write notes with a budget of 2 writes."
     },
     {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
-      "at": "2026-11-04T12:01:00.000Z",
-      "event": "revoked",
+      "actor": "20d7bfe152532d0cbccd2143db7644ac",
+      "actorLabel": "Research agent",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "addNote",
+      "namespace": "notes",
+      "origin": "ai",
       "sequence": 8,
-      "subject": "20d7bfe152532d0cbccd2143db7644ac",
-      "text": "Owner ended Research agent's access; previously decrypted data cannot be unread"
-    },
-    {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
-      "at": "2026-11-04T12:01:00.000Z",
-      "event": "rekeyed",
-      "sequence": 9,
-      "text": "notes started epoch 2 without Research agent"
-    },
-    {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
-      "at": "2026-11-04T12:01:00.000Z",
-      "event": "rekeyed",
-      "sequence": 10,
-      "text": "reading.saved started epoch 2"
-    },
-    {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
-      "at": "2026-11-04T12:01:00.000Z",
-      "event": "rekeyed",
-      "sequence": 11,
-      "text": "listening.podcasts started epoch 2"
-    },
-    {
-      "actor": "1473d30c29aa585410d0d5342cc1a0dd",
-      "actorLabel": "Recovery identity",
-      "at": "2026-11-04T12:01:00.000Z",
-      "event": "granted",
-      "sequence": 12,
-      "subject": "554d879a8d002447b94566bd1320cba3",
-      "text": "Recovery restored authority and every historical data key"
-    },
-    {
-      "actor": "1473d30c29aa585410d0d5342cc1a0dd",
-      "actorLabel": "Recovery identity",
-      "at": "2026-11-04T12:01:00.000Z",
-      "event": "rekeyed",
-      "sequence": 13,
-      "text": "reading.saved started epoch 3 without the former root"
-    },
-    {
-      "actor": "1473d30c29aa585410d0d5342cc1a0dd",
-      "actorLabel": "Recovery identity",
-      "at": "2026-11-04T12:01:00.000Z",
-      "event": "rekeyed",
-      "sequence": 14,
-      "text": "listening.podcasts started epoch 3 without the former root"
-    },
-    {
-      "actor": "1473d30c29aa585410d0d5342cc1a0dd",
-      "actorLabel": "Recovery identity",
-      "at": "2026-11-04T12:01:00.000Z",
-      "event": "rekeyed",
-      "sequence": 15,
-      "text": "notes started epoch 3 without the former root"
-    },
-    {
-      "actor": "20d7bfe152532d0cbccd2143db7644ac",
-      "actorLabel": "Research agent",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "requested",
-      "sequence": 16,
-      "subject": "20d7bfe152532d0cbccd2143db7644ac",
-      "text": "Research agent requested access to reading.saved, listening.podcasts, notes"
-    },
-    {
-      "actor": "391a33c8613333b0e8f9fbab293e057d",
-      "actorLabel": "Laptop",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "requested",
-      "sequence": 17,
-      "subject": "391a33c8613333b0e8f9fbab293e057d",
-      "text": "Laptop requested access to reading.saved, listening.podcasts, notes"
-    },
-    {
-      "actor": "ba9026f3d6d8ef13a12eb8f680c096a7",
-      "actorLabel": "Reader app",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "requested",
-      "sequence": 18,
-      "subject": "ba9026f3d6d8ef13a12eb8f680c096a7",
-      "text": "Reader app requested access to reading.saved, listening.podcasts, notes"
-    },
-    {
-      "actor": "391a33c8613333b0e8f9fbab293e057d",
-      "actorLabel": "Laptop",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 19,
-      "subject": "d5a8c0bc3f9aa78d41a4ab7d18f8a480",
-      "text": "Laptop wrote follow in listening.podcasts"
-    },
-    {
-      "actor": "ba9026f3d6d8ef13a12eb8f680c096a7",
-      "actorLabel": "Reader app",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 20,
-      "subject": "e2fb80d0deb2e662c21288f6a05e8bc5",
-      "text": "Reader app wrote capture in reading.saved"
-    },
-    {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 21,
-      "subject": "9187c275a69692ca1d112e19f5c8414b",
-      "text": "Owner wrote createNotebook in notes"
-    },
-    {
-      "actor": "20d7bfe152532d0cbccd2143db7644ac",
-      "actorLabel": "Research agent",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 22,
       "subject": "0eee3a3a56c0a66d78b7ce25eeacd11c",
-      "text": "Research agent wrote addNote in notes"
-    },
-    {
-      "actor": "391a33c8613333b0e8f9fbab293e057d",
-      "actorLabel": "Laptop",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 23,
-      "subject": "c552bbf85bf3175d22acf1d48652ca8e",
-      "text": "Laptop wrote episode in listening.podcasts"
-    },
-    {
-      "actor": "ba9026f3d6d8ef13a12eb8f680c096a7",
-      "actorLabel": "Reader app",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 24,
-      "subject": "03c16cba09c5e2c3d7ea75afca854434",
-      "text": "Reader app wrote setState in reading.saved"
+      "text": "Research agent added a note."
     },
     {
       "actor": "20d7bfe152532d0cbccd2143db7644ac",
       "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
       "event": "wrote",
-      "sequence": 25,
+      "kind": "editNote",
+      "namespace": "notes",
+      "origin": "ai",
+      "sequence": 9,
       "subject": "2035296080664a57663f99c660a4256f",
-      "text": "Research agent wrote editNote in notes"
+      "text": "Research agent edited a note."
     },
     {
-      "actor": "391a33c8613333b0e8f9fbab293e057d",
-      "actorLabel": "Laptop",
+      "actor": "20d7bfe152532d0cbccd2143db7644ac",
+      "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 26,
-      "subject": "9d084f99f769c19e237c4a4481bdef6d",
-      "text": "Laptop wrote position in listening.podcasts"
+      "event": "held",
+      "sequence": 10,
+      "subject": "27aa60f2ce67335f677d276bfdb56c5c",
+      "text": "Research agent has an update waiting: it arrived after access ended and was not preserved."
     },
     {
-      "actor": "ba9026f3d6d8ef13a12eb8f680c096a7",
-      "actorLabel": "Reader app",
+      "actor": "20d7bfe152532d0cbccd2143db7644ac",
+      "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 27,
-      "subject": "0f1a8e8d66895be918f722c88c6c4575",
-      "text": "Reader app wrote editMetadata in reading.saved"
-    },
-    {
-      "actor": "391a33c8613333b0e8f9fbab293e057d",
-      "actorLabel": "Laptop",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 28,
-      "subject": "e323b732088fb9a6838ae97ebd71addf",
-      "text": "Laptop wrote queue in listening.podcasts"
-    },
-    {
-      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
-      "actorLabel": "Owner",
-      "at": "2026-11-04T12:00:00.000Z",
-      "event": "wrote",
-      "sequence": 29,
-      "subject": "ebb4485fb18c5c150db1e316e6415315",
-      "text": "Owner wrote capture in reading.saved"
+      "event": "held",
+      "sequence": 11,
+      "subject": "d879f3180378982bb6411b27753e3cc0",
+      "text": "Research agent has an update waiting: it arrived after access ended and was not preserved."
     },
     {
       "actor": "20d7bfe152532d0cbccd2143db7644ac",
       "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
       "event": "refused",
-      "sequence": 30,
+      "sequence": 12,
       "subject": "e3f9c5e2bbf7da42eb9a9bce9800ad81",
-      "text": "Research agent's operation was refused: notGranted"
+      "text": "Research agent's update is refused: its author does not have permission here."
     },
     {
-      "actor": "20d7bfe152532d0cbccd2143db7644ac",
-      "actorLabel": "Research agent",
+      "actor": "391a33c8613333b0e8f9fbab293e057d",
+      "actorLabel": "Laptop",
       "at": "2026-11-04T12:00:00.000Z",
-      "event": "held",
-      "sequence": 31,
-      "subject": "27aa60f2ce67335f677d276bfdb56c5c",
-      "text": "Research agent's operation was held: revokedBackdated"
+      "event": "wrote",
+      "kind": "position",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 13,
+      "subject": "9d084f99f769c19e237c4a4481bdef6d",
+      "text": "Laptop updated playback."
     },
     {
-      "actor": "20d7bfe152532d0cbccd2143db7644ac",
-      "actorLabel": "Research agent",
+      "actor": "391a33c8613333b0e8f9fbab293e057d",
+      "actorLabel": "Laptop",
       "at": "2026-11-04T12:00:00.000Z",
-      "event": "held",
-      "sequence": 32,
-      "subject": "d879f3180378982bb6411b27753e3cc0",
-      "text": "Research agent's operation was held: revokedBackdated"
+      "event": "wrote",
+      "kind": "episode",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 14,
+      "subject": "c552bbf85bf3175d22acf1d48652ca8e",
+      "text": "Laptop added an episode."
+    },
+    {
+      "actor": "391a33c8613333b0e8f9fbab293e057d",
+      "actorLabel": "Laptop",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "follow",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 15,
+      "subject": "d5a8c0bc3f9aa78d41a4ab7d18f8a480",
+      "text": "Laptop followed a show."
+    },
+    {
+      "actor": "391a33c8613333b0e8f9fbab293e057d",
+      "actorLabel": "Laptop",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "queue",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 16,
+      "subject": "e323b732088fb9a6838ae97ebd71addf",
+      "text": "Laptop updated the listening queue."
+    },
+    {
+      "actor": "ba9026f3d6d8ef13a12eb8f680c096a7",
+      "actorLabel": "Reader app",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "setState",
+      "namespace": "reading.saved",
+      "origin": "person",
+      "sequence": 17,
+      "subject": "03c16cba09c5e2c3d7ea75afca854434",
+      "text": "Reader app updated reading progress."
+    },
+    {
+      "actor": "ba9026f3d6d8ef13a12eb8f680c096a7",
+      "actorLabel": "Reader app",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "editMetadata",
+      "namespace": "reading.saved",
+      "origin": "person",
+      "sequence": 18,
+      "subject": "0f1a8e8d66895be918f722c88c6c4575",
+      "text": "Reader app edited a link."
+    },
+    {
+      "actor": "ba9026f3d6d8ef13a12eb8f680c096a7",
+      "actorLabel": "Reader app",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "capture",
+      "namespace": "reading.saved",
+      "origin": "person",
+      "sequence": 19,
+      "subject": "e2fb80d0deb2e662c21288f6a05e8bc5",
+      "text": "Reader app saved a link."
+    },
+    {
+      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "createNotebook",
+      "namespace": "notes",
+      "origin": "person",
+      "sequence": 20,
+      "subject": "9187c275a69692ca1d112e19f5c8414b",
+      "text": "Owner started a notebook."
+    },
+    {
+      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "revoked",
+      "sequence": 21,
+      "subject": "20d7bfe152532d0cbccd2143db7644ac",
+      "text": "Owner ended Research agent's access. Its 1 note stays; what it already read can't be unread."
+    },
+    {
+      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "rekeyed",
+      "sequence": 22,
+      "subject": "20d7bfe152532d0cbccd2143db7644ac",
+      "text": "Notes was rekeyed without Research agent."
+    },
+    {
+      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "rekeyed",
+      "sequence": 23,
+      "text": "Listening and reading were rekeyed."
+    },
+    {
+      "actor": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "capture",
+      "namespace": "reading.saved",
+      "origin": "person",
+      "sequence": 24,
+      "subject": "ebb4485fb18c5c150db1e316e6415315",
+      "text": "Owner saved a link."
+    },
+    {
+      "actor": "1473d30c29aa585410d0d5342cc1a0dd",
+      "actorLabel": "Recovery identity",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "granted",
+      "sequence": 25,
+      "subject": "554d879a8d002447b94566bd1320cba3",
+      "text": "Recovery restored control of this library and access to its past."
+    },
+    {
+      "actor": "1473d30c29aa585410d0d5342cc1a0dd",
+      "actorLabel": "Recovery identity",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "rekeyed",
+      "sequence": 26,
+      "text": "Listening, notes and reading were rekeyed without the former owner."
     }
   ],
   "libraryID": "ccb2f77eafee5d3c8d9cf74b08f67199",
@@ -627,8 +618,10 @@
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
             "clock": 1,
-            "futureField": {
-              "kept": true
+            "extensions": {
+              "futureField": {
+                "kept": true
+              }
             },
             "id": "inbox",
             "origin": "person",
@@ -641,6 +634,9 @@
             "author": "20d7bfe152532d0cbccd2143db7644ac",
             "authorLabel": "Research agent",
             "clock": 3,
+            "extensions": {
+              "origin": "person"
+            },
             "id": "ai-note",
             "notebook": "inbox",
             "origin": "ai",
@@ -724,7 +720,9 @@
             "author": "ba9026f3d6d8ef13a12eb8f680c096a7",
             "authorLabel": "Reader app",
             "clock": 3,
-            "custom": "preserved",
+            "extensions": {
+              "custom": "preserved"
+            },
             "id": "link",
             "origin": "person",
             "revision": "0f1a8e8d66895be918f722c88c6c4575",

@@ -88,6 +88,7 @@ enum Status {
 }
 #[derive(Clone)]
 struct Judged {
+    digest: String,
     header: OperationHeader,
     operation: Option<Operation>,
     status: Status,
@@ -320,7 +321,7 @@ impl Library {
         )
         .map(Outcome::success)
     }
-    /// Prepare revocation with all admitted author IDs kept and every readable namespace rotated.
+    /// Prepare revocation with all admitted authenticated record digests kept and every readable namespace rotated.
     pub fn begin_revoke(
         &self,
         member_id: &str,
@@ -559,8 +560,12 @@ impl Library {
         self.evaluate()
             .0
             .into_iter()
-            .filter(|j| j.header.meta.author == author && j.status == Status::Admitted)
-            .map(|j| j.header.meta.id)
+            .filter(|j| {
+                j.header.meta.author == author
+                    && j.status == Status::Admitted
+                    && j.operation.is_some()
+            })
+            .map(|j| j.digest)
             .collect()
     }
     fn authorize(&self, namespace: &str, access: Access, now: &str) -> Result<Option<Denial>> {
@@ -621,7 +626,9 @@ impl Library {
                     .filter(|j| {
                         j.header.meta.author == self.me.id() && j.status == Status::Admitted
                     })
-                    .count() as u64;
+                    .map(|j| &j.header.meta.id)
+                    .collect::<BTreeSet<_>>()
+                    .len() as u64;
                 if writes >= budget {
                     return Ok(Some(Denial::new(
                         "budgetSpent",
@@ -668,7 +675,9 @@ impl Library {
             .0
             .iter()
             .filter(|j| {
-                j.header.meta.namespace == namespace && !matches!(j.status, Status::Refused(_))
+                j.header.meta.namespace == namespace
+                    && j.status == Status::Admitted
+                    && j.operation.is_some()
             })
             .map(|j| j.header.meta.clock)
             .max()
@@ -808,7 +817,9 @@ impl Library {
                 m.writes = judged
                     .iter()
                     .filter(|j| j.header.meta.author == m.id && j.status == Status::Admitted)
-                    .count() as u64;
+                    .map(|j| &j.header.meta.id)
+                    .collect::<BTreeSet<_>>()
+                    .len() as u64;
                 m
             })
             .collect()
@@ -898,7 +909,7 @@ impl Library {
         let mut candidates = Vec::new();
         let mut invalid = Vec::new();
         for (path, raw) in self.records.iter().filter(|(p, _)| p.starts_with("ops/")) {
-            let parsed = (|| -> Result<OperationHeader> {
+            let parsed = (|| -> Result<(OperationHeader, String)> {
                 let record: SignedRecord = serde_json::from_slice(raw)?;
                 let header: OperationHeader = serde_json::from_slice(&record.body)?;
                 let meta = &header.meta;
@@ -930,7 +941,7 @@ impl Library {
                     "Invalid operation header",
                 )?;
                 time_key(&meta.created)?;
-                Ok(header)
+                Ok((header, records::digest(&record.body)))
             })();
             match parsed {
                 Ok(header) => candidates.push(header),
@@ -957,30 +968,27 @@ impl Library {
             }
         }
         candidates.sort_by(|a, b| {
-            (&a.meta.clock, &a.meta.author, &a.meta.id).cmp(&(
-                &b.meta.clock,
-                &b.meta.author,
-                &b.meta.id,
+            (&a.0.meta.clock, &a.0.meta.author, &a.0.meta.id).cmp(&(
+                &b.0.meta.clock,
+                &b.0.meta.author,
+                &b.0.meta.id,
             ))
         });
-        let mut ids = BTreeMap::new();
-        for h in &candidates {
-            *ids.entry((&h.meta.author, &h.meta.id)).or_insert(0usize) += 1;
-        }
-        let duplicates: BTreeSet<_> = ids
-            .into_iter()
-            .filter(|(_, count)| *count > 1)
-            .map(|((a, id), _)| (a.clone(), id.clone()))
-            .collect();
+        let mut authenticated_ids = BTreeSet::new();
         let mut spent = BTreeMap::new();
+        let mut clocks = BTreeMap::<String, u64>::new();
         let mut judged = Vec::new();
-        for header in candidates {
+        for (header, digest) in candidates {
             let meta = &header.meta;
-            let status = if duplicates.contains(&(meta.author.clone(), meta.id.clone())) {
-                Status::Refused("duplicateID".into())
-            } else {
-                self.judge(meta, &mut spent)
-            };
+            let mut status = self.judge(
+                meta,
+                &digest,
+                &mut spent,
+                clocks.get(&meta.namespace).copied().unwrap_or(0),
+            );
+            if status == Status::Admitted {
+                clocks.insert(meta.namespace.clone(), meta.clock);
+            }
             // Budget admission is over signed headers, even for namespaces this reader cannot open.
             // Invalid encrypted payloads still consume a slot; a signer cannot hide budget usage.
             let operation = self
@@ -1018,7 +1026,14 @@ impl Library {
                     }
                     Some(op)
                 });
+            if status == Status::Admitted
+                && operation.is_some()
+                && !authenticated_ids.insert((meta.author.clone(), meta.id.clone()))
+            {
+                status = Status::Refused("duplicateID".into());
+            }
             judged.push(Judged {
+                digest,
                 header,
                 operation,
                 status,
@@ -1026,18 +1041,27 @@ impl Library {
         }
         (judged, invalid)
     }
-    fn judge(&self, meta: &OperationMeta, spent: &mut BTreeMap<String, u64>) -> Status {
+    fn judge(
+        &self,
+        meta: &OperationMeta,
+        digest: &str,
+        spent: &mut BTreeMap<String, BTreeSet<String>>,
+        clock: u64,
+    ) -> Status {
         let refuse = |s: &str| Status::Refused(s.into());
-        if meta.authority > self.authority.latest {
-            return Status::Held("authorityBehind".into());
-        }
         let Some(member) = self.authority.members.get(&meta.author) else {
             return refuse("notGranted");
         };
         if meta.authority < member.member.since {
             return refuse("notGranted");
         }
-        let is_root = self.authority.root_at(meta.authority) == Some(&meta.author);
+        let is_root = self
+            .authority
+            .root_at(meta.authority.min(self.authority.latest))
+            == Some(&meta.author);
+        if !self.authority.namespaces.contains(&meta.namespace) {
+            return refuse("notGranted");
+        }
         if !is_root
             && !member
                 .member
@@ -1047,22 +1071,29 @@ impl Library {
         {
             return refuse("notGranted");
         }
-        if self.authority.epoch_at(&meta.namespace, meta.authority) != Some(meta.epoch) {
-            return refuse("wrongEpoch");
-        }
         if let Some(grant) = &member.member.grant {
             if expired(&grant.expires, &meta.created).unwrap_or(true) {
                 return refuse("expired");
             }
         }
         if let Some(revoked) = member.member.revoked_at {
-            if !member.kept.contains(&meta.id) {
+            if !member.kept.contains(digest) {
                 return if meta.authority >= revoked {
                     refuse("revoked")
                 } else {
                     Status::Held("revokedBackdated".into())
                 };
             }
+        }
+        if meta.authority > self.authority.latest {
+            return Status::Held("authorityBehind".into());
+        }
+        if self.authority.epoch_at(&meta.namespace, meta.authority) != Some(meta.epoch) {
+            return refuse("wrongEpoch");
+        }
+        // Bound each admitted header's forward jump, including a namespace's first header.
+        if meta.clock > clock.saturating_add(1024) {
+            return refuse("clockJump");
         }
         let count = spent.entry(meta.author.clone()).or_default();
         if !is_root
@@ -1071,16 +1102,53 @@ impl Library {
                 .grant
                 .as_ref()
                 .and_then(|g| g.write_budget)
-                .is_some_and(|budget| *count >= budget)
+                .is_some_and(|budget| !count.contains(&meta.id) && count.len() as u64 >= budget)
         {
             return refuse("budgetSpent");
         }
-        *count += 1;
+        count.insert(meta.id.clone());
         Status::Admitted
     }
-    /// Plain-language authority, request and operation ledger, ordered without author timestamps.
+    fn preserved_description(&self, author: &str, kept: &BTreeSet<String>) -> String {
+        let mut contributions = BTreeMap::<(&str, &str), BTreeSet<(String, String)>>::new();
+        for judged in self.evaluate().0 {
+            if judged.header.meta.author != author || !kept.contains(&judged.digest) {
+                continue;
+            }
+            let Some(op) = judged.operation else {
+                continue;
+            };
+            let namespace = judged.header.meta.namespace;
+            let names = domain::module(&namespace)
+                .filter(|module| module.write_phrase(&op.kind).is_some())
+                .map(|module| module.contribution_names(&op.kind))
+                .unwrap_or(("update", "updates"));
+            let id = op.payload["id"].as_str().unwrap_or(&op.id).to_owned();
+            contributions
+                .entry(names)
+                .or_default()
+                .insert((namespace, id));
+        }
+        let count: usize = contributions.values().map(BTreeSet::len).sum();
+        if count == 0 {
+            return "What it already read can't be unread.".into();
+        }
+        let parts: Vec<_> = contributions
+            .into_iter()
+            .map(|((one, many), ids)| {
+                format!("{} {}", ids.len(), if ids.len() == 1 { one } else { many })
+            })
+            .collect();
+        format!(
+            "Its {} {}; what it already read can't be unread.",
+            english_list(&parts),
+            if count == 1 { "stays" } else { "stay" }
+        )
+    }
+    /// Plain-language story in authority order, with writes ordered by date, author and ID per sequence.
     pub fn ledger(&self) -> Vec<LedgerEntry> {
         let mut ledger = Vec::new();
+        let mut order = Vec::new();
         let mut previous_root = self.authority.root_at(1).unwrap_or("").to_owned();
         for entry in &self.authority.entries {
             let actor = if entry.by == "recovery" {
@@ -1095,7 +1163,18 @@ impl Library {
                 .map(|m| m.member.label.clone())
                 .unwrap_or_else(|| "Recovery identity".into());
             let mut add = |event: &str, subject: Option<String>, text: String| {
+                order.push((
+                    entry.seq,
+                    1u8,
+                    [0; 7],
+                    String::new(),
+                    String::new(),
+                    ledger.len(),
+                ));
                 ledger.push(LedgerEntry {
+                    namespace: None,
+                    kind: None,
+                    origin: None,
                     sequence: ledger.len() as u64 + 1,
                     at: entry.issued.clone(),
                     actor: actor.clone(),
@@ -1106,8 +1185,8 @@ impl Library {
                 });
             };
             match &entry.action {
-                Action::Genesis { label: library, .. } => {
-                    add("created", None, format!("{label} created {library}"))
+                Action::Genesis { namespaces, .. } => {
+                    add("created", None, format!("{label} created this library. {} {} sealed with keys only its members hold.", capitalized(&namespace_names(namespaces)), if namespaces.len() == 1 { "is" } else { "are" }));
                 }
                 Action::Grant { request, grant, .. } => {
                     if let Ok(r) = authority::verify_request(request, self.id()) {
@@ -1115,14 +1194,9 @@ impl Library {
                             "granted",
                             Some(r.member.id()),
                             format!(
-                                "{} could {} {}{}{}",
+                                "{label} let {} {}{}{}.",
                                 r.label,
-                                if grant.access.contains(&Access::Write) {
-                                    "read and write"
-                                } else {
-                                    "read"
-                                },
-                                grant.namespaces.join(", "),
+                                access_description(&grant.namespaces, &grant.access),
                                 grant
                                     .write_budget
                                     .map(|b| format!(" with a budget of {b} writes"))
@@ -1131,13 +1205,15 @@ impl Library {
                                     .expires
                                     .as_ref()
                                     .map(|e| format!(" until {e}"))
-                                    .unwrap_or_default()
+                                    .unwrap_or_default(),
                             ),
                         );
                     }
                 }
                 Action::Revoke {
-                    member_id, epochs, ..
+                    member_id,
+                    kept,
+                    epochs,
                 } => {
                     let subject = self
                         .authority
@@ -1145,71 +1221,61 @@ impl Library {
                         .get(member_id)
                         .map(|m| m.member.label.as_str())
                         .unwrap_or(member_id);
-                    add("revoked",Some(member_id.clone()),format!("{label} ended {subject}'s access; previously decrypted data cannot be unread"));
-                    for epoch in epochs {
-                        add(
-                            "rekeyed",
-                            None,
-                            format!(
-                                "{} started epoch {} without {subject}",
-                                epoch.namespace, epoch.epoch
-                            ),
-                        );
-                    }
+                    add(
+                        "revoked",
+                        Some(member_id.clone()),
+                        format!(
+                            "{label} ended {subject}'s access. {}",
+                            self.preserved_description(member_id, kept)
+                        ),
+                    );
+                    add(
+                        "rekeyed",
+                        Some(member_id.clone()),
+                        rekey_description(epochs, Some(subject)),
+                    );
                 }
                 Action::Rekey { epochs } => {
-                    for epoch in epochs {
-                        add(
-                            "rekeyed",
-                            None,
-                            format!("{} started epoch {}", epoch.namespace, epoch.epoch),
-                        );
+                    // Creation already explains the initial sealing of every namespace.
+                    if epochs.iter().any(|epoch| epoch.epoch > 1) {
+                        add("rekeyed", None, rekey_description(epochs, None));
                     }
                 }
                 Action::Reshare { recipient, .. } => add(
                     "rekeyed",
                     Some(recipient.id()),
-                    format!("{label} reshared every historical key before handover"),
+                    format!("{label} shared the library’s past with its next owner."),
                 ),
                 Action::Handover { root, epochs, .. } => {
                     add(
                         "granted",
                         Some(root.id()),
-                        format!("{label} handed over the library after sharing its data keys"),
+                        format!("{label} handed over this library."),
                     );
-                    for epoch in epochs {
-                        add(
-                            "rekeyed",
-                            None,
-                            format!(
-                                "{} started epoch {} without the former root",
-                                epoch.namespace, epoch.epoch
-                            ),
-                        );
-                    }
+                    add(
+                        "rekeyed",
+                        None,
+                        rekey_description(epochs, Some("the former owner")),
+                    );
                     previous_root = root.id();
                 }
                 Action::Recover { root, epochs, .. } => {
                     add(
                         "granted",
                         Some(root.id()),
-                        "Recovery restored authority and every historical data key".into(),
+                        "Recovery restored control of this library and access to its past.".into(),
                     );
-                    for epoch in epochs {
-                        add(
-                            "rekeyed",
-                            None,
-                            format!(
-                                "{} started epoch {} without the former root",
-                                epoch.namespace, epoch.epoch
-                            ),
-                        );
-                    }
+                    add(
+                        "rekeyed",
+                        None,
+                        rekey_description(epochs, Some("the former owner")),
+                    );
                     previous_root = root.id();
                 }
             }
         }
         let mut requests = BTreeMap::new();
+        let mut grant_sequences = BTreeMap::new();
         for (path, raw) in self
             .records
             .iter()
@@ -1225,12 +1291,28 @@ impl Library {
         for entry in &self.authority.entries {
             if let Action::Grant { request, .. } = &entry.action {
                 if let Ok(request) = authority::verify_request(request, self.id()) {
+                    grant_sequences.insert(request.member.id(), entry.seq);
                     requests.insert(request.member.id(), request);
                 }
             }
         }
         for request in requests.into_values() {
+            let grant_sequence = grant_sequences
+                .get(&request.member.id())
+                .copied()
+                .unwrap_or(self.authority.latest + 1);
+            order.push((
+                grant_sequence,
+                0,
+                time_key(&request.created).unwrap_or_default(),
+                request.member.id(),
+                String::new(),
+                ledger.len(),
+            ));
             ledger.push(LedgerEntry {
+                namespace: None,
+                kind: None,
+                origin: None,
                 sequence: ledger.len() as u64 + 1,
                 at: request.created,
                 actor: request.member.id(),
@@ -1238,9 +1320,9 @@ impl Library {
                 event: "requested".into(),
                 subject: Some(request.member.id()),
                 text: format!(
-                    "{} requested access to {}",
+                    "{} asked to {}.",
                     request.label,
-                    request.namespaces.join(", ")
+                    access_description(&request.namespaces, &request.access)
                 ),
             });
         }
@@ -1262,29 +1344,67 @@ impl Library {
                     {
                         (
                             "refused",
-                            format!("{label}'s encrypted operation could not be authenticated"),
+                            format!("{label} sent an update that could not be verified."),
                         )
                     } else {
                         (
                             "wrote",
                             format!(
-                                "{label} wrote {} in {}",
+                                "{label} {}.",
                                 j.operation
                                     .as_ref()
-                                    .map(|o| o.kind.as_str())
-                                    .unwrap_or("an operation"),
-                                meta.namespace
+                                    .and_then(|op| domain::module(&meta.namespace)?
+                                        .write_phrase(&op.kind))
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| format!(
+                                        "added an update to {}",
+                                        namespace_name(&meta.namespace)
+                                    ))
                             ),
                         )
                     }
                 }
-                Status::Held(reason) => ("held", format!("{label}'s operation was held: {reason}")),
+                Status::Held(reason) => (
+                    "held",
+                    format!(
+                        "{label} has an update waiting: {}.",
+                        admission_description(reason)
+                    ),
+                ),
                 Status::Refused(reason) => (
                     "refused",
-                    format!("{label}'s operation was refused: {reason}"),
+                    format!(
+                        "{label}'s update is refused: {}.",
+                        admission_description(reason)
+                    ),
                 ),
             };
+            order.push((
+                meta.authority,
+                2,
+                time_key(&meta.created).unwrap_or_default(),
+                meta.author.clone(),
+                meta.id.clone(),
+                ledger.len(),
+            ));
             ledger.push(LedgerEntry {
+                namespace: (event == "wrote").then(|| meta.namespace.clone()),
+                kind: (event == "wrote")
+                    .then(|| j.operation.as_ref().map(|op| op.kind.clone()))
+                    .flatten(),
+                origin: (event == "wrote").then(|| {
+                    if self
+                        .authority
+                        .members
+                        .get(&meta.author)
+                        .is_some_and(|member| member.member.kind == MemberKind::Agent)
+                    {
+                        "ai"
+                    } else {
+                        "person"
+                    }
+                    .into()
+                }),
                 sequence: ledger.len() as u64 + 1,
                 at: meta.created.clone(),
                 actor: meta.author.clone(),
@@ -1295,17 +1415,105 @@ impl Library {
             });
         }
         for (_, r) in invalid {
+            order.push((
+                u64::MAX,
+                3,
+                [0; 7],
+                r.author.clone(),
+                r.id.clone(),
+                ledger.len(),
+            ));
             ledger.push(LedgerEntry {
+                namespace: None,
+                kind: None,
+                origin: None,
                 sequence: ledger.len() as u64 + 1,
                 at: String::new(),
                 actor: r.author,
                 actor_label: "Unknown or invalid signer".into(),
                 event: "refused".into(),
                 subject: Some(r.id),
-                text: r.reason,
+                text: "A record could not be verified.".into(),
             });
         }
-        ledger
+        let mut ordered: Vec<_> = order.into_iter().zip(ledger).collect();
+        ordered.sort_by(|a, b| a.0.cmp(&b.0));
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, mut entry))| {
+                entry.sequence = index as u64 + 1;
+                entry
+            })
+            .collect()
+    }
+}
+fn namespace_name(namespace: &str) -> String {
+    domain::module(namespace)
+        .map(|module| module.display_name().to_owned())
+        .unwrap_or_else(|| namespace.into())
+}
+fn namespace_names(namespaces: &[String]) -> String {
+    let mut names: Vec<_> = namespaces
+        .iter()
+        .map(|namespace| namespace_name(namespace))
+        .collect();
+    names.sort();
+    names.dedup();
+    english_list(&names)
+}
+fn english_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [item] => item.clone(),
+        [first, rest @ ..] => {
+            let mut prefix = vec![first.clone()];
+            prefix.extend_from_slice(&rest[..rest.len() - 1]);
+            format!("{} and {}", prefix.join(", "), rest[rest.len() - 1])
+        }
+    }
+}
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
+}
+fn access_description(namespaces: &[String], access: &[Access]) -> String {
+    format!(
+        "{} {}",
+        if access.contains(&Access::Write) {
+            "read and write"
+        } else {
+            "read"
+        },
+        namespace_names(namespaces)
+    )
+}
+fn rekey_description(epochs: &[Epoch], excluded: Option<&str>) -> String {
+    let namespaces: Vec<_> = epochs.iter().map(|epoch| epoch.namespace.clone()).collect();
+    format!(
+        "{} {} rekeyed{}.",
+        capitalized(&namespace_names(&namespaces)),
+        if namespaces.len() == 1 { "was" } else { "were" },
+        excluded
+            .map(|subject| format!(" without {subject}"))
+            .unwrap_or_default()
+    )
+}
+fn admission_description(reason: &str) -> &str {
+    match reason {
+        "authorityBehind" => "more access history is needed",
+        "revokedBackdated" => "it arrived after access ended and was not preserved",
+        "notGranted" => "its author does not have permission here",
+        "revoked" => "its author's access has ended",
+        "expired" => "its author's permission has expired",
+        "wrongEpoch" => "it uses a key that was not current",
+        "budgetSpent" => "its author's write budget is spent",
+        "clockJump" => "its logical clock jumps too far ahead",
+        "duplicateID" => "another verified update already uses that identity",
+        _ => "it could not be verified",
     }
 }
 /// Tool dispatch result; the host drives signing only for `Write`.

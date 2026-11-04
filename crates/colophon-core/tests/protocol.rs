@@ -354,7 +354,10 @@ fn ordering_ignores_dates_unknown_kinds_skip_unknown_fields_survive() {
         before.admitted.iter().map(|o| o.clock).collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
-    assert_eq!(before.state["notebooks"][0]["extension"]["future"], 42);
+    assert_eq!(
+        before.state["notebooks"][0]["extensions"]["extension"]["future"],
+        42
+    );
     assert_eq!(before.state["notes"][0]["origin"], "person");
     write(
         &mut root,
@@ -365,7 +368,7 @@ fn ordering_ignores_dates_unknown_kinds_skip_unknown_fields_survive() {
         63,
     );
     let view = success(root.view("notes", NOW).unwrap());
-    assert_eq!(view.state["notes"][0]["future"], "keep");
+    assert_eq!(view.state["notes"][0]["extensions"]["future"], "keep");
     write(
         &mut root,
         &owner,
@@ -539,4 +542,577 @@ fn domain_tombstones_progress_queue_and_notebook_boundaries() {
             [79; 32]
         )
         .is_err());
+}
+
+#[test]
+fn hostile_headers_cannot_poison_write_clocks() {
+    let (mut root, owner, _) = create();
+    let agent = keys(4);
+    enroll(
+        &mut root,
+        &owner,
+        &agent,
+        "Agent",
+        MemberKind::Agent,
+        grant(&["notes"], None),
+        80,
+    );
+    let revoke = success(
+        root.begin_revoke(&agent.public().id(), NOW, [81; 32])
+            .unwrap(),
+    );
+    apply(&mut root, revoke, &owner);
+    for (ns, signer, authority, clock, reason) in [
+        (
+            "reading.saved",
+            &agent,
+            9_007_199_254_740_991,
+            9_007_199_254_740_991,
+            "notGranted",
+        ),
+        (
+            "notes",
+            &agent,
+            9_007_199_254_740_991,
+            9_007_199_254_740_991,
+            "revoked",
+        ),
+        (
+            "reading.saved",
+            &owner,
+            root.authority().latest,
+            9_007_199_254_740_991,
+            "clockJump",
+        ),
+    ] {
+        let records = adversarial(
+            &root,
+            &owner,
+            signer,
+            ns,
+            op("future", clock, authority, json!({})),
+            1,
+            82,
+        );
+        root.merge(records).unwrap();
+        assert!(success(root.view(ns, NOW).unwrap())
+            .refused
+            .iter()
+            .any(|r| r.reason == reason));
+    }
+    // Even an otherwise eligible future header or an invalid payload cannot move the clock.
+    for (authority, seed) in [
+        (root.authority().latest + 1, 83),
+        (root.authority().latest, 84),
+    ] {
+        let records = adversarial(
+            &root,
+            &owner,
+            &owner,
+            "reading.saved",
+            op("future", 100, authority, json!({})),
+            1,
+            seed,
+        );
+        let (path, raw) = records.into_iter().next().unwrap();
+        let bad = resign(&raw, &owner, |v| {
+            v["ciphertext"] = json!("AAAAAAAAAAAAAAAAAAAAAA==")
+        });
+        root.merge(Records::from([(path, bad)])).unwrap();
+    }
+    write(
+        &mut root,
+        &owner,
+        "reading.saved",
+        "capture",
+        json!({"id":"ok","url":"https://example.org"}),
+        85,
+    );
+    let view = success(root.view("reading.saved", NOW).unwrap());
+    assert_eq!(view.admitted.len(), 1);
+    assert_eq!(view.admitted[0].clock, 1);
+}
+
+#[test]
+fn invalid_duplicate_cannot_remove_a_valid_or_kept_operation() {
+    let (mut root, owner, _) = create();
+    let agent = keys(4);
+    enroll(
+        &mut root,
+        &owner,
+        &agent,
+        "Agent",
+        MemberKind::Agent,
+        grant(&["notes"], Some(1)),
+        86,
+    );
+    let mut replica = opened(root.records().clone(), &agent);
+    // Clock 2 leaves room for an invalid competitor to sort before the valid record.
+    let original = adversarial(
+        &root,
+        &owner,
+        &agent,
+        "notes",
+        op(
+            "createNotebook",
+            2,
+            root.authority().latest,
+            json!({"id":"book","title":"Book"}),
+        ),
+        1,
+        87,
+    );
+    replica.merge(original.clone()).unwrap();
+    root.merge(original.clone()).unwrap();
+    let raw = original.values().next().unwrap();
+    for clock in [1, 3] {
+        let bad = resign(raw, &agent, |v| v["clock"] = json!(clock));
+        let signed: SignedRecord = serde_json::from_slice(&bad).unwrap();
+        let header: OperationHeader = serde_json::from_slice(&signed.body).unwrap();
+        root.merge(Records::from([(
+            colophon_core::library::operation_path(&header.meta),
+            bad,
+        )]))
+        .unwrap();
+    }
+    assert_eq!(success(root.view("notes", NOW).unwrap()).admitted.len(), 1);
+    let revoke = success(
+        root.begin_revoke(&agent.public().id(), NOW, [88; 32])
+            .unwrap(),
+    );
+    apply(&mut root, revoke, &owner);
+    let body: SignedRecord = serde_json::from_slice(raw).unwrap();
+    assert!(root.authority().members[&agent.public().id()]
+        .kept
+        .contains(&colophon_core::records::digest(&body.body)));
+    let bad = resign(raw, &agent, |v| {
+        v["clock"] = json!(4);
+        v["authority"] = json!(9_007_199_254_740_991u64);
+    });
+    let signed: SignedRecord = serde_json::from_slice(&bad).unwrap();
+    let header: OperationHeader = serde_json::from_slice(&signed.body).unwrap();
+    root.merge(Records::from([(
+        colophon_core::library::operation_path(&header.meta),
+        bad,
+    )]))
+    .unwrap();
+    let view = success(root.view("notes", NOW).unwrap());
+    assert_eq!(view.admitted.len(), 1);
+    assert_eq!(view.state["notebooks"][0]["title"], "Book");
+    assert!(view.refused.iter().any(|r| r.reason == "revoked"));
+    assert_eq!(
+        json!(view),
+        json!(success(
+            opened(root.records().clone(), &owner)
+                .view("notes", NOW)
+                .unwrap()
+        ))
+    );
+}
+
+#[test]
+fn fractional_payloads_keep_their_ids_through_write_and_replay() {
+    assert_eq!(
+        String::from_utf8(
+            canonical(&json!([
+                1,
+                1.0,
+                -0.0,
+                1e-6,
+                1e-5,
+                6.713554789312184e-10,
+                123456789.12345679
+            ]))
+            .unwrap()
+        )
+        .unwrap(),
+        "[1,1.0,-0.0,1e-6,0.00001,6.713554789312184e-10,123456789.12345679]"
+    );
+    let (mut root, owner, _) = create();
+    for (i, seconds) in [6.713554789312184e-10_f64, 123456789.12345679]
+        .into_iter()
+        .enumerate()
+    {
+        write(
+            &mut root,
+            &owner,
+            "listening.podcasts",
+            "position",
+            json!({"id":format!("e{i}"),"seconds":seconds}),
+            90 + i as u8,
+        );
+        let view = success(root.view("listening.podcasts", NOW).unwrap());
+        assert_eq!(view.admitted.len(), i + 1);
+        assert_eq!(
+            view.admitted[i].payload["seconds"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            seconds.to_bits()
+        );
+        let replay = success(
+            opened(root.records().clone(), &owner)
+                .view("listening.podcasts", NOW)
+                .unwrap(),
+        );
+        assert_eq!(json!(view), json!(replay));
+    }
+}
+
+#[test]
+fn extensions_cannot_mutate_controlled_domain_fields() {
+    let (mut root, owner, _) = create();
+    write(
+        &mut root,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":100}),
+        92,
+    );
+    let before =
+        success(root.view("listening.podcasts", NOW).unwrap()).state["episodes"][0].clone();
+    write(
+        &mut root,
+        &owner,
+        "listening.podcasts",
+        "episode",
+        json!({"id":"e","title":"Title","seconds":0,"positionRevision":"fake","revision":"fake","extensions":{"seconds":-1}}),
+        93,
+    );
+    let view = success(root.view("listening.podcasts", NOW).unwrap());
+    let episode = &view.state["episodes"][0];
+    assert_eq!(episode["seconds"], 100);
+    assert_eq!(episode["positionRevision"], before["positionRevision"]);
+    assert_ne!(episode["revision"], "fake");
+    assert_eq!(episode["extensions"]["seconds"], 0);
+    assert_eq!(episode["extensions"]["positionRevision"], "fake");
+    assert_eq!(episode["extensions"]["extensions"]["seconds"], -1);
+    write(
+        &mut root,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":10,"expect":"fake"}),
+        94,
+    );
+    assert_eq!(
+        success(root.view("listening.podcasts", NOW).unwrap()).state["episodes"][0]["seconds"],
+        100
+    );
+    write(
+        &mut root,
+        &owner,
+        "reading.saved",
+        "capture",
+        json!({"id":"r","url":"https://example.org","deleted":true}),
+        95,
+    );
+    write(
+        &mut root,
+        &owner,
+        "reading.saved",
+        "setState",
+        json!({"id":"r","state":"read","url":"evil","deleted":true}),
+        96,
+    );
+    let shelf = success(root.view("reading.saved", NOW).unwrap());
+    assert_eq!(shelf.state["items"][0]["url"], "https://example.org");
+    assert_eq!(shelf.state["items"][0]["state"], "read");
+    assert!(shelf.state["items"][0]["deleted"].is_null());
+    assert_eq!(shelf.state["items"][0]["extensions"]["deleted"], true);
+    write(
+        &mut root,
+        &owner,
+        "notes",
+        "createNotebook",
+        json!({"id":"b","title":"B","text":"not a note","origin":"ai"}),
+        97,
+    );
+    write(
+        &mut root,
+        &owner,
+        "notes",
+        "addNote",
+        json!({"id":"n","notebook":"b","text":"Text","title":"extension","author":"fake"}),
+        98,
+    );
+    write(
+        &mut root,
+        &owner,
+        "notes",
+        "editNote",
+        json!({"id":"n","notebook":"b","text":"Edited"}),
+        99,
+    );
+    let notes = success(root.view("notes", NOW).unwrap());
+    assert!(notes.state["notebooks"][0]["text"].is_null());
+    assert_eq!(notes.state["notes"][0]["extensions"]["title"], "extension");
+    assert_eq!(notes.state["notes"][0]["author"], owner.public().id());
+}
+
+#[test]
+fn ledger_interleaves_authority_requests_and_writes_as_a_story() {
+    let (mut root, owner, _) = create();
+    write(
+        &mut root,
+        &owner,
+        "notes",
+        "createNotebook",
+        json!({"id":"b","title":"B"}),
+        100,
+    );
+    let before_id = success(root.view("notes", NOW).unwrap()).admitted[0]
+        .id
+        .clone();
+    let agent = keys(4);
+    enroll(
+        &mut root,
+        &owner,
+        &agent,
+        "Muse on MacBook",
+        MemberKind::Agent,
+        grant(&["notes"], None),
+        101,
+    );
+    let at = root.authority().latest;
+    let mut expected = Vec::new();
+    for (signer, clock, created, seed) in [
+        (&owner, 20, LATER, 102),
+        (&agent, 21, NOW, 103),
+        (&owner, 22, NOW, 104),
+        (&agent, 23, "2026-11-04T12:00:00Z", 105),
+    ] {
+        let mut operation = op(
+            "addNote",
+            clock,
+            at,
+            json!({"id":format!("n{seed}"),"notebook":"b","text":"Text"}),
+        );
+        operation.created = created.into();
+        let records = adversarial(&root, &owner, signer, "notes", operation, 1, seed);
+        let record: SignedRecord =
+            serde_json::from_slice(records.values().next().unwrap()).unwrap();
+        let header: OperationHeader = serde_json::from_slice(&record.body).unwrap();
+        expected.push((
+            time_key(created).unwrap(),
+            signer.public().id(),
+            header.meta.id,
+        ));
+        root.merge(records).unwrap();
+    }
+    let revoke = success(
+        root.begin_revoke(&agent.public().id(), LATER, [106; 32])
+            .unwrap(),
+    );
+    apply(&mut root, revoke, &owner);
+    let ledger = root.ledger();
+    let index = |event: &str| ledger.iter().position(|e| e.event == event).unwrap();
+    let before = ledger
+        .iter()
+        .position(|e| e.subject.as_ref() == Some(&before_id))
+        .unwrap();
+    assert!(before < index("requested"));
+    assert!(index("requested") < index("granted"));
+    expected.sort();
+    let actual: Vec<_> = ledger[index("granted") + 1..index("revoked")]
+        .iter()
+        .filter(|e| e.event == "wrote")
+        .map(|e| e.subject.clone().unwrap())
+        .collect();
+    assert_eq!(
+        actual,
+        expected
+            .into_iter()
+            .map(|(_, _, id)| id)
+            .collect::<Vec<_>>()
+    );
+    for (i, entry) in ledger.iter().enumerate() {
+        assert_eq!(entry.sequence, i as u64 + 1);
+    }
+    let mut replay = create().0;
+    // Merge operation records before authority, then the complete verified history.
+    replay
+        .merge(
+            root.records()
+                .iter()
+                .filter(|(p, _)| p.starts_with("ops/"))
+                .map(|(p, r)| (p.clone(), r.clone()))
+                .collect(),
+        )
+        .unwrap();
+    replay.merge(root.records().clone()).unwrap();
+    unlock(&mut replay, &owner);
+    assert_eq!(replay.ledger(), ledger);
+}
+
+#[test]
+fn ledger_uses_module_language_and_one_rekey_summary() {
+    let (mut root, owner, _) = create();
+    let agent = keys(4);
+    let request = request(
+        &root,
+        &agent,
+        "Muse on MacBook",
+        MemberKind::Agent,
+        vec!["listening.podcasts".into(), "notes".into()],
+    );
+    let approve = success(
+        root.begin_approve(
+            request,
+            Some(grant(&["listening.podcasts", "notes"], None)),
+            NOW,
+            [107; 32],
+        )
+        .unwrap(),
+    );
+    apply(&mut root, approve, &owner);
+    write(
+        &mut root,
+        &owner,
+        "notes",
+        "createNotebook",
+        json!({"id":"b","title":"B"}),
+        108,
+    );
+    let mut muse = opened(root.records().clone(), &agent);
+    for i in 0..3 {
+        write(
+            &mut muse,
+            &agent,
+            "notes",
+            "addNote",
+            json!({"id":format!("n{i}"),"notebook":"b","text":"Text"}),
+            109 + i,
+        );
+    }
+    write(
+        &mut muse,
+        &agent,
+        "notes",
+        "editNote",
+        json!({"id":"n0","notebook":"b","text":"Edit"}),
+        112,
+    );
+    root.merge(muse.records().clone()).unwrap();
+    let revoke = success(
+        root.begin_revoke(&agent.public().id(), NOW, [113; 32])
+            .unwrap(),
+    );
+    apply(&mut root, revoke, &owner);
+    let ledger = root.ledger();
+    let texts: Vec<_> = ledger.iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(texts[0], "Owner created this library. Listening, notes and reading are sealed with keys only its members hold.");
+    for expected in [
+        "Muse on MacBook asked to read and write listening and notes.",
+        "Owner let Muse on MacBook read and write listening and notes.",
+        "Owner started a notebook.",
+        "Muse on MacBook added a note.",
+        "Muse on MacBook edited a note.",
+        "Owner ended Muse on MacBook's access. Its 3 notes stay; what it already read can't be unread.",
+        "Listening and notes were rekeyed without Muse on MacBook.",
+    ] { assert!(texts.contains(&expected), "Missing: {expected}; got {texts:?}"); }
+    assert_eq!(ledger.iter().filter(|e| e.event == "rekeyed").count(), 1);
+    assert!(texts
+        .iter()
+        .all(|text| !text.contains("epoch") && !text.contains("listening.podcasts")));
+    for (ns, kind, payload, phrase, seed) in [
+        (
+            "reading.saved",
+            "capture",
+            json!({"id":"l","url":"https://example.org"}),
+            "saved a link",
+            114,
+        ),
+        (
+            "listening.podcasts",
+            "follow",
+            json!({"id":"s","url":"https://example.org"}),
+            "followed a show",
+            115,
+        ),
+        (
+            "listening.podcasts",
+            "episode",
+            json!({"id":"e"}),
+            "added an episode",
+            116,
+        ),
+        (
+            "listening.podcasts",
+            "position",
+            json!({"id":"e","seconds":1}),
+            "updated playback",
+            117,
+        ),
+    ] {
+        write(&mut root, &owner, ns, kind, payload, seed);
+        assert!(root
+            .ledger()
+            .iter()
+            .any(|e| e.text == format!("Owner {phrase}.")));
+    }
+}
+
+#[test]
+fn ledger_write_metadata_supports_authenticated_ui_grouping() {
+    let (mut root, owner, _) = create();
+    write(
+        &mut root,
+        &owner,
+        "reading.saved",
+        "capture",
+        json!({"id":"l","url":"https://example.org","origin":"ai"}),
+        118,
+    );
+    let agent = keys(4);
+    enroll(
+        &mut root,
+        &owner,
+        &agent,
+        "Muse",
+        MemberKind::Agent,
+        grant(&["notes"], None),
+        119,
+    );
+    let mut muse = opened(root.records().clone(), &agent);
+    write(
+        &mut muse,
+        &agent,
+        "notes",
+        "createNotebook",
+        json!({"id":"b","title":"B","origin":"person"}),
+        120,
+    );
+    root.merge(muse.records().clone()).unwrap();
+    let ledger = json!(root.ledger());
+    let entries = ledger.as_array().unwrap();
+    for (actor, namespace, kind, origin) in [
+        (owner.public().id(), "reading.saved", "capture", "person"),
+        (agent.public().id(), "notes", "createNotebook", "ai"),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|e| e["event"] == "wrote" && e["actor"] == actor)
+            .unwrap();
+        assert_eq!(entry["namespace"], namespace);
+        assert_eq!(entry["kind"], kind);
+        assert_eq!(entry["origin"], origin);
+    }
+    assert!(entries
+        .iter()
+        .filter(|e| e["event"] != "wrote")
+        .all(|e| e.get("namespace").is_none() && e.get("kind").is_none()));
+    // Readers without a namespace key can see signed attribution but never the encrypted kind.
+    let locked = Library::open(root.records().clone(), owner.public()).unwrap();
+    for entry in json!(locked.ledger())
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event"] == "wrote")
+    {
+        assert!(entry.get("namespace").is_some());
+        assert!(entry.get("kind").is_none());
+        assert!(entry.get("origin").is_some());
+    }
 }

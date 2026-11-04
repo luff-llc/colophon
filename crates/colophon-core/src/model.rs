@@ -252,6 +252,15 @@ pub struct LedgerEntry {
     /// Optional member or operation ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Namespace on write entries, from the authenticated header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Operation kind on write entries, when the payload can be authenticated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Authenticated author attribution on write entries: `person` or `ai`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// Human-readable description.
     pub text: String,
 }

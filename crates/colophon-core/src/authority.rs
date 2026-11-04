@@ -65,7 +65,7 @@ pub enum Action {
         #[serde(rename = "memberID")]
         /// Identity whose access ends.
         member_id: String,
-        /// Acknowledged operation IDs whose admission is preserved.
+        /// Acknowledged authenticated signed-body digests whose admission is preserved.
         kept: BTreeSet<String>,
         /// Fresh consecutive epochs, each sealed to exactly the eligible recipients.
         epochs: Vec<Epoch>,
@@ -83,7 +83,7 @@ pub enum Action {
     Handover {
         /// Initial or replacement root public identity.
         root: PublicIdentity,
-        /// Acknowledged operation IDs whose admission is preserved.
+        /// Acknowledged authenticated signed-body digests whose admission is preserved.
         kept: BTreeSet<String>,
         /// Fresh consecutive epochs, each sealed to exactly the eligible recipients.
         epochs: Vec<Epoch>,
@@ -94,7 +94,7 @@ pub enum Action {
         root: PublicIdentity,
         /// Human-readable library or replacement-member label.
         label: String,
-        /// Acknowledged operation IDs whose admission is preserved.
+        /// Acknowledged authenticated signed-body digests whose admission is preserved.
         kept: BTreeSet<String>,
         /// Every existing epoch in scope, sealed to the intended recipient.
         shares: Vec<Epoch>,
