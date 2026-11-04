@@ -236,15 +236,24 @@ async function importAgreementKey(raw: Uint8Array): Promise<CryptoKey> {
   );
 }
 
+/** Browsers return DER from ECDSA sign; Node 24+ returns raw r||s. Accept both. */
+function toRawSignature(out: Uint8Array): Uint8Array {
+  if (out.length === 64 && out[0] !== 0x30) return out;
+  return derToRaw(out);
+}
+
 async function verifyRaw(pubRaw: Uint8Array, body: Uint8Array, sigRaw: Uint8Array): Promise<boolean> {
   try {
     const key = await importSigningKey(pubRaw);
-    return await crypto.subtle.verify(
-      { name: 'ECDSA', hash: 'SHA-256' },
-      key,
-      rawToDer(sigRaw) as BufferSource,
-      body as BufferSource,
-    );
+    const alg = { name: 'ECDSA', hash: 'SHA-256' };
+    if (await crypto.subtle.verify(alg, key, rawToDer(sigRaw) as BufferSource, body as BufferSource)) {
+      return true;
+    }
+    // Second chance for runtimes that verify raw directly (Node 24+);
+    // browsers just answer false here.
+    return await crypto.subtle
+      .verify(alg, key, sigRaw as BufferSource, body as BufferSource)
+      .catch(() => false);
   } catch {
     return false;
   }
@@ -363,14 +372,14 @@ export class WebCryptoKeys implements KeyProvider {
   }
 
   async sign(body: Uint8Array): Promise<Uint8Array> {
-    const der = new Uint8Array(
+    const out = new Uint8Array(
       await crypto.subtle.sign(
         { name: 'ECDSA', hash: 'SHA-256' },
         this.signingPrivate,
         body as BufferSource,
       ),
     );
-    return derToRaw(der);
+    return toRawSignature(out);
   }
 
   async agree(peerPublicKey: Uint8Array): Promise<Uint8Array> {
@@ -571,18 +580,26 @@ function foldListening(ops: OpInternal[], slot: SharedSlot): ListeningState {
   for (const op of ops) {
     const p = (slot.plaintext.get(op.id) ?? op.payload) as Record<string, unknown>;
     if (op.kind === 'show.follow' && typeof p['showId'] === 'string') {
-      if (!state.shows.some((s) => s.id === p['showId'])) {
-        state.shows.push({
-          id: p['showId'] as string,
-          title: String(p['title'] ?? 'Untitled show'),
-          feed: String(p['feed'] ?? ''),
-        });
+      const id = p['showId'] as string;
+      const existing = state.shows.find((s) => s.id === id);
+      if (existing) {
+        existing.title = String(p['title'] ?? existing.title);
+        existing.feed = String(p['feed'] ?? existing.feed);
+      } else {
+        state.shows.push({ id, title: String(p['title'] ?? 'Untitled show'), feed: String(p['feed'] ?? '') });
       }
     } else if (op.kind === 'episode.add' && typeof p['episodeId'] === 'string') {
-      const show = state.shows.find((s) => s.id === (p['showId'] as string));
+      const showId = String(p['showId'] ?? '');
+      let show = state.shows.find((s) => s.id === showId);
+      if (!show && showId) {
+        // A reference arriving before its show (cross-author order) opens a
+        // shell; the later show.follow fills in the title.
+        show = { id: showId, title: 'Unknown show', feed: '' };
+        state.shows.push(show);
+      }
       state.episodes.push({
         id: p['episodeId'] as string,
-        showId: String(p['showId'] ?? ''),
+        showId,
         showTitle: show?.title ?? 'Unknown show',
         title: String(p['title'] ?? 'Untitled episode'),
         published: String(p['published'] ?? ''),
@@ -603,6 +620,8 @@ function foldListening(ops: OpInternal[], slot: SharedSlot): ListeningState {
       ep.hasTranscript = true;
       ep.excerpt = t.length > 220 ? `${t.slice(0, 220)}…` : t;
     }
+    const s = state.shows.find((sh) => sh.id === ep.showId);
+    if (s) ep.showTitle = s.title;
   }
   return state;
 }
@@ -616,17 +635,21 @@ function foldNotes(
   for (const op of ops) {
     const p = (slot.plaintext.get(op.id) ?? op.payload) as Record<string, unknown>;
     if (op.kind === 'notebook.create' && typeof p['notebookId'] === 'string') {
-      if (!state.notebooks.some((n) => n.id === p['notebookId'])) {
-        state.notebooks.push({
-          id: p['notebookId'] as string,
-          title: String(p['title'] ?? 'Notebook'),
-          archived: false,
-          cells: [],
-        });
+      const id = p['notebookId'] as string;
+      const existing = state.notebooks.find((n) => n.id === id);
+      if (existing) existing.title = String(p['title'] ?? existing.title);
+      else {
+        state.notebooks.push({ id, title: String(p['title'] ?? 'Notebook'), archived: false, cells: [] });
       }
     } else if (op.kind === 'cell.put' && typeof p['notebookId'] === 'string') {
-      const nb = state.notebooks.find((n) => n.id === (p['notebookId'] as string));
-      if (!nb) continue;
+      const id = p['notebookId'] as string;
+      let nb = state.notebooks.find((n) => n.id === id);
+      if (!nb) {
+        // A note arriving before its notebook (cross-author order) opens a
+        // shell; the later notebook.create fills in the title.
+        nb = { id, title: 'Untitled notebook', archived: false, cells: [] };
+        state.notebooks.push(nb);
+      }
       const m = members.get(op.author);
       const cellId = typeof p['cellId'] === 'string' ? (p['cellId'] as string) : op.id;
       const existing = nb.cells.findIndex((c) => c.id === cellId);
@@ -667,12 +690,12 @@ function foldReading(ops: OpInternal[], slot: SharedSlot): ReadingState {
 /* ------------------------- ledger sentences ------------------------- */
 
 function scopeWords(g: Grant): string {
-  const read = g.namespaces.filter(() => g.access.includes('read'));
-  const write = g.namespaces.filter(() => g.access.includes('write'));
-  const parts: string[] = [];
-  if (read.length > 0) parts.push(`read ${read.join(', ')}`);
-  if (write.length > 0) parts.push(`write ${write.join(', ')}`);
-  return parts.join(' and ') || 'nothing';
+  const canRead = g.access.includes('read');
+  const canWrite = g.access.includes('write');
+  if (canRead && canWrite) return `read and write ${g.namespaces.join(', ')}`;
+  if (canRead) return `read ${g.namespaces.join(', ')}`;
+  if (canWrite) return `write ${g.namespaces.join(', ')}`;
+  return 'nothing';
 }
 
 /* ------------------------------------------------------------------ */

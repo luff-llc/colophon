@@ -724,6 +724,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     transcript: string;
   }
   interface FoldNote {
+    id: string;
     opId: string;
     notebook: string;
     title: string;
@@ -749,8 +750,10 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     const transcripts = new Map<string, string>();
     for (const op of ops) {
       const p = (op.payload ?? {}) as Record<string, unknown>;
+      // Order-independent: references may fold before what they name.
       if (op.kind === 'show.follow' && str(p['showId'])) shows.set(str(p['showId']), str(p['title']) || 'Untitled show');
       else if (op.kind === 'episode.add' && str(p['episodeId'])) {
+        if (str(p['showId']) && !shows.has(str(p['showId']))) shows.set(str(p['showId']), 'Unknown show');
         eps.set(str(p['episodeId']), {
           showId: str(p['showId']),
           title: str(p['title']) || 'Untitled episode',
@@ -782,12 +785,21 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       const p = (op.payload ?? {}) as Record<string, unknown>;
       if (op.kind === 'notebook.create' && str(p['notebookId'])) {
         const id = str(p['notebookId']);
-        if (!notebooks.has(id)) notebooks.set(id, { id, title: str(p['title']) || 'Notebook', cells: [] });
+        const existing = notebooks.get(id);
+        if (existing) existing.title = str(p['title']) || existing.title;
+        else notebooks.set(id, { id, title: str(p['title']) || 'Notebook', cells: [] });
       } else if (op.kind === 'cell.put' && str(p['notebookId'])) {
-        const nb = notebooks.get(str(p['notebookId']));
-        if (!nb) continue;
+        const nbId = str(p['notebookId']);
+        let nb = notebooks.get(nbId);
+        if (!nb) {
+          // A note arriving before its notebook opens a shell; the later
+          // notebook.create fills in the title.
+          nb = { id: nbId, title: 'Untitled notebook', cells: [] };
+          notebooks.set(nbId, nb);
+        }
         const cellId = str(p['cellId']) || op.id;
         const cell: FoldNote = {
+          id: cellId,
           opId: op.id,
           notebook: nb.id,
           title: str(p['title']),
@@ -796,8 +808,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
           authorLabel: op.authorLabel,
           created: op.created,
         };
-        const ix = nb.cells.findIndex((c) => c.opId === op.id || str(p['cellId'] as unknown) === c.opId);
-        void cellId;
+        const ix = nb.cells.findIndex((c) => c.id === cellId);
         if (ix >= 0) nb.cells[ix] = cell;
         else nb.cells.push(cell);
       }
@@ -931,7 +942,11 @@ export async function boot(root: HTMLElement | null): Promise<void> {
         el('h2', {}, ['Colophon']),
         el('p', { class: 'belongs' }, [state.busy === 'recover' ? 'Rebuilding from stored records…' : 'Preparing your library…']),
       );
-      if (state.statusErr) page.append(el('p', { class: 'status-line error' }, [state.statusErr]));
+      if (state.statusErr) {
+        page.append(el('p', { class: 'status-line error' }, [state.statusErr]));
+        const retry = el('button', { type: 'button', class: 'button-ghost', id: 'replay' }, ['Reload the playground']);
+        page.append(el('p', {}, [retry]));
+      }
       return;
     }
     const members = new Map(state.library.members().map((m) => [m.id, m]));
@@ -951,7 +966,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       const key = `${e.sequence}|${e.event}|${e.subject ?? ''}|${e.text}`;
       const fresh = !seenLedger.has(key);
       seenLedger.add(key);
-      const cls = ['ledger-line'];
+      const cls: string[] = [];
       if (fresh) cls.push('fresh');
       if (e.event === 'granted' && e.subject && revoked.has(e.subject)) cls.push('struck');
       if (e.event === 'revoked') cls.push('revoked-line');
@@ -1174,6 +1189,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       body.append(el('p', { class: 'empty-note' }, ['No notebooks yet.']));
       return;
     }
+    const pendingFills: [string, string, 'person' | 'ai'][] = [];
     for (const nb of notebooks) {
       body.append(el('h3', {}, [nb.title]));
       if (nb.cells.length === 0) {
@@ -1203,11 +1219,13 @@ export async function boot(root: HTMLElement | null): Promise<void> {
         cell.append(toggle);
         if (open) {
           cell.append(el('div', { class: 'record-view', id: `record-${c.opId}` }, ['Checking the record…']));
-          void fillRecordView(c.opId, c.authorLabel, c.origin);
+          pendingFills.push([c.opId, c.authorLabel, c.origin]);
         }
         body.append(cell);
       }
     }
+    // Fill after appending: fillRecordView looks the box up in the document.
+    for (const [opId, authorLabel, origin] of pendingFills) void fillRecordView(opId, authorLabel, origin);
   }
 
   async function fillRecordView(opId: string, authorLabel: string, origin: 'person' | 'ai'): Promise<void> {

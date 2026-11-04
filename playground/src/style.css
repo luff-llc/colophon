@@ -118,7 +118,8 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.6rem 0.75rem;
   padding: 0.7rem 1.25rem;
   border-bottom: 1px solid var(--line);
   background: var(--paper);
@@ -187,7 +188,8 @@ body {
 .demo-bar {
   display: flex;
   align-items: center;
-  gap: 0.9rem;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.9rem;
   padding: 0.6rem 1.25rem;
   background: var(--plum);
   color: var(--plum-ink);
@@ -1286,13 +1288,6 @@ dialog.settings::backdrop {
   min-height: 9rem;
 }
 
-.intro .lines .colophon-line {
-  font-family: var(--serif);
-  font-size: clamp(1.3rem, 4vw, 1.9rem);
-  margin: 0.3rem 0;
-  animation: set-type 0.9s ease both;
-}
-
 .intro .lines .big {
   font-family: var(--serif);
   font-weight: 700;
@@ -1368,7 +1363,8 @@ dialog.settings::backdrop {
 
 /* ---------------- responsive ---------------- */
 
-@media (max-width: 64rem) {
+/* Three columns need room: below 76rem the agent and library become sheets. */
+@media (max-width: 76rem) {
   .layout {
     grid-template-columns: 1fr;
     max-width: 46rem;
@@ -1393,7 +1389,7 @@ dialog.settings::backdrop {
   }
 }
 
-@media (min-width: 64.01rem) {
+@media (min-width: 76.01rem) {
   .panel {
     display: block !important;
   }
@@ -1410,6 +1406,10 @@ dialog.settings::backdrop {
 
   .brand {
     font-size: 1.15rem;
+  }
+
+  .brand .sub {
+    display: none;
   }
 
   .layout {
