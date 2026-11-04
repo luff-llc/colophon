@@ -11,8 +11,27 @@ signed, encrypted operations, and every client folds the admitted operations int
 state. Storage and transport never grant access: a folder, iCloud Drive or a relay only
 moves bytes it can't read. There is no vendor account.
 
-This repository holds the Colophon 0.2 Rust core and JavaScript package, plus the 0.1
-specification, conformance vectors and shipped Swift reference implementation.
+This repository holds the Colophon 0.2 Rust core and JavaScript package, the
+playground demo, plus the 0.1 specification, conformance vectors and shipped
+Swift reference implementation.
+
+## Try it
+
+The fastest way to see Colophon: the playground runs the real 0.2 Rust core as
+WebAssembly in one browser tab, where an AI agent knocks, gets narrow access,
+does useful work, and is shown the door.
+
+```sh
+# Rust stable; on Homebrew installations:
+export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+npm ci --prefix js && npm --prefix js run build   # @colophon/core + wasm
+cd playground && npm install && npm run dev       # http://localhost:5173
+```
+
+Open `http://localhost:5173/?demo` and click Next through knock → grant → act →
+end → recover. Without a key the scripted stand-in performs the agent's tool
+calls; with `MUSE_API_KEY` in `playground/.env.local`, the live Muse model
+answers instead (the key stays on the server; see `playground/README.md`).
 
 ## Why
 
@@ -87,7 +106,7 @@ crypto. The Swift package has no dependencies.
 
 ```sh
 swift build --product colophon
-.build/debug/colophon "<library folder>" join --label "Llama on MacBook" --namespaces listening.podcasts,notes
+.build/debug/colophon "<library folder>" join --label "Muse on MacBook" --namespaces listening.podcasts,notes
 # compare the six-digit code with the app that can approve access, and approve there
 .build/debug/colophon "<library folder>" mcp      # MCP over stdio
 ```

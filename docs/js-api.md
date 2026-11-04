@@ -76,7 +76,7 @@ export interface LedgerEntry {
   actor: string; actorLabel: string;
   event: 'created' | 'requested' | 'granted' | 'revoked' | 'rekeyed' | 'wrote' | 'held' | 'refused';
   subject?: string;             // member or operation ID
-  text: string;                 // e.g. "Llama on MacBook could read listening and write notes"
+  text: string;                 // e.g. "Muse on MacBook could read listening and write notes"
 }
 
 export class Library {

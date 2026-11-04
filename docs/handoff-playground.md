@@ -1,110 +1,90 @@
 # Playground handoff
 
-The Colophon playground is built and verified on branch `playground`, in
-`playground/`. Two commits: the app, then verification fixes.
+The Colophon playground in `playground/` is integrated with the real core on
+branch `integrate`. It runs the actual Rust core as WebAssembly
+(`@colophon/core`, `file:../js`) — no mock, no "preview core" badge. The mock
+(`src/mock-core.ts` on branch `playground`) was deleted; git history keeps it.
 
 ## What's done
 
 - **Vite + TypeScript, no UI framework.** Exact-pinned deps (`vite`,
-  `typescript`, `@types/node`). `npm run dev`, `npm run build` (static
-  `playground/dist`), tiny `playground/README.md`.
-- **Core behind one import.** All core calls go through
-  `playground/src/core.ts`, which today re-exports `./mock-core`.
-  `playground/src/mock-core.ts` implements the `docs/js-api.md` contract with
-  real WebCrypto P-256 keys/signatures, ECDH-wrapped epoch keys, AES-GCM
-  sealed operations, enforced grants (read/write, expiry, write budget),
-  revocation that refuses later writes while keeping earlier notes, AI origin
-  derived from member kind, and ledger sentences. The mock is marked in code,
-  and the UI shows a gold **preview core** badge while it backs the page.
+  `typescript`, `@types/node`, `@colophon/core` via `file:../js`).
+  `npm run dev`, `npm run build` (static `playground/dist`, wasm emitted as
+  an asset, no extra plugins), `playground/README.md`.
+- **Real core behind one import.** All core calls go through
+  `playground/src/core.ts`, which re-exports `@colophon/core`. Namespaces are
+  `listening.podcasts` / `notes` / `reading.saved`; kinds are the clean 0.2
+  set (`follow`, `episode`, `createNotebook`, `addNote`, `capture`); tools keep
+  namespace dots (`listening.podcasts__read`, `notes__addNote`,
+  `reading.saved__read`).
+- **Real sync semantics.** After Knock the request record is merged at
+  `requests/<id>.json` so it ledgers while waiting. After Act the owner merges
+  the agent's records and awaits `ready()` before reading the notes. After End
+  the revocation is merged into the agent's replica (synchronous), so its next
+  tool call visibly fails with `revoked` while its 3 notes stay attributed.
+- **Recovery keys persisted.** `create` returns `recoveryKeys`; owner and
+  recovery key handles are structured-cloned into IndexedDB separately from
+  the records. Recover drops every in-memory key and replica, restores both
+  key sets from storage, and re-opens from the stored records alone.
 - **Intro + five verbs** per `docs/playground-design.md`: book intro
   (skippable, ~12s, calm path for reduced motion), colophon page as the main
   surface, Listening/Notes/Reading tabs, agent panel styled as a separate
   device, consent card with matching six-digit codes, grant narrowing
   (read-only, expiry, write budget), “show the record” revealing signed bytes
-  plus the verified author, and the agent's view of reading shown as
+  (op paths end `-<opId>.json`), and the agent's view of reading shown as
   `notGranted` rather than empty.
 - **Seed content:** 3 invented podcast episodes with original transcript
-  excerpts, 3 saved links (Gutenberg, MDN, Wikipedia), 1 empty notebook.
-- **Agent** (`src/agent.ts`): with a key, OpenAI-compatible chat completions
-  with tools from `Library.tools()`; default base URL
-  `https://api.llama.com/compat/v1` with `Llama-4-Maverick-17B-128E-Instruct-FP8`
-  (endpoint + model id verified against Meta/Llama docs). Settings panel for
-  base URL / model / key; key in `sessionStorage` only; Vite dev proxy for
-  the default base URL. Without a key, a scripted stand-in performs the same
-  tool calls with typed-out messages. Everything goes through `Library.call()`.
+  excerpts, 3 saved links (Gutenberg, MDN, Wikipedia), 1 notebook. Episode
+  date/duration ride along as unknown fields the core preserves.
+- **Agent** (`src/agent.ts`): “Muse on MacBook” (member kind agent). With
+  `MUSE_API_KEY` in the server environment, the live Muse model
+  (`https://api.meta.ai/v1`, default `muse-spark-1.3`, overridable in
+  settings) answers via chat completions with tools from `Library.tools()`.
+  The key is never in the browser: dev and preview servers proxy
+  `/api/muse/*` and add `Authorization` there (`playground/.env.local`,
+  gitignored; see `playground/.env.example`). No key field in the UI; the page
+  shows “Muse connected” or “Scripted agent (no MUSE_API_KEY)”. Without a key,
+  the scripted stand-in performs the same tool calls through `Library.call()`.
+  All wire-format details stay in `agent.ts`.
 - **Guided demo** (`?demo`): step bar with Next through intro → five verbs.
-- **Polish:** Fraunces/Inter/IBM Plex Mono from Google Fonts, paper +
-  lamplight themes (follows OS, toggle persisted), `prefers-reduced-motion`
-  throughout, single-column sheets under 76rem, labelled controls, tablist
-  arrow keys, live-region announcements.
 
 ## How to run
 
 ```sh
-cd playground && npm install && npm run dev   # http://localhost:5173
-npm run build                                  # -> playground/dist
+export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+npm ci --prefix js && npm --prefix js run build   # @colophon/core + wasm, once
+cd playground && npm install && npm run dev       # http://localhost:5173
 ```
 
-Demo video: open `http://localhost:5173/?demo`, record, click Next.
-Optionally set an API key in Agent settings first for the live model.
+Demo video: open `http://localhost:5173/?demo`, record, click Next. For the
+live model, copy `playground/.env.example` to `playground/.env.local`, set
+`MUSE_API_KEY`, and (re)start the server first.
 
-## Verification (no browser was available in the sandbox)
+## Verification
 
-Chrome aborts and Firefox can't capture under this session's sandbox, and
-listening sockets are blocked, so screenshots could not be taken here:
-`playground/screenshots/` is empty (gitignored). Before recording, please run
-the screenshot pass on a normal machine (system Chrome + the walkthrough in
-`/tmp/shot/run.mjs` is stale scratch — simplest is `npm run dev` and manual
-clicks at 1440px and 390px, light + dark).
-
-What *was* verified, all passing:
-
-- `node /tmp/shot/verify-core.mjs` — mock core in Node: key shapes, seeding,
-  pairing format, approve, tool gating (`notGranted` on reading), 3 scripted
-  writes admitted with AI origin and verifying signatures, ledger sentences,
-  read-only/budget/expiry enforcement, revoke → `revoked` with kept notes,
-  owner writes after rekey, re-open from copied records with identical views.
-  (Scratch files under `/tmp/shot`; not committed.)
-- `node /tmp/shot/verify-app.mjs` — jsdom walkthrough of the app bundle:
-  skip intro → Knock (codes match on both sides) → Grant (`notGranted`
-  proof) → Act (3 AI notes, ledger counts, no failed calls) → show-the-record
-  (verified author) → End (struck line, rekey rule, visible `revoked`
-  failure) → Recover (identical ledger/notes) → theme toggle → settings
-  save → full `?demo` Next-walk. Zero window errors/unhandled rejections.
-- `tsc --noEmit` clean, `vite build` clean, CSS-vs-DOM class cross-check.
-
-These caught and fixed three real bugs: cross-author fold ordering (agent
-notes folded before the notebook existed), record views filled before append,
-and Node-vs-browser ECDSA encoding (mock now accepts both).
-
-## What the swap to the real core needs
-
-1. `npm install @colophon/core`, change the one line in `src/core.ts`,
-   delete `src/mock-core.ts`. The `IS_MOCK_CORE` badge auto-clears (the UI
-   feature-detects it).
-2. Two mock-only call sites in `src/app.ts` already have contract-only
-   fallbacks, but deserve real equivalents: `noteRequest` (filing Knock
-   requests so they ledger promptly) and `operationRecord` (“show the
-   record”; the fallback shows raw bytes and notes the core checked the
-   signature on open, without naming the verified author inline).
-3. Confirm shapes the UI folds from admitted payloads: `show.follow`,
-   `episode.add`, `episode.transcript`, `notebook.create`, `cell.put`,
-   `capture.link`, and the five tool names the scripted agent calls.
-   The UI folds from `admitted[]` payloads (contract-stable), not from
-   `view().state`, so fold-shape drift won't break it.
-4. The demo grant is read+write on `listening, notes` (the `Grant` shape is
-   namespaces × access, so per-namespace asymmetric access isn't
-   expressible). The design's “Read your listening and write notes” line is
-   rendered honestly as “Read and write your listening and your notes. Not
-   your reading.”
+- `npm --prefix js test` — WebCrypto smoke and Rust/WASM fixture parity.
+- `npm --prefix playground run build` — `tsc --noEmit` clean, `vite build`
+  clean, wasm emitted as an asset, bundle references it, no key material in
+  the bundle.
+- `/tmp/walkthrough.mjs` (scratch, not committed) — Node walkthrough of the
+  five verbs against the real core, mirroring the app's exact calls: create +
+  seed, knock (request ledgers, six-digit code), grant narrowed (exceeding
+  grants rejected), agent reads + writes 3 AI notes, reading view
+  `notGranted`, revoke → next agent call `revoked` with notes kept, reopen
+  from records with identical views, recovery keys open, read-only narrowing
+  enforced. Passing.
+- No committed test runner for the playground itself; the walkthrough above is
+  the integration check. No browser was available in the sandbox (as before),
+  so the UI itself is code-reviewed only — see gaps.
 
 ## Known gaps
 
-- No screenshots taken (see above) — visual polish is code-reviewed only.
-- The live-model path is written but untested against the real Llama API
-  (no key in the sandbox); on failure it announces the error and the
-  scripted stand-in takes over, so the demo can't strand.
+- No screenshots taken — visual polish is code-reviewed only.
+- The live-Muse path is written but untested against the real Meta API (no key
+  in the sandbox); on failure it announces the error and the scripted
+  stand-in takes over, so the demo can't strand. If the API's chat-completions
+  shape differs, only `src/agent.ts` needs to change.
 - Intro runs ~12s, not ~30s — a pace call for the demo video.
 - One agent at a time; no decline path (requests wait, per the design);
   no persistence across page loads by design (fresh keys each visit).
-- `dist/` and `screenshots/` are gitignored; `package-lock.json` is committed.
+- `dist/` is gitignored; `package-lock.json` is committed.

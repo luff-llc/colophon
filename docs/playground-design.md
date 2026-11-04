@@ -13,7 +13,7 @@ member did. The page is the product's main surface, not a settings screen.
 
 > This library belongs to Ada. It lives in this browser tab.
 > Taupe can read and write listening. Since 2:02 PM.
-> Llama on MacBook could read listening and write notes. 3 AI notes. Access ended 2:14 PM.
+> Muse on MacBook could read listening and write notes. 3 AI notes. Access ended 2:14 PM.
 
 ## Visual language
 
@@ -43,7 +43,7 @@ member did. The page is the product's main surface, not a settings screen.
 The demo runs as five moments, each one a button the visitor presses (with a guided "next" for a
 recorded demo):
 
-1. **Knock.** An agent ("Llama on MacBook") asks to join. A consent card shows a six-digit code on
+1. **Knock.** An agent ("Muse on MacBook") asks to join. A consent card shows a six-digit code on
    both sides (the agent's panel and the library), the member kind (AI agent) and the scope in plain
    words: "Read your listening and write notes. Not your reading." Undecided requests wait; they
    don't fail.
@@ -69,13 +69,15 @@ the left. Phone: the colophon page with the agent and content as sheets.
 
 ## The agent
 
-A real model when a key is configured: the Llama API (OpenAI-compatible `chat/completions` with
-tool calls) or any OpenAI-compatible base URL, such as a local Ollama running Llama. Without a key,
-a scripted agent performs the same tool calls so the demo always works. The agent only ever acts
-through `Library.tools()` and `Library.call()`; it holds its own `KeyProvider`.
+A real model when a key is configured: Meta's Muse API (`https://api.meta.ai/v1`,
+chat completions with tool calls, default model `muse-spark-1.3`). The key is
+never in the browser — the dev/preview servers proxy `/api/muse/*` and add it
+there. Without a key, a scripted agent performs the same tool calls so the demo
+always works. The agent only ever acts through `Library.tools()` and
+`Library.call()`; it holds its own `KeyProvider`.
 
 ## Copy
 
 Plain, short, second person. Never "users", "data subject" or "sync". Say "this tab", "your keys",
-"access ended". Errors say what happened and what still holds: "Llama's access ended at 2:14 PM.
+"access ended". Errors say what happened and what still holds: "Muse's access ended at 2:14 PM.
 Its 3 notes stay, marked as written by AI."
