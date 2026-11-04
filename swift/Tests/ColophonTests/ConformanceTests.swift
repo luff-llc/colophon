@@ -15,6 +15,7 @@ private let vectorsExist = FileManager.default.fileExists(atPath: ConformanceTes
 
 @Suite struct ConformanceTests {
   static let root = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    .deletingLastPathComponent()
     .appending(path: "conformance", directoryHint: .isDirectory)
   static var library: URL { root.appending(path: "library", directoryHint: .isDirectory) }
 
