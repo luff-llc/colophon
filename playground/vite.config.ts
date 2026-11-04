@@ -1,12 +1,13 @@
 import { defineConfig, loadEnv } from 'vite';
 import type { ProxyOptions } from 'vite';
+import { fileURLToPath } from 'node:url';
 
 // The browser never holds the Meta API key. Same-origin /api/muse/* requests
 // are proxied to the Meta API, and the server adds
 // `Authorization: Bearer $MUSE_API_KEY` from its own environment
 // (playground/.env.local, gitignored — see playground/.env.example).
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
+  const env = loadEnv(mode, fileURLToPath(new URL('.', import.meta.url)), '');
   const museKey = env['MUSE_API_KEY'] ?? process.env['MUSE_API_KEY'] ?? '';
   const museProxy: ProxyOptions = {
     target: 'https://api.meta.ai/v1',
@@ -28,6 +29,8 @@ export default defineConfig(({ mode }) => {
     optimizeDeps: { exclude: ['@colophon/core'] },
     server: {
       port: 5173,
+      // `@colophon/core` is linked from ../js, outside this folder.
+      fs: { allow: ['..'] },
       proxy: { '/api/muse': museProxy },
     },
     preview: {
