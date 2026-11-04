@@ -17,7 +17,8 @@ docs/          this file and design notes
 
 ## The core is a pure function of records
 
-The core owns everything that must mean the same thing on every device:
+The core owns everything that must mean the same thing on every device (section numbers
+refer to the 0.1 spec, which 0.2 revises):
 
 - reading and writing records (spec §2): signed bodies, verification over the stored bytes,
   key-derived IDs;
@@ -65,25 +66,41 @@ afterwards. It can't unread what it already decrypted; the interface says so pla
 
 The Swift reference and the apps take no third-party dependencies. The Rust core takes a small,
 pinned set of audited crates and nothing else: RustCrypto (`p256`, `aes-gcm`, `hkdf`, `sha2`),
-`serde`/`serde_json`, `base64`, `getrandom`, and `wasm-bindgen` in the bindings crate only. Every
+`serde`/`serde_json`, `base64`, `getrandom`, and `wasm-bindgen`/`js-sys` in the bindings crate
+only. Every
 addition is recorded here with its reason.
 
-## Conformance is the contract
+## Colophon 0.2: a clean break
 
-Implementations are interchangeable because they reproduce `conformance/expected.json` and
-`conformance/keyring/expected.json` from the committed records and keys. The Rust core's test
-suite runs those vectors; the Swift reference runs the same ones. A host moves from the Swift
-reference to the Rust core one module at a time, only after the vectors pass.
+The Rust core implements Colophon 0.2. It keeps 0.1's model (members with their own keys, a
+user-held authority history, scoped grants, revocation that keeps the past, deterministic folds)
+and drops what only existed for the apps that shipped first:
+
+- **No backward compatibility with 0.1 libraries.** No legacy kinds, bridge imports or
+  app-named wire constants. Purposes and digest seeds are `colophon/...` strings.
+- **One curve family.** P-256 for signing and agreement everywhere, because it is what the
+  Secure Enclave, Android Keystore and WebCrypto all hold natively.
+- **HPKE for sealing** (RFC 9180 base mode: DHKEM(P-256, HKDF-SHA256), HKDF-SHA256,
+  AES-256-GCM), implemented so the decapsulation's ECDH can be done by the host (two-phase).
+- **Member kinds are part of the grant**: `device`, `app`, `agent` or `server`. Everything an
+  `agent` writes is marked `origin: ai` by the core from the author's key, never by a payload
+  field.
+- **Caveats are a small closed set** in 0.2: namespaces, read/write, expiry and a write budget.
+  Richer delegation (attenuating sub-grants for agent swarms) is the next research step.
+- **The keyring and WebAuthn controllers wait** until after 0.2's core is stable.
+
+`spec/colophon-0.2.md` states the format. `conformance/0.2/` holds vectors the Rust core writes
+and every other implementation must reproduce. The Swift reference and `conformance/` (0.1)
+stay as the record of what shipped.
 
 ## Roadmap
 
-1. Rust core: verification, authority, admission, unsealing and the `reading.saved` and
-   `listening.podcasts` folds, passing the vectors. Writing as a member.
+1. Rust core (0.2): records, authority, admission, sealing and the `reading.saved`,
+   `listening.podcasts` and `notes` folds, with its own conformance vectors.
 2. WASM bindings, the `@colophon/core` package and the playground.
 3. UniFFI bindings; Swift apps adopt the core behind their existing API.
 4. Android moves from the legacy journal to Colophon through the same bindings.
 5. Server members: a KMS key provider and the transcript worker as the first server member.
-6. HPKE (RFC 9180, P-256) for sealing, one curve family everywhere, signed checkpoints for long
-   histories, and capability negotiation between module versions.
+6. Signed checkpoints for long histories and capability negotiation between module versions.
 7. Delegation research for agent swarms (attenuating grants, approval laundering, tamper-evident
    forensics).
