@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" data-theme="paper">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Colophon Playground — your library, your keys</title>
+    <meta
+      name="description"
+      content="An interactive introduction to Colophon: a personal library in your browser tab. Your keys decide who gets access."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%236b3a5b'/%3E%3Ctext x='32' y='44' font-family='Georgia,serif' font-size='36' fill='%23f6f1e7' text-anchor='middle'%3EC%3C/text%3E%3C/svg%3E"
+    />
+    <script>
+      try {
+        var t = localStorage.getItem('colophon.playground.theme');
+        if (t === 'paper' || t === 'lamplight') document.documentElement.dataset.theme = t;
+        else if (window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.dataset.theme = 'lamplight';
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>
+      <p style="font-family: Georgia, serif; padding: 2rem; text-align: center">
+        This playground needs JavaScript: your library is created with real keys in this tab.
+      </p>
+    </noscript>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
