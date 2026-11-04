@@ -1,19 +1,34 @@
-/* The agent: a real model when a key is configured, otherwise a scripted
+/* The agent: Muse when the server proxy has a key, otherwise a scripted
  * stand-in that performs the same tool calls. Both paths act only through
  * Library.tools() and Library.call(), and the agent holds its own keys.
+ *
+ * The API key is never in the browser: the Vite dev/preview servers proxy
+ * /api/muse/* to the Meta API and add Authorization from MUSE_API_KEY.
+ * All wire-format details stay in this file.
  */
 
-import type { Library, Outcome } from './core';
+import type { Library, NamespaceView, Outcome } from './core';
 
-export const DEFAULT_BASE_URL = 'https://api.llama.com/compat/v1';
-export const DEFAULT_MODEL = 'Llama-4-Maverick-17B-128E-Instruct-FP8';
+export const DEFAULT_MODEL = 'muse-spark-1.3';
 
-export const AGENT_LABEL = 'Llama on MacBook';
+/** Same-origin proxy path (see vite.config.ts). Never carries a key. */
+export const MUSE_PROXY_PATH = '/api/muse';
+
+export const AGENT_LABEL = 'Muse on MacBook';
+
+declare const __MUSE_AVAILABLE__: boolean | undefined;
+
+/** True when the server was started with MUSE_API_KEY (baked at serve/build time). */
+export function museAvailable(): boolean {
+  try {
+    return typeof __MUSE_AVAILABLE__ !== 'undefined' && __MUSE_AVAILABLE__ === true;
+  } catch {
+    return false;
+  }
+}
 
 export interface AgentSettings {
-  baseURL: string;
   model: string;
-  apiKey: string; // sessionStorage only, never committed, never persisted to disk
 }
 
 export type AgentEvent =
@@ -25,48 +40,27 @@ export type AgentEvent =
 
 export type Emit = (e: AgentEvent) => void | Promise<void>;
 
-const LS_BASE = 'colophon.playground.baseURL';
 const LS_MODEL = 'colophon.playground.model';
-const SS_KEY = 'colophon.playground.apiKey';
 
 export function loadSettings(): AgentSettings {
-  let baseURL = DEFAULT_BASE_URL;
   let model = DEFAULT_MODEL;
-  let apiKey = '';
   try {
-    baseURL = localStorage.getItem(LS_BASE) || DEFAULT_BASE_URL;
     model = localStorage.getItem(LS_MODEL) || DEFAULT_MODEL;
-    apiKey = sessionStorage.getItem(SS_KEY) || '';
+    // Drop pre-integration settings; the key was never persisted to disk.
+    localStorage.removeItem('colophon.playground.baseURL');
+    sessionStorage.removeItem('colophon.playground.apiKey');
   } catch {
     // Storage unavailable (private mode): run scripted with defaults.
   }
-  return { baseURL, model, apiKey };
+  return { model };
 }
 
 export function saveSettings(s: AgentSettings): void {
   try {
-    localStorage.setItem(LS_BASE, s.baseURL);
     localStorage.setItem(LS_MODEL, s.model);
-    if (s.apiKey) sessionStorage.setItem(SS_KEY, s.apiKey);
-    else sessionStorage.removeItem(SS_KEY);
   } catch {
     // Ignore; the settings still apply for this tab.
   }
-}
-
-/**
- * Where to POST chat completions. The default Llama base URL goes through the
- * Vite dev proxy (see vite.config.ts) when served from localhost, so the demo
- * never fights CORS. Custom base URLs (Ollama, another gateway) are used as-is.
- */
-export function endpointForBaseURL(baseURL: string): string {
-  const trimmed = baseURL.trim().replace(/\/+$/, '');
-  const host = typeof location !== 'undefined' ? location.hostname : '';
-  const local = host === 'localhost' || host === '127.0.0.1' || host === '';
-  if (local && (trimmed === DEFAULT_BASE_URL || trimmed.startsWith('https://api.llama.com'))) {
-    return '/llama-api';
-  }
-  return trimmed;
 }
 
 /** Run the Act turn: answer the question from listening, then write 3 notes. */
@@ -76,20 +70,20 @@ export async function runActTurn(
   question: string,
   emit: Emit,
 ): Promise<void> {
-  if (settings.apiKey.trim()) {
+  if (museAvailable()) {
     try {
       await runLive(agentLibrary, settings, question, emit);
       return;
     } catch (err) {
       await emit({
         type: 'notice',
-        text: `The live model call failed (${err instanceof Error ? err.message : 'network error'}). The scripted stand-in takes over so the demo continues.`,
+        text: `The Muse call failed (${err instanceof Error ? err.message : 'network error'}). The scripted stand-in takes over so the demo continues.`,
       });
     }
   } else {
     await emit({
       type: 'notice',
-      text: 'No key configured — the scripted stand-in performs the same tool calls a model would.',
+      text: 'Scripted agent (no MUSE_API_KEY) — performing the same tool calls Muse would.',
     });
   }
   await runScripted(agentLibrary, question, emit);
@@ -97,45 +91,58 @@ export async function runActTurn(
 
 /* ------------------------- scripted stand-in ------------------------- */
 
+interface PodcastEpisode {
+  id: string;
+  show?: string;
+  title?: string;
+  transcriptExcerpt?: string;
+}
+
 async function runScripted(library: Library, question: string, emit: Emit): Promise<void> {
   await emit({ type: 'message', text: `On it — “${question}” I'll search your listening for the answer.` });
 
-  await emit({ type: 'tool_call', name: 'listening_list_episodes', input: {} });
-  const list = await library.call('listening_list_episodes', {});
-  await emit({ type: 'tool_result', name: 'listening_list_episodes', outcome: list });
-
-  let episodeId = '';
-  let citation = 'your listening';
-  if (list.ok) {
-    const eps = (list.value as { episodes?: { id: string; title: string }[] }).episodes ?? [];
-    const hit = eps.find((e) => /foghorn/i.test(e.title)) ?? eps[0];
-    if (hit) episodeId = hit.id;
+  await emit({ type: 'tool_call', name: 'listening.podcasts__read', input: {} });
+  const list = await library.call('listening.podcasts__read', {});
+  await emit({ type: 'tool_result', name: 'listening.podcasts__read', outcome: list });
+  if (!list.ok) {
+    await emit({ type: 'message', text: 'I could not read your listening, so there is nothing to answer from.' });
+    await emit({ type: 'done' });
+    return;
   }
-  if (!episodeId) {
+  const view = list.value as NamespaceView<{
+    shows?: { id: string; title?: string }[];
+    episodes?: PodcastEpisode[];
+  }>;
+  const episodes = view.state?.episodes ?? [];
+  const hit = episodes.find((e) => /foghorn/i.test(e.title ?? '')) ?? episodes[0];
+  if (!hit) {
     await emit({ type: 'message', text: 'Your listening is empty, so there is nothing to answer from.' });
     await emit({ type: 'done' });
     return;
   }
-
-  const tInput = { episode: episodeId };
-  await emit({ type: 'tool_call', name: 'listening_get_transcript', input: tInput });
-  const t = await library.call('listening_get_transcript', tInput);
-  await emit({ type: 'tool_result', name: 'listening_get_transcript', outcome: t });
+  const showTitle = view.state?.shows?.find((s) => s.id === hit.show)?.title ?? 'your listening';
+  const citation = `${showTitle}, “${hit.title ?? hit.id}”`;
 
   let answer =
     'Keeper Ilsa Brandt logged the weather in the margins — “Sleet, gulls quiet” — though the regulation only asked for sounding times. Nobody required it; she gave the fog a diary anyway, and decades later the acoustics lab uses those margins to calibrate its models. The unofficial record became the useful one.';
-  if (t.ok) {
-    const v = t.value as { citation?: string; text?: string };
-    if (v.citation) citation = v.citation;
-    const m = /“[^”]+”/.exec(v.text ?? '');
-    if (m) {
-      answer =
-        `Keeper Ilsa Brandt logged the weather in the margins — ${m[0]} — though the regulation only asked for sounding times. ` +
-        'Nobody required it; she gave the fog a diary anyway, and decades later the acoustics lab uses those margins to calibrate its models. The unofficial record became the useful one.';
-    }
+  const m = /“[^”]+”/.exec(hit.transcriptExcerpt ?? '');
+  if (m) {
+    answer =
+      `Keeper Ilsa Brandt logged the weather in the margins — ${m[0]} — though the regulation only asked for sounding times. ` +
+      'Nobody required it; she gave the fog a diary anyway, and decades later the acoustics lab uses those margins to calibrate its models. The unofficial record became the useful one.';
   }
   await emit({ type: 'message', text: `${answer}\n\nSource: ${citation}.` });
 
+  await emit({ type: 'tool_call', name: 'notes__read', input: {} });
+  const shelf = await library.call('notes__read', {});
+  await emit({ type: 'tool_result', name: 'notes__read', outcome: shelf });
+  let notebook = 'nb-field';
+  if (shelf.ok) {
+    const notebooks = (shelf.value as NamespaceView<{ notebooks?: { id: string }[] }>).state?.notebooks ?? [];
+    if (notebooks[0]?.id) notebook = notebooks[0].id;
+  }
+
+  const stamp = Date.now().toString(36);
   const notes = [
     {
       title: 'The margin beats the form',
@@ -150,11 +157,11 @@ async function runScripted(library: Library, question: string, emit: Emit): Prom
       text: 'The lab depends on margins that were never part of the spec. If we keep our own notes this way — small, regular, in the margins — someone (maybe us) will thank us in twenty years.',
     },
   ];
-  for (const n of notes) {
-    const input = { title: n.title, text: n.text };
-    await emit({ type: 'tool_call', name: 'notes_write', input });
-    const r = await library.call('notes_write', input);
-    await emit({ type: 'tool_result', name: 'notes_write', outcome: r });
+  for (const [i, n] of notes.entries()) {
+    const input = { id: `muse-note-${stamp}-${i + 1}`, notebook, title: n.title, text: n.text };
+    await emit({ type: 'tool_call', name: 'notes__addNote', input });
+    const r = await library.call('notes__addNote', input);
+    await emit({ type: 'tool_result', name: 'notes__addNote', outcome: r });
   }
   await emit({
     type: 'message',
@@ -173,7 +180,7 @@ interface ChatMessage {
   name?: string;
 }
 
-function toOpenAITools(library: Library): unknown[] {
+function toChatTools(library: Library): unknown[] {
   return library.tools().map((t) => ({
     type: 'function',
     function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -191,25 +198,27 @@ async function runLive(
   question: string,
   emit: Emit,
 ): Promise<void> {
-  const endpoint = endpointForBaseURL(settings.baseURL);
   const messages: ChatMessage[] = [
     {
       role: 'system',
       content:
-        'You are Llama, an AI agent invited into the person’s personal library. ' +
+        'You are Muse, an AI agent invited into the person’s personal library. ' +
         'You can read their listening (podcasts) and write notes. You were never granted their reading (saved links): ' +
         'never call reading tools, and say plainly that you cannot see reading. ' +
-        'Answer the person’s question using the tools, with a spoken citation (show, episode, date). ' +
-        'Then write exactly three short notes capturing what you learned, via notes_write. ' +
+        'First read listening.podcasts to find the episode that answers the question, using its transcriptExcerpt. ' +
+        'Answer with a spoken citation (show, episode). ' +
+        'Then read notes to find the first notebook id, and write exactly three short attributed notes via notes__addNote, ' +
+        'each with a unique id like muse-note-<random>-<n>, the notebook id, a short title, and the note text. ' +
         'Keep every message short — two or three sentences.',
     },
     { role: 'user', content: question },
   ];
-  const tools = toOpenAITools(library);
-  for (let round = 0; round < 8; round++) {
-    const res = await fetch(`${endpoint}/chat/completions`, {
+  const tools = toChatTools(library);
+  for (let round = 0; round < 10; round++) {
+    // Same-origin; the server proxy adds Authorization from MUSE_API_KEY.
+    const res = await fetch(`${MUSE_PROXY_PATH}/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey.trim()}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: settings.model.trim(), messages, tools, tool_choice: 'auto' }),
     });
     if (!res.ok) {

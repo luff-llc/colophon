@@ -1,20 +1,27 @@
 /* The playground page: colophon surface, content tabs, agent device, intro.
- * Every core call in this file goes to './core' (the mock until the swap).
+ * Every core call in this file goes to './core' (the real @colophon/core).
  */
 
 import * as core from './core';
 import {
   AGENT_LABEL,
   loadSettings,
+  museAvailable,
   runActTurn,
   saveSettings,
   type AgentSettings,
 } from './agent';
 import { DEMO_QUESTION, seedLibrary } from './seed';
-import { loadRecords, saveRecords } from './storage';
+import { loadKeys, loadRecords, saveKeys, saveRecords } from './storage';
 
-const IS_MOCK = (core as unknown as { IS_MOCK_CORE?: unknown }).IS_MOCK_CORE === true;
-const NAMESPACES = ['listening', 'notes', 'reading'];
+const NAMESPACES = ['listening.podcasts', 'notes', 'reading.saved'];
+/** Short display names for the consent card's plain-words scope. */
+const DISPLAY_NAME: Record<string, string> = {
+  'listening.podcasts': 'listening',
+  notes: 'notes',
+  'reading.saved': 'reading',
+};
+const displayName = (namespace: string): string => DISPLAY_NAME[namespace] ?? namespace;
 const OWNER_LABEL = 'Ada';
 
 const REDUCED = () =>
@@ -26,6 +33,7 @@ type Tab = 'listening' | 'notes' | 'reading';
 
 interface State {
   ownerKeys: core.KeyProvider | null;
+  recoveryKeys: core.KeyProvider | null;
   library: core.Library | null;
   agentKeys: core.KeyProvider | null;
   agentLibrary: core.Library | null;
@@ -84,6 +92,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   const settings: AgentSettings = loadSettings();
   const state: State = {
     ownerKeys: null,
+    recoveryKeys: null,
     library: null,
     agentKeys: null,
     agentLibrary: null,
@@ -95,7 +104,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     tab: 'listening',
     showRecordFor: null,
     agentPhase: 'idle',
-    agentModel: settings.apiKey.trim() ? 'live' : 'scripted',
+    agentModel: museAvailable() ? 'live' : 'scripted',
     readingProof: null,
     probeAfterEnd: null,
     recoveredNote: null,
@@ -140,12 +149,8 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     const themeName = () => (document.documentElement.dataset['theme'] === 'lamplight' ? 'Lamplight' : 'Paper');
     const header = el('header', { class: 'topbar' });
     const h1 = el('h1', { class: 'brand' }, ['Colophon', el('span', { class: 'sub' }, ['playground'])]);
-    const badge = el('span', { class: IS_MOCK ? 'badge mock' : 'badge' }, [
-      IS_MOCK ? 'preview core' : 'WebAssembly core',
-    ]);
-    badge.title = IS_MOCK
-      ? 'Running the preview core (mock-core.ts) until @colophon/core lands'
-      : 'Running the real @colophon/core';
+    const badge = el('span', { class: 'badge' }, ['WebAssembly core']);
+    badge.title = 'Running the real @colophon/core';
     const spacer = el('span', { class: 'spacer' });
     const themeBtn = el('button', { class: 'icon-button', id: 'btn-theme', type: 'button' }, [`Theme: ${themeName()}`]);
     themeBtn.addEventListener('click', () => {
@@ -209,7 +214,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       el('div', { class: 'agent-device' }, [
         el('div', { class: 'agent-screen' }, [
           el('div', { class: 'agent-bar' }, [
-            el('div', { class: 'device-name' }, ['MacBook · Llama']),
+            el('div', { class: 'device-name' }, ['MacBook · Muse']),
             el('div', { class: 'agent-status', id: 'agent-status' }, []),
           ]),
           el('div', { id: 'agent-code-wrap' }),
@@ -238,21 +243,18 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     dlg.append(
       el('h2', {}, ['Agent settings']),
       el('p', { class: 'lede' }, [
-        'With a key, a real model answers through your library’s tools. Without one, a scripted stand-in performs the same tool calls.',
+        museAvailable()
+          ? 'Muse connected. The model answers through your library’s tools.'
+          : 'Scripted agent (no MUSE_API_KEY). A scripted stand-in performs the same tool calls Muse would.',
+      ]),
+      el('p', { class: 'lede' }, [
+        'The API key is never in this tab: the server proxies chat completions and adds it there. ',
+        'Start the server with MUSE_API_KEY set (see playground/.env.example) to use the live model.',
       ]),
       el('form', { class: 'settings-form', id: 'settings-form', method: 'dialog' }, [
-        el('label', { for: 'set-base' }, [
-          'Base URL (OpenAI-compatible)',
-          el('input', { type: 'text', id: 'set-base', name: 'base', value: '', autocomplete: 'off', spellcheck: 'false' }),
-        ]),
         el('label', { for: 'set-model' }, [
           'Model',
           el('input', { type: 'text', id: 'set-model', name: 'model', value: '', autocomplete: 'off', spellcheck: 'false' }),
-        ]),
-        el('label', { for: 'set-key' }, [
-          'API key ',
-          el('span', { class: 'hint' }, ['(kept in sessionStorage only; leave blank for the scripted stand-in)']),
-          el('input', { type: 'password', id: 'set-key', name: 'key', value: '', autocomplete: 'off', spellcheck: 'false' }),
         ]),
         el('div', { class: 'row' }, [
           el('button', { class: 'button-primary', id: 'set-save', type: 'submit', value: 'save' }, ['Save']),
@@ -263,12 +265,9 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     dlg.querySelector('#settings-form')?.addEventListener('submit', (ev) => {
       const submitter = (ev as SubmitEvent).submitter as HTMLElement | null;
       if (submitter?.id === 'set-save') {
-        settings.baseURL = ($('set-base') as HTMLInputElement).value.trim() || settings.baseURL;
         settings.model = ($('set-model') as HTMLInputElement).value.trim() || settings.model;
-        settings.apiKey = ($('set-key') as HTMLInputElement).value;
         saveSettings(settings);
-        state.agentModel = settings.apiKey.trim() ? 'live' : 'scripted';
-        state.statusMsg = settings.apiKey.trim()
+        state.statusMsg = museAvailable()
           ? `Agent will call ${settings.model} at Act.`
           : 'Agent will run as the scripted stand-in at Act.';
         state.statusErr = null;
@@ -279,9 +278,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   }
 
   function syncSettingsForm(): void {
-    ($('set-base') as HTMLInputElement).value = settings.baseURL;
     ($('set-model') as HTMLInputElement).value = settings.model;
-    ($('set-key') as HTMLInputElement).value = settings.apiKey;
   }
 
   /* ----- intro ----- */
@@ -380,7 +377,9 @@ export async function boot(root: HTMLElement | null): Promise<void> {
         });
         await seedLibrary(library);
         state.ownerKeys = ownerKeys;
+        state.recoveryKeys = library.recoveryKeys ?? null;
         state.library = library;
+        await persistKeys();
         await persist();
         renderAll();
       })();
@@ -430,6 +429,18 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     }
   }
 
+  /** Persist owner + recovery key handles separately from the records, so the
+   * Recover verb can drop every in-memory key and still rebuild. */
+  async function persistKeys(): Promise<void> {
+    if (!state.ownerKeys || !state.recoveryKeys) return;
+    if (!(state.ownerKeys instanceof core.WebCryptoKeys) || !(state.recoveryKeys instanceof core.WebCryptoKeys)) return;
+    try {
+      await saveKeys(state.ownerKeys.keyPairs(), state.recoveryKeys.keyPairs());
+    } catch (err) {
+      console.warn('could not persist keys', err);
+    }
+  }
+
   /* ----- the five verbs ----- */
 
   async function doKnock(): Promise<void> {
@@ -444,13 +455,11 @@ export async function boot(root: HTMLElement | null): Promise<void> {
         keys: agentKeys,
         label: AGENT_LABEL,
         kind: 'agent',
-        namespaces: ['listening', 'notes'],
+        namespaces: ['listening.podcasts', 'notes'],
         access: ['read', 'write'],
       });
-      // File the request so it ledgers. Mock-only helper; otherwise merge.
-      const note = (state.library as unknown as { noteRequest?: (r: Uint8Array) => Promise<void> }).noteRequest;
-      if (typeof note === 'function') await note.call(state.library, pending.record);
-      else state.library.merge(new Map([[`requests/${pending.id}.json`, pending.record]]));
+      // File the request at its canonical path so it ledgers while waiting.
+      state.library.merge(new Map([[`requests/${pending.id}.json`, pending.record]]));
       state.agentKeys = agentKeys;
       state.pending = pending;
       state.consentOpen = true;
@@ -495,7 +504,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       state.agentPhase = 'granted';
       state.verbsDone.grant = true;
       // Prove the negative early: the agent's view of reading is notGranted.
-      state.readingProof = await state.agentLibrary.call('reading_list', {});
+      state.readingProof = await state.agentLibrary.call('reading.saved__read', {});
       agentLogNotice('Access granted. This device can read listening and write notes — nothing else.');
       await persist();
       announce(`Granted. ${outcome.value.label} joined the library.`);
@@ -508,7 +517,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   }
 
   async function doAct(): Promise<void> {
-    if (!state.agentLibrary || state.busy || state.verbsDone.act) return;
+    if (!state.library || !state.agentLibrary || state.busy || state.verbsDone.act) return;
     state.busy = 'act';
     state.statusErr = null;
     state.agentPhase = 'working';
@@ -516,7 +525,11 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     agentLogPerson(DEMO_QUESTION);
     try {
       await runActTurn(state.agentLibrary, settings, DEMO_QUESTION, (e) => agentEvent(e));
-      state.readingProof = await state.agentLibrary.call('reading_list', {});
+      // The agent wrote into its own replica; merge its records here and wait
+      // for the shared keys before reading them back.
+      state.library.merge(state.agentLibrary.records);
+      await state.library.ready();
+      state.readingProof = await state.agentLibrary.call('reading.saved__read', {});
       state.verbsDone.act = true;
       state.agentPhase = 'granted';
       await persist();
@@ -541,10 +554,12 @@ export async function boot(root: HTMLElement | null): Promise<void> {
         state.statusErr = outcome.detail;
         return;
       }
-      // Its next tool call visibly fails.
-      const probe = await state.agentLibrary.call('notes_list', {});
+      // Hand the revocation to the agent's replica; revocation applies
+      // synchronously, so its next tool call visibly fails.
+      state.agentLibrary.merge(state.library.records);
+      const probe = await state.agentLibrary.call('notes__read', {});
       state.probeAfterEnd = probe;
-      appendToolCard('notes_list', {}, probe);
+      appendToolCard('notes__read', {}, probe);
       state.agentPhase = 'ended';
       state.verbsDone.end = true;
       await persist();
@@ -563,24 +578,57 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     state.busy = 'recover';
     state.statusErr = null;
     state.statusMsg = 'Closing this tab’s memory…';
+    await persistKeys();
     await persist();
+    // Drop every in-memory key and replica. The agent's keys stay: they live
+    // on its own device, which never closed.
     const dropped = state.library.records.size;
+    const ownerBackup = state.ownerKeys;
+    const recoveryBackup = state.recoveryKeys;
     state.library = null;
     state.agentLibrary = null;
+    state.ownerKeys = null;
+    state.recoveryKeys = null;
     renderAll();
     announce('Closing in-memory state. Reopening from stored records.');
     try {
       await new Promise((r) => setTimeout(r, REDUCED() ? 60 : 700));
       const stored = await loadRecords();
       if (!stored || stored.size === 0) throw new Error('No stored records found in this browser.');
-      const library = await core.Library.open(stored, state.ownerKeys);
+      // Keys were persisted separately from the records; restore both from
+      // storage, falling back to this tab's keys when storage is unavailable.
+      let ownerKeys: core.KeyProvider = ownerBackup;
+      let recoveryKeys: core.KeyProvider | null = recoveryBackup;
+      let keysFromStore = false;
+      const keys = await loadKeys().catch(() => null);
+      if (keys) {
+        ownerKeys = await core.WebCryptoKeys.fromKeyPairs(keys.owner.signing, keys.owner.agreement);
+        recoveryKeys = await core.WebCryptoKeys.fromKeyPairs(keys.recovery.signing, keys.recovery.agreement);
+        keysFromStore = true;
+      }
+      const library = await core.Library.open(stored, ownerKeys);
+      state.ownerKeys = ownerKeys;
+      state.recoveryKeys = recoveryKeys;
       state.library = library;
       if (state.agentKeys) state.agentLibrary = await core.Library.open(stored, state.agentKeys);
       state.verbsDone.recover = true;
-      state.recoveredNote = `Rebuilt from ${stored.size} stored records (dropped ${dropped} in-memory). Same page, same keys.`;
+      state.recoveredNote =
+        `Rebuilt from ${stored.size} stored records (dropped ${dropped} in-memory). ` +
+        (keysFromStore ? 'Owner and recovery keys restored from this browser’s separate storage.' : 'Same page, same keys.');
       state.statusMsg = null;
       announce(state.recoveredNote);
     } catch (err) {
+      // Restore this tab's keys so the page is not left keyless on failure.
+      state.ownerKeys = state.ownerKeys ?? ownerBackup;
+      state.recoveryKeys = state.recoveryKeys ?? recoveryBackup;
+      if (state.ownerKeys && !state.library) {
+        try {
+          const stored = await loadRecords();
+          if (stored && stored.size > 0) state.library = await core.Library.open(stored, state.ownerKeys);
+        } catch {
+          /* keep the original error */
+        }
+      }
       state.statusErr = err instanceof Error ? err.message : String(err);
       state.statusMsg = null;
     } finally {
@@ -658,18 +706,20 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   function summarizeOutcome(name: string, outcome: core.Outcome<unknown>): string {
     if (!outcome.ok) return `${outcome.reason}: ${outcome.detail}`;
     const v = outcome.value as Record<string, unknown>;
-    if (name === 'listening_list_episodes') {
-      const eps = (v['episodes'] as { title?: string }[] | undefined) ?? [];
+    if (name === 'listening.podcasts__read') {
+      const state = (v['state'] ?? {}) as { episodes?: { title?: string }[] };
+      const eps = state.episodes ?? [];
       return `${eps.length} episode${eps.length === 1 ? '' : 's'}${eps[0]?.title ? ` — first: “${String(eps[0].title)}”` : ''}`;
     }
-    if (name === 'listening_get_transcript') {
-      const c = typeof v['citation'] === 'string' ? (v['citation'] as string) : 'transcript';
-      const t = typeof v['text'] === 'string' ? (v['text'] as string) : '';
-      return `${c} (${t.length} chars)`;
+    if (name === 'notes__read') {
+      const state = (v['state'] ?? {}) as { notebooks?: unknown[]; notes?: unknown[] };
+      const nbs = state.notebooks ?? [];
+      const notes = state.notes ?? [];
+      return `${nbs.length} notebook${nbs.length === 1 ? '' : 's'} · ${notes.length} note${notes.length === 1 ? '' : 's'}`;
     }
-    if (name === 'notes_write') {
-      const note = v['note'] as { id?: string; origin?: string } | undefined;
-      return `admitted${note?.id ? ` · ${String(note.id)}` : ''}${note?.origin ? ` · origin ${String(note.origin)}` : ''}`;
+    if (name === 'notes__addNote') {
+      const op = v as { id?: string; origin?: string };
+      return `admitted${op.id ? ` · ${String(op.id).slice(0, 8)}` : ''}${op.origin ? ` · origin ${String(op.origin)}` : ''}`;
     }
     const s = JSON.stringify(outcome.value);
     return s.length > 140 ? `${s.slice(0, 140)}…` : s;
@@ -708,7 +758,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       } else {
         appendToolCard(e.name, {}, e.outcome);
       }
-      if (e.outcome.ok && e.name === 'notes_write') renderContent();
+      if (e.outcome.ok && e.name === 'notes__addNote') renderContent();
     }
   }
 
@@ -746,36 +796,31 @@ export async function boot(root: HTMLElement | null): Promise<void> {
 
   function foldListening(ops: core.OperationView[]): { shows: string[]; episodes: FoldEpisode[] } {
     const shows = new Map<string, string>();
-    const eps = new Map<string, { showId: string; title: string; published: string; durationSec: number }>();
-    const transcripts = new Map<string, string>();
+    const eps = new Map<string, { show: string; title: string; published: string; durationSec: number; transcript: string }>();
     for (const op of ops) {
       const p = (op.payload ?? {}) as Record<string, unknown>;
       // Order-independent: references may fold before what they name.
-      if (op.kind === 'show.follow' && str(p['showId'])) shows.set(str(p['showId']), str(p['title']) || 'Untitled show');
-      else if (op.kind === 'episode.add' && str(p['episodeId'])) {
-        if (str(p['showId']) && !shows.has(str(p['showId']))) shows.set(str(p['showId']), 'Unknown show');
-        eps.set(str(p['episodeId']), {
-          showId: str(p['showId']),
+      if (op.kind === 'follow' && str(p['id'])) shows.set(str(p['id']), str(p['title']) || 'Untitled show');
+      else if (op.kind === 'episode' && str(p['id'])) {
+        if (str(p['show']) && !shows.has(str(p['show']))) shows.set(str(p['show']), 'Unknown show');
+        eps.set(str(p['id']), {
+          show: str(p['show']),
           title: str(p['title']) || 'Untitled episode',
           published: str(p['published']),
           durationSec: typeof p['durationSec'] === 'number' ? (p['durationSec'] as number) : 0,
+          transcript: str(p['transcriptExcerpt']),
         });
-      } else if (op.kind === 'episode.transcript' && str(p['episodeId'])) {
-        transcripts.set(str(p['episodeId']), str(p['text']));
       }
     }
-    const episodes: FoldEpisode[] = [...eps.entries()].map(([id, e]) => {
-      const t = transcripts.get(id) ?? '';
-      return {
-        id,
-        showTitle: shows.get(e.showId) ?? 'Unknown show',
-        title: e.title,
-        published: e.published,
-        durationSec: e.durationSec,
-        transcript: t,
-        excerpt: t.length > 200 ? `${t.slice(0, 200)}…` : t,
-      };
-    });
+    const episodes: FoldEpisode[] = [...eps.entries()].map(([id, e]) => ({
+      id,
+      showTitle: shows.get(e.show) ?? 'Unknown show',
+      title: e.title,
+      published: e.published,
+      durationSec: e.durationSec,
+      transcript: e.transcript,
+      excerpt: e.transcript.length > 200 ? `${e.transcript.slice(0, 200)}…` : e.transcript,
+    }));
     return { shows: [...shows.values()], episodes };
   }
 
@@ -783,27 +828,30 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     const notebooks = new Map<string, { id: string; title: string; cells: FoldNote[] }>();
     for (const op of ops) {
       const p = (op.payload ?? {}) as Record<string, unknown>;
-      if (op.kind === 'notebook.create' && str(p['notebookId'])) {
-        const id = str(p['notebookId']);
+      if (op.kind === 'createNotebook' && str(p['id'])) {
+        const id = str(p['id']);
         const existing = notebooks.get(id);
         if (existing) existing.title = str(p['title']) || existing.title;
         else notebooks.set(id, { id, title: str(p['title']) || 'Notebook', cells: [] });
-      } else if (op.kind === 'cell.put' && str(p['notebookId'])) {
-        const nbId = str(p['notebookId']);
+      } else if ((op.kind === 'addNote' || op.kind === 'editNote') && str(p['notebook'])) {
+        const nbId = str(p['notebook']);
         let nb = notebooks.get(nbId);
         if (!nb) {
           // A note arriving before its notebook opens a shell; the later
-          // notebook.create fills in the title.
+          // createNotebook fills in the title.
           nb = { id: nbId, title: 'Untitled notebook', cells: [] };
           notebooks.set(nbId, nb);
         }
-        const cellId = str(p['cellId']) || op.id;
+        const cellId = str(p['id']) || op.id;
+        const text = str(p['text']);
         const cell: FoldNote = {
           id: cellId,
           opId: op.id,
           notebook: nb.id,
-          title: str(p['title']),
-          text: str(p['text']),
+          // Titles are a playground convention on top of addNote, not a core
+          // field: fall back to the first line when the writer sent none.
+          title: str(p['title']) || text.split('\n')[0]?.slice(0, 80) || 'Untitled note',
+          text,
           origin: op.origin,
           authorLabel: op.authorLabel,
           created: op.created,
@@ -820,16 +868,22 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     const items: FoldLink[] = [];
     for (const op of ops) {
       const p = (op.payload ?? {}) as Record<string, unknown>;
-      if (op.kind === 'capture.link' && str(p['itemId'])) {
-        items.push({ id: str(p['itemId']), url: str(p['url']), title: str(p['title']) || 'Untitled', saved: op.created });
+      if (op.kind === 'capture' && str(p['id'])) {
+        items.push({ id: str(p['id']), url: str(p['url']), title: str(p['title']) || 'Untitled', saved: op.created });
       }
     }
     return items;
   }
 
-  function admitted(ns: Tab): core.OperationView[] {
+  const TAB_NAMESPACE: Record<Tab, string> = {
+    listening: 'listening.podcasts',
+    notes: 'notes',
+    reading: 'reading.saved',
+  };
+
+  function admitted(tab: Tab): core.OperationView[] {
     if (!state.library) return [];
-    const v = state.library.view(ns);
+    const v = state.library.view(TAB_NAMESPACE[tab]);
     return v.ok ? v.value.admitted : [];
   }
 
@@ -855,36 +909,19 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     if (!state.library) return null;
     const cached = recordCache.get(opId);
     if (cached !== undefined) return cached;
-    // Preferred: the core's own inspection (mock). Otherwise read the stored
-    // bytes straight from the live records view.
-    const op = (state.library as unknown as { operationRecord?: (id: string) => Promise<{
-      path: string; record: string; sealedBytes: number; authorLabel: string; origin: 'person' | 'ai'; verified: boolean;
-    } | null> }).operationRecord;
-    if (typeof op === 'function') {
-      const r = await op.call(state.library, opId);
-      if (!r) {
-        recordCache.set(opId, null);
-        return null;
-      }
-      const insp: RecordInspection = {
-        path: r.path,
-        recordPretty: pretty(r.record),
-        sealedBytes: r.sealedBytes,
-        authorLabel: r.authorLabel,
-        origin: r.origin,
-        verified: r.verified,
-      };
-      recordCache.set(opId, insp);
-      return insp;
-    }
+    // Read the stored bytes straight from the live records view. Operation
+    // paths end in `-<opId>.json`, so the note's own record is findable.
     for (const [path, bytes] of state.library.records) {
       if (path.endsWith(`-${opId}.json`)) {
         const raw = new TextDecoder().decode(bytes);
         let sealedBytes = 0;
         try {
           const rec = JSON.parse(raw) as { body?: string };
-          const header = JSON.parse(atobToText(rec.body ?? '')) as { sealed?: string };
-          sealedBytes = header.sealed ? Math.ceil((header.sealed.length * 3) / 4) : 0;
+          const bodyText = atobToText(rec.body ?? '');
+          const header = JSON.parse(bodyText) as { sealed?: string };
+          sealedBytes = header.sealed
+            ? Math.ceil((header.sealed.length * 3) / 4)
+            : new TextEncoder().encode(bodyText).length;
         } catch {
           /* show what we have */
         }
@@ -975,7 +1012,13 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       li.append(el('span', { class: 'seq', 'aria-hidden': 'true' }, [String(e.sequence).padStart(2, '0')]));
       const words = el('span', { class: 'words' }, [e.text]);
       const actor = members.get(e.actor);
-      if ((e.event === 'wrote' || e.event === 'granted' || e.event === 'requested') && actor?.kind === 'agent') {
+      const subject = e.subject ? members.get(e.subject) : undefined;
+      // Writes and requests are marked by their author; grants and revocations
+      // are the owner's lines about the member, so they follow the subject.
+      const agentLine =
+        ((e.event === 'wrote' || e.event === 'requested') && actor?.kind === 'agent') ||
+        ((e.event === 'granted' || e.event === 'revoked') && subject?.kind === 'agent');
+      if (agentLine) {
         words.append(el('span', { class: 'ai-mark ai-tag' }, ['AI']));
       }
       li.append(words);
@@ -1069,9 +1112,9 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       ]),
       el('p', { class: 'scope' }, [
         reads.length > 0 && writes.length > 0 && reads.join() === writes.join()
-          ? `Read and write ${andJoin(reads.map((n) => `your ${n}`))}. `
-          : `${reads.length > 0 ? `Read ${andJoin(reads.map((n) => `your ${n}`))}. ` : ''}${writes.length > 0 ? `Write ${andJoin(writes.map((n) => n))}. ` : ''}`,
-        others.length > 0 ? el('span', { class: 'not' }, [`Not your ${andJoin(others)}.`]) : '',
+          ? `Read and write ${andJoin(reads.map((n) => `your ${displayName(n)}`))}. `
+          : `${reads.length > 0 ? `Read ${andJoin(reads.map((n) => `your ${displayName(n)}`))}. ` : ''}${writes.length > 0 ? `Write ${andJoin(writes.map((n) => displayName(n)))}. ` : ''}`,
+        others.length > 0 ? el('span', { class: 'not' }, [`Not your ${andJoin(others.map(displayName))}.`]) : '',
       ]),
     );
     const fieldset = el('fieldset', {}, [el('legend', {}, ['Narrow the grant (optional)'])]);
@@ -1315,8 +1358,8 @@ export async function boot(root: HTMLElement | null): Promise<void> {
             : state.agentPhase === 'ended'
               ? 'Access ended'
               : state.agentModel === 'live'
-                ? 'Has access · live model'
-                : 'Has access · scripted stand-in';
+                ? 'Has access · Muse connected'
+                : 'Has access · Scripted agent (no MUSE_API_KEY)';
     status.innerHTML = '';
     status.append(dot, label);
 
@@ -1334,7 +1377,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     proof.innerHTML = '';
     if (state.readingProof && state.verbsDone.grant) {
       const box = el('div', { class: 'reading-proof' });
-      box.append(el('h5', {}, ['Reading, as Llama sees it']));
+      box.append(el('h5', {}, ['Reading, as Muse sees it']));
       if (state.readingProof.ok) {
         const items = (state.readingProof.value as { items?: unknown[] }).items;
         box.append(el('p', {}, [`${Array.isArray(items) ? items.length : 0} items visible.`]));
@@ -1393,8 +1436,8 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   function renderFooter(): void {
     const records = state.library ? state.library.records.size : 0;
     $('footer-line').textContent =
-      `Agent: ${state.agentModel === 'live' ? 'live model' : 'scripted stand-in'} · ` +
-      `${state.library ? `${records} records in memory` : 'no library yet'}${IS_MOCK ? ' · preview core' : ''}`;
+      `Agent: ${state.agentModel === 'live' ? 'Muse connected' : 'Scripted agent (no MUSE_API_KEY)'} · ` +
+      `${state.library ? `${records} records in memory` : 'no library yet'}`;
   }
 
   /* ----- events (delegated; panels re-render) ----- */

@@ -8,6 +8,15 @@ import type { Records } from './core';
 const DB = 'colophon-playground';
 const STORE = 'kv';
 const KEY = 'records-v1';
+const OWNER_KEYS = 'owner-keys-v1';
+const RECOVERY_KEYS = 'recovery-keys-v1';
+
+/** Persisted host key handles. CryptoKeys structured-clone into IndexedDB with
+ * private halves staying non-extractable; restore with WebCryptoKeys.fromKeyPairs. */
+export interface StoredKeyPairs {
+  signing: CryptoKeyPair;
+  agreement: CryptoKeyPair;
+}
 
 function b64encode(bytes: Uint8Array): string {
   let bin = '';
@@ -49,6 +58,39 @@ export async function saveRecords(records: Records): Promise<number> {
     db.close();
   }
   return pairs.length;
+}
+
+export async function saveKeys(owner: StoredKeyPairs, recovery: StoredKeyPairs): Promise<void> {
+  const db = await openDB();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put(owner, OWNER_KEYS);
+      tx.objectStore(STORE).put(recovery, RECOVERY_KEYS);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function loadKeys(): Promise<{ owner: StoredKeyPairs; recovery: StoredKeyPairs } | null> {
+  const db = await openDB();
+  try {
+    const get = (key: string): Promise<StoredKeyPairs | undefined> =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const rq = tx.objectStore(STORE).get(key) as IDBRequest<StoredKeyPairs | undefined>;
+        rq.onsuccess = () => resolve(rq.result);
+        rq.onerror = () => reject(rq.error);
+      });
+    const owner = await get(OWNER_KEYS);
+    const recovery = await get(RECOVERY_KEYS);
+    return owner && recovery ? { owner, recovery } : null;
+  } finally {
+    db.close();
+  }
 }
 
 export async function loadRecords(): Promise<Records | null> {

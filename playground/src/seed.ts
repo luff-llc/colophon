@@ -65,26 +65,26 @@ export async function seedLibrary(library: Library): Promise<void> {
     if (!ep) continue;
     if (!followed.has(ep.showId)) {
       followed.add(ep.showId);
-      const r = await library.write('listening', 'show.follow', { showId: ep.showId, title: ep.showTitle, feed: ep.feed });
-      if (!r.ok) throw new Error(`seed show.follow failed: ${r.reason}`);
+      const r = await library.write('listening.podcasts', 'follow', { id: ep.showId, url: ep.feed, title: ep.showTitle });
+      if (!r.ok) throw new Error(`seed follow failed: ${r.reason}`);
     }
-    const a = await library.write('listening', 'episode.add', {
-      episodeId: epId,
-      showId: ep.showId,
+    // published/durationSec are unknown fields the core carries along untouched.
+    const a = await library.write('listening.podcasts', 'episode', {
+      id: epId,
+      show: ep.showId,
       title: ep.title,
+      transcriptExcerpt: ep.text,
       published: ep.published,
       durationSec: ep.durationSec,
     });
-    if (!a.ok) throw new Error(`seed episode.add failed: ${a.reason}`);
-    const t = await library.write('listening', 'episode.transcript', { episodeId: epId, text: ep.text });
-    if (!t.ok) throw new Error(`seed episode.transcript failed: ${t.reason}`);
+    if (!a.ok) throw new Error(`seed episode failed: ${a.reason}`);
   }
   for (const link of SEED_LINKS) {
-    const r = await library.write('reading', 'capture.link', link);
-    if (!r.ok) throw new Error(`seed capture.link failed: ${r.reason}`);
+    const r = await library.write('reading.saved', 'capture', { id: link.itemId, url: link.url, title: link.title });
+    if (!r.ok) throw new Error(`seed capture failed: ${r.reason}`);
   }
-  const nb = await library.write('notes', 'notebook.create', { notebookId: SEED_NOTEBOOK.id, title: SEED_NOTEBOOK.title });
-  if (!nb.ok) throw new Error(`seed notebook.create failed: ${nb.reason}`);
+  const nb = await library.write('notes', 'createNotebook', { id: SEED_NOTEBOOK.id, title: SEED_NOTEBOOK.title });
+  if (!nb.ok) throw new Error(`seed createNotebook failed: ${nb.reason}`);
 }
 
 /** The question the scripted (and suggested-to-real) agent answers in Act. */
