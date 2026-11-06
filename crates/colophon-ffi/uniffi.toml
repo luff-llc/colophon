@@ -1,0 +1,9 @@
+[defaults.bindings.swift]
+module_name = "ColophonBindings"
+ffi_module_name = "ColophonFFI"
+generate_immutable_records = true
+
+[defaults.bindings.kotlin]
+package_name = "com.luff.colophon"
+generate_immutable_records = true
+cdylib_name = "colophon_ffi"

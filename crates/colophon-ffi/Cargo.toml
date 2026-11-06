@@ -1,0 +1,27 @@
+[package]
+name = "colophon-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+colophon-core = { path = "../colophon-core", version = "=0.2.0" }
+serde.workspace = true
+serde_json.workspace = true
+uniffi = { version = "=0.32.2", default-features = false }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[lints]
+workspace = true

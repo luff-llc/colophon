@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/colophon-core", "crates/colophon-wasm"]
+members = ["crates/colophon-core", "crates/colophon-wasm", "crates/colophon-ffi"]
 resolver = "2"
 
 [workspace.package]

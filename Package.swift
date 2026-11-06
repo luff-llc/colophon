@@ -5,6 +5,7 @@ import PackageDescription
 // what it needs: a verifier needs Core and Authority; a storage provider needs Store; an app adds
 // Replica and the domain modules it shows.
 let package = Package(name: "Colophon", platforms: [.macOS(.v14), .iOS(.v17), .visionOS("26.0")], products: [
+  .library(name: "ColophonKit", targets: ["ColophonKit"]),
   .library(name: "ColophonCore", targets: ["ColophonCore"]),
   .library(name: "ColophonStore", targets: ["ColophonStore"]),
   .library(name: "ColophonAuthority", targets: ["ColophonAuthority"]),
@@ -16,6 +17,11 @@ let package = Package(name: "Colophon", platforms: [.macOS(.v14), .iOS(.v17), .v
   .library(name: "ColophonMCP", targets: ["ColophonMCP"]),
   .executable(name: "colophon", targets: ["colophon"]),
 ], targets: [
+  .binaryTarget(name: "ColophonFFI", path: "sdk/apple/ColophonFFI.xcframework"),
+  .target(name: "ColophonKit", dependencies: ["ColophonFFI"], path: "swift/Sources/ColophonKit",
+          exclude: ["Generated/ColophonFFI.h", "Generated/ColophonFFI.modulemap"],
+          linkerSettings: [.linkedLibrary("resolv")]),
+  .testTarget(name: "ColophonKitTests", dependencies: ["ColophonKit"], path: "swift/Tests/ColophonKitTests"),
   .target(name: "ColophonCore", path: "swift/Sources/ColophonCore"),
   .target(name: "ColophonStore", dependencies: ["ColophonCore"], path: "swift/Sources/ColophonStore"),
   .target(name: "ColophonAuthority", dependencies: ["ColophonCore", "ColophonStore"], path: "swift/Sources/ColophonAuthority"),

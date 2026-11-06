@@ -111,3 +111,13 @@ People already have 0.1 libraries (Taupe testers included). On first launch of t
    and denied scopes, restart, revoke, rejoin, and upgrade from a 0.1 library.
 7. Android on the Kotlin SDK.
 8. Merge plan in Marginalia's `QUESTIONS.md`; merge only after it's agreed.
+
+### Bindings implementation status (November 6, 2026)
+
+The `ffi` worktree implements `colophon-ffi`, the async `ColophonKit` facade and CryptoKit
+providers, generated Kotlin/JNA bindings, and the shared consent/write/revoke/reopen journeys.
+All five arm64 Apple slices build, including nightly-built visionOS, and the host JVM journey
+passes. Android's two-ABI AAR build is scripted; SDK/NDK and physical keystore validation remain.
+Storage, `ColophonSession`, and typed domain-store extraction remain the following steps.
+See [native bindings](native-bindings.md), [FFI measurements](performance.md#ffi), and the
+[bindings handoff](handoff-ffi.md) for the exact build gates and sandbox limitations.
