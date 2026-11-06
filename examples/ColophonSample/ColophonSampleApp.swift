@@ -1,8 +1,10 @@
 import SwiftUI
 import ColophonSession
+import ColophonSessionUI
 
 @main struct ColophonSampleApp: App {
     // One process session, shared by every window. No core or storage calls in product views.
+    private let keys: any AsyncKeyProvider
     @State private var session: ColophonSession
     init() {
         // Launch with --demo-key-failure to exercise the visible error and Retry without
@@ -11,6 +13,7 @@ import ColophonSession
         let home = demonstration ? FileManager.default.temporaryDirectory.appendingPathComponent("ColophonKeyFailure-" + UUID().uuidString)
             : URL.applicationSupportDirectory.appending(path: "ColophonSample")
         let keys: any AsyncKeyProvider = demonstration ? DemoKeyFailure() : KeychainKeys(service: "org.luff.ColophonSample", backend: .software)
+        self.keys = keys
         let recovery: any AsyncKeyProvider = demonstration ? SoftwareKeys() : KeychainKeys(service: "org.luff.ColophonSample", account: "recovery", backend: .software)
         _session = State(initialValue: ColophonSession(configuration: .init(
             memberLabel: "Colophon Sample", namespaces: ["reading.saved"],
@@ -18,7 +21,7 @@ import ColophonSession
             keys: keys, recoveryKeys: recovery)))
     }
     var body: some Scene {
-        WindowGroup { SampleView(session: session).task { await session.restore() } }
+        WindowGroup { SampleView(session: session, host: .init(rejoinKeys: { keys })) }
     }
 }
 
