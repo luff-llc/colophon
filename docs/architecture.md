@@ -6,7 +6,7 @@ Colophon is a standard first and a library second. The repository holds:
 spec/          the protocol (colophon-0.1.md)
 conformance/   vectors every implementation must reproduce (spec §11)
 crates/        the Rust core, the one implementation every platform runs
-  colophon-core/   records, identities, authority, admission, sealing, domain folds
+  colophon-core/   records, identities, authority, admission, sealing, domain reducers
   colophon-wasm/   wasm-bindgen bindings for browsers and Node
   (colophon-ffi/   UniFFI bindings for Swift and Kotlin: next)
 js/            @colophon/core: the npm package wrapping colophon-wasm, plus a WebCrypto key provider
@@ -25,7 +25,8 @@ refer to the 0.1 spec, which 0.2 revises):
 - the authority history (§6): roots, grants, caveats, revocation with `kept`, handover;
 - admission (§8.3): admitted, held, refused, each with a reason;
 - namespace keys (§4) and operations (§8): unsealing, opening, ordering, sealing;
-- domain folds (§9): deterministic, skipping unknown kinds, keeping unknown fields;
+- domain reducers (§9): cached incremental state, deterministic replay, skipping unknown kinds,
+  keeping unknown fields, bounded queries and device-local checkpoints;
 - operation and query specs (§9.2, §9.3), so agents' tool lists are generated, not hand-written.
 
 The core does no I/O. It never reads a file, opens a socket or looks at a clock. Hosts hand it
@@ -101,7 +102,8 @@ stay as the record of what shipped.
 3. UniFFI bindings; Swift apps adopt the core behind their existing API.
 4. Android moves from the legacy journal to Colophon through the same bindings.
 5. Server members: a KMS key provider and the transcript worker as the first server member.
-6. Signed checkpoints for long histories and capability negotiation between module versions.
+6. Verified-history persistence for fast cold open, bounded-memory host storage, and capability
+   negotiation between module versions. Device-local projection checkpoints are implemented.
 7. Delegation research for agent swarms (attenuating grants, approval laundering, tamper-evident
    forensics).
 
@@ -130,3 +132,16 @@ reshares and fresh epochs in its recovery-signed record. Planned handover writes
 reshares first, then transfers authority with fresh epochs excluding the former root. These
 atomic transitions prevent a verified prefix from ending access without advancing encryption.
 See the [0.2 specification](../spec/colophon-0.2.md) for the precise wire fields.
+
+## Incremental engine and local caches
+
+The core preserves the public `Library` API while adding reducer-backed queries, local revisions,
+change summaries, batched key unlock and authenticated device-local projection checkpoints.
+[Engine API](engine.md) defines the query names, paging, digest seed, cache authentication and
+invalidation contract. No new crates were added for the engine or its `std::time::Instant`
+benchmark. `DomainModule::fold` and the full `NamespaceView` remain compatibility APIs.
+
+Records, parsed verified headers and authenticated plaintext are still retained by `Library`.
+This is O(history) memory, despite projection-only reducer state and bounded snapshot retention.
+[Performance](performance.md) records this limitation and distinguishes signature-verified cold
+open from warm projection restoration; a projection checkpoint is not a verification cache.

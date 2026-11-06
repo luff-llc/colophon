@@ -5,6 +5,7 @@
 pub mod authority;
 pub mod crypto;
 pub mod domain;
+pub mod engine;
 pub mod hpke;
 pub mod library;
 pub mod model;

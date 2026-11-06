@@ -206,15 +206,18 @@ Revocation cannot erase keys or content already obtained by a member.
 
 ## 6. Modules, views and tools
 
-`DomainModule` supplies a display name, per-kind ledger phrases, deterministic folds and operation/query specs containing a name,
-description and JSON Schema. Known inputs are validated both by generated tools and when
-folding received payloads. Unknown kinds are skipped. Each kind applies only its defined mutations: payload properties
+`DomainModule` supplies a display name, per-kind ledger phrases and operation/query specs containing a name,
+description and JSON Schema. The Rust `Reducer` interface supplies serializable state, incremental
+`apply` and named `query`; `DomainModule::fold` remains a compatibility replay wrapper.
+Known inputs are validated both by generated tools and when folding received payloads. Unknown kinds are skipped. Each kind applies only its defined mutations: payload properties
 outside that kind's schema are preserved in the projected object's `extensions` bag and
 survive edits. They MUST NOT overwrite defined domain state or authenticated projection fields.
 An input property named `extensions` is itself stored under `extensions.extensions`; it is
 never flattened. `expect` and `seek` are command controls, not persisted object properties.
 An optional stale `expect` records a complete attributed alternative in `conflicts`. Edits
-without `expect` apply in agreed order. All built-in queries currently expose only `read`.
+without `expect` apply in agreed order. Built-in queries include compatibility `read`,
+single-object lookups and bounded collection pages;
+the additive local API and query names are documented in [the engine contract](../docs/engine.md).
 
 | Namespace | Kind | Required payload | Optional defined fields |
 | --- | --- | --- | --- |
@@ -242,7 +245,7 @@ and `clock` are reserved authenticated fields. `origin` is `ai` iff the author's
 `agent`, otherwise `person`, regardless of payload claims. This is key attribution, not proof of
 a physical person's involvement. OperationView still retains the original payload unchanged.
 
-Tools are `<namespace>__read` and `<namespace>__<kind>`, retaining namespace dots, for example
+Tools are `<namespace>__<query>` and `<namespace>__<kind>`, retaining namespace dots, for example
 `reading.saved__capture` and `notes__addNote`. Tool lists are filtered by current grants,
 expiry and budget; `call` independently enforces the same restrictions. Removing a tool from
 a list is never the authorization mechanism.
