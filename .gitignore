@@ -12,5 +12,7 @@ dist/
 /sdk/kotlin/.gradle/
 /sdk/kotlin/build/
 /sdk/android/build/
+/sdk/android/.gradle/
+/sdk/android/local.properties
 /.gradle-home/
 /.tools/

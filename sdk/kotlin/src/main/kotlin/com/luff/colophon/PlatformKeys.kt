@@ -18,6 +18,8 @@ class PlatformKeys(private val signing: KeyPair, private val agreement: KeyPair)
     override fun signingPublicKey(): ByteArray = point(signing.public as ECPublicKey)
     override fun agreementPublicKey(): ByteArray = point(agreement.public as ECPublicKey)
     override fun sign(body: ByteArray): ByteArray = providerCall {
+        // AndroidKeyStore does not advertise SHA256withECDSA itself. The platform
+        // workaround provider selects it when initSign receives a Keystore key.
         val signature = Signature.getInstance("SHA256withECDSA")
         signature.initSign(signing.private)
         signature.update(body)
@@ -29,7 +31,35 @@ class PlatformKeys(private val signing: KeyPair, private val agreement: KeyPair)
             .getParameterSpec(ECParameterSpec::class.java)
         val publicKey = KeyFactory.getInstance("EC").generatePublic(ECPublicKeySpec(
             ECPoint(BigInteger(1, peer.copyOfRange(1, 33)), BigInteger(1, peer.copyOfRange(33, 65))), parameters))
-        KeyAgreement.getInstance("ECDH").apply { init(agreement.private); doPhase(publicKey, true) }.generateSecret()
+        val keyAgreement = keyAgreement(agreement.private)
+        keyAgreement.doPhase(publicKey, true)
+        val secret = keyAgreement.generateSecret()
+        if (isAndroidKeyStore(agreement.private)) p256Coordinate(secret) else secret
+    }
+    private fun keyAgreement(key: java.security.PrivateKey): KeyAgreement {
+        if (!isAndroidKeyStore(key)) {
+            return KeyAgreement.getInstance("ECDH").apply { init(key) }
+        }
+        val providers = listOf("AndroidKeyStore", null)
+        var last: Exception? = null
+        for (provider in providers) {
+            try {
+                val instance = if (provider == null) KeyAgreement.getInstance("ECDH") else KeyAgreement.getInstance("ECDH", provider)
+                instance.init(key)
+                return instance
+            } catch (error: Exception) {
+                last = error
+            }
+        }
+        throw last ?: IllegalStateException("ECDH is unavailable")
+    }
+    private fun isAndroidKeyStore(key: java.security.Key) = key.javaClass.name.contains("AndroidKeyStore")
+    /** Keystore ECDH returns the raw x coordinate; some providers drop a leading zero. */
+    private fun p256Coordinate(secret: ByteArray): ByteArray = when {
+        secret.size == 32 -> secret
+        secret.size == 33 && secret[0] == 0.toByte() -> secret.copyOfRange(1, 33)
+        secret.size in 1 until 32 -> ByteArray(32 - secret.size) + secret
+        else -> throw IllegalArgumentException("Unexpected ECDH secret length ${secret.size}")
     }
     companion object {
         /** Software-only generation. Android apps should supply their own Keystore handles. */

@@ -1,0 +1,4 @@
+-keep class com.luff.colophon.** { *; }
+-keep class org.luff.colophon.** { *; }
+-keep class com.sun.jna.** { *; }
+-keepclassmembers class com.sun.jna.** { *; }
