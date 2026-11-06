@@ -1,4 +1,5 @@
 //! Deterministic domain reducers and generated operation/query specifications.
+use crate::domains::books::{BooksState, ReadingBooks};
 use crate::model::OperationView;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -360,6 +361,9 @@ fn known_valid(module: &dyn DomainModule, op: &OperationView, invalid: &mut Vec<
 }
 /// Validate the JSON Schema subset used by the built-in tool specs, including nested arrays.
 pub fn validate_input(schema: &Value, input: &Value) -> bool {
+    if let Some(kind) = schema["x-colophon-books-kind"].as_str() {
+        return crate::domains::books::validate(kind, input);
+    }
     let valid_type = match schema["type"].as_str() {
         Some("object") => input.is_object(),
         Some("string") => input.is_string(),
@@ -415,6 +419,7 @@ pub fn validate_input(schema: &Value, input: &Value) -> bool {
 /// Built-in module lookup; unknown namespaces may still store operations but have an empty fold.
 pub fn module(namespace: &str) -> Option<Box<dyn DomainModule>> {
     match namespace {
+        "reading.books" => Some(Box::new(ReadingBooks)),
         "reading.saved" => Some(Box::new(ReadingSaved)),
         "listening.podcasts" => Some(Box::new(ListeningPodcasts)),
         "notes" => Some(Box::new(Notes)),
@@ -422,7 +427,12 @@ pub fn module(namespace: &str) -> Option<Box<dyn DomainModule>> {
     }
 }
 /// All built-in module namespaces.
-pub const NAMESPACES: [&str; 3] = ["reading.saved", "listening.podcasts", "notes"];
+pub const NAMESPACES: [&str; 4] = [
+    "reading.saved",
+    "listening.podcasts",
+    "notes",
+    "reading.books",
+];
 
 // Display collection items in the agreed order of their most recent applied operation.
 fn ordered(items: &BTreeMap<String, Value>) -> Vec<Value> {
@@ -695,6 +705,7 @@ fn page_map(values: &BTreeMap<String, Value>, args: &Value) -> crate::Result<Val
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum State {
+    Books(BooksState),
     Saved(SavedState),
     Podcasts(PodcastsState),
     Notes(NotesState),
@@ -703,6 +714,7 @@ pub(crate) enum State {
 impl State {
     pub fn new(namespace: &str) -> Self {
         match namespace {
+            "reading.books" => Self::Books(BooksState::default()),
             "reading.saved" => Self::Saved(SavedState::default()),
             "listening.podcasts" => Self::Podcasts(PodcastsState::default()),
             "notes" => Self::Notes(NotesState::default()),
@@ -711,6 +723,7 @@ impl State {
     }
     pub fn apply(&mut self, op: &AdmittedOperation) {
         match self {
+            Self::Books(s) => ReadingBooks.apply(s, op),
             Self::Saved(s) => ReadingSaved.apply(s, op),
             Self::Podcasts(s) => ListeningPodcasts.apply(s, op),
             Self::Notes(s) => Notes.apply(s, op),
@@ -719,6 +732,7 @@ impl State {
     }
     pub fn query(&self, name: &str, args: &Value) -> crate::Result<Value> {
         match self {
+            Self::Books(s) => ReadingBooks.query(s, name, args),
             Self::Saved(s) => ReadingSaved.query(s, name, args),
             Self::Podcasts(s) => ListeningPodcasts.query(s, name, args),
             Self::Notes(s) => Notes.query(s, name, args),

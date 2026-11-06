@@ -35,3 +35,20 @@ is held according to the precedence in the spec.
 The fixture asserts generated outputs and replay equivalence. Independent protocol tests also
 assert the invariants directly, including malformed signatures, chain failures, missing recovery
 seals, wrong epochs, foreign requests, widened grants, stale edits, and planned handover ordering.
+
+`reading.books/records.json` is an independent synthetic library (base64 signed records),
+with bounded query answers in `reading.books/expected.json`. The fixture uses the public
+software-key seed 5, exercises all ten books kinds, stale note resolution, rereads,
+backwards position, tombstones, orphan rejection and invalid progress. The existing
+library vectors are unchanged. The loan write currently produces the intentional
+`authenticatedAppOrDeviceRequired` diagnostic because the engine's `OperationView`
+does not expose member kind; authorized loan behavior is covered by domain tests.
+
+Regenerate only this vector with:
+
+```sh
+COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_books deterministic_books_vector
+```
+
+The existing `conformance` test target and the JavaScript smoke test both check these
+exact query results from the saved record bytes. No source library data is included.

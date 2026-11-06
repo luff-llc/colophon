@@ -312,3 +312,8 @@ fn deterministic_library_conformance() {
         expected_stored["ledger"]
     );
 }
+
+#[test]
+fn deterministic_books_conformance() {
+    support::books::check(false);
+}
