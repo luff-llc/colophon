@@ -415,12 +415,14 @@ fn domain_tombstones_progress_queue_and_notebook_boundaries() {
         json!({"id":"saved","url":"https://example.org/"}),
         65,
     );
+    let saved_activity =
+        success(root.view("reading.saved", NOW).unwrap()).state["items"][0]["revision"].clone();
     write(
         &mut root,
         &owner,
         "reading.saved",
         "delete",
-        json!({"id":"saved"}),
+        json!({"id":"saved","expectActivity":saved_activity}),
         66,
     );
     write(
@@ -498,7 +500,8 @@ fn domain_tombstones_progress_queue_and_notebook_boundaries() {
     assert_eq!(podcasts.state["episodes"][0]["seconds"], 20);
     assert_eq!(podcasts.state["shows"][0]["followed"], false);
     assert_eq!(podcasts.state["queue"]["episodes"], json!(["e"]));
-    assert_eq!(podcasts.state["conflicts"].as_array().unwrap().len(), 1);
+    // Passive regressions now retain an explicit receipt alongside stale queue attempts.
+    assert_eq!(podcasts.state["conflicts"].as_array().unwrap().len(), 2);
     write(
         &mut root,
         &owner,

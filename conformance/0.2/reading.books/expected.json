@@ -1,0 +1,309 @@
+{
+  "namespace": "reading.books",
+  "queries": [
+    {
+      "args": {
+        "limit": 1
+      },
+      "name": "books",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "next": null,
+          "rows": [
+            {
+              "conflictCount": 0,
+              "creator": "Example writer",
+              "finished": null,
+              "fraction": 0.25,
+              "id": "b",
+              "isbn": null,
+              "noteCount": 1,
+              "page": null,
+              "pages": 200,
+              "revision": "e2929256b63435a8d73a136621cb89a8",
+              "started": null,
+              "status": "reading",
+              "title": "Synthetic book revised"
+            }
+          ],
+          "total": 1
+        }
+      }
+    },
+    {
+      "args": {
+        "id": "b"
+      },
+      "name": "book",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "book": {
+            "author": "554d879a8d002447b94566bd1320cba3",
+            "authorLabel": "Books fixture owner",
+            "catalogKey": "OL-example",
+            "clock": 11,
+            "creator": "Example writer",
+            "fraction": 0.25,
+            "id": "b",
+            "isbn": null,
+            "origin": "person",
+            "page": null,
+            "pages": 200,
+            "revision": "e2929256b63435a8d73a136621cb89a8",
+            "title": "Synthetic book revised"
+          },
+          "currentReading": {
+            "extensions": {},
+            "finished": null,
+            "id": "e2929256b63435a8d73a136621cb89a8",
+            "revision": "e2929256b63435a8d73a136621cb89a8",
+            "started": null,
+            "status": "reading"
+          },
+          "extensions": {
+            "extensions": {
+              "fixture": true
+            }
+          },
+          "heads": {
+            "activity": "e2929256b63435a8d73a136621cb89a8",
+            "loan": null,
+            "metadata": "549a31358ede9905485db3892719a22a",
+            "plan": "e2929256b63435a8d73a136621cb89a8",
+            "progress": "d3ceb00eba9b8757a53df570369c69a1"
+          },
+          "loan": null
+        }
+      }
+    },
+    {
+      "args": {},
+      "name": "bookCounts",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "byStatus": {
+            "reading": 1
+          },
+          "conflicts": 2,
+          "finishedYears": [],
+          "total": 1
+        }
+      }
+    },
+    {
+      "args": {
+        "book": "b"
+      },
+      "name": "bookNotes",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "next": null,
+          "rows": [
+            {
+              "alternativeCount": 0,
+              "authorLabel": "Books fixture owner",
+              "id": "n",
+              "location": null,
+              "quotePreview": "Example quote",
+              "revision": "ab1095b78f04bf3b57e5243f25ab33cd",
+              "textPreview": "Reviewed text",
+              "truncated": false
+            }
+          ],
+          "total": 1
+        }
+      }
+    },
+    {
+      "args": {
+        "id": "n"
+      },
+      "name": "note",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "alternativeCount": 0,
+          "book": "b",
+          "extensions": {},
+          "location": null,
+          "note": {
+            "author": "554d879a8d002447b94566bd1320cba3",
+            "authorLabel": "Books fixture owner",
+            "clock": 9,
+            "id": "n",
+            "origin": "person",
+            "revision": "ab1095b78f04bf3b57e5243f25ab33cd"
+          },
+          "quote": "Example quote",
+          "text": "Reviewed text"
+        }
+      }
+    },
+    {
+      "args": {
+        "book": "b"
+      },
+      "name": "readings",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "next": null,
+          "rows": [
+            {
+              "finished": null,
+              "id": "e2929256b63435a8d73a136621cb89a8",
+              "revision": "e2929256b63435a8d73a136621cb89a8",
+              "started": null,
+              "status": "reading"
+            },
+            {
+              "finished": "2024-03-01",
+              "id": "d6b7675440aeb7c1a65e4ee4ba736fd9",
+              "revision": "75c51e5e35dca6e28b1a34a265090dae",
+              "started": "2024-02-29",
+              "status": "finished"
+            }
+          ],
+          "total": 2
+        }
+      }
+    },
+    {
+      "args": {
+        "keys": [
+          "OL-example",
+          "missing"
+        ]
+      },
+      "name": "catalogMembership",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": [
+          {
+            "bookIDs": [
+              "b"
+            ],
+            "key": "OL-example",
+            "total": 1,
+            "truncated": false
+          },
+          {
+            "bookIDs": [],
+            "key": "missing",
+            "total": 0,
+            "truncated": false
+          }
+        ]
+      }
+    },
+    {
+      "args": {
+        "object": "n"
+      },
+      "name": "conflicts",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "next": null,
+          "rows": [
+            {
+              "author": "554d879a8d002447b94566bd1320cba3",
+              "authorLabel": "Books fixture owner",
+              "candidate": {
+                "expect": null,
+                "id": "n",
+                "text": "A stale alternative"
+              },
+              "clock": 8,
+              "component": "text",
+              "expected": null,
+              "found": "43a47650e07c928b1a9e76bd30e68ea4",
+              "historical": false,
+              "operation": "1549eef13da0502e1e47aef2c8b74cf0",
+              "origin": "person",
+              "resolved": true
+            }
+          ],
+          "total": 1
+        }
+      }
+    },
+    {
+      "args": {
+        "object": "gone"
+      },
+      "name": "conflicts",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "next": null,
+          "rows": [
+            {
+              "author": "554d879a8d002447b94566bd1320cba3",
+              "authorLabel": "Books fixture owner",
+              "candidate": {
+                "creator": "",
+                "id": "gone",
+                "title": "Cannot resurrect"
+              },
+              "clock": 17,
+              "component": "metadata",
+              "expected": null,
+              "found": "a57ecfe246a258deef09440b4b73ae2d",
+              "historical": false,
+              "operation": "88e64b7583b4b4c63a4aab8ef26bea48",
+              "origin": "person",
+              "resolved": false
+            }
+          ],
+          "total": 1
+        }
+      }
+    },
+    {
+      "args": {},
+      "name": "invalid",
+      "result": {
+        "revision": "1631775f47a233948d6d8c9da69af7f003cd34d747f49ed2218e4a650ae6b7e9",
+        "value": {
+          "next": null,
+          "rows": [
+            {
+              "operation": "29309e9f843ce1e7b419656b50881b9e",
+              "reason": "authenticatedAppOrDeviceRequired"
+            },
+            {
+              "operation": "3dd550f19163e86f13923d4f1bfe6f3f",
+              "reason": "invalidPayload"
+            }
+          ],
+          "total": 2
+        }
+      }
+    },
+    {
+      "args": {
+        "id": "gone"
+      },
+      "name": "book",
+      "result": {
+        "ok": false,
+        "reason": "deleted"
+      }
+    },
+    {
+      "args": {
+        "id": "gone-note"
+      },
+      "name": "note",
+      "result": {
+        "ok": false,
+        "reason": "deleted"
+      }
+    }
+  ]
+}

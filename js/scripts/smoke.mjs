@@ -41,6 +41,14 @@ assert.equal(notes.value.state.notes.length, 1);
 assert.equal(notes.value.state.notes[0].origin, 'ai');
 assert.equal(notes.value.state.notes[0].extensions.extension.retained, true);
 assert(notes.value.admitted.some(op => op.id === written.value.id));
+const cells = await root.call('notes__cells', { notebook: 'inbox', limit: 1 });
+assert.equal(cells.ok, true);
+assert.equal(cells.value.value.rows[0].id, 'agent-note');
+assert.equal(cells.value.value.rows[0].kind, 'markdown');
+assert.equal(cells.value.value.total, 1);
+const cell = await root.call('notes__cell', { notebook: 'inbox', id: 'agent-note' });
+assert.equal(cell.value.value.source, 'An agent contribution');
+assert.equal(cell.value.value.cell.origin, 'ai');
 assert(root.ledger().some(entry => entry.event === 'revoked'));
 assert.equal((await agentLibrary.call('reading.saved__read', {})).reason, 'notGranted');
 
@@ -51,6 +59,16 @@ assert.equal((await recovery.recover(restoredKeys, 'Recovered owner')).ok, true)
 const restored = await Library.open(recovery.records, restoredKeys);
 assert.deepEqual(restored.view('notes').value.state, notes.value.state);
 assert.equal((await restored.write('reading.saved', 'capture', { id: 'new', url: 'https://example.org/' })).ok, true);
+assert.equal((await restored.call('reading.saved__capture', { id: 'native', title: 'Native document' })).ok, true);
+const savedItem = await restored.call('reading.saved__item', { id: 'native' });
+assert.equal(savedItem.value.value.item.title, 'Native document');
+assert.equal((await restored.call('reading.saved__setState', { id: 'native', consumption: 'inProgress', expect: savedItem.value.value.heads.state })).ok, true);
+const savedPage = await restored.call('reading.saved__items', { limit: 1 });
+assert.equal(savedPage.value.value.rows.length, 1);
+assert.equal(savedPage.value.value.total, 2);
+assert.equal(new Set(restored.tools().map(tool => tool.name)).size, restored.tools().length);
+assert.equal((await restored.call('reading.saved__getPosition', { item: 'native' })).value.value, null);
+
 
 // Replay Rust's fixed vectors through WASM with a host WebCrypto key derived solely for fixtures.
 const encoded = JSON.parse(await readFile(new URL('../../conformance/0.2/library.json', import.meta.url), 'utf8'));
@@ -62,8 +80,8 @@ async function deriveScalar(seed, counter) {
   return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('colophon/entropy/2'), info }, material, 256));
 }
 const { createECDH } = await import('node:crypto');
-async function fixturePair(counter, algorithm, usages) {
-  const scalar = await deriveScalar(new Uint8Array(32).fill(5), counter);
+async function fixturePair(counter, algorithm, usages, seed = 5) {
+  const scalar = await deriveScalar(new Uint8Array(32).fill(seed), counter);
   const ecdh = createECDH('prime256v1'); ecdh.setPrivateKey(scalar);
   const point = ecdh.getPublicKey();
   const jwk = { kty: 'EC', crv: 'P-256', x: point.subarray(1,33).toString('base64url'), y: point.subarray(33).toString('base64url'), d: Buffer.from(scalar).toString('base64url') };
@@ -76,6 +94,42 @@ const fixture = await Library.open(new Map(Object.entries(encoded).map(([path,b6
 assert.equal(fixture.id, expected.libraryID);
 for (const [namespace, view] of Object.entries(expected.views)) assert.deepEqual(fixture.view(namespace).value, view);
 assert.deepEqual(fixture.ledger(), expected.ledger);
+const notesVector = JSON.parse(await readFile(new URL('../../conformance/0.2/notes.json', import.meta.url), 'utf8'));
+const notesKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
+const notesFixture = await Library.open(new Map(Object.entries(notesVector.records).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), notesKeys);
+for (const query of notesVector.queries) {
+  const result = await notesFixture.call(`notes__${query.name}`, query.args);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, query.result);
+}
+
+const savedVector = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.saved.json', import.meta.url), 'utf8'));
+const savedKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
+const savedFixture = await Library.open(new Map(Object.entries(savedVector.records).map(([path,b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), savedKeys);
+for (const query of savedVector.queries) {
+  const name = query.name === 'position' ? 'getPosition' : query.name;
+  const result = await savedFixture.call(`reading.saved__${name}`, query.args);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, query.expected);
+}
+
+// Replay the podcast domain vector through generated bounded query tools.
+const podcastRecords = JSON.parse(await readFile(new URL('../../conformance/0.2/listening.podcasts.records.json', import.meta.url), 'utf8'));
+const podcastExpected = JSON.parse(await readFile(new URL('../../conformance/0.2/listening.podcasts.expected.json', import.meta.url), 'utf8'));
+const podcastKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
+const podcasts = await Library.open(new Map(Object.entries(podcastRecords).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), podcastKeys);
+for (const test of podcastExpected) {
+  const name = test.query === 'episode' ? 'episodeDetail' : test.query === 'queue' ? 'getQueue' : test.query;
+  const result = await podcasts.call(`listening.podcasts__${name}`, test.arguments);
+  assert.equal(result.ok, true);
+  if (test.query === 'queue') {
+    assert.equal(result.value.value.head, test.result.value.head);
+    assert.deepEqual(result.value.value.page.rows, test.result.value.page.rows);
+    assert.equal(result.value.value.page.total, test.result.value.page.total);
+  } else {
+    assert.deepEqual(result.value, test.result);
+  }
+}
 // Exercise fractional IDs through the JSON host boundary as well as native Rust.
 for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entries()) {
   const result = await restored.write('listening.podcasts', 'position', { id: `fraction-${index}`, seconds });
@@ -90,3 +144,16 @@ for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entri
   assert.equal(entry.origin, 'person');
 }
 console.log('Node 24 smoke passed: non-extractable keys, narrowed grants, tools, AI attribution, budget, revoke/keep, rekey, recovery, and Rust/WASM fixture parity.');
+
+// The books fixture uses the same deliberately public seed-5 fixture identity.
+const booksRecords = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.books/records.json', import.meta.url), 'utf8'));
+const booksExpected = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.books/expected.json', import.meta.url), 'utf8'));
+const booksFixture = await Library.open(new Map(Object.entries(booksRecords).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), fixtureKeys);
+for (const { name, args, result } of booksExpected.queries) {
+  const actual = await booksFixture.call(`reading.books__${name}`, args);
+  assert.equal(actual.ok, true);
+  assert.deepEqual(actual.value, result);
+}
+assert.equal((await booksFixture.call('reading.books__addBook', { id: 'js-book', title: 'JS book', creator: 'Example' })).ok, true);
+assert.equal((await booksFixture.call('reading.books__book', { id: 'js-book' })).value.value.book.title, 'JS book');
+console.log('Books Rust/WASM query parity and generated tools passed.');

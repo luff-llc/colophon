@@ -195,3 +195,5 @@ pub fn op(kind: &str, clock: u64, authority: u64, payload: Value) -> Operation {
 pub fn public_identity(seed: u8) -> PublicIdentity {
     keys(seed).public()
 }
+
+pub mod books;
