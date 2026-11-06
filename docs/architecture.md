@@ -8,7 +8,7 @@ conformance/   vectors every implementation must reproduce (spec §11)
 crates/        the Rust core, the one implementation every platform runs
   colophon-core/   records, identities, authority, admission, sealing, domain reducers
   colophon-wasm/   wasm-bindgen bindings for browsers and Node
-  (colophon-ffi/   UniFFI bindings for Swift and Kotlin: next)
+  colophon-ffi/    UniFFI bindings for Swift and Kotlin; host-owned keys
 js/            @colophon/core: the npm package wrapping colophon-wasm, plus a WebCrypto key provider
 playground/    the interactive introduction: a library and an agent, in a browser tab
 swift/         the Swift reference implementation that shipped in LUFF's apps
@@ -67,8 +67,9 @@ afterwards. It can't unread what it already decrypted; the interface says so pla
 
 The Swift reference and the apps take no third-party dependencies. The Rust core takes a small,
 pinned set of audited crates and nothing else: RustCrypto (`p256`, `aes-gcm`, `hkdf`, `sha2`),
-`serde`/`serde_json`, `base64`, `getrandom`, and `wasm-bindgen`/`js-sys` in the bindings crate
-only. Every
+`serde`/`serde_json`, `base64`, `getrandom`, and `wasm-bindgen`/`js-sys` in the WASM bindings crate
+only. Native bindings additionally use `uniffi` (proc-macro mode) to generate matching Swift and
+Kotlin transports, typed outcomes, and host key-provider callbacks. Every
 addition is recorded here with its reason.
 
 ## Colophon 0.2: a clean break
@@ -122,6 +123,7 @@ remain within the allowlist above:
 | `serde_json` | 1.0.145 | `std`; defaults off |
 | `base64` | 0.22.1 | `std`; defaults off |
 | `wasm-bindgen` | 0.2.130 | `std`; defaults off, bindings only; matches the CLI |
+| `uniffi` | 0.32.2 | defaults off; native bindings only; `cli` enabled only for the in-repo generator via `bindgen` |
 
 Neither `getrandom` nor `js-sys` is needed by this implementation. WebCrypto and host-generated
 seeds provide randomness. The JavaScript package's sole build dependency is exact-pinned
@@ -145,3 +147,29 @@ Records, parsed verified headers and authenticated plaintext are still retained 
 This is O(history) memory, despite projection-only reducer state and bounded snapshot retention.
 [Performance](performance.md) records this limitation and distinguishes signature-verified cold
 open from warm projection restoration; a projection checkpoint is not a verification cache.
+
+## Native bindings and host scheduling
+
+`colophon-ffi` wraps the public `Library` API behind a mutex. It performs no storage I/O,
+clock reads, or random generation. Hosts supply timestamps and fresh 32-byte action seeds.
+Signing and ECDH use explicit prepare/finish calls, so hosts can suspend without retaining a
+Rust lock. The synchronous `KeyProvider` callback convenience is for local platform providers;
+async stores use the same steps through `ColophonKit.AsyncKeyProvider`. No Rust executor or
+async-trait dependency is required. Prepared session mutations carry a session ID and local
+revision: a merge during signing fails with `StaleAction`, requiring a fresh preparation.
+Changes conservatively invalidate all declared namespaces until the incremental engine exposes
+a compatible change API. Unlock changes identify the namespace whose key became available.
+
+UniFFI's transitive crates are pinned in `Cargo.lock`; its generator is a host build tool and is
+not linked into mobile binaries. The Kotlin JVM transport uses JNA 5.18.1, Kotlin 2.2.21, and
+Gradle 8.14.3; these are platform tooling/runtime dependencies, not additions to the Rust core.
+The Swift 0.1 reference products retain their existing dependency-free build.
+
+## Apple app lifecycle (0.2)
+
+The additive `ColophonKitStorage` product owns coordinated immutable folder records, App Group
+and iCloud location resolution, change notifications and private checkpoint bytes. The
+`ColophonSession` product owns process lifecycle, scoped pairing, revisions, typed query caches
+and durable destination-bound ingress. Its internal `SessionCore` protocol isolates the current
+`ColophonKit` snapshot API from the incoming incremental engine. Neither platform storage nor
+extension envelopes grant authority. See [session contracts](session.md) and [new app](new-app.md).

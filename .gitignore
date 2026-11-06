@@ -7,3 +7,10 @@ node_modules/
 dist/
 *.wasm
 .env.local
+/sdk/apple/*.xcframework/
+/sdk/apple/*.zip
+/sdk/kotlin/.gradle/
+/sdk/kotlin/build/
+/sdk/android/build/
+/.gradle-home/
+/.tools/

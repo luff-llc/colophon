@@ -1,0 +1,13 @@
+{
+  "date": "2026-11-06",
+  "unit": "microseconds_median",
+  "history_operations": 21,
+  "query_samples_per_run": 100,
+  "write_samples_per_run": 50,
+  "host_signing_included": false,
+  "runs": [
+    {"native_query":5325.666,"native_write":11044.292,"rust_facade_query":5159.459,"rust_facade_write":11053.834,"swift_query":5694.208,"swift_write":11886.125,"kotlin_query":5502.958,"kotlin_write":11769.625},
+    {"native_query":5061.25,"native_write":10859.709,"rust_facade_query":5062.875,"rust_facade_write":10920.458,"swift_query":5466.792,"swift_write":11605.625,"kotlin_query":5537.042,"kotlin_write":11742.833},
+    {"native_query":5067.417,"native_write":10847.291,"rust_facade_query":5073.041,"rust_facade_write":10862.333,"swift_query":5472.833,"swift_write":11585.958,"kotlin_query":5524.708,"kotlin_write":11755.125}
+  ]
+}

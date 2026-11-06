@@ -119,3 +119,23 @@ People already have 0.1 libraries (Taupe testers included). On first launch of t
    and denied scopes, restart, revoke, rejoin, and upgrade from a 0.1 library.
 7. Android on the Kotlin SDK.
 8. Merge plan in Marginalia's `QUESTIONS.md`; merge only after it's agreed.
+
+### Bindings implementation status (November 6, 2026)
+
+The `ffi` worktree implements `colophon-ffi`, the async `ColophonKit` facade and CryptoKit
+providers, generated Kotlin/JNA bindings, and the shared consent/write/revoke/reopen journeys.
+All five arm64 Apple slices build, including nightly-built visionOS, and the host JVM journey
+passes. Android's two-ABI AAR build is scripted; SDK/NDK and physical keystore validation remain.
+Storage, `ColophonSession`, and typed domain-store extraction remain the following steps.
+See [native bindings](native-bindings.md), [FFI measurements](performance.md#ffi), and the
+[bindings handoff](handoff-ffi.md) for the exact build gates and sandbox limitations.
+
+### App SDK implementation status (November 6, 2026)
+
+The `ffi` worktree adds `ColophonKitStorage`, `ColophonSession`, revision-keyed typed query
+stores, destination-bound extension ingress and the macOS/iOS `examples/ColophonSample`.
+See [new app](new-app.md), [session contracts](session.md), and [session handoff](handoff-session.md).
+The internal `SessionCore` protocol isolates the current binding API for the incoming engine.
+Checkpoint byte storage is present; verified-prefix use waits for that engine and bindings.
+These are SDK/sample and synthetic multi-session checks, not migration acceptance for the
+four shipping apps. Their product journeys and real provider/hardware behavior remain gates.

@@ -1,0 +1,131 @@
+# Apple app SDK contracts
+
+`ColophonKitStorage` and `ColophonSession` are additive 0.2 products in the root Swift package.
+They have no third-party Swift dependencies and compile in Swift 6 language mode. The 0.1
+products remain unchanged. The sample is a starting template, not acceptance evidence from
+Later, Taupe, Shelf or Scribenda.
+
+## Storage, restoration and private state
+
+`FolderRecordStore` stores the spec's `authority`, `requests` and `ops` paths unchanged. Each
+write batch uses `NSFileCoordinator`; files are staged with mode 0600, synchronized, and linked
+into place without replacing an existing record. Equal bytes are idempotent; different bytes
+at one path are a conflict. Directory synchronization precedes success. Publication is atomic
+per record, **not across a batch**. Partial batches remain retryable; an incomplete authority
+chain never produces a ready session. Records are capped at 16 MiB per file in this adapter.
+
+Reads enumerate immutable records off-main. iCloud placeholder files and non-current download
+status request hydration and throw `unavailable`; enumeration/read/permission failures are not
+absence. Previously observed paths are retained in the private journal, including across
+restart, and disappearing records also produce `unavailable`. The first complete observation
+cannot prove an unseen remote record exists; there is no remote completeness oracle.
+
+An `NSFilePresenter` on the library directory emits bounded wake-up hints. The session
+coalesces bursts into a 75 ms batch and rereads once; duplicate snapshots do not bump revisions.
+`flushExternalChanges()` is an explicit completion barrier, useful for tests and host refresh.
+Foreground entry should always call `refresh()`; presenter delivery alone is not a guarantee
+that a suspended process received every provider notification.
+
+App Group/iCloud resolution is performed for this process, before opening records. Failure
+never falls back to a private empty library. `.folder` is for an already accessible, host-owned
+location; arbitrary document-picker bookmarks and live profile switching are not implemented.
+Private-container mode stores the library in `home/Library`. Keep session state, checkpoints
+and identity providers outside the shared library/App Group. iOS private staging uses
+`completeUntilFirstUserAuthentication`; macOS uses private POSIX permissions without requesting
+unsupported iOS file-protection flags. Existing files remain intact when staging fails.
+
+`KeychainKeys` stores software scalars or opaque Secure Enclave references in a process-private,
+ThisDeviceOnly Keychain item. The backend selects initial creation; reopening preserves the
+stored identity/backend. No keychain error regenerates keys or silently falls back. Hardware
+and protected-data failures propagate. Supply a separate persistent recovery provider when
+creating a library. If omitted, ColophonKit creates an ephemeral recovery provider available
+through `recoveryKeys()`; the host must protect it before relying on recovery. The sample
+supplies a separate persistent provider, but it does not implement recovery-kit export UI.
+
+`CheckpointCache(privateContainer:)` bounds opaque cache bytes and keys them by validated
+library ID, sets backup exclusion and can discard/reload them. The current bindings have no
+verified-prefix checkpoint API, so the session deliberately does **not** read projections from
+this cache. It must be connected only to the new engine's prefix validation, never to an app
+revision counter. Cache persistence errors are explicit. No cache is an authority or backup.
+
+## Session and engine boundary
+
+Create one session per app process, shared by windows, intents and feature stores. `restore()`
+is a shared completion barrier. The session owns phase, identity, ledger, pairing requests,
+global revision and per-namespace revisions. Inaccessible namespaces prevent `ready`; views
+are invalidated immediately on loss of readiness. Revocation and expiry are checked on every
+refresh and command; an expiry task schedules a recheck even without a file notification.
+
+All storage, signing, FFI and projection work runs on background actors. `SessionWorker` has a
+suspension-aware FIFO gate around complete operations: a key-provider suspension cannot let a
+second write/rejoin interleave with its persistence. Leave completes preceding operations
+before invalidating the context. `ObservedRevision` binds an action to session context and
+global revision. The worker refreshes before signing and rejects stale observations. It never
+silently retries an unsigned stale command. Cancellation is checked before core signing/commit;
+a committed operation must still be persisted. The API does not promise a cross-process CAS:
+concurrent authority writers may produce immutable-path conflicts, which stop publication.
+
+`SessionCore` is the one internal engine protocol; `BindingSessionCore` is its current adapter.
+Replace it when `docs/engine.md` and matching bindings land. Today this adapter still obtains
+full record/view snapshots and compares namespace evidence off-main to avoid falsely
+invalidating unrelated namespace caches. This is **not** the incremental engine or a 100k-op
+performance claim. SwiftUI only reads cached values. `NamespaceStore<Query, Result>` decodes
+on a concurrent executor, fences completion by context and namespace revision, bounds query
+entries, and publishes cold-load completion separately from journal changes. Cache registrations are removed on deinit; `close()` also allows explicit early disposal.
+
+## Exactly what is automatic
+
+By default: restore the configured location, establish container access, refresh observations,
+create/persist this identity's **signed pairing request** when it is ungranted, and recognize
+an approved grant. No App Group, member label, folder selection, request kind or transport
+credential authorizes approval. Agents and servers always wait for explicit approval.
+
+`EnrollmentPolicy.deviceOnlyAppGroup(starterKeys:)` is an explicit suite-only opt-in, matching
+Marginalia's device-only starter-root policy. It applies only to `.app` members at an `.appGroup`
+location. The host supplies the actual device-only starter root and must cease supplying it
+when protecting/moving the library. Creation makes that starter the root, then the app writes
+its own pairing request. Joining also writes a real request. A second core handle using the
+starter signs a grant with **exactly the request's namespaces/access**, never all supported
+library namespaces. Core authority must still recognize that starter as current root; a
+former starter is refused and the app remains in the normal pairing phase. There is no
+label allowlist or automatic root-key discovery. The SDK does not copy starter/root secrets
+into the App Group or implement the old 0.1 starter-to-protected-root migration.
+
+`leave()` disconnects locally and persists the choice; it neither revokes membership nor
+deletes records. `rejoin(keys:)` reconnects. A revoked member must use a fresh independently
+persisted identity and request, because requests are immutable. Configure that same new key
+provider on subsequent launches. Pending signed publication must be retried before leave or
+rejoin. Profile replacement in place and account-selection UI remain host responsibilities.
+
+## Extension inbox and retry
+
+Extensions enqueue `IngressEnvelope` values into `IngressInbox(appGroupContainer:)`. Each
+contains a UUID, destination library **and member**, expiration, and a bounded domain command.
+They never receive a signing key. Default limits are 128 files, 64 KiB encoded per envelope,
+32 KiB command payload and seven-day maximum lifetime. A nonblocking advisory lock bounds
+concurrent extension publication; malformed/oversized files stop the bounded scan. Enqueue
+returns `.queued`, never `.saved`. Destination-route UI/publication is product policy; use the
+foreground session's ready library/member IDs, and remove stale routes when it loses access.
+
+Foreground `drain` refreshes and validates exact destination, expiry, current namespace and
+write grant before core signing. Signed records plus the envelope's operation receipt are
+atomically journaled in the app's private container before public publication. It retries the
+**same bytes**, verifies readback, then acknowledges the queue file. Durable receipt matching
+prevents a lost acknowledgement/restart from signing again. A post-commit provider failure
+binds its receipt to the core-emitted operation path; retry checks admitted evidence before
+acknowledging. An ambiguous publication stays queued for review instead of re-signing. Expired receipt entries are pruned
+before accepting new requests; at most 4096 active receipts are retained. Conflicting IDs,
+wrong destinations, denied grants and expired unsigned envelopes remain queued for review.
+A partial batch or write failure is not a saved receipt. Foreground refresh, external changes
+or explicit Retry resume publication. There is no background network scheduler and no promise
+of remote iCloud upload completion: saved means durable in the selected local store.
+
+## Acceptance limits
+
+Tests use actual Rust-backed sessions and independent keys/private homes. The two-process-style
+folder test uses separate folder-store objects and explicit change barriers. Its internal test
+initializer disables coordination because filecoordinationd is inaccessible in this sandbox;
+production has no uncoordinated fallback. Actual OS presenter delivery, iCloud hydration,
+App Group entitlement/bootstrap, Secure Enclave, Keychain prompts, Share/Safari/widget host
+journeys and two real consuming apps still need unrestricted/device acceptance. The sample
+uses a private folder and explicit pairing-request import, including agent approval/revocation.
