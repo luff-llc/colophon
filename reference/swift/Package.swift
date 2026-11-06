@@ -1,0 +1,33 @@
+// swift-tools-version: 6.0
+import PackageDescription
+
+// The 0.1 reference and its optional SDK migration adapter.
+let package = Package(name: "ColophonReference", platforms: [.macOS(.v14), .iOS(.v17), .visionOS("26.0")], products: [
+  .library(name: "ColophonCore", targets: ["ColophonCore"]),
+  .library(name: "ColophonStore", targets: ["ColophonStore"]),
+  .library(name: "ColophonAuthority", targets: ["ColophonAuthority"]),
+  .library(name: "ColophonReplica", targets: ["ColophonReplica"]),
+  .library(name: "ColophonSaved", targets: ["ColophonSaved"]),
+  .library(name: "ColophonBooks", targets: ["ColophonBooks"]),
+  .library(name: "ColophonListening", targets: ["ColophonListening"]),
+  .library(name: "ColophonNotes", targets: ["ColophonNotes"]),
+  .library(name: "ColophonMCP", targets: ["ColophonMCP"]),
+  .library(name: "ColophonLegacyAdapter", targets: ["ColophonLegacyAdapter"]),
+  .executable(name: "colophon", targets: ["colophon"]),
+], dependencies: [.package(name: "ColophonSDK", path: "../..")], targets: [
+  .target(name: "ColophonCore", path: "Sources/ColophonCore"),
+  .target(name: "ColophonStore", dependencies: ["ColophonCore"], path: "Sources/ColophonStore"),
+  .target(name: "ColophonAuthority", dependencies: ["ColophonCore", "ColophonStore"], path: "Sources/ColophonAuthority"),
+  .target(name: "ColophonReplica", dependencies: ["ColophonCore", "ColophonStore", "ColophonAuthority"], path: "Sources/ColophonReplica"),
+  .target(name: "ColophonSaved", dependencies: ["ColophonReplica"], path: "Sources/ColophonSaved"),
+  .target(name: "ColophonBooks", dependencies: ["ColophonReplica"], path: "Sources/ColophonBooks"),
+  .target(name: "ColophonListening", dependencies: ["ColophonReplica"], path: "Sources/ColophonListening"),
+  .target(name: "ColophonNotes", dependencies: ["ColophonReplica", "ColophonListening"], path: "Sources/ColophonNotes"),
+  .target(name: "ColophonMCP", dependencies: ["ColophonReplica"], path: "Sources/ColophonMCP"),
+  .executableTarget(name: "colophon", dependencies: ["ColophonMCP", "ColophonSaved", "ColophonBooks", "ColophonListening",
+    "ColophonNotes"], path: "Sources/colophon"),
+  .testTarget(name: "ColophonTests", dependencies: ["ColophonCore", "ColophonStore", "ColophonAuthority", "ColophonReplica",
+    "ColophonSaved", "ColophonBooks", "ColophonListening", "ColophonNotes", "ColophonMCP"], path: "Tests/ColophonTests"),
+  .target(name: "ColophonLegacyAdapter", dependencies: ["ColophonCore", "ColophonStore", "ColophonAuthority", "ColophonReplica", "ColophonBooks", "ColophonListening", "ColophonSaved", "ColophonNotes", .product(name: "ColophonMigration", package: "ColophonSDK")]),
+  .testTarget(name: "ColophonMigrationTests", dependencies: ["ColophonLegacyAdapter", .product(name: "ColophonMigration", package: "ColophonSDK")]),
+], swiftLanguageModes: [.v6])

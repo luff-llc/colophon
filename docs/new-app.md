@@ -1,7 +1,11 @@
 # A new Apple app
 
 1. Build the native artifact once with `bash scripts/build-apple.sh` (see
-   [native bindings](native-bindings.md)). Add the root package's **ColophonSession** product.
+   [native bindings](native-bindings.md)). Add the root **ColophonSDK** package's **ColophonSession** product.
+   If the app still has a local `Colophon` package, use a `packages/ColophonSDK` checkout and
+   follow the [identity steps](native-bindings.md#package-identity-and-coexistence-with-01).
+   For existing 0.1 data, implement [LegacyLibrarySource](migration.md) and migrate only the
+   app's namespaces; the SDK does not pull in another copy of the old modules.
 2. Copy `examples/ColophonSample`, run `python3 generate-project.py`, and change the bundle ID,
    member label, namespaces and private home. Its product views import `ColophonSession` and the shared `ColophonSessionUI` flows.
 3. Own one `@State` session at the process entry point and pass it to windows and intents:

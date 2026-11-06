@@ -4,11 +4,11 @@ import ColophonCore
 import ColophonStore
 import ColophonAuthority
 import ColophonReplica
+import ColophonMigration
 
 struct SourceSnapshot: Sendable {
     let authority: AuthorityState
     let records: [String: Data]
-    let views: [String: ReplicaView]
     let operations: [String: [SourceEntry]]
     let unresolved: [String]
     let unresolvedPaths: [String]
@@ -19,14 +19,12 @@ struct SourceEntry: Sendable {
     let path: String
     let payloadJSON: Data
     let claimedDateJSON: Data
-    var key: String { Canonical.digest(Data("\(admitted.author)/\(admitted.id)/\(digest)".utf8)) }
-    var fingerprint: String { key + (admitted.status == .admitted ? "/admitted" : "/held") }
 }
 
 enum SourceReader {
     static let namespaces = ["reading.books", "listening.podcasts", "reading.saved", "notes"]
     /// Snapshot into a private immutable reader: no migration method writes to the source store.
-    static func read(store: any ColophonStore.RecordStore, reader: any Identity, root: any Identity) throws -> SourceSnapshot {
+    static func read(store: any ColophonStore.RecordStore, reader: any Identity, root: any Identity, namespaces: Set<String>) throws -> SourceSnapshot {
         let copy = MemoryStore()
         func copyFiles(_ directory: String) throws {
             for name in try store.list(directory) {
@@ -48,11 +46,11 @@ enum SourceReader {
         let challenge = Data(("colophon-migration-root/1/" + authority.libraryID + "/" + UUID().uuidString).utf8)
         guard authority.root.verify(try root.sign(challenge), over: challenge) else { throw MigrationError.rootRequired }
         let readerID = try reader.availablePublicIdentity().id
-        var views: [String: ReplicaView] = [:], entries: [String: [SourceEntry]] = [:]
+        var entries: [String: [SourceEntry]] = [:]
         var accounted = Set<String>(), unresolved: [String] = []
-        for namespace in namespaces where authority.keys[namespace] != nil {
+        for namespace in namespaces.sorted() {
+            guard authority.keys[namespace] != nil else { throw MigrationError.sourceUnavailable(namespace) }
             guard let view = try replica.readComplete(namespace) else { throw MigrationError.sourceUnavailable(namespace) }
-            views[namespace] = view
             for entry in view.operations {
                 let path = LibraryPath.operation(author: entry.author, clock: entry.operation.clock, id: entry.id)
                 guard let bytes = copy.snapshot[path] else { throw MigrationError.sourceUnavailable(path) }
@@ -72,8 +70,19 @@ enum SourceReader {
             unresolved += view.rejected.map { "\($0.path): \($0.reason)" }
             if view.unreadable > 0 { unresolved.append("\(namespace): \(view.unreadable) unreadable records") }
         }
-        let unresolvedPaths = copy.snapshot.keys.filter { $0.hasPrefix("ops/") && !accounted.contains($0) }.sorted()
+        // Only a verified signed header can establish that an envelope belongs to another
+        // namespace. Never trust an unverified namespace field to suppress invalid evidence.
+        let foreign = Set(copy.snapshot.compactMap { path, bytes -> String? in
+            guard path.hasPrefix("ops/"),
+                  let signed = try? Canonical.decode(SignedRecord.self, from: bytes),
+                  let header = try? Canonical.decode(OperationHeader.self, from: signed.body),
+                  authority.members[header.author]?.key.verify(signed) == true,
+                  !namespaces.contains(header.namespace) else { return nil }
+            return path
+        })
+        let selected = copy.snapshot.filter { !foreign.contains($0.key) }
+        let unresolvedPaths = selected.keys.filter { $0.hasPrefix("ops/") && !accounted.contains($0) }.sorted()
         unresolved += unresolvedPaths.map { "Unresolved source envelope: " + $0 }
-        return SourceSnapshot(authority: authority, records: copy.snapshot, views: views, operations: entries, unresolved: unresolved, unresolvedPaths: unresolvedPaths)
+        return SourceSnapshot(authority: authority, records: selected, operations: entries, unresolved: unresolved, unresolvedPaths: unresolvedPaths)
     }
 }

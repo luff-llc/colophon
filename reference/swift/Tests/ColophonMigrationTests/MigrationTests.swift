@@ -11,6 +11,9 @@ import ColophonSaved
 import ColophonNotes
 import ColophonSession
 @testable import ColophonMigration
+import ColophonLegacyAdapter
+
+private let allNamespaces = ["reading.books", "listening.podcasts", "reading.saved", "notes"]
 
 private struct Fixture {
     let source = MemoryStore()
@@ -18,9 +21,9 @@ private struct Fixture {
     let holder: AuthorityHolder
     init() throws {
         holder = try AuthorityHolder.create(in: source, label: "Four apps", root: root, firstMember: phone.publicIdentity,
-            memberLabel: "iPhone", role: .app, custody: .software, namespaces: SourceReader.namespaces).0
-        try holder.admit(mac.publicIdentity, label: "Mac", role: .device, custody: .software, namespaces: SourceReader.namespaces, write: true)
-        try holder.admit(agent.publicIdentity, label: "Old assistant", role: .agent, custody: .software, namespaces: SourceReader.namespaces, write: true)
+            memberLabel: "iPhone", role: .app, custody: .software, namespaces: allNamespaces).0
+        try holder.admit(mac.publicIdentity, label: "Mac", role: .device, custody: .software, namespaces: allNamespaces, write: true)
+        try holder.admit(agent.publicIdentity, label: "Old assistant", role: .agent, custody: .software, namespaces: allNamespaces, write: true)
     }
     var replica: Replica { Replica(store: source, identity: phone) }
     func populate() throws {
@@ -73,10 +76,10 @@ private struct Fixture {
     var marker: URL { home.appendingPathComponent("migration-status.json") }
     init() { home = FileManager.default.temporaryDirectory.appendingPathComponent("migration-test-" + UUID().uuidString) }
     func session() -> ColophonSession {
-        ColophonSession(configuration: .init(memberLabel: "Migration root", namespaces: SourceReader.namespaces, location: .memory(store), privateContainer: home.appendingPathComponent("session"), keys: keys, migrationMarker: marker, migrationWriter: true))
+        ColophonSession(configuration: .init(memberLabel: "Migration root", namespaces: allNamespaces, location: .memory(store), privateContainer: home.appendingPathComponent("session"), keys: keys, migrationMarker: marker, migrationWriter: true))
     }
     func migration(_ source: Fixture, _ session: ColophonSession) -> LibraryMigration {
-        LibraryMigration(source: source.source, readerIdentity: source.phone, rootIdentity: source.root, destination: session,
+        LibraryMigration(source: ColophonLegacyAdapter(store: source.source, readerIdentity: source.phone, rootIdentity: source.root), namespaces: Set(allNamespaces), destination: session,
             privateContainer: home.appendingPathComponent("migration"), evidenceKey: evidenceKey, markerURL: marker)
     }
     func library() async throws -> Library { try await Library.open(records: store.read(), me: keys) }
@@ -238,7 +241,7 @@ private struct Fixture {
 
     @Test func onlyRootCanStartMigration() async throws {
         let f = try Fixture(), d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
-        let migration = LibraryMigration(source: f.source, readerIdentity: f.phone, rootIdentity: f.mac,
+        let migration = LibraryMigration(source: ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.mac), namespaces: Set(allNamespaces),
             destination: d.session(), privateContainer: d.home, evidenceKey: d.evidenceKey, markerURL: d.marker)
         await #expect(throws: MigrationError.rootRequired) { try await migration.run() }
         #expect(try await d.store.read().isEmpty)
@@ -289,7 +292,7 @@ private struct Fixture {
         let d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
         let session = d.session(); _ = try await d.migration(f, session).run()
         let before = try await d.store.read()
-        let wrongKey = LibraryMigration(source: f.source, readerIdentity: f.phone, rootIdentity: f.root,
+        let wrongKey = LibraryMigration(source: ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.root), namespaces: Set(allNamespaces),
             destination: session, privateContainer: d.home.appendingPathComponent("migration"),
             evidenceKey: SymmetricKey(size: .bits256), markerURL: d.marker)
         await #expect(throws: (any Error).self) { try await wrongKey.run() }
@@ -313,6 +316,123 @@ private struct Fixture {
         #expect(try MigrationMarker.isActive(at: d.marker))
     }
 
+    @Test func booksOnlyMixedSourceThenNotesUpgradeAndCatchUp() async throws {
+        let f = try Fixture()
+        try f.replica.perform(Books.add(book: "book", title: "Book", author: "Author"))
+        try f.replica.perform(Notes.create(notebook: "notebook", title: "Notes later"))
+        // This reference does not implement Later's full codec; it must not block Shelf.
+        try f.replica.perform(Command(namespace: SavedLinks.namespace, kind: "content.restoreDeleted", payload: [:]))
+        let original = f.source.snapshot
+        let d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
+        let source = ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.root)
+        let booksMarker = d.home.appendingPathComponent("books-marker.json")
+        let booksSession = ColophonSession(configuration: .init(memberLabel: "Books migration", namespaces: [Books.namespace],
+            location: .memory(d.store), privateContainer: d.home.appendingPathComponent("books-session"), keys: d.keys,
+            migrationMarker: booksMarker, migrationWriter: true))
+        func booksMigration() -> LibraryMigration {
+            LibraryMigration(source: source, namespaces: [Books.namespace], destination: booksSession,
+                privateContainer: d.home.appendingPathComponent("books-migration"), evidenceKey: d.evidenceKey, markerURL: booksMarker)
+        }
+        var migration = booksMigration()
+        let first = try await migration.run(batchSize: 1)
+        #expect(first.importedOperations == 1 && first.remainingOperations == 0)
+        #expect(first.unresolved.isEmpty)
+        #expect(try !MigrationMarker.isActive(at: booksMarker))
+        #expect(try await migration.evidence().count == 1)
+        let destinationID = try #require(booksSession.libraryID)
+        // No saved-reading grant is needed, even when invalid envelopes need evidence.
+        #expect(f.source.snapshot == original)
+        let before = try await d.store.read()
+        try f.replica.perform(Command(namespace: SavedLinks.namespace, kind: "content.restoreDeleted", payload: ["item": .string("other")]))
+        migration = booksMigration() // cold journal resume ignores changes to the other scope
+        let unchanged = try await migration.run()
+        #expect(unchanged.unresolved.isEmpty && unchanged.importedOperations == 1)
+        #expect(try await d.store.read() == before)
+        try f.replica.perform(Books.add(book: "second", title: "Catch up", author: "Author"))
+        let appended = try await migration.run()
+        #expect(appended.importedOperations == 2 && appended.unresolved.isEmpty)
+
+        // A second app can choose its own destination and migrate its namespace later.
+        let notesDestination = Destination(); defer { try? FileManager.default.removeItem(at: notesDestination.home) }
+        let notesSession = ColophonSession(configuration: .init(memberLabel: "Notes migration", namespaces: [Notes.namespace],
+            location: .memory(notesDestination.store), privateContainer: notesDestination.home.appendingPathComponent("notes-session"),
+            keys: notesDestination.keys, migrationMarker: notesDestination.marker, migrationWriter: true))
+        let notes = LibraryMigration(source: source, namespaces: [Notes.namespace], destination: notesSession,
+            privateContainer: notesDestination.home.appendingPathComponent("notes-migration"), evidenceKey: notesDestination.evidenceKey,
+            markerURL: notesDestination.marker)
+        let notesReport = try await notes.run()
+        #expect(notesReport.importedOperations == 1 && notesReport.unresolved.isEmpty)
+        #expect(try await notes.evidence().count == 1)
+        #expect(booksSession.libraryID == destinationID)
+        #expect(original.allSatisfy { f.source.snapshot[$0.key] == $0.value })
+    }
+
+    @Test func laterScopeCanUseExplicitExistingDestinationAndScopeCannotChange() async throws {
+        let f = try Fixture()
+        try f.replica.perform(Books.add(book: "book", title: "Book", author: "Author"))
+        try f.replica.perform(Notes.create(notebook: "notebook", title: "Notebook"))
+        let d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
+        let session = d.session(), source = ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.root)
+        let books = LibraryMigration(source: source, namespaces: [Books.namespace], destination: session,
+            privateContainer: d.home.appendingPathComponent("books"), evidenceKey: d.evidenceKey, markerURL: d.marker)
+        _ = try await books.run()
+        let id = try #require(session.libraryID)
+        let changed = LibraryMigration(source: source, namespaces: [Notes.namespace], destination: session,
+            privateContainer: d.home.appendingPathComponent("books"), evidenceKey: d.evidenceKey, markerURL: d.marker)
+        await #expect(throws: MigrationError.invalidSource) { try await changed.run() }
+        let wrong = LibraryMigration(source: source, namespaces: [Notes.namespace], destination: session, destinationLibraryID: "wrong",
+            privateContainer: d.home.appendingPathComponent("notes"), evidenceKey: d.evidenceKey, markerURL: d.marker)
+        await #expect(throws: MigrationError.destinationChanged) { try await wrong.run() }
+        let notes = LibraryMigration(source: source, namespaces: [Notes.namespace], destination: session, destinationLibraryID: id,
+            privateContainer: d.home.appendingPathComponent("notes"), evidenceKey: d.evidenceKey, markerURL: d.marker)
+        let result = try await notes.run()
+        #expect(result.importedOperations == 1 && result.unresolved.isEmpty)
+        #expect(try await books.evidence().count == 1)
+        #expect(try await notes.evidence().count == 1)
+    }
+
+    @Test func booksOnlyInvalidSignaturePublishesEvidenceWithinBooks() async throws {
+        let f = try Fixture()
+        let op = try f.replica.perform(Books.add(book: "bad", title: "Untrusted", author: "Author"))
+        let path = LibraryPath.operation(author: f.phone.publicIdentity.id, clock: op.clock, id: op.id)
+        let record = try Canonical.decode(SignedRecord.self, from: #require(try f.source.read(path)))
+        f.source.tamper(path, try Canonical.encode(SignedRecord(body: record.body, signature: Data(repeating: 0, count: 64))))
+        let d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
+        let session = ColophonSession(configuration: .init(memberLabel: "Books migration", namespaces: [Books.namespace],
+            location: .memory(d.store), privateContainer: d.home.appendingPathComponent("books-session"), keys: d.keys,
+            migrationMarker: d.marker, migrationWriter: true))
+        let migration = LibraryMigration(source: ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.root),
+            namespaces: [Books.namespace], destination: session, privateContainer: d.home.appendingPathComponent("migration"),
+            evidenceKey: d.evidenceKey, markerURL: d.marker)
+        let report = try await migration.run()
+        #expect(report.importedOperations == 0 && !report.unresolved.isEmpty)
+        #expect(try await migration.evidence().count == 1)
+        #expect(try MigrationMarker.isActive(at: d.marker))
+    }
+
+    @Test func adapterSemanticChangeStopsCatchUpWithoutNativeEffects() async throws {
+        let f = try Fixture()
+        try f.replica.perform(Books.add(book: "book", title: "Book", author: "Author"))
+        let d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
+        let session = d.session()
+        let base = ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.root)
+        func migration(_ revision: String) -> LibraryMigration {
+            LibraryMigration(source: RevisedSource(base: base, revision: revision), namespaces: [Books.namespace], destination: session,
+                privateContainer: d.home.appendingPathComponent("migration"), evidenceKey: d.evidenceKey, markerURL: d.marker)
+        }
+        _ = try await migration("codec-1").run()
+        let before = try await d.store.read()
+        do { _ = try await migration("codec-2").run(); Issue.record("Expected reconciliation") }
+        catch MigrationError.reconciliationRequired { }
+        let after = try await d.store.read()
+        #expect(before.allSatisfy { after[$0.key] == $0.value })
+        #expect(try MigrationMarker.isActive(at: d.marker))
+        // Repeating the same reconciliation remains idempotent.
+        do { _ = try await migration("codec-2").run(); Issue.record("Expected reconciliation") }
+        catch MigrationError.reconciliationRequired { }
+        #expect(try await d.store.read() == after)
+    }
+
 }
 
 private final class MigrationChunkSource: BlobSource {
@@ -322,5 +442,38 @@ private final class MigrationChunkSource: BlobSource {
     func read(path: String) throws -> BlobReadOutcome {
         guard path == self.path else { return .missing }
         return .available(bytes: bytes)
+    }
+}
+
+// An app-owned adapter can revise evaluated semantics independently of the reference modules.
+private struct RevisedSource: LegacyLibrarySource {
+    let base: any LegacyLibrarySource
+    let revision: String
+    func snapshot(namespaces: Set<String>) throws -> any LegacyLibrarySnapshot {
+        RevisedSnapshot(base: try base.snapshot(namespaces: namespaces), revision: revision)
+    }
+}
+private struct RevisedSnapshot: LegacyLibrarySnapshot {
+    let base: any LegacyLibrarySnapshot
+    let revision: String
+    var libraryID: String { base.libraryID }
+    var readerID: String { base.readerID }
+    var rootID: String { base.rootID }
+    var members: [LegacyMember] { base.members }
+    var namespaces: Set<String> { base.namespaces }
+    var changeToken: String { base.changeToken + revision }
+    var records: [String: Data] { base.records }
+    var unresolved: [String] { base.unresolved }
+    var unresolvedPaths: [String] { base.unresolvedPaths }
+    var operations: [String: [LegacyOperation]] {
+        base.operations.mapValues { entries in entries.map { entry in
+            LegacyOperation(id: entry.id, authorID: entry.authorID, authorLabel: entry.authorLabel,
+                signedBodyDigest: entry.signedBodyDigest, kind: entry.kind, version: entry.version,
+                payloadJSON: entry.payloadJSON, claimedDateJSON: entry.claimedDateJSON, admission: entry.admission,
+                sourcePath: entry.sourcePath, semanticFingerprint: entry.semanticFingerprint + revision, admissionDetail: entry.admissionDetail)
+        } }
+    }
+    func evaluate(namespace: String, index: Int, bindings: LegacyImportBindings) throws -> LegacyEvaluation {
+        try base.evaluate(namespace: namespace, index: index, bindings: bindings)
     }
 }

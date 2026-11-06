@@ -11,7 +11,9 @@ crates/        the Rust core, the one implementation every platform runs
   colophon-ffi/    UniFFI bindings for Swift and Kotlin; host-owned keys
 js/            @colophon/core: the npm package wrapping colophon-wasm, plus a WebCrypto key provider
 playground/    the interactive introduction: a library and an agent, in a browser tab
-swift/         the Swift reference implementation that shipped in LUFF's apps
+Package.swift  ColophonSDK: only the Rust-backed 0.2 Apple SDK
+swift/         0.2 SDK sources and tests
+reference/swift/ independent 0.1 reference package, CLI, tests and legacy migration adapter
 docs/          this file and design notes
 ```
 

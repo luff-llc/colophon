@@ -149,36 +149,19 @@ four shipping apps. Their product journeys and real provider/hardware behavior r
 
 ### Migration implementation in this worktree
 
-The root package now includes `ColophonMigration`. Construct `LibraryMigration` with the old
-Swift `RecordStore` (for a folder, `ColophonStore.FolderStore(oldURL)`), the app's existing reader
-identity, the current source root identity, a new 0.2 `ColophonSession`, a private migration
-directory, a persistently protected AES key and a shared marker URL. Configure that destination
-session with all source namespaces and `migrationWriter: true`; do not expose this dedicated
-writer as the product UI session. Configure sibling sessions
-with the same marker and the normal enrollment policy. Keep both destination/session private
-state and the migration directory separate from the source library.
+The root **ColophonSDK** package includes `ColophonMigration`, independent of the 0.1 modules.
+Construct `LibraryMigration` with a host-owned `LegacyLibrarySource`, an explicit namespace
+scope, a dedicated 0.2 migration session, private journal directory, persistently protected AES
+key and scope-specific marker URL. Marginalia implements the protocol over its existing full
+0.1 stack; `ColophonLegacyAdapter` in `reference/swift/` is for the reference implementation.
 
-Call `run(batchSize:)` repeatedly while `remainingOperations > 0`, and again on later foreground
-rollout passes for catch-up. It copies and verifies the source, proves possession of the current
-root, archives exact source bytes, evaluates source prefixes, translates through UniFFI and
-publishes via the session's durable receipts. The source store is never mutated. There is no
-optional moved marker yet. `membersNeedingRejoin` is informational, not an imported grant.
-An initial run refuses an existing destination rather than risking native identity collisions.
+See [migration.md](migration.md) for the complete verification, evaluation, catch-up and
+persistence contract, including migrating books from a mixed suite library and importing a later
+scope into an explicitly identified shared destination. See [native bindings](native-bindings.md#package-identity-and-coexistence-with-01)
+for the `packages/ColophonSDK` dependency path needed to coexist with `packages/Colophon`.
 
-The private directory contains `migration-progress.aesgcm`, `source-archive/`, and explicitly
-named `import-evidence-local/` encrypted files. Preserve this directory and its independent key:
-these are migration records, not disposable caches. `evidence()` reads the local fallback for
-an upgrade review UI. They are not yet synchronized, encrypted namespace sidecars with grant-
-checked engine queries. Signed new records are authored by the importer; historical authors
-remain labelled claims. Every source envelope either has an import receipt or an unresolved
-archive disposition. Missing/changed previously archived immutable source records fail closed.
-
-`unresolved` entries keep the shared marker active. The implementation does not claim complete
-shipping-app parity: the reference saved-reading module here folds only capture/state/metadata,
-so Later's fuller content, graph and archive codecs require integration from the shipping app.
-Other unconnected service/blob/role-sensitive projections are retained explicitly for review.
-Earlier source insertion, changed admission, changed legacy duplicate-ID outcomes, and native
-identity collisions stop for
-historical reconciliation without rewriting signed destination history. Appended source writes
-use the last imported component heads, allowing native 0.2 edits to win. See the migration
-handoff for precise coverage, checks, engine requests and release blockers.
+`run(batchSize:)` checkpoints complete source units and supports restart and appended catch-up.
+Unresolved evidence keeps only this scope's marker active. Exact source bytes remain unchanged;
+old grants are not recreated. Evidence is synchronized through the engine's grant-checked
+queries. Full shipping-app codecs, automatic historical reconciliation and actual provider/UI
+acceptance remain host integration work, as described in the migration handoff.

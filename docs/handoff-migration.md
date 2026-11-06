@@ -1,5 +1,11 @@
 # Migration handoff — November 6, 2026
 
+Layout/API update: the root is now the 0.2-only `ColophonSDK`; the 0.1 reference and real
+migration fixture tests moved to `reference/swift/`. `LibraryMigration` takes a scoped
+`LegacyLibrarySource`, with the reference implementation in `ColophonLegacyAdapter`.
+[The current migration contract](migration.md) supersedes the original constructor and
+whole-suite marker guidance below; the remainder records historical implementation work.
+
 The worktree now has a Rust-to-native import bridge, a root-owned Swift migration target,
 durable import receipts, encrypted local evidence, rollout phases, fixture tests, and explicit
 retryable key failures. Changes are **uncommitted**. No `colophon-core` files were changed.

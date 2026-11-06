@@ -13,7 +13,8 @@ moves bytes it can't read. There is no vendor account.
 
 This repository holds the Colophon 0.2 Rust core and JavaScript package, the
 playground demo, plus the 0.1 specification, conformance vectors and shipped
-Swift reference implementation.
+Swift reference implementation in `reference/swift/`. The root Swift package is **ColophonSDK**,
+with the Rust-backed 0.2 products under `swift/`.
 
 ## Try it
 
@@ -94,13 +95,18 @@ See the [0.2 spec](spec/colophon-0.2.md), [JavaScript contract](docs/js-api.md),
 Regenerate the deterministic fixture with
 `COLOPHON_UPDATE_VECTORS=1 cargo test -p colophon-core --test conformance`.
 
-Version 0.2 is an implemented preview with clean kinds and pure 0.1 import transforms;
-end-to-end 0.1 migration still requires the host integrations described in the domain handoffs.
-Persistence, sync, hardware custody, an online budget sequencer, native FFI and an executable
-CLI/MCP transport remain host or follow-up work. The sections below describe the historical
-Swift 0.1 package.
+The root Apple package exports `ColophonFFI`, `ColophonKit`, `ColophonKitStorage`,
+`ColophonSession`, `ColophonSessionUI`, `ColophonBooksKit`, `ColophonListeningKit`,
+`ColophonSavedKit`, `ColophonNotesKit`, and `ColophonMigration`. Start with
+[new app](docs/new-app.md), [native bindings and package identity](docs/native-bindings.md),
+and [scoped migration](docs/migration.md). Build the local XCFramework before resolving SwiftPM.
+Apps retaining a local `Colophon` package should check out this SDK as `packages/ColophonSDK`.
 
-## Swift modules: take only what you need
+The sections below describe the independent historical Swift package in `reference/swift/`.
+Its optional `ColophonLegacyAdapter` connects that reference to the root migration protocol;
+apps with their own 0.1 stack implement the protocol themselves.
+
+## Swift 0.1 reference modules
 
 | Module | What it is | Depends on |
 | --- | --- | --- |
@@ -117,11 +123,13 @@ Swift 0.1 package.
 
 Cryptography is P-256 ECDSA and ECDH, HKDF-SHA256 and AES-GCM: the primitives built into
 CryptoKit, WebCrypto and Android Keystore, so other implementations need no third-party
-crypto. The Swift package has no dependencies.
+crypto. The reference modules have no third-party dependencies; its optional migration adapter depends
+on the root SDK.
 
 ## Connect an agent
 
 ```sh
+cd reference/swift
 swift build --product colophon
 .build/debug/colophon "<library folder>" join --label "Muse on MacBook" --namespaces listening.podcasts,notes
 # compare the six-digit code with the app that can approve access, and approve there
@@ -151,11 +159,15 @@ they don't interpret. Conflicts are recorded, never silently resolved (spec §9)
 ## Tests and conformance
 
 ```sh
-COLOPHON_SOFTWARE_KEYS=1 swift test        # software-key suite; hardware acceptance is separate
-COLOPHON_SOFTWARE_KEYS=1 COLOPHON_WRITE_VECTORS=1 swift test --filter writeVectors   # regenerate vectors
+COLOPHON_SOFTWARE_KEYS=1 swift test        # root 0.2 SDK
+COLOPHON_SOFTWARE_KEYS=1 swift test --package-path reference/swift  # 0.1 + real migration adapter
+COLOPHON_SOFTWARE_KEYS=1 COLOPHON_WRITE_VECTORS=1 swift test --package-path reference/swift --filter writeVectors
 ```
 
-`conformance/` holds a library, the keys that wrote it and `expected.json`. Another
+Restricted builders use `bash scripts/test-swift.sh` and
+`bash scripts/test-swift.sh --package-path reference/swift`. Hardware acceptance is separate.
+
+`conformance/` stays at the repository root and holds a library, the keys that wrote it and `expected.json`. Another
 implementation conforms if it reproduces `expected.json` from the records and keys
 (spec §11). `conformance/keyring/` is a separate vector for keyring controllers. The keys in
 `conformance/` are test keys, published so anyone can check the vectors; never use them for

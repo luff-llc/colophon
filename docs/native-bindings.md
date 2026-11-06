@@ -9,7 +9,8 @@ namespace evidence, changes, and expected refusals have generated types.
 ## Build on an Apple Silicon Mac
 
 Install Xcode with the iOS and visionOS SDKs, select it with `xcode-select`, and use Swift 6.2+
-(the new async facade uses `@concurrent`). The existing 0.1 products remain in `Package.swift`.
+(the async facade uses `@concurrent`). The root `Package.swift` is named **ColophonSDK**
+and exports only 0.2 products. The 0.1 reference package and CLI live in `reference/swift/`.
 The local binary artifact is ignored by Git and must be built before SwiftPM resolves the package.
 
 ```sh
@@ -37,6 +38,65 @@ Restricted builders may need `bash scripts/test-swift.sh`, which keeps module ca
 and disables SwiftPM's nested `sandbox-exec`. This does not bypass the enclosing sandbox or
 make macOS file coordination/backup services available. See the handoff for the observed
 baseline failures; the tests are not skipped or weakened by that script.
+
+## Package identity and coexistence with 0.1
+
+SwiftPM derives dependency identity from the last component of the dependency path or URL
+(lowercased, with `.git` removed). `Package(name: "ColophonSDK")` is the display/package name;
+changing it or the `.package(name: ...)` label does **not** rename a `colophon` identity.
+An app with `packages/Colophon` must point at an SDK path whose last component differs.
+
+From the consuming repository, make a separate checkout (choose this or the submodule below):
+
+```sh
+mkdir -p packages
+git clone https://github.com/luff-llc/colophon.git packages/ColophonSDK
+# Check out the reviewed restructure revision in that checkout when it is available.
+(cd packages/ColophonSDK && bash scripts/build-apple.sh)
+```
+
+Or add a pinned submodule at that same path:
+
+```sh
+git submodule add https://github.com/luff-llc/colophon.git packages/ColophonSDK
+git submodule update --init --recursive
+(cd packages/ColophonSDK && bash scripts/build-apple.sh)
+```
+
+These are consumer setup commands, not a claim that this uncommitted restructure is published.
+For an existing SDK checkout named `colophon`, move it to `packages/ColophonSDK` and update the
+package reference; do not rename the app's existing `packages/Colophon` package.
+In a consumer `Package.swift` at that repository root:
+
+```swift
+dependencies: [
+    .package(path: "packages/Colophon"),
+    .package(path: "packages/ColophonSDK"),
+],
+targets: [
+    .target(name: "Shelf", dependencies: [
+        .product(name: "ColophonBooks", package: "colophon"), // app's 0.1 stack, if needed
+        .product(name: "ColophonBooksKit", package: "colophonsdk"),
+        .product(name: "ColophonMigration", package: "colophonsdk"),
+    ]),
+]
+```
+
+In Xcode, remove the external SDK reference ending in `colophon` (retain the app's local
+Colophon reference), choose Add Local Package for `packages/ColophonSDK`, and attach only the
+0.2 products each target needs. Update any project generator's local package path too, regenerate
+it, then resolve packages and build the entire app graph. Relative paths are relative to the
+consumer manifest/project, so adjust them for an `apps/suite` project.
+
+The submodule's remote may still end in `colophon.git`: SwiftPM sees the **local dependency
+path** `ColophonSDK`. A direct remote `.package(url: "https://github.com/luff-llc/colophon.git", ...)`
+still collides; use a real separately named remote/mirror ending in `ColophonSDK.git` if remote
+resolution is required. A manifest label, product name or module alias cannot fix package
+identity. No such alternate hosted URL or binary release is supplied here.
+
+Do not add `reference/swift` or `ColophonLegacyAdapter` to a graph that already contains the
+app's own 0.1 modules. Implement the small [legacy-source protocol](migration.md) over those
+existing modules instead. The root SDK no longer exports any of the colliding 0.1 module names.
 
 ## Swift
 

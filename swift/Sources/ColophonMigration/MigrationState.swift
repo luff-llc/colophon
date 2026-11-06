@@ -1,7 +1,6 @@
 import Foundation
 import CryptoKit
 import ColophonSession
-import ColophonCore
 
 public enum MigrationError: Error, Equatable, Sendable {
     case rootRequired, invalidSource, busy, destinationUnavailable, destinationChanged
@@ -18,6 +17,8 @@ public struct MigrationReport: Sendable {
 }
 struct MigrationProgress: Codable {
     var sourceLibraryID: String
+    var namespaces: [String]
+    var sourceChangeToken: String?
     var destinationLibraryID: String?
     var prefixes: [String: [String]] = [:]
     var states: [String: Data] = [:]

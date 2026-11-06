@@ -152,11 +152,15 @@ history to reconstruct a result. Storage-backed history remains separately paged
 ## Upgrade barriers, durable import writes and key failures
 
 `SessionPhase.migrating` means “Your library is being upgraded.” Configure every suite app
-with the same `SessionConfiguration.migrationMarker` URL outside the destination record tree.
+participating in one migration scope with the same `SessionConfiguration.migrationMarker` URL
+outside the destination record tree. Independent scoped migrations use separate markers and
+journals; apps still on another 0.1 namespace are not gated by books completion. See
+[scoped migration](migration.md) for multi-scope coordination.
 An active marker takes precedence over an empty destination, enrollment and ordinary writes.
 Foreground `refresh()` observes marker changes; the marker itself is not a new sync protocol or
 authority record. The root's dedicated migration session sets `migrationWriter: true`; only
-`ColophonMigration` verifies the existing source root before using it. Other app sessions use
+the host’s `LegacyLibrarySource` adapter verifies possession of the existing source root
+before `ColophonMigration` imports it. Other app sessions use
 normal enrollment, including the existing explicit App Group starter policy where applicable.
 Old members are reported as needing to rejoin; no agent or grant is automatically restored.
 
