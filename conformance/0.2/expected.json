@@ -507,22 +507,31 @@
       "refused": [],
       "state": {
         "conflicts": [],
+        "contributions": [],
         "episodes": [
           {
             "author": "391a33c8613333b0e8f9fbab293e057d",
             "authorLabel": "Laptop",
             "clock": 3,
             "id": "episode",
+            "metadataAvailable": true,
+            "metadataRevision": "c552bbf85bf3175d22acf1d48652ca8e",
             "origin": "person",
+            "positionBaseline": false,
             "positionRevision": "9d084f99f769c19e237c4a4481bdef6d",
             "revision": "9d084f99f769c19e237c4a4481bdef6d",
             "seconds": 42,
             "show": "show",
             "title": "An episode",
-            "transcriptExcerpt": "A short transcript excerpt."
+            "transcriptExcerpt": "A short transcript excerpt.",
+            "updated": "2026-11-04T12:00:00.000Z"
           }
         ],
         "invalid": [],
+        "jobs": [],
+        "notes": [],
+        "playlists": [],
+        "preferences": {},
         "queue": {
           "author": "391a33c8613333b0e8f9fbab293e057d",
           "authorLabel": "Laptop",
@@ -533,19 +542,23 @@
           "origin": "person",
           "revision": "e323b732088fb9a6838ae97ebd71addf"
         },
+        "receipts": {},
+        "recordings": {},
         "shows": [
           {
             "author": "391a33c8613333b0e8f9fbab293e057d",
             "authorLabel": "Laptop",
             "clock": 1,
             "followed": true,
+            "following": true,
             "id": "show",
             "origin": "person",
             "revision": "d5a8c0bc3f9aa78d41a4ab7d18f8a480",
             "title": "A podcast",
             "url": "https://example.org/feed.xml"
           }
-        ]
+        ],
+        "transcripts": []
       }
     },
     "notes": {

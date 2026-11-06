@@ -62,8 +62,8 @@ async function deriveScalar(seed, counter) {
   return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('colophon/entropy/2'), info }, material, 256));
 }
 const { createECDH } = await import('node:crypto');
-async function fixturePair(counter, algorithm, usages) {
-  const scalar = await deriveScalar(new Uint8Array(32).fill(5), counter);
+async function fixturePair(counter, algorithm, usages, seed = 5) {
+  const scalar = await deriveScalar(new Uint8Array(32).fill(seed), counter);
   const ecdh = createECDH('prime256v1'); ecdh.setPrivateKey(scalar);
   const point = ecdh.getPublicKey();
   const jwk = { kty: 'EC', crv: 'P-256', x: point.subarray(1,33).toString('base64url'), y: point.subarray(33).toString('base64url'), d: Buffer.from(scalar).toString('base64url') };
@@ -76,6 +76,23 @@ const fixture = await Library.open(new Map(Object.entries(encoded).map(([path,b6
 assert.equal(fixture.id, expected.libraryID);
 for (const [namespace, view] of Object.entries(expected.views)) assert.deepEqual(fixture.view(namespace).value, view);
 assert.deepEqual(fixture.ledger(), expected.ledger);
+// Replay the podcast domain vector through generated bounded query tools.
+const podcastRecords = JSON.parse(await readFile(new URL('../../conformance/0.2/listening.podcasts.records.json', import.meta.url), 'utf8'));
+const podcastExpected = JSON.parse(await readFile(new URL('../../conformance/0.2/listening.podcasts.expected.json', import.meta.url), 'utf8'));
+const podcastKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
+const podcasts = await Library.open(new Map(Object.entries(podcastRecords).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), podcastKeys);
+for (const test of podcastExpected) {
+  const name = test.query === 'episode' ? 'episodeDetail' : test.query === 'queue' ? 'getQueue' : test.query;
+  const result = await podcasts.call(`listening.podcasts__${name}`, test.arguments);
+  assert.equal(result.ok, true);
+  if (test.query === 'queue') {
+    assert.equal(result.value.value.head, test.result.value.head);
+    assert.deepEqual(result.value.value.page.rows, test.result.value.page.rows);
+    assert.equal(result.value.value.page.total, test.result.value.page.total);
+  } else {
+    assert.deepEqual(result.value, test.result);
+  }
+}
 // Exercise fractional IDs through the JSON host boundary as well as native Rust.
 for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entries()) {
   const result = await restored.write('listening.podcasts', 'position', { id: `fraction-${index}`, seconds });

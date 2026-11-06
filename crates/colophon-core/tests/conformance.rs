@@ -312,3 +312,10 @@ fn deterministic_library_conformance() {
         expected_stored["ledger"]
     );
 }
+
+#[path = "support/listening_vector.rs"]
+mod listening_vector;
+#[test]
+fn listening_podcasts_conformance() {
+    listening_vector::check();
+}
