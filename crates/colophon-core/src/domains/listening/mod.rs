@@ -1163,6 +1163,24 @@ impl ListeningPodcasts {
     }
 }
 
+impl PodcastsState {
+    pub(crate) fn identity_exists(&self, category: &str, id: &str) -> bool {
+        match category {
+            "show" => self.shows.contains_key(id),
+            "episode" => self.episodes.contains_key(id),
+            "note" => self.notes.contains_key(id),
+            "recording" => self.recordings.contains_key(id),
+            "transcript" => self.transcripts.contains_key(id),
+            "playlist" => self.playlists.contains_key(id),
+            "job" => self.jobs.contains_key(id),
+            "contribution" => self.contributions.contains_key(id),
+            "receipt" => self.receipts.contains_key(id),
+            "preference" => self.preferences.contains_key(id),
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod prefix_tests {
     use super::*;

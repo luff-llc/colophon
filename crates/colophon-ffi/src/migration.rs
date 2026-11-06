@@ -31,6 +31,7 @@ pub struct LegacyImportCommand {
     pub kind: String,
     pub payload_json: Vec<u8>,
     pub expect_from_child: Option<u64>,
+    pub baseline: bool,
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct LegacyImportBatch {
@@ -127,7 +128,7 @@ pub fn import_legacy_batch(
                 let plan =
                     listening::import::import_operation(&serde_json::from_value(source)?, &ctx);
                 let key = plan.evidence[0].id.clone();
-                (plan.commands.into_iter().enumerate().map(|(i,c)| json!({"outputKey":format!("{key}/{i}"),"kind":c.kind,"payload":c.payload})).collect(), plan.evidence.into_iter().map(serde_json::to_value).collect::<std::result::Result<_,_>>()?)
+                (plan.commands.into_iter().enumerate().map(|(i,c)| json!({"outputKey":format!("{key}/{i}"),"kind":c.kind,"payload":c.payload,"baseline":c.baseline})).collect(), plan.evidence.into_iter().map(serde_json::to_value).collect::<std::result::Result<_,_>>()?)
             }
             "reading.saved" => {
                 source["outcome"] = json!(if op.admission != "admitted" {
@@ -213,6 +214,7 @@ pub fn import_legacy_batch(
                     .into(),
                 payload_json: serde_json::to_vec(&command["payload"])?,
                 expect_from_child: command["expectFromChild"].as_u64(),
+                baseline: command["baseline"].as_bool().unwrap_or(false),
             });
         }
         evidence.extend(entries);

@@ -252,3 +252,14 @@ After validation, `cargo clean` removed 3.6 GiB of disposable outputs. The rebui
 JavaScript distribution, Swift cache and validation logs remain; about 14 GiB is free.
 No Git-writing commands ran. Conflict markers are removed from the working files; the index
 intentionally still lists the two paths as unmerged until the resolutions are staged.
+
+## Engine3 follow-up — November 6, 2026
+
+The engine-facing storage and authenticated-context requests above are superseded by the
+[engine3 API contract](engine.md#engine3-authenticated-import-storage-and-blobs) and
+[engine3 validation handoff](handoff-engine3.md). Root-signed encrypted batches now bind evidence,
+virtual output revisions, reservations and manifests atomically. Historical alternatives and
+prefix reconciliation remain separate from effective native state. The Swift migration reader
+uses synchronized evidence; unsupported source codecs, automatic correction/UI, typed collision
+remapping in that orchestrator, source/anchor verification and real platform acceptance remain
+explicit host/app work. Earlier validation counts describe the earlier handoff, not engine3.

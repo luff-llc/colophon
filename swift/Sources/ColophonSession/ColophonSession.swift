@@ -95,6 +95,14 @@ import ColophonKitStorage
             throw error
         }
     }
+    /// Persist encrypted chunks before the migration publishes their signed manifest.
+    public func migrationBlob(namespace: String, mediaType: String, bytes: Data) async throws -> Data {
+        await restore()
+        let lease = context
+        let manifest = try await worker.migrationBlob(namespace: namespace, mediaType: mediaType, bytes: bytes)
+        guard lease == context else { throw SessionError.destinationChanged }
+        return manifest
+    }
     public func approve(_ request: AccessRequest, grant: GrantOptions? = nil) async throws {
         await restore()
         let lease = context

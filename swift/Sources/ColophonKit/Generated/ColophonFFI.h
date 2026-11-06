@@ -271,6 +271,13 @@ typedef void (*UniffiCallbackInterfaceKeyProviderMethod3)(uint64_t, RustBuffer, 
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLOB_SOURCE_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLOB_SOURCE_METHOD0
+typedef void (*UniffiCallbackInterfaceBlobSourceMethod0)(uint64_t, RustBuffer, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_KEY_PROVIDER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_KEY_PROVIDER
 typedef struct UniffiVTableCallbackInterfaceKeyProvider {
@@ -281,6 +288,15 @@ typedef struct UniffiVTableCallbackInterfaceKeyProvider {
     UniffiCallbackInterfaceKeyProviderMethod2 _Nonnull sign;
     UniffiCallbackInterfaceKeyProviderMethod3 _Nonnull agree;
 } UniffiVTableCallbackInterfaceKeyProvider;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLOB_SOURCE
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLOB_SOURCE
+typedef struct UniffiVTableCallbackInterfaceBlobSource {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceBlobSourceMethod0 _Nonnull read;
+} UniffiVTableCallbackInterfaceBlobSource;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CLONE_HOSTACTION
@@ -433,9 +449,49 @@ RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_written_operation(uint64_
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_written_operation_json(uint64_t ptr, uint64_t action, RustBuffer namespace, RustBuffer now, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_BEGIN_BLOB
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_BEGIN_BLOB
+RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_begin_blob(uint64_t ptr, RustBuffer namespace, RustBuffer media_type, RustBuffer now, RustBuffer entropy, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_BEGIN_IMPORT
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_BEGIN_IMPORT
+RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_begin_import(uint64_t ptr, RustBuffer namespace, RustBuffer batch, RustBuffer now, RustBuffer entropy, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_READ_BLOB_CHUNK
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_READ_BLOB_CHUNK
+RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_read_blob_chunk(uint64_t ptr, RustBuffer namespace, RustBuffer digest, uint32_t index, RustBuffer now, uint64_t source, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CLONE_NATIVEBLOBWRITER
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CLONE_NATIVEBLOBWRITER
+uint64_t uniffi_colophon_ffi_fn_clone_nativeblobwriter(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FREE_NATIVEBLOBWRITER
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FREE_NATIVEBLOBWRITER
+void uniffi_colophon_ffi_fn_free_nativeblobwriter(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVEBLOBWRITER_FINISH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVEBLOBWRITER_FINISH
+RustBuffer uniffi_colophon_ffi_fn_method_nativeblobwriter_finish(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVEBLOBWRITER_PUSH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVEBLOBWRITER_PUSH
+RustBuffer uniffi_colophon_ffi_fn_method_nativeblobwriter_push(uint64_t ptr, RustBuffer plaintext, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_INIT_CALLBACK_VTABLE_KEYPROVIDER
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_INIT_CALLBACK_VTABLE_KEYPROVIDER
 void uniffi_colophon_ffi_fn_init_callback_vtable_keyprovider(const UniffiVTableCallbackInterfaceKeyProvider* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_INIT_CALLBACK_VTABLE_BLOBSOURCE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_INIT_CALLBACK_VTABLE_BLOBSOURCE
+void uniffi_colophon_ffi_fn_init_callback_vtable_blobsource(const UniffiVTableCallbackInterfaceBlobSource* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_BEGIN_CREATE
@@ -451,6 +507,26 @@ uint64_t uniffi_colophon_ffi_fn_func_begin_request(RustBuffer library_id, RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_REQUEST_INFO
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_REQUEST_INFO
 RustBuffer uniffi_colophon_ffi_fn_func_request_info(RustBuffer record, RustBuffer library_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_IMPORT_IDENTITY_CATEGORY
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_IMPORT_IDENTITY_CATEGORY
+RustBuffer uniffi_colophon_ffi_fn_func_import_identity_category(RustBuffer namespace, RustBuffer kind, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_IMPORT_OCCURRENCE_ID
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_IMPORT_OCCURRENCE_ID
+RustBuffer uniffi_colophon_ffi_fn_func_import_occurrence_id(RustBuffer library, RustBuffer namespace, RustBuffer source, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_IMPORT_OUTPUT_ID
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_IMPORT_OUTPUT_ID
+RustBuffer uniffi_colophon_ffi_fn_func_import_output_id(RustBuffer library, RustBuffer namespace, RustBuffer batch, RustBuffer child, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_RECONCILE_IMPORT_PREFIX
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_RECONCILE_IMPORT_PREFIX
+RustBuffer uniffi_colophon_ffi_fn_func_reconcile_import_prefix(RustBuffer previous, RustBuffer current, RustBuffer imported_heads, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_BIND_LEGACY_IMPORT_STATE
@@ -741,6 +817,30 @@ uint16_t uniffi_colophon_ffi_checksum_func_request_info(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_IDENTITY_CATEGORY
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_IDENTITY_CATEGORY
+uint16_t uniffi_colophon_ffi_checksum_func_import_identity_category(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_OCCURRENCE_ID
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_OCCURRENCE_ID
+uint16_t uniffi_colophon_ffi_checksum_func_import_occurrence_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_OUTPUT_ID
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_OUTPUT_ID
+uint16_t uniffi_colophon_ffi_checksum_func_import_output_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_RECONCILE_IMPORT_PREFIX
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_RECONCILE_IMPORT_PREFIX
+uint16_t uniffi_colophon_ffi_checksum_func_reconcile_import_prefix(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_BIND_LEGACY_IMPORT_STATE
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_BIND_LEGACY_IMPORT_STATE
 uint16_t uniffi_colophon_ffi_checksum_func_bind_legacy_import_state(void
@@ -903,6 +1003,36 @@ uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_written_operation_jso
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_BEGIN_BLOB
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_BEGIN_BLOB
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_begin_blob(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_BEGIN_IMPORT
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_BEGIN_IMPORT
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_READ_BLOB_CHUNK
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_READ_BLOB_CHUNK
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_read_blob_chunk(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVEBLOBWRITER_FINISH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVEBLOBWRITER_FINISH
+uint16_t uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVEBLOBWRITER_PUSH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVEBLOBWRITER_PUSH
+uint16_t uniffi_colophon_ffi_checksum_method_nativeblobwriter_push(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_NATIVELIBRARY_OPEN
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_CONSTRUCTOR_NATIVELIBRARY_OPEN
 uint16_t uniffi_colophon_ffi_checksum_constructor_nativelibrary_open(void
@@ -930,6 +1060,12 @@ uint16_t uniffi_colophon_ffi_checksum_method_keyprovider_sign(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_KEYPROVIDER_AGREE
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_KEYPROVIDER_AGREE
 uint16_t uniffi_colophon_ffi_checksum_method_keyprovider_agree(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_BLOBSOURCE_READ
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_BLOBSOURCE_READ
+uint16_t uniffi_colophon_ffi_checksum_method_blobsource_read(void
     
 );
 #endif

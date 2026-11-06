@@ -24,12 +24,13 @@ struct MigrationProgress: Codable {
     var revisions: [String: String] = [:]
     var heads: [String: String] = [:]
     var outputs: [String: String] = [:]
+    var sourceOutcomes: [String: [String: Data]]?
     var lastImportedOperation: [String: String] = [:]
     var sourceRecords: [String: String] = [:]
     var unresolved: [String] = []
     var membersNeedingRejoin: [String] = []
 }
-/// Local encrypted fallback until the engine offers grant-checked import evidence. The host
+/// Local encrypted resume journal and exact source archive. Synchronized evidence lives in the engine. The host
 /// must persist this key independently; losing it makes resume fail closed, never start over.
 struct MigrationFiles {
     let directory: URL

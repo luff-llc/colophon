@@ -174,3 +174,19 @@ Provider failures carry `SessionFailure.keysUnavailable(detail:)`; unrelated fai
 create and otherwise refreshes restore/enrollment. It never regenerates an identity in response
 to a key failure. The sample's `--demo-key-failure` mode fails the first provider access and
 allows Retry using that same identity in a temporary, separate demo library.
+
+## Engine3 migration publication
+
+The migration writer now sends one `colophon.importBatch` command per source unit through the
+existing gated signing/outbox/readback path. Only these migration batches receive the engine's
+1 MiB ceiling; ordinary session commands keep their 256 KiB ceiling. Permanent local receipts
+bind the batch command digest and signed parent operation; synchronized `importReceipt` binds
+its virtual children. Migration checks that receipt after refreshed admission before advancing
+source progress. Child authorship is the importer; original attribution remains evidence.
+
+`migrationBlob` streams 64 KiB plaintext chunks through the native writer, persists encrypted
+chunks through `BlobStore`, reads them back, and returns the manifest for atomic publication.
+`FolderRecordStore` implements blob storage separately from record snapshots. Chunks may arrive
+before their manifest but have no projected visibility until publication. Failed uploads can
+leave unreferenced encrypted chunks; hosts retain them until an explicit archival cleanup policy
+can prove removal safe. Sibling apps read evidence through their ordinary namespace grants.

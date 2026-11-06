@@ -1505,3 +1505,24 @@ pub(crate) fn validate_command_input(kind: &str, input: &Value) -> bool {
     })
     .is_ok()
 }
+
+impl SavedState {
+    pub(crate) fn identity_exists(&self, category: &str, id: &str) -> bool {
+        match category {
+            "item" => self.items.contains_key(id),
+            "source" => self.sources.contains_key(id),
+            "sourceMetadata" => self.metadata.contains_key(id),
+            "image" => self.images.contains_key(id),
+            "checkpoint" => self.checkpoints.contains_key(id),
+            "annotation" => self.annotations.contains_key(id),
+            "view" => self.views.contains_key(id),
+            "visibility" => self.visibility.contains_key(id),
+            "connection" => self.connections.contains_key(id),
+            "feed" => self.feeds.contains_key(id),
+            "answer" => self.answers.contains_key(id),
+            "subscription" => self.subscriptions.contains_key(id),
+            "receipt" => self.receipts.contains_key(id),
+            _ => false,
+        }
+    }
+}

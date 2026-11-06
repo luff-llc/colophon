@@ -126,10 +126,16 @@ private struct Fixture {
             }
         }
         let listening = try await library.view(namespace: Podcasts.namespace).get()
-        #expect(listening.admitted.contains { $0.kind == "follow" })
-        #expect(listening.admitted.contains { $0.kind == "position" })
-        #expect(!listening.admitted.contains { $0.kind == "requestTranscript" })
-        #expect(!books.admitted.contains { String(decoding: $0.payload, as: UTF8.self).contains("held-book") })
+        let listeningChildren = try listening.admitted.flatMap { operation -> [[String: Any]] in
+            let batch = try JSONSerialization.jsonObject(with: operation.payload) as? [String: Any] ?? [:]
+            return batch["children"] as? [[String: Any]] ?? []
+        }
+        #expect(listening.admitted.allSatisfy { $0.kind == "colophon.importBatch" })
+        #expect(listeningChildren.contains { $0["kind"] as? String == "follow" })
+        #expect(listeningChildren.contains { $0["kind"] as? String == "position" })
+        #expect(!listeningChildren.contains { $0["kind"] as? String == "requestTranscript" })
+        #expect(!String(decoding: books.state, as: UTF8.self).contains("held-book"))
+        #expect(!FileManager.default.fileExists(atPath: destination.home.appendingPathComponent("migration/import-evidence-local").path))
         let evidence = try await migration.evidence()
         #expect(evidence.count == report.importedOperations)
         let allEvidence = evidence.map { String(decoding: $0, as: UTF8.self) }.joined()
@@ -192,6 +198,44 @@ private struct Fixture {
         #expect(try await d.store.read() == before)
     }
 
+    @Test func largeOutputPublishesEncryptedBlobAndSynchronizedEvidence() async throws {
+        let f = try Fixture()
+        try f.replica.perform(Notes.create(notebook: "n", title: "Notebook"))
+        try f.replica.perform(Notes.putCell("c", notebook: "n", kind: .code, source: "source"))
+        let text = String(repeating: "retained output ", count: 5000)
+        try f.replica.perform(Notes.output(cell: "c", notebook: "n", source: "source", runtime: "historical",
+            outputs: [(mime: "text/plain", data: text)]))
+        let d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
+        let migration = d.migration(f, d.session()), report = try await migration.run()
+        #expect(report.remainingOperations == 0)
+        let digest = Canonical.digest(Data(text.utf8))
+        let library = try await d.library()
+        let blob = try await library.query(namespace: Notes.namespace, name: "blob", arguments: json(["digest": digest])).get()
+        let envelope = try #require(JSONSerialization.jsonObject(with: blob) as? [String: Any])
+        let manifest = try #require(envelope["manifest"] as? [String: Any])
+        let chunks = try #require(manifest["chunks"] as? [[String: Any]])
+        #expect(chunks.count == 2)
+        let records = try await d.store.read()
+        #expect(!records.keys.contains { $0.hasPrefix("blobs/") }, "Snapshots must not eagerly load blobs")
+        let native = try NativeLibrary.open(records: records, me: await d.keys.publicKeys())
+        _ = try native.readyWith(keys: d.keys)
+        var plaintext = Data()
+        for (index, chunk) in chunks.enumerated() {
+            let path = try #require(chunk["path"] as? String)
+            let ciphertext = try await d.store.readBlob(path)
+            #expect(ciphertext.range(of: Data("retained output".utf8)) == nil)
+            let read = try native.readBlobChunk(namespace: Notes.namespace, digest: digest, index: UInt32(index),
+                now: "2026-11-06T18:00:00Z", source: MigrationChunkSource(path: path, bytes: ciphertext))
+            guard case .available(let bytes) = read else { Issue.record("Blob must authenticate"); return }
+            plaintext.append(bytes)
+        }
+        #expect(plaintext == Data(text.utf8))
+        #expect(Canonical.digest(plaintext) == digest)
+        #expect(try await migration.evidence().count == 3)
+        let before = try await d.store.read(); _ = try await migration.run()
+        #expect(try await d.store.read() == before)
+    }
+
     @Test func onlyRootCanStartMigration() async throws {
         let f = try Fixture(), d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
         let migration = LibraryMigration(source: f.source, readerIdentity: f.phone, rootIdentity: f.mac,
@@ -211,7 +255,15 @@ private struct Fixture {
         for (path, bytes) in offline.snapshot where f.source.snapshot[path] == nil { try f.source.create(path, bytes) }
         do { _ = try await migration.run(); Issue.record("Earlier prefix must require reconciliation") }
         catch MigrationError.reconciliationRequired(let reason) { #expect(reason.contains(Books.namespace)) }
-        #expect(try await d.store.read() == before)
+        let after = try await d.store.read()
+        #expect(before.allSatisfy { after[$0.key] == $0.value }, "Signed native history remains byte-identical")
+        let library = try await d.library()
+        let overlay = try await library.query(namespace: Books.namespace, name: "historicalAlternatives", arguments: json([:])).get()
+        #expect(String(decoding: overlay, as: UTF8.self).contains("Earlier offline"))
+        let state = try await library.view(namespace: Books.namespace).get().state
+        #expect(!String(decoding: state, as: UTF8.self).contains("Earlier offline"), "Late evidence is not silently made effective")
+        do { _ = try await migration.run() } catch MigrationError.reconciliationRequired { }
+        #expect(try await d.store.read() == after, "Reconciliation publication is idempotent")
         #expect(try MigrationMarker.isActive(at: d.marker))
     }
 
@@ -261,4 +313,14 @@ private struct Fixture {
         #expect(try MigrationMarker.isActive(at: d.marker))
     }
 
+}
+
+private final class MigrationChunkSource: BlobSource {
+    let path: String
+    let bytes: Data
+    init(path: String, bytes: Data) { self.path = path; self.bytes = bytes }
+    func read(path: String) throws -> BlobReadOutcome {
+        guard path == self.path else { return .missing }
+        return .available(bytes: bytes)
+    }
 }

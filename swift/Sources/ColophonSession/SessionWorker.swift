@@ -123,6 +123,20 @@ actor SessionWorker {
         try await persistDelta()
         return try await refreshLocked()
     }
+    func migrationBlob(namespace: String, mediaType: String, bytes: Data) async throws -> Data {
+        await enter(); defer { exit() }
+        let fresh = try await refreshLocked()
+        guard fresh.phase == .ready, configuration.migrationWriter,
+              let blobs = try storage() as? any BlobStore else { throw SessionError.notReady }
+        let writer = try await core.beginBlob(namespace: namespace, mediaType: mediaType)
+        for offset in stride(from: 0, to: bytes.count, by: 65536) {
+            try Task.checkCancellation()
+            let chunk = try writer.push(plaintext: bytes.subdata(in: offset..<min(bytes.count, offset + 65536)))
+            try await blobs.appendBlob(chunk.path, bytes: chunk.bytes)
+            guard try await blobs.readBlob(chunk.path) == chunk.bytes else { throw SessionError.publicationUncertain }
+        }
+        return try writer.finish()
+    }
     func write(_ command: DomainCommand, observed: UInt64, ingress: IngressEnvelope? = nil, migrationKey: String? = nil) async throws -> (WriteReceipt, SessionSnapshot) {
         await enter(); defer { exit() }
         try Task.checkCancellation()
@@ -146,7 +160,7 @@ actor SessionWorker {
         }
         guard observed == revision else { throw SessionRefusal(snapshot: fresh, error: .staleRevision) }
         guard configuration.namespaces.contains(command.namespace), configuration.access.contains(.write) else { throw SessionError.invalidCommand }
-        guard command.payload.count <= 256 * 1024 else { throw SessionError.invalidCommand }
+        guard command.payload.count <= (migrationKey != nil && command.kind == "colophon.importBatch" ? 1024 * 1024 : 256 * 1024) else { throw SessionError.invalidCommand }
         if let ingress {
             guard let snapshot = fresh.core, ingress.libraryID == snapshot.libraryID, ingress.memberID == snapshot.me.id else { throw SessionError.destinationChanged }
             if let receipt = journal.ingress[ingress.id] {

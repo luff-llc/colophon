@@ -165,3 +165,15 @@ full replay and checkpoint replay from an invalidated earlier prefix. Include 10
 libraries and real-shaped large queues, notebooks and annotation graphs; measure the targets
 in the migration guide. No examples in this change contain personal data. The handoff records
 remaining proof gaps; these specifications are not a claim that those gates have passed.
+
+## Engine3 integration status
+
+The shared evidence/blob proposals above now have an implemented engine extension; see the
+[engine3 contract](../engine.md#engine3-authenticated-import-storage-and-blobs). Schema 4 supplies
+authenticated kind/grant/root context, atomic encrypted import publications, bounded evidence and
+historical-alternative queries, deterministic occurrence reservations, additive prefix comparison,
+and lazy encrypted blob chunks with live reference counts. Historical conflict UI must join the
+separate labelled overlay; acknowledging it does not itself change native domain content. Hosts
+still verify old folds, source formats and anchors, preserve exact archives, apply typed collision
+maps, synchronize blob chunks, and provide user-facing correction workflows. These are explicit
+boundaries, not evidence that all shipping-app codecs or production data have been accepted.

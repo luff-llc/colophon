@@ -99,6 +99,15 @@ public actor Library {
         return try await executeVoid(native.beginRevoke(memberId: memberID, now: HostInputs.now(), entropy: HostInputs.entropy()))
     }
 
+    /// A streaming writer; the host persists each encrypted chunk before publishing its manifest.
+    public func beginBlob(namespace: String, mediaType: String) async throws -> NativeBlobWriter {
+        try await ready()
+        switch try native.beginBlob(namespace: namespace, mediaType: mediaType, now: HostInputs.now(), entropy: HostInputs.entropy()) {
+        case .ready(let writer): return writer
+        case .failure(let denial): throw AccessError(denial: denial)
+        }
+    }
+
     public func write(namespace: String, kind: String, payload: Data) async throws -> Outcome<OperationView> {
         try await ready()
         let prepared = try native.beginWrite(namespace: namespace, kind: kind, payload: payload, now: HostInputs.now(), entropy: HostInputs.entropy())

@@ -235,3 +235,14 @@ Those remain release proof gaps, not claims made by these synthetic tests.
 
 Leave these changes uncommitted for the coordinating worker. No other domain implementation
 or playground source was changed.
+
+## Engine3 follow-up — November 6, 2026
+
+The engine-facing storage and authenticated-context requests above are superseded by the
+[engine3 API contract](engine.md#engine3-authenticated-import-storage-and-blobs) and
+[engine3 validation handoff](handoff-engine3.md). Root-signed encrypted batches now bind evidence,
+virtual output revisions, reservations and manifests atomically. Historical alternatives and
+prefix reconciliation remain separate from effective native state. The Swift migration reader
+uses synchronized evidence; unsupported source codecs, automatic correction/UI, typed collision
+remapping in that orchestrator, source/anchor verification and real platform acceptance remain
+explicit host/app work. Earlier validation counts describe the earlier handoff, not engine3.

@@ -5,7 +5,9 @@ The storage-backed `Engine` adds verified-prefix cold opens and bounded content 
 see [stage 2 below](#storage-backed-engine-stage-2). Existing `Library` methods and return types
 are unchanged. `view` and the `read`
 tool still return the full history-bearing `NamespaceView`; use `query` for app rendering.
-Protocol records are unchanged. Role-sensitive conformance expectations reflect authenticated member kinds.
+Operation and authority envelope formats are unchanged. The engine3 extension below adds reserved
+engine operations for import publication and blobs. Role-sensitive conformance expectations reflect
+authenticated member kinds.
 
 ## Reducers
 
@@ -32,9 +34,9 @@ The engine alone orders admission. Reducers retain attributed conflicts, invalid
 extensions, and the previous conflict semantics. Unknown kinds are skipped. `DomainModule::fold`
 is retained as a source-compatible from-scratch replay wrapper. A new reducer schema or semantic
 change must increment the authenticated `reducer_schema` generation before old snapshots can
-be restored. Generation 3 adds authority-derived member kinds to the integrated full-domain reducers during
-append, full replay and checkpoint-suffix replay. Both cache APIs reject older generations,
-whose role-sensitive projections may be incomplete.
+be restored. Generation 3 added authority-derived member kinds during append, full replay and checkpoint-suffix
+replay. Generation 4 adds full author context and the import/blob sidecar projection. Both cache APIs
+reject older generations, whose role-sensitive or import projections may be incomplete.
 
 ## Queries
 
@@ -339,3 +341,135 @@ namespace reduction preserves each namespace's operation order.
 `--no-default-features` disables native parallelism. `wasm32` always uses the single-thread path,
 even if the feature is enabled. Dependency pins, wire bytes and the size-focused WASM release
 profile are unchanged. See [performance.md](performance.md) for measured targets and limits.
+
+## Engine3: authenticated import storage and blobs
+
+Reducer schema **4** adds `AuthorContext { kind, grant, root, library }` and the namespace
+import projection. Kind, the immutable grant and root enrollment come from verified authority,
+after ordinary admission. Library append, reconciliation, checkpoint suffixes and storage-backed
+parallel reduction use the same context. Books loans and notes reviews accept app/device members;
+local signing and tool filtering reject other kinds. Saved-reading's protected commands also
+check the authenticated kind on replay. Payload role claims never supply context. Schema 3
+already delivered member kinds; older local caches are invalidated by the generation change.
+
+### Atomic source units and reservations
+
+`Library::begin_write(ns, "colophon.importBatch", batch, now, entropy)` (or native
+`beginImport`) prepares **one** encrypted, signed ordinary operation. Only an admitted root can
+publish this engine operation. It uses ordinary namespace epochs, grant checks, signature/ID
+validation, ordering, revocation and preservation. There are no plaintext sidecar files and no
+unsigned privileged domain opcode. Each source unit has this JSON shape:
+
+```json
+{
+  "key": "full source tuple plus transform version",
+  "evidence": {"sourceLibrary":"old", "authorID":"old-author", "domainOutcome":"applied"},
+  "children": [{"key":"stable-output", "kind":"createNotebook", "payload":{"id":"n","title":"Imported"}, "baseline":false}],
+  "alternatives": [],
+  "identities": {"framed source occurrence": {"category":"notebook", "id":"n"}},
+  "blobs": []
+}
+```
+
+The complete canonical batch is bounded to 1 MiB and 1,024 children/alternatives/manifests.
+Structural and reservation validation precedes effects. A complete admitted record exposes its
+ordered children, evidence, bindings and reservations together; a missing, truncated, refused or
+invalid record exposes none. Normal domain CAS/no-op/conflict semantics still apply to each clean
+child. This is atomic **publication**, not a promise that every domain command is effective.
+
+Children are virtual authenticated operations: their author/label/origin/clock/date are the
+importer's, and their order is the array order. Their revisions are the first 32 hex SHA-256
+characters of canonical `["colophon/import-output/1", destinationLibrary, namespace, batchKey,
+childKey]`. `output_id` / `importOutputId` computes them before signing, allowing references
+between children. The enclosing signature authenticates every child and its output binding;
+children do not have separate envelopes or signatures. Original source authorship remains
+labelled evidence. Compatibility history exposes the enclosing batch; query `importReceipt`
+for its actual output bindings. The engine supplies podcast `imported_baseline` only from the
+root-authenticated child receipt, never from a domain payload extension.
+
+A namespace retains its first accepted batch per key. A byte-equivalent retry cannot repeat its
+effects, even with new entropy/signature/clock; changed content under that key is rejected.
+`importReceipt({key})` returns the publication, canonical batch digest, importer, evidence,
+identity bindings, retained `alternatives`, `baselineOutputs` and `outputOperationIDs`. Native `HostAction.commit` still rejects stale actions.
+Hosts durably journal signed bytes before publication and read back the record before advancing
+source progress. No multi-file atomic filesystem primitive is required for the publication itself.
+
+`importIdentity({key,category,preferred})` reports a prior reservation and whether the preferred
+identity is occupied. Native object attempts and tombstones remain indexed by namespace/category;
+reservations commit with the batch. `occurrence_id` / `importOccurrenceId` derives a deterministic
+replacement from the destination library/namespace and framed source tuple including the creation
+digest. Hosts apply that mapping to typed references before submitting the batch. A conflicting
+reservation fails; it never silently reuses a native object. Concurrent proposals are resolved in
+normal signed fold order, so hosts must inspect the receipt after refreshed admission.
+
+### Evidence, historical alternatives and reconciliation
+
+All namespace queries perform current grant/expiry/revocation/key checks before accessing the
+sidecar. `importEvidence({sourceLibrary?,object?,cursor?,limit?})` and
+`historicalAlternatives({sourceLibrary?,object?,component?,cursor?,limit?})` return
+`{revision,value:{rows,next,total}}`. Default limit is 50, maximum 100; responses have a 1 MiB
+ceiling. Oversize individual rows report `contentTooLarge`; retained history remains available.
+Cursors bind the namespace, query, filters, admitted-prefix observation and last key. Any admitted
+attempt invalidates old cursors. Namespace pages traverse the retained key index; filtered totals
+currently scan metadata, without fetching original operation records. Evidence retains the
+importer's complete JSON, including original attribution, original date representations, losing
+candidates, exact-body digest purposes, baseline receipts and all output bindings.
+
+`historicalAlternatives` materializes separately attributed candidates with `historical:true`,
+a stable alternative ID, source batch, importer and publication. They do not enter native domain
+reducers. An app/device may acknowledge an exact set using `colophon.resolveHistorical` with
+`{alternatives:[sorted IDs],expectedRevision,object?,component?}`. A stale revision or changed set
+leaves the overlay intact and appears in `importInvalid`. Resolution acknowledges the historical
+set; changing native content requires an explicit clean domain command with its normal head/CAS
+checks. Historical acknowledgments never replay a rejected old write as an unconditional effect.
+The native domain `conflicts` query remains native-only; UIs query this labelled overlay alongside it.
+
+`reconcile_prefix(previous,current,imported_heads)` / `reconcileImportPrefix` compares maps keyed
+by the complete source identity. Values are the source reader's evaluated outcomes and effective
+values. Insertions, removals and changed outcomes produce explicit historical alternatives with
+both previous/current candidates and the last imported component heads. It emits no domain writes.
+Publish those alternatives in another additive import batch; signed destination history and native
+edits remain intact. The verified source reader still owns old admission/fold evaluation.
+
+Swift `ColophonMigration` now publishes each supported source unit atomically and reads evidence
+through the engine query. It stages encrypted blob manifests for retry, while exact old envelopes
+and migration progress remain protected local archival data. It compares evaluated outcomes after
+an earlier-prefix change, publishes bounded reconciliation evidence, then keeps the migration
+marker active pending review. Automatic application of historical corrections and app repair UI
+remain host work. Native identity collisions likewise require the caller to apply the deterministic
+occurrence map; the Swift orchestrator continues to stop safely rather than guess cross-references.
+
+### Blob descriptor and host contract
+
+`BlobDescriptor = {digest,size,mediaType}` names complete plaintext. `begin_blob` / `beginBlob`
+checks current write access and returns a streaming writer. Feed at most 64 KiB to `push`; persist
+its immutable `(blobs/<ciphertext SHA-256>, ciphertext)` result before publishing. `finish` returns
+a manifest containing the plaintext descriptor, epoch, random upload identity and ordered chunk
+metadata (plaintext digest/size, nonce, ciphertext path). One manifest supports up to 8,192 chunks;
+the publication's 1 MiB metadata bound can impose a smaller limit. Larger assets require multiple
+application-level parts. Descriptor media type does not prove parsing or anchor validity.
+
+AES-256-GCM uses the namespace epoch key. Chunk nonces are the first 12 SHA-256 bytes of canonical
+`[upload,index]`; upload is SHA-256 of the fresh host seed. Associated data is canonical
+`["colophon/blob/1",library,namespace,epoch,upload,index]`. Hosts MUST supply fresh unpredictable
+seeds. The signed encrypted manifest binds the chunk order, digests and complete descriptor.
+
+A root can publish manifests in an import batch. Any namespace writer can publish an ordinary
+`colophon.blobPublish` operation with `{manifest,reference}`. `colophon.blobReference` with
+`{digest,reference,retain:boolean}` adds/removes an idempotent reference. `blob({digest})` returns
+the signed manifest and live reference count. Zero live references is **not** permission to delete
+retained originals or bytes needed by immutable history; no automatic garbage collection runs.
+
+`Engine::blob_chunk` fetches one chunk through `RecordSource::read_blob`; default sources may use
+`read`, while hosts can return `Missing` or `Inaccessible`. Native `BlobSource` callbacks run outside
+the session mutex, with access rechecked after callback reentry. Results distinguish available,
+missing, inaccessible and invalid. Successful bytes have verified ciphertext address, AEAD tag,
+chunk plaintext digest and size. Complete streaming consumers also use `BlobVerifier` (or an
+independent SHA-256 accumulator) to verify the whole descriptor before certifying an original.
+
+Blob paths are outside the authority/operation listing and local history cache. Cold opens and
+metadata queries fetch no blob bytes. Hosts must synchronize the chunk directory as user data,
+retain referenced chunks, enforce immutable writes and bound reads to 65,552 ciphertext bytes.
+Swift `FolderRecordStore` implements separate lazy `BlobStore` methods; snapshots enumerate only
+records. Migration persists/read-checks chunks before signing their manifest. Actual iCloud
+hydration, format parsing, quotation/UTF-16 anchor verification and mobile acceptance are host gates.

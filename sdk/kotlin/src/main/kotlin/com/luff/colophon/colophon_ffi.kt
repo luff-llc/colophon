@@ -662,6 +662,9 @@ internal interface UniffiCallbackInterfaceKeyProviderMethod2 : com.sun.jna.Callb
 internal interface UniffiCallbackInterfaceKeyProviderMethod3 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`peer`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceBlobSourceMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`path`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "signingPublicKey", "agreementPublicKey", "sign", "agree")
 internal open class UniffiVTableCallbackInterfaceKeyProvider(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -687,6 +690,25 @@ internal open class UniffiVTableCallbackInterfaceKeyProvider(
         `agreementPublicKey` = other.`agreementPublicKey`
         `sign` = other.`sign`
         `agree` = other.`agree`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "read")
+internal open class UniffiVTableCallbackInterfaceBlobSource(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `read`: UniffiCallbackInterfaceBlobSourceMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `read`: UniffiCallbackInterfaceBlobSourceMethod0? = null,
+    ): UniffiVTableCallbackInterfaceBlobSource(`uniffiFree`,`uniffiClone`,`read`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceBlobSource) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `read` = other.`read`
     }
 
 }
@@ -720,6 +742,14 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_colophon_ffi_checksum_func_begin_request(
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_request_info(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_import_identity_category(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_import_occurrence_id(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_import_output_id(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_reconcile_import_prefix(
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_bind_legacy_import_state(
     ): Int
@@ -775,6 +805,16 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_written_operation_json(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_blob(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_read_blob_chunk(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativeblobwriter_push(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_nativelibrary_open(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_keyprovider_signing_public_key(
@@ -784,6 +824,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_colophon_ffi_checksum_method_keyprovider_sign(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_keyprovider_agree(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_blobsource_read(
     ): Int
     external fun ffi_colophon_ffi_uniffi_contract_version(
     ): Int
@@ -801,6 +843,7 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "colophon_ffi"))
+        uniffiCallbackInterfaceBlobSource.register(this)
         uniffiCallbackInterfaceKeyProvider.register(this)
         
     }
@@ -866,13 +909,37 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_written_operation_json(`ptr`: Long,`action`: Long,`namespace`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_blob(`ptr`: Long,`namespace`: RustBuffer.ByValue,`mediaType`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_import(`ptr`: Long,`namespace`: RustBuffer.ByValue,`batch`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_read_blob_chunk(`ptr`: Long,`namespace`: RustBuffer.ByValue,`digest`: RustBuffer.ByValue,`index`: Int,`now`: RustBuffer.ByValue,`source`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_clone_nativeblobwriter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_free_nativeblobwriter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_colophon_ffi_fn_method_nativeblobwriter_finish(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativeblobwriter_push(`ptr`: Long,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_init_callback_vtable_keyprovider(`vtable`: UniffiVTableCallbackInterfaceKeyProvider,
+    ): Unit
+    external fun uniffi_colophon_ffi_fn_init_callback_vtable_blobsource(`vtable`: UniffiVTableCallbackInterfaceBlobSource,
     ): Unit
     external fun uniffi_colophon_ffi_fn_func_begin_create(`owner`: RustBuffer.ByValue,`recovery`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`ownerLabel`: RustBuffer.ByValue,`namespaces`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_func_begin_request(`libraryId`: RustBuffer.ByValue,`keys`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`namespaces`: RustBuffer.ByValue,`access`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_func_request_info(`record`: RustBuffer.ByValue,`libraryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_import_identity_category(`namespace`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_import_occurrence_id(`library`: RustBuffer.ByValue,`namespace`: RustBuffer.ByValue,`source`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_import_output_id(`library`: RustBuffer.ByValue,`namespace`: RustBuffer.ByValue,`batch`: RustBuffer.ByValue,`child`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_reconcile_import_prefix(`previous`: RustBuffer.ByValue,`current`: RustBuffer.ByValue,`importedHeads`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_bind_legacy_import_state(`namespace`: RustBuffer.ByValue,`stateJson`: RustBuffer.ByValue,`outputs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1006,6 +1073,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_func_request_info() and 0xFFFF) != 12621) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_func_import_identity_category() and 0xFFFF) != 46243) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_import_occurrence_id() and 0xFFFF) != 60317) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_import_output_id() and 0xFFFF) != 9411) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_reconcile_import_prefix() and 0xFFFF) != 30375) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_func_bind_legacy_import_state() and 0xFFFF) != 14834) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1087,6 +1166,21 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_written_operation_json() and 0xFFFF) != 30521) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_blob() and 0xFFFF) != 53685) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import() and 0xFFFF) != 32536) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_read_blob_chunk() and 0xFFFF) != 11638) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish() and 0xFFFF) != 7658) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativeblobwriter_push() and 0xFFFF) != 42511) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_constructor_nativelibrary_open() and 0xFFFF) != 13014) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1100,6 +1194,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_keyprovider_agree() and 0xFFFF) != 21091) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_blobsource_read() and 0xFFFF) != 32010) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1288,6 +1385,29 @@ private class JavaLangRefCleanable(
     val cleanable: java.lang.ref.Cleaner.Cleanable
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
+    }
 }
 
 /**
@@ -1805,6 +1925,279 @@ public object FfiConverterTypeHostAction: FfiConverter<HostAction, Long> {
 //
 
 
+public interface NativeBlobWriterInterface {
+    
+    fun `finish`(): kotlin.ByteArray
+    
+    fun `push`(`plaintext`: kotlin.ByteArray): BlobChunkWrite
+    
+    companion object
+}
+
+open class NativeBlobWriter: Disposable, AutoCloseable, NativeBlobWriterInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_colophon_ffi_fn_free_nativeblobwriter(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_colophon_ffi_fn_clone_nativeblobwriter(handle, status)
+        }
+    }
+
+    
+    @Throws(BindingException::class)override fun `finish`(): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativeblobwriter_finish(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(BindingException::class)override fun `push`(`plaintext`: kotlin.ByteArray): BlobChunkWrite {
+            return FfiConverterTypeBlobChunkWrite.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativeblobwriter_push(
+        it,
+        
+        FfiConverterByteArray.lower(`plaintext`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeBlobWriter: FfiConverter<NativeBlobWriter, Long> {
+    override fun lower(value: NativeBlobWriter): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): NativeBlobWriter {
+        return NativeBlobWriter(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): NativeBlobWriter {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: NativeBlobWriter) = 8UL
+
+    override fun write(value: NativeBlobWriter, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
 /**
  * Thread-safe in-memory session. All private keys remain in platform providers.
  */
@@ -1868,6 +2261,12 @@ public interface NativeLibraryInterface {
      * JSON form of a write-tool result, matching the JavaScript OperationView shape.
      */
     fun `writtenOperationJson`(`action`: HostAction, `namespace`: kotlin.String, `now`: kotlin.String): JsonOutcome
+    
+    fun `beginBlob`(`namespace`: kotlin.String, `mediaType`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): BlobWriteOutcome
+    
+    fun `beginImport`(`namespace`: kotlin.String, `batch`: kotlin.ByteArray, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
+    
+    fun `readBlobChunk`(`namespace`: kotlin.String, `digest`: kotlin.String, `index`: kotlin.UInt, `now`: kotlin.String, `source`: BlobSource): BlobReadOutcome
     
     companion object
 }
@@ -2343,6 +2742,61 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
     
 
     
+    @Throws(BindingException::class)override fun `beginBlob`(`namespace`: kotlin.String, `mediaType`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): BlobWriteOutcome {
+            return FfiConverterTypeBlobWriteOutcome.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_blob(
+        it,
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`mediaType`),
+        FfiConverterString.lower(`now`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(BindingException::class)override fun `beginImport`(`namespace`: kotlin.String, `batch`: kotlin.ByteArray, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction {
+            return FfiConverterTypePreparedAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_import(
+        it,
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterByteArray.lower(`batch`),
+        FfiConverterString.lower(`now`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(BindingException::class)override fun `readBlobChunk`(`namespace`: kotlin.String, `digest`: kotlin.String, `index`: kotlin.UInt, `now`: kotlin.String, `source`: BlobSource): BlobReadOutcome {
+            return FfiConverterTypeBlobReadOutcome.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_read_blob_chunk(
+        it,
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`digest`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterString.lower(`now`),
+        FfiConverterTypeBlobSource.lower(`source`),_status)
+}
+    }
+    )
+    }
+    
+
+    
 
     
 
@@ -2495,6 +2949,44 @@ public object FfiConverterTypeAgreementStep: FfiConverterRustBuffer<AgreementSte
             FfiConverterString.write(value.`namespace`, buf)
             FfiConverterULong.write(value.`epoch`, buf)
             FfiConverterByteArray.write(value.`peer`, buf)
+    }
+}
+
+
+
+data class BlobChunkWrite (
+    val `path`: kotlin.String
+    , 
+    val `bytes`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBlobChunkWrite: FfiConverterRustBuffer<BlobChunkWrite> {
+    override fun read(buf: ByteBuffer): BlobChunkWrite {
+        return BlobChunkWrite(
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BlobChunkWrite) = (
+            FfiConverterString.allocationSize(value.`path`) +
+            FfiConverterByteArray.allocationSize(value.`bytes`)
+    )
+
+    override fun write(value: BlobChunkWrite, buf: ByteBuffer) {
+            FfiConverterString.write(value.`path`, buf)
+            FfiConverterByteArray.write(value.`bytes`, buf)
     }
 }
 
@@ -2831,6 +3323,8 @@ data class LegacyImportCommand (
     val `payloadJson`: kotlin.ByteArray
     , 
     val `expectFromChild`: kotlin.ULong?
+    , 
+    val `baseline`: kotlin.Boolean
     
 ){
     
@@ -2852,6 +3346,7 @@ public object FfiConverterTypeLegacyImportCommand: FfiConverterRustBuffer<Legacy
             FfiConverterString.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterOptionalULong.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -2860,7 +3355,8 @@ public object FfiConverterTypeLegacyImportCommand: FfiConverterRustBuffer<Legacy
             FfiConverterString.allocationSize(value.`outputKey`) +
             FfiConverterString.allocationSize(value.`kind`) +
             FfiConverterByteArray.allocationSize(value.`payloadJson`) +
-            FfiConverterOptionalULong.allocationSize(value.`expectFromChild`)
+            FfiConverterOptionalULong.allocationSize(value.`expectFromChild`) +
+            FfiConverterBoolean.allocationSize(value.`baseline`)
     )
 
     override fun write(value: LegacyImportCommand, buf: ByteBuffer) {
@@ -2869,6 +3365,7 @@ public object FfiConverterTypeLegacyImportCommand: FfiConverterRustBuffer<Legacy
             FfiConverterString.write(value.`kind`, buf)
             FfiConverterByteArray.write(value.`payloadJson`, buf)
             FfiConverterOptionalULong.write(value.`expectFromChild`, buf)
+            FfiConverterBoolean.write(value.`baseline`, buf)
     }
 }
 
@@ -3486,6 +3983,234 @@ public object FfiConverterTypeBindingError : FfiConverterRustBuffer<BindingExcep
     }
 
 }
+
+
+
+/**
+ * Explicit availability for a bounded chunk. Host callbacks return ciphertext; library methods
+ * return only authenticated plaintext. Host Invalid/Inaccessible messages must not contain keys.
+ */
+sealed class BlobReadOutcome {
+    
+    data class Available(
+        val `bytes`: kotlin.ByteArray) : BlobReadOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object Missing : BlobReadOutcome()
+    
+    
+    data class Inaccessible(
+        val `detail`: kotlin.String) : BlobReadOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Invalid(
+        val `detail`: kotlin.String) : BlobReadOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBlobReadOutcome : FfiConverterRustBuffer<BlobReadOutcome>{
+    override fun read(buf: ByteBuffer): BlobReadOutcome {
+        return when(buf.getInt()) {
+            1 -> BlobReadOutcome.Available(
+                FfiConverterByteArray.read(buf),
+                )
+            2 -> BlobReadOutcome.Missing
+            3 -> BlobReadOutcome.Inaccessible(
+                FfiConverterString.read(buf),
+                )
+            4 -> BlobReadOutcome.Invalid(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: BlobReadOutcome): ULong = when(value) {
+        is BlobReadOutcome.Available -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterByteArray.allocationSize(value.`bytes`)
+            )
+        }
+        is BlobReadOutcome.Missing -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is BlobReadOutcome.Inaccessible -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+        }
+        is BlobReadOutcome.Invalid -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+        }
+    }
+
+    override fun write(value: BlobReadOutcome, buf: ByteBuffer) {
+        when(value) {
+            is BlobReadOutcome.Available -> {
+                buf.putInt(1)
+                FfiConverterByteArray.write(value.`bytes`, buf)
+                Unit
+            }
+            is BlobReadOutcome.Missing -> {
+                buf.putInt(2)
+                Unit
+            }
+            is BlobReadOutcome.Inaccessible -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is BlobReadOutcome.Invalid -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class BlobWriteOutcome: Disposable  {
+    
+    data class Ready(
+        val `writer`: com.luff.colophon.NativeBlobWriter) : BlobWriteOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Failure(
+        val `denial`: com.luff.colophon.Denial) : BlobWriteOutcome()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+    @Suppress("UNNECESSARY_SAFE_CALL") // codegen is much simpler if we unconditionally emit safe calls here
+    override fun destroy() {
+        when(this) {
+            is BlobWriteOutcome.Ready -> {
+                
+    Disposable.destroy(
+        this.`writer`
+    )
+                
+            }
+            is BlobWriteOutcome.Failure -> {
+                
+    Disposable.destroy(
+        this.`denial`
+    )
+                
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBlobWriteOutcome : FfiConverterRustBuffer<BlobWriteOutcome>{
+    override fun read(buf: ByteBuffer): BlobWriteOutcome {
+        return when(buf.getInt()) {
+            1 -> BlobWriteOutcome.Ready(
+                FfiConverterTypeNativeBlobWriter.read(buf),
+                )
+            2 -> BlobWriteOutcome.Failure(
+                FfiConverterTypeDenial.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: BlobWriteOutcome): ULong = when(value) {
+        is BlobWriteOutcome.Ready -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeNativeBlobWriter.allocationSize(value.`writer`)
+            )
+        }
+        is BlobWriteOutcome.Failure -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeDenial.allocationSize(value.`denial`)
+            )
+        }
+    }
+
+    override fun write(value: BlobWriteOutcome, buf: ByteBuffer) {
+        when(value) {
+            is BlobWriteOutcome.Ready -> {
+                buf.putInt(1)
+                FfiConverterTypeNativeBlobWriter.write(value.`writer`, buf)
+                Unit
+            }
+            is BlobWriteOutcome.Failure -> {
+                buf.putInt(2)
+                FfiConverterTypeDenial.write(value.`denial`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
 
 
 
@@ -4123,6 +4848,74 @@ public object FfiConverterTypeViewOutcome : FfiConverterRustBuffer<ViewOutcome>{
 }
 
 
+
+
+
+
+
+/**
+ * Return immutable ciphertext at the supplied content-addressed path; never plaintext.
+ */
+public interface BlobSource {
+    
+    fun `read`(`path`: kotlin.String): BlobReadOutcome
+    
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceBlobSource {
+    internal object `read`: UniffiCallbackInterfaceBlobSourceMethod0 {
+        override fun callback(`uniffiHandle`: Long,`path`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeBlobSource.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`read`(
+                    FfiConverterString.lift(`path`),
+                )
+            }
+            val writeReturn = { value: BlobReadOutcome -> uniffiOutReturn.setValue(FfiConverterTypeBlobReadOutcome.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: BindingException -> FfiConverterTypeBindingError.lower(e) }
+            )
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeBlobSource.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeBlobSource.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceBlobSource.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `read`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_colophon_ffi_fn_init_callback_vtable_blobsource(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeBlobSource: FfiConverterCallbackInterface<BlobSource>()
 
 
 
@@ -4932,6 +5725,61 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         
         FfiConverterByteArray.lower(`record`),
         FfiConverterString.lower(`libraryId`),_status)
+}
+    )
+    }
+    
+ fun `importIdentityCategory`(`namespace`: kotlin.String, `kind`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_import_identity_category(
+    
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`kind`),_status)
+}
+    )
+    }
+    
+
+    @Throws(BindingException::class) fun `importOccurrenceId`(`library`: kotlin.String, `namespace`: kotlin.String, `source`: kotlin.ByteArray): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_import_occurrence_id(
+    
+        
+        FfiConverterString.lower(`library`),
+        FfiConverterString.lower(`namespace`),
+        FfiConverterByteArray.lower(`source`),_status)
+}
+    )
+    }
+    
+
+    @Throws(BindingException::class) fun `importOutputId`(`library`: kotlin.String, `namespace`: kotlin.String, `batch`: kotlin.String, `child`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_import_output_id(
+    
+        
+        FfiConverterString.lower(`library`),
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`batch`),
+        FfiConverterString.lower(`child`),_status)
+}
+    )
+    }
+    
+
+    @Throws(BindingException::class) fun `reconcileImportPrefix`(`previous`: kotlin.ByteArray, `current`: kotlin.ByteArray, `importedHeads`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_reconcile_import_prefix(
+    
+        
+        FfiConverterByteArray.lower(`previous`),
+        FfiConverterByteArray.lower(`current`),
+        FfiConverterByteArray.lower(`importedHeads`),_status)
 }
     )
     }

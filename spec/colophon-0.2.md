@@ -336,3 +336,43 @@ MAY provide a trusted exact-byte P-256/SHA-256 batch verifier; it supplies crypt
 only. The core MUST still decide path binding, operation IDs, ordering, grants, epochs, budgets,
 revocation and final admission. Native threading and provider choice do not alter wire semantics;
 WASM remains single-threaded. Record storage and on-demand full-view allocations remain host-owned.
+
+### 7.2 Authenticated import and blob extension (engine3)
+
+The engine3 extension uses the existing signed/encrypted operation envelope and namespace epochs;
+there is no new authority permission or public plaintext sidecar. Reducer generation 4 MUST
+invalidate older projection caches. Reducers receive kind, immutable grant and root role from
+verified authority, never from payload or historical source assertions.
+
+`colophon.importBatch` is a root-only engine operation carrying a bounded source-unit key,
+evidence, ordered clean children, historical alternatives, occurrence reservations and blob
+manifests. A source unit MUST become visible through one complete admitted publication. Readers
+MUST validate its structure/reservations before applying any child and MUST retain immutable
+source receipts so equivalent retries cannot repeat effects. Changed content under an accepted
+key MUST fail. The signed parent authenticates virtual children and their deterministic output
+revisions; children are not separately signed envelopes. All ordinary admission, revocation,
+epoch and domain conditional-write rules still apply. Original attribution remains labelled
+historical evidence, never replacement authenticated authorship. Only this authenticated root
+publication can confer imported-baseline semantics.
+
+Evidence and historical alternatives MUST be encrypted in their destination namespace and read
+only after current grant/expiry/revocation/key checks. The common bounded queries and the exact
+batch/revision encodings are defined in [engine3's engine contract](../docs/engine.md#engine3-authenticated-import-storage-and-blobs).
+Rejected old writes MUST NOT enter effective domain state through the overlay. Earlier-source
+reconciliation is additive: retain previous/current evaluated outcomes and imported component
+heads as alternatives, preserving native edits and immutable signed destination history.
+Acknowledging historical alternatives requires an authenticated app/device, the observed revision
+and the exact alternative set; changing native state requires a clean command with domain checks.
+
+Blob descriptors name complete plaintext SHA-256, size and media type. Signed encrypted manifests
+bind independently authenticated, content-addressed ciphertext chunks, their namespace epoch,
+order and plaintext identities. Hosts persist chunks before publishing manifests, synchronize them
+as retained user data, and provide bounded lazy reads. Readers MUST check current namespace access,
+ciphertext address, AEAD authentication and chunk identity before returning bytes, and MUST verify
+the complete descriptor before marking the full original verified. Missing, inaccessible and invalid
+bytes MUST remain distinct from available content. Reference counts are idempotent live-reference
+counts, not an erasure promise or permission to discard retained immutable evidence.
+
+Earlier 0.2 implementations skip these unknown engine operations and cannot render their imported
+children. All participating apps MUST upgrade before enabling this extension. No 0.1 signature,
+codec, grant or historical agent authority is imported into the 0.2 trust chain.

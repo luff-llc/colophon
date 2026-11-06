@@ -11,14 +11,20 @@ Each item has a source and a check that closes it.
    this without Keychain entitlements or touching an existing sample library. Both sample
    platforms compile; interactive LaunchServices/device verification remains an unrestricted
    acceptance check (the restricted host refused to launch the built app).
-2. **Engine-supplied author kind and roles.** `reading.books` loans and `notes` proposal reviews
-   fail closed until the engine passes the authenticated member kind and grant to reducers.
-   Check: loan and review tests pass with real authority, refused for wrong roles.
-3. **Historical conflict overlay and import evidence.** Domain importers emit import-evidence
-   entries; the engine needs an encrypted evidence sidecar and an overlay for historical
-   conflicts (docs/domains/README.md). Check: an importer round trip shows the evidence via a
-   query.
-4. **Blob descriptors.** Transcripts, retained originals and archives need the blob contract
-   (encrypted, content-addressed, grant-checked) in the engine and storage layer.
+2. **Implemented: authenticated author context.** Schema 3 already supplied member kinds;
+   schema 4 supplies authority-derived kind, grant and root role on every engine path. Books
+   loans and notes reviews have real-authority acceptance/rejection, replay and checkpoint tests;
+   local signing/tool filtering also enforce their fences.
+3. **Implemented: encrypted import evidence and historical alternatives.** Root-signed atomic
+   source units synchronize namespace-encrypted evidence, output bindings and explicit alternatives.
+   Bounded `importEvidence`/`historicalAlternatives` queries recheck grants. ColophonMigration uses
+   the sidecar, publishes earlier-prefix outcome differences and retains native state. Exact-set
+   historical acknowledgment is available; automatic correction and the app repair UI remain host
+   work. See [engine contract](engine.md#engine3-authenticated-import-storage-and-blobs).
+4. **Implemented: blob descriptors and storage seam.** Streaming 64 KiB encrypted chunks,
+   content addresses, signed manifests, current grant checks, live reference counts and distinct
+   availability outcomes are exposed through core/native host interfaces. Swift folder storage
+   separates lazy blob bytes from record snapshots. Format/anchor validation and actual iCloud/
+   mobile acceptance remain app/host gates; originals are never garbage-collected automatically.
 5. **Android packaging.** No Android SDK/NDK on the build machine; `scripts/build-android.sh`
    is unrun. Check: AAR built and the Kotlin journey passes on an emulator.

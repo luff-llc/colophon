@@ -28,6 +28,7 @@ public enum RecordPath {
 /// Each subscriber gets a bounded wake-up hint; consumers re-read the complete store.
 public actor MemoryRecordStore: RecordStore {
     private var records: [String: Data]
+    private var blobs: [String: Data] = [:]
     private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     private var unavailable: String?
     public init(records: [String: Data] = [:]) { self.records = records }
@@ -69,5 +70,35 @@ extension StorageError: LocalizedError {
         case .conflict(let path): "Immutable record conflict: \(path)"
         case .limitExceeded: "Storage limit exceeded"
         }
+    }
+}
+
+/// Immutable encrypted blob chunks live alongside records but are never loaded in snapshots.
+public protocol BlobStore: Sendable {
+    func readBlob(_ path: String) async throws -> Data
+    func appendBlob(_ path: String, bytes: Data) async throws
+}
+public enum BlobPath {
+    public static func validate(_ path: String) throws {
+        let digest = path.dropFirst(6)
+        guard path.hasPrefix("blobs/"), digest.count == 64,
+              digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+        else { throw StorageError.invalidPath(path) }
+    }
+}
+
+extension MemoryRecordStore: BlobStore {
+    public func readBlob(_ path: String) throws -> Data {
+        try BlobPath.validate(path)
+        if let unavailable { throw StorageError.unavailable(unavailable) }
+        guard let bytes = blobs[path] else { throw StorageError.unavailable("Blob chunk is missing: " + path) }
+        return bytes
+    }
+    public func appendBlob(_ path: String, bytes: Data) throws {
+        try BlobPath.validate(path)
+        if let unavailable { throw StorageError.unavailable(unavailable) }
+        guard bytes.count <= 65536 + 16 else { throw StorageError.limitExceeded }
+        if let old = blobs[path], old != bytes { throw StorageError.conflict(path) }
+        blobs[path] = bytes
     }
 }

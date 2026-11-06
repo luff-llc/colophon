@@ -61,10 +61,10 @@ impl Namespace {
         &mut self,
         digest: &str,
         op: &OperationView,
-        kind: Option<crate::model::MemberKind>,
+        kind: Option<crate::domain::AuthorContext>,
         policy: &CheckpointPolicy,
     ) {
-        self.state.apply_with_member_kind(op, kind);
+        self.state.apply_with_context(op, kind.as_ref());
         self.applied += 1;
         self.clock = op.clock;
         self.order.push(digest.into());
@@ -90,7 +90,7 @@ impl Namespace {
         ops: &[(&str, &OperationView)],
         policy: &CheckpointPolicy,
         restored: Option<Snapshot>,
-        member_kind: impl Fn(&OperationView) -> Option<crate::model::MemberKind>,
+        member_kind: impl Fn(&OperationView) -> Option<crate::domain::AuthorContext>,
     ) -> bool {
         let common = self
             .order

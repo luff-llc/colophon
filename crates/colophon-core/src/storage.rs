@@ -13,8 +13,18 @@ use std::{
 pub trait RecordSource {
     /// Fetch the exact stored envelope, including its original body bytes.
     fn read(&self, path: &str) -> Result<Vec<u8>>;
+    /// Lazy blob fetch. Override to distinguish missing hydration from inaccessible storage.
+    fn read_blob(&self, path: &str) -> Result<crate::blobs::BlobRead> {
+        self.read(path).map(crate::blobs::BlobRead::Available)
+    }
 }
 impl RecordSource for Records {
+    fn read_blob(&self, path: &str) -> Result<crate::blobs::BlobRead> {
+        Ok(self.get(path).cloned().map_or(
+            crate::blobs::BlobRead::Missing,
+            crate::blobs::BlobRead::Available,
+        ))
+    }
     fn read(&self, path: &str) -> Result<Vec<u8>> {
         self.get(path)
             .cloned()
@@ -22,6 +32,9 @@ impl RecordSource for Records {
     }
 }
 impl<T: RecordSource + ?Sized> RecordSource for Arc<T> {
+    fn read_blob(&self, path: &str) -> Result<crate::blobs::BlobRead> {
+        (**self).read_blob(path)
+    }
     fn read(&self, path: &str) -> Result<Vec<u8>> {
         (**self).read(path)
     }
@@ -543,6 +556,18 @@ impl<S: RecordSource> Engine<S> {
             a.cmp(b).then_with(|| path_order(p).cmp(&path_order(q)))
         });
         let mut new_entries = Vec::with_capacity(paths.len());
+        let contexts: BTreeMap<_, _> = self
+            .library
+            .authority
+            .members
+            .iter()
+            .map(|(id, member)| {
+                (
+                    id.clone(),
+                    domain::AuthorContext::from_member(&member.member, &self.library.authority.id),
+                )
+            })
+            .collect();
         let mut invalidates = false;
         for chunk in paths.chunks(BATCH) {
             let records = chunk
@@ -656,7 +681,7 @@ impl<S: RecordSource> Engine<S> {
                     Library::open_operation(&self.library.authority, &self.library.keys, j);
                 }
             });
-            type Reduction = (OperationView, Option<MemberKind>);
+            type Reduction<'a> = (OperationView, Option<&'a domain::AuthorContext>);
             let mut reductions: BTreeMap<String, Vec<Reduction>> = BTreeMap::new();
             for (mut entry, mut j) in candidates {
                 if j.opened {
@@ -721,12 +746,7 @@ impl<S: RecordSource> Engine<S> {
                 if j.status == Status::Admitted {
                     if let Some(op) = j.operation.take() {
                         state.clock = op.clock;
-                        let kind = self
-                            .library
-                            .authority
-                            .members
-                            .get(&op.author)
-                            .map(|member| member.member.kind);
+                        let kind = contexts.get(&op.author);
                         reductions
                             .entry(meta.namespace.clone())
                             .or_default()
@@ -787,7 +807,7 @@ impl<S: RecordSource> Engine<S> {
                 .collect();
             let apply = |(state, ops): &mut (&mut domain::State, Vec<Reduction>)| {
                 for (op, kind) in ops {
-                    state.apply_with_member_kind(op, *kind);
+                    state.apply_with_context(op, *kind);
                 }
             };
             if chunk.len() >= 512 {
@@ -1432,4 +1452,84 @@ fn decode_cache(
         entries,
         pending,
     })
+}
+
+impl<S: RecordSource> Engine<S> {
+    /// Read and authenticate at most one 64 KiB blob chunk through host storage.
+    /// Blob paths are not operation-listing entries and are fetched only on demand.
+    pub fn read_blob_chunk(
+        &self,
+        namespace: &str,
+        digest: &str,
+        index: usize,
+        now: &str,
+    ) -> Result<Outcome<Vec<u8>>> {
+        self.check_ready()?;
+        match self.library.blob_manifest(namespace, digest, now)? {
+            Outcome::Success {
+                value: manifest, ..
+            } => {
+                let chunk = manifest
+                    .chunks
+                    .get(index)
+                    .ok_or_else(|| Error("Invalid blob chunk index".into()))?;
+                let bytes = self.source.read(&chunk.path)?;
+                self.library
+                    .open_blob_chunk(namespace, digest, index, &bytes, now)
+            }
+            Outcome::Failure { reason, detail, .. } => {
+                Ok(Outcome::failure(Denial::new(&reason, &detail)))
+            }
+        }
+    }
+    /// Start a grant-checked streaming blob upload. The host owns the returned immutable bytes.
+    pub fn begin_blob(
+        &self,
+        namespace: &str,
+        media_type: String,
+        now: &str,
+        seed: [u8; 32],
+    ) -> Result<Outcome<crate::blobs::BlobWriter>> {
+        self.check_ready()?;
+        self.library.begin_blob(namespace, media_type, now, seed)
+    }
+}
+
+impl<S: RecordSource> Engine<S> {
+    /// Bounded blob retrieval with explicit availability; authenticates bytes before success.
+    pub fn blob_chunk(
+        &self,
+        namespace: &str,
+        digest: &str,
+        index: usize,
+        now: &str,
+    ) -> Result<crate::blobs::BlobRead> {
+        use crate::blobs::BlobRead;
+        self.check_ready()?;
+        let manifest = match self.library.blob_manifest(namespace, digest, now)? {
+            Outcome::Success { value, .. } => value,
+            Outcome::Failure { reason, detail, .. } => {
+                return Ok(if reason == "unavailable" {
+                    BlobRead::Missing
+                } else {
+                    BlobRead::Inaccessible(detail)
+                })
+            }
+        };
+        let chunk = manifest
+            .chunks
+            .get(index)
+            .ok_or_else(|| Error("Invalid blob chunk index".into()))?;
+        match self.source.read_blob(&chunk.path)? {
+            BlobRead::Available(bytes) => match self
+                .library
+                .open_blob_chunk(namespace, digest, index, &bytes, now)
+            {
+                Ok(Outcome::Success { value, .. }) => Ok(BlobRead::Available(value)),
+                Ok(Outcome::Failure { detail, .. }) => Ok(BlobRead::Inaccessible(detail)),
+                Err(error) => Ok(BlobRead::Invalid(error.to_string())),
+            },
+            other => Ok(other),
+        }
+    }
 }

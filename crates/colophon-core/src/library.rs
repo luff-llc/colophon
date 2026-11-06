@@ -1,4 +1,6 @@
 //! Pure record replica and two-phase host actions. No storage, clocks or platform callbacks.
+#[path = "blob_api.rs"]
+mod blob_api;
 use crate::{
     authority::{self, Action, Authority, AuthorityEntry},
     crypto::{self, Entropy, PublicIdentity},
@@ -375,10 +377,9 @@ impl Library {
             &self.checkpoint_policy,
             Some(snapshot),
             |op| {
-                self.authority
-                    .members
-                    .get(&op.author)
-                    .map(|member| member.member.kind)
+                self.authority.members.get(&op.author).map(|member| {
+                    domain::AuthorContext::from_member(&member.member, &self.authority.id)
+                })
             },
         );
         Ok(true)
@@ -413,8 +414,8 @@ impl Library {
             "Checkpoint authentication failed",
         )?;
         ensure(
-            std::mem::discriminant(&body.snapshot.state)
-                == std::mem::discriminant(&domain::State::new(namespace)),
+            std::mem::discriminant(&body.snapshot.state.projection)
+                == std::mem::discriminant(&domain::State::new(namespace).projection),
             "Checkpoint domain mismatch",
         )?;
         ensure(
@@ -936,6 +937,33 @@ impl Library {
             return Ok(Outcome::failure(denial));
         }
         ensure(payload.is_object(), "Operation payload must be an object")?;
+        let member = self
+            .authority
+            .members
+            .get(&self.me.id())
+            .ok_or_else(|| missing("member"))?;
+        if kind == crate::imports::BATCH_KIND {
+            if let Some(denial) = self.root_denial() {
+                return Ok(Outcome::failure(denial));
+            }
+            if let Some(state) = self.namespaces.get(namespace) {
+                state.state.validate_import(&payload)?;
+            }
+        } else if kind == "colophon.blobPublish" {
+            let manifest: crate::blobs::BlobManifest =
+                serde_json::from_value(payload["manifest"].clone())?;
+            manifest.validate()?;
+            ensure(
+                payload["reference"].as_str().is_some_and(|r| !r.is_empty()),
+                "Missing blob reference",
+            )?;
+        } else {
+            ensure(
+                domain::role_allows(namespace, kind, member.member.kind),
+                "Authenticated app or device required",
+            )?;
+        }
+
         if let Some(module) = domain::module(namespace) {
             if let Some(spec) = module.operations().iter().find(|s| s.name == kind) {
                 ensure(
@@ -1130,13 +1158,20 @@ impl Library {
         for ns in domain::NAMESPACES {
             if let Some(module) = domain::module(ns) {
                 if self.authorize(ns, Access::Read, now)?.is_none() {
-                    for mut spec in module.queries() {
+                    for mut spec in module
+                        .queries()
+                        .into_iter()
+                        .chain(crate::imports::query_specs())
+                    {
                         spec.name = format!("{ns}__{}", spec.name);
                         tools.push(spec);
                     }
                 }
                 if self.authorize(ns, Access::Write, now)?.is_none() {
                     for mut spec in module.operations() {
+                        if !domain::role_allows(ns, &spec.name, self.me().kind) {
+                            continue;
+                        }
                         spec.name = format!("{ns}__{}", spec.name);
                         tools.push(spec);
                     }
@@ -1178,7 +1213,9 @@ impl Library {
             Ok(map_outcome(self.view(ns, now)?, |v| Call::Read {
                 value: json!(v),
             }))
-        } else if module.queries().iter().any(|s| s.name == kind) {
+        } else if module.queries().iter().any(|s| s.name == kind)
+            || crate::imports::query_names().contains(&kind)
+        {
             Ok(map_outcome(self.query(ns, kind, input, now)?, |value| {
                 Call::Read { value }
             }))
@@ -1381,10 +1418,9 @@ impl Library {
                     .entry(ns.clone())
                     .or_insert_with(|| Namespace::new(ns));
                 let changed = state.reconcile(ns, ops, &self.checkpoint_policy, restored, |op| {
-                    self.authority
-                        .members
-                        .get(&op.author)
-                        .map(|member| member.member.kind)
+                    self.authority.members.get(&op.author).map(|member| {
+                        domain::AuthorContext::from_member(&member.member, &self.authority.id)
+                    })
                 });
                 if changed || invalidated.contains(ns) || touched.contains(ns) {
                     state.revision += 1;
@@ -1404,10 +1440,12 @@ impl Library {
                         state.append(
                             &j.digest,
                             view,
-                            self.authority
-                                .members
-                                .get(&view.author)
-                                .map(|member| member.member.kind),
+                            self.authority.members.get(&view.author).map(|member| {
+                                domain::AuthorContext::from_member(
+                                    &member.member,
+                                    &self.authority.id,
+                                )
+                            }),
                             &self.checkpoint_policy,
                         );
                     }

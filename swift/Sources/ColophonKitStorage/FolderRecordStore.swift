@@ -148,3 +148,28 @@ private final class FolderPresenter: NSObject, NSFilePresenter, Sendable {
         signal(); completionHandler(nil)
     }
 }
+
+extension FolderRecordStore: BlobStore {
+    public func readBlob(_ path: String) throws -> Data {
+        try BlobPath.validate(path); try rejectSymlinks(path)
+        let url = folder.appendingPathComponent(path)
+        try checkAvailability(url)
+        return try AtomicFile.read(url, maximumBytes: 65536 + 16)
+    }
+    public func appendBlob(_ path: String, bytes: Data) throws {
+        try BlobPath.validate(path); try rejectSymlinks(path)
+        guard bytes.count <= 65536 + 16 else { throw StorageError.limitExceeded }
+        try checkAvailability(folder)
+        let write: (URL) throws -> Void = { root in
+            try AtomicFile.write(bytes, to: root.appendingPathComponent(path), immutable: true)
+        }
+        if coordinated {
+            var coordinationError: NSError?, writeError: (any Error)?
+            NSFileCoordinator().coordinate(writingItemAt: folder, options: [], error: &coordinationError) { root in
+                do { try write(root) } catch { writeError = error }
+            }
+            if let coordinationError { throw StorageError.unavailable(coordinationError.localizedDescription) }
+            if let writeError { throw writeError }
+        } else { try write(folder) }
+    }
+}

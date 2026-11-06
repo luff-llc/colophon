@@ -517,3 +517,13 @@ impl Reducer for ReadingBooks {
         query::query(state, name, args)
     }
 }
+
+impl BooksState {
+    pub(crate) fn identity_exists(&self, category: &str, id: &str) -> bool {
+        match category {
+            "book" => self.books.contains_key(id),
+            "note" => self.notes.contains_key(id),
+            _ => false,
+        }
+    }
+}

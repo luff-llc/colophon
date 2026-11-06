@@ -171,17 +171,17 @@ pub const NAMESPACES: [&str; 4] = [
 
 // Authenticated local-cache generation for the complete built-in reducer registry.
 // Increment on any projection schema or reducer semantic change, even if serde can decode it.
-pub(crate) const REDUCER_SCHEMA: u32 = 3;
+pub(crate) const REDUCER_SCHEMA: u32 = 4;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) enum State {
+pub(crate) enum ProjectionState {
     Books(Box<BooksState>),
     Saved(Box<SavedState>),
     Podcasts(Box<PodcastsState>),
     Notes(NotesState),
     Unknown,
 }
-impl State {
+impl ProjectionState {
     pub fn new(namespace: &str) -> Self {
         match namespace {
             "reading.books" => Self::Books(Box::default()),
@@ -191,12 +191,23 @@ impl State {
             _ => Self::Unknown,
         }
     }
+    pub(crate) fn identity_exists(&self, category: &str, id: &str) -> bool {
+        match self {
+            Self::Books(s) => s.identity_exists(category, id),
+            Self::Saved(s) => s.identity_exists(category, id),
+            Self::Podcasts(s) => s.identity_exists(category, id),
+            Self::Notes(s) => s.identity_exists(category, id),
+            Self::Unknown => false,
+        }
+    }
     /// Authenticated role context comes only from the verified authority chain.
-    pub fn apply_with_member_kind(
+    pub fn apply_with_context(
         &mut self,
         op: &AdmittedOperation,
-        kind: Option<crate::model::MemberKind>,
+        context: &AuthorContext,
+        baseline: bool,
     ) {
+        let kind = Some(context.kind);
         match self {
             Self::Books(s) => ReadingBooks.apply_with_member_kind(s, op, kind),
             Self::Saved(s) => ReadingSaved.apply(s, op),
@@ -205,7 +216,7 @@ impl State {
                 op,
                 crate::domains::listening::ApplyContext {
                     member_kind: kind,
-                    ..Default::default()
+                    imported_baseline: baseline,
                 },
             ),
             Self::Notes(s) => Notes.apply_with_member_kind(s, op, kind),
@@ -220,5 +231,88 @@ impl State {
             Self::Notes(s) => Notes.query(s, name, args),
             Self::Unknown => Ok(json!({})),
         }
+    }
+}
+
+/// Authority-derived reducer identity. Never constructed from operation payload fields.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthorContext {
+    /// Authenticated member kind.
+    pub kind: crate::model::MemberKind,
+    /// Destination library authenticated by the operation header.
+    pub library: String,
+    /// Immutable approved grant; absent only for an admitted root identity.
+    pub grant: Option<crate::model::Grant>,
+    /// Whether this identity was enrolled as a root (admission separately checks its tenure).
+    pub root: bool,
+}
+impl AuthorContext {
+    pub(crate) fn from_member(member: &crate::model::Member, library: &str) -> Self {
+        Self {
+            library: library.into(),
+            kind: member.kind,
+            grant: member.grant.clone(),
+            root: member.grant.is_none(),
+        }
+    }
+}
+/// Role fence used before signing, in tool filtering and during authenticated replay.
+pub fn role_allows(namespace: &str, kind: &str, member: crate::model::MemberKind) -> bool {
+    if matches!(
+        member,
+        crate::model::MemberKind::App | crate::model::MemberKind::Device
+    ) {
+        return true;
+    }
+    if matches!(kind, "colophon.blobPublish" | "colophon.blobReference") {
+        return true;
+    }
+    if kind == "colophon.resolveHistorical" {
+        return matches!(
+            member,
+            crate::model::MemberKind::App | crate::model::MemberKind::Device
+        );
+    }
+    let protected = match namespace {
+        "reading.books" => kind == "setCopyLoan",
+        "notes" => kind == "reviewProposal",
+        "reading.saved" => {
+            crate::domains::saved::protected_kind(kind)
+                && module(namespace).is_some_and(|m| m.operations().iter().any(|s| s.name == kind))
+        }
+        _ => false,
+    };
+    !protected
+        || matches!(
+            member,
+            crate::model::MemberKind::App | crate::model::MemberKind::Device
+        )
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct State {
+    pub(crate) projection: ProjectionState,
+    sidecar: crate::imports::ImportState,
+}
+impl State {
+    pub fn new(namespace: &str) -> Self {
+        Self {
+            projection: ProjectionState::new(namespace),
+            sidecar: crate::imports::ImportState::new(namespace),
+        }
+    }
+    pub fn apply_with_context(&mut self, op: &AdmittedOperation, context: Option<&AuthorContext>) {
+        let Some(context) = context else { return };
+        self.sidecar.apply(&mut self.projection, op, context);
+    }
+    pub fn query(&self, name: &str, args: &Value) -> crate::Result<Value> {
+        if let Some(value) = self.sidecar.query(name, args, &self.projection)? {
+            return Ok(value);
+        }
+        self.projection.query(name, args)
+    }
+    pub(crate) fn validate_import(&self, payload: &Value) -> crate::Result<()> {
+        self.sidecar
+            .validate_batch(payload, &self.projection)
+            .map(|_| ())
     }
 }

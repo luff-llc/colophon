@@ -3,11 +3,13 @@
 #![deny(missing_docs)]
 
 pub mod authority;
+pub mod blobs;
 pub mod crypto;
 pub mod domain;
 pub mod domains;
 pub mod engine;
 pub mod hpke;
+pub mod imports;
 pub mod library;
 pub mod model;
 pub mod records;

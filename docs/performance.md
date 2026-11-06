@@ -1,5 +1,40 @@
 # Engine performance — integrated domains, November 6, 2026
 
+## Engine3 final verification
+
+Engine3 preserves all storage-backed desktop timing gates with reducer schema 4, authenticated
+contexts, evidence/alternative projections, identity reservations and the lazy blob interface.
+Final single-run measurements on the same synthetic four-domain 100k fixture, release opt-level 3:
+
+| Measurement | Engine3 final | Target |
+| --- | ---: | ---: |
+| Full 100k rebuild including unlock | **1,391.915 ms** | <1,500 ms, met |
+| Fresh-process disk checkpoint open plus 1,000 new operations | **95.297 ms** | <100 ms, met |
+| Local write including software sign/persist(memory)/apply | **0.872 ms** | <2 ms, met |
+| Unchanged checkpoint open including unlock | 73.696 ms | <100 ms, met |
+| In-memory checkpoint plus 1% suffix | 90.937 ms | <100 ms, met |
+| Checkpoint serialization | 90.190 ms | Host schedules persistence |
+| First lazy 50-operation history page | 4.533 ms | No numeric gate |
+| Independent 128-record audit | 34.142 ms | No numeric gate |
+
+The checkpoint is 19,249,071 bytes. Work counters remain 100,000 verified/decrypted/applied for
+full replay, zero fetches/verification/decryption/reduction for unchanged restoration, and exactly
+1,000 for either suffix. The history page fetches only 50 payloads and retains 11,539 cache bytes.
+The final cold disk process peaked at **128,581,632 bytes (122.6 MiB)**. The main harness peaked
+at 358,203,392 bytes; unlike the independent cold run it also retains the fixture in memory.
+
+The compatibility `Library` harness was separately rerun: 1,644.314 ms full rebuild,
+1,245.521 ms checkpoint cold open (which still redoes historical cryptography), and 771,817,472
+bytes peak process RSS. These are not the storage-backed engine's timing gates; apps must opt
+into `Engine<RecordSource>` for the fast cold-open path. The native session remains the compatible
+Library adapter. No 100k-import, large-blob throughput, mobile timing or production-library claim
+is made by this existing workload.
+
+Logs and the Python `os.wait4` RSS harness are in `.build/engine3-validation/`. `/usr/bin/time -l`
+finished an earlier benchmark but then failed its sandbox-restricted `sysctl` query; it was replaced
+by the documented child-resource method. These are single confirmation runs with warm filesystem
+caches, not medians or tail-latency promises. Earlier measurements below are retained for history.
+
 ## Four-domain merge validation
 
 The final merged engine meets all three desktop timing targets with `reading.books`,

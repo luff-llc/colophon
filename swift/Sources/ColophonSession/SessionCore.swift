@@ -11,6 +11,7 @@ protocol SessionCore: Sendable {
     func snapshot(namespaces: [String]) async throws -> CoreSnapshot
     func request(configuration: SessionConfiguration, keys: any AsyncKeyProvider) async throws -> AccessRequest
     func query(namespace: String, name: String, arguments: Data) async throws -> Data
+    func beginBlob(namespace: String, mediaType: String) async throws -> NativeBlobWriter
     func write(_ command: DomainCommand) async throws -> OperationView
     func approve(_ request: Data, grant: GrantOptions?) async throws
     func revoke(_ id: String) async throws
@@ -83,6 +84,9 @@ actor BindingSessionCore: SessionCore {
     func query(namespace: String, name: String, arguments: Data) async throws -> Data {
         try await requireLibrary().query(namespace: namespace, name: name, arguments: arguments).get()
     }
+    func beginBlob(namespace: String, mediaType: String) async throws -> NativeBlobWriter {
+        try await requireLibrary().beginBlob(namespace: namespace, mediaType: mediaType)
+    }
     func write(_ command: DomainCommand) async throws -> OperationView {
         try await requireLibrary().write(namespace: command.namespace, kind: command.kind, payload: command.payload).get()
     }
@@ -92,6 +96,7 @@ actor BindingSessionCore: SessionCore {
 
 // Existing test/host adapters need not implement named queries until they support them.
 extension SessionCore {
+    func beginBlob(namespace: String, mediaType: String) async throws -> NativeBlobWriter { throw SessionError.notReady }
     func query(namespace: String, name: String, arguments: Data) async throws -> Data {
         throw SessionError.notReady
     }

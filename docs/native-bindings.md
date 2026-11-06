@@ -240,3 +240,21 @@ bind actual output IDs, archive exact source envelopes and handle blob publicati
 The generated Swift/Kotlin APIs and three-slice XCFramework were rebuilt for this bridge with
 `SKIP_VISIONOS=1`; this artifact is not a five-platform release. The migration handoff records
 acceptance and remaining engine requirements.
+
+## Engine3 import publication and blobs
+
+Generated Swift/Kotlin now expose `NativeLibrary.beginImport`, `beginBlob`, `readBlobChunk`,
+`NativeBlobWriter.push/finish`, `BlobSource`, `BlobReadOutcome`, `importOutputId`,
+`importOccurrenceId`, `importIdentityCategory` and `reconcileImportPrefix`. JSON arguments use
+the [engine3 wire/API shapes](engine.md#engine3-authenticated-import-storage-and-blobs).
+`LegacyImportCommand.baseline` carries the trusted transform receipt separately from payload
+extensions. `beginImport` produces one signed parent with deterministic virtual child revisions;
+use `importReceipt` to verify its accepted bindings after persistence and refreshed admission.
+
+Blob callbacks supply only immutable ciphertext. The library checks grants before fetching and
+again after callback reentry; available results contain authenticated plaintext. Missing,
+inaccessible and invalid content are separate outcomes. Hosts stream at most 64 KiB per call and
+verify the complete plaintext descriptor before certifying the full original. The Kotlin ABI
+regression exercises publication, evidence, deterministic bindings, blob read/missing/corruption,
+and a reentrant callback. The Swift migration regression queries evidence through synchronized
+records and verifies source-unit crash/retry behavior.

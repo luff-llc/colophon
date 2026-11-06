@@ -54,6 +54,7 @@ public actor LibraryMigration {
             if !FileManager.default.fileExists(atPath: archive.path) { try files.write(bytes, to: archive) }
             progress.sourceRecords[path] = digest
         }
+        var unresolvedEvidence: [(String, Data)] = []
         for path in snapshot.unresolvedPaths {
             guard let bytes = snapshot.records[path] else { throw MigrationError.sourceUnavailable(path) }
             let digest = Canonical.digest(bytes)
@@ -61,10 +62,25 @@ public actor LibraryMigration {
                 "envelopeDigest": digest, "digestAlgorithm": "SHA-256", "digestPurpose": "exact source envelope bytes (not an authenticated signed-body digest)",
                 "admission": "unresolved", "domainOutcome": "unresolved", "outputOperationIDs": [String: String](),
                 "reason": "Refused, unreadable, invalid, or unsupported namespace; exact envelope retained in encrypted source archive"]
-            try files.write(json(unresolved), to: evidenceURL("unresolved-" + Canonical.digest(Data((path + digest).utf8))))
+            unresolvedEvidence.append(("unresolved-" + Canonical.digest(Data((path + digest).utf8)), try json(unresolved)))
         }
         progress.membersNeedingRejoin = snapshot.authority.members.values.sorted { $0.id < $1.id }.map { "\($0.label) (\($0.id)) — needs to rejoin" }
         for issue in snapshot.unresolved where !progress.unresolved.contains(issue) { progress.unresolved.append(issue) }
+        await destination.refresh()
+        if previous == nil, await destination.phase != .noLibrary { throw MigrationError.destinationChanged }
+        try files.save(progress)
+        if await destination.phase == .noLibrary { await destination.create() }
+        guard await destination.phase == .ready, let destinationID = await destination.libraryID else { throw MigrationError.destinationUnavailable }
+        guard progress.destinationLibraryID == nil || progress.destinationLibraryID == destinationID else { throw MigrationError.destinationChanged }
+        progress.destinationLibraryID = destinationID
+        try files.save(progress)
+        // Unreadable source envelopes have no trusted namespace. Retain their explicit archive
+        // dispositions under the root's saved-reading grant; they never produce domain effects.
+        for (key, bytes) in unresolvedEvidence {
+            let body: [String: Any] = ["key": key, "evidence": try JSONSerialization.jsonObject(with: bytes), "children": []]
+            let command = try DomainCommand(namespace: "reading.saved", kind: "colophon.importBatch", payloadJSON: json(body))
+            guard case .saved = try await destination.performMigration(command, outputKey: key) else { throw MigrationError.destinationUnavailable }
+        }
         // Re-evaluate complete admission/order, including held -> admitted transitions. Earlier
         // insertions need an engine historical overlay; do not rewrite already signed history.
         for namespace in SourceReader.namespaces {
@@ -78,18 +94,30 @@ public actor LibraryMigration {
             if Array(current.prefix(prior.count)) != prior || changedReceipt {
                 let reason = "\(namespace): source admission/order changed before the imported tail; historical reconciliation required"
                 if !progress.unresolved.contains(reason) { progress.unresolved.append(reason) }
+                var before: [String: Any] = [:], after: [String: Any] = [:]
+                for (key, bytes) in progress.sourceOutcomes?[namespace] ?? [:] {
+                    before[key] = try JSONSerialization.jsonObject(with: bytes)
+                }
+                for (index, entry) in entries.enumerated() {
+                    let evaluated = try SourceEvaluation.evaluate(namespace: namespace, entries: entries, index: index, library: progress.sourceLibraryID, progress: progress)
+                    after[entry.key] = try sourceOutcome(entry, index: index, evaluated: evaluated)
+                }
+                let changes = try reconcileImportPrefix(previous: json(before), current: json(after), importedHeads: json(progress.heads))
+                let rows = try JSONSerialization.jsonObject(with: changes) as? [Any] ?? []
+                let key = "reconcile-" + Canonical.digest(changes)
+                // Each bounded reconciliation record is independently visible evidence, never effects.
+                for offset in stride(from: 0, to: max(1, rows.count), by: 100) {
+                    let unit = key + "/" + String(offset)
+                    let body: [String: Any] = ["key": unit, "children": [], "alternatives": Array(rows.dropFirst(offset).prefix(100)),
+                        "evidence": ["sourceLibrary": progress.sourceLibraryID, "namespace": namespace, "reason": reason,
+                            "previousPrefixDigest": Canonical.digest(try json(prior)), "currentPrefixDigest": Canonical.digest(try json(current))]]
+                    let command = try DomainCommand(namespace: namespace, kind: "colophon.importBatch", payloadJSON: json(body))
+                    guard case .saved = try await destination.performMigration(command, outputKey: unit) else { throw MigrationError.destinationUnavailable }
+                }
                 try files.save(progress)
                 throw MigrationError.reconciliationRequired(reason)
             }
         }
-        await destination.refresh()
-        if previous == nil, await destination.phase != .noLibrary { throw MigrationError.destinationChanged }
-        try files.save(progress)
-        if await destination.phase == .noLibrary { await destination.create() }
-        guard await destination.phase == .ready, let destinationID = await destination.libraryID else { throw MigrationError.destinationUnavailable }
-        guard progress.destinationLibraryID == nil || progress.destinationLibraryID == destinationID else { throw MigrationError.destinationChanged }
-        progress.destinationLibraryID = destinationID
-        try files.save(progress)
         var processed = 0
         for namespace in SourceReader.namespaces {
             let entries = snapshot.operations[namespace] ?? []
@@ -104,15 +132,32 @@ public actor LibraryMigration {
                     admission: entry.admitted.status == .admitted ? "admitted" : "held", outcome: evaluated.outcome, contextJson: try json(evaluated.context))
                 let plan = try importLegacyBatch(namespace: namespace, operations: [input], stateJson: progress.states[namespace] ?? Data("{}".utf8))
                 let blobValues = try JSONSerialization.jsonObject(with: plan.blobsJson) as? [Any] ?? []
-                // Retain supplied blob bytes encrypted; they are not yet accessible through the engine.
+                // Persist encrypted chunks before publishing the one-record source unit. Reuse
+                // the staged manifest across crashes so the permanent receipt remains identical.
+                let manifestURL = files.directory.appendingPathComponent("blob-manifests/" + entry.key + ".aesgcm")
+                var manifests: [Any] = []
                 if !blobValues.isEmpty {
-                    try files.write(plan.blobsJson, to: files.directory.appendingPathComponent("import-evidence-local/" + entry.key + "-blobs.aesgcm"))
-                    progress.unresolved.append("\(namespace)/\(operation.id): blob sidecar awaiting engine blob publication")
+                    if FileManager.default.fileExists(atPath: manifestURL.path) {
+                        manifests = try JSONSerialization.jsonObject(with: files.open(manifestURL)) as? [Any] ?? []
+                    } else {
+                        for case let blob as [String: Any] in blobValues {
+                            guard let text = blob["utf8"] as? String, let descriptor = blob["descriptor"] as? [String: Any],
+                                  let mediaType = descriptor["mediaType"] as? String else { throw MigrationError.invalidSource }
+                            let manifest = try await destination.migrationBlob(namespace: namespace, mediaType: mediaType, bytes: Data(text.utf8))
+                            let decoded = try JSONSerialization.jsonObject(with: manifest) as? [String: Any] ?? [:]
+                            guard let actual = decoded["descriptor"] as? [String: Any],
+                                  NSDictionary(dictionary: actual).isEqual(to: descriptor) else { throw MigrationError.invalidSource }
+                            manifests.append(decoded)
+                        }
+                        try files.write(json(manifests), to: manifestURL)
+                    }
                 }
-                var childIDs: [String] = [], outputIDs: [String: String] = [:]
+                let batchKey = tuple(progress.sourceLibraryID, namespace, entry.key, "transform-1")
+                var childIDs: [String] = [], outputIDs: [String: String] = [:], children: [[String: Any]] = []
+                var bindings: [(LegacyImportCommand, Data, String)] = []
+                var identities: [String: [String: String]] = [:]
                 for command in plan.commands {
                     var payload = try JSONSerialization.jsonObject(with: command.payloadJson) as? [String: Any] ?? [:]
-                    // Only control/reference placeholders are rebound; original payload/provenance stays exact.
                     for control in ["expect", "expectActivity", "expectedPosition", "expectedState"] {
                         if let key = payload[control] as? String, let id = outputIDs[key] ?? progress.outputs[key] { payload[control] = id }
                     }
@@ -121,31 +166,51 @@ public actor LibraryMigration {
                         guard child < childIDs.count else { throw MigrationError.invalidSource }
                         payload[command.kind == "delete" ? "expectActivity" : "expect"] = childIDs[Int(child)]
                     }
-                    let clean = try DomainCommand(namespace: namespace, kind: command.kind, payloadJSON: json(payload))
-                    let receipt: WriteReceipt
-                    do { receipt = try await destination.performMigration(clean, outputKey: tuple(progress.sourceLibraryID, namespace, command.outputKey)) }
-                    catch SessionError.migrationCollision {
-                        let reason = "\(namespace)/\(operation.id): native identity collision requires occurrence remapping"
-                        if !progress.unresolved.contains(reason) { progress.unresolved.append(reason) }
-                        try files.save(progress)
-                        throw MigrationError.reconciliationRequired(reason)
+                    if let id = payload["id"] as? String, migrationCreatesIdentity(namespace, command.kind, payload) {
+                        let category = importIdentityCategory(namespace: namespace, kind: command.kind)
+                        let key = tuple(progress.sourceLibraryID, namespace, category, id, entry.digest)
+                        let reserved = try await destination.query(namespace: namespace, name: "importIdentity", arguments: json(["key": key, "preferred": id, "category": category]))
+                        let status = try JSONSerialization.jsonObject(with: reserved) as? [String: Any] ?? [:]
+                        if status["occupied"] as? Bool == true && status["reserved"] as? String != id {
+                            let reason = "\(namespace)/\(operation.id): native identity collision requires occurrence remapping"
+                            if !progress.unresolved.contains(reason) { progress.unresolved.append(reason) }
+                            try files.save(progress); throw MigrationError.reconciliationRequired(reason)
+                        }
+                        identities[key] = ["category": category, "id": id]
                     }
-                    guard case .saved(let id) = receipt else { throw MigrationError.destinationUnavailable }
-                    try afterPublication?()
+                    let id = try importOutputId(library: destinationID, namespace: namespace, batch: batchKey, child: command.outputKey)
+                    children.append(["key": command.outputKey, "kind": command.kind, "payload": payload, "baseline": command.baseline])
                     childIDs.append(id); outputIDs[command.outputKey] = id
-                    SourceEvaluation.bind(namespace: namespace, source: entry, command: command, payload: payload, operationID: id, progress: &progress)
+                    bindings.append((command, try json(payload), id))
                 }
                 let evidence = try JSONSerialization.jsonObject(with: plan.evidenceJson)
-                let record: [String: Any] = ["sourceLibrary": progress.sourceLibraryID, "namespace": namespace, "operationID": operation.id,
+                var record: [String: Any] = ["sourceLibrary": progress.sourceLibraryID, "namespace": namespace, "operationID": operation.id,
                     "authorID": entry.admitted.author, "authorLabel": entry.admitted.authorLabel, "signedBodyDigest": entry.digest,
                     "digestAlgorithm": "SHA-256", "digestPurpose": "exact authenticated signed operation body", "transformVersion": 1,
                     "admittedOrder": index, "claimedDate": try JSONSerialization.jsonObject(with: entry.claimedDateJSON, options: .fragmentsAllowed), "claimedDateCodec": "Colophon 0.1 Canonical/ISO8601",
                     "admission": input.admission, "admissionDetail": String(describing: entry.admitted.status), "sourceOutcome": evaluated.outcome, "domainEvidence": evidence, "outputOperationIDs": outputIDs]
-                try files.write(json(record), to: evidenceURL(entry.key))
+                let firstOutput = children.first?["payload"] as? [String: Any]
+                record["object"] = firstOutput?["id"] as? String ?? ["cell", "note", "entry", "book", "item", "episode", "show", "notebook"].compactMap { operation.payload[$0]?.string }.first
+                let alternatives: [Any] = ["conflict", "lateEdit"].contains(evaluated.outcome) ? [record] : historicalCandidates(evidence)
+                let body: [String: Any] = ["key": batchKey, "evidence": record, "children": children, "alternatives": alternatives, "identities": identities, "blobs": manifests]
+                let clean = try DomainCommand(namespace: namespace, kind: "colophon.importBatch", payloadJSON: json(body))
+                guard case .saved = try await destination.performMigration(clean, outputKey: batchKey) else { throw MigrationError.destinationUnavailable }
+                let receiptBytes = try await destination.query(namespace: namespace, name: "importReceipt", arguments: json(["key": batchKey]))
+                guard let receipt = try JSONSerialization.jsonObject(with: receiptBytes, options: .fragmentsAllowed) as? [String: Any],
+                      receipt["outputOperationIDs"] as? [String: String] == outputIDs else {
+                    throw MigrationError.reconciliationRequired("\(namespace): source unit was not accepted after refreshed admission")
+                }
+                try afterPublication?()
+                for (command, payloadBytes, id) in bindings {
+                    let payload = try JSONSerialization.jsonObject(with: payloadBytes) as? [String: Any] ?? [:]
+                    SourceEvaluation.bind(namespace: namespace, source: entry, command: command, payload: payload, operationID: id, progress: &progress)
+                }
                 if evaluated.outcome == "unresolved" || evidenceHasGap(evidence) || entry.admitted.status != .admitted {
                     let issue = "\(namespace)/\(operation.id): retained import evidence requires review"
                     if !progress.unresolved.contains(issue) { progress.unresolved.append(issue) }
                 }
+                if progress.sourceOutcomes == nil { progress.sourceOutcomes = [:] }
+                progress.sourceOutcomes?[namespace, default: [:]][entry.key] = try json(sourceOutcome(entry, index: index, evaluated: evaluated))
                 progress.outputs.merge(outputIDs) { _, new in new }
                 progress.states[namespace] = try bindLegacyImportState(namespace: namespace, stateJson: plan.stateJson, outputs: outputIDs)
                 progress.prefixes[namespace, default: []].append(entry.fingerprint)
@@ -160,12 +225,28 @@ public actor LibraryMigration {
             importedOperations: progress.prefixes.values.reduce(0) { $0 + $1.count }, remainingOperations: remaining,
             unresolved: progress.unresolved, membersNeedingRejoin: progress.membersNeedingRejoin)
     }
-    private func evidenceURL(_ key: String) -> URL { files.directory.appendingPathComponent("import-evidence-local/" + key + ".aesgcm") }
-    /// Local evidence fallback for an upgrade review UI. No synchronized/grant-checked engine query yet.
-    public func evidence() throws -> [Data] {
-        let directory = files.directory.appendingPathComponent("import-evidence-local")
-        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
-        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { !$0.lastPathComponent.contains("-blobs") }.sorted { $0.path < $1.path }.map { try files.open($0) }
+    /// Grant-checked synchronized evidence. Pagination is bounded in the engine; callers that
+    /// render pages should use ColophonSession.query(importEvidence) directly.
+    public func evidence() async throws -> [Data] {
+        var records: [Data] = []
+        for namespace in SourceReader.namespaces {
+            var cursor: Any? = nil
+            repeat {
+                var args: [String: Any] = ["limit": 100]
+                if let cursor { args["cursor"] = cursor }
+                let page = try await destination.query(namespace: namespace, name: "importEvidence", arguments: json(args))
+                guard let envelope = try JSONSerialization.jsonObject(with: page) as? [String: Any],
+                      let value = envelope["value"] as? [String: Any], let rows = value["rows"] as? [[String: Any]] else { throw MigrationError.invalidSource }
+                for row in rows {
+                    var evidence = row["evidence"] as? [String: Any] ?? [:]
+                    evidence["outputOperationIDs"] = row["outputOperationIDs"]
+                    evidence["publication"] = row["publication"]
+                    records.append(try json(evidence))
+                }
+                cursor = value["next"] is NSNull ? nil : value["next"]
+            } while cursor != nil
+        }
+        return records
     }
 }
 private func evidenceHasGap(_ value: Any) -> Bool {
@@ -182,4 +263,27 @@ private func evidenceHasGap(_ value: Any) -> Bool {
         if let list = object[key] as? [String], list.contains(where: { !historicalNotes.contains($0) }) { return true }
     }
     return object.filter { !["source", "payload", "historical_candidate"].contains($0.key) }.values.contains(where: evidenceHasGap)
+}
+
+private func migrationCreatesIdentity(_ namespace: String, _ kind: String, _ payload: [String: Any]) -> Bool {
+    switch (namespace, kind) {
+    case ("reading.books", "addBook"), ("reading.books", "addNote"), ("reading.saved", "capture"),
+         ("notes", "createNotebook"), ("notes", "addNote"), ("listening.podcasts", "addNote"): return true
+    case ("notes", "putCell"), ("notes", "putEntry"), ("listening.podcasts", "follow"): return payload["expect"] is NSNull
+    default: return false
+    }
+}
+private func historicalCandidates(_ value: Any) -> [Any] {
+    if let rows = value as? [Any] { return rows.flatMap(historicalCandidates) }
+    guard let row = value as? [String: Any] else { return [] }
+    if let disposition = row["disposition"] as? String, ["historicalAlternative", "lateEdit"].contains(disposition) { return [row] }
+    return []
+}
+
+private func sourceOutcome(_ entry: SourceEntry, index: Int, evaluated: SourceEvaluation) throws -> [String: Any] {
+    ["key": entry.key, "authorID": entry.admitted.author, "authorLabel": entry.admitted.authorLabel,
+     "operationID": entry.admitted.id, "signedBodyDigest": entry.digest, "admittedOrder": index,
+     "admission": entry.admitted.status == .admitted ? "admitted" : "held", "outcome": evaluated.outcome,
+     "payload": try JSONSerialization.jsonObject(with: entry.payloadJSON),
+     "effectivePayload": evaluated.context["effective_payload"] ?? evaluated.context["effectivePayload"] ?? NSNull()]
 }

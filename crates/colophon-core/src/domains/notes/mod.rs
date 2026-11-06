@@ -932,3 +932,17 @@ fn merge_extensions_only(value: &mut Value, op: &AdmittedOperation) {
 fn merge_alias_extras(value: &mut Value, op: &AdmittedOperation) {
     merge_extensions_only(value, op);
 }
+
+impl NotesState {
+    pub(crate) fn identity_exists(&self, category: &str, id: &str) -> bool {
+        match category {
+            "notebook" => self.books.contains_key(id),
+            "cell" => self.cells.contains_key(id),
+            "entry" => self.entries.contains_key(id),
+            "run" => self.runs.contains_key(id),
+            "attachment" => self.attachments.contains_key(id),
+            "proposal" => self.proposals.contains_key(id),
+            _ => false,
+        }
+    }
+}
