@@ -1,4 +1,7 @@
 //! Device-local incremental projections and bounded replay checkpoints.
+pub use crate::library::storage::{
+    Engine, EngineOptions, EngineStats, HistoryPage, OpenMode, RecordSource, VerificationProgress,
+};
 use crate::{domain::State, model::OperationView, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

@@ -46,11 +46,14 @@ missing data, explicit cache invalidation, and every shared seam proven by two r
   keeps each namespace's state and the admitted order.
 - Appending operations that sort after the tail costs time proportional to the new operations.
   An operation that sorts earlier (offline work, held operations later admitted, authority
-  changes) replays from the nearest checkpoint before it.
+  changes) invalidates affected evidence. `Library` can replay from the nearest retained
+  projection checkpoint; storage-backed `Engine` conservatively verifies/rebuilds on such changes.
 - **Checkpoints** are device-local caches: a serialized domain state plus a rolling digest of the
   admitted prefix (`H(n) = SHA-256(H(n-1) || operation digest)`). A checkpoint is used only if
   the current prefix at that position has the same digest. This is the explicit invalidation
-  contract the guide asks for; nothing is inferred from a revision counter.
+  contract the guide asks for; nothing is inferred from a revision counter. The storage-backed
+  cache additionally authenticates the record-path/digest index and admission evidence so an
+  unchanged covered prefix need not be fetched, verified or decrypted on open.
 - **Queries** return small, typed slices (an episode, a page of a shelf), so apps never copy a
   whole domain state across the FFI boundary per render. Change notifications carry the changed
   namespaces and a new revision.
@@ -58,13 +61,17 @@ missing data, explicit cache invalidation, and every shared seam proven by two r
   cold open from a checkpoint under 100 ms; a local write to updated state under 2 ms; a full
   rebuild of 100k operations under 1.5 s; memory proportional to state, not history.
 
-Engine implementation (November 6, 2026): reducers, bounded queries, incremental namespace
-state, revisions/change summaries and authenticated local checkpoints are available through
-additive Rust APIs. Existing `Library` signatures and 0.2 conformance vectors are unchanged.
-See [engine API](engine.md) and [measured performance](performance.md). Local writes meet the
-2 ms target on the measured M3 Max. Verified full rebuild/cold open and memory proportional to
-state remain unmet: record verification dominates startup, and the existing `records()` API
-requires retaining history. Those limits remain proof gates before app migration is complete.
+Engine stage 2 (November 6, 2026): reducers, bounded queries, revisions and existing `Library`
+APIs remain compatible. Native hosts can opt into `Engine<RecordSource>` for authenticated
+verified-prefix checkpoints, lazy bounded history content and explicit admission invalidation.
+Portable native verification uses cached public-key tables and scoped parallel workers; an
+optional host batch-verification seam is ready for bindings. The 100k desktop timing gates now
+pass, including a checkpoint open with 1% new operations. See [engine API](engine.md) and
+[measured performance](performance.md). The engine retains lightweight history indexes plus
+state and bounded content, rather than full record bytes/views; strictly state-only memory is
+not claimed. iPhone measurements, platform crypto integration and real-app storage/lifecycle
+validation remain proof gates before migration is complete. The version-1 `Library` checkpoint
+path remains cryptographically eager; bindings must opt into the storage-backed API for fast opens.
 
 ### Domains
 

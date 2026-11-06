@@ -283,3 +283,56 @@ No storage, network, clock, OS randomness, UI, relay, CLI executable, MCP transp
 keystore is implemented by the Rust core. Hosts provide these. The JavaScript host uses WebCrypto,
 the host clock, and file/fetch loading of the wasm module. Native/wasm parity is tested from the
 same fixture bytes. The Swift 0.1 implementation and vectors remain unchanged historical material.
+
+### 7.1 Device-local verified-prefix optimization (no wire change)
+
+An implementation MAY retain a device-authenticated cache of verified record membership,
+admission evidence and reducer state. This is a local optimization, **not a new wire record**,
+shared authority, portable backup, or replacement for signature/admission rules. A cache MUST
+bind the format/reducer version, library, recipient, authority state, exact record paths and
+digests, namespace admitted prefixes, and the corresponding reducer states. Namespace keys
+shared with other members MUST NOT alone authorize a device-local verification cache.
+
+The Rust `Engine` version-2 cache uses a sorted path/digest index and per-namespace rolling
+prefix hashes, authenticated together with a host-provided device-local 32-byte secret. Index
+digests cover exact **outer envelope bytes** (including signatures); namespace prefix hashes
+cover admitted exact **signed body** digests, as used by `kept`. The cache separately marks
+verified headers, payload-authenticated IDs, projected operations, and rejected/observed bytes.
+Rejected records and unvalidated requests MUST NOT become admitted merely by being indexed.
+Epoch secret keys are not persisted in the cache. Hosts protect the local cache because reducer
+state can include plaintext. See [the engine format/API](../docs/engine.md#storage-backed-engine-stage-2).
+
+Given an authenticated cache and a coherent current path listing, the core MAY trust covered
+records without fetching, re-verifying, decrypting or JSON-parsing their historical operations.
+It MUST fully verify, authenticate and admit new operations before applying them. It MUST check
+access/expiry/revocation and current key availability for queries and writes, including after
+cache restoration. A missing, stale, unknown-version, wrong-identity/library or unauthenticated
+cache MUST fall back to full verification, never to an empty successful projection. Authority
+listing changes, missing covered paths, earlier arrivals that can affect admission, and changed
+payload-key availability invalidate admission/projection evidence. This implementation rebuilds
+fully on those events; a future implementation may safely use more precise explicit invalidation.
+
+Path membership does not prove that the folder still holds the previously verified bytes. An
+attacker who can rewrite the shared folder but cannot forge the local cache authentication can
+suppress unseen records or replace/delete a covered record at its old path. A fast open can
+continue displaying the earlier authenticated state until bytes are fetched. The attacker cannot
+choose replacement reducer state or grant themselves authority through the cached path. Listing
+a missing prefix path as absent invalidates the cache; withholding an unseen suffix is not
+observable. Neither this optimization nor ordinary signatures establish global freshness or
+prevent rollback of a valid old local cache if local storage is also controlled by the attacker.
+
+Hosts MUST have an explicit integrity-audit path. `Engine::verify_batch(limit)` lazily rechecks
+up to `limit` indexed records, validating exact envelope digests and independently verifying
+signatures on records previously classified as verified. History queries fetch/decrypt only
+needed original operations and check their envelope digests on cache misses; plaintext caching
+is bounded. Changed/missing covered bytes, or a trusted signature that fails audit, MUST produce
+a clear integrity error. They MUST NOT silently substitute bytes, return empty content, or
+silently rebase the trusted checkpoint. The Rust engine poisons subsequent query/write/cache
+operations after such a failure, requiring host intervention and a fresh open. Hosts schedule
+audits and surface their errors; the pure core does not run an autonomous background service.
+
+Independent signature verification and payload authentication MAY execute in parallel. Hosts
+MAY provide a trusted exact-byte P-256/SHA-256 batch verifier; it supplies cryptographic results
+only. The core MUST still decide path binding, operation IDs, ordering, grants, epochs, budgets,
+revocation and final admission. Native threading and provider choice do not alter wire semantics;
+WASM remains single-threaded. Record storage and on-demand full-view allocations remain host-owned.

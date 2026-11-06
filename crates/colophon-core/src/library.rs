@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "storage.rs"]
+pub(crate) mod storage;
+
 /// One exact body to sign. Finish verifies the supplied signature against `signing`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SigningStep {
@@ -88,6 +91,7 @@ pub struct Library {
     checkpoint_policy: CheckpointPolicy,
     changes: ChangeSummary,
     pending_checkpoints: BTreeMap<String, Vec<u8>>,
+    verifiers: std::sync::Arc<crate::verification::Verifiers>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Status {
@@ -180,7 +184,9 @@ impl Library {
         if me.id() == authority.recovery.id() {
             ensure(me == authority.recovery, "Recovery agreement key mismatch")?;
         }
+        let verifiers = std::sync::Arc::new(crate::verification::Verifiers::new(&authority));
         let mut library = Self {
+            verifiers,
             records,
             authority,
             me,
@@ -257,6 +263,7 @@ impl Library {
             );
             let authority = Authority::replay(&authority_records)?;
             ensure(authority.id == self.authority.id, "Different library")?;
+            self.verifiers = std::sync::Arc::new(crate::verification::Verifiers::new(&authority));
             self.authority = authority;
         }
         let mut paths: Vec<_> = incoming
@@ -1178,55 +1185,15 @@ impl Library {
         self.changes = ChangeSummary::default();
         let mut touched = BTreeSet::new();
         let mut candidates = Vec::new();
-        let verifiers: BTreeMap<_, _> = if paths.is_empty() {
-            BTreeMap::new()
-        } else {
-            self.authority
-                .members
-                .iter()
-                .filter_map(|(id, member)| {
-                    p256::ecdsa::VerifyingKey::from_sec1_bytes(&member.public.signing)
-                        .ok()
-                        .map(|key| (id.clone(), key))
-                })
-                .collect()
-        };
-        for path in paths {
-            let Some(raw) = self.records.get(path) else {
-                continue;
-            };
-            let parsed = (|| -> Result<(OperationHeader, String)> {
-                let record: SignedRecord = serde_json::from_slice(raw)?;
-                let header: OperationHeader = serde_json::from_slice(&record.body)?;
-                let meta = &header.meta;
-                let verifier = verifiers
-                    .get(&meta.author)
-                    .ok_or_else(|| missing("author"))?;
-                record.verify_with(verifier)?;
-                ensure(
-                    meta.protocol == "colophon/operation/2" && meta.library == self.id(),
-                    "Wrong operation protocol or library",
-                )?;
-                ensure(
-                    meta.id.len() == 32
-                        && meta
-                            .id
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-                    "Invalid operation ID",
-                )?;
-                ensure(path == &operation_path(meta), "Operation path mismatch")?;
-                ensure(
-                    meta.clock > 0
-                        && meta.clock <= 9_007_199_254_740_991
-                        && meta.authority > 0
-                        && header.nonce.len() == 12
-                        && header.ciphertext.len() >= 16,
-                    "Invalid operation header",
-                )?;
-                time_key(&meta.created)?;
-                Ok((header, records::digest(&record.body)))
-            })();
+        let input: Vec<_> = paths
+            .iter()
+            .filter_map(|p| self.records.get(p).map(|r| (p.as_str(), r.as_slice())))
+            .collect();
+        let results = self
+            .verifiers
+            .operations(&self.authority, &input, None)
+            .expect("portable verifier has no host failure");
+        for ((path, raw), parsed) in input.into_iter().zip(results) {
             match parsed {
                 Ok((header, digest)) => {
                     self.invalid.remove(path);
@@ -1248,7 +1215,7 @@ impl Library {
                         touched.insert(header.meta.namespace.clone());
                     }
                     self.invalid.insert(
-                        path.clone(),
+                        path.to_owned(),
                         (
                             header
                                 .as_ref()
@@ -1258,7 +1225,7 @@ impl Library {
                                 id: header
                                     .as_ref()
                                     .map(|h| h.meta.id.clone())
-                                    .unwrap_or_else(|| path.clone()),
+                                    .unwrap_or_else(|| path.to_owned()),
                                 author: header.map(|h| h.meta.author).unwrap_or_default(),
                                 reason: format!("invalidRecord: {error}"),
                             },

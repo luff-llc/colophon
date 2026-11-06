@@ -103,7 +103,7 @@ pub enum Action {
     },
 }
 /// Internal member identity and admission history, exposed for protocol inspectors.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberState {
     /// View metadata and grant.
     pub member: Member,
@@ -112,8 +112,8 @@ pub struct MemberState {
     /// Operations explicitly preserved by revocation.
     pub kept: BTreeSet<String>,
 }
-/// A verified history. Construct only through `replay`.
-#[derive(Clone, Debug)]
+/// A verified history produced by `replay`. Deserialized caches require device authentication.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Authority {
     /// Genesis-body ID.
     pub id: String,

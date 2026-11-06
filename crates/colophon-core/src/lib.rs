@@ -10,6 +10,7 @@ pub mod hpke;
 pub mod library;
 pub mod model;
 pub mod records;
+pub mod verification;
 
 /// A protocol or cryptographic validation failure. Messages contain no private key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
