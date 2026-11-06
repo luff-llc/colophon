@@ -105,21 +105,13 @@ impl Default for PodcastsState {
         }
     }
 }
-/// Notebooks, notes and attributed alternatives.
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct NotesState {
-    notebooks: BTreeMap<String, Value>,
-    notes: BTreeMap<String, Value>,
-    conflicts: Vec<Value>,
-    invalid: Vec<String>,
-}
+/// Notebook, cell and entry domain types.
+pub use crate::domains::notes::{Notes, NotesState};
 
 /// Saved reading shelf.
 pub struct ReadingSaved;
 /// Followed podcasts, episodes, positions and queue.
 pub struct ListeningPodcasts;
-/// Notebooks and attributed notes.
-pub struct Notes;
 fn spec(name: &str, description: &str, required: &[&str], properties: Value) -> Spec {
     Spec {
         name: name.into(),
@@ -242,57 +234,6 @@ impl DomainModule for ListeningPodcasts {
     }
     fn fold(&self, ops: &[OperationView]) -> Value {
         let mut state = PodcastsState::default();
-        for op in ops {
-            self.apply(&mut state, op);
-        }
-        state.projection()
-    }
-}
-impl DomainModule for Notes {
-    fn display_name(&self) -> &'static str {
-        "notes"
-    }
-    fn write_phrase(&self, kind: &str) -> Option<&'static str> {
-        match kind {
-            "createNotebook" => Some("started a notebook"),
-            "addNote" => Some("added a note"),
-            "editNote" => Some("edited a note"),
-            _ => None,
-        }
-    }
-    fn contribution_names(&self, kind: &str) -> (&'static str, &'static str) {
-        match kind {
-            "createNotebook" => ("notebook", "notebooks"),
-            _ => ("note", "notes"),
-        }
-    }
-    fn namespace(&self) -> &'static str {
-        "notes"
-    }
-    fn operations(&self) -> Vec<Spec> {
-        vec![
-            spec(
-                "createNotebook",
-                "Create a notebook",
-                &["id", "title"],
-                json!({"id":{"type":"string"},"title":{"type":"string"}}),
-            ),
-            spec(
-                "addNote",
-                "Add an attributed note to a notebook",
-                &["id", "notebook", "text"],
-                json!({"id":{"type":"string"},"notebook":{"type":"string"},"text":{"type":"string"}}),
-            ),
-            spec(
-                "editNote",
-                "Edit a note, retaining stale edits as conflicts",
-                &["id", "notebook", "text"],
-                json!({"id":{"type":"string"},"notebook":{"type":"string"},"text":{"type":"string"},"expect":{"type":"string"}}),
-            ),
-        ]
-    }
-    fn fold(&self, ops: &[OperationView]) -> Value {
-        let mut state = NotesState::default();
         for op in ops {
             self.apply(&mut state, op);
         }
@@ -579,69 +520,6 @@ impl Reducer for ListeningPodcasts {
                     .unwrap_or(&[]),
                 args,
             ),
-            "conflicts" => page_slice(&state.conflicts, args),
-            "invalid" => page_slice(&state.invalid, args),
-            _ => Err(crate::Error("Unknown query".into())),
-        }
-    }
-}
-
-impl NotesState {
-    fn projection(&self) -> Value {
-        let state = self;
-        json!({"notebooks":ordered(&state.notebooks),"notes":ordered(&state.notes),"conflicts":state.conflicts,"invalid":state.invalid})
-    }
-}
-impl Reducer for Notes {
-    type State = NotesState;
-    fn apply(&self, state: &mut Self::State, op: &AdmittedOperation) {
-        let NotesState {
-            notebooks,
-            notes,
-            conflicts,
-            invalid,
-        } = state;
-
-        if !known_valid(self, op, invalid) {
-            return;
-        }
-        let id = string(&op.payload, "id");
-        match op.kind.as_str() {
-            "createNotebook" => create(self, notebooks, id, op, conflicts),
-            "addNote" if notebooks.contains_key(string(&op.payload, "notebook")) => {
-                create(self, notes, id, op, conflicts)
-            }
-            "editNote" => {
-                if let Some(note) = notes.get_mut(id) {
-                    if note["notebook"] != op.payload["notebook"] {
-                        invalid.push(op.id.clone());
-                    } else if conflict(note, op) {
-                        conflicts.push(json!(op));
-                    } else {
-                        merge(self, note, op);
-                    }
-                } else {
-                    invalid.push(op.id.clone());
-                }
-            }
-            _ => invalid.push(op.id.clone()),
-        }
-    }
-    fn query(&self, state: &Self::State, name: &str, args: &Value) -> crate::Result<Value> {
-        match name {
-            "read" => Ok(state.projection()),
-            "notebooks" => page_map(&state.notebooks, args),
-            "notebook" => Ok(state
-                .notebooks
-                .get(required_id(args)?)
-                .cloned()
-                .unwrap_or(Value::Null)),
-            "notes" => page_map(&state.notes, args),
-            "note" => Ok(state
-                .notes
-                .get(required_id(args)?)
-                .cloned()
-                .unwrap_or(Value::Null)),
             "conflicts" => page_slice(&state.conflicts, args),
             "invalid" => page_slice(&state.invalid, args),
             _ => Err(crate::Error("Unknown query".into())),
