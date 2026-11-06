@@ -106,6 +106,23 @@ import ColophonKitStorage
         do { let snapshot = try await worker.importRequest(from: url); if lease == context { apply(snapshot) } }
         catch { if lease == context { handleCommandError(error) }; throw error }
     }
+    /// Reads a bounded core query. Results are fenced against namespace and identity changes.
+    public func query(namespace: String, name: String, arguments: Data) async throws -> Data {
+        await restore()
+        guard phase == .ready else { throw SessionError.notReady }
+        let lease = context
+        let observed = namespaceRevisions[namespace, default: 0]
+        do {
+            let bytes = try await worker.query(namespace: namespace, name: name, arguments: arguments)
+            guard context == lease, phase == .ready,
+                  namespaceRevisions[namespace, default: 0] == observed else { throw SessionError.staleRevision }
+            return bytes
+        } catch {
+            if context == lease { handleCommandError(error) }
+            throw error
+        }
+    }
+
     public func recoveryKeys() async -> (any AsyncKeyProvider)? { await worker.recovery() }
 
     /// Returns per-envelope outcomes; invalid items stay queued for user review, never acknowledged.

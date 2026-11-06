@@ -367,6 +367,28 @@ impl NativeLibrary {
                 .begin_recover(new_root.into(), label, &now, seed(entropy)?)?,
         )
     }
+    /// Read a named domain query without tool-name collisions or preparing a write.
+    pub fn query(
+        &self,
+        namespace: String,
+        name: String,
+        arguments: Vec<u8>,
+        now: String,
+    ) -> Result<JsonOutcome> {
+        match self.lock()?.library.query(
+            &namespace,
+            &name,
+            serde_json::from_slice(&arguments)?,
+            &now,
+        )? {
+            Outcome::Success { value, .. } => Ok(JsonOutcome::Success {
+                value: serde_json::to_vec(&value)?,
+            }),
+            Outcome::Failure { reason, detail, .. } => Ok(JsonOutcome::Failure {
+                denial: denial(reason, detail)?,
+            }),
+        }
+    }
     pub fn view(&self, namespace: String, now: String) -> Result<ViewOutcome> {
         match self.lock()?.library.view(&namespace, &now)? {
             Outcome::Success { value, .. } => Ok(ViewOutcome::Success {

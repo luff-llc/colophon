@@ -21,7 +21,7 @@
               "noteCount": 1,
               "page": null,
               "pages": 200,
-              "revision": "e2929256b63435a8d73a136621cb89a8",
+              "revision": "29309e9f843ce1e7b419656b50881b9e",
               "started": null,
               "status": "reading",
               "title": "Synthetic book revised"
@@ -43,7 +43,7 @@
             "author": "554d879a8d002447b94566bd1320cba3",
             "authorLabel": "Books fixture owner",
             "catalogKey": "OL-example",
-            "clock": 11,
+            "clock": 12,
             "creator": "Example writer",
             "fraction": 0.25,
             "id": "b",
@@ -51,7 +51,7 @@
             "origin": "person",
             "page": null,
             "pages": 200,
-            "revision": "e2929256b63435a8d73a136621cb89a8",
+            "revision": "29309e9f843ce1e7b419656b50881b9e",
             "title": "Synthetic book revised"
           },
           "currentReading": {
@@ -68,13 +68,22 @@
             }
           },
           "heads": {
-            "activity": "e2929256b63435a8d73a136621cb89a8",
-            "loan": null,
+            "activity": "29309e9f843ce1e7b419656b50881b9e",
+            "loan": "29309e9f843ce1e7b419656b50881b9e",
             "metadata": "549a31358ede9905485db3892719a22a",
             "plan": "e2929256b63435a8d73a136621cb89a8",
             "progress": "d3ceb00eba9b8757a53df570369c69a1"
           },
-          "loan": null
+          "loan": {
+            "author": "554d879a8d002447b94566bd1320cba3",
+            "authorLabel": "Books fixture owner",
+            "clock": 12,
+            "extensions": {},
+            "origin": "person",
+            "requestID": "fixture-request",
+            "revision": "29309e9f843ce1e7b419656b50881b9e",
+            "status": "needsReturn"
+          }
         }
       }
     },
@@ -273,15 +282,11 @@
           "next": null,
           "rows": [
             {
-              "operation": "29309e9f843ce1e7b419656b50881b9e",
-              "reason": "authenticatedAppOrDeviceRequired"
-            },
-            {
               "operation": "3dd550f19163e86f13923d4f1bfe6f3f",
               "reason": "invalidPayload"
             }
           ],
-          "total": 2
+          "total": 1
         }
       }
     },

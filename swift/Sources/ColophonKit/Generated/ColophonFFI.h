@@ -393,6 +393,11 @@ RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_members(uint64_t ptr, Rus
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_merge(uint64_t ptr, RustBuffer records, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_QUERY
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_QUERY
+RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_query(uint64_t ptr, RustBuffer namespace, RustBuffer name, RustBuffer arguments, RustBuffer now, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_READY_WITH
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_READY_WITH
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_ready_with(uint64_t ptr, uint64_t keys, RustCallStatus *_Nonnull out_status
@@ -825,6 +830,12 @@ uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_members(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_MERGE
 uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_merge(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_QUERY
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_QUERY
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_query(void
     
 );
 #endif

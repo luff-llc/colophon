@@ -99,7 +99,9 @@ fresh-identity enrollment; this engine does not introduce same-identity replacem
   disables creation; `retain: 0` also removes retained snapshots. A host explicitly persists
   `checkpoint()` bytes; the core performs no filesystem I/O.
 
-The version-1 body contains `version`, `library`, `identity`, `namespace`, `epoch`, and `snapshot`.
+The version-2 body contains `version`, `library`, `identity`, `namespace`, `epoch`, and `snapshot`.
+Version 2 passes authority-derived member kinds to domain reducers during append and replay.
+Version-1 caches are discarded because their role-sensitive projections may be incomplete.
 The snapshot contains serialized reducer `state`, admitted-prefix `position`, and 32-byte `digest`.
 `H(0)` is 32 zero bytes. `H(n) = SHA-256(H(n-1) || recordDigest(n))`, concatenating raw 32-byte
 values. The operation record digest is SHA-256 of the exact signed **body** bytes, as in `kept`;

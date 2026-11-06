@@ -117,6 +117,15 @@ public actor Library {
         }
     }
 
+    /// Read-only tool dispatch. A command name can never commit a write through this API.
+    public func query(namespace: String, name: String, arguments: Data) async throws -> Outcome<Data> {
+        try await ready()
+        switch try native.query(namespace: namespace, name: name, arguments: arguments, now: HostInputs.now()) {
+        case .success(let value): return .success(value)
+        case .failure(let denial): return .failure(denial)
+        }
+    }
+
     public func call(tool: String, input: Data) async throws -> Outcome<Data> {
         try await ready()
         switch try native.beginCall(tool: tool, input: input, now: HostInputs.now(), entropy: HostInputs.entropy()) {

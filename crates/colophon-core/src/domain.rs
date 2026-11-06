@@ -187,12 +187,24 @@ impl State {
             _ => Self::Unknown,
         }
     }
-    pub fn apply(&mut self, op: &AdmittedOperation) {
+    /// Authenticated role context comes only from the verified authority chain.
+    pub fn apply_with_member_kind(
+        &mut self,
+        op: &AdmittedOperation,
+        kind: Option<crate::model::MemberKind>,
+    ) {
         match self {
-            Self::Books(s) => ReadingBooks.apply(s, op),
+            Self::Books(s) => ReadingBooks.apply_with_member_kind(s, op, kind),
             Self::Saved(s) => ReadingSaved.apply(s, op),
-            Self::Podcasts(s) => ListeningPodcasts.apply(s, op),
-            Self::Notes(s) => Notes.apply(s, op),
+            Self::Podcasts(s) => ListeningPodcasts.apply_with_context(
+                s,
+                op,
+                crate::domains::listening::ApplyContext {
+                    member_kind: kind,
+                    ..Default::default()
+                },
+            ),
+            Self::Notes(s) => Notes.apply_with_member_kind(s, op, kind),
             Self::Unknown => {}
         }
     }

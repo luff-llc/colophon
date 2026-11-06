@@ -755,6 +755,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_merge(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_query(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_ready_with(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_records(
@@ -843,6 +845,8 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_members(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_merge(`ptr`: Long,`records`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_query(`ptr`: Long,`namespace`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`arguments`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_ready_with(`ptr`: Long,`keys`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1043,6 +1047,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_merge() and 0xFFFF) != 51897) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_query() and 0xFFFF) != 28303) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_ready_with() and 0xFFFF) != 23978) {
@@ -1798,6 +1805,11 @@ public interface NativeLibraryInterface {
     fun `merge`(`records`: Map<kotlin.String, kotlin.ByteArray>): ChangeSummary
     
     /**
+     * Read a named domain query without tool-name collisions or preparing a write.
+     */
+    fun `query`(`namespace`: kotlin.String, `name`: kotlin.String, `arguments`: kotlin.ByteArray, `now`: kotlin.String): JsonOutcome
+    
+    /**
      * Drives synchronous local callbacks without holding a session lock.
      */
     fun `readyWith`(`keys`: KeyProvider): ChangeSummary
@@ -2149,6 +2161,27 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
         it,
         
         FfiConverterMapStringByteArray.lower(`records`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Read a named domain query without tool-name collisions or preparing a write.
+     */
+    @Throws(BindingException::class)override fun `query`(`namespace`: kotlin.String, `name`: kotlin.String, `arguments`: kotlin.ByteArray, `now`: kotlin.String): JsonOutcome {
+            return FfiConverterTypeJsonOutcome.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_query(
+        it,
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`name`),
+        FfiConverterByteArray.lower(`arguments`),
+        FfiConverterString.lower(`now`),_status)
 }
     }
     )

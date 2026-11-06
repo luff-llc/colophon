@@ -207,3 +207,11 @@ Apps can now depend on `ColophonSession`, with `ColophonKitStorage` underneath, 
 assembling persistence and lifecycle around `Library` directly. See [new app](new-app.md)
 and [session contracts](session.md). The current adapter still uses this snapshot binding;
 verified-prefix checkpoint consumption waits for the new engine and regenerated bindings.
+
+### Read-only named queries
+
+`NativeLibrary.query(namespace:name:arguments:now:) -> JsonOutcome` is an additive read path.
+`Library.query(namespace:name:arguments:)` wraps it asynchronously. It calls core `Library::query`
+directly, requires read access, and cannot prepare or commit writes. This preserves the bounded
+0.2 query envelopes even when names such as podcast `episode`/`queue` also name operations.
+The four typed domain products use this through `ColophonSession`; apps normally use their stores.

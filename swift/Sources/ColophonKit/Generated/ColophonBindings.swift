@@ -737,6 +737,11 @@ public protocol NativeLibraryProtocol: AnyObject, Sendable {
     func merge(records: [String: Data]) throws  -> ChangeSummary
     
     /**
+     * Read a named domain query without tool-name collisions or preparing a write.
+     */
+    func query(namespace: String, name: String, arguments: Data, now: String) throws  -> JsonOutcome
+    
+    /**
      * Drives synchronous local callbacks without holding a session lock.
      */
     func readyWith(keys: KeyProvider) throws  -> ChangeSummary
@@ -980,6 +985,22 @@ open func merge(records: [String: Data])throws  -> ChangeSummary  {
     uniffi_colophon_ffi_fn_method_nativelibrary_merge(
             self.uniffiCloneHandle(),
         FfiConverterDictionaryStringData.lower(records),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Read a named domain query without tool-name collisions or preparing a write.
+     */
+open func query(namespace: String, name: String, arguments: Data, now: String)throws  -> JsonOutcome  {
+    return try  FfiConverterTypeJsonOutcome_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_query(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(name),
+        FfiConverterData.lower(arguments),
+        FfiConverterString.lower(now),uniffiCallStatus
     )
 })
 }
@@ -3681,6 +3702,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_merge() != 51897) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_query() != 28303) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_ready_with() != 23978) {
