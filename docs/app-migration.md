@@ -121,3 +121,13 @@ passes. Android's two-ABI AAR build is scripted; SDK/NDK and physical keystore v
 Storage, `ColophonSession`, and typed domain-store extraction remain the following steps.
 See [native bindings](native-bindings.md), [FFI measurements](performance.md#ffi), and the
 [bindings handoff](handoff-ffi.md) for the exact build gates and sandbox limitations.
+
+### App SDK implementation status (November 6, 2026)
+
+The `ffi` worktree adds `ColophonKitStorage`, `ColophonSession`, revision-keyed typed query
+stores, destination-bound extension ingress and the macOS/iOS `examples/ColophonSample`.
+See [new app](new-app.md), [session contracts](session.md), and [session handoff](handoff-session.md).
+The internal `SessionCore` protocol isolates the current binding API for the incoming engine.
+Checkpoint byte storage is present; verified-prefix use waits for that engine and bindings.
+These are SDK/sample and synthetic multi-session checks, not migration acceptance for the
+four shipping apps. Their product journeys and real provider/hardware behavior remain gates.

@@ -149,3 +149,12 @@ UniFFI's transitive crates are pinned in `Cargo.lock`; its generator is a host b
 not linked into mobile binaries. The Kotlin JVM transport uses JNA 5.18.1, Kotlin 2.2.21, and
 Gradle 8.14.3; these are platform tooling/runtime dependencies, not additions to the Rust core.
 The Swift 0.1 reference products retain their existing dependency-free build.
+
+## Apple app lifecycle (0.2)
+
+The additive `ColophonKitStorage` product owns coordinated immutable folder records, App Group
+and iCloud location resolution, change notifications and private checkpoint bytes. The
+`ColophonSession` product owns process lifecycle, scoped pairing, revisions, typed query caches
+and durable destination-bound ingress. Its internal `SessionCore` protocol isolates the current
+`ColophonKit` snapshot API from the incoming incremental engine. Neither platform storage nor
+extension envelopes grant authority. See [session contracts](session.md) and [new app](new-app.md).

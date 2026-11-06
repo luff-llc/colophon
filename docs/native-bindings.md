@@ -200,3 +200,10 @@ UniFFI references: [two-phase host scheduling needs no Rust executor](https://mo
 `bash scripts/check-apple-swift.sh` also typechecks the generated Swift and CryptoKit providers
 against the iOS device/simulator and visionOS device/simulator SDKs. This is a compile check,
 not simulator or physical-device execution.
+
+## Apple app layer
+
+Apps can now depend on `ColophonSession`, with `ColophonKitStorage` underneath, instead of
+assembling persistence and lifecycle around `Library` directly. See [new app](new-app.md)
+and [session contracts](session.md). The current adapter still uses this snapshot binding;
+verified-prefix checkpoint consumption waits for the new engine and regenerated bindings.
