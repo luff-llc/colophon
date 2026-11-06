@@ -90,3 +90,16 @@ for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entri
   assert.equal(entry.origin, 'person');
 }
 console.log('Node 24 smoke passed: non-extractable keys, narrowed grants, tools, AI attribution, budget, revoke/keep, rekey, recovery, and Rust/WASM fixture parity.');
+
+// The books fixture uses the same deliberately public seed-5 fixture identity.
+const booksRecords = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.books/records.json', import.meta.url), 'utf8'));
+const booksExpected = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.books/expected.json', import.meta.url), 'utf8'));
+const booksFixture = await Library.open(new Map(Object.entries(booksRecords).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), fixtureKeys);
+for (const { name, args, result } of booksExpected.queries) {
+  const actual = await booksFixture.call(`reading.books__${name}`, args);
+  assert.equal(actual.ok, true);
+  assert.deepEqual(actual.value, result);
+}
+assert.equal((await booksFixture.call('reading.books__addBook', { id: 'js-book', title: 'JS book', creator: 'Example' })).ok, true);
+assert.equal((await booksFixture.call('reading.books__book', { id: 'js-book' })).value.value.book.title, 'JS book');
+console.log('Books Rust/WASM query parity and generated tools passed.');
