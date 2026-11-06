@@ -11,7 +11,7 @@
 000000000000000000000006 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (00000000000000000000000A, 00000000000000000000000B); runOnlyForDeploymentPostprocessing = 0; };
 000000000000000000000007 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (00000000000000000000000E); runOnlyForDeploymentPostprocessing = 0; };
 00000000000000000000000C = { isa = XCLocalSwiftPackageReference; relativePath = ../..; };
-00000000000000000000000D = { isa = XCSwiftPackageProductDependency; package = 00000000000000000000000C; productName = ColophonSession; };
+00000000000000000000000D = { isa = XCSwiftPackageProductDependency; package = 00000000000000000000000C; productName = ColophonSessionUI; };
 000000000000000000000005 = { isa = PBXNativeTarget; buildConfigurationList = 000000000000000000000010; buildPhases = (000000000000000000000006, 000000000000000000000007); buildRules = (); dependencies = (); name = ColophonSample; packageProductDependencies = (00000000000000000000000D); productName = ColophonSample; productReference = 000000000000000000000004; productType = "com.apple.product-type.application"; };
 00000000000000000000000F = { isa = XCConfigurationList; buildConfigurations = (000000000000000000000011, 000000000000000000000012); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 000000000000000000000011 = { isa = XCBuildConfiguration; buildSettings = { SWIFT_VERSION = 6.0; SWIFT_STRICT_CONCURRENCY = complete; CLANG_ENABLE_MODULES = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; }; name = Debug; };

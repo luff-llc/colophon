@@ -25,7 +25,7 @@ obj('buildProduct', f'isa = PBXBuildFile; productRef = {i("product")};')
 obj('sources', f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({i("buildApp")}, {i("buildView")}); runOnlyForDeploymentPostprocessing = 0;')
 obj('frameworks', f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({i("buildProduct")}); runOnlyForDeploymentPostprocessing = 0;')
 obj('package', 'isa = XCLocalSwiftPackageReference; relativePath = ../..;')
-obj('product', f'isa = XCSwiftPackageProductDependency; package = {i("package")}; productName = ColophonSession;')
+obj('product', f'isa = XCSwiftPackageProductDependency; package = {i("package")}; productName = ColophonSessionUI;')
 obj('target', f'isa = PBXNativeTarget; buildConfigurationList = {i("targetConfigs")}; buildPhases = ({i("sources")}, {i("frameworks")}); buildRules = (); dependencies = (); name = ColophonSample; packageProductDependencies = ({i("product")}); productName = ColophonSample; productReference = {i("app")}; productType = "com.apple.product-type.application";')
 for prefix in ['project', 'target']:
     obj(prefix+'Configs', f'isa = XCConfigurationList; buildConfigurations = ({i(prefix+"Debug")}, {i(prefix+"Release")}); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
@@ -49,7 +49,7 @@ if standalone:
         return i(name)
     target_ids = []
     dependency_ids = []
-    library_names = ['ColophonKit', 'ColophonKitStorage', 'ColophonSession']
+    library_names = ['ColophonKit', 'ColophonKitStorage', 'ColophonSession', 'ColophonSessionUI']
     for module in library_names:
         for suffix in ['Target', 'Product', 'Sources', 'Configs', 'Debug', 'Release', 'Dependency']:
             allocate(module+suffix)
@@ -65,7 +65,7 @@ if standalone:
             obj(build, f'isa = PBXBuildFile; fileRef = {i(ref)};')
             builds.append(i(build))
         obj(module+'Sources', f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({", ".join(builds)}); runOnlyForDeploymentPostprocessing = 0;')
-        deps = ', '.join(dependency_ids[:-1]) if module == 'ColophonSession' else ''
+        deps = ', '.join(dependency_ids[:-1]) if module in ['ColophonSession', 'ColophonSessionUI'] else ''
         obj(module+'Target', f'isa = PBXNativeTarget; buildConfigurationList = {i(module+"Configs")}; buildPhases = ({i(module+"Sources")}); buildRules = (); dependencies = ({deps}); name = {module}; productName = {module}; productReference = {i(module+"Product")}; productType = "com.apple.product-type.library.static";')
         obj(module+'Configs', f'isa = XCConfigurationList; buildConfigurations = ({i(module+"Debug")}, {i(module+"Release")}); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
         includes = f'SWIFT_INCLUDE_PATHS = "{repo}/sdk/apple/ColophonFFI.xcframework/$(COLOPHON_FFI_SLICE)/Headers";'
