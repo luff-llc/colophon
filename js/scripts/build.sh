@@ -10,6 +10,6 @@ if [[ "$actual" != "wasm-bindgen $expected" ]]; then
 fi
 cargo build --locked -p colophon-wasm --target wasm32-unknown-unknown --release
 mkdir -p js/dist/wasm
-wasm-bindgen --target web --out-dir js/dist/wasm --out-name colophon_wasm target/wasm32-unknown-unknown/release/colophon_wasm.wasm
+wasm-bindgen --target web --out-dir js/dist/wasm --out-name colophon_wasm "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/colophon_wasm.wasm"
 cd js
 ./node_modules/.bin/tsc -p tsconfig.json

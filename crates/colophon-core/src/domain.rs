@@ -77,13 +77,7 @@ pub trait Reducer: DomainModule {
     fn query(&self, state: &Self::State, name: &str, args: &Value) -> crate::Result<Value>;
 }
 
-/// Saved links and their attributed conflicts.
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct SavedState {
-    items: BTreeMap<String, Value>,
-    conflicts: Vec<Value>,
-    invalid: Vec<String>,
-}
+pub use crate::domains::saved::{ReadingSaved, SavedState};
 /// Followed shows, episode metadata, progress and the queue.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PodcastsState {
@@ -113,8 +107,6 @@ pub struct NotesState {
     invalid: Vec<String>,
 }
 
-/// Saved reading shelf.
-pub struct ReadingSaved;
 /// Followed podcasts, episodes, positions and queue.
 pub struct ListeningPodcasts;
 /// Notebooks and attributed notes.
@@ -124,61 +116,6 @@ fn spec(name: &str, description: &str, required: &[&str], properties: Value) -> 
         name: name.into(),
         description: description.into(),
         input_schema: json!({"type":"object","required":required,"properties":properties,"additionalProperties":true}),
-    }
-}
-impl DomainModule for ReadingSaved {
-    fn display_name(&self) -> &'static str {
-        "reading"
-    }
-    fn write_phrase(&self, kind: &str) -> Option<&'static str> {
-        match kind {
-            "capture" => Some("saved a link"),
-            "setState" => Some("updated reading progress"),
-            "editMetadata" => Some("edited a link"),
-            "delete" => Some("removed a link"),
-            _ => None,
-        }
-    }
-    fn contribution_names(&self, _kind: &str) -> (&'static str, &'static str) {
-        ("link", "links")
-    }
-    fn namespace(&self) -> &'static str {
-        "reading.saved"
-    }
-    fn operations(&self) -> Vec<Spec> {
-        vec![
-            spec(
-                "capture",
-                "Save a link to the reading shelf",
-                &["id", "url"],
-                json!({"id":{"type":"string"},"url":{"type":"string"},"title":{"type":"string"}}),
-            ),
-            spec(
-                "setState",
-                "Set a saved item's reading state",
-                &["id", "state"],
-                json!({"id":{"type":"string"},"state":{"type":"string"},"expect":{"type":"string"}}),
-            ),
-            spec(
-                "editMetadata",
-                "Edit a saved item's metadata",
-                &["id"],
-                json!({"id":{"type":"string"},"title":{"type":"string"},"expect":{"type":"string"}}),
-            ),
-            spec(
-                "delete",
-                "Delete a saved item",
-                &["id"],
-                json!({"id":{"type":"string"},"expect":{"type":"string"}}),
-            ),
-        ]
-    }
-    fn fold(&self, ops: &[OperationView]) -> Value {
-        let mut state = SavedState::default();
-        for op in ops {
-            self.apply(&mut state, op);
-        }
-        state.projection()
     }
 }
 impl DomainModule for ListeningPodcasts {
@@ -360,6 +297,9 @@ fn known_valid(module: &dyn DomainModule, op: &OperationView, invalid: &mut Vec<
 }
 /// Validate the JSON Schema subset used by the built-in tool specs, including nested arrays.
 pub fn validate_input(schema: &Value, input: &Value) -> bool {
+    if let Some(kind) = schema["x-colophon-saved-command"].as_str() {
+        return crate::domains::saved::validate_command_input(kind, input);
+    }
     let valid_type = match schema["type"].as_str() {
         Some("object") => input.is_object(),
         Some("string") => input.is_string(),
@@ -440,56 +380,6 @@ fn ordered(items: &BTreeMap<String, Value>) -> Vec<Value> {
             ))
     });
     values
-}
-
-impl SavedState {
-    fn projection(&self) -> Value {
-        let state = self;
-        json!({"items":ordered(&state.items),"conflicts":state.conflicts,"invalid":state.invalid})
-    }
-}
-impl Reducer for ReadingSaved {
-    type State = SavedState;
-    fn apply(&self, state: &mut Self::State, op: &AdmittedOperation) {
-        let SavedState {
-            items,
-            conflicts,
-            invalid,
-        } = state;
-
-        if !known_valid(self, op, invalid) {
-            return;
-        }
-        let id = string(&op.payload, "id");
-        if op.kind == "capture" {
-            create(self, items, id, op, conflicts);
-        } else if let Some(item) = items.get_mut(id) {
-            if conflict(item, op) || item["deleted"] == true {
-                conflicts.push(json!(op));
-                return;
-            }
-            merge(self, item, op);
-            if op.kind == "delete" {
-                item["deleted"] = json!(true);
-            }
-        } else {
-            invalid.push(op.id.clone());
-        }
-    }
-    fn query(&self, state: &Self::State, name: &str, args: &Value) -> crate::Result<Value> {
-        match name {
-            "read" => Ok(state.projection()),
-            "items" => page_map(&state.items, args),
-            "item" => Ok(state
-                .items
-                .get(required_id(args)?)
-                .cloned()
-                .unwrap_or(Value::Null)),
-            "conflicts" => page_slice(&state.conflicts, args),
-            "invalid" => page_slice(&state.invalid, args),
-            _ => Err(crate::Error("Unknown query".into())),
-        }
-    }
 }
 
 impl PodcastsState {
@@ -695,7 +585,7 @@ fn page_map(values: &BTreeMap<String, Value>, args: &Value) -> crate::Result<Val
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum State {
-    Saved(SavedState),
+    Saved(Box<SavedState>),
     Podcasts(PodcastsState),
     Notes(NotesState),
     Unknown,
@@ -703,7 +593,7 @@ pub(crate) enum State {
 impl State {
     pub fn new(namespace: &str) -> Self {
         match namespace {
-            "reading.saved" => Self::Saved(SavedState::default()),
+            "reading.saved" => Self::Saved(Box::default()),
             "listening.podcasts" => Self::Podcasts(PodcastsState::default()),
             "notes" => Self::Notes(NotesState::default()),
             _ => Self::Unknown,

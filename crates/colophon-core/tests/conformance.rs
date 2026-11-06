@@ -312,3 +312,36 @@ fn deterministic_library_conformance() {
         expected_stored["ledger"]
     );
 }
+
+#[test]
+fn saved_domain_conformance() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/reading.saved.json");
+    let fixture: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let records: Records = fixture["records"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(path, bytes)| {
+            (
+                path.clone(),
+                STANDARD.decode(bytes.as_str().unwrap()).unwrap(),
+            )
+        })
+        .collect();
+    let lib = opened(records, &keys(1));
+    for query in fixture["queries"].as_array().unwrap() {
+        assert_eq!(
+            json!(success(
+                lib.query(
+                    "reading.saved",
+                    query["name"].as_str().unwrap(),
+                    query["args"].clone(),
+                    NOW
+                )
+                .unwrap()
+            )),
+            query["expected"]
+        );
+    }
+}

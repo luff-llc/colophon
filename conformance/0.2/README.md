@@ -35,3 +35,19 @@ is held according to the precedence in the spec.
 The fixture asserts generated outputs and replay equivalence. Independent protocol tests also
 assert the invariants directly, including malformed signatures, chain failures, missing recovery
 seals, wrong epochs, foreign requests, widened grants, stale edits, and planned handover ordering.
+
+`reading.saved.json` adds synthetic saved-reading signed records and expected results for all
+19 named domain queries. `tests/domain_saved.rs::deterministic_saved_vector` generates it;
+`tests/conformance.rs::saved_domain_conformance` reopens and checks its stored records. The
+JavaScript smoke test checks the same query results through WASM (`getPosition` is the tool
+alias for the `position` query).
+
+Regenerate deliberately with:
+
+```sh
+COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_saved deterministic_saved_vector
+```
+
+The saved-domain port also updates only the saved projection in `expected.json`: added dates,
+default retention/title, the preview state alias's normalized consumption, and the expanded
+compatibility projection. Existing `library.json` and `library/` signed record bytes are unchanged.
