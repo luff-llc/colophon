@@ -25,8 +25,9 @@ ledger. Regeneration is deliberate; normal tests never update expectations.
 specified in the generator. The Node smoke derives the recovered owner's fixture keys with
 WebCrypto HKDF and imports the fixed scalars as non-extractable CryptoKeys.
 
-The scenario covers all three namespaces, a narrowed two-write agent grant, local and signed
-out-of-scope refusals, budget exhaustion, AI attribution despite a false payload claim,
+The shared scenario covers `reading.saved`, `listening.podcasts`, and `notes`, a narrowed
+two-write agent grant, local and signed out-of-scope refusals, budget exhaustion, AI attribution
+despite a false payload claim,
 revocation with kept writes, a held unseen backdated write, epoch rotation excluding the agent,
 and recovery of every data epoch followed by root replacement and another complete rotation.
 The budget refusal is captured before revocation; after revocation the unkept backdated header
@@ -52,3 +53,32 @@ COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_books deterministic_books_vec
 
 The existing `conformance` test target and the JavaScript smoke test both check these
 exact query results from the saved record bytes. No source library data is included.
+
+`reading.saved.json` adds synthetic saved-reading signed records and expected results for all
+19 named domain queries. `tests/domain_saved.rs::deterministic_saved_vector` generates it;
+`tests/conformance.rs::saved_domain_conformance` reopens and checks its stored records. The
+JavaScript smoke test checks the same query results through WASM (`getPosition` is the tool
+alias for the `position` query).
+
+Regenerate deliberately with:
+
+```sh
+COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_saved deterministic_saved_vector
+```
+
+The saved-domain port also updates only the saved projection in `expected.json`: added dates,
+default retention/title, the preview state alias's normalized consumption, and the expanded
+compatibility projection. Existing `library.json` and `library/` signed record bytes are unchanged.
+
+`notes.json` contains synthetic signed notebook, cell and entry records with expected results
+for all ten named notes queries. The Rust conformance target and JavaScript smoke test replay
+the same bytes, including the current fail-closed proposal-review role diagnostic. Regenerate
+only this vector with:
+
+```sh
+COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_notes deterministic_notes_conformance_vector
+```
+
+The shared `expected.json` retains both the notes notebook/cell compatibility projection and
+the expanded saved-reading projection. The independent books, notes and saved-reading vectors
+coexist with the shared library scenario.

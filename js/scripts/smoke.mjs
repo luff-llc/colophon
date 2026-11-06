@@ -59,6 +59,16 @@ assert.equal((await recovery.recover(restoredKeys, 'Recovered owner')).ok, true)
 const restored = await Library.open(recovery.records, restoredKeys);
 assert.deepEqual(restored.view('notes').value.state, notes.value.state);
 assert.equal((await restored.write('reading.saved', 'capture', { id: 'new', url: 'https://example.org/' })).ok, true);
+assert.equal((await restored.call('reading.saved__capture', { id: 'native', title: 'Native document' })).ok, true);
+const savedItem = await restored.call('reading.saved__item', { id: 'native' });
+assert.equal(savedItem.value.value.item.title, 'Native document');
+assert.equal((await restored.call('reading.saved__setState', { id: 'native', consumption: 'inProgress', expect: savedItem.value.value.heads.state })).ok, true);
+const savedPage = await restored.call('reading.saved__items', { limit: 1 });
+assert.equal(savedPage.value.value.rows.length, 1);
+assert.equal(savedPage.value.value.total, 2);
+assert.equal(new Set(restored.tools().map(tool => tool.name)).size, restored.tools().length);
+assert.equal((await restored.call('reading.saved__getPosition', { item: 'native' })).value.value, null);
+
 
 // Replay Rust's fixed vectors through WASM with a host WebCrypto key derived solely for fixtures.
 const encoded = JSON.parse(await readFile(new URL('../../conformance/0.2/library.json', import.meta.url), 'utf8'));
@@ -92,6 +102,17 @@ for (const query of notesVector.queries) {
   assert.equal(result.ok, true);
   assert.deepEqual(result.value, query.result);
 }
+
+const savedVector = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.saved.json', import.meta.url), 'utf8'));
+const savedKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
+const savedFixture = await Library.open(new Map(Object.entries(savedVector.records).map(([path,b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), savedKeys);
+for (const query of savedVector.queries) {
+  const name = query.name === 'position' ? 'getPosition' : query.name;
+  const result = await savedFixture.call(`reading.saved__${name}`, query.args);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, query.expected);
+}
+
 // Exercise fractional IDs through the JSON host boundary as well as native Rust.
 for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entries()) {
   const result = await restored.write('listening.podcasts', 'position', { id: `fraction-${index}`, seconds });

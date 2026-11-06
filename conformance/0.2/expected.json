@@ -773,33 +773,56 @@
         }
       ],
       "state": {
+        "annotations": {},
+        "answers": {},
+        "checkpoints": {},
         "conflicts": [],
+        "connections": {},
+        "diagnostics": [],
+        "exportBlocked": false,
+        "feeds": {},
+        "images": {},
         "invalid": [],
         "items": [
           {
+            "added": "2026-11-04T12:00:00.000Z",
             "author": "ba9026f3d6d8ef13a12eb8f680c096a7",
             "authorLabel": "Reader app",
             "clock": 3,
+            "consumption": "inProgress",
             "extensions": {
               "custom": "preserved"
             },
             "id": "link",
             "origin": "person",
+            "retention": "saved",
             "revision": "0f1a8e8d66895be918f722c88c6c4575",
             "state": "reading",
             "title": "Edited title",
             "url": "https://example.org/article"
           },
           {
+            "added": "2026-11-04T12:00:00.000Z",
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
             "clock": 4,
             "id": "after-rekey",
             "origin": "person",
+            "retention": "saved",
             "revision": "ebb4485fb18c5c150db1e316e6415315",
+            "title": "https://example.org/new",
             "url": "https://example.org/new"
           }
-        ]
+        ],
+        "pendingCount": 0,
+        "receipts": {},
+        "reviewHistory": [],
+        "savedViews": {},
+        "sourceMetadata": {},
+        "sources": {},
+        "subscriptions": {},
+        "unsupported": [],
+        "visibility": {}
       }
     }
   }
