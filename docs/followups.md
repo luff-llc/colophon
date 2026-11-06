@@ -2,11 +2,15 @@
 
 Each item has a source and a check that closes it.
 
-1. **Silent create failure without Keychain access.** An unsigned simulator build of the sample
-   left the session in `noLibrary` when key creation failed; nothing was shown. Fails closed but
-   silently. Fix: key-provider failures in `create`, `restore` and `request` move the session to
-   `failed(.keysUnavailable)` with a retry, and the sample shows it. Check: a unit test with a
-   failing key provider, then the unsigned sample shows the error.
+1. **Fixed: explicit, retryable key-provider failure.** `SessionKeys` classifies provider
+   errors at the public-key/sign/agreement boundary. Create, restore and signed enrollment
+   request failures now produce `failed(.keysUnavailable(detail:))`; `retry()` retries the
+   failed creation or refreshes restoration/enrollment with the same identity. The sample
+   displays the reason and Retry. `KeyFailureTests` covers all three failure paths and recovery.
+   Launch the sample with `--demo-key-failure`, choose Create library, then Retry to demonstrate
+   this without Keychain entitlements or touching an existing sample library. Both sample
+   platforms compile; interactive LaunchServices/device verification remains an unrestricted
+   acceptance check (the restricted host refused to launch the built app).
 2. **Engine-supplied author kind and roles.** `reading.books` loans and `notes` proposal reviews
    fail closed until the engine passes the authenticated member kind and grant to reducers.
    Check: loan and review tests pass with real authority, refused for wrong roles.

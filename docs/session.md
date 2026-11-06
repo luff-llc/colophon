@@ -66,7 +66,8 @@ a committed operation must still be persisted. The API does not promise a cross-
 concurrent authority writers may produce immutable-path conflicts, which stop publication.
 
 `SessionCore` is the one internal engine protocol; `BindingSessionCore` is its current adapter.
-Replace it when `docs/engine.md` and matching bindings land. Today this adapter still obtains
+The storage-backed engine is documented in `docs/engine.md`; its `RecordSource` and verified-prefix
+checkpoint APIs are not yet exposed by the native bindings. Today this adapter still obtains
 full record/view snapshots and compares namespace evidence off-main to avoid falsely
 invalidating unrelated namespace caches. This is **not** the incremental engine or a 100k-op
 performance claim. SwiftUI only reads cached values. `NamespaceStore<Query, Result>` decodes
@@ -143,4 +144,33 @@ Closing a store invalidates pending load completions as well as existing cache e
 This does not replace the existing session snapshot adapter: writes and refreshes still collect
 full views off-main as described above. The new stores make no claim that the entire session
 pipeline is incremental at 100k operations. The core now supplies authenticated member kinds to
-role-sensitive reducers on append/replay; this requires version-2 local engine checkpoints.
+role-sensitive reducers on append/replay. Both checkpoint APIs authenticate the reducer schema
+generation, so caches from before those semantics fall back to replay. Named queries must keep
+using projection state directly; they must not call `view`, `materialize_library`, or read all
+history to reconstruct a result. Storage-backed history remains separately paged and lazy.
+
+## Upgrade barriers, durable import writes and key failures
+
+`SessionPhase.migrating` means “Your library is being upgraded.” Configure every suite app
+with the same `SessionConfiguration.migrationMarker` URL outside the destination record tree.
+An active marker takes precedence over an empty destination, enrollment and ordinary writes.
+Foreground `refresh()` observes marker changes; the marker itself is not a new sync protocol or
+authority record. The root's dedicated migration session sets `migrationWriter: true`; only
+`ColophonMigration` verifies the existing source root before using it. Other app sessions use
+normal enrollment, including the existing explicit App Group starter policy where applicable.
+Old members are reported as needing to rejoin; no agent or grant is automatically restored.
+
+`performMigration(_:outputKey:)` uses the same serialized session write/publication path as
+ordinary commands. A non-expiring receipt binds the full source output key and a command digest
+to the signed operation ID. The receipt and exact pending signed bytes are journaled together
+before publication, then read back from storage. A restart reuses those bytes and receipts;
+a conflicting command for the same key fails. Creation collisions with native objects/tombstones stop with `migrationCollision` before signing;
+occurrence remapping requires the engine reservation seam. Payloads are not duplicated as plaintext
+in the migration receipt. These receipts currently grow with history and share the 64 MiB session
+journal bound; a scalable transactional import receipt API remains an engine integration gap.
+
+Provider failures carry `SessionFailure.keysUnavailable(detail:)`; unrelated failures retain
+`.other(detail:)`. The sample displays the actionable reason. `retry()` remembers a failed
+create and otherwise refreshes restore/enrollment. It never regenerates an identity in response
+to a key failure. The sample's `--demo-key-failure` mode fails the first provider access and
+allows Retry using that same identity in a temporary, separate demo library.

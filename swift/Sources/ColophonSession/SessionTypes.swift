@@ -3,16 +3,27 @@
 import Foundation
 
 public enum SessionPhase: Equatable, Sendable {
-    case opening, noLibrary, creating
+    case opening, noLibrary, creating, migrating
     case waitingForApproval(code: String)
     case denied
     case unavailable(reason: String)
     case ready
-    case failed(error: String)
+    case failed(error: SessionFailure)
+}
+
+public enum SessionFailure: Equatable, Sendable {
+    case keysUnavailable(detail: String)
+    case other(detail: String)
+    public var message: String {
+        switch self {
+        case .keysUnavailable(let detail): "Your identity keys are unavailable. Unlock this device or restore key access, then retry. " + detail
+        case .other(let detail): detail
+        }
+    }
 }
 
 public enum SessionError: Error, Equatable, Sendable {
-    case notReady, staleRevision, destinationChanged, invalidCommand, publicationUncertain
+    case notReady, staleRevision, destinationChanged, invalidCommand, publicationUncertain, migrationCollision
 }
 
 /// A command is bound to the context and revision observed before the user's action began.
@@ -28,6 +39,10 @@ public struct DomainCommand: Codable, Equatable, Sendable {
     public init<Payload: Encodable & Sendable>(namespace: String, kind: String, payload: Payload) throws {
         self.namespace = namespace; self.kind = kind
         self.payload = try JSONEncoder().encode(payload)
+    }
+    public init(namespace: String, kind: String, payloadJSON: Data) throws {
+        guard (try JSONSerialization.jsonObject(with: payloadJSON)) is [String: Any] else { throw SessionError.invalidCommand }
+        self.namespace = namespace; self.kind = kind; self.payload = payloadJSON
     }
     public static func saveLink(id: String = UUID().uuidString, url: URL, title: String) throws -> Self {
         guard ["http", "https"].contains(url.scheme?.lowercased()), url.host != nil else { throw SessionError.invalidCommand }
@@ -59,10 +74,15 @@ public struct SessionConfiguration: Sendable {
     public let privateContainer: URL
     public let keys: any AsyncKeyProvider
     public let enrollment: EnrollmentPolicy
+    /// Shared rollout marker outside the immutable library record tree. Configure every suite app.
+    public let migrationMarker: URL?
+    /// Only the verified source root's migration session may bypass the rollout barrier.
+    public let migrationWriter: Bool
     public let recoveryKeys: (any AsyncKeyProvider)?
     public init(memberLabel: String, memberKind: MemberKind = .app, namespaces: [String], access: [Access] = [.read, .write],
                 libraryNamespaces: [String]? = nil, location: StorageLocation, privateContainer: URL,
-                keys: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil, enrollment: EnrollmentPolicy = .pairing) {
+                keys: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil, enrollment: EnrollmentPolicy = .pairing, migrationMarker: URL? = nil, migrationWriter: Bool = false) {
+        self.migrationMarker = migrationMarker; self.migrationWriter = migrationWriter
         self.memberLabel = memberLabel; self.memberKind = memberKind; self.namespaces = namespaces
         self.access = access; self.libraryNamespaces = libraryNamespaces ?? namespaces
         self.enrollment = enrollment
@@ -99,6 +119,7 @@ extension SessionConfiguration {
 extension SessionError: LocalizedError {
     public var errorDescription: String? {
         switch self {
+        case .migrationCollision: "A native object already uses this imported identity. Review and remap the source occurrence before continuing the upgrade."
         case .publicationUncertain: "Publication needs review. Refresh and inspect the ledger before retrying this action."
         case .notReady: "The library is not ready. Restore access and retry."
         case .staleRevision: "The library changed while this action was open. Review the current values and try again."

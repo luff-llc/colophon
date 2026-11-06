@@ -16,6 +16,7 @@ import ColophonKitStorage
     public private(set) var lastError: String?
     public private(set) var context = UUID()
     @ObservationIgnored private let worker: SessionWorker
+    @ObservationIgnored private var retryCreate = false
     @ObservationIgnored private var restoreTask: Task<Void, Never>?
     @ObservationIgnored private var watchTask: Task<Void, Never>?
     @ObservationIgnored private var batchTask: Task<Void, Never>?
@@ -54,9 +55,28 @@ import ColophonKitStorage
     public func create() async {
         await restore()
         guard phase == .noLibrary else { return }
+        retryCreate = true
         phase = .creating
-        do { apply(try await worker.create()); await startWatching() }
+        do { apply(try await worker.create()); retryCreate = false; await startWatching() }
         catch { fail(error) }
+    }
+    /// Retries the lifecycle action that failed, including an interrupted create.
+    public func retry() async {
+        await refresh()
+        if retryCreate, phase == .noLibrary { await create() }
+    }
+    /// Durable, non-expiring source-output receipt. Used only by the root migration session.
+    public func performMigration(_ command: DomainCommand, outputKey: String) async throws -> WriteReceipt {
+        await refresh()
+        let lease = context
+        do {
+            let (receipt, snapshot) = try await worker.write(command, observed: revision, migrationKey: outputKey)
+            guard lease == context else { throw SessionError.destinationChanged }
+            apply(snapshot); return receipt
+        } catch let refusal as SessionRefusal {
+            if lease == context { apply(refusal.snapshot); lastError = refusal.error.localizedDescription }
+            throw refusal.error
+        } catch { if lease == context { handleCommandError(error) }; throw error }
     }
     public var observedRevision: ObservedRevision { .init(context: context, revision: revision) }
 
@@ -195,7 +215,7 @@ import ColophonKitStorage
         for invalidate in caches.values { invalidate([], true) }
     }
     private func handleCommandError(_ error: any Error) {
-        if error is AccessError || error is StorageError || error is PendingPublication { fail(error) }
+        if error is AccessError || error is StorageError || error is PendingPublication || error is SessionKeyFailure { fail(error) }
         else { lastError = error.localizedDescription }
     }
     private func fail(_ error: any Error) {
@@ -203,11 +223,12 @@ import ColophonKitStorage
         for invalidate in caches.values { invalidate([], true) }
         lastError = error.localizedDescription
         switch error {
+        case let keys as SessionKeyFailure: phase = .failed(error: .keysUnavailable(detail: keys.detail))
         case let pending as PendingPublication: phase = .unavailable(reason: pending.reason)
         case StorageError.unavailable(let reason): phase = .unavailable(reason: reason)
         case let access as AccessError:
             phase = [.notReadable, .unavailable].contains(access.denial.reason) ? .unavailable(reason: access.denial.detail) : .denied
-        default: phase = .failed(error: error.localizedDescription)
+        default: phase = .failed(error: .other(detail: error.localizedDescription))
         }
     }
     func registerCache(_ callback: @escaping @MainActor (Set<String>, Bool) -> Void) -> UUID {

@@ -26,19 +26,19 @@ actor BindingSessionCore: SessionCore {
         guard let library else { throw SessionError.notReady }; return library
     }
     func open(records: [String: Data], keys: any AsyncKeyProvider) async throws {
-        library = try await Library.open(records: records, me: keys)
+        library = try await Library.open(records: records, me: SessionKeys(base: keys))
     }
     func create(configuration: SessionConfiguration) async throws {
-        library = try await Library.create(owner: configuration.starterKeys ?? configuration.keys, label: configuration.memberLabel,
-            ownerLabel: configuration.memberLabel, namespaces: configuration.libraryNamespaces, recovery: configuration.recoveryKeys)
+        library = try await Library.create(owner: SessionKeys(base: configuration.starterKeys ?? configuration.keys), label: configuration.memberLabel,
+            ownerLabel: configuration.memberLabel, namespaces: configuration.libraryNamespaces, recovery: configuration.recoveryKeys.map { SessionKeys(base: $0) })
         recoveryProvider = library?.recoveryKeys
         if configuration.starterKeys != nil, let created = library {
-            library = try await Library.open(records: created.records, me: configuration.keys)
+            library = try await Library.open(records: created.records, me: SessionKeys(base: configuration.keys))
         }
     }
     func approveWithStarter(_ request: Data, keys: any AsyncKeyProvider) async throws {
         let library = try requireLibrary()
-        let owner = try await Library.open(records: library.records, me: keys)
+        let owner = try await Library.open(records: library.records, me: SessionKeys(base: keys))
         // Core authority, not location or a display label, decides whether this key may grant.
         _ = try await owner.approve(request: request).get()
         try await library.merge(records: owner.records)
@@ -77,7 +77,7 @@ actor BindingSessionCore: SessionCore {
             ledger: try await library.ledger(), requests: requests, views: views, denials: denials, records: records)
     }
     func request(configuration: SessionConfiguration, keys: any AsyncKeyProvider) async throws -> AccessRequest {
-        try await Library.requestAccess(libraryID: requireLibrary().id, keys: keys, label: configuration.memberLabel,
+        try await Library.requestAccess(libraryID: requireLibrary().id, keys: SessionKeys(base: keys), label: configuration.memberLabel,
             kind: configuration.memberKind, namespaces: configuration.namespaces, access: configuration.access)
     }
     func query(namespace: String, name: String, arguments: Data) async throws -> Data {

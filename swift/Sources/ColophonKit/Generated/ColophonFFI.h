@@ -453,6 +453,16 @@ uint64_t uniffi_colophon_ffi_fn_func_begin_request(RustBuffer library_id, RustBu
 RustBuffer uniffi_colophon_ffi_fn_func_request_info(RustBuffer record, RustBuffer library_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_BIND_LEGACY_IMPORT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_BIND_LEGACY_IMPORT_STATE
+RustBuffer uniffi_colophon_ffi_fn_func_bind_legacy_import_state(RustBuffer namespace, RustBuffer state_json, RustBuffer outputs, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_IMPORT_LEGACY_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_IMPORT_LEGACY_BATCH
+RustBuffer uniffi_colophon_ffi_fn_func_import_legacy_batch(RustBuffer namespace, RustBuffer operations, RustBuffer state_json, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_COLOPHON_FFI_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_COLOPHON_FFI_RUSTBUFFER_ALLOC
 RustBuffer ffi_colophon_ffi_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -728,6 +738,18 @@ uint16_t uniffi_colophon_ffi_checksum_func_begin_request(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_REQUEST_INFO
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_REQUEST_INFO
 uint16_t uniffi_colophon_ffi_checksum_func_request_info(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_BIND_LEGACY_IMPORT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_BIND_LEGACY_IMPORT_STATE
+uint16_t uniffi_colophon_ffi_checksum_func_bind_legacy_import_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_LEGACY_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_IMPORT_LEGACY_BATCH
+uint16_t uniffi_colophon_ffi_checksum_func_import_legacy_batch(void
     
 );
 #endif

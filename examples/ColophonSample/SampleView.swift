@@ -20,6 +20,7 @@ struct SampleView: View {
             Group {
                 switch session.phase {
                 case .opening, .creating: ProgressView("Opening library…")
+                case .migrating: ProgressView("Your library is being upgraded…")
                 case .noLibrary:
                     ContentUnavailableView {
                         Label("Your library", systemImage: "books.vertical")
@@ -33,7 +34,7 @@ struct SampleView: View {
                 case .denied:
                     ContentUnavailableView("Access denied", systemImage: "lock", description: Text("This identity is revoked, expired, or lacks the requested scope."))
                 case .unavailable(let reason): recoveryView(reason)
-                case .failed(let reason): recoveryView(reason)
+                case .failed(let reason): recoveryView(reason.message, title: "Couldn’t open your library")
                 case .ready: libraryView
                 }
             }
@@ -102,11 +103,11 @@ struct SampleView: View {
             }
         }
     }
-    private func recoveryView(_ reason: String) -> some View {
+    private func recoveryView(_ reason: String, title: String = "Library unavailable") -> some View {
         ContentUnavailableView {
-            Label("Library unavailable", systemImage: "externaldrive.badge.exclamationmark")
+            Label(title, systemImage: "externaldrive.badge.exclamationmark")
         } description: { Text(reason) } actions: {
-            Button("Retry") { Task { await session.refresh() } }
+            Button("Retry") { Task { await session.retry() } }
         }
     }
     private func warmLinks() async {

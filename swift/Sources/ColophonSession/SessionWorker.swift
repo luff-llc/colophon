@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import ColophonKit
 import ColophonKitStorage
 
@@ -52,6 +53,8 @@ actor SessionWorker {
         return try await refreshLocked()
     }
     private func refreshLocked() async throws -> SessionSnapshot {
+        if !configuration.migrationWriter, let marker = configuration.migrationMarker,
+           try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
         let records = try await storage().read()
         guard journal.knownPaths.isSubset(of: Set(records.keys).union(journal.pending.keys)) else {
             throw StorageError.unavailable("Previously observed library records are unavailable")
@@ -111,6 +114,8 @@ actor SessionWorker {
     }
     func create() async throws -> SessionSnapshot {
         await enter(); defer { exit() }
+        if !configuration.migrationWriter, let marker = configuration.migrationMarker,
+           try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
         guard !opened, journal.libraryID == nil, try await storage().read().isEmpty else { throw SessionError.destinationChanged }
         try await core.create(configuration: configuration); opened = true
         journal.left = false
@@ -118,11 +123,27 @@ actor SessionWorker {
         try await persistDelta()
         return try await refreshLocked()
     }
-    func write(_ command: DomainCommand, observed: UInt64, ingress: IngressEnvelope? = nil) async throws -> (WriteReceipt, SessionSnapshot) {
+    func write(_ command: DomainCommand, observed: UInt64, ingress: IngressEnvelope? = nil, migrationKey: String? = nil) async throws -> (WriteReceipt, SessionSnapshot) {
         await enter(); defer { exit() }
         try Task.checkCancellation()
         let fresh = try await refreshLocked()
         guard fresh.phase == .ready else { throw SessionRefusal(snapshot: fresh, error: .notReady) }
+        if let migrationKey {
+            guard configuration.migrationWriter else { throw SessionError.invalidCommand }
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            let commandDigest = SHA256.hash(data: try encoder.encode(command)).map { String(format: "%02x", $0) }.joined()
+            if let receipt = journal.migration?[migrationKey] {
+                guard receipt.commandDigest == commandDigest else { throw SessionError.invalidCommand }
+                guard receipt.uncertain != true else { throw SessionError.publicationUncertain }
+                if let id = receipt.operationID {
+                    guard fresh.core?.views[command.namespace]?.admitted.contains(where: { $0.id == id }) == true else { throw SessionError.publicationUncertain }
+                    return (.saved(operationID: id), fresh)
+                }
+            }
+            try checkMigrationIdentity(command, in: fresh.core?.views[command.namespace]?.state)
+            if journal.migration == nil { journal.migration = [:] }
+            journal.migration?[migrationKey] = .init(commandDigest: commandDigest)
+        }
         guard observed == revision else { throw SessionRefusal(snapshot: fresh, error: .staleRevision) }
         guard configuration.namespaces.contains(command.namespace), configuration.access.contains(.write) else { throw SessionError.invalidCommand }
         guard command.payload.count <= 256 * 1024 else { throw SessionError.invalidCommand }
@@ -152,6 +173,11 @@ actor SessionWorker {
             let after = try await core.records()
             let added = after.keys.filter { $0.hasPrefix("ops/") && fresh.core?.records[$0] == nil }
             if !added.isEmpty {
+                if let migrationKey {
+                    let parts = URL(fileURLWithPath: added[0]).deletingPathExtension().lastPathComponent.split(separator: "-")
+                    if added.count == 1, parts.count == 2 { journal.migration?[migrationKey]?.operationID = String(parts[1]) }
+                    else { journal.migration?[migrationKey]?.uncertain = true }
+                }
                 if let ingress {
                     let name = URL(fileURLWithPath: added[0]).deletingPathExtension().lastPathComponent
                     let parts = name.split(separator: "-")
@@ -166,11 +192,35 @@ actor SessionWorker {
             throw error
         }
         if let ingress { journal.ingress[ingress.id]?.operationID = operation.id }
+        if let migrationKey { journal.migration?[migrationKey]?.operationID = operation.id }
         do { try await persistDelta() }
         catch is PendingPublication {
             return (.queued, empty(.unavailable(reason: "Write queued for durable publication")))
         }
         return (.saved(operationID: operation.id), try await refreshLocked())
+    }
+    /// Stop an unreserved native-identity collision before signing. The future engine should
+    /// supply occurrence reservation/remapping atomically with the import write.
+    private func checkMigrationIdentity(_ command: DomainCommand, in state: Data?) throws {
+        guard let state,
+              let payload = try JSONSerialization.jsonObject(with: command.payload) as? [String: Any],
+              let id = payload["id"] as? String,
+              let projection = try JSONSerialization.jsonObject(with: state) as? [String: Any] else { return }
+        let collection: String?
+        switch (command.namespace, command.kind) {
+        case ("reading.books", "addBook"): collection = "books"
+        case ("reading.books", "addNote"): collection = "notes"
+        case ("reading.saved", "capture"): collection = "items"
+        case ("notes", "createNotebook"): collection = "notebooks"
+        case ("notes", "putCell") where payload["expect"] is NSNull: collection = "cells"
+        case ("notes", "putEntry") where payload["expect"] is NSNull: collection = "entries"
+        case ("listening.podcasts", "follow") where payload["expect"] is NSNull: collection = "shows"
+        case ("listening.podcasts", "addNote"): collection = "notes"
+        default: collection = nil
+        }
+        guard let collection else { return }
+        if let map = projection[collection] as? [String: Any], map[id] != nil { throw SessionError.migrationCollision }
+        if let rows = projection[collection] as? [[String: Any]], rows.contains(where: { $0["id"] as? String == id }) { throw SessionError.migrationCollision }
     }
     /// Replay pending exact bytes before accepting more commands. Conflicts stop; no silent rebase.
     private func persistDelta() async throws {

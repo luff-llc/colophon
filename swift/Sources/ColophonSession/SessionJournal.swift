@@ -7,6 +7,12 @@ struct SessionJournal: Codable, Sendable {
     var left = false
     var knownPaths: Set<String> = []
     var pending: [String: Data] = [:]
+    var migration: [String: MigrationReceipt]? = [:]
+    struct MigrationReceipt: Codable, Sendable {
+        let commandDigest: String
+        var operationID: String?
+        var uncertain: Bool?
+    }
     var ingress: [UUID: IngressReceipt] = [:]
     struct IngressReceipt: Codable, Sendable {
         let envelope: IngressEnvelope
