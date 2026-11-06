@@ -5,6 +5,7 @@ import PackageDescription
 // what it needs: a verifier needs Core and Authority; a storage provider needs Store; an app adds
 // Replica and the domain modules it shows.
 let package = Package(name: "Colophon", platforms: [.macOS(.v14), .iOS(.v17), .visionOS("26.0")], products: [
+  .library(name: "ColophonMigration", targets: ["ColophonMigration"]),
   .library(name: "ColophonKitStorage", targets: ["ColophonKitStorage"]),
   .library(name: "ColophonSession", targets: ["ColophonSession"]),
   .library(name: "ColophonKit", targets: ["ColophonKit"]),
@@ -19,6 +20,8 @@ let package = Package(name: "Colophon", platforms: [.macOS(.v14), .iOS(.v17), .v
   .library(name: "ColophonMCP", targets: ["ColophonMCP"]),
   .executable(name: "colophon", targets: ["colophon"]),
 ], targets: [
+  .target(name: "ColophonMigration", dependencies: ["ColophonSession", "ColophonCore", "ColophonStore", "ColophonAuthority", "ColophonReplica", "ColophonBooks", "ColophonListening", "ColophonSaved", "ColophonNotes"], path: "swift/Sources/ColophonMigration"),
+  .testTarget(name: "ColophonMigrationTests", dependencies: ["ColophonMigration"], path: "swift/Tests/ColophonMigrationTests"),
   .target(name: "ColophonKitStorage", path: "swift/Sources/ColophonKitStorage"),
   .target(name: "ColophonSession", dependencies: ["ColophonKit", "ColophonKitStorage"], path: "swift/Sources/ColophonSession"),
   .testTarget(name: "ColophonSessionTests", dependencies: ["ColophonSession", "ColophonKitStorage"], path: "swift/Tests/ColophonSessionTests"),

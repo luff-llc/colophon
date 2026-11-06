@@ -487,6 +487,30 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -1572,6 +1596,266 @@ public func FfiConverterTypeLedgerEntry_lift(_ buf: RustBuffer) throws -> Ledger
 #endif
 public func FfiConverterTypeLedgerEntry_lower(_ value: LedgerEntry) -> RustBuffer {
     return FfiConverterTypeLedgerEntry.lower(value)
+}
+
+
+public struct LegacyImportBatch: Equatable, Hashable {
+    public let commands: [LegacyImportCommand]
+    /**
+     * Array of domain evidence records, preserving their full original fields.
+     */
+    public let evidenceJson: Data
+    /**
+     * Opaque source fold/identity state. Persist along with receipts, never as authority.
+     */
+    public let stateJson: Data
+    public let blobsJson: Data
+    public let publicationBarrier: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(commands: [LegacyImportCommand], 
+        /**
+         * Array of domain evidence records, preserving their full original fields.
+         */evidenceJson: Data, 
+        /**
+         * Opaque source fold/identity state. Persist along with receipts, never as authority.
+         */stateJson: Data, blobsJson: Data, publicationBarrier: Bool) {
+        self.commands = commands
+        self.evidenceJson = evidenceJson
+        self.stateJson = stateJson
+        self.blobsJson = blobsJson
+        self.publicationBarrier = publicationBarrier
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LegacyImportBatch: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyImportBatch: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyImportBatch {
+        return
+            try LegacyImportBatch(
+                commands: FfiConverterSequenceTypeLegacyImportCommand.read(from: &buf), 
+                evidenceJson: FfiConverterData.read(from: &buf), 
+                stateJson: FfiConverterData.read(from: &buf), 
+                blobsJson: FfiConverterData.read(from: &buf), 
+                publicationBarrier: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LegacyImportBatch, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeLegacyImportCommand.write(value.commands, into: &buf)
+        FfiConverterData.write(value.evidenceJson, into: &buf)
+        FfiConverterData.write(value.stateJson, into: &buf)
+        FfiConverterData.write(value.blobsJson, into: &buf)
+        FfiConverterBool.write(value.publicationBarrier, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyImportBatch_lift(_ buf: RustBuffer) throws -> LegacyImportBatch {
+    return try FfiConverterTypeLegacyImportBatch.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyImportBatch_lower(_ value: LegacyImportBatch) -> RustBuffer {
+    return FfiConverterTypeLegacyImportBatch.lower(value)
+}
+
+
+public struct LegacyImportCommand: Equatable, Hashable {
+    public let sourceIndex: UInt64
+    public let outputKey: String
+    public let kind: String
+    public let payloadJson: Data
+    public let expectFromChild: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceIndex: UInt64, outputKey: String, kind: String, payloadJson: Data, expectFromChild: UInt64?) {
+        self.sourceIndex = sourceIndex
+        self.outputKey = outputKey
+        self.kind = kind
+        self.payloadJson = payloadJson
+        self.expectFromChild = expectFromChild
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LegacyImportCommand: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyImportCommand: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyImportCommand {
+        return
+            try LegacyImportCommand(
+                sourceIndex: FfiConverterUInt64.read(from: &buf), 
+                outputKey: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                payloadJson: FfiConverterData.read(from: &buf), 
+                expectFromChild: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LegacyImportCommand, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.sourceIndex, into: &buf)
+        FfiConverterString.write(value.outputKey, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterData.write(value.payloadJson, into: &buf)
+        FfiConverterOptionUInt64.write(value.expectFromChild, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyImportCommand_lift(_ buf: RustBuffer) throws -> LegacyImportCommand {
+    return try FfiConverterTypeLegacyImportCommand.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyImportCommand_lower(_ value: LegacyImportCommand) -> RustBuffer {
+    return FfiConverterTypeLegacyImportCommand.lower(value)
+}
+
+
+public struct LegacyImportOperation: Equatable, Hashable {
+    public let sourceLibrary: String
+    public let authorId: String
+    public let authorLabel: String
+    public let operationId: String
+    public let signedBodyDigest: String
+    public let kind: String
+    public let version: UInt64
+    public let payloadJson: Data
+    public let admittedOrder: UInt64
+    public let claimedDateJson: Data
+    /**
+     * admitted, held, refused, unreadable, etc. Only admitted can produce effects.
+     */
+    public let admission: String
+    /**
+     * applied, conflict, invalid, noEffect, retained, lateEdit, or unresolved.
+     */
+    public let outcome: String
+    /**
+     * Domain-specific context serialized from the verified old fold. Omit with {}.
+     */
+    public let contextJson: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceLibrary: String, authorId: String, authorLabel: String, operationId: String, signedBodyDigest: String, kind: String, version: UInt64, payloadJson: Data, admittedOrder: UInt64, claimedDateJson: Data, 
+        /**
+         * admitted, held, refused, unreadable, etc. Only admitted can produce effects.
+         */admission: String, 
+        /**
+         * applied, conflict, invalid, noEffect, retained, lateEdit, or unresolved.
+         */outcome: String, 
+        /**
+         * Domain-specific context serialized from the verified old fold. Omit with {}.
+         */contextJson: Data) {
+        self.sourceLibrary = sourceLibrary
+        self.authorId = authorId
+        self.authorLabel = authorLabel
+        self.operationId = operationId
+        self.signedBodyDigest = signedBodyDigest
+        self.kind = kind
+        self.version = version
+        self.payloadJson = payloadJson
+        self.admittedOrder = admittedOrder
+        self.claimedDateJson = claimedDateJson
+        self.admission = admission
+        self.outcome = outcome
+        self.contextJson = contextJson
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LegacyImportOperation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyImportOperation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyImportOperation {
+        return
+            try LegacyImportOperation(
+                sourceLibrary: FfiConverterString.read(from: &buf), 
+                authorId: FfiConverterString.read(from: &buf), 
+                authorLabel: FfiConverterString.read(from: &buf), 
+                operationId: FfiConverterString.read(from: &buf), 
+                signedBodyDigest: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                version: FfiConverterUInt64.read(from: &buf), 
+                payloadJson: FfiConverterData.read(from: &buf), 
+                admittedOrder: FfiConverterUInt64.read(from: &buf), 
+                claimedDateJson: FfiConverterData.read(from: &buf), 
+                admission: FfiConverterString.read(from: &buf), 
+                outcome: FfiConverterString.read(from: &buf), 
+                contextJson: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LegacyImportOperation, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sourceLibrary, into: &buf)
+        FfiConverterString.write(value.authorId, into: &buf)
+        FfiConverterString.write(value.authorLabel, into: &buf)
+        FfiConverterString.write(value.operationId, into: &buf)
+        FfiConverterString.write(value.signedBodyDigest, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterUInt64.write(value.version, into: &buf)
+        FfiConverterData.write(value.payloadJson, into: &buf)
+        FfiConverterUInt64.write(value.admittedOrder, into: &buf)
+        FfiConverterData.write(value.claimedDateJson, into: &buf)
+        FfiConverterString.write(value.admission, into: &buf)
+        FfiConverterString.write(value.outcome, into: &buf)
+        FfiConverterData.write(value.contextJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyImportOperation_lift(_ buf: RustBuffer) throws -> LegacyImportOperation {
+    return try FfiConverterTypeLegacyImportOperation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyImportOperation_lower(_ value: LegacyImportOperation) -> RustBuffer {
+    return FfiConverterTypeLegacyImportOperation.lower(value)
 }
 
 
@@ -3398,6 +3682,56 @@ fileprivate struct FfiConverterSequenceTypeLedgerEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeLegacyImportCommand: FfiConverterRustBuffer {
+    typealias SwiftType = [LegacyImportCommand]
+
+    public static func write(_ value: [LegacyImportCommand], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLegacyImportCommand.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LegacyImportCommand] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LegacyImportCommand]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeLegacyImportCommand.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeLegacyImportOperation: FfiConverterRustBuffer {
+    typealias SwiftType = [LegacyImportOperation]
+
+    public static func write(_ value: [LegacyImportOperation], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLegacyImportOperation.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LegacyImportOperation] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LegacyImportOperation]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeLegacyImportOperation.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeMember: FfiConverterRustBuffer {
     typealias SwiftType = [Member]
 
@@ -3548,6 +3882,32 @@ fileprivate struct FfiConverterSequenceTypeAccess: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
+    public static func write(_ value: [String: String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for (key, value) in value {
+            FfiConverterString.write(key, into: &buf)
+            FfiConverterString.write(value, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String: String] {
+        let len: Int32 = try readInt(&buf)
+        var dict = [String: String]()
+        dict.reserveCapacity(Int(len))
+        for _ in 0..<len {
+            let key = try FfiConverterString.read(from: &buf)
+            let value = try FfiConverterString.read(from: &buf)
+            dict[key] = value
+        }
+        return dict
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDictionaryStringData: FfiConverterRustBuffer {
     public static func write(_ value: [String: Data], into buf: inout [UInt8]) {
         let len = Int32(value.count)
@@ -3607,6 +3967,33 @@ public func requestInfo(record: Data, libraryId: String)throws  -> AccessRequest
     )
 })
 }
+/**
+ * Bind planned book component heads to actual signed destination IDs before the next batch.
+ */
+public func bindLegacyImportState(namespace: String, stateJson: Data, outputs: [String: String])throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_bind_legacy_import_state(
+        FfiConverterString.lower(namespace),
+        FfiConverterData.lower(stateJson),
+        FfiConverterDictionaryStringString.lower(outputs),uniffiCallStatus
+    )
+})
+}
+/**
+ * Inputs must be in complete verified source order. Contexts describe each old prefix,
+ * not the final snapshot. Return values are unsigned proposals, signed by the importer.
+ */
+public func importLegacyBatch(namespace: String, operations: [LegacyImportOperation], stateJson: Data)throws  -> LegacyImportBatch  {
+    return try  FfiConverterTypeLegacyImportBatch_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_import_legacy_batch(
+        FfiConverterString.lower(namespace),
+        FfiConverterSequenceTypeLegacyImportOperation.lower(operations),
+        FfiConverterData.lower(stateJson),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -3630,6 +4017,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_request_info() != 12621) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_bind_legacy_import_state() != 14834) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_import_legacy_batch() != 60451) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_hostaction_finish() != 36295) {

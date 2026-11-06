@@ -721,6 +721,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_request_info(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_func_bind_legacy_import_state(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_import_legacy_batch(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_hostaction_finish(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_hostaction_sign_with(
@@ -866,6 +870,10 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_colophon_ffi_fn_func_request_info(`record`: RustBuffer.ByValue,`libraryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_bind_legacy_import_state(`namespace`: RustBuffer.ByValue,`stateJson`: RustBuffer.ByValue,`outputs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_import_legacy_batch(`namespace`: RustBuffer.ByValue,`operations`: RustBuffer.ByValue,`stateJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun ffi_colophon_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_colophon_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -992,6 +1000,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_request_info() and 0xFFFF) != 12621) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_bind_legacy_import_state() and 0xFFFF) != 14834) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_import_legacy_batch() and 0xFFFF) != 60451) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_finish() and 0xFFFF) != 36295) {
@@ -1289,6 +1303,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 
     override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
+
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
+
+    override fun allocationSize(value: Boolean) = 1UL
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
     }
 }
 
@@ -2687,6 +2724,220 @@ public object FfiConverterTypeLedgerEntry: FfiConverterRustBuffer<LedgerEntry> {
             FfiConverterOptionalString.write(value.`kind`, buf)
             FfiConverterOptionalTypeOrigin.write(value.`origin`, buf)
             FfiConverterString.write(value.`text`, buf)
+    }
+}
+
+
+
+data class LegacyImportBatch (
+    val `commands`: List<LegacyImportCommand>
+    , 
+    /**
+     * Array of domain evidence records, preserving their full original fields.
+     */
+    val `evidenceJson`: kotlin.ByteArray
+    , 
+    /**
+     * Opaque source fold/identity state. Persist along with receipts, never as authority.
+     */
+    val `stateJson`: kotlin.ByteArray
+    , 
+    val `blobsJson`: kotlin.ByteArray
+    , 
+    val `publicationBarrier`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLegacyImportBatch: FfiConverterRustBuffer<LegacyImportBatch> {
+    override fun read(buf: ByteBuffer): LegacyImportBatch {
+        return LegacyImportBatch(
+            FfiConverterSequenceTypeLegacyImportCommand.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LegacyImportBatch) = (
+            FfiConverterSequenceTypeLegacyImportCommand.allocationSize(value.`commands`) +
+            FfiConverterByteArray.allocationSize(value.`evidenceJson`) +
+            FfiConverterByteArray.allocationSize(value.`stateJson`) +
+            FfiConverterByteArray.allocationSize(value.`blobsJson`) +
+            FfiConverterBoolean.allocationSize(value.`publicationBarrier`)
+    )
+
+    override fun write(value: LegacyImportBatch, buf: ByteBuffer) {
+            FfiConverterSequenceTypeLegacyImportCommand.write(value.`commands`, buf)
+            FfiConverterByteArray.write(value.`evidenceJson`, buf)
+            FfiConverterByteArray.write(value.`stateJson`, buf)
+            FfiConverterByteArray.write(value.`blobsJson`, buf)
+            FfiConverterBoolean.write(value.`publicationBarrier`, buf)
+    }
+}
+
+
+
+data class LegacyImportCommand (
+    val `sourceIndex`: kotlin.ULong
+    , 
+    val `outputKey`: kotlin.String
+    , 
+    val `kind`: kotlin.String
+    , 
+    val `payloadJson`: kotlin.ByteArray
+    , 
+    val `expectFromChild`: kotlin.ULong?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLegacyImportCommand: FfiConverterRustBuffer<LegacyImportCommand> {
+    override fun read(buf: ByteBuffer): LegacyImportCommand {
+        return LegacyImportCommand(
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LegacyImportCommand) = (
+            FfiConverterULong.allocationSize(value.`sourceIndex`) +
+            FfiConverterString.allocationSize(value.`outputKey`) +
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterByteArray.allocationSize(value.`payloadJson`) +
+            FfiConverterOptionalULong.allocationSize(value.`expectFromChild`)
+    )
+
+    override fun write(value: LegacyImportCommand, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`sourceIndex`, buf)
+            FfiConverterString.write(value.`outputKey`, buf)
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterByteArray.write(value.`payloadJson`, buf)
+            FfiConverterOptionalULong.write(value.`expectFromChild`, buf)
+    }
+}
+
+
+
+data class LegacyImportOperation (
+    val `sourceLibrary`: kotlin.String
+    , 
+    val `authorId`: kotlin.String
+    , 
+    val `authorLabel`: kotlin.String
+    , 
+    val `operationId`: kotlin.String
+    , 
+    val `signedBodyDigest`: kotlin.String
+    , 
+    val `kind`: kotlin.String
+    , 
+    val `version`: kotlin.ULong
+    , 
+    val `payloadJson`: kotlin.ByteArray
+    , 
+    val `admittedOrder`: kotlin.ULong
+    , 
+    val `claimedDateJson`: kotlin.ByteArray
+    , 
+    /**
+     * admitted, held, refused, unreadable, etc. Only admitted can produce effects.
+     */
+    val `admission`: kotlin.String
+    , 
+    /**
+     * applied, conflict, invalid, noEffect, retained, lateEdit, or unresolved.
+     */
+    val `outcome`: kotlin.String
+    , 
+    /**
+     * Domain-specific context serialized from the verified old fold. Omit with {}.
+     */
+    val `contextJson`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLegacyImportOperation: FfiConverterRustBuffer<LegacyImportOperation> {
+    override fun read(buf: ByteBuffer): LegacyImportOperation {
+        return LegacyImportOperation(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LegacyImportOperation) = (
+            FfiConverterString.allocationSize(value.`sourceLibrary`) +
+            FfiConverterString.allocationSize(value.`authorId`) +
+            FfiConverterString.allocationSize(value.`authorLabel`) +
+            FfiConverterString.allocationSize(value.`operationId`) +
+            FfiConverterString.allocationSize(value.`signedBodyDigest`) +
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterULong.allocationSize(value.`version`) +
+            FfiConverterByteArray.allocationSize(value.`payloadJson`) +
+            FfiConverterULong.allocationSize(value.`admittedOrder`) +
+            FfiConverterByteArray.allocationSize(value.`claimedDateJson`) +
+            FfiConverterString.allocationSize(value.`admission`) +
+            FfiConverterString.allocationSize(value.`outcome`) +
+            FfiConverterByteArray.allocationSize(value.`contextJson`)
+    )
+
+    override fun write(value: LegacyImportOperation, buf: ByteBuffer) {
+            FfiConverterString.write(value.`sourceLibrary`, buf)
+            FfiConverterString.write(value.`authorId`, buf)
+            FfiConverterString.write(value.`authorLabel`, buf)
+            FfiConverterString.write(value.`operationId`, buf)
+            FfiConverterString.write(value.`signedBodyDigest`, buf)
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterULong.write(value.`version`, buf)
+            FfiConverterByteArray.write(value.`payloadJson`, buf)
+            FfiConverterULong.write(value.`admittedOrder`, buf)
+            FfiConverterByteArray.write(value.`claimedDateJson`, buf)
+            FfiConverterString.write(value.`admission`, buf)
+            FfiConverterString.write(value.`outcome`, buf)
+            FfiConverterByteArray.write(value.`contextJson`, buf)
     }
 }
 
@@ -4309,6 +4560,62 @@ public object FfiConverterSequenceTypeLedgerEntry: FfiConverterRustBuffer<List<L
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeLegacyImportCommand: FfiConverterRustBuffer<List<LegacyImportCommand>> {
+    override fun read(buf: ByteBuffer): List<LegacyImportCommand> {
+        val len = buf.getInt()
+        return List<LegacyImportCommand>(len) {
+            FfiConverterTypeLegacyImportCommand.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<LegacyImportCommand>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeLegacyImportCommand.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<LegacyImportCommand>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeLegacyImportCommand.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeLegacyImportOperation: FfiConverterRustBuffer<List<LegacyImportOperation>> {
+    override fun read(buf: ByteBuffer): List<LegacyImportOperation> {
+        val len = buf.getInt()
+        return List<LegacyImportOperation>(len) {
+            FfiConverterTypeLegacyImportOperation.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<LegacyImportOperation>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeLegacyImportOperation.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<LegacyImportOperation>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeLegacyImportOperation.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeMember: FfiConverterRustBuffer<List<Member>> {
     override fun read(buf: ByteBuffer): List<Member> {
         val len = buf.getInt()
@@ -4477,6 +4784,45 @@ public object FfiConverterSequenceTypeAccess: FfiConverterRustBuffer<List<Access
 /**
  * @suppress
  */
+public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.String, kotlin.String>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, kotlin.String> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, kotlin.String>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterString.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, kotlin.String>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterString.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterString.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.String, kotlin.ByteArray>> {
     override fun read(buf: ByteBuffer): Map<kotlin.String, kotlin.ByteArray> {
         val len = buf.getInt()
@@ -4553,6 +4899,41 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         
         FfiConverterByteArray.lower(`record`),
         FfiConverterString.lower(`libraryId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Bind planned book component heads to actual signed destination IDs before the next batch.
+         */
+    @Throws(BindingException::class) fun `bindLegacyImportState`(`namespace`: kotlin.String, `stateJson`: kotlin.ByteArray, `outputs`: Map<kotlin.String, kotlin.String>): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_bind_legacy_import_state(
+    
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterByteArray.lower(`stateJson`),
+        FfiConverterMapStringString.lower(`outputs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Inputs must be in complete verified source order. Contexts describe each old prefix,
+         * not the final snapshot. Return values are unsigned proposals, signed by the importer.
+         */
+    @Throws(BindingException::class) fun `importLegacyBatch`(`namespace`: kotlin.String, `operations`: List<LegacyImportOperation>, `stateJson`: kotlin.ByteArray): LegacyImportBatch {
+            return FfiConverterTypeLegacyImportBatch.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_import_legacy_batch(
+    
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterSequenceTypeLegacyImportOperation.lower(`operations`),
+        FfiConverterByteArray.lower(`stateJson`),_status)
 }
     )
     }

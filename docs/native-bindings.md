@@ -207,3 +207,27 @@ Apps can now depend on `ColophonSession`, with `ColophonKitStorage` underneath, 
 assembling persistence and lifecycle around `Library` directly. See [new app](new-app.md)
 and [session contracts](session.md). The current adapter still uses this snapshot binding;
 verified-prefix checkpoint consumption waits for the new engine and regenerated bindings.
+
+## Pure 0.1 migration bridge
+
+`importLegacyBatch(namespace:operations:stateJson:)` / `import_legacy_batch` exposes all four
+core domain importers. `LegacyImportOperation` carries source library, author ID/label, old
+operation ID, exact signed-body SHA-256, kind/version, original payload JSON, admitted order,
+original claimed-date JSON, admission and **evaluated old fold outcome**. The binding does not
+verify old signatures or infer effectiveness from admission. Batches are limited to 1,024
+records and must have increasing admitted order within a source library.
+
+`contextJson` is the corresponding domain's serialized import context. Listening and saved
+use their camel-case serde field names; notes uses its existing snake-case context field names.
+Missing context fields receive the core type's defaults. Missing semantic facts fail closed to
+evidence. Books instead carries its own old-fold/identity context in opaque `stateJson`.
+Commands have a stable output key and source index. `expectFromChild` identifies a prior
+saved-reading child whose actual signed ID must be substituted before writing. Bind planned
+book heads through `bindLegacyImportState` after signing each batch. These are planned keys,
+never new authenticated operation IDs. Evidence and blob JSON preserve the complete core
+results, including baseline flags and publication-barrier requirements. The host must durably
+bind actual output IDs, archive exact source envelopes and handle blob publication.
+
+The generated Swift/Kotlin APIs and three-slice XCFramework were rebuilt for this bridge with
+`SKIP_VISIONOS=1`; this artifact is not a five-platform release. The migration handoff records
+acceptance and remaining engine requirements.

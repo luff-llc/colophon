@@ -129,3 +129,29 @@ production has no uncoordinated fallback. Actual OS presenter delivery, iCloud h
 App Group entitlement/bootstrap, Secure Enclave, Keychain prompts, Share/Safari/widget host
 journeys and two real consuming apps still need unrestricted/device acceptance. The sample
 uses a private folder and explicit pairing-request import, including agent approval/revocation.
+
+## Upgrade barriers, durable import writes and key failures
+
+`SessionPhase.migrating` means “Your library is being upgraded.” Configure every suite app
+with the same `SessionConfiguration.migrationMarker` URL outside the destination record tree.
+An active marker takes precedence over an empty destination, enrollment and ordinary writes.
+Foreground `refresh()` observes marker changes; the marker itself is not a new sync protocol or
+authority record. The root's dedicated migration session sets `migrationWriter: true`; only
+`ColophonMigration` verifies the existing source root before using it. Other app sessions use
+normal enrollment, including the existing explicit App Group starter policy where applicable.
+Old members are reported as needing to rejoin; no agent or grant is automatically restored.
+
+`performMigration(_:outputKey:)` uses the same serialized session write/publication path as
+ordinary commands. A non-expiring receipt binds the full source output key and a command digest
+to the signed operation ID. The receipt and exact pending signed bytes are journaled together
+before publication, then read back from storage. A restart reuses those bytes and receipts;
+a conflicting command for the same key fails. Creation collisions with native objects/tombstones stop with `migrationCollision` before signing;
+occurrence remapping requires the engine reservation seam. Payloads are not duplicated as plaintext
+in the migration receipt. These receipts currently grow with history and share the 64 MiB session
+journal bound; the incoming engine should offer a scalable transactional import receipt API.
+
+Provider failures carry `SessionFailure.keysUnavailable(detail:)`; unrelated failures retain
+`.other(detail:)`. The sample displays the actionable reason. `retry()` remembers a failed
+create and otherwise refreshes restore/enrollment. It never regenerates an identity in response
+to a key failure. The sample's `--demo-key-failure` mode fails the first provider access and
+allows Retry using that same identity in a temporary, separate demo library.

@@ -1,11 +1,13 @@
 //! Native transport for the public Colophon core API. No storage, clock, or entropy source.
 //! Host calls always happen outside the session mutex. Prepared actions are optimistic:
 //! a changed session rejects their commit, so a suspended signer cannot overwrite newer authority.
+mod migration;
 mod types;
 use colophon_core::{
     library::{Call, CreateOptions, Library, PendingBatch},
     model::{self, Outcome},
 };
+pub use migration::*;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, MutexGuard,
