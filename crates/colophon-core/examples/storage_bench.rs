@@ -101,6 +101,13 @@ fn main() {
         .map(String::as_str)
         .unwrap_or("/tmp/colophon-engine-100k.records");
     let owner = keys(1);
+    println!(
+        "registered domains: {:?}",
+        colophon_core::domain::NAMESPACES
+    );
+    for ns in colophon_core::domain::NAMESPACES {
+        assert!(colophon_core::domain::module(ns).is_some());
+    }
     if args
         .iter()
         .any(|a| a == "--disk-memory" || a == "--source-only")

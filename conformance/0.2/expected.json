@@ -57,10 +57,29 @@
       }
     ],
     "state": {
+      "attachments": [],
+      "cells": [
+        {
+          "author": "20d7bfe152532d0cbccd2143db7644ac",
+          "authorLabel": "Research agent",
+          "clock": 3,
+          "extensions": {
+            "origin": "person"
+          },
+          "id": "ai-note",
+          "kind": "markdown",
+          "notebook": "inbox",
+          "origin": "ai",
+          "revision": "2035296080664a57663f99c660a4256f",
+          "source": "An edited contribution"
+        }
+      ],
       "conflicts": [],
+      "entries": [],
       "invalid": [],
       "notebooks": [
         {
+          "archived": false,
           "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
           "authorLabel": "Owner",
           "clock": 1,
@@ -70,9 +89,16 @@
             }
           },
           "id": "inbox",
+          "kind": "notebook",
+          "orderRevision": "0eee3a3a56c0a66d78b7ce25eeacd11c",
           "origin": "person",
           "revision": "9187c275a69692ca1d112e19f5c8414b",
-          "title": "Inbox"
+          "title": "Inbox",
+          "touched": [
+            3,
+            "20d7bfe152532d0cbccd2143db7644ac",
+            "2035296080664a57663f99c660a4256f"
+          ]
         }
       ],
       "notes": [
@@ -84,12 +110,16 @@
             "origin": "person"
           },
           "id": "ai-note",
+          "kind": "markdown",
           "notebook": "inbox",
           "origin": "ai",
           "revision": "2035296080664a57663f99c660a4256f",
+          "source": "An edited contribution",
           "text": "An edited contribution"
         }
-      ]
+      ],
+      "proposals": [],
+      "runs": []
     }
   },
   "ledger": [
@@ -507,22 +537,31 @@
       "refused": [],
       "state": {
         "conflicts": [],
+        "contributions": [],
         "episodes": [
           {
             "author": "391a33c8613333b0e8f9fbab293e057d",
             "authorLabel": "Laptop",
             "clock": 3,
             "id": "episode",
+            "metadataAvailable": true,
+            "metadataRevision": "c552bbf85bf3175d22acf1d48652ca8e",
             "origin": "person",
+            "positionBaseline": false,
             "positionRevision": "9d084f99f769c19e237c4a4481bdef6d",
             "revision": "9d084f99f769c19e237c4a4481bdef6d",
             "seconds": 42,
             "show": "show",
             "title": "An episode",
-            "transcriptExcerpt": "A short transcript excerpt."
+            "transcriptExcerpt": "A short transcript excerpt.",
+            "updated": "2026-11-04T12:00:00.000Z"
           }
         ],
         "invalid": [],
+        "jobs": [],
+        "notes": [],
+        "playlists": [],
+        "preferences": {},
         "queue": {
           "author": "391a33c8613333b0e8f9fbab293e057d",
           "authorLabel": "Laptop",
@@ -533,19 +572,23 @@
           "origin": "person",
           "revision": "e323b732088fb9a6838ae97ebd71addf"
         },
+        "receipts": {},
+        "recordings": {},
         "shows": [
           {
             "author": "391a33c8613333b0e8f9fbab293e057d",
             "authorLabel": "Laptop",
             "clock": 1,
             "followed": true,
+            "following": true,
             "id": "show",
             "origin": "person",
             "revision": "d5a8c0bc3f9aa78d41a4ab7d18f8a480",
             "title": "A podcast",
             "url": "https://example.org/feed.xml"
           }
-        ]
+        ],
+        "transcripts": []
       }
     },
     "notes": {
@@ -611,10 +654,29 @@
       "namespace": "notes",
       "refused": [],
       "state": {
+        "attachments": [],
+        "cells": [
+          {
+            "author": "20d7bfe152532d0cbccd2143db7644ac",
+            "authorLabel": "Research agent",
+            "clock": 3,
+            "extensions": {
+              "origin": "person"
+            },
+            "id": "ai-note",
+            "kind": "markdown",
+            "notebook": "inbox",
+            "origin": "ai",
+            "revision": "2035296080664a57663f99c660a4256f",
+            "source": "An edited contribution"
+          }
+        ],
         "conflicts": [],
+        "entries": [],
         "invalid": [],
         "notebooks": [
           {
+            "archived": false,
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
             "clock": 1,
@@ -624,9 +686,16 @@
               }
             },
             "id": "inbox",
+            "kind": "notebook",
+            "orderRevision": "0eee3a3a56c0a66d78b7ce25eeacd11c",
             "origin": "person",
             "revision": "9187c275a69692ca1d112e19f5c8414b",
-            "title": "Inbox"
+            "title": "Inbox",
+            "touched": [
+              3,
+              "20d7bfe152532d0cbccd2143db7644ac",
+              "2035296080664a57663f99c660a4256f"
+            ]
           }
         ],
         "notes": [
@@ -638,12 +707,16 @@
               "origin": "person"
             },
             "id": "ai-note",
+            "kind": "markdown",
             "notebook": "inbox",
             "origin": "ai",
             "revision": "2035296080664a57663f99c660a4256f",
+            "source": "An edited contribution",
             "text": "An edited contribution"
           }
-        ]
+        ],
+        "proposals": [],
+        "runs": []
       }
     },
     "reading.saved": {
@@ -713,33 +786,56 @@
         }
       ],
       "state": {
+        "annotations": {},
+        "answers": {},
+        "checkpoints": {},
         "conflicts": [],
+        "connections": {},
+        "diagnostics": [],
+        "exportBlocked": false,
+        "feeds": {},
+        "images": {},
         "invalid": [],
         "items": [
           {
+            "added": "2026-11-04T12:00:00.000Z",
             "author": "ba9026f3d6d8ef13a12eb8f680c096a7",
             "authorLabel": "Reader app",
             "clock": 3,
+            "consumption": "inProgress",
             "extensions": {
               "custom": "preserved"
             },
             "id": "link",
             "origin": "person",
+            "retention": "saved",
             "revision": "0f1a8e8d66895be918f722c88c6c4575",
             "state": "reading",
             "title": "Edited title",
             "url": "https://example.org/article"
           },
           {
+            "added": "2026-11-04T12:00:00.000Z",
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
             "clock": 4,
             "id": "after-rekey",
             "origin": "person",
+            "retention": "saved",
             "revision": "ebb4485fb18c5c150db1e316e6415315",
+            "title": "https://example.org/new",
             "url": "https://example.org/new"
           }
-        ]
+        ],
+        "pendingCount": 0,
+        "receipts": {},
+        "reviewHistory": [],
+        "savedViews": {},
+        "sourceMetadata": {},
+        "sources": {},
+        "subscriptions": {},
+        "unsupported": [],
+        "visibility": {}
       }
     }
   }

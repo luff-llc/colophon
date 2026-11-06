@@ -1,27 +1,66 @@
-# Engine performance — stage 2, November 6, 2026
+# Engine performance — integrated domains, November 6, 2026
 
-The storage-backed `Engine` meets all three measured desktop timing targets: **78.2 ms**
-for a fresh-process checkpoint open with 1% new records, **1.11 s** for a full
-100k rebuild, and **0.746 ms** for a local write. These are medians of three runs, not tail-latency
-guarantees. iPhone and Android hardware remain unmeasured. Existing `Library` methods stay source
-compatible; applications must opt into `Engine<RecordSource>` for the fast cold-open path.
+## Four-domain merge validation
 
-Record envelopes and full history views are no longer retained by the new engine. Its memory is
-O(indexes + authority + reducer state + bounded content/batch buffers), **not strictly O(state)**.
-The fresh cold process with 1% new records peaked at **98.2 MiB** with a disk-backed source.
-The compatibility `Library::records() -> &Records` contract still retains complete history.
+The final merged engine meets all three desktop timing targets with `reading.books`,
+`reading.saved`, `notes` and `listening.podcasts` registered **and exercised**. One final run
+on the same host/release configuration, after builds and tests completed:
+
+| Measurement | Final merged run | Target |
+| --- | ---: | ---: |
+| Full 100k rebuild, including unlock | **1,308.880 ms** | <1,500 ms, met |
+| Fresh-process disk checkpoint open + 1,000 new operations | **92.215 ms** | <100 ms, met |
+| Local write, software signing, in-memory host persistence and application | **0.809 ms** | <2 ms, met |
+| Unchanged checkpoint open, including unlock | 71.251 ms | <100 ms, met |
+| Checkpoint + 1% suffix, in-memory source | 88.424 ms | <100 ms, met |
+| Checkpoint serialization | 87.874 ms | Host schedules persistence |
+| First lazy 50-operation history page | 4.709 ms | No numeric gate |
+| Independent background audit of 128 records | 34.170 ms | No numeric gate |
+
+The new fixture keeps 100,000 operations, four writers, three grants, a revocation preserving
+25,000 writes and namespace rotations. It adds books to genesis/grants and replaces part of the
+old workload: 89,998 podcast positions, 4,000 episode updates, 4,000 saved captures, 1,000 note
+edits, one notebook, one initial note, one book and 999 book positions. There are 100,009 paths
+and 89,645,618 envelope bytes. This is a separate fixture from the historical three-domain run;
+it is synthetic engine-load coverage, not a scale test of every domain command or blob workflow.
+
+The final checkpoint is **19,116,119 bytes**. Full rebuild fetched 100,015 records (the authority
+coherence reads are included), verified/decrypted/applied 100,000 operations, and retained zero
+history-cache bytes. Unchanged restoration fetched/verified/decrypted/applied **zero** records.
+Both suffix runs fetched/verified/decrypted/applied exactly **1,000** new operations. Lazy history
+then opened only 50 requested payloads and retained 11,539 bytes under the 64 KiB cache budget.
+Projection comparisons and all work-counter assertions passed. The memory contract remains
+O(indexes + authority + projection + bounded content/batch buffers); historical RSS figures below
+were not remeasured for this merged workload.
+
+The first merged measurement failed the gates: 1,985.553 ms rebuild, 186.726 ms fresh-process
+suffix open, and a 38,971,192-byte checkpoint. Saved shelf indexes duplicated ordering strings
+across filter buckets; podcast reports repeatedly copied projections and rebuilt unchanged
+indexes. The final implementation shares ordering keys, compacts item columns and identical
+index memberships in local snapshots, and reconstructs derived shelf rows from retained state
+in parallel during restore. Podcast updates reuse projection fields, retain exact canonical
+prefix bytes and use a schema-equivalent typed playback validator. Ordered admission still
+runs centrally; independent namespace reductions can run concurrently inside the same bounded
+batch, preserving each namespace's order. No checks, conflicts, extensions or retained originals
+were discarded to achieve these timings.
+
+Intermediate measurements were used to diagnose the regression. Before the final parallel row
+restoration change, a fixed three-process cold series was 102.537, 100.646 and 99.574 ms (median
+100.646 ms), still over target; it is not included in the final result above. The final table is
+one confirmation run, not a median or tail-latency guarantee. Existing timing exclusions and the
+warm-filesystem-cache limitation below still apply. No conformance vectors were regenerated.
 
 ## Reproduction
 
 ```sh
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 CARGO_PROFILE_RELEASE_OPT_LEVEL=3 cargo build --release -p colophon-core --examples
-# Reuse the previous fixture, or generate it if absent (generation is not timed).
-target/release/examples/bench 100000 /tmp/colophon-engine-100k.records --profile
+# Reuse the four-domain fixture, or generate it if absent (generation is not timed).
+target/release/examples/bench 100000 /tmp/colophon-engine-four-domains-100k.records --profile
 # Full rebuild, unchanged cold open, real 1% suffix, local write and history/audit timings.
-target/release/examples/storage_bench /tmp/colophon-engine-100k.records
+target/release/examples/storage_bench /tmp/colophon-engine-four-domains-100k.records
 # Independent process, disk source, including first-use verifier setup and new-record reads.
-target/release/examples/storage_bench /tmp/colophon-engine-100k.records --cold-suffix
+target/release/examples/storage_bench /tmp/colophon-engine-four-domains-100k.records --cold-suffix
 ```
 
 `storage_bench` writes three synthetic, device-local scratch artifacts for the independent run:
@@ -39,7 +78,7 @@ import resource, subprocess
 mode = '--cold-suffix' # also: --source-only, --cold-memory, --disk-memory
 subprocess.run([
     'target/release/examples/storage_bench',
-    '/tmp/colophon-engine-100k.records', mode
+    '/tmp/colophon-engine-four-domains-100k.records', mode
 ], check=True)
 print('peak RSS bytes:', resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
 MEASURE
@@ -55,12 +94,28 @@ For the portable serial diagnostic, build the `bench` example with `--no-default
 run the same command. Rebuild with default features before comparing the native parallel timings.
 No new benchmark framework, crypto dependency or platform provider is needed.
 
-## Machine, fixture and timing boundary
+## Historical stage-2 baseline
+
+The following stage-2 summary and before/after tables predate the four-domain integration.
+Use the merged measurements above for the current code.
+
+The storage-backed `Engine` meets all three measured desktop timing targets: **78.2 ms**
+for a fresh-process checkpoint open with 1% new records, **1.11 s** for a full
+100k rebuild, and **0.746 ms** for a local write. These are medians of three runs, not tail-latency
+guarantees. iPhone and Android hardware remain unmeasured. Existing `Library` methods stay source
+compatible; applications must opt into `Engine<RecordSource>` for the fast cold-open path.
+
+Record envelopes and full history views are no longer retained by the new engine. Its memory is
+O(indexes + authority + reducer state + bounded content/batch buffers), **not strictly O(state)**.
+The fresh cold process with 1% new records peaked at **98.2 MiB** with a disk-backed source.
+The compatibility `Library::records() -> &Records` contract still retains complete history.
+
+## Historical machine, fixture and timing boundary
 
 - Apple M3 Max, 16 CPU cores (12 performance, 4 efficiency), 64 GB RAM; macOS 27.0.1, arm64.
   rustc 1.91.1 (`ed61e7d7e`), release/LTO and `CARGO_PROFILE_RELEASE_OPT_LEVEL=3`. No target-CPU
   override. The repository's default size-focused WASM release profile is unchanged.
-- Same 100,000-operation fixture used at `302db73`: 89,999 podcast positions, 4,000 episode
+- Historical 100,000-operation fixture used at `302db73`: 89,999 podcast positions, 4,000 episode
   updates, 4,000 saved links, 1,999 note edits, one notebook and one initial note. Four writers,
   three grants and one revocation preserving 25,000 writes, with rotations of all namespaces.
 - 100,009 total paths, 89,681,974 stored bytes. Projection: about 940 episodes, 4,000 saved
@@ -213,3 +268,63 @@ unchanged authority. Administrative materialization can still allocate full hist
 storage, production record sources, FFI/provider adapters, total app-launch I/O and mobile
 hardware/power/tail latency remain host integration work. See [engine.md](engine.md) and
 [the handoff](handoff-engine.md) for the contract and next-worker details.
+
+## FFI
+
+Measured November 6, 2026 on the arm64 macOS host in the `ffi` worktree. Rust stable 1.91.1,
+Swift 6.4.2 / Xcode 27.2, JDK 17, Kotlin 2.2.21, JNA 5.18.1, UniFFI 0.32.2. CPU model access
+is denied by this sandbox. Rust uses the workspace release profile (`opt-level = "s"`, LTO);
+Swift uses `-c release`. These historical measurements used the pre-incremental public core of the
+`ffi` worktree; they were not remeasured during the engine/domain merge.
+
+| Path | Query median | Write median | Query difference vs Rust | Write difference vs Rust |
+| --- | ---: | ---: | ---: | ---: |
+| Native Rust + query JSON | 5.067 ms | 10.860 ms | +0.000 ms / +0.0% | +0.000 ms / +0.0% |
+| Rust binding facade (no language ABI) | 5.073 ms | 10.920 ms | +0.006 ms / +0.1% | +0.061 ms / +0.6% |
+| Swift generated ABI | 5.473 ms | 11.606 ms | +0.405 ms / +8.0% | +0.746 ms / +6.9% |
+| Kotlin/JNA ABI | 5.525 ms | 11.755 ms | +0.457 ms / +9.0% | +0.895 ms / +8.2% |
+
+Each cell is the median of three independent run medians. Each run uses 100 queries and 50
+writes against the same fixed history: one notebook and 20 notes. Query is `notes__read`,
+including JSON serialization on both native Rust and FFI paths. Write is prepare `addNote`,
+verify/commit a precomputed valid signature, and retrieve the admitted operation. Every write
+starts with a freshly restored, unlocked copy of the fixture; restoration is outside timing.
+The seed and signature are deliberately reused only on those independent benchmark copies,
+never on a continuing production library. Assertions and result inspection are outside timing.
+
+Host ECDSA signing, ECDH, entropy generation, clocks, disk I/O, cold open, and UI work are
+excluded. The same Rust signature verification, sealing, admission, and domain evaluation
+remain inside the measured work. This isolates the transport path from differing Rust,
+CryptoKit, Keystore, and JCA signing implementations. The Swift sample measures actual
+UniFFI calls, not an in-Rust stand-in; the JVM sample crosses JNA after 200 query warmups and
+10 discarded write warmups. It does not include an app coroutine dispatcher or Swift actor hop.
+
+Observed per-run query medians ranged 5.061–5.326 ms in native Rust, 5.467–5.694 ms in Swift,
+and 5.503–5.537 ms in Kotlin. Write medians ranged 10.847–11.044 ms, 11.586–11.886 ms, and
+11.743–11.770 ms respectively. Treat the deltas as costs of the complete wrapper/ABI path,
+including conversion and build/code-generation differences, rather than an isolated foreign
+function call instruction. The host was shared with other work, so small differences are
+noise-sensitive; these are not mobile-device latency claims.
+
+At this history size the complete Swift/JVM paths add about 0.4–0.5 ms per query and
+0.7–0.9 ms per write. The much smaller in-Rust facade delta separates adapter work from the
+actual foreign-language transport. The current core's repeated full evaluation dominates;
+these results neither establish the engine's future 100k-operation targets nor measure its
+planned narrow query/checkpoint API. Small domain queries should replace whole namespace
+reads when that public API is available.
+
+Reproduce after `bash scripts/build-apple.sh`:
+
+```sh
+bash scripts/bench-ffi.sh
+```
+
+The harness is `crates/colophon-ffi/examples/ffi_bench.rs`, Swift's `PerformanceTests`, and
+Kotlin's `PerformanceTest`. It writes only `target/ffi-bench/`. To repeat without recompiling,
+run the Rust example binary, then `COLOPHON_FFI_BENCH=1 bash scripts/test-swift.sh --skip-build
+-c release --filter PerformanceTests` and `COLOPHON_FFI_BENCH=1 bash scripts/test-kotlin.sh
+--tests '*PerformanceTest' --rerun`. The three measured run medians are preserved in
+`crates/colophon-ffi/benchmarks/2026-11-06.json`; build/test logs are local artifacts under
+`target/ffi-validation/`.
+
+<!-- End FFI measurements; keep engine sections separate when merging. -->

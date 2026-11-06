@@ -312,3 +312,81 @@ fn deterministic_library_conformance() {
         expected_stored["ledger"]
     );
 }
+
+#[test]
+fn deterministic_books_conformance() {
+    support::books::check(false);
+}
+
+#[test]
+fn notes_domain_queries_match_signed_vector() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/notes.json");
+    let vector: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let records: Records = vector["records"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(path, bytes)| {
+            (
+                path.clone(),
+                STANDARD.decode(bytes.as_str().unwrap()).unwrap(),
+            )
+        })
+        .collect();
+    let library = opened(records, &keys(1));
+    for query in vector["queries"].as_array().unwrap() {
+        assert_eq!(
+            success(
+                library
+                    .query(
+                        "notes",
+                        query["name"].as_str().unwrap(),
+                        query["args"].clone(),
+                        NOW
+                    )
+                    .unwrap()
+            ),
+            query["result"]
+        );
+    }
+}
+
+#[test]
+fn saved_domain_conformance() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/reading.saved.json");
+    let fixture: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let records: Records = fixture["records"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(path, bytes)| {
+            (
+                path.clone(),
+                STANDARD.decode(bytes.as_str().unwrap()).unwrap(),
+            )
+        })
+        .collect();
+    let lib = opened(records, &keys(1));
+    for query in fixture["queries"].as_array().unwrap() {
+        assert_eq!(
+            json!(success(
+                lib.query(
+                    "reading.saved",
+                    query["name"].as_str().unwrap(),
+                    query["args"].clone(),
+                    NOW
+                )
+                .unwrap()
+            )),
+            query["expected"]
+        );
+    }
+}
+
+#[path = "support/listening_vector.rs"]
+mod listening_vector;
+#[test]
+fn listening_podcasts_conformance() {
+    listening_vector::check();
+}

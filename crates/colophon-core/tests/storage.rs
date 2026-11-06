@@ -696,3 +696,271 @@ fn invalidation_does_not_erase_authenticated_immutability_evidence() {
         }
     }
 }
+
+#[test]
+fn all_domain_vectors_restore_without_reads_and_fetch_history_lazily() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use serde_json::Value;
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2");
+    let read = |name: &str| -> Value {
+        serde_json::from_slice(&std::fs::read(folder.join(name)).unwrap()).unwrap()
+    };
+    for (ns, record_file, expected_file, seed) in [
+        (
+            "reading.books",
+            "reading.books/records.json",
+            "reading.books/expected.json",
+            5,
+        ),
+        ("notes", "notes.json", "notes.json", 1),
+        (
+            "reading.saved",
+            "reading.saved.json",
+            "reading.saved.json",
+            1,
+        ),
+        (
+            "listening.podcasts",
+            "listening.podcasts.records.json",
+            "listening.podcasts.expected.json",
+            1,
+        ),
+    ] {
+        let vector = read(record_file);
+        let records = vector
+            .get("records")
+            .unwrap_or(&vector)
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(p, b)| (p.clone(), STANDARD.decode(b.as_str().unwrap()).unwrap()))
+            .collect();
+        let owner = keys(seed);
+        let lib = opened(records, &owner);
+        let first = engine(&lib, &owner);
+        let cp = first.checkpoint().unwrap();
+        let source = first.source().clone();
+        source.1.borrow_mut().clear();
+        let mut cold = Engine::open(
+            source.clone(),
+            source.listing(),
+            owner.public(),
+            options(&lib),
+            Some(&cp),
+        )
+        .unwrap();
+        unlock_engine(&mut cold, &owner);
+        assert_eq!(cold.open_mode(), &OpenMode::VerifiedPrefix, "{ns}");
+        let expected = read(expected_file);
+        for q in expected
+            .get("queries")
+            .unwrap_or(&expected)
+            .as_array()
+            .unwrap()
+        {
+            let name = q.get("name").unwrap_or(&q["query"]).as_str().unwrap();
+            let args = q.get("args").unwrap_or(&q["arguments"]).clone();
+            let result = q.get("result").unwrap_or(&q["expected"]);
+            assert_eq!(
+                &success(cold.query(ns, name, args, NOW).unwrap()),
+                result,
+                "{ns}/{name}"
+            );
+        }
+        assert!(source.1.borrow().is_empty(), "{ns} queries fetched history");
+        assert_eq!(cold.stats().applied_operations, 0);
+        assert_eq!(cold.stats().payloads_decrypted, 0);
+        let page = success(cold.history(ns, 0, 1, NOW).unwrap());
+        assert_eq!(
+            json!(page.items),
+            json!(success(lib.view(ns, NOW).unwrap()).admitted[..1])
+        );
+        assert_eq!(source.1.borrow().len(), 1);
+        assert_eq!(cold.stats().payloads_decrypted, 1);
+        equal(&mut cold, &lib);
+    }
+}
+
+#[test]
+fn four_domain_writes_and_suffix_replay_share_the_registered_reducers() {
+    let owner = keys(1);
+    let pending = Library::begin_create(
+        colophon_core::library::CreateOptions {
+            owner: owner.public(),
+            recovery: keys(9).public(),
+            label: "Four domains".into(),
+            owner_label: "Owner".into(),
+            namespaces: colophon_core::domain::NAMESPACES
+                .iter()
+                .map(|ns| (*ns).into())
+                .collect(),
+        },
+        NOW,
+        [10; 32],
+    )
+    .unwrap();
+    let mut lib = opened(finish(pending, &owner), &owner);
+    let mut live = engine(&lib, &owner);
+    let cp = live.checkpoint().unwrap();
+    for (i, (ns, kind, payload)) in [
+        (
+            "reading.books",
+            "addBook",
+            json!({"id":"book","title":"Book","creator":"Writer"}),
+        ),
+        (
+            "reading.saved",
+            "capture",
+            json!({"id":"saved","url":"https://example.org"}),
+        ),
+        (
+            "notes",
+            "createNotebook",
+            json!({"id":"notebook","title":"Notebook"}),
+        ),
+        (
+            "listening.podcasts",
+            "follow",
+            json!({"id":"show","url":"https://example.org/feed"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pending = success(
+            live.begin_write(ns, kind, payload, NOW, [i as u8 + 30; 32])
+                .unwrap(),
+        );
+        let records = finish(pending, &owner);
+        lib.merge(records.clone()).unwrap();
+        let paths = live.source().add(records);
+        live.apply_paths(paths).unwrap();
+    }
+    assert_eq!(live.stats().applied_operations, 4);
+    let source = live.source().clone();
+    source.1.borrow_mut().clear();
+    let mut suffix = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        Some(&cp),
+    )
+    .unwrap();
+    unlock_engine(&mut suffix, &owner);
+    assert_eq!(suffix.open_mode(), &OpenMode::VerifiedPrefix);
+    assert_eq!(suffix.stats().records_read, 4);
+    assert_eq!(suffix.stats().signatures_verified, 4);
+    assert_eq!(suffix.stats().payloads_decrypted, 4);
+    assert_eq!(suffix.stats().applied_operations, 4);
+    equal(&mut suffix, &lib);
+    equal(&mut live, &lib);
+}
+
+#[test]
+fn authenticated_old_reducer_schemas_fall_back_to_full_replay() {
+    let (mut lib, owner, _) = create();
+    write(&mut lib, &owner, 1);
+    let first = engine(&lib, &owner);
+    let cp = first.checkpoint().unwrap();
+    let length = u32::from_le_bytes(cp[8..12].try_into().unwrap()) as usize;
+    let original: serde_json::Value = serde_json::from_slice(&cp[12..12 + length]).unwrap();
+    for schema in [None, Some(json!(1)), Some(json!(999))] {
+        let mut meta = original.clone();
+        match schema {
+            Some(value) => {
+                meta["reducer_schema"] = value;
+            }
+            None => {
+                meta.as_object_mut().unwrap().remove("reducer_schema");
+            }
+        }
+        let bytes = serde_json::to_vec(&meta).unwrap();
+        let mut old = cp[..8].to_vec();
+        old.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        old.extend(bytes);
+        old.extend_from_slice(&cp[12 + length..cp.len() - 32]);
+        let mut tag = [0; 32];
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(&[71; 32]), &old)
+            .expand(b"colophon/verified-prefix/2", &mut tag)
+            .unwrap();
+        old.extend(tag);
+        let source = first.source().clone();
+        let mut cold = Engine::open(
+            source.clone(),
+            source.listing(),
+            owner.public(),
+            options(&lib),
+            Some(&old),
+        )
+        .unwrap();
+        assert!(matches!(cold.open_mode(), OpenMode::Invalidated(_)));
+        unlock_engine(&mut cold, &owner);
+        assert_eq!(cold.stats().signatures_verified, 1);
+        assert_eq!(cold.stats().applied_operations, 1);
+        equal(&mut cold, &lib);
+    }
+}
+
+#[test]
+fn parallel_domain_reduction_keeps_global_budget_admission_and_stream_order() {
+    let (mut lib, owner, _) = create();
+    let device = keys(2);
+    enroll(
+        &mut lib,
+        &owner,
+        &device,
+        "Budgeted device",
+        MemberKind::Device,
+        grant(&["reading.saved", "notes", "listening.podcasts"], Some(400)),
+        21,
+    );
+    let mut replica = engine(&lib, &owner);
+    let mut batch = Records::new();
+    for i in 0..600 {
+        let (ns, kind, payload) = match i % 3 {
+            0 => (
+                "listening.podcasts",
+                "position",
+                json!({"id":"episode","seconds":i}),
+            ),
+            1 => (
+                "reading.saved",
+                "capture",
+                json!({"id":format!("link{i}"),"url":"https://example.org"}),
+            ),
+            _ => (
+                "notes",
+                "createNotebook",
+                json!({"id":format!("notebook{i}"),"title":"Notebook"}),
+            ),
+        };
+        batch.extend(adversarial(
+            &lib,
+            &owner,
+            &device,
+            ns,
+            op(kind, i + 1, lib.authority().latest, payload),
+            1,
+            i as u8,
+        ));
+    }
+    lib.merge(batch.clone()).unwrap();
+    let paths = replica.source().add(batch);
+    replica.apply_paths(paths).unwrap();
+    assert_eq!(replica.stats().applied_operations, 400);
+    equal(&mut replica, &lib);
+    let cp = replica.checkpoint().unwrap();
+    let source = replica.source().clone();
+    let mut cold = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        Some(&cp),
+    )
+    .unwrap();
+    unlock_engine(&mut cold, &owner);
+    assert_eq!(cold.stats().records_read, 0);
+    equal(&mut cold, &lib);
+}

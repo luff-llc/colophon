@@ -218,12 +218,15 @@ pub(crate) fn parallel_map<T: Sync, R: Send>(input: &[T], f: impl Fn(&T) -> R + 
 }
 
 pub(crate) fn parallel_for_each<T: Send>(input: &mut [T], f: impl Fn(&mut T) + Sync) {
+    parallel_tasks(input, 64, f);
+}
+pub(crate) fn parallel_tasks<T: Send>(input: &mut [T], _grain: usize, f: impl Fn(&mut T) + Sync) {
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     {
         let threads = std::thread::available_parallelism()
             .map_or(1, |n| n.get())
             .min(16)
-            .min(input.len().div_ceil(64))
+            .min(input.len().div_ceil(_grain))
             .max(1);
         if threads > 1 {
             let size = input.len().div_ceil(threads);

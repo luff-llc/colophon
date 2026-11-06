@@ -19,12 +19,20 @@ pub trait Reducer: DomainModule {
 }
 ```
 
+All four built-in modules are registered: `reading.books`, `reading.saved`, `notes`, and
+`listening.podcasts`. Their full reducers, operation validation hooks, named queries and pure
+import planners are shared by `Library` and `Engine`; registration does not materialize history.
+See [domain contracts](domains/README.md) for the richer query shapes, cursor/revision rules,
+validation and host integration seams. The offset/query table below describes the retained
+preview compatibility surface; new domain queries use their own bounded result envelopes.
+
 `AdmittedOperation` aliases the existing authenticated `OperationView`. `ReadingSaved`,
 `ListeningPodcasts`, and `Notes` own `SavedState`, `PodcastsState`, and `NotesState` respectively.
 The engine alone orders admission. Reducers retain attributed conflicts, invalid IDs, tombstones,
 extensions, and the previous conflict semantics. Unknown kinds are skipped. `DomainModule::fold`
 is retained as a source-compatible from-scratch replay wrapper. A new reducer schema or semantic
-change must increment the local checkpoint format version before old snapshots can be restored.
+change must increment the authenticated `reducer_schema` generation before old snapshots can
+be restored. Generation 2 identifies the integrated full-domain reducers.
 
 ## Queries
 
@@ -101,7 +109,7 @@ fresh-identity enrollment; this engine does not introduce same-identity replacem
   disables creation; `retain: 0` also removes retained snapshots. A host explicitly persists
   `checkpoint()` bytes; the core performs no filesystem I/O.
 
-The version-1 body contains `version`, `library`, `identity`, `namespace`, `epoch`, and `snapshot`.
+The version-1 body contains `version`, `reducer_schema`, `library`, `identity`, `namespace`, `epoch`, and `snapshot`.
 The snapshot contains serialized reducer `state`, admitted-prefix `position`, and 32-byte `digest`.
 `H(0)` is 32 zero bytes. `H(n) = SHA-256(H(n-1) || recordDigest(n))`, concatenating raw 32-byte
 values. The operation record digest is SHA-256 of the exact signed **body** bytes, as in `kept`;
@@ -190,7 +198,7 @@ namespaces. Flags distinguish signature-verified headers, header budget admissio
 IDs and projected operations. Rejected records/requests are bound as observed bytes, never
 promoted to valid operations. The metadata contains:
 
-- Format/reducer version, expected library and complete recipient public identity.
+- Container version, required `reducer_schema` generation, expected library and complete recipient public identity.
 - Authenticated authority state, including historical roots, grants, epochs and revocation keeps.
 - Reducer states, namespace prefix counts and rolling digests, clocks and revisions.
 - Admission tails, capped-author spend sets, unlocked-epoch names and rejection evidence.
@@ -205,7 +213,10 @@ outer encodings and ciphertext. These two digest purposes are intentionally diff
 
 Authentication is HKDF-SHA256 with the host's device key as salt, the exact container body as
 IKM, `colophon/verified-prefix/2` as expansion info and 32 output bytes. Comparison covers all
-tag bytes before parsing metadata or index. Format/reducer changes must bump version and magic.
+tag bytes before parsing metadata or index. Container changes must bump version and magic. Reducer schema/semantic changes increment the
+required authenticated `reducer_schema` generation in both cache APIs. Missing or mismatching
+generations fall back to replay, including caches made before all four full domains were merged.
+This preserves the `COLOENG2` layout, exact-envelope index, tag construction and prefix digests.
 The key must be random and protected separately from the shared folder. This is an additional
 host-supplied device secret, independent of namespace AES keys and the version-1 ECDH-derived
 `Library` cache key. Checkpoint state is plaintext; protect the local cache itself as well.
@@ -256,6 +267,11 @@ state + bounded cache + bounded processing batch), **not strictly O(projection s
 membership, duplicate IDs, ordering and capped budgets require history indexes. Reducer conflicts,
 invalid entries, tombstones and authority `kept` sets can also legitimately grow with history.
 The engine processes at most 8,192 new records per batch; an individual record is not size-capped.
+After ordered global admission, independent namespace projections can reduce concurrently in
+native workers. Each namespace's operation order is preserved; workers receive only projection
+state and admitted content. Small deltas, WASM and builds without `parallel` run serially.
+Saved-reading caches compact retained items and shelf indexes; derived shelf rows are rebuilt
+from projection state during restore (in parallel where available), never from historical records.
 
 ### Integrity audits and trusted-folder limits
 

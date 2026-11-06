@@ -106,6 +106,7 @@ struct Projection {
 #[derive(Serialize, Deserialize)]
 struct CacheMeta {
     version: u32,
+    reducer_schema: u32,
     identity: PublicIdentity,
     authority: Authority,
     projections: BTreeMap<String, Projection>,
@@ -655,6 +656,7 @@ impl<S: RecordSource> Engine<S> {
                     Library::open_operation(&self.library.authority, &self.library.keys, j);
                 }
             });
+            let mut reductions: BTreeMap<String, Vec<OperationView>> = BTreeMap::new();
             for (mut entry, mut j) in candidates {
                 if j.opened {
                     self.stats.payloads_decrypted += 1;
@@ -716,9 +718,12 @@ impl<S: RecordSource> Engine<S> {
                     .or_insert_with(|| Namespace::new(&meta.namespace));
                 state.revision += 1;
                 if j.status == Status::Admitted {
-                    if let Some(op) = &j.operation {
-                        state.state.apply(op);
+                    if let Some(op) = j.operation.take() {
                         state.clock = op.clock;
+                        reductions
+                            .entry(meta.namespace.clone())
+                            .or_default()
+                            .push(op);
                         state.hashes[0] = engine::roll(state.hashes[0], &j.digest);
                         *self.counts.entry(meta.namespace.clone()).or_default() += 1;
                         entry.flags |= PROJECTED;
@@ -762,6 +767,25 @@ impl<S: RecordSource> Engine<S> {
                     );
                 }
                 new_entries.push(entry);
+            }
+            // Admission (including global budgets/duplicates) is complete and ordered. Reducers
+            // own disjoint namespace states; retain each namespace's operation order within the
+            // bounded batch. No source, keys, authority or admission decisions enter these tasks.
+            let mut jobs: Vec<_> = self
+                .library
+                .namespaces
+                .iter_mut()
+                .filter_map(|(ns, state)| reductions.remove(ns).map(|ops| (&mut state.state, ops)))
+                .collect();
+            let apply = |(state, ops): &mut (&mut domain::State, Vec<OperationView>)| {
+                for op in ops {
+                    state.apply(op);
+                }
+            };
+            if chunk.len() >= 512 {
+                crate::verification::parallel_tasks(&mut jobs, 1, apply);
+            } else {
+                jobs.iter_mut().for_each(apply);
             }
         }
         if invalidates {
@@ -842,6 +866,7 @@ impl<S: RecordSource> Engine<S> {
             .collect();
         let meta = CacheMeta {
             version: 2,
+            reducer_schema: domain::REDUCER_SCHEMA,
             identity: self.library.me.clone(),
             authority: self.library.authority.clone(),
             projections,
@@ -1355,7 +1380,10 @@ fn decode_cache(
     let length = reader.length()?;
     let meta: CacheMeta = serde_json::from_slice(reader.take(length)?)?;
     ensure(
-        meta.version == 2 && meta.identity == *identity && meta.authority.id == options.library_id,
+        meta.version == 2
+            && meta.reducer_schema == domain::REDUCER_SCHEMA
+            && meta.identity == *identity
+            && meta.authority.id == options.library_id,
         "Checkpoint version/library/identity mismatch",
     )?;
     ensure(

@@ -79,7 +79,23 @@ fn operation(
 }
 fn generate(count: usize) -> Records {
     assert!(count >= 100);
-    let (mut root, owner, _) = create();
+    let owner = keys(1);
+    let pending = Library::begin_create(
+        colophon_core::library::CreateOptions {
+            owner: owner.public(),
+            recovery: SoftwareKeys::recovery([9; 32]).unwrap().public(),
+            label: "Four-domain benchmark".into(),
+            owner_label: "Owner".into(),
+            namespaces: colophon_core::domain::NAMESPACES
+                .iter()
+                .map(|ns| (*ns).into())
+                .collect(),
+        },
+        NOW,
+        [10; 32],
+    )
+    .unwrap();
+    let mut root = opened(finish(pending, &owner), &owner);
     let members = [keys(2), keys(3), keys(4)];
     for (i, member) in members.iter().enumerate() {
         enroll(
@@ -88,7 +104,7 @@ fn generate(count: usize) -> Records {
             member,
             &format!("Member {i}"),
             MemberKind::Device,
-            grant(&["listening.podcasts", "notes", "reading.saved"], None),
+            grant(&colophon_core::domain::NAMESPACES, None),
             40 + i as u8,
         );
     }
@@ -121,6 +137,18 @@ fn generate(count: usize) -> Records {
                 "notes",
                 "addNote",
                 json!({"id":"daily","notebook":"journal","text":"First entry"}),
+            )
+        } else if i == 2 {
+            (
+                "reading.books",
+                "addBook",
+                json!({"id":"book","title":"Benchmark book","creator":"Writer"}),
+            )
+        } else if i % 100 == 0 {
+            (
+                "reading.books",
+                "position",
+                json!({"id":"book","fraction": (i % 1000) as f64 / 1000.0}),
             )
         } else if i % 50 == 0 {
             (
@@ -279,6 +307,15 @@ fn main() {
         started,
     );
     if args.iter().any(|arg| arg == "--profile") {
+        for ns in ["reading.saved", "reading.books", "notes"] {
+            let view = success(root.view(ns, NOW).unwrap());
+            let started = Instant::now();
+            let state = colophon_core::domain::module(ns)
+                .unwrap()
+                .fold(&view.admitted);
+            report(&format!("{ns} reducer replay"), started);
+            assert_eq!(state, view.state);
+        }
         profile(&root, &owner);
     }
     let before = root.applied_operations("listening.podcasts");

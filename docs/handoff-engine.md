@@ -235,3 +235,73 @@ Changes remain uncommitted. Suggested dependency-ordered subjects:
 
 Include verifier tests with the first change, storage regressions with the second, and benchmark,
 specification, API, migration-status and performance/handoff documentation with the third.
+
+## Merge main into engine — November 6, 2026
+
+Resolved `docs/performance.md` in the working tree, retaining the stage-2 engine design and
+measurements and the incoming FFI section. Removed only the obsolete pre-stage-2 claims that
+verified-prefix storage and parallel verification were still unimplemented. The earlier sections
+of this handoff describe the pre-merge work; this section records the integrated result.
+
+All four full domains remain registered through the shared module lookup, state constructors,
+apply/query dispatch, operation/spec validation hooks and tool lists. Their pure import modules,
+all domain fixtures, native bindings and session SDK files from main are retained. Both `Library`
+and storage-backed `Engine<RecordSource>` use the same full-domain reducers. Domain import
+planners still receive explicitly supplied verified source operations and evidence; no new eager
+plaintext/history dependency was introduced. The existing domain handoffs' host requirements
+(role-aware adapters, blob verification, historical overlays and migration transactions) remain
+explicit; this merge preserves their fail-closed behavior rather than inventing host evidence.
+
+The `COLOENG2` container, index entries, exact-envelope digests, signed-body prefix construction,
+HKDF authentication, key requirements, invalidation rules, bounded content cache, lazy history and
+parallel verification are preserved. Both checkpoint APIs now require authenticated
+`reducer_schema: 2`. This separates reducer compatibility from the existing container versions
+(1 for `Library`, 2 for `Engine`); older caches without the marker or with a different generation
+fall back to replay. This is necessary for the full-domain state schemas and the compact saved
+indexes, even if a particular old state might otherwise deserialize. No protocol records changed.
+
+Performance adaptation preserves the engine's admission and trust guarantees. Saved shelf indexes
+share immutable ordering keys through `Arc`, encode unique keys and identical bucket memberships once, and restore
+independent ordered trees so subsequent edits do not copy an entire shared tree. Internal bucket
+names use unambiguous length framing. Query ordering, cursors, counts, conflicts and retained
+content are unchanged. Item checkpoint tables store column names once while preserving missing
+fields, explicit nulls, extensions and every item field. Derived shelf rows are rebuilt from the
+retained projection during restore using native workers, with no history reads or decryption;
+all rows are ready before restore returns. Podcast updates validate and check CAS/parent constraints
+before updating an episode in place; indexes change only when their membership or ordering fields change. Prefix
+hashes retain the same canonical bytes while avoiding redundant copies, and payload byte-limit
+validation avoids an unnecessary canonicalization copy. Differential tests check the optimized
+playback validator against its published JSON schema and borrowed prefix serialization against
+canonical OperationView bytes. After global admission completes, independent namespace reducers
+can run concurrently within each bounded batch. Each namespace retains its admitted order;
+workers receive only disjoint projection state and admitted operations, never the RecordSource,
+keys or admission authority. Small deltas, WASM and builds without `parallel` remain serial.
+
+Added storage regressions for all four signed conformance fixtures and every fixture query, zero
+historical reads/decryptions/reductions after restoration, one-record lazy history, all-four-domain
+host writes and suffix replay, and correctly authenticated incompatible reducer caches. A further
+600-record mixed-namespace test verifies global budget admission, ordered parallel reduction,
+Library parity and zero-read checkpoint restoration. Every original test remains: 36 engine-parent and 100 main-parent Rust integration test functions, plus
+all 33 engine-parent and 59 main-parent JavaScript smoke assertion lines. No conformance vectors
+were regenerated: signed bytes, expected query results and native/WASM parity pass unchanged.
+
+Validation on the merged code:
+
+- `cargo test`: 115 passed, zero failed; the existing opt-in notes 100k shape test remains ignored.
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo fmt --check`
+- `npm --prefix js ci && npm --prefix js run build && npm --prefix js test`
+
+The final 100k benchmark exercises all four domains and meets the targets: **1,308.880 ms** full
+rebuild, **92.215 ms** fresh-process disk checkpoint open plus 1,000 new records, and **0.809 ms**
+local write. Unchanged restore did zero historical work; the suffix did exactly 1,000
+fetches/verifications/decryptions/reductions. See [performance.md](performance.md) for the fixture,
+failed initial measurement, adaptations, exact commands, final counters and timing boundaries.
+The existing three-domain fixture and conformance files were not overwritten; the benchmark's
+new four-domain fixture is `/tmp/colophon-engine-four-domains-100k.records`.
+
+Also passed `cargo test -p colophon-core --no-default-features --test storage` (all 13 tests),
+`git diff --check`, conflict-marker scanning and test-preservation checks. After verification,
+`cargo clean --profile dev` removed 5.5 GiB of regenerable build output; release benchmark and
+WASM artifacts remain available. No git command that writes was run. Resolved files and new source files remain in the working tree; the index still reports
+`docs/performance.md` as unmerged because staging/merge completion would write Git metadata.

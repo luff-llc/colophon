@@ -340,6 +340,7 @@ impl Library {
             .ok_or_else(|| missing("unlocked checkpoint key"))?;
         let body = serde_json::to_vec(&CheckpointBody {
             version: 1,
+            reducer_schema: domain::REDUCER_SCHEMA,
             library: self.id().into(),
             identity: self.me.id(),
             namespace: namespace.into(),
@@ -381,6 +382,7 @@ impl Library {
         let body: CheckpointBody = serde_json::from_slice(&envelope.body)?;
         ensure(
             body.version == 1
+                && body.reducer_schema == domain::REDUCER_SCHEMA
                 && body.library == self.id()
                 && body.identity == self.me.id()
                 && body.namespace == namespace,
@@ -2042,6 +2044,7 @@ struct CheckpointEnvelope {
 #[derive(Serialize, Deserialize)]
 struct CheckpointBody {
     version: u32,
+    reducer_schema: u32,
     library: String,
     identity: String,
     namespace: String,
