@@ -29,14 +29,20 @@ pub fn canonical<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 }
 /// Lowercase SHA-256 hex digest.
 pub fn digest(value: &[u8]) -> String {
-    Sha256::digest(value)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex(&Sha256::digest(value))
+}
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    output
 }
 /// First 128 bits of SHA-256, in lowercase hex.
 pub fn id(value: &[u8]) -> String {
-    digest(value)[..32].to_owned()
+    hex(&Sha256::digest(value)[..16])
 }
 /// Exact signed bytes, with a raw P-256 ECDSA signature.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,6 +65,9 @@ impl SignedRecord {
     pub fn verify(&self, public: &[u8]) -> Result<()> {
         let key = VerifyingKey::from_sec1_bytes(public)
             .map_err(|_| Error("Invalid signing public key".into()))?;
+        self.verify_with(&key)
+    }
+    pub(crate) fn verify_with(&self, key: &VerifyingKey) -> Result<()> {
         let sig = Signature::from_slice(&self.signature)
             .map_err(|_| Error("Invalid signature format".into()))?;
         key.verify(&self.body, &sig)

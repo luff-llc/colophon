@@ -1,8 +1,8 @@
-//! Deterministic domain folds and generated operation/query specifications.
+//! Deterministic domain reducers and generated operation/query specifications.
 use crate::model::OperationView;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 /// A portable tool/operation/query description using JSON Schema.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,15 +29,90 @@ pub trait DomainModule {
     fn operations(&self) -> Vec<Spec>;
     /// Read-only queries. Every built-in domain exposes `read`.
     fn queries(&self) -> Vec<Spec> {
-        vec![Spec {
+        let mut specs = vec![Spec {
             name: "read".into(),
-            description: format!("Read {}", self.namespace()),
+            description: format!("Read {} (compatibility full view)", self.namespace()),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
-        }]
+        }];
+        let (single, pages): (&[&str], &[&str]) = match self.namespace() {
+            "reading.saved" => (&["item"], &["items", "conflicts", "invalid"]),
+            // Avoid names already used by write tools (episode and queue).
+            "listening.podcasts" => (
+                &["show", "getEpisode"],
+                &["shows", "episodes", "getQueue", "conflicts", "invalid"],
+            ),
+            "notes" => (
+                &["notebook", "note"],
+                &["notebooks", "notes", "conflicts", "invalid"],
+            ),
+            _ => (&[], &[]),
+        };
+        for name in single {
+            specs.push(spec(
+                name,
+                "Get one projected object by ID, or null",
+                &["id"],
+                json!({"id":{"type":"string"}}),
+            ));
+        }
+        for name in pages {
+            specs.push(spec(name, "Read a page (default 50, maximum 200); nextOffset is null at the end", &[], json!({"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":200}})));
+        }
+        specs
     }
+
     /// Fold known kinds, retaining unknown payload fields and ignoring unknown kinds.
     fn fold(&self, operations: &[OperationView]) -> Value;
 }
+/// Authenticated operation delivered in deterministic admitted order.
+pub type AdmittedOperation = OperationView;
+
+/// Incremental domain contract. State contains projections, never an operation journal.
+pub trait Reducer: DomainModule {
+    /// Serializable, device-local projection state.
+    type State: Default + Clone + Serialize + for<'de> Deserialize<'de>;
+    /// Apply one admitted operation after the existing prefix.
+    fn apply(&self, state: &mut Self::State, operation: &AdmittedOperation);
+    /// Read a named projection. Collection queries use offset/limit (default 50, maximum 200).
+    fn query(&self, state: &Self::State, name: &str, args: &Value) -> crate::Result<Value>;
+}
+
+/// Saved links and their attributed conflicts.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct SavedState {
+    items: BTreeMap<String, Value>,
+    conflicts: Vec<Value>,
+    invalid: Vec<String>,
+}
+/// Followed shows, episode metadata, progress and the queue.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PodcastsState {
+    shows: BTreeMap<String, Value>,
+    episodes: BTreeMap<String, Value>,
+    queue: Value,
+    conflicts: Vec<Value>,
+    invalid: Vec<String>,
+}
+impl Default for PodcastsState {
+    fn default() -> Self {
+        Self {
+            shows: BTreeMap::new(),
+            episodes: BTreeMap::new(),
+            queue: json!({"episodes":[]}),
+            conflicts: Vec::new(),
+            invalid: Vec::new(),
+        }
+    }
+}
+/// Notebooks, notes and attributed alternatives.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct NotesState {
+    notebooks: BTreeMap<String, Value>,
+    notes: BTreeMap<String, Value>,
+    conflicts: Vec<Value>,
+    invalid: Vec<String>,
+}
+
 /// Saved reading shelf.
 pub struct ReadingSaved;
 /// Followed podcasts, episodes, positions and queue.
@@ -99,30 +174,11 @@ impl DomainModule for ReadingSaved {
         ]
     }
     fn fold(&self, ops: &[OperationView]) -> Value {
-        let mut items = BTreeMap::new();
-        let mut conflicts = Vec::new();
-        let mut invalid = Vec::new();
+        let mut state = SavedState::default();
         for op in ops {
-            if !known_valid(self, op, &mut invalid) {
-                continue;
-            }
-            let id = string(&op.payload, "id");
-            if op.kind == "capture" {
-                create(self, &mut items, id, op, &mut conflicts);
-            } else if let Some(item) = items.get_mut(id) {
-                if conflict(item, op) || item["deleted"] == true {
-                    conflicts.push(json!(op));
-                    continue;
-                }
-                merge(self, item, op);
-                if op.kind == "delete" {
-                    item["deleted"] = json!(true);
-                }
-            } else {
-                invalid.push(op.id.clone());
-            }
+            self.apply(&mut state, op);
         }
-        json!({"items":ordered(items),"conflicts":conflicts,"invalid":invalid})
+        state.projection()
     }
 }
 impl DomainModule for ListeningPodcasts {
@@ -184,51 +240,11 @@ impl DomainModule for ListeningPodcasts {
         ]
     }
     fn fold(&self, ops: &[OperationView]) -> Value {
-        let mut shows = BTreeMap::new();
-        let mut episodes: BTreeMap<String, Value> = BTreeMap::new();
-        let mut queue = json!({"episodes":[]});
-        let mut conflicts = Vec::new();
-        let mut invalid = Vec::new();
+        let mut state = PodcastsState::default();
         for op in ops {
-            if !known_valid(self, op, &mut invalid) {
-                continue;
-            }
-            let id = string(&op.payload, "id");
-            match op.kind.as_str() {
-                "follow" | "unfollow" => {
-                    let show = shows.entry(id.to_owned()).or_insert_with(|| json!({}));
-                    merge(self, show, op);
-                    show["followed"] = json!(op.kind == "follow");
-                }
-                "episode" => {
-                    let episode = episodes.entry(id.to_owned()).or_insert_with(|| json!({}));
-                    merge(self, episode, op);
-                }
-                "position" => {
-                    let episode = episodes
-                        .entry(id.to_owned())
-                        .or_insert_with(|| json!({"id":id}));
-                    let ahead = op.payload["seconds"].as_f64().unwrap_or(0.0)
-                        >= episode["seconds"].as_f64().unwrap_or(0.0);
-                    let saw_position = op.payload["expect"]
-                        .as_str()
-                        .is_some_and(|s| Some(s) == episode["positionRevision"].as_str());
-                    if ahead || op.payload["seek"] == true || saw_position {
-                        merge(self, episode, op);
-                        episode["positionRevision"] = json!(op.id);
-                    }
-                }
-                "queue" => {
-                    if conflict(&queue, op) {
-                        conflicts.push(json!(op));
-                    } else {
-                        merge(self, &mut queue, op);
-                    }
-                }
-                _ => {}
-            }
+            self.apply(&mut state, op);
         }
-        json!({"shows":ordered(shows),"episodes":ordered(episodes),"queue":queue,"conflicts":conflicts,"invalid":invalid})
+        state.projection()
     }
 }
 impl DomainModule for Notes {
@@ -275,37 +291,11 @@ impl DomainModule for Notes {
         ]
     }
     fn fold(&self, ops: &[OperationView]) -> Value {
-        let mut notebooks = BTreeMap::new();
-        let mut notes: BTreeMap<String, Value> = BTreeMap::new();
-        let mut conflicts = Vec::new();
-        let mut invalid = Vec::new();
+        let mut state = NotesState::default();
         for op in ops {
-            if !known_valid(self, op, &mut invalid) {
-                continue;
-            }
-            let id = string(&op.payload, "id");
-            match op.kind.as_str() {
-                "createNotebook" => create(self, &mut notebooks, id, op, &mut conflicts),
-                "addNote" if notebooks.contains_key(string(&op.payload, "notebook")) => {
-                    create(self, &mut notes, id, op, &mut conflicts)
-                }
-                "editNote" => {
-                    if let Some(note) = notes.get_mut(id) {
-                        if note["notebook"] != op.payload["notebook"] {
-                            invalid.push(op.id.clone());
-                        } else if conflict(note, op) {
-                            conflicts.push(json!(op));
-                        } else {
-                            merge(self, note, op);
-                        }
-                    } else {
-                        invalid.push(op.id.clone());
-                    }
-                }
-                _ => invalid.push(op.id.clone()),
-            }
+            self.apply(&mut state, op);
         }
-        json!({"notebooks":ordered(notebooks),"notes":ordered(notes),"conflicts":conflicts,"invalid":invalid})
+        state.projection()
     }
 }
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -333,7 +323,7 @@ fn create(
 }
 fn merge(module: &dyn DomainModule, value: &mut Value, op: &OperationView) {
     if let (Some(target), Some(payload)) = (value.as_object_mut(), op.payload.as_object()) {
-        let specs = module.operations();
+        let specs = operation_specs(module);
         let Some(spec) = specs.iter().find(|spec| spec.name == op.kind) else {
             return;
         };
@@ -357,7 +347,7 @@ fn merge(module: &dyn DomainModule, value: &mut Value, op: &OperationView) {
     }
 }
 fn known_valid(module: &dyn DomainModule, op: &OperationView, invalid: &mut Vec<String>) -> bool {
-    let specs = module.operations();
+    let specs = operation_specs(module);
     let Some(spec) = specs.iter().find(|s| s.name == op.kind) else {
         return false;
     };
@@ -374,6 +364,7 @@ pub fn validate_input(schema: &Value, input: &Value) -> bool {
         Some("object") => input.is_object(),
         Some("string") => input.is_string(),
         Some("number") => input.is_number(),
+        Some("integer") => input.as_u64().is_some(),
         Some("boolean") => input.is_boolean(),
         Some("array") => input.is_array(),
         _ => true,
@@ -409,6 +400,11 @@ pub fn validate_input(schema: &Value, input: &Value) -> bool {
             return false;
         }
     }
+    if let (Some(max), Some(value)) = (schema["maximum"].as_f64(), input.as_f64()) {
+        if value > max {
+            return false;
+        }
+    }
     if let (Some(items), Some(values)) = (schema.get("items"), input.as_array()) {
         if !values.iter().all(|v| validate_input(items, v)) {
             return false;
@@ -429,8 +425,8 @@ pub fn module(namespace: &str) -> Option<Box<dyn DomainModule>> {
 pub const NAMESPACES: [&str; 3] = ["reading.saved", "listening.podcasts", "notes"];
 
 // Display collection items in the agreed order of their most recent applied operation.
-fn ordered(items: BTreeMap<String, Value>) -> Vec<Value> {
-    let mut values: Vec<_> = items.into_values().collect();
+fn ordered(items: &BTreeMap<String, Value>) -> Vec<Value> {
+    let mut values: Vec<_> = items.values().cloned().collect();
     values.sort_by(|a, b| {
         (
             a["clock"].as_u64(),
@@ -444,4 +440,289 @@ fn ordered(items: BTreeMap<String, Value>) -> Vec<Value> {
             ))
     });
     values
+}
+
+impl SavedState {
+    fn projection(&self) -> Value {
+        let state = self;
+        json!({"items":ordered(&state.items),"conflicts":state.conflicts,"invalid":state.invalid})
+    }
+}
+impl Reducer for ReadingSaved {
+    type State = SavedState;
+    fn apply(&self, state: &mut Self::State, op: &AdmittedOperation) {
+        let SavedState {
+            items,
+            conflicts,
+            invalid,
+        } = state;
+
+        if !known_valid(self, op, invalid) {
+            return;
+        }
+        let id = string(&op.payload, "id");
+        if op.kind == "capture" {
+            create(self, items, id, op, conflicts);
+        } else if let Some(item) = items.get_mut(id) {
+            if conflict(item, op) || item["deleted"] == true {
+                conflicts.push(json!(op));
+                return;
+            }
+            merge(self, item, op);
+            if op.kind == "delete" {
+                item["deleted"] = json!(true);
+            }
+        } else {
+            invalid.push(op.id.clone());
+        }
+    }
+    fn query(&self, state: &Self::State, name: &str, args: &Value) -> crate::Result<Value> {
+        match name {
+            "read" => Ok(state.projection()),
+            "items" => page_map(&state.items, args),
+            "item" => Ok(state
+                .items
+                .get(required_id(args)?)
+                .cloned()
+                .unwrap_or(Value::Null)),
+            "conflicts" => page_slice(&state.conflicts, args),
+            "invalid" => page_slice(&state.invalid, args),
+            _ => Err(crate::Error("Unknown query".into())),
+        }
+    }
+}
+
+impl PodcastsState {
+    fn projection(&self) -> Value {
+        let state = self;
+        json!({"shows":ordered(&state.shows),"episodes":ordered(&state.episodes),"queue":state.queue,"conflicts":state.conflicts,"invalid":state.invalid})
+    }
+}
+impl Reducer for ListeningPodcasts {
+    type State = PodcastsState;
+    fn apply(&self, state: &mut Self::State, op: &AdmittedOperation) {
+        let PodcastsState {
+            shows,
+            episodes,
+            queue,
+            conflicts,
+            invalid,
+        } = state;
+
+        if !known_valid(self, op, invalid) {
+            return;
+        }
+        let id = string(&op.payload, "id");
+        match op.kind.as_str() {
+            "follow" | "unfollow" => {
+                let show = shows.entry(id.to_owned()).or_insert_with(|| json!({}));
+                merge(self, show, op);
+                show["followed"] = json!(op.kind == "follow");
+            }
+            "episode" => {
+                let episode = episodes.entry(id.to_owned()).or_insert_with(|| json!({}));
+                merge(self, episode, op);
+            }
+            "position" => {
+                let episode = episodes
+                    .entry(id.to_owned())
+                    .or_insert_with(|| json!({"id":id}));
+                let ahead = op.payload["seconds"].as_f64().unwrap_or(0.0)
+                    >= episode["seconds"].as_f64().unwrap_or(0.0);
+                let saw_position = op.payload["expect"]
+                    .as_str()
+                    .is_some_and(|s| Some(s) == episode["positionRevision"].as_str());
+                if ahead || op.payload["seek"] == true || saw_position {
+                    merge(self, episode, op);
+                    episode["positionRevision"] = json!(op.id);
+                }
+            }
+            "queue" => {
+                if conflict(queue, op) {
+                    conflicts.push(json!(op));
+                } else {
+                    merge(self, queue, op);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn query(&self, state: &Self::State, name: &str, args: &Value) -> crate::Result<Value> {
+        match name {
+            "read" => Ok(state.projection()),
+            "shows" => page_map(&state.shows, args),
+            "show" => Ok(state
+                .shows
+                .get(required_id(args)?)
+                .cloned()
+                .unwrap_or(Value::Null)),
+            "episodes" => page_map(&state.episodes, args),
+            "getEpisode" => Ok(state
+                .episodes
+                .get(required_id(args)?)
+                .cloned()
+                .unwrap_or(Value::Null)),
+            "getQueue" => page_slice(
+                state.queue["episodes"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                args,
+            ),
+            "conflicts" => page_slice(&state.conflicts, args),
+            "invalid" => page_slice(&state.invalid, args),
+            _ => Err(crate::Error("Unknown query".into())),
+        }
+    }
+}
+
+impl NotesState {
+    fn projection(&self) -> Value {
+        let state = self;
+        json!({"notebooks":ordered(&state.notebooks),"notes":ordered(&state.notes),"conflicts":state.conflicts,"invalid":state.invalid})
+    }
+}
+impl Reducer for Notes {
+    type State = NotesState;
+    fn apply(&self, state: &mut Self::State, op: &AdmittedOperation) {
+        let NotesState {
+            notebooks,
+            notes,
+            conflicts,
+            invalid,
+        } = state;
+
+        if !known_valid(self, op, invalid) {
+            return;
+        }
+        let id = string(&op.payload, "id");
+        match op.kind.as_str() {
+            "createNotebook" => create(self, notebooks, id, op, conflicts),
+            "addNote" if notebooks.contains_key(string(&op.payload, "notebook")) => {
+                create(self, notes, id, op, conflicts)
+            }
+            "editNote" => {
+                if let Some(note) = notes.get_mut(id) {
+                    if note["notebook"] != op.payload["notebook"] {
+                        invalid.push(op.id.clone());
+                    } else if conflict(note, op) {
+                        conflicts.push(json!(op));
+                    } else {
+                        merge(self, note, op);
+                    }
+                } else {
+                    invalid.push(op.id.clone());
+                }
+            }
+            _ => invalid.push(op.id.clone()),
+        }
+    }
+    fn query(&self, state: &Self::State, name: &str, args: &Value) -> crate::Result<Value> {
+        match name {
+            "read" => Ok(state.projection()),
+            "notebooks" => page_map(&state.notebooks, args),
+            "notebook" => Ok(state
+                .notebooks
+                .get(required_id(args)?)
+                .cloned()
+                .unwrap_or(Value::Null)),
+            "notes" => page_map(&state.notes, args),
+            "note" => Ok(state
+                .notes
+                .get(required_id(args)?)
+                .cloned()
+                .unwrap_or(Value::Null)),
+            "conflicts" => page_slice(&state.conflicts, args),
+            "invalid" => page_slice(&state.invalid, args),
+            _ => Err(crate::Error("Unknown query".into())),
+        }
+    }
+}
+
+fn operation_specs(module: &dyn DomainModule) -> &'static [Spec] {
+    static SAVED: OnceLock<Vec<Spec>> = OnceLock::new();
+    static PODCASTS: OnceLock<Vec<Spec>> = OnceLock::new();
+    static NOTES: OnceLock<Vec<Spec>> = OnceLock::new();
+    match module.namespace() {
+        "reading.saved" => SAVED.get_or_init(|| ReadingSaved.operations()),
+        "listening.podcasts" => PODCASTS.get_or_init(|| ListeningPodcasts.operations()),
+        "notes" => NOTES.get_or_init(|| Notes.operations()),
+        _ => &[],
+    }
+}
+fn required_id(args: &Value) -> crate::Result<&str> {
+    args.get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| crate::Error("Query requires string id".into()))
+}
+fn paging(args: &Value) -> crate::Result<(usize, usize)> {
+    let number = |key: &str, default: u64| -> crate::Result<usize> {
+        let n = match args.get(key) {
+            Some(v) => v
+                .as_u64()
+                .ok_or_else(|| crate::Error(format!("{key} must be a nonnegative integer")))?,
+            None => default,
+        };
+        usize::try_from(n).map_err(|_| crate::Error("Paging integer too large".into()))
+    };
+    let offset = number("offset", 0)?;
+    let limit = number("limit", 50)?;
+    crate::ensure(
+        (1..=200).contains(&limit),
+        "limit must be between 1 and 200",
+    )?;
+    Ok((offset, limit))
+}
+fn page_slice<T: Serialize>(values: &[T], args: &Value) -> crate::Result<Value> {
+    let (offset, limit) = paging(args)?;
+    let end = offset.saturating_add(limit).min(values.len());
+    Ok(
+        json!({"items":&values[offset.min(values.len())..end],"nextOffset":(end < values.len()).then_some(end)}),
+    )
+}
+fn page_map(values: &BTreeMap<String, Value>, args: &Value) -> crate::Result<Value> {
+    // Only references are sorted; only the requested page is cloned/serialized.
+    let mut ordered: Vec<_> = values.values().collect();
+    ordered.sort_by_key(|v| {
+        (
+            v["clock"].as_u64(),
+            v["author"].as_str(),
+            v["revision"].as_str(),
+        )
+    });
+    page_slice(&ordered, args)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) enum State {
+    Saved(SavedState),
+    Podcasts(PodcastsState),
+    Notes(NotesState),
+    Unknown,
+}
+impl State {
+    pub fn new(namespace: &str) -> Self {
+        match namespace {
+            "reading.saved" => Self::Saved(SavedState::default()),
+            "listening.podcasts" => Self::Podcasts(PodcastsState::default()),
+            "notes" => Self::Notes(NotesState::default()),
+            _ => Self::Unknown,
+        }
+    }
+    pub fn apply(&mut self, op: &AdmittedOperation) {
+        match self {
+            Self::Saved(s) => ReadingSaved.apply(s, op),
+            Self::Podcasts(s) => ListeningPodcasts.apply(s, op),
+            Self::Notes(s) => Notes.apply(s, op),
+            Self::Unknown => {}
+        }
+    }
+    pub fn query(&self, name: &str, args: &Value) -> crate::Result<Value> {
+        match self {
+            Self::Saved(s) => ReadingSaved.query(s, name, args),
+            Self::Podcasts(s) => ListeningPodcasts.query(s, name, args),
+            Self::Notes(s) => Notes.query(s, name, args),
+            Self::Unknown => Ok(json!({})),
+        }
+    }
 }

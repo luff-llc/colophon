@@ -58,6 +58,14 @@ missing data, explicit cache invalidation, and every shared seam proven by two r
   cold open from a checkpoint under 100 ms; a local write to updated state under 2 ms; a full
   rebuild of 100k operations under 1.5 s; memory proportional to state, not history.
 
+Engine implementation (November 6, 2026): reducers, bounded queries, incremental namespace
+state, revisions/change summaries and authenticated local checkpoints are available through
+additive Rust APIs. Existing `Library` signatures and 0.2 conformance vectors are unchanged.
+See [engine API](engine.md) and [measured performance](performance.md). Local writes meet the
+2 ms target on the measured M3 Max. Verified full rebuild/cold open and memory proportional to
+state remain unmet: record verification dominates startup, and the existing `records()` API
+requires retaining history. Those limits remain proof gates before app migration is complete.
+
 ### Domains
 
 Rust reducers reach parity with what the apps actually use: `reading.books` (Shelf),

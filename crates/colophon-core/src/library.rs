@@ -3,6 +3,7 @@ use crate::{
     authority::{self, Action, Authority, AuthorityEntry},
     crypto::{self, Entropy, PublicIdentity},
     domain::{self, Spec},
+    engine::{self, ChangeSummary, CheckpointPolicy, Namespace, Snapshot},
     ensure,
     hpke::SealedKey,
     model::*,
@@ -79,6 +80,14 @@ pub struct Library {
     authority: Authority,
     me: PublicIdentity,
     keys: BTreeMap<(String, u64), Vec<u8>>,
+    checkpoint_keys: BTreeMap<(String, u64), Vec<u8>>,
+    judged: Vec<Judged>,
+    invalid: BTreeMap<String, (String, Rejection)>,
+    admission: Admission,
+    namespaces: BTreeMap<String, Namespace>,
+    checkpoint_policy: CheckpointPolicy,
+    changes: ChangeSummary,
+    pending_checkpoints: BTreeMap<String, Vec<u8>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Status {
@@ -86,11 +95,20 @@ enum Status {
     Held(String),
     Refused(String),
 }
+#[derive(Clone, Default)]
+struct Admission {
+    authenticated_ids: BTreeSet<(String, String)>,
+    spent: BTreeMap<String, BTreeSet<String>>,
+    clocks: BTreeMap<String, u64>,
+    namespace_tails: BTreeMap<String, (u64, String, String)>,
+    author_tails: BTreeMap<String, (u64, String, String)>,
+}
 #[derive(Clone)]
 struct Judged {
     digest: String,
     header: OperationHeader,
-    operation: Option<Operation>,
+    operation: Option<OperationView>,
+    opened: bool,
     status: Status,
 }
 impl Library {
@@ -162,12 +180,28 @@ impl Library {
         if me.id() == authority.recovery.id() {
             ensure(me == authority.recovery, "Recovery agreement key mismatch")?;
         }
-        Ok(Self {
+        let mut library = Self {
             records,
             authority,
             me,
             keys: BTreeMap::new(),
-        })
+            checkpoint_keys: BTreeMap::new(),
+            judged: Vec::new(),
+            invalid: BTreeMap::new(),
+            admission: Admission::default(),
+            namespaces: BTreeMap::new(),
+            checkpoint_policy: CheckpointPolicy::default(),
+            changes: ChangeSummary::default(),
+            pending_checkpoints: BTreeMap::new(),
+        };
+        let paths = library
+            .records
+            .keys()
+            .filter(|p| p.starts_with("ops/"))
+            .cloned()
+            .collect::<Vec<_>>();
+        library.ingest(&paths, true, &[]);
+        Ok(library)
     }
     /// Library identifier derived from genesis bytes.
     pub fn id(&self) -> &str {
@@ -187,24 +221,220 @@ impl Library {
     }
     /// Merge immutable records transactionally. Conflicting paths fail; identical replay is harmless.
     pub fn merge(&mut self, incoming: Records) -> Result<()> {
-        let mut next = self.records.clone();
-        for (path, raw) in incoming {
+        self.merge_with_changes(incoming).map(|_| ())
+    }
+    /// Merge records and return changed namespace revisions; the original `merge` is a wrapper.
+    pub fn merge_with_changes(&mut self, incoming: Records) -> Result<ChangeSummary> {
+        for (path, raw) in &incoming {
             ensure(
                 path.starts_with("authority/")
                     || path.starts_with("requests/")
                     || path.starts_with("ops/"),
                 "Unknown storage path",
             )?;
-            if let Some(old) = next.get(&path) {
-                ensure(old == &raw, "Immutable record conflict")?;
+            if let Some(old) = self.records.get(path) {
+                ensure(old == raw, "Immutable record conflict")?;
             }
-            next.insert(path, raw);
         }
-        let authority = Authority::replay(&next)?;
-        ensure(authority.id == self.authority.id, "Different library")?;
-        self.records = next;
-        self.authority = authority;
-        Ok(())
+        let incoming: Records = incoming
+            .into_iter()
+            .filter(|(p, _)| !self.records.contains_key(p))
+            .collect();
+        let authority_changed = incoming.keys().any(|p| p.starts_with("authority/"));
+        if authority_changed {
+            // Replay only authority records; operations do not participate in authority validation.
+            let mut authority_records: Records = self
+                .records
+                .iter()
+                .filter(|(p, _)| p.starts_with("authority/"))
+                .map(|(p, r)| (p.clone(), r.clone()))
+                .collect();
+            authority_records.extend(
+                incoming
+                    .iter()
+                    .filter(|(p, _)| p.starts_with("authority/"))
+                    .map(|(p, r)| (p.clone(), r.clone())),
+            );
+            let authority = Authority::replay(&authority_records)?;
+            ensure(authority.id == self.authority.id, "Different library")?;
+            self.authority = authority;
+        }
+        let mut paths: Vec<_> = incoming
+            .keys()
+            .filter(|p| p.starts_with("ops/"))
+            .cloned()
+            .collect();
+        self.records.extend(incoming);
+        if authority_changed {
+            paths.extend(self.invalid.keys().cloned());
+        }
+        let invalidated = if authority_changed {
+            self.authority.namespaces.clone()
+        } else {
+            Vec::new()
+        };
+        self.ingest(&paths, authority_changed, &invalidated);
+        Ok(self.changes.clone())
+    }
+    /// Complete a two-phase write/action and return its namespace changes.
+    pub fn finish_with_changes(
+        &mut self,
+        pending: PendingBatch,
+        signatures: Vec<Vec<u8>>,
+    ) -> Result<ChangeSummary> {
+        self.merge_with_changes(pending.finish(signatures)?)
+    }
+    /// Changes from the most recent successful merge or key unlock.
+    pub fn changes(&self) -> &ChangeSummary {
+        &self.changes
+    }
+    /// Local namespace revision; not a portable content digest or authority sequence.
+    pub fn revision(&self, namespace: &str) -> u64 {
+        self.namespaces.get(namespace).map_or(0, |n| n.revision)
+    }
+    /// Configure bounded automatic projection snapshots. Zero cadence disables them.
+    pub fn set_checkpoint_policy(&mut self, policy: CheckpointPolicy) {
+        for ns in self.namespaces.values_mut() {
+            if ns.checkpoints.len() > policy.retain {
+                ns.checkpoints.drain(..ns.checkpoints.len() - policy.retain);
+            }
+        }
+        self.checkpoint_policy = policy;
+    }
+    /// Number of reducer applications in this replica, for diagnostics and performance tests.
+    pub fn applied_operations(&self, namespace: &str) -> u64 {
+        self.namespaces.get(namespace).map_or(0, |n| n.applied)
+    }
+    /// Open records with optional device-local checkpoint bytes, applied as keys unlock.
+    /// Records still undergo signature, authority and admission validation. Invalid caches are ignored.
+    pub fn open_with_checkpoints(
+        records: Records,
+        me: PublicIdentity,
+        checkpoints: BTreeMap<String, Vec<u8>>,
+    ) -> Result<Self> {
+        let mut library = Self::open(records, me)?;
+        library.pending_checkpoints = checkpoints;
+        Ok(library)
+    }
+    /// Serialize an authenticated device-local projection cache. Never sync these bytes as records.
+    /// The format binds identity, library, namespace, epoch, reducer version and admitted prefix.
+    pub fn checkpoint(&self, namespace: &str) -> Result<Vec<u8>> {
+        let state = self
+            .namespaces
+            .get(namespace)
+            .ok_or_else(|| missing("namespace"))?;
+        let epoch = self
+            .authority
+            .epoch_at(namespace, self.authority.latest)
+            .ok_or_else(|| missing("epoch"))?;
+        let key = self
+            .checkpoint_keys
+            .get(&(namespace.into(), epoch))
+            .ok_or_else(|| missing("unlocked checkpoint key"))?;
+        let body = serde_json::to_vec(&CheckpointBody {
+            version: 1,
+            library: self.id().into(),
+            identity: self.me.id(),
+            namespace: namespace.into(),
+            epoch,
+            snapshot: state.snapshot(),
+        })?;
+        let tag = checkpoint_tag(key, &body)?;
+        Ok(serde_json::to_vec(&CheckpointEnvelope { body, tag })?)
+    }
+    /// Restore a local checkpoint against currently admitted content. Returns false on any mismatch;
+    /// the already replayed state remains authoritative. Operations after its position are replayed.
+    pub fn restore_checkpoint(&mut self, namespace: &str, bytes: &[u8]) -> Result<bool> {
+        let mut ops: Vec<_> = self
+            .judged
+            .iter()
+            .filter(|j| j.status == Status::Admitted && j.header.meta.namespace == namespace)
+            .filter_map(|j| j.operation.as_ref().map(|op| (j.digest.as_str(), op)))
+            .collect();
+        ops.sort_by(|a, b| {
+            (a.1.clock, &a.1.author, &a.1.id).cmp(&(b.1.clock, &b.1.author, &b.1.id))
+        });
+        let Ok(snapshot) = self.decode_checkpoint(namespace, bytes, &ops) else {
+            return Ok(false);
+        };
+        let state = self
+            .namespaces
+            .entry(namespace.into())
+            .or_insert_with(|| Namespace::new(namespace));
+        state.reconcile(namespace, &ops, &self.checkpoint_policy, Some(snapshot));
+        Ok(true)
+    }
+    fn decode_checkpoint(
+        &self,
+        namespace: &str,
+        bytes: &[u8],
+        ops: &[(&str, &OperationView)],
+    ) -> Result<Snapshot> {
+        let envelope: CheckpointEnvelope = serde_json::from_slice(bytes)?;
+        let body: CheckpointBody = serde_json::from_slice(&envelope.body)?;
+        ensure(
+            body.version == 1
+                && body.library == self.id()
+                && body.identity == self.me.id()
+                && body.namespace == namespace,
+            "Checkpoint format or identity mismatch",
+        )?;
+        let key = self
+            .checkpoint_keys
+            .get(&(namespace.into(), body.epoch))
+            .ok_or_else(|| missing("checkpoint key"))?;
+        let expected = checkpoint_tag(key, &envelope.body)?;
+        let difference = expected
+            .iter()
+            .zip(&envelope.tag)
+            .fold(0u8, |d, (a, b)| d | (a ^ b));
+        ensure(
+            expected.len() == envelope.tag.len() && difference == 0,
+            "Checkpoint authentication failed",
+        )?;
+        ensure(
+            std::mem::discriminant(&body.snapshot.state)
+                == std::mem::discriminant(&domain::State::new(namespace)),
+            "Checkpoint domain mismatch",
+        )?;
+        ensure(
+            body.snapshot.position <= ops.len(),
+            "Checkpoint prefix unavailable",
+        )?;
+        let digest = ops[..body.snapshot.position]
+            .iter()
+            .fold([0; 32], |h, (d, _)| engine::roll(h, d));
+        ensure(digest == body.snapshot.digest, "Checkpoint prefix mismatch")?;
+        Ok(body.snapshot)
+    }
+    /// Read a bounded projection without constructing the history-bearing compatibility view.
+    /// Queries are documented in docs/engine.md. `read` remains a compatibility full projection.
+    pub fn query(
+        &self,
+        namespace: &str,
+        name: &str,
+        args: Value,
+        now: &str,
+    ) -> Result<Outcome<Value>> {
+        ensure(args.is_object(), "Query arguments must be an object")?;
+        if let Some(denial) = self.authorize(namespace, Access::Read, now)? {
+            return Ok(Outcome::failure(denial));
+        }
+        let epoch = self
+            .authority
+            .epoch_at(namespace, self.authority.latest)
+            .ok_or_else(|| missing("epoch"))?;
+        if !self.keys.contains_key(&(namespace.into(), epoch)) {
+            return Ok(Outcome::failure(Denial::new(
+                "notReadable",
+                "The namespace key has not been unlocked",
+            )));
+        }
+        let state = self
+            .namespaces
+            .get(namespace)
+            .ok_or_else(|| missing("namespace"))?;
+        Ok(Outcome::success(state.query(name, &args)?))
     }
     /// Verify host signatures, then merge the complete action atomically.
     pub fn finish(&mut self, pending: PendingBatch, signatures: Vec<Vec<u8>>) -> Result<()> {
@@ -230,8 +460,39 @@ impl Library {
             })
             .collect()
     }
-    /// Complete one host ECDH step and cache only the authenticated 32-byte epoch key.
+    /// Complete one host ECDH step, caching the authenticated epoch key and a local cache key.
     pub fn finish_unlock(&mut self, namespace: &str, epoch: u64, shared: &[u8]) -> Result<()> {
+        let (key, checkpoint_key) = self.unseal_key(namespace, epoch, shared)?;
+        self.keys.insert((namespace.into(), epoch), key);
+        self.checkpoint_keys
+            .insert((namespace.into(), epoch), checkpoint_key);
+        self.ingest(&[], true, &[namespace.into()]);
+        Ok(())
+    }
+    /// Complete all host ECDH results atomically, then refresh admission/projections once.
+    /// Each tuple is (namespace, epoch, raw shared secret). Prefer this on cold open.
+    pub fn finish_unlock_many(&mut self, results: Vec<(String, u64, Vec<u8>)>) -> Result<()> {
+        let keys = results
+            .iter()
+            .map(|(ns, epoch, shared)| {
+                self.unseal_key(ns, *epoch, shared)
+                    .map(|key| ((ns.clone(), *epoch), key))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !keys.is_empty() {
+            let invalidated: Vec<_> = keys
+                .iter()
+                .map(|(location, _)| location.0.clone())
+                .collect();
+            for (location, (key, checkpoint_key)) in keys {
+                self.keys.insert(location.clone(), key);
+                self.checkpoint_keys.insert(location, checkpoint_key);
+            }
+            self.ingest(&[], true, &invalidated);
+        }
+        Ok(())
+    }
+    fn unseal_key(&self, namespace: &str, epoch: u64, shared: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         let id = self.me.id();
         let sealed = self
             .authority
@@ -246,8 +507,16 @@ impl Library {
             &self.authority.key_info(namespace, epoch, &id),
         )?;
         ensure(key.len() == 32, "Invalid epoch key length")?;
-        self.keys.insert((namespace.into(), epoch), key);
-        Ok(())
+        // A recipient-specific ECDH result, unlike the shared namespace AES key, cannot
+        // be reproduced by another granted member. This authenticates local caches only.
+        let mut checkpoint_key = vec![0; 32];
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(b"colophon/checkpoint-key/1"), shared)
+            .expand(
+                &self.authority.key_info(namespace, epoch, &id),
+                &mut checkpoint_key,
+            )
+            .map_err(|_| Error("Checkpoint key derivation failed".into()))?;
+        Ok((key, checkpoint_key))
     }
     /// Prepare a self-signed request, before the prospective member has access.
     pub fn begin_request(request: Request) -> Result<PendingBatch> {
@@ -565,7 +834,7 @@ impl Library {
                     && j.status == Status::Admitted
                     && j.operation.is_some()
             })
-            .map(|j| j.digest)
+            .map(|j| j.digest.clone())
             .collect()
     }
     fn authorize(&self, namespace: &str, access: Access, now: &str) -> Result<Option<Denial>> {
@@ -620,15 +889,10 @@ impl Library {
         if access == Access::Write {
             if let Some(budget) = grant.write_budget {
                 let writes = self
-                    .evaluate()
-                    .0
-                    .iter()
-                    .filter(|j| {
-                        j.header.meta.author == self.me.id() && j.status == Status::Admitted
-                    })
-                    .map(|j| &j.header.meta.id)
-                    .collect::<BTreeSet<_>>()
-                    .len() as u64;
+                    .admission
+                    .spent
+                    .get(&self.me.id())
+                    .map_or(0, |s| s.len()) as u64;
                 if writes >= budget {
                     return Ok(Some(Denial::new(
                         "budgetSpent",
@@ -671,17 +935,9 @@ impl Library {
             )));
         };
         let clock = self
-            .evaluate()
-            .0
-            .iter()
-            .filter(|j| {
-                j.header.meta.namespace == namespace
-                    && j.status == Status::Admitted
-                    && j.operation.is_some()
-            })
-            .map(|j| j.header.meta.clock)
-            .max()
-            .unwrap_or(0)
+            .namespaces
+            .get(namespace)
+            .map_or(0, |n| n.clock)
             .checked_add(1)
             .ok_or_else(|| Error("Logical clock exhausted".into()))?;
         ensure(
@@ -712,7 +968,8 @@ impl Library {
             authority: self.authority.latest,
             created: now.into(),
         };
-        let ciphertext = crypto::seal(key, &nonce, &canonical(&operation)?, &canonical(&meta)?)?;
+        let ciphertext =
+            crypto::seal(key, &nonce, &canonical(&operation)?, &operation_aad(&meta)?)?;
         let path = operation_path(&meta);
         let body = canonical(&OperationHeader {
             meta,
@@ -762,8 +1019,7 @@ impl Library {
             match &j.status {
                 Status::Admitted => {
                     if let Some(operation) = &j.operation {
-                        view.admitted
-                            .push(self.operation_view(&j.header.meta, operation));
+                        view.admitted.push(operation.clone());
                     } else if self
                         .keys
                         .contains_key(&(namespace.into(), j.header.meta.epoch))
@@ -783,16 +1039,20 @@ impl Library {
                 .filter(|(ns, _)| ns == namespace)
                 .map(|(_, r)| r),
         );
-        if let Some(module) = domain::module(namespace) {
-            view.state = module.fold(&view.admitted);
+        if let Some(state) = self.namespaces.get(namespace) {
+            view.state = state.query("read", &json!({}))?;
         }
         Ok(Outcome::success(view))
     }
-    fn operation_view(&self, meta: &OperationMeta, operation: &Operation) -> OperationView {
-        let member = self.authority.members.get(&meta.author);
+    fn operation_view(
+        authority: &Authority,
+        meta: &OperationMeta,
+        operation: Operation,
+    ) -> OperationView {
+        let member = authority.members.get(&meta.author);
         OperationView {
-            id: operation.id.clone(),
-            kind: operation.kind.clone(),
+            id: operation.id,
+            kind: operation.kind,
             author: meta.author.clone(),
             author_label: member.map(|m| m.member.label.clone()).unwrap_or_default(),
             origin: if member.is_some_and(|m| m.member.kind == MemberKind::Agent) {
@@ -802,8 +1062,8 @@ impl Library {
             }
             .into(),
             clock: operation.clock,
-            created: operation.created.clone(),
-            payload: operation.payload.clone(),
+            created: operation.created,
+            payload: operation.payload,
         }
     }
     /// Known members, with counts derived from signed admission, not mutable counters.
@@ -898,6 +1158,10 @@ impl Library {
             Ok(map_outcome(self.view(ns, now)?, |v| Call::Read {
                 value: json!(v),
             }))
+        } else if module.queries().iter().any(|s| s.name == kind) {
+            Ok(map_outcome(self.query(ns, kind, input, now)?, |value| {
+                Call::Read { value }
+            }))
         } else {
             Ok(map_outcome(
                 self.begin_write(ns, kind, input, now, seed)?,
@@ -905,20 +1169,40 @@ impl Library {
             ))
         }
     }
-    fn evaluate(&self) -> (Vec<Judged>, Vec<(String, Rejection)>) {
+    fn evaluate(&self) -> (Vec<&Judged>, Vec<(String, Rejection)>) {
+        let mut judged: Vec<_> = self.judged.iter().collect();
+        judged.sort_by(|a, b| order(&a.header.meta).cmp(&order(&b.header.meta)));
+        (judged, self.invalid.values().cloned().collect())
+    }
+    fn ingest(&mut self, paths: &[String], mut replay: bool, invalidated: &[String]) {
+        self.changes = ChangeSummary::default();
+        let mut touched = BTreeSet::new();
         let mut candidates = Vec::new();
-        let mut invalid = Vec::new();
-        for (path, raw) in self.records.iter().filter(|(p, _)| p.starts_with("ops/")) {
+        let verifiers: BTreeMap<_, _> = if paths.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.authority
+                .members
+                .iter()
+                .filter_map(|(id, member)| {
+                    p256::ecdsa::VerifyingKey::from_sec1_bytes(&member.public.signing)
+                        .ok()
+                        .map(|key| (id.clone(), key))
+                })
+                .collect()
+        };
+        for path in paths {
+            let Some(raw) = self.records.get(path) else {
+                continue;
+            };
             let parsed = (|| -> Result<(OperationHeader, String)> {
                 let record: SignedRecord = serde_json::from_slice(raw)?;
                 let header: OperationHeader = serde_json::from_slice(&record.body)?;
                 let meta = &header.meta;
-                let member = self
-                    .authority
-                    .members
+                let verifier = verifiers
                     .get(&meta.author)
                     .ok_or_else(|| missing("author"))?;
-                record.verify(&member.public.signing)?;
+                record.verify_with(verifier)?;
                 ensure(
                     meta.protocol == "colophon/operation/2" && meta.library == self.id(),
                     "Wrong operation protocol or library",
@@ -944,122 +1228,284 @@ impl Library {
                 Ok((header, records::digest(&record.body)))
             })();
             match parsed {
-                Ok(header) => candidates.push(header),
+                Ok((header, digest)) => {
+                    self.invalid.remove(path);
+                    touched.insert(header.meta.namespace.clone());
+                    candidates.push(Judged {
+                        header,
+                        digest,
+                        operation: None,
+                        opened: false,
+                        status: Status::Admitted,
+                    });
+                }
                 Err(error) => {
                     // Best-effort location for UI only; these untrusted fields grant no capability.
                     let header = serde_json::from_slice::<SignedRecord>(raw)
                         .ok()
                         .and_then(|r| serde_json::from_slice::<OperationHeader>(&r.body).ok());
-                    invalid.push((
-                        header
-                            .as_ref()
-                            .map(|h| h.meta.namespace.clone())
-                            .unwrap_or_default(),
-                        Rejection {
-                            id: header
+                    if let Some(header) = &header {
+                        touched.insert(header.meta.namespace.clone());
+                    }
+                    self.invalid.insert(
+                        path.clone(),
+                        (
+                            header
                                 .as_ref()
-                                .map(|h| h.meta.id.clone())
-                                .unwrap_or_else(|| path.clone()),
-                            author: header.map(|h| h.meta.author).unwrap_or_default(),
-                            reason: format!("invalidRecord: {error}"),
-                        },
-                    ));
+                                .map(|h| h.meta.namespace.clone())
+                                .unwrap_or_default(),
+                            Rejection {
+                                id: header
+                                    .as_ref()
+                                    .map(|h| h.meta.id.clone())
+                                    .unwrap_or_else(|| path.clone()),
+                                author: header.map(|h| h.meta.author).unwrap_or_default(),
+                                reason: format!("invalidRecord: {error}"),
+                            },
+                        ),
+                    );
                 }
             }
         }
-        candidates.sort_by(|a, b| {
-            (&a.0.meta.clock, &a.0.meta.author, &a.0.meta.id).cmp(&(
-                &b.0.meta.clock,
-                &b.0.meta.author,
-                &b.0.meta.id,
-            ))
-        });
-        let mut authenticated_ids = BTreeSet::new();
-        let mut spent = BTreeMap::new();
-        let mut clocks = BTreeMap::<String, u64>::new();
-        let mut judged = Vec::new();
-        for (header, digest) in candidates {
-            let meta = &header.meta;
-            let mut status = self.judge(
+        candidates.sort_by(|a, b| order(&a.header.meta).cmp(&order(&b.header.meta)));
+        // Namespace clock checks are independent. Only a capped author's grant-wide budget
+        // adds an ordering dependency across namespaces. This permits cheap local appends to
+        // a quieter namespace even when another namespace has a much higher clock.
+        for candidate in &candidates {
+            let meta = &candidate.header.meta;
+            let before = |tail: &(u64, String, String)| {
+                order(meta) <= (tail.0, tail.1.as_str(), tail.2.as_str())
+            };
+            replay |= self
+                .admission
+                .namespace_tails
+                .get(&meta.namespace)
+                .is_some_and(before);
+            let capped = self
+                .authority
+                .members
+                .get(&meta.author)
+                .and_then(|m| m.member.grant.as_ref())
+                .and_then(|g| g.write_budget)
+                .is_some();
+            replay |= capped
+                && self
+                    .admission
+                    .author_tails
+                    .get(&meta.author)
+                    .is_some_and(before);
+            // Duplicate candidates require agreed global order, including invalid copies.
+            replay |= self
+                .admission
+                .authenticated_ids
+                .contains(&(meta.author.clone(), meta.id.clone()));
+        }
+        let old_len = self.judged.len();
+        self.judged.extend(candidates);
+        if replay {
+            self.judged
+                .sort_by(|a, b| order(&a.header.meta).cmp(&order(&b.header.meta)));
+            self.admission = Admission::default();
+        }
+        let start = if replay { 0 } else { old_len };
+        for j in &mut self.judged[start..] {
+            let meta = &j.header.meta;
+            if !j.opened
+                && self
+                    .keys
+                    .contains_key(&(meta.namespace.clone(), meta.epoch))
+            {
+                Self::open_operation(&self.authority, &self.keys, j);
+            }
+            let meta = &j.header.meta;
+            let mut status = Self::judge(
+                &self.authority,
                 meta,
-                &digest,
-                &mut spent,
-                clocks.get(&meta.namespace).copied().unwrap_or(0),
+                &j.digest,
+                &mut self.admission.spent,
+                self.admission
+                    .clocks
+                    .get(&meta.namespace)
+                    .copied()
+                    .unwrap_or(0),
             );
             if status == Status::Admitted {
-                clocks.insert(meta.namespace.clone(), meta.clock);
+                self.admission
+                    .clocks
+                    .insert(meta.namespace.clone(), meta.clock);
             }
-            // Budget admission is over signed headers, even for namespaces this reader cannot open.
-            // Invalid encrypted payloads still consume a slot; a signer cannot hide budget usage.
-            let operation = self
-                .keys
-                .get(&(meta.namespace.clone(), meta.epoch))
-                .and_then(|key| {
-                    let plain = crypto::open(
-                        key,
-                        &header.nonce,
-                        &header.ciphertext,
-                        &canonical(meta).ok()?,
-                    )
-                    .ok()?;
-                    let op: Operation = serde_json::from_slice(&plain).ok()?;
-                    if op.id != meta.id
-                        || op.clock != meta.clock
-                        || op.authority != meta.authority
-                        || op.created != meta.created
-                        || !op.payload.is_object()
-                        || op.v != 1
-                    {
-                        return None;
-                    }
-                    if operation_id(
-                        &meta.namespace,
-                        &meta.author,
-                        meta.epoch,
-                        &header.nonce,
-                        &op,
-                    )
-                    .ok()?
-                        != op.id
-                    {
-                        return None;
-                    }
-                    Some(op)
-                });
             if status == Status::Admitted
-                && operation.is_some()
-                && !authenticated_ids.insert((meta.author.clone(), meta.id.clone()))
+                && j.operation.is_some()
+                && !self
+                    .admission
+                    .authenticated_ids
+                    .insert((meta.author.clone(), meta.id.clone()))
             {
                 status = Status::Refused("duplicateID".into());
             }
-            judged.push(Judged {
-                digest,
-                header,
-                operation,
-                status,
-            });
+            if status != j.status {
+                touched.insert(meta.namespace.clone());
+            }
+            j.status = status;
+            let tail = (meta.clock, meta.author.clone(), meta.id.clone());
+            self.admission
+                .namespace_tails
+                .entry(meta.namespace.clone())
+                .and_modify(|old| {
+                    if *old < tail {
+                        *old = tail.clone();
+                    }
+                })
+                .or_insert_with(|| tail.clone());
+            self.admission
+                .author_tails
+                .entry(meta.author.clone())
+                .and_modify(|old| {
+                    if *old < tail {
+                        *old = tail.clone();
+                    }
+                })
+                .or_insert(tail);
         }
-        (judged, invalid)
+        if replay {
+            let mut grouped: BTreeMap<String, Vec<(&str, &OperationView)>> = BTreeMap::new();
+            for j in &self.judged {
+                if j.status == Status::Admitted {
+                    if let Some(op) = &j.operation {
+                        grouped
+                            .entry(j.header.meta.namespace.clone())
+                            .or_default()
+                            .push((&j.digest, op));
+                    }
+                }
+            }
+            for ns in &self.authority.namespaces {
+                let ops = grouped.get(ns).map(Vec::as_slice).unwrap_or(&[]);
+                // During sequential unlock, do not replay a staged cache's namespace before
+                // its current epoch key is available. Queries cannot read that namespace yet.
+                let readable = self
+                    .authority
+                    .epoch_at(ns, self.authority.latest)
+                    .is_some_and(|epoch| self.keys.contains_key(&(ns.clone(), epoch)));
+                if self.pending_checkpoints.contains_key(ns) && !readable {
+                    continue;
+                }
+                let restored = self
+                    .pending_checkpoints
+                    .get(ns)
+                    .and_then(|bytes| self.decode_checkpoint(ns, bytes, ops).ok());
+                // A failed cache is discarded, not retried indefinitely after a mismatch.
+                self.pending_checkpoints.remove(ns);
+                let state = self
+                    .namespaces
+                    .entry(ns.clone())
+                    .or_insert_with(|| Namespace::new(ns));
+                let changed = state.reconcile(ns, ops, &self.checkpoint_policy, restored);
+                if changed || invalidated.contains(ns) || touched.contains(ns) {
+                    state.revision += 1;
+                    self.changes.namespaces.insert(ns.clone(), state.revision);
+                }
+            }
+        } else {
+            for j in &self.judged[start..] {
+                let ns = &j.header.meta.namespace;
+                if j.status == Status::Admitted {
+                    if let Some(op) = &j.operation {
+                        let view = op;
+                        let state = self
+                            .namespaces
+                            .entry(ns.clone())
+                            .or_insert_with(|| Namespace::new(ns));
+                        state.append(&j.digest, view, &self.checkpoint_policy);
+                    }
+                }
+                let state = self
+                    .namespaces
+                    .entry(ns.clone())
+                    .or_insert_with(|| Namespace::new(ns));
+                self.changes
+                    .namespaces
+                    .entry(ns.clone())
+                    .or_insert_with(|| {
+                        state.revision += 1;
+                        state.revision
+                    });
+            }
+        }
+        // Invalid records affect rejection queries even when they never enter admitted order.
+        for ns in touched {
+            if self.authority.namespaces.contains(&ns) && !self.changes.namespaces.contains_key(&ns)
+            {
+                let state = self
+                    .namespaces
+                    .entry(ns.clone())
+                    .or_insert_with(|| Namespace::new(&ns));
+                state.revision += 1;
+                self.changes.namespaces.insert(ns, state.revision);
+            }
+        }
+    }
+    fn open_operation(
+        authority: &Authority,
+        keys: &BTreeMap<(String, u64), Vec<u8>>,
+        j: &mut Judged,
+    ) {
+        let header = &j.header;
+        let meta = &header.meta;
+        j.opened = true;
+        j.operation = keys
+            .get(&(meta.namespace.clone(), meta.epoch))
+            .and_then(|key| {
+                let plain = crypto::open(
+                    key,
+                    &header.nonce,
+                    &header.ciphertext,
+                    &operation_aad(meta).ok()?,
+                )
+                .ok()?;
+                let op: Operation = serde_json::from_slice(&plain).ok()?;
+                if op.id != meta.id
+                    || op.clock != meta.clock
+                    || op.authority != meta.authority
+                    || op.created != meta.created
+                    || !op.payload.is_object()
+                    || op.v != 1
+                {
+                    return None;
+                }
+                if operation_id(
+                    &meta.namespace,
+                    &meta.author,
+                    meta.epoch,
+                    &header.nonce,
+                    &op,
+                )
+                .ok()?
+                    != op.id
+                {
+                    return None;
+                }
+                Some(Self::operation_view(authority, meta, op))
+            });
+        // Exact encrypted records remain in `records`; do not retain a second ciphertext copy.
+        j.header.ciphertext = Vec::new();
     }
     fn judge(
-        &self,
+        authority: &Authority,
         meta: &OperationMeta,
         digest: &str,
         spent: &mut BTreeMap<String, BTreeSet<String>>,
         clock: u64,
     ) -> Status {
         let refuse = |s: &str| Status::Refused(s.into());
-        let Some(member) = self.authority.members.get(&meta.author) else {
+        let Some(member) = authority.members.get(&meta.author) else {
             return refuse("notGranted");
         };
         if meta.authority < member.member.since {
             return refuse("notGranted");
         }
-        let is_root = self
-            .authority
-            .root_at(meta.authority.min(self.authority.latest))
-            == Some(&meta.author);
-        if !self.authority.namespaces.contains(&meta.namespace) {
+        let is_root = authority.root_at(meta.authority.min(authority.latest)) == Some(&meta.author);
+        if !authority.namespaces.contains(&meta.namespace) {
             return refuse("notGranted");
         }
         if !is_root
@@ -1085,10 +1531,10 @@ impl Library {
                 };
             }
         }
-        if meta.authority > self.authority.latest {
+        if meta.authority > authority.latest {
             return Status::Held("authorityBehind".into());
         }
-        if self.authority.epoch_at(&meta.namespace, meta.authority) != Some(meta.epoch) {
+        if authority.epoch_at(&meta.namespace, meta.authority) != Some(meta.epoch) {
             return refuse("wrongEpoch");
         }
         // Bound each admitted header's forward jump, including a namespace's first header.
@@ -1115,10 +1561,10 @@ impl Library {
             if judged.header.meta.author != author || !kept.contains(&judged.digest) {
                 continue;
             }
-            let Some(op) = judged.operation else {
+            let Some(op) = &judged.operation else {
                 continue;
             };
-            let namespace = judged.header.meta.namespace;
+            let namespace = judged.header.meta.namespace.clone();
             let names = domain::module(&namespace)
                 .filter(|module| module.write_phrase(&op.kind).is_some())
                 .map(|module| module.contribution_names(&op.kind))
@@ -1575,9 +2021,98 @@ fn operation_id(
     nonce: &[u8],
     operation: &Operation,
 ) -> Result<String> {
-    let mut unsigned = operation.clone();
-    unsigned.id.clear();
-    Ok(records::id(&canonical(
-        &json!({"purpose":"colophon/operation-id/2","namespace":namespace,"author":author,"epoch":epoch,"nonce":nonce,"operation":unsigned}),
-    )?))
+    // Struct fields are in canonical key order; payload maps already use serde_json's
+    // sorted map representation. Borrowing avoids a payload clone and an intermediate Value tree.
+    #[derive(Serialize)]
+    struct Plain<'a> {
+        authority: u64,
+        clock: u64,
+        created: &'a str,
+        id: &'a str,
+        kind: &'a str,
+        payload: &'a Value,
+        v: u32,
+    }
+    #[derive(Serialize)]
+    struct Preimage<'a> {
+        author: &'a str,
+        epoch: u64,
+        namespace: &'a str,
+        nonce: &'a [u8],
+        operation: Plain<'a>,
+        purpose: &'a str,
+    }
+    let preimage = Preimage {
+        author,
+        epoch,
+        namespace,
+        nonce,
+        operation: Plain {
+            authority: operation.authority,
+            clock: operation.clock,
+            created: &operation.created,
+            id: "",
+            kind: &operation.kind,
+            payload: &operation.payload,
+            v: operation.v,
+        },
+        purpose: "colophon/operation-id/2",
+    };
+    Ok(records::id(&serde_json::to_vec(&preimage)?))
+}
+
+fn order(meta: &OperationMeta) -> (u64, &str, &str) {
+    (meta.clock, &meta.author, &meta.id)
+}
+
+#[derive(Serialize, Deserialize)]
+struct CheckpointEnvelope {
+    #[serde(with = "bytes")]
+    body: Vec<u8>,
+    #[serde(with = "bytes")]
+    tag: Vec<u8>,
+}
+#[derive(Serialize, Deserialize)]
+struct CheckpointBody {
+    version: u32,
+    library: String,
+    identity: String,
+    namespace: String,
+    epoch: u64,
+    snapshot: Snapshot,
+}
+fn checkpoint_tag(key: &[u8], body: &[u8]) -> Result<Vec<u8>> {
+    // HKDF-Extract is HMAC-SHA256(salt=recipient-local checkpoint key, IKM=exact cache body).
+    // A separate expansion label keeps this authentication purpose separate from wire crypto.
+    let mut tag = vec![0; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(key), body)
+        .expand(b"colophon/device-checkpoint/1", &mut tag)
+        .map_err(|_| Error("Checkpoint authentication failed".into()))?;
+    Ok(tag)
+}
+
+fn operation_aad(meta: &OperationMeta) -> Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct Aad<'a> {
+        author: &'a str,
+        authority: u64,
+        clock: u64,
+        created: &'a str,
+        epoch: u64,
+        id: &'a str,
+        library: &'a str,
+        namespace: &'a str,
+        protocol: &'a str,
+    }
+    Ok(serde_json::to_vec(&Aad {
+        author: &meta.author,
+        authority: meta.authority,
+        clock: meta.clock,
+        created: &meta.created,
+        epoch: meta.epoch,
+        id: &meta.id,
+        library: &meta.library,
+        namespace: &meta.namespace,
+        protocol: &meta.protocol,
+    })?)
 }
