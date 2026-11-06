@@ -57,10 +57,29 @@
       }
     ],
     "state": {
+      "attachments": [],
+      "cells": [
+        {
+          "author": "20d7bfe152532d0cbccd2143db7644ac",
+          "authorLabel": "Research agent",
+          "clock": 3,
+          "extensions": {
+            "origin": "person"
+          },
+          "id": "ai-note",
+          "kind": "markdown",
+          "notebook": "inbox",
+          "origin": "ai",
+          "revision": "2035296080664a57663f99c660a4256f",
+          "source": "An edited contribution"
+        }
+      ],
       "conflicts": [],
+      "entries": [],
       "invalid": [],
       "notebooks": [
         {
+          "archived": false,
           "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
           "authorLabel": "Owner",
           "clock": 1,
@@ -70,9 +89,16 @@
             }
           },
           "id": "inbox",
+          "kind": "notebook",
+          "orderRevision": "0eee3a3a56c0a66d78b7ce25eeacd11c",
           "origin": "person",
           "revision": "9187c275a69692ca1d112e19f5c8414b",
-          "title": "Inbox"
+          "title": "Inbox",
+          "touched": [
+            3,
+            "20d7bfe152532d0cbccd2143db7644ac",
+            "2035296080664a57663f99c660a4256f"
+          ]
         }
       ],
       "notes": [
@@ -84,12 +110,16 @@
             "origin": "person"
           },
           "id": "ai-note",
+          "kind": "markdown",
           "notebook": "inbox",
           "origin": "ai",
           "revision": "2035296080664a57663f99c660a4256f",
+          "source": "An edited contribution",
           "text": "An edited contribution"
         }
-      ]
+      ],
+      "proposals": [],
+      "runs": []
     }
   },
   "ledger": [
@@ -611,10 +641,29 @@
       "namespace": "notes",
       "refused": [],
       "state": {
+        "attachments": [],
+        "cells": [
+          {
+            "author": "20d7bfe152532d0cbccd2143db7644ac",
+            "authorLabel": "Research agent",
+            "clock": 3,
+            "extensions": {
+              "origin": "person"
+            },
+            "id": "ai-note",
+            "kind": "markdown",
+            "notebook": "inbox",
+            "origin": "ai",
+            "revision": "2035296080664a57663f99c660a4256f",
+            "source": "An edited contribution"
+          }
+        ],
         "conflicts": [],
+        "entries": [],
         "invalid": [],
         "notebooks": [
           {
+            "archived": false,
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
             "clock": 1,
@@ -624,9 +673,16 @@
               }
             },
             "id": "inbox",
+            "kind": "notebook",
+            "orderRevision": "0eee3a3a56c0a66d78b7ce25eeacd11c",
             "origin": "person",
             "revision": "9187c275a69692ca1d112e19f5c8414b",
-            "title": "Inbox"
+            "title": "Inbox",
+            "touched": [
+              3,
+              "20d7bfe152532d0cbccd2143db7644ac",
+              "2035296080664a57663f99c660a4256f"
+            ]
           }
         ],
         "notes": [
@@ -638,12 +694,16 @@
               "origin": "person"
             },
             "id": "ai-note",
+            "kind": "markdown",
             "notebook": "inbox",
             "origin": "ai",
             "revision": "2035296080664a57663f99c660a4256f",
+            "source": "An edited contribution",
             "text": "An edited contribution"
           }
-        ]
+        ],
+        "proposals": [],
+        "runs": []
       }
     },
     "reading.saved": {

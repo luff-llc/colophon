@@ -41,6 +41,14 @@ assert.equal(notes.value.state.notes.length, 1);
 assert.equal(notes.value.state.notes[0].origin, 'ai');
 assert.equal(notes.value.state.notes[0].extensions.extension.retained, true);
 assert(notes.value.admitted.some(op => op.id === written.value.id));
+const cells = await root.call('notes__cells', { notebook: 'inbox', limit: 1 });
+assert.equal(cells.ok, true);
+assert.equal(cells.value.value.rows[0].id, 'agent-note');
+assert.equal(cells.value.value.rows[0].kind, 'markdown');
+assert.equal(cells.value.value.total, 1);
+const cell = await root.call('notes__cell', { notebook: 'inbox', id: 'agent-note' });
+assert.equal(cell.value.value.source, 'An agent contribution');
+assert.equal(cell.value.value.cell.origin, 'ai');
 assert(root.ledger().some(entry => entry.event === 'revoked'));
 assert.equal((await agentLibrary.call('reading.saved__read', {})).reason, 'notGranted');
 
@@ -62,8 +70,8 @@ async function deriveScalar(seed, counter) {
   return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('colophon/entropy/2'), info }, material, 256));
 }
 const { createECDH } = await import('node:crypto');
-async function fixturePair(counter, algorithm, usages) {
-  const scalar = await deriveScalar(new Uint8Array(32).fill(5), counter);
+async function fixturePair(counter, algorithm, usages, seed = 5) {
+  const scalar = await deriveScalar(new Uint8Array(32).fill(seed), counter);
   const ecdh = createECDH('prime256v1'); ecdh.setPrivateKey(scalar);
   const point = ecdh.getPublicKey();
   const jwk = { kty: 'EC', crv: 'P-256', x: point.subarray(1,33).toString('base64url'), y: point.subarray(33).toString('base64url'), d: Buffer.from(scalar).toString('base64url') };
@@ -76,6 +84,14 @@ const fixture = await Library.open(new Map(Object.entries(encoded).map(([path,b6
 assert.equal(fixture.id, expected.libraryID);
 for (const [namespace, view] of Object.entries(expected.views)) assert.deepEqual(fixture.view(namespace).value, view);
 assert.deepEqual(fixture.ledger(), expected.ledger);
+const notesVector = JSON.parse(await readFile(new URL('../../conformance/0.2/notes.json', import.meta.url), 'utf8'));
+const notesKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
+const notesFixture = await Library.open(new Map(Object.entries(notesVector.records).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), notesKeys);
+for (const query of notesVector.queries) {
+  const result = await notesFixture.call(`notes__${query.name}`, query.args);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, query.result);
+}
 // Exercise fractional IDs through the JSON host boundary as well as native Rust.
 for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entries()) {
   const result = await restored.write('listening.podcasts', 'position', { id: `fraction-${index}`, seconds });
