@@ -858,6 +858,116 @@ fn four_domain_writes_and_suffix_replay_share_the_registered_reducers() {
 }
 
 #[test]
+fn authenticated_roles_survive_storage_append_and_checkpoint_suffix_without_query_reads() {
+    let (mut lib, owner, _) = create();
+    let agent = keys(7);
+    let server = keys(8);
+    for (member, kind, seed) in [
+        (&agent, MemberKind::Agent, 81),
+        (&server, MemberKind::Server, 82),
+    ] {
+        enroll(
+            &mut lib,
+            &owner,
+            member,
+            "Worker",
+            kind,
+            grant(&["listening.podcasts"], None),
+            seed,
+        );
+    }
+    let mut live = engine(&lib, &owner);
+    let source = live.source().clone();
+    let ns = "listening.podcasts";
+    let audio = json!({"digest":"a".repeat(64),"size":12,"mediaType":"application/json"});
+    let request = json!({"id":"job","episode":"e","show":"s","worker":agent.public().id(),
+        "audio":audio,"recording":"a".repeat(64),"language":"en"});
+    let records = finish(
+        success(
+            lib.begin_write(ns, "requestTranscript", request.clone(), NOW, [83; 32])
+                .unwrap(),
+        ),
+        &owner,
+    );
+    lib.merge(records.clone()).unwrap();
+    live.apply_paths(source.add(records)).unwrap();
+    let jobs = success(
+        live.query(ns, "jobs", json!({"kind":"transcript"}), NOW)
+            .unwrap(),
+    );
+    assert_eq!(jobs["value"]["total"], 1);
+    let checkpoint = live.checkpoint().unwrap();
+    let agent_lib = opened(lib.records().clone(), &agent);
+    let response =
+        json!({"id":"job","request":jobs["value"]["rows"][0]["requestRevision"],"result":audio});
+    let records = finish(
+        success(
+            agent_lib
+                .begin_write(ns, "supplyTranscript", response, NOW, [84; 32])
+                .unwrap(),
+        ),
+        &agent,
+    );
+    lib.merge(records.clone()).unwrap();
+    live.apply_paths(source.add(records)).unwrap();
+    let server_lib = opened(lib.records().clone(), &server);
+    let mut forbidden = request;
+    forbidden["id"] = json!("forbidden");
+    let records = finish(
+        success(
+            server_lib
+                .begin_write(ns, "requestTranscript", forbidden, NOW, [85; 32])
+                .unwrap(),
+        ),
+        &server,
+    );
+    lib.merge(records.clone()).unwrap();
+    live.apply_paths(source.add(records)).unwrap();
+    let mut suffix = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        Some(&checkpoint),
+    )
+    .unwrap();
+    unlock_engine(&mut suffix, &owner);
+    assert_eq!(suffix.open_mode(), &OpenMode::VerifiedPrefix);
+    assert_eq!(suffix.stats().records_read, 2);
+    assert_eq!(suffix.stats().payloads_decrypted, 2);
+    assert_eq!(suffix.stats().applied_operations, 2);
+    let rebuilt = engine(&lib, &owner);
+    source.1.borrow_mut().clear();
+    for replica in [&live, &suffix, &rebuilt] {
+        let jobs = success(
+            replica
+                .query(ns, "jobs", json!({"kind":"transcript"}), NOW)
+                .unwrap(),
+        );
+        assert_eq!(jobs["value"]["total"], 1);
+        assert!(jobs["value"]["rows"][0]["responseRevision"].is_string());
+        assert_eq!(
+            jobs,
+            success(
+                lib.query(ns, "jobs", json!({"kind":"transcript"}), NOW)
+                    .unwrap()
+            )
+        );
+        let conflicts = success(
+            replica
+                .query(ns, "conflicts", json!({"object":"forbidden"}), NOW)
+                .unwrap(),
+        );
+        assert_eq!(conflicts["value"]["total"], 1);
+        assert_eq!(conflicts["value"]["rows"][0]["outcome"], "roleDenied");
+    }
+    assert!(
+        source.1.borrow().is_empty(),
+        "named queries fetched history"
+    );
+}
+
+#[test]
 fn authenticated_old_reducer_schemas_fall_back_to_full_replay() {
     let (mut lib, owner, _) = create();
     write(&mut lib, &owner, 1);
@@ -865,7 +975,7 @@ fn authenticated_old_reducer_schemas_fall_back_to_full_replay() {
     let cp = first.checkpoint().unwrap();
     let length = u32::from_le_bytes(cp[8..12].try_into().unwrap()) as usize;
     let original: serde_json::Value = serde_json::from_slice(&cp[12..12 + length]).unwrap();
-    for schema in [None, Some(json!(1)), Some(json!(999))] {
+    for schema in [None, Some(json!(1)), Some(json!(2)), Some(json!(999))] {
         let mut meta = original.clone();
         match schema {
             Some(value) => {
@@ -921,8 +1031,10 @@ fn parallel_domain_reduction_keeps_global_budget_admission_and_stream_order() {
         let (ns, kind, payload) = match i % 3 {
             0 => (
                 "listening.podcasts",
-                "position",
-                json!({"id":"episode","seconds":i}),
+                "requestTranscript",
+                json!({"id":format!("job{i}"),"episode":"episode","show":"show",
+                    "worker":device.public().id(),"audio":{"digest":"a".repeat(64),"size":12,"mediaType":"application/json"},
+                    "recording":"a".repeat(64),"language":"en"}),
             ),
             1 => (
                 "reading.saved",
@@ -949,6 +1061,17 @@ fn parallel_domain_reduction_keeps_global_budget_admission_and_stream_order() {
     let paths = replica.source().add(batch);
     replica.apply_paths(paths).unwrap();
     assert_eq!(replica.stats().applied_operations, 400);
+    let jobs = success(
+        replica
+            .query(
+                "listening.podcasts",
+                "jobs",
+                json!({"kind":"transcript"}),
+                NOW,
+            )
+            .unwrap(),
+    );
+    assert_eq!(jobs["value"]["total"], 134);
     equal(&mut replica, &lib);
     let cp = replica.checkpoint().unwrap();
     let source = replica.source().clone();

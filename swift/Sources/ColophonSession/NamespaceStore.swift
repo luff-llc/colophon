@@ -11,6 +11,9 @@ import Observation
     private var results: [Query: Result] = [:]
     @ObservationIgnored private let session: ColophonSession
     @ObservationIgnored private let evaluate: @Sendable (Query, Data) throws -> Result
+    @ObservationIgnored private var loader: (@Sendable (Query) async throws -> Result)?
+    @ObservationIgnored private var generation: UInt64 = 0
+    @ObservationIgnored private var isClosed = false
     @ObservationIgnored private var registration: UUID?
     @ObservationIgnored private let maximumQueries: Int
     public init(session: ColophonSession, namespace: String, maximumQueries: Int = 64,
@@ -19,29 +22,44 @@ import Observation
         self.maximumQueries = max(1, maximumQueries)
         registration = session.registerCache { [weak self] changed, lost in
             guard let self, lost || changed.contains(namespace) else { return }
+            generation &+= 1
             results = [:]; revision = self.session.namespaceRevisions[namespace, default: 0]
             state = lost ? .unavailable : .idle
         }
+    }
+    /// Named-query mode avoids taking a compatibility whole-state projection.
+    public convenience init(session: ColophonSession, namespace: String, maximumQueries: Int = 64,
+                            load: @escaping @Sendable (Query) async throws -> Result) {
+        self.init(session: session, namespace: namespace, maximumQueries: maximumQueries) { _, _ in
+            throw SessionError.notReady
+        }
+        loader = load
     }
     isolated deinit { if let registration { session.unregisterCache(registration) } }
     public func cached(_ query: Query) -> Result? { results[query] }
     @discardableResult public func load(_ query: Query) async throws -> Result {
         await session.restore()
+        guard !isClosed else { throw SessionError.notReady }
         if let result = results[query] { return result }
+        let loadGeneration = generation
         let lease = session.context
         let observed = session.namespaceRevisions[namespace, default: 0]
-        let data = try session.projection(namespace: namespace)
         state = .warming
         do {
-            let result = try await Self.compute(query, data: data, evaluate: evaluate)
-            guard session.context == lease, session.phase == .ready,
+            let result: Result
+            if let loader { result = try await loader(query) }
+            else { result = try await Self.compute(query, data: session.projection(namespace: namespace), evaluate: evaluate) }
+            guard !isClosed, generation == loadGeneration, session.context == lease, session.phase == .ready,
                   session.namespaceRevisions[namespace, default: 0] == observed else { throw SessionError.staleRevision }
             if results.count >= maximumQueries { results = [:] }
             results[query] = result; revision = observed; state = .ready
             return result
-        } catch { state = .unavailable; throw error }
+        } catch {
+            if generation == loadGeneration, !isClosed { state = .unavailable }
+            throw error
+        }
     }
-    public func close() { if let registration { session.unregisterCache(registration) }; registration = nil; results = [:]; state = .unavailable }
+    public func close() { isClosed = true; generation &+= 1; if let registration { session.unregisterCache(registration) }; registration = nil; results = [:]; state = .unavailable }
     @concurrent private static func compute(_ query: Query, data: Data,
                                             evaluate: @Sendable (Query, Data) throws -> Result) async throws -> Result {
         try Task.checkCancellation(); return try evaluate(query, data)

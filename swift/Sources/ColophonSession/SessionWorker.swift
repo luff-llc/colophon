@@ -231,6 +231,11 @@ actor SessionWorker {
         try await persistDelta()
         return try await refreshLocked()
     }
+    func query(namespace: String, name: String, arguments: Data) async throws -> Data {
+        await enter(); defer { exit() }
+        try Task.checkCancellation()
+        return try await core.query(namespace: namespace, name: name, arguments: arguments)
+    }
     func recovery() async -> (any AsyncKeyProvider)? { await core.recovery() }
     private func empty(_ phase: SessionPhase) -> SessionSnapshot {
         SessionSnapshot(phase: phase, core: nil, revision: revision, namespaceRevisions: namespaceRevisions)

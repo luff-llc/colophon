@@ -238,8 +238,9 @@
               "id": "p",
               "inputCurrent": false,
               "markdownPreview": "Proposed organization",
+              "reviewRevision": "f9cd1eca78f1a9769a5fc973e4c17190",
               "revision": "74ac395e3c14835a4e747dde38b9ccd5",
-              "status": "pending",
+              "status": "kept",
               "truncated": false
             }
           ],
@@ -310,8 +311,13 @@
             "markdown": "Proposed organization",
             "notebook": "b",
             "origin": "person",
+            "reviewKeep": true,
+            "reviewRevision": "f9cd1eca78f1a9769a5fc973e4c17190",
+            "reviewedMarkdown": null,
+            "reviewer": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
+            "reviewerLabel": "Owner",
             "revision": "74ac395e3c14835a4e747dde38b9ccd5",
-            "status": "pending",
+            "status": "kept",
             "tags": []
           },
           "versions": {
@@ -427,7 +433,7 @@
           "lateEdits": 1,
           "materials": 1,
           "notebooks": 1,
-          "pendingProposals": 1
+          "pendingProposals": 0
         }
       }
     },
@@ -446,7 +452,7 @@
           "lateEdits": 1,
           "materials": 1,
           "notebooks": 1,
-          "pendingProposals": 1
+          "pendingProposals": 0
         }
       }
     },
@@ -459,15 +465,11 @@
           "next": null,
           "rows": [
             {
-              "id": "f9cd1eca78f1a9769a5fc973e4c17190",
-              "reason": "authenticatedAppOrDeviceRequired"
-            },
-            {
               "id": "438d812932a8141a91ce9f8e7085f74c",
               "reason": "invalidPayload"
             }
           ],
-          "total": 2
+          "total": 1
         }
       }
     },

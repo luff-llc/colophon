@@ -656,7 +656,8 @@ impl<S: RecordSource> Engine<S> {
                     Library::open_operation(&self.library.authority, &self.library.keys, j);
                 }
             });
-            let mut reductions: BTreeMap<String, Vec<OperationView>> = BTreeMap::new();
+            type Reduction = (OperationView, Option<MemberKind>);
+            let mut reductions: BTreeMap<String, Vec<Reduction>> = BTreeMap::new();
             for (mut entry, mut j) in candidates {
                 if j.opened {
                     self.stats.payloads_decrypted += 1;
@@ -720,10 +721,16 @@ impl<S: RecordSource> Engine<S> {
                 if j.status == Status::Admitted {
                     if let Some(op) = j.operation.take() {
                         state.clock = op.clock;
+                        let kind = self
+                            .library
+                            .authority
+                            .members
+                            .get(&op.author)
+                            .map(|member| member.member.kind);
                         reductions
                             .entry(meta.namespace.clone())
                             .or_default()
-                            .push(op);
+                            .push((op, kind));
                         state.hashes[0] = engine::roll(state.hashes[0], &j.digest);
                         *self.counts.entry(meta.namespace.clone()).or_default() += 1;
                         entry.flags |= PROJECTED;
@@ -770,16 +777,17 @@ impl<S: RecordSource> Engine<S> {
             }
             // Admission (including global budgets/duplicates) is complete and ordered. Reducers
             // own disjoint namespace states; retain each namespace's operation order within the
-            // bounded batch. No source, keys, authority or admission decisions enter these tasks.
+            // bounded batch. Only the verified member kind accompanies each operation; no source,
+            // keys, authority state or admission decisions enter these tasks.
             let mut jobs: Vec<_> = self
                 .library
                 .namespaces
                 .iter_mut()
                 .filter_map(|(ns, state)| reductions.remove(ns).map(|ops| (&mut state.state, ops)))
                 .collect();
-            let apply = |(state, ops): &mut (&mut domain::State, Vec<OperationView>)| {
-                for op in ops {
-                    state.apply(op);
+            let apply = |(state, ops): &mut (&mut domain::State, Vec<Reduction>)| {
+                for (op, kind) in ops {
+                    state.apply_with_member_kind(op, *kind);
                 }
             };
             if chunk.len() >= 512 {

@@ -676,3 +676,123 @@ fn query_tools_keep_write_names_and_restored_checkpoint_is_reused() {
             .unwrap();
     assert_eq!(body["snapshot"]["digest"], json!(hash));
 }
+
+#[test]
+fn authenticated_domain_roles_survive_incremental_replay_and_checkpoints() {
+    let (mut root, owner, _) = create();
+    let agent_keys = keys(7);
+    let server_keys = keys(8);
+    enroll(
+        &mut root,
+        &owner,
+        &agent_keys,
+        "Agent",
+        MemberKind::Agent,
+        grant(&["listening.podcasts"], None),
+        81,
+    );
+    enroll(
+        &mut root,
+        &owner,
+        &server_keys,
+        "Server",
+        MemberKind::Server,
+        grant(&["listening.podcasts"], None),
+        82,
+    );
+    let audio = json!({"digest":"a".repeat(64),"size":12,"mediaType":"application/json"});
+    let request = json!({"id":"job","episode":"e","show":"s","worker":agent_keys.public().id(),"audio":audio,"recording":"a".repeat(64),"language":"en"});
+    write(
+        &mut root,
+        &owner,
+        "listening.podcasts",
+        "requestTranscript",
+        request.clone(),
+        83,
+    );
+    let jobs = success(
+        root.query(
+            "listening.podcasts",
+            "jobs",
+            json!({"kind":"transcript"}),
+            NOW,
+        )
+        .unwrap(),
+    );
+    assert_eq!(jobs["value"]["total"], 1);
+    let request_revision = jobs["value"]["rows"][0]["requestRevision"].clone();
+    let mut agent = opened(root.records().clone(), &agent_keys);
+    write(
+        &mut agent,
+        &agent_keys,
+        "listening.podcasts",
+        "supplyTranscript",
+        json!({"id":"job","request":request_revision,"result":audio}),
+        84,
+    );
+    root.merge(agent.records().clone()).unwrap();
+    let mut server = opened(root.records().clone(), &server_keys);
+    let mut forbidden = request;
+    forbidden["id"] = json!("forbidden");
+    // Person origin is insufficient: only authority-derived app/device kind may request work.
+    write(
+        &mut server,
+        &server_keys,
+        "listening.podcasts",
+        "requestTranscript",
+        forbidden,
+        85,
+    );
+    root.merge(server.records().clone()).unwrap();
+    let expected = success(
+        root.query(
+            "listening.podcasts",
+            "jobs",
+            json!({"kind":"transcript"}),
+            NOW,
+        )
+        .unwrap(),
+    );
+    assert_eq!(expected["value"]["total"], 1);
+    assert!(expected["value"]["rows"][0]["responseRevision"].is_string());
+    let refused = success(
+        root.query(
+            "listening.podcasts",
+            "conflicts",
+            json!({"object":"forbidden"}),
+            NOW,
+        )
+        .unwrap(),
+    );
+    assert_eq!(refused["value"]["total"], 1);
+    assert_eq!(refused["value"]["rows"][0]["outcome"], "roleDenied");
+    let checkpoint = root.checkpoint("listening.podcasts").unwrap();
+    let mut cold = opened(root.records().clone(), &owner);
+    assert_eq!(
+        expected,
+        success(
+            cold.query(
+                "listening.podcasts",
+                "jobs",
+                json!({"kind":"transcript"}),
+                NOW
+            )
+            .unwrap()
+        )
+    );
+    assert!(cold
+        .restore_checkpoint("listening.podcasts", &checkpoint)
+        .unwrap());
+    assert_eq!(
+        expected,
+        success(
+            cold.query(
+                "listening.podcasts",
+                "jobs",
+                json!({"kind":"transcript"}),
+                NOW
+            )
+            .unwrap()
+        )
+    );
+}

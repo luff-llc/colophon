@@ -5,7 +5,7 @@ The storage-backed `Engine` adds verified-prefix cold opens and bounded content 
 see [stage 2 below](#storage-backed-engine-stage-2). Existing `Library` methods and return types
 are unchanged. `view` and the `read`
 tool still return the full history-bearing `NamespaceView`; use `query` for app rendering.
-No protocol records or conformance vectors changed.
+Protocol records are unchanged. Role-sensitive conformance expectations reflect authenticated member kinds.
 
 ## Reducers
 
@@ -32,7 +32,9 @@ The engine alone orders admission. Reducers retain attributed conflicts, invalid
 extensions, and the previous conflict semantics. Unknown kinds are skipped. `DomainModule::fold`
 is retained as a source-compatible from-scratch replay wrapper. A new reducer schema or semantic
 change must increment the authenticated `reducer_schema` generation before old snapshots can
-be restored. Generation 2 identifies the integrated full-domain reducers.
+be restored. Generation 3 adds authority-derived member kinds to the integrated full-domain reducers during
+append, full replay and checkpoint-suffix replay. Both cache APIs reject older generations,
+whose role-sensitive projections may be incomplete.
 
 ## Queries
 
@@ -152,7 +154,10 @@ Native hosts should opt into `engine::Engine<S: RecordSource>`. `Library` remain
 in-memory API, with every existing method signature and outcome shape intact. Both paths share
 exact-byte verification, payload validation and admission rules. The existing version-1
 `Library` checkpoints still replay cryptography; the new version-2 `Engine` checkpoint is a
-separate, library-wide cache. No FFI or WASM export was changed.
+separate, library-wide cache. The additive `NativeLibrary.query` FFI method exposes named
+reads directly, including names that also identify commands (`episode`, `queue`, `position`),
+without preparing writes or constructing history. Swift and Kotlin bindings include it;
+WASM export signatures are unchanged.
 
 ```rust
 use colophon_core::engine::{Engine, EngineOptions, RecordSource};
@@ -269,7 +274,7 @@ invalid entries, tombstones and authority `kept` sets can also legitimately grow
 The engine processes at most 8,192 new records per batch; an individual record is not size-capped.
 After ordered global admission, independent namespace projections can reduce concurrently in
 native workers. Each namespace's operation order is preserved; workers receive only projection
-state and admitted content. Small deltas, WASM and builds without `parallel` run serially.
+state, admitted content and its authority-derived member kind. Small deltas, WASM and builds without `parallel` run serially.
 Saved-reading caches compact retained items and shelf indexes; derived shelf rows are rebuilt
 from projection state during restore (in parallel where available), never from historical records.
 
@@ -329,7 +334,8 @@ change despite these differential checks.
 
 The default `parallel` feature uses `std::thread::scope`, up to 16 available workers, for
 independent verification and payload opening. Parsing occurs once per valid operation and
-payload buffers are opened in place. Admission and reducers remain ordered on the caller thread.
+payload buffers are opened in place. Admission remains ordered on the caller thread; parallel
+namespace reduction preserves each namespace's operation order.
 `--no-default-features` disables native parallelism. `wasm32` always uses the single-thread path,
 even if the feature is enabled. Dependency pins, wire bytes and the size-focused WASM release
 profile are unchanged. See [performance.md](performance.md) for measured targets and limits.

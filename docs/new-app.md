@@ -31,3 +31,100 @@
 
 Build the template for both platforms with `bash scripts/build-sample.sh`; restricted builders
 use `bash scripts/build-sample.sh --restricted`. No third-party generator is required.
+
+## Typed 0.2 domains
+
+Add the product for each namespace your app reads. Each depends only on `ColophonSession`;
+none imports the 0.1 domain products. The examples below assume `configuration` points at an
+existing library with the listed namespace granted. Follow the creation/pairing lifecycle above
+before showing these features. `load` awaits session restoration and cold query completion.
+Capture the observed revision before presenting a longer edit flow, rather than at its Save button.
+
+### Books — `ColophonBooksKit`
+
+```swift
+import Foundation
+import ColophonBooksKit
+```
+
+```swift
+let session = ColophonSession(configuration: configuration) // reading.books
+let store = BooksStore(session: session)
+let page = try await store.load(BooksQuery(limit: 50)).get()
+let observed = session.observedRevision
+try await session.perform(AddBook(creator: "Writer", id: UUID().uuidString.lowercased(), title: "Book").domainCommand(), observed: observed)
+```
+
+### Listening — `ColophonListeningKit`
+
+```swift
+import Foundation
+import ColophonListeningKit
+```
+
+```swift
+let session = ColophonSession(configuration: configuration) // listening.podcasts
+let store = ListeningStore(session: session)
+let page = try await store.load(ShowsQuery(limit: 50)).get()
+let observed = session.observedRevision
+try await session.perform(Follow(id: "show", title: "Show", url: "https://example.org/feed").domainCommand(), observed: observed)
+```
+
+### Saved reading — `ColophonSavedKit`
+
+```swift
+import Foundation
+import ColophonSavedKit
+```
+
+```swift
+let session = ColophonSession(configuration: configuration) // reading.saved
+let store = SavedStore(session: session)
+let page = try await store.load(ItemsQuery(limit: 50)).get()
+let observed = session.observedRevision
+try await session.perform(Capture(id: UUID().uuidString.lowercased(), title: "Article", url: "https://example.org/article").domainCommand(), observed: observed)
+```
+
+### Notes — `ColophonNotesKit`
+
+```swift
+import Foundation
+import ColophonNotesKit
+```
+
+```swift
+let session = ColophonSession(configuration: configuration) // notes
+let store = NotesStore(session: session)
+let page = try await store.load(NotebooksQuery(limit: 50)).get()
+let observed = session.observedRevision
+try await session.perform(CreateNotebook(id: UUID().uuidString.lowercased(), title: "Ideas").domainCommand(), observed: observed)
+```
+
+Keep each store for the session's lifetime. A view reads `store.cached(query)?.value` and passes
+plain `Equatable` rows to row views; it never calls `load` or a whole-state projection in `body`.
+Loads cache at most 64 argument-specific results by default. Only a change in that namespace,
+loss of readiness, identity change, or explicit `close()` invalidates them. New query entries
+may evict cached entries at the capacity limit. The cache's observable
+`state` and `revision` report cold completion and namespace changes. A closed store cannot reload.
+
+Use `query.nextPage(after: page)` to continue with identical filters, or `query.firstPage()` to
+restart after `.failure(.staleCursor)`. Queue/recording queries wrap their page in `.page`.
+Results distinguish `notFound`, `deleted`, `invalidArgument`, `staleCursor`, and unavailable
+content; `.get()` throws the domain outcome rather than treating it as an empty page. Access
+and storage failures throw through the session. A retained blob descriptor does not prove local
+byte availability. Imported podcast session history still returns `unavailable` until a host
+import-evidence adapter exists.
+
+Nullable command fields use `nil` for omission, `.null` for an explicit clear/no-head expectation,
+and `.value(value)` for a supplied value. For example `EditBook(id: id, isbn: .null)` clears ISBN;
+`EditBook(id: id)` leaves it alone. Dates stay wire-format strings (UTC instants or calendar days),
+IDs and revision tokens stay opaque strings, and the core enforces ranges, references and roles.
+`additionalFields` preserves future payload/model fields without replacing known fields.
+The core retains them under its `extensions` rules; don't use result attribution as command data.
+
+The input structs are generated from the core operation/query schemas by
+`scripts/generate-swift-domains.py`; typed result contracts live in that generator alongside the
+schema mapping. To regenerate, run `cargo run -q -p colophon-core --example swift_schema > /tmp/schemas.json`
+then `python3 scripts/generate-swift-domains.py /tmp/schemas.json`. Commit the generated Swift sources
+with schema changes. Podcast `EpisodeQuery`/`QueueQuery` and saved `PositionQuery` use the direct
+read-only query binding to avoid collisions with operation names.

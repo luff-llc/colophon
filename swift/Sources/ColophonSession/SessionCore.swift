@@ -10,6 +10,7 @@ protocol SessionCore: Sendable {
     func records() async throws -> [String: Data]
     func snapshot(namespaces: [String]) async throws -> CoreSnapshot
     func request(configuration: SessionConfiguration, keys: any AsyncKeyProvider) async throws -> AccessRequest
+    func query(namespace: String, name: String, arguments: Data) async throws -> Data
     func write(_ command: DomainCommand) async throws -> OperationView
     func approve(_ request: Data, grant: GrantOptions?) async throws
     func revoke(_ id: String) async throws
@@ -79,9 +80,19 @@ actor BindingSessionCore: SessionCore {
         try await Library.requestAccess(libraryID: requireLibrary().id, keys: keys, label: configuration.memberLabel,
             kind: configuration.memberKind, namespaces: configuration.namespaces, access: configuration.access)
     }
+    func query(namespace: String, name: String, arguments: Data) async throws -> Data {
+        try await requireLibrary().query(namespace: namespace, name: name, arguments: arguments).get()
+    }
     func write(_ command: DomainCommand) async throws -> OperationView {
         try await requireLibrary().write(namespace: command.namespace, kind: command.kind, payload: command.payload).get()
     }
     func approve(_ request: Data, grant: GrantOptions?) async throws { _ = try await requireLibrary().approve(request: request, grant: grant).get() }
     func revoke(_ id: String) async throws { try await requireLibrary().revoke(memberID: id).get() }
+}
+
+// Existing test/host adapters need not implement named queries until they support them.
+extension SessionCore {
+    func query(namespace: String, name: String, arguments: Data) async throws -> Data {
+        throw SessionError.notReady
+    }
 }

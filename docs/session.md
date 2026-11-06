@@ -129,3 +129,18 @@ production has no uncoordinated fallback. Actual OS presenter delivery, iCloud h
 App Group entitlement/bootstrap, Secure Enclave, Keychain prompts, Share/Safari/widget host
 journeys and two real consuming apps still need unrestricted/device acceptance. The sample
 uses a private folder and explicit pairing-request import, including agent approval/revocation.
+
+## Named domain queries
+
+The four `Colophon*Kit` domain stores use `NamespaceStore`'s additive async-loader initializer.
+`ColophonSession.query(namespace:name:arguments:)` serializes the core read through the worker's
+FIFO gate, checks the session context/namespace revision around suspension, and sends no signing
+request. `Library.query` calls the core's named query API directly, avoiding tool-name collisions.
+The typed decoder runs on a concurrent executor, and only its completed plain value enters the
+bounded cache. No compatibility whole-state projection is decoded to answer a domain query.
+Closing a store invalidates pending load completions as well as existing cache entries.
+
+This does not replace the existing session snapshot adapter: writes and refreshes still collect
+full views off-main as described above. The new stores make no claim that the entire session
+pipeline is incremental at 100k operations. The core now supplies authenticated member kinds to
+role-sensitive reducers on append/replay; this requires version-2 local engine checkpoints.

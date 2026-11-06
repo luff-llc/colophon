@@ -369,7 +369,18 @@ impl Library {
             .namespaces
             .entry(namespace.into())
             .or_insert_with(|| Namespace::new(namespace));
-        state.reconcile(namespace, &ops, &self.checkpoint_policy, Some(snapshot));
+        state.reconcile(
+            namespace,
+            &ops,
+            &self.checkpoint_policy,
+            Some(snapshot),
+            |op| {
+                self.authority
+                    .members
+                    .get(&op.author)
+                    .map(|member| member.member.kind)
+            },
+        );
         Ok(true)
     }
     fn decode_checkpoint(
@@ -1369,7 +1380,12 @@ impl Library {
                     .namespaces
                     .entry(ns.clone())
                     .or_insert_with(|| Namespace::new(ns));
-                let changed = state.reconcile(ns, ops, &self.checkpoint_policy, restored);
+                let changed = state.reconcile(ns, ops, &self.checkpoint_policy, restored, |op| {
+                    self.authority
+                        .members
+                        .get(&op.author)
+                        .map(|member| member.member.kind)
+                });
                 if changed || invalidated.contains(ns) || touched.contains(ns) {
                     state.revision += 1;
                     self.changes.namespaces.insert(ns.clone(), state.revision);
@@ -1385,7 +1401,15 @@ impl Library {
                             .namespaces
                             .entry(ns.clone())
                             .or_insert_with(|| Namespace::new(ns));
-                        state.append(&j.digest, view, &self.checkpoint_policy);
+                        state.append(
+                            &j.digest,
+                            view,
+                            self.authority
+                                .members
+                                .get(&view.author)
+                                .map(|member| member.member.kind),
+                            &self.checkpoint_policy,
+                        );
                     }
                 }
                 let state = self

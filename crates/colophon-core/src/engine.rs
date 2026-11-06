@@ -57,8 +57,14 @@ impl Namespace {
             applied: 0,
         }
     }
-    pub fn append(&mut self, digest: &str, op: &OperationView, policy: &CheckpointPolicy) {
-        self.state.apply(op);
+    pub fn append(
+        &mut self,
+        digest: &str,
+        op: &OperationView,
+        kind: Option<crate::model::MemberKind>,
+        policy: &CheckpointPolicy,
+    ) {
+        self.state.apply_with_member_kind(op, kind);
         self.applied += 1;
         self.clock = op.clock;
         self.order.push(digest.into());
@@ -84,6 +90,7 @@ impl Namespace {
         ops: &[(&str, &OperationView)],
         policy: &CheckpointPolicy,
         restored: Option<Snapshot>,
+        member_kind: impl Fn(&OperationView) -> Option<crate::model::MemberKind>,
     ) -> bool {
         let common = self
             .order
@@ -118,7 +125,7 @@ impl Namespace {
             ops[start - 1].1.clock
         };
         for (digest, op) in &ops[start..] {
-            self.append(digest, op, policy);
+            self.append(digest, op, member_kind(op), policy);
         }
         changed
     }
