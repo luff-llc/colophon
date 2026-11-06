@@ -79,6 +79,15 @@ only this vector with:
 COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_notes deterministic_notes_conformance_vector
 ```
 
-The shared `expected.json` retains both the notes notebook/cell compatibility projection and
-the expanded saved-reading projection. The independent books, notes and saved-reading vectors
-coexist with the shared library scenario.
+`listening.podcasts.records.json` and `listening.podcasts.expected.json` contain synthetic
+signed podcast records and expected results for all 17 named queries. The Rust conformance
+target and JavaScript smoke test replay them, with `episodeDetail` and `getQueue` as generated
+tool aliases for the `episode` and `queue` queries. Regenerate only this vector with:
+
+```sh
+COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_listening deterministic_listening_vector
+```
+
+The shared `expected.json` retains the notes notebook/cell compatibility projection, expanded
+saved-reading projection and podcast component heads and collections. The independent books,
+notes, saved-reading and podcast vectors coexist with the shared library scenario.

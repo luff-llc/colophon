@@ -52,9 +52,24 @@ makes access explicit instead:
 ## Rust core and JavaScript package (0.2)
 
 The pure Rust core implements records, P-256 host key steps, HPKE, grants, admission, epoch
-rotation, recovery, three domain folds, the ledger and generated agent tools. It performs no
+rotation, recovery, four domain folds, the ledger and generated agent tools. It performs no
 I/O and takes time and entropy explicitly. `colophon-wasm` and `@colophon/core` run the same
 implementation with non-extractable WebCrypto keys.
+
+The Rust domains coexist under `crates/colophon-core/src/domains/`:
+
+- [`reading.books`](docs/handoff-dom-reading.books.md): books, plans, rereads, progress,
+  book notes and loan receipts.
+- [`reading.saved`](docs/handoff-dom-reading.saved.md): saved items, reading state, sources,
+  annotations, feeds and browser checkpoints.
+- [`notes`](docs/handoff-dom-notes.md): notebooks, cells, entries, recorded outputs,
+  attachments and proposals.
+- [`listening.podcasts`](docs/handoff-dom-listening.podcasts.md): shows, episodes, playback,
+  queues, playlists, notes, chapters and transcript descriptors.
+
+Each supplies reducers, query/tool specifications, synthetic conformance vectors and pure
+verified-source import transforms. The linked handoffs describe the remaining authenticated-role,
+blob, historical-evidence and migration integration requirements.
 
 ```sh
 # Rust stable; on Homebrew installations:
@@ -79,9 +94,11 @@ See the [0.2 spec](spec/colophon-0.2.md), [JavaScript contract](docs/js-api.md),
 Regenerate the deterministic fixture with
 `COLOPHON_UPDATE_VECTORS=1 cargo test -p colophon-core --test conformance`.
 
-Version 0.2 is an implemented preview with clean kinds and no 0.1 compatibility. Persistence,
-sync, hardware custody, an online budget sequencer, native FFI and an executable CLI/MCP transport
-remain host or follow-up work. The sections below describe the historical Swift 0.1 package.
+Version 0.2 is an implemented preview with clean kinds and pure 0.1 import transforms;
+end-to-end 0.1 migration still requires the host integrations described in the domain handoffs.
+Persistence, sync, hardware custody, an online budget sequencer, native FFI and an executable
+CLI/MCP transport remain host or follow-up work. The sections below describe the historical
+Swift 0.1 package.
 
 ## Swift modules: take only what you need
 

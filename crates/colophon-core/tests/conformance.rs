@@ -383,3 +383,10 @@ fn saved_domain_conformance() {
         );
     }
 }
+
+#[path = "support/listening_vector.rs"]
+mod listening_vector;
+#[test]
+fn listening_podcasts_conformance() {
+    listening_vector::check();
+}
