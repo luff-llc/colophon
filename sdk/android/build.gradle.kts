@@ -51,6 +51,7 @@ android {
             it.systemProperty("colophon.consumerRules", rootDir.resolve("consumer-rules.pro").absolutePath)
             it.systemProperty("colophon.buildGradle", rootDir.resolve("build.gradle.kts").absolutePath)
             it.systemProperty("colophon.buildScript", rootDir.resolve("../../scripts/build-android.sh").canonicalPath)
+            it.systemProperty("colophon.relayScript", rootDir.resolve("../../relay/server.js").canonicalPath)
         }
     }
     publishing {

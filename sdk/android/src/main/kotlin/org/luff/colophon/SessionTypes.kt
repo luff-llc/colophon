@@ -69,6 +69,8 @@ data class SessionConfiguration(
     val keys: KeyProvider,
     val recoveryKeys: KeyProvider? = null,
     val store: RecordStore? = null,
+    /** Optional relay (spec §8). The private record store stays the source of truth. */
+    val relay: RelayConfiguration? = null,
 ) {
     companion object {
         fun app(
@@ -77,14 +79,32 @@ data class SessionConfiguration(
             namespaces: List<String>,
             keys: KeyProvider,
             memberKind: MemberKind = MemberKind.APP,
+            relay: RelayConfiguration? = null,
         ) = SessionConfiguration(
             memberLabel = memberLabel,
             memberKind = memberKind,
             namespaces = namespaces,
             privateHome = File(filesDir, "colophon"),
             keys = keys,
+            relay = relay,
         )
     }
+}
+
+/**
+ * A relay slot URL and its storage token. Keep the token in app-private, encrypted storage;
+ * it grants relay storage only, never library membership.
+ * With [automatic] the session syncs in the background (after local changes, on relay
+ * long-poll wake-ups, with capped backoff after failures); otherwise call `syncNow()`.
+ */
+class RelayConfiguration(
+    url: String,
+    token: String?,
+    val automatic: Boolean = true,
+    val transport: RelayTransport = HttpUrlConnectionTransport(),
+) {
+    val endpoint = RelayEndpoint(url, token)
+    override fun toString(): String = "RelayConfiguration(endpoint=$endpoint, automatic=$automatic)"
 }
 
 internal data class CoreSnapshot(

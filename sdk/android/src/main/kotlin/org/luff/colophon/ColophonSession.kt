@@ -17,7 +17,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -78,6 +82,18 @@ class ColophonSession internal constructor(
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
+    private val relay = configuration.relay
+    private val _syncState = MutableStateFlow<SyncState>(if (relay == null) SyncState.Disabled else SyncState.Idle)
+    /** Relay synchronization (spec §8). [SyncState.Disabled] without a configured relay. */
+    val syncState: StateFlow<SyncState> = _syncState.asStateFlow()
+    private val _lastSynced = MutableStateFlow<Instant?>(null)
+    val lastSynced: StateFlow<Instant?> = _lastSynced.asStateFlow()
+    private val _syncConflicts = MutableStateFlow<List<String>>(emptyList())
+    /** Paths whose relay bytes differ from this device's records, from the latest pass. */
+    val syncConflicts: StateFlow<List<String>> = _syncConflicts.asStateFlow()
+    private val syncKick = Channel<Unit>(Channel.CONFLATED)
+    private var syncJob: Job? = null
+
     val observedRevision: ObservedRevision get() = ObservedRevision(context, _revision.value)
 
     /** Shared completion barrier. Dependent startup work awaits this before using the session. */
@@ -91,6 +107,7 @@ class ColophonSession internal constructor(
                     if (error is CancellationException || error is SessionException.NotReady) throw error
                     fail(error)
                 }
+                startSyncLoop()
             }.also { restoreDeferred = it }
         }
         deferred.await()
@@ -197,6 +214,7 @@ class ColophonSession internal constructor(
         withContext(dispatcher) {
             try {
                 worker.leave()
+                stopSync()
                 invalidateContext()
                 _phase.value = SessionPhase.NoLibrary
             } catch (error: Exception) {
@@ -230,6 +248,7 @@ class ColophonSession internal constructor(
             invalidateContext()
             apply(snapshot)
             startWatching()
+            startSyncLoop()
         }
     }
 
@@ -251,7 +270,98 @@ class ColophonSession internal constructor(
 
     suspend fun recoveryKeys(): KeyProvider? = withContext(dispatcher) { worker.recovery() }
 
+    /**
+     * Runs one relay pass now (list, pull, push) and refreshes when records arrived. A barrier
+     * for tests and for hosts that sync on foreground entry. Returns false when the pass failed.
+     */
+    suspend fun syncNow(): Boolean {
+        if (relay == null) return false
+        restore()
+        _syncState.value = SyncState.Syncing
+        return try {
+            val report = withContext(Dispatchers.IO) { worker.syncRelay() }
+            _syncConflicts.value = report?.conflicts ?: emptyList()
+            _lastSynced.value = Instant.now()
+            val conflict = report?.conflicts?.firstOrNull()
+            _syncState.value = if (conflict != null) SyncState.Error("The relay holds different bytes for $conflict") else SyncState.Idle
+            // Pulled records reach the core exactly like another process's folder writes.
+            if ((report?.pulled ?: 0) > 0 || _phase.value != SessionPhase.Ready) refresh()
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: RelayException) {
+            _syncState.value = when (error) {
+                is RelayException.Offline -> SyncState.Offline(error.reason)
+                is RelayException.Unauthorized -> SyncState.Unauthorized
+                is RelayException.Busy -> SyncState.Offline(error.message ?: "busy")
+                else -> SyncState.Error(error.message ?: error.toString())
+            }
+            false
+        } catch (error: SessionException.NotReady) {
+            throw error
+        } catch (error: Exception) {
+            _syncState.value = SyncState.Error(error.message ?: error.toString())
+            false
+        }
+    }
+
+    /** Wakes the background sync loop, for example when connectivity returns. */
+    fun requestSync() {
+        syncKick.trySend(Unit)
+    }
+
+    /** Stops background relay sync. Local storage and the session keep working. */
+    fun stopSync() {
+        syncJob?.cancel()
+        syncJob = null
+    }
+
+    private fun startSyncLoop() {
+        val relay = relay ?: return
+        if (!relay.automatic || syncJob != null) return
+        syncJob = scope.launch {
+            var failures = 0
+            while (isActive) {
+                val ok = try {
+                    syncNow()
+                } catch (_: SessionException.NotReady) {
+                    return@launch
+                }
+                failures = if (ok) 0 else failures + 1
+                val backoffMs = if (_syncState.value == SyncState.Unauthorized) {
+                    300_000L
+                } else {
+                    (minOf(60_000.0, 1000.0 * Math.pow(2.0, (failures - 1).coerceAtLeast(0).toDouble())) *
+                        (0.5 + Math.random() * 0.5)).toLong()
+                }
+                // Success: long-poll the relay or wait for a local change. Failure: capped,
+                // jittered backoff that a local change or requestSync() cuts short. A blocking
+                // long-poll is not joined, so a kick never waits for it.
+                val wake = scope.async(Dispatchers.IO) {
+                    if (ok) {
+                        val started = System.nanoTime()
+                        val changed = try {
+                            worker.waitForRemoteChanges(25)
+                        } catch (_: Exception) {
+                            false
+                        }
+                        // A relay that answers at once without long-polling is polled instead.
+                        if (!changed && System.nanoTime() - started < 2_000_000_000L) delay(15_000)
+                    } else {
+                        delay(backoffMs)
+                    }
+                }
+                select<Unit> {
+                    wake.onAwait {}
+                    syncKick.onReceive {}
+                }
+                if (wake.isActive) wake.cancel()
+            }
+        }
+    }
+
     fun close() {
+        stopSync()
         watchHandle?.close()
         watchHandle = null
         expiryJob?.cancel()
@@ -282,6 +392,7 @@ class ColophonSession internal constructor(
     }
 
     private fun apply(snapshot: SessionSnapshot) {
+        if (relay != null && (snapshot.revision != _revision.value || snapshot.phase != _phase.value)) syncKick.trySend(Unit)
         val changed = snapshot.namespaceRevisions.keys.filter { _namespaceRevisions.value[it] != snapshot.namespaceRevisions[it] }.toSet()
         val lost = snapshot.phase != SessionPhase.Ready
         _phase.value = snapshot.phase

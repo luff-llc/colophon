@@ -31,6 +31,7 @@ internal class SessionWorker(
     private val journalFile: File = File(configuration.privateHome, "session.json")
     private var acceptNewIdentity = false
     @Volatile private var closed = false
+    @Volatile private var relaySync: RelaySync? = null
 
     private fun storage(): RecordStore {
         store?.let { return it }
@@ -41,6 +42,32 @@ internal class SessionWorker(
     }
 
     fun watch(onChange: () -> Unit): AutoCloseable = storage().watch(onChange)
+
+    @Synchronized private fun relay(): RelaySync? {
+        relaySync?.let { return it }
+        val relay = configuration.relay ?: return null
+        return RelaySync(storage(), relay.endpoint, relay.transport, File(configuration.privateHome, "relay.json"))
+            .also { relaySync = it }
+    }
+
+    /**
+     * One relay pass outside the session mutex (blocking; call on an IO thread). The relay only
+     * appends digest-verified records to local storage; the session then refreshes them through
+     * the normal merge, exactly like another writer's files.
+     */
+    fun syncRelay(): RelaySync.Report? = relay()?.sync()
+
+    fun waitForRemoteChanges(seconds: Int): Boolean = relay()?.waitForRemoteChanges(seconds) ?: false
+
+    /** An empty local store is not an empty library while a configured relay has not been listed. */
+    private fun pullBeforeTrustingEmpty() {
+        val relay = relay() ?: return
+        try {
+            relay.sync()
+        } catch (error: RelayException) {
+            throw StorageException.Unavailable("Waiting for the relay before opening this library. ${error.message}")
+        }
+    }
 
     private fun loadJournal() {
         if (!loaded) {
@@ -64,7 +91,11 @@ internal class SessionWorker(
     }
 
     private fun refreshLocked(): SessionSnapshot {
-        val records = storage().read()
+        var records = storage().read()
+        if (records.isEmpty() && journal.pending.isEmpty() && configuration.relay != null) {
+            pullBeforeTrustingEmpty()
+            records = storage().read()
+        }
         val available = records.keys + journal.pending.keys
         if (!journal.knownPaths.all { it in available }) {
             throw StorageException.Unavailable("Previously observed library records are unavailable")
@@ -154,6 +185,11 @@ internal class SessionWorker(
     suspend fun create(): SessionSnapshot = mutex.withLock {
         ensureUsable()
         loadJournal()
+        if (configuration.relay != null && !opened && journal.libraryID == null && storage().read().isEmpty()) {
+            pullBeforeTrustingEmpty()
+            // The relay already holds a library for this slot: join it instead of forking it.
+            if (storage().read().isNotEmpty()) return refreshLocked()
+        }
         if (opened || journal.libraryID != null || storage().read().isNotEmpty()) {
             throw SessionException.DestinationChanged
         }
