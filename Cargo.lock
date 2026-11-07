@@ -240,6 +240,8 @@ dependencies = [
 name = "colophon-ffi"
 version = "0.3.0"
 dependencies = [
+ "aes-gcm",
+ "base64",
  "colophon-core",
  "serde",
  "serde_json",

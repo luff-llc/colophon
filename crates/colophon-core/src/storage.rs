@@ -169,6 +169,7 @@ pub struct Engine<S: RecordSource> {
     pending: Vec<String>,
     listing: Vec<String>,
     authenticated: AuthenticatedIds,
+    member_writes: BTreeMap<[u8; 32], AuthenticatedIds>,
     counts: BTreeMap<String, u64>,
     rejections: BTreeMap<String, (String, Rejection, bool)>,
     cached_unlocked: BTreeSet<(String, u64)>,
@@ -285,12 +286,25 @@ impl<S: RecordSource> Engine<S> {
         library.read_scope = options.namespaces.clone();
         let mut authenticated =
             AuthenticatedIds::with_capacity_and_hasher(entries.len(), Default::default());
+        let mut member_writes: BTreeMap<[u8; 32], AuthenticatedIds> = BTreeMap::new();
         for entry in &entries {
-            if entry.flags & AUTHENTICATED != 0 && !crate::protocol::is_replaceable(&entry.path) {
-                authenticated.insert(path_identity(&entry.path)?);
+            if !crate::protocol::is_replaceable(&entry.path)
+                && entry.flags & (AUTHENTICATED | SPENT) != 0
+            {
+                let id = path_identity(&entry.path)?;
+                if entry.flags & AUTHENTICATED != 0 {
+                    authenticated.insert(id);
+                }
+                if entry.flags & SPENT != 0 {
+                    member_writes
+                        .entry(entry.author_key)
+                        .or_default()
+                        .insert(id);
+                }
             }
         }
         Ok(Self {
+            member_writes,
             source,
             library,
             options,
@@ -315,6 +329,155 @@ impl<S: RecordSource> Engine<S> {
             generation: 0,
             history_order: BTreeMap::new(),
         })
+    }
+    /// Cheap current-authority readiness probe, with no projection or history allocation.
+    pub fn access(&self, namespace: &str, now: &str) -> Result<Option<Denial>> {
+        self.check_ready()?;
+        if let Some(denial) = self.library.authorize(namespace, Access::Read, now)? {
+            return Ok(Some(denial));
+        }
+        let epoch = self
+            .library
+            .authority
+            .epoch_at(namespace, self.library.authority.latest)
+            .ok_or_else(|| missing("epoch"))?;
+        Ok(
+            (!self.library.keys.contains_key(&(namespace.into(), epoch)))
+                .then(|| Denial::new("notReadable", "The namespace key has not been unlocked")),
+        )
+    }
+    /// Bind provider versions only after exact bytes have been durably read back by the host.
+    pub fn acknowledge_versions(&mut self, paths: &[String]) -> Result<()> {
+        self.check_ready()?;
+        let result: Result<()> = (|| {
+            let mut versions = Vec::with_capacity(paths.len());
+            for path in paths {
+                if let Ok(i) = self.entries.binary_search_by(|e| e.path.cmp(path)) {
+                    let raw = self.source.read(path)?;
+                    ensure(
+                        <[u8; 32]>::from(Sha256::digest(raw)) == self.entries[i].digest,
+                        "Persisted record digest mismatch",
+                    )?;
+                    versions.push((i, self.source.content_version(path)?));
+                }
+            }
+            for (i, version) in versions {
+                self.entries[i].version = version;
+            }
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            self.failure = Some(error.clone());
+        }
+        result
+    }
+    /// Current member metadata without materializing historical payloads.
+    pub fn me(&self) -> Member {
+        self.members()
+            .into_iter()
+            .find(|m| m.id == self.library.me.id())
+            .unwrap_or_else(|| self.library.me())
+    }
+    /// Authority metadata. Write counts use authenticated header admission, not payload history.
+    pub fn members(&self) -> Vec<Member> {
+        let mut members = self.library.members();
+        for member in &mut members {
+            if let Some(author) = self.library.authority.members.get(&member.id) {
+                let key: [u8; 32] = Sha256::digest(&author.public.signing).into();
+                member.writes = self
+                    .member_writes
+                    .get(&key)
+                    .map_or(0, |ids| ids.len() as u64);
+            }
+        }
+        members
+    }
+    /// Verify a live slot against current authority before host conditional publication.
+    pub fn live_generation(&self, path: &str, bytes: &[u8], now: &str) -> Result<u64> {
+        self.check_ready()?;
+        self.library.live_generation(path, bytes, now)
+    }
+    /// Authenticate host-fetched blob bytes without retaining ciphertext in the source.
+    pub fn open_blob_chunk(
+        &self,
+        namespace: &str,
+        digest: &str,
+        index: usize,
+        bytes: &[u8],
+        now: &str,
+    ) -> Result<Outcome<Vec<u8>>> {
+        self.check_ready()?;
+        self.library
+            .open_blob_chunk(namespace, digest, index, bytes, now)
+    }
+    /// One admitted operation, for write receipts and durable publication reconciliation.
+    pub fn operation_at(
+        &mut self,
+        path: &str,
+        namespace: &str,
+        now: &str,
+    ) -> Result<Outcome<OperationView>> {
+        self.check_ready()?;
+        if let Some(denial) = self.library.authorize(namespace, Access::Read, now)? {
+            return Ok(Outcome::failure(denial));
+        }
+        let Some(epoch) = self
+            .library
+            .authority
+            .epoch_at(namespace, self.library.authority.latest)
+        else {
+            return Err(missing("epoch"));
+        };
+        if !self.library.keys.contains_key(&(namespace.into(), epoch)) {
+            return Ok(Outcome::failure(Denial::new(
+                "notReadable",
+                "The namespace key has not been unlocked",
+            )));
+        }
+        if let Ok(i) = self.entries.binary_search_by(|e| e.path.as_str().cmp(path)) {
+            let entry = &self.entries[i];
+            let ns = self
+                .library
+                .authority
+                .namespaces
+                .get(usize::from(entry.namespace));
+            if ns.map(String::as_str) == Some(namespace) && entry.flags & PROJECTED != 0 {
+                let digest = entry.digest;
+                match self.load_operation(path, digest) {
+                    Ok(op) => return Ok(Outcome::success(op)),
+                    Err(e) => {
+                        self.failure = Some(e.clone());
+                        return Err(e);
+                    }
+                }
+            }
+            if crate::protocol::is_replaceable(path)
+                && entry.flags & (VERIFIED | SPENT | AUTHENTICATED)
+                    == (VERIFIED | SPENT | AUTHENTICATED)
+            {
+                for judged in self.library.live.values() {
+                    if judged.header.meta.namespace == namespace
+                        && judged.status == Status::Admitted
+                    {
+                        // Slot paths do not encode operation IDs; match the authenticated source digest.
+                        let raw = self.source.read(path)?;
+                        if <[u8; 32]>::from(Sha256::digest(&raw)) == entry.digest {
+                            let record: SignedRecord = serde_json::from_slice(&raw)?;
+                            let header: OperationHeader = serde_json::from_slice(&record.body)?;
+                            if header.meta.id == judged.header.meta.id {
+                                if let Some(op) = &judged.operation {
+                                    return Ok(Outcome::success(op.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Outcome::failure(Denial::new(
+            "unavailable",
+            "Signed operation is held or refused under current authority",
+        )))
     }
     /// Source owned by this engine. Hosts may use interior mutability for snapshot-safe storage.
     pub fn source(&self) -> &S {
@@ -588,6 +751,7 @@ impl<S: RecordSource> Engine<S> {
             self.integrity_baseline = std::mem::take(&mut self.entries);
         }
         self.authenticated.clear();
+        self.member_writes.clear();
         self.counts.clear();
         self.rejections.clear();
         self.cache.clear();
@@ -862,6 +1026,12 @@ impl<S: RecordSource> Engine<S> {
                     &meta.author,
                     &tail,
                 );
+                if j.status == Status::Admitted {
+                    self.member_writes
+                        .entry(entry.author_key)
+                        .or_default()
+                        .insert(path_identity_parts(&meta.author, &meta.id)?);
+                }
                 if j.from_live_slot {
                     if j.status == Status::Admitted && j.operation.is_some() {
                         let stamp = j.header.live.as_ref().expect("verified live stamp");
@@ -881,7 +1051,23 @@ impl<S: RecordSource> Engine<S> {
                                 .entry(meta.namespace.clone())
                                 .or_insert_with(|| Namespace::new(&meta.namespace))
                                 .revision += 1;
-                            self.library.live.insert(key, j);
+                            if let Some((_, raw)) =
+                                records.iter().find(|(path, _)| *path == entry.path)
+                            {
+                                self.library.records.insert(entry.path.clone(), raw.clone());
+                            }
+                            if let Some(previous) = self.library.live.insert(key, j) {
+                                let old = path_identity_parts(
+                                    &previous.header.meta.author,
+                                    &previous.header.meta.id,
+                                )?;
+                                if !self.authenticated.contains(&old) {
+                                    if let Some(ids) = self.member_writes.get_mut(&entry.author_key)
+                                    {
+                                        ids.remove(&old);
+                                    }
+                                }
+                            }
                         }
                     }
                     new_entries.push(entry);
@@ -1001,7 +1187,9 @@ impl<S: RecordSource> Engine<S> {
         self.integrity_baseline = Vec::new();
         // Authority bytes were retained only to check the initial read against this batch.
         // Parsed authority and exact digest indexes suffice between host reads.
-        self.library.records.clear();
+        self.library
+            .records
+            .retain(|path, _| crate::protocol::is_replaceable(path));
         Ok(())
     }
     fn needs_replay(&self, meta: &OperationMeta) -> bool {

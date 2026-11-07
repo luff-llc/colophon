@@ -886,6 +886,893 @@ public func FfiConverterTypeNativeBlobWriter_lower(_ value: NativeBlobWriter) ->
 
 
 
+public protocol NativeCheckpointKeyProtocol: AnyObject, Sendable {
+    
+}
+open class NativeCheckpointKey: NativeCheckpointKeyProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_nativecheckpointkey(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_nativecheckpointkey(handle, $0) }
+    }
+
+    
+
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeCheckpointKey: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeCheckpointKey
+
+    public static func lift(_ handle: UInt64) throws -> NativeCheckpointKey {
+        return NativeCheckpointKey(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeCheckpointKey) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeCheckpointKey {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeCheckpointKey, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeCheckpointKey_lift(_ handle: UInt64) throws -> NativeCheckpointKey {
+    return try FfiConverterTypeNativeCheckpointKey.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeCheckpointKey_lower(_ value: NativeCheckpointKey) -> UInt64 {
+    return FfiConverterTypeNativeCheckpointKey.lower(value)
+}
+
+
+
+
+
+
+public protocol NativeCheckpointOpeningProtocol: AnyObject, Sendable {
+    
+    func agreementPeer() throws  -> Data
+    
+    func finish(shared: Data) throws  -> NativeCheckpointKey
+    
+}
+open class NativeCheckpointOpening: NativeCheckpointOpeningProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_nativecheckpointopening(self.handle, $0) }
+    }
+public convenience init(bytes: Data, libraryId: String, member: PublicKeys)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_nativecheckpointopening_new(
+        FfiConverterData.lower(bytes),
+        FfiConverterString.lower(libraryId),
+        FfiConverterTypePublicKeys_lower(member),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_nativecheckpointopening(handle, $0) }
+    }
+
+    
+
+    
+open func agreementPeer()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativecheckpointopening_agreement_peer(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func finish(shared: Data)throws  -> NativeCheckpointKey  {
+    return try  FfiConverterTypeNativeCheckpointKey_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativecheckpointopening_finish(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(shared),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeCheckpointOpening: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeCheckpointOpening
+
+    public static func lift(_ handle: UInt64) throws -> NativeCheckpointOpening {
+        return NativeCheckpointOpening(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeCheckpointOpening) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeCheckpointOpening {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeCheckpointOpening, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeCheckpointOpening_lift(_ handle: UInt64) throws -> NativeCheckpointOpening {
+    return try FfiConverterTypeNativeCheckpointOpening.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeCheckpointOpening_lower(_ value: NativeCheckpointOpening) -> UInt64 {
+    return FfiConverterTypeNativeCheckpointOpening.lower(value)
+}
+
+
+
+
+
+
+public protocol NativeCheckpointPreparationProtocol: AnyObject, Sendable {
+    
+    func finish(signature: Data) throws  -> NativeCheckpointKey
+    
+    func signingBody() throws  -> Data
+    
+}
+open class NativeCheckpointPreparation: NativeCheckpointPreparationProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_nativecheckpointpreparation(self.handle, $0) }
+    }
+public convenience init(libraryId: String, member: PublicKeys, entropy: Data)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_nativecheckpointpreparation_new(
+        FfiConverterString.lower(libraryId),
+        FfiConverterTypePublicKeys_lower(member),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_nativecheckpointpreparation(handle, $0) }
+    }
+
+    
+
+    
+open func finish(signature: Data)throws  -> NativeCheckpointKey  {
+    return try  FfiConverterTypeNativeCheckpointKey_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativecheckpointpreparation_finish(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(signature),uniffiCallStatus
+    )
+})
+}
+    
+open func signingBody()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativecheckpointpreparation_signing_body(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeCheckpointPreparation: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeCheckpointPreparation
+
+    public static func lift(_ handle: UInt64) throws -> NativeCheckpointPreparation {
+        return NativeCheckpointPreparation(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeCheckpointPreparation) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeCheckpointPreparation {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeCheckpointPreparation, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeCheckpointPreparation_lift(_ handle: UInt64) throws -> NativeCheckpointPreparation {
+    return try FfiConverterTypeNativeCheckpointPreparation.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeCheckpointPreparation_lower(_ value: NativeCheckpointPreparation) -> UInt64 {
+    return FfiConverterTypeNativeCheckpointPreparation.lower(value)
+}
+
+
+
+
+
+
+public protocol NativeEngineProtocol: AnyObject, Sendable {
+    
+    func access(namespace: String, now: String) throws  -> Denial?
+    
+    func beginApprove(request: Data, grant: GrantOptions?, now: String, entropy: Data) throws  -> PreparedAction
+    
+    func beginBlob(namespace: String, mediaType: String, now: String, entropy: Data) throws  -> BlobWriteOutcome
+    
+    func beginRevoke(memberId: String, now: String, entropy: Data) throws  -> PreparedAction
+    
+    func beginUnlock() throws  -> [AgreementStep]
+    
+    func beginWrite(namespace: String, kind: String, payload: Data, now: String, entropy: Data) throws  -> PreparedAction
+    
+    func checkpoint(entropy: Data) throws  -> Data
+    
+    func commit(action: HostAction, signatures: [Data]) throws  -> ChangeSummary
+    
+    func finishUnlockMany(results: [UnlockResult]) throws 
+    
+    func id() throws  -> String
+    
+    /**
+     * Explicit compatibility history materialization, never needed by named queries or writes.
+     */
+    func ledger() throws  -> [LedgerEntry]
+    
+    func liveGeneration(path: String, bytes: Data, now: String) throws  -> UInt64
+    
+    func me() throws  -> Member
+    
+    func members() throws  -> [Member]
+    
+    func merge(records: [String: Data]) throws  -> ChangeSummary
+    
+    /**
+     * A provider version change requires fresh verification even if its bytes are identical.
+     */
+    func mergeObserved(records: [String: Data], versions: [String: String]) throws  -> ChangeSummary
+    
+    func openBlobChunk(namespace: String, digest: String, index: UInt32, ciphertext: Data, now: String) throws  -> BlobReadOutcome
+    
+    func operationAt(path: String, namespace: String, now: String) throws  -> OperationOutcome
+    
+    func query(namespace: String, name: String, arguments: Data, now: String) throws  -> JsonOutcome
+    
+    func records() throws  -> [String: Data]
+    
+    func recordsAt(paths: [String]) throws  -> [String: Data]
+    
+    func revision() throws  -> UInt64
+    
+    func revisions() throws  -> [String: UInt64]
+    
+    /**
+     * Replace the coherent host snapshot after successful publication/refresh.
+     */
+    func setSource(source: EngineRecordSource) throws 
+    
+    func updateVersions(versions: [String: String]) throws 
+    
+    /**
+     * Bounded independent integrity audit. Failure is sticky until the host repairs and reopens.
+     */
+    func verifyBatch(limit: UInt32) throws  -> UInt64
+    
+    func work() throws  -> EngineWork
+    
+}
+open class NativeEngine: NativeEngineProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_nativeengine(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_nativeengine(handle, $0) }
+    }
+
+    
+public static func `open`(source: EngineRecordSource, listing: [String], versions: [String: String], me: PublicKeys, libraryId: String, namespaces: [String], key: NativeCheckpointKey)throws  -> NativeEngine  {
+    return try  FfiConverterTypeNativeEngine_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_nativeengine_open(
+        FfiConverterCallbackInterfaceEngineRecordSource_lower(source),
+        FfiConverterSequenceString.lower(listing),
+        FfiConverterDictionaryStringString.lower(versions),
+        FfiConverterTypePublicKeys_lower(me),
+        FfiConverterString.lower(libraryId),
+        FfiConverterSequenceString.lower(namespaces),
+        FfiConverterTypeNativeCheckpointKey_lower(key),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Batched inventory: little-endian u32 path length, UTF-8 path, u32 version length,
+     * UTF-8 version; zero version length means no provider token. No per-record callbacks.
+     */
+public static func openInventory(source: EngineRecordSource, inventory: Data, me: PublicKeys, libraryId: String, namespaces: [String], key: NativeCheckpointKey)throws  -> NativeEngine  {
+    return try  FfiConverterTypeNativeEngine_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_nativeengine_open_inventory(
+        FfiConverterCallbackInterfaceEngineRecordSource_lower(source),
+        FfiConverterData.lower(inventory),
+        FfiConverterTypePublicKeys_lower(me),
+        FfiConverterString.lower(libraryId),
+        FfiConverterSequenceString.lower(namespaces),
+        FfiConverterTypeNativeCheckpointKey_lower(key),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+open func access(namespace: String, now: String)throws  -> Denial?  {
+    return try  FfiConverterOptionTypeDenial.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_access(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+open func beginApprove(request: Data, grant: GrantOptions?, now: String, entropy: Data)throws  -> PreparedAction  {
+    return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_begin_approve(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(request),
+        FfiConverterOptionTypeGrantOptions.lower(grant),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+open func beginBlob(namespace: String, mediaType: String, now: String, entropy: Data)throws  -> BlobWriteOutcome  {
+    return try  FfiConverterTypeBlobWriteOutcome_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_begin_blob(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(mediaType),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+open func beginRevoke(memberId: String, now: String, entropy: Data)throws  -> PreparedAction  {
+    return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_begin_revoke(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(memberId),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+open func beginUnlock()throws  -> [AgreementStep]  {
+    return try  FfiConverterSequenceTypeAgreementStep.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_begin_unlock(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func beginWrite(namespace: String, kind: String, payload: Data, now: String, entropy: Data)throws  -> PreparedAction  {
+    return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_begin_write(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(kind),
+        FfiConverterData.lower(payload),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+open func checkpoint(entropy: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_checkpoint(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+open func commit(action: HostAction, signatures: [Data])throws  -> ChangeSummary  {
+    return try  FfiConverterTypeChangeSummary_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_commit(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeHostAction_lower(action),
+        FfiConverterSequenceData.lower(signatures),uniffiCallStatus
+    )
+})
+}
+    
+open func finishUnlockMany(results: [UnlockResult])throws   {try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_finish_unlock_many(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeUnlockResult.lower(results),uniffiCallStatus
+    )
+}
+}
+    
+open func id()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Explicit compatibility history materialization, never needed by named queries or writes.
+     */
+open func ledger()throws  -> [LedgerEntry]  {
+    return try  FfiConverterSequenceTypeLedgerEntry.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_ledger(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func liveGeneration(path: String, bytes: Data, now: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_live_generation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),
+        FfiConverterData.lower(bytes),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+open func me()throws  -> Member  {
+    return try  FfiConverterTypeMember_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_me(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func members()throws  -> [Member]  {
+    return try  FfiConverterSequenceTypeMember.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_members(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func merge(records: [String: Data])throws  -> ChangeSummary  {
+    return try  FfiConverterTypeChangeSummary_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_merge(
+            self.uniffiCloneHandle(),
+        FfiConverterDictionaryStringData.lower(records),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A provider version change requires fresh verification even if its bytes are identical.
+     */
+open func mergeObserved(records: [String: Data], versions: [String: String])throws  -> ChangeSummary  {
+    return try  FfiConverterTypeChangeSummary_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_merge_observed(
+            self.uniffiCloneHandle(),
+        FfiConverterDictionaryStringData.lower(records),
+        FfiConverterDictionaryStringString.lower(versions),uniffiCallStatus
+    )
+})
+}
+    
+open func openBlobChunk(namespace: String, digest: String, index: UInt32, ciphertext: Data, now: String)throws  -> BlobReadOutcome  {
+    return try  FfiConverterTypeBlobReadOutcome_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_open_blob_chunk(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(digest),
+        FfiConverterUInt32.lower(index),
+        FfiConverterData.lower(ciphertext),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+open func operationAt(path: String, namespace: String, now: String)throws  -> OperationOutcome  {
+    return try  FfiConverterTypeOperationOutcome_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_operation_at(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+open func query(namespace: String, name: String, arguments: Data, now: String)throws  -> JsonOutcome  {
+    return try  FfiConverterTypeJsonOutcome_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_query(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(name),
+        FfiConverterData.lower(arguments),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+open func records()throws  -> [String: Data]  {
+    return try  FfiConverterDictionaryStringData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_records(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func recordsAt(paths: [String])throws  -> [String: Data]  {
+    return try  FfiConverterDictionaryStringData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_records_at(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(paths),uniffiCallStatus
+    )
+})
+}
+    
+open func revision()throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_revision(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func revisions()throws  -> [String: UInt64]  {
+    return try  FfiConverterDictionaryStringUInt64.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_revisions(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Replace the coherent host snapshot after successful publication/refresh.
+     */
+open func setSource(source: EngineRecordSource)throws   {try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_set_source(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceEngineRecordSource_lower(source),uniffiCallStatus
+    )
+}
+}
+    
+open func updateVersions(versions: [String: String])throws   {try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_update_versions(
+            self.uniffiCloneHandle(),
+        FfiConverterDictionaryStringString.lower(versions),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Bounded independent integrity audit. Failure is sticky until the host repairs and reopens.
+     */
+open func verifyBatch(limit: UInt32)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_verify_batch(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+open func work()throws  -> EngineWork  {
+    return try  FfiConverterTypeEngineWork_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativeengine_work(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeEngine: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeEngine
+
+    public static func lift(_ handle: UInt64) throws -> NativeEngine {
+        return NativeEngine(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeEngine) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEngine {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeEngine, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEngine_lift(_ handle: UInt64) throws -> NativeEngine {
+    return try FfiConverterTypeNativeEngine.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEngine_lower(_ value: NativeEngine) -> UInt64 {
+    return FfiConverterTypeNativeEngine.lower(value)
+}
+
+
+
+
+
+
 /**
  * Thread-safe in-memory session. All private keys remain in platform providers.
  */
@@ -1760,6 +2647,72 @@ public func FfiConverterTypeDenial_lift(_ buf: RustBuffer) throws -> Denial {
 #endif
 public func FfiConverterTypeDenial_lower(_ value: Denial) -> RustBuffer {
     return FfiConverterTypeDenial.lower(value)
+}
+
+
+public struct EngineWork: Equatable, Hashable {
+    public let recordsRead: UInt64
+    public let signaturesVerified: UInt64
+    public let payloadsDecrypted: UInt64
+    public let appliedOperations: UInt64
+    public let openMode: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordsRead: UInt64, signaturesVerified: UInt64, payloadsDecrypted: UInt64, appliedOperations: UInt64, openMode: String) {
+        self.recordsRead = recordsRead
+        self.signaturesVerified = signaturesVerified
+        self.payloadsDecrypted = payloadsDecrypted
+        self.appliedOperations = appliedOperations
+        self.openMode = openMode
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EngineWork: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEngineWork: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineWork {
+        return
+            try EngineWork(
+                recordsRead: FfiConverterUInt64.read(from: &buf), 
+                signaturesVerified: FfiConverterUInt64.read(from: &buf), 
+                payloadsDecrypted: FfiConverterUInt64.read(from: &buf), 
+                appliedOperations: FfiConverterUInt64.read(from: &buf), 
+                openMode: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EngineWork, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.recordsRead, into: &buf)
+        FfiConverterUInt64.write(value.signaturesVerified, into: &buf)
+        FfiConverterUInt64.write(value.payloadsDecrypted, into: &buf)
+        FfiConverterUInt64.write(value.appliedOperations, into: &buf)
+        FfiConverterString.write(value.openMode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineWork_lift(_ buf: RustBuffer) throws -> EngineWork {
+    return try FfiConverterTypeEngineWork.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineWork_lower(_ value: EngineWork) -> RustBuffer {
+    return FfiConverterTypeEngineWork.lower(value)
 }
 
 
@@ -2683,6 +3636,60 @@ public func FfiConverterTypeTool_lift(_ buf: RustBuffer) throws -> Tool {
 #endif
 public func FfiConverterTypeTool_lower(_ value: Tool) -> RustBuffer {
     return FfiConverterTypeTool.lower(value)
+}
+
+
+public struct UnlockResult: Equatable, Hashable {
+    public let step: AgreementStep
+    public let shared: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(step: AgreementStep, shared: Data) {
+        self.step = step
+        self.shared = shared
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension UnlockResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUnlockResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UnlockResult {
+        return
+            try UnlockResult(
+                step: FfiConverterTypeAgreementStep.read(from: &buf), 
+                shared: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: UnlockResult, into buf: inout [UInt8]) {
+        FfiConverterTypeAgreementStep.write(value.step, into: &buf)
+        FfiConverterData.write(value.shared, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUnlockResult_lift(_ buf: RustBuffer) throws -> UnlockResult {
+    return try FfiConverterTypeUnlockResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUnlockResult_lower(_ value: UnlockResult) -> RustBuffer {
+    return FfiConverterTypeUnlockResult.lower(value)
 }
 
 
@@ -3882,6 +4889,142 @@ public func FfiConverterCallbackInterfaceBlobSource_lower(_ v: BlobSource) -> UI
 
 
 
+public protocol EngineRecordSource: AnyObject, Sendable {
+    
+    func read(path: String) throws  -> Data
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceEngineRecordSource {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceEngineRecordSource = UniffiVTableCallbackInterfaceEngineRecordSource(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceEngineRecordSource.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface EngineRecordSource: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceEngineRecordSource.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface EngineRecordSource: handle missing in uniffiClone")
+            }
+        },
+        read: { (
+            uniffiHandle: UInt64,
+            path: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceEngineRecordSource.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.read(
+                     path: try FfiConverterString.lift(path)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeBindingError_lower
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceEngineRecordSource> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceEngineRecordSource>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitEngineRecordSource() {
+    uniffi_colophon_ffi_fn_init_callback_vtable_enginerecordsource(UniffiCallbackInterfaceEngineRecordSource.vtablePtr)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceEngineRecordSource {
+    fileprivate static let handleMap = UniffiHandleMap<EngineRecordSource>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceEngineRecordSource : FfiConverter {
+    typealias SwiftType = EngineRecordSource
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceEngineRecordSource_lift(_ handle: UInt64) throws -> EngineRecordSource {
+    return try FfiConverterCallbackInterfaceEngineRecordSource.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceEngineRecordSource_lower(_ v: EngineRecordSource) -> UInt64 {
+    return FfiConverterCallbackInterfaceEngineRecordSource.lower(v)
+}
+
+
+
+
 /**
  * Local synchronous provider convenience. Remote/asynchronous stores use signing_steps and
  * begin_unlock, await on the platform, then commit / finish_unlock. Never block on async here.
@@ -4139,6 +5282,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeDenial: FfiConverterRustBuffer {
+    typealias SwiftType = Denial?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeDenial.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeDenial.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -4542,6 +5709,31 @@ fileprivate struct FfiConverterSequenceTypeTool: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeUnlockResult: FfiConverterRustBuffer {
+    typealias SwiftType = [UnlockResult]
+
+    public static func write(_ value: [UnlockResult], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUnlockResult.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UnlockResult] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UnlockResult]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeUnlockResult.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeAccess: FfiConverterRustBuffer {
     typealias SwiftType = [Access]
 
@@ -4561,6 +5753,32 @@ fileprivate struct FfiConverterSequenceTypeAccess: FfiConverterRustBuffer {
             seq.append(try FfiConverterTypeAccess.read(from: &buf))
         }
         return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterDictionaryStringUInt64: FfiConverterRustBuffer {
+    public static func write(_ value: [String: UInt64], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for (key, value) in value {
+            FfiConverterString.write(key, into: &buf)
+            FfiConverterUInt64.write(value, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String: UInt64] {
+        let len: Int32 = try readInt(&buf)
+        var dict = [String: UInt64]()
+        dict.reserveCapacity(Int(len))
+        for _ in 0..<len {
+            let key = try FfiConverterString.read(from: &buf)
+            let value = try FfiConverterUInt64.read(from: &buf)
+            dict[key] = value
+        }
+        return dict
     }
 }
 
@@ -4870,7 +6088,112 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_nativeblobwriter_push() != 42511) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_nativecheckpointopening_agreement_peer() != 34623) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativecheckpointopening_finish() != 52689) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativecheckpointpreparation_finish() != 46694) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativecheckpointpreparation_signing_body() != 34391) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_access() != 27754) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_begin_approve() != 11307) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_begin_blob() != 10223) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_begin_revoke() != 19136) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_begin_unlock() != 28138) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_begin_write() != 21680) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_checkpoint() != 15211) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_commit() != 65331) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_finish_unlock_many() != 64010) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_id() != 60611) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_ledger() != 2240) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_live_generation() != 53079) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_me() != 35364) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_members() != 44575) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_merge() != 50126) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_merge_observed() != 64769) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_open_blob_chunk() != 54397) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_operation_at() != 4688) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_query() != 46170) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_records() != 9415) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_records_at() != 61302) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_revision() != 45850) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_revisions() != 40621) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_set_source() != 28865) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_update_versions() != 28793) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_verify_batch() != 29259) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativeengine_work() != 48830) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_constructor_nativelibrary_open() != 13014) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_nativecheckpointopening_new() != 3003) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_nativecheckpointpreparation_new() != 34038) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_nativeengine_open() != 41786) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_nativeengine_open_inventory() != 52496) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_keyprovider_signing_public_key() != 846) {
@@ -4888,8 +6211,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_blobsource_read() != 32010) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_enginerecordsource_read() != 9929) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
     uniffiCallbackInitBlobSource()
+    uniffiCallbackInitEngineRecordSource()
     uniffiCallbackInitKeyProvider()
     return InitializationResult.ok
 }()

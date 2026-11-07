@@ -121,6 +121,8 @@ struct CoreSnapshot: Sendable {
     let views: [String: NamespaceView]
     let denials: [String: Denial]
     let records: [String: Data]
+    var engine: NativeEngine? = nil
+    var engineRevisions: [String: UInt64]? = nil
 }
 
 struct SessionSnapshot: Sendable {

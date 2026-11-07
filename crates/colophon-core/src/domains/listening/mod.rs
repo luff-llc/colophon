@@ -55,6 +55,15 @@ pub struct PodcastsState {
     memberships: BTreeMap<String, Vec<(String, String)>>,
 }
 impl PodcastsState {
+    /// Bounded playback overlay scratch state; live positions touch only this episode.
+    pub(crate) fn playback_slice(&self, id: &str) -> Self {
+        let mut state = Self::default();
+        if let Some(episode) = self.episodes.get(id) {
+            state.episodes.insert(id.into(), episode.clone());
+        }
+        state
+    }
+
     pub(crate) fn playback_revision_is(&self, episode: &str, revision: &str) -> bool {
         self.episodes.get(episode).is_some_and(|row| {
             row["positionRevision"] == revision || row["stateRevision"] == revision

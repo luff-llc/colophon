@@ -137,6 +137,8 @@ internal data class CoreSnapshot(
     val denials: Map<String, Denial>,
     /** Native record revision; changes whenever records are added. */
     val revision: ULong,
+    val engineRevisions: Map<String, ULong>? = null,
+    val engine: com.luff.colophon.NativeEngine? = null,
 )
 
 internal data class SessionSnapshot(

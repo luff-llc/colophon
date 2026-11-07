@@ -11,7 +11,17 @@ import ColophonKitStorage
     public private(set) var libraryID: String?
     public private(set) var memberID: String?
     public private(set) var members: [Member] = []
-    public private(set) var ledger: [LedgerEntry] = []
+    private var ledgerValue: [LedgerEntry] = []
+    @ObservationIgnored private var ledgerEngine: NativeEngine?
+    @ObservationIgnored private var ledgerRevision: UInt64?
+    public var ledger: [LedgerEntry] {
+        // Legacy whole-history access is explicit; normal session readiness never requests it.
+        if let engine = ledgerEngine, ledgerRevision != revision {
+            do { ledgerValue = try engine.ledger(); ledgerRevision = revision }
+            catch { fail(error) }
+        }
+        return ledgerValue
+    }
     public private(set) var requests: [AccessRequest] = []
     public private(set) var lastError: String?
     public private(set) var context = UUID()
@@ -44,7 +54,16 @@ import ColophonKitStorage
         worker = SessionWorker(configuration: configuration, core: core, store: store); relay = configuration.relay
         if relay != nil { syncState = .idle }
     }
-    deinit { restoreTask?.cancel(); watchTask?.cancel(); batchTask?.cancel(); expiryTask?.cancel(); syncTask?.cancel() }
+    @ObservationIgnored private var checkpointTask: Task<Void, Never>?
+    private func scheduleCheckpoint() {
+        checkpointTask?.cancel()
+        checkpointTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(1)); try await self?.worker.saveCheckpoint() }
+            catch is CancellationError {}
+            catch { self?.fail(error) }
+        }
+    }
+    deinit { checkpointTask?.cancel(); restoreTask?.cancel(); watchTask?.cancel(); batchTask?.cancel(); expiryTask?.cancel(); syncTask?.cancel() }
 
     /// A shared completion barrier. Dependent startup work awaits this before using the session.
     public func restore() async {
@@ -57,6 +76,7 @@ import ColophonKitStorage
                 let snapshot = try await worker.restore()
                 guard lease == context, !Task.isCancelled else { return }
                 apply(snapshot)
+                scheduleCheckpoint()
             } catch { if lease == context { fail(error) } }
             startSyncLoop()
         }
@@ -305,8 +325,9 @@ import ColophonKitStorage
         let lost = ![SessionPhase.ready, .refreshing, .waitingForDownload, .retry].contains(snapshot.phase)
         phase = snapshot.phase; revision = snapshot.revision; namespaceRevisions = snapshot.namespaceRevisions
         libraryID = snapshot.core?.libraryID ?? libraryID; memberID = snapshot.core?.me.id ?? memberID
-        members = snapshot.core?.members ?? []; ledger = snapshot.core?.ledger ?? []; requests = snapshot.core?.requests ?? []
+        members = snapshot.core?.members ?? []; ledgerValue = snapshot.core?.ledger ?? []; ledgerEngine = lost ? nil : snapshot.core?.engine; ledgerRevision = nil; requests = snapshot.core?.requests ?? []
         views = lost ? [:] : snapshot.core?.views ?? [:]
+        if !lost { scheduleCheckpoint() }
         for invalidate in caches.values { invalidate(changed, lost) }
         expiryTask?.cancel(); expiryTask = nil
         if let expires = snapshot.core?.me.grant?.expires,
@@ -319,7 +340,7 @@ import ColophonKitStorage
         lastError = nil
     }
     private func invalidateContext() {
-        context = UUID(); views = [:]; members = []; ledger = []; requests = []; libraryID = nil; memberID = nil
+        context = UUID(); views = [:]; members = []; ledgerValue = []; ledgerEngine = nil; requests = []; libraryID = nil; memberID = nil
         for invalidate in caches.values { invalidate([], true) }
     }
     private func handleCommandError(_ error: any Error) {
@@ -348,17 +369,19 @@ import ColophonKitStorage
             phase = [.notReadable, .unavailable].contains(access.denial.reason) ? .unavailable(reason: access.denial.detail) : .denied
         default: phase = .failed(error: .other(detail: error.localizedDescription))
         }
-        views = [:]; ledger = []; members = []; requests = []
+        views = [:]; ledgerValue = []; ledgerEngine = nil; members = []; requests = []
         for invalidate in caches.values { invalidate([], true) }
     }
     func registerCache(_ callback: @escaping @MainActor (Set<String>, Bool) -> Void) -> UUID {
         let id = UUID(); caches[id] = callback; return id
     }
     func unregisterCache(_ id: UUID) { caches[id] = nil }
-    func projection(namespace: String) throws -> Data {
-        guard hasUsableContent, let view = views[namespace] else { throw SessionError.notReady }
-        return view.state
+    func projection(namespace: String) async throws -> Data {
+        try await query(namespace: namespace, name: "read", arguments: Data("{}".utf8))
     }
+    /// Persist acceleration state in the private cache, after durable publication.
+    public func flushCheckpoint() async throws { checkpointTask?.cancel(); checkpointTask = nil; try await worker.saveCheckpoint() }
+
 }
 
 /// A one-shot wake-up for the sync loop. Firing while nobody waits is remembered once.

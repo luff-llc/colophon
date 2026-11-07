@@ -1,10 +1,37 @@
 # Native bindings (0.3)
 
-`colophon-ffi` wraps the public Rust `Library` API; it does not implement protocol rules or
-storage. `ColophonKit` is the Swift product. `sdk/kotlin` contains the JVM bindings and a local
-key-provider facade. All records cross as maps of path to exact bytes; domain inputs, state,
+`colophon-ffi` exposes the storage-backed `NativeEngine` used by native sessions and the
+compatible `NativeLibrary` API. It does not implement protocol rules or filesystem storage. `ColophonKit` is the Swift product. `sdk/kotlin` contains the JVM bindings and a local
+key-provider facade. Engine records are fetched on demand through host callbacks; deltas cross as maps of exact bytes; domain inputs, state,
 and tool results cross as UTF-8 JSON bytes. Members, grants, attribution, ledger events,
 namespace evidence, changes, and expected refusals have generated types.
+
+## Storage engine transport
+
+`NativeEngine.openInventory` accepts one binary inventory (little-endian u32 UTF-8 path
+length, path, u32 UTF-8 provider-version length, version; empty version means unavailable).
+`open` also accepts generated lists/maps. `EngineRecordSource.read` returns coherent exact
+bytes synchronously on the session worker. Callbacks must be thread-safe and must not reenter
+the engine; the engine uses a nonblocking mutex so reentry fails instead of deadlocking.
+Signing and agreement happen outside that mutex through the existing host key-provider API.
+
+`NativeCheckpointPreparation` returns a member signing request. `NativeCheckpointOpening`
+verifies the protected ticket before returning an agreement peer. Their finished opaque key
+handles feed `NativeEngine`; raw cache keys never cross FFI. `checkpoint` returns an encrypted,
+member-bound envelope for `CheckpointCache`, never a synchronized library record. The new
+binary private envelope avoids base64 copies of large caches; the existing JSON envelope remains
+readable. The engine's authenticated-prefix format and trust rules are unchanged.
+
+The engine exports named `query`, namespace `revisions`, delta `ChangeSummary`, readiness/access,
+member metadata, bounded operation receipts, live generation checks, blob writers/readers, and
+independent `verifyBatch` audits. `commit` rejects actions from another engine or an obsolete
+revision. `mergeObserved` binds provider tokens and re-verifies changed tokens. After durable
+publication and exact readback, hosts replace the source and acknowledge provider versions.
+Authority/layout validation precedes content reads; current authority still governs every write.
+
+Full `ledger` and administrative approval/revocation are explicit compatibility materializations.
+They can read/decrypt history and are not part of launch, named queries or passive writes.
+See [the session handoff](handoff-engine-sessions.md) for lifecycle and performance limits.
 
 ## Build on an Apple Silicon Mac
 
@@ -265,9 +292,8 @@ not simulator or physical-device execution.
 
 Apps can now depend on `ColophonSession`, with `ColophonKitStorage` underneath, instead of
 assembling persistence and lifecycle around `Library` directly. See [new app](new-app.md)
-and [session contracts](session.md). The current adapter still uses this snapshot binding;
-the core storage-backed engine is available, but its `RecordSource` and verified-prefix
-checkpoint interfaces still need a native bridge before this adapter can consume them.
+and [session contracts](session.md). Sessions use the `NativeEngine` callback/checkpoint bridge
+described above; direct `Library` callers retain the compatibility snapshot API.
 
 ### Read-only named queries
 
@@ -275,7 +301,8 @@ checkpoint interfaces still need a native bridge before this adapter can consume
 `Library.query(namespace:name:arguments:)` wraps it asynchronously. It calls core `Library::query`
 directly, requires read access, and cannot prepare or commit writes. This preserves the bounded
 0.3 query envelopes even when names such as podcast `episode`/`queue` also name operations.
-The four typed domain products use this through `ColophonSession`; apps normally use their stores.
+The four typed domain products use the equivalent `NativeEngine.query` path through
+`ColophonSession`; apps normally use their stores.
 
 ## Pure 0.1 migration bridge
 

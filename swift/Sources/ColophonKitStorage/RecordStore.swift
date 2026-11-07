@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum StorageError: Error, Equatable, Sendable {
     case unavailable(String)
@@ -9,6 +10,10 @@ public enum StorageError: Error, Equatable, Sendable {
 
 /// A complete readable snapshot, or an explicit error. No partial maps escape this boundary.
 public protocol RecordStore: Sendable {
+    func changeToken() async throws -> String?
+    func changes(since token: String) async throws -> RecordDelta?
+    /// A synchronous reader for engine callbacks; built-in stores avoid loading history.
+    func engineReader() async throws -> RecordReader
     func read() async throws -> [String: Data]
     /// Exact duplicates are idempotent. Existing different bytes must never be overwritten.
     func append(_ records: [String: Data]) async throws
@@ -28,6 +33,14 @@ public protocol RecordStore: Sendable {
 
 /// Compatibility defaults for stores that only implement complete snapshots.
 extension RecordStore {
+    public func changeToken() async throws -> String? { nil }
+    public func changes(since token: String) async throws -> RecordDelta? { nil }
+    public func engineReader() async throws -> RecordReader {
+        let records = try await read()
+        return RecordReader { path in
+            guard let bytes = records[path] else { throw StorageError.unavailable("Missing record: " + path) }; return bytes
+        }
+    }
     public func replaceLive(_ path: String, expected: Data?, bytes: Data) async throws -> Bool {
         throw StorageError.unavailable("This provider does not support conditional live publication")
     }
@@ -49,40 +62,42 @@ extension RecordStore {
 
 public enum RecordPath {
     public static func validate(_ path: String) throws {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        let validComponent: (String) -> Bool = { !$0.isEmpty && $0 != "." && $0 != ".." && !$0.hasPrefix(".") && !$0.contains("\\") && !$0.contains("\0") }
-        guard parts.allSatisfy(validComponent), path.utf8.count < 512, path.hasSuffix(".json") else {
-            throw StorageError.invalidPath(path)
-        }
+        let bytes = path.utf8
+        let parts = bytes.split(separator: 47, omittingEmptySubsequences: false)
+        guard bytes.count < 512, path.hasSuffix(".json"), !bytes.contains(0), !bytes.contains(92),
+              parts.allSatisfy({ !$0.isEmpty && $0.first != 46 }) else { throw StorageError.invalidPath(path) }
+        let root = parts.first.map { String(decoding: $0, as: UTF8.self) } ?? ""
         switch parts.count {
-        case 2 where ["authority", "requests"].contains(parts[0]): return
-        case 3 where parts[0] == "ops": return
-        case 4 where ["ops", "state", "history"].contains(parts[0]): return
+        case 2 where root == "authority" || root == "requests": return
+        case 3 where root == "ops": return
+        case 4 where root == "ops" || root == "state" || root == "history": return
         default: throw StorageError.invalidPath(path)
         }
     }
     public static func isReplaceable(_ path: String) -> Bool { path.hasPrefix("state/") }
     /// Empty `namespaces` means every namespace. Authority, requests and legacy three-part ops always match.
     public static func listingIncludes(_ path: String, namespaces: [String]) -> Bool {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        if parts.count == 2 && ["authority", "requests"].contains(parts[0]) { return true }
-        if parts.count == 3 && parts[0] == "ops" { return true }
-        if parts.count == 4 && ["ops", "state", "history"].contains(parts[0]) {
-            return namespaces.isEmpty || namespaces.contains(parts[2])
+        let parts = path.utf8.split(separator: 47, omittingEmptySubsequences: false)
+        guard let first = parts.first else { return false }
+        let root = String(decoding: first, as: UTF8.self)
+        if parts.count == 2 && (root == "authority" || root == "requests") { return true }
+        if parts.count == 3 && root == "ops" { return true }
+        if parts.count == 4 && (root == "ops" || root == "state" || root == "history") {
+            return namespaces.isEmpty || namespaces.contains(String(decoding: parts[2], as: UTF8.self))
         }
         return false
     }
-    /// Missing namespaced records never block another namespace; authority, requests and unknown ops still do.
     public static func missingBlocks(_ path: String) -> Bool {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        return parts.count == 2 || parts[0] == "ops"
+        path.hasPrefix("ops/") || path.hasPrefix("authority/") || path.hasPrefix("requests/")
     }
 }
 
 /// Each subscriber gets a bounded wake-up hint; consumers re-read the complete store.
 public actor MemoryRecordStore: RecordStore {
-    private var records: [String: Data]
-    private var versionsByPath: [String: UInt64] = [:]
+    private let records: LockedMemoryRecords
+    private var versionsByPath: [String: String] = [:]
+    private var recentChanges: [(UInt64, String)] = []
+    private var changeFloor: UInt64 = 0
     private var generation: UInt64 = 0
     private var blobs: [String: Data] = [:]
     private var blobDates: [String: Date] = [:]
@@ -92,16 +107,35 @@ public actor MemoryRecordStore: RecordStore {
     public private(set) var fullReads = 0
     /// Record bodies served by `read(paths:)`.
     public private(set) var recordReads = 0
-    public init(records: [String: Data] = [:]) { self.records = records }
+    public init(records: [String: Data] = [:]) {
+        self.records = LockedMemoryRecords(records)
+        self.versionsByPath = records.mapValues { Data(SHA256.hash(data: $0)).base64EncodedString() }
+    }
+    public func changeToken() throws -> String? {
+        if let unavailable { throw StorageError.unavailable(unavailable) }; return String(generation)
+    }
+    public func changes(since token: String) throws -> RecordDelta? {
+        if let unavailable { throw StorageError.unavailable(unavailable) }
+        guard let previous = UInt64(token), previous >= changeFloor, previous <= generation else { return nil }
+        return RecordDelta(token: String(generation), paths: Set(recentChanges.lazy.filter { $0.0 > previous }.map { $0.1 }))
+    }
     deinit { for observer in observers.values { observer.finish() } }
     public func setUnavailable(_ reason: String?) {
         unavailable = reason
+        records.setUnavailable(reason)
         notify()
+    }
+    public func engineReader() throws -> RecordReader {
+        if let unavailable { throw StorageError.unavailable(unavailable) }
+        let snapshot = records
+        return RecordReader { path in
+            return try snapshot.read(path)
+        }
     }
     public func read() throws -> [String: Data] {
         if let unavailable { throw StorageError.unavailable(unavailable) }
         fullReads += 1
-        return records
+        return records.snapshot()
     }
     public func paths() async throws -> Set<String> {
         if let unavailable { throw StorageError.unavailable(unavailable) }
@@ -109,7 +143,7 @@ public actor MemoryRecordStore: RecordStore {
     }
     public func versions(paths: Set<String>) async throws -> [String: String] {
         if let unavailable { throw StorageError.unavailable(unavailable) }
-        return Dictionary(uniqueKeysWithValues: paths.compactMap { path in records[path].map { _ in (path, String(versionsByPath[path] ?? 0)) } })
+        return Dictionary(uniqueKeysWithValues: paths.compactMap { path in records[path].map { _ in (path, versionsByPath[path] ?? "") } })
     }
     public func read(paths: [String]) async throws -> [String: Data] {
         if let unavailable { throw StorageError.unavailable(unavailable) }
@@ -128,7 +162,11 @@ public actor MemoryRecordStore: RecordStore {
         }
         let changed = incoming.contains { records[$0.key] != $0.value }
         for (path, bytes) in incoming {
-            if records[path] != bytes { generation += 1; versionsByPath[path] = generation }
+            if records[path] != bytes {
+                generation += 1; versionsByPath[path] = Data(SHA256.hash(data: bytes)).base64EncodedString()
+                recentChanges.append((generation, path))
+                if recentChanges.count > 4096 { changeFloor = recentChanges[2047].0; recentChanges.removeFirst(2048) }
+            }
             records[path] = bytes
         }
         if changed { notify() }
@@ -216,4 +254,39 @@ extension MemoryRecordStore: BlobStore {
     }
     /// Test seam: age a chunk past a garbage-collection grace period.
     public func setBlobDate(_ path: String, _ date: Date) { if blobs[path] != nil { blobDates[path] = date } }
+}
+
+/// Read-only callback value. The closure must be thread-safe and return exact coherent bytes.
+public struct RecordReader: Sendable {
+    private let body: @Sendable (String) throws -> Data
+    public init(read: @escaping @Sendable (String) throws -> Data) { body = read }
+    public func read(_ path: String) throws -> Data { try body(path) }
+}
+
+/// Complete changes since a provider token. Missing history must return nil, never a partial delta.
+public struct RecordDelta: Sendable {
+    public let token: String
+    public let paths: Set<String>
+    public init(token: String, paths: Set<String>) { self.token = token; self.paths = paths }
+}
+
+/// Callback reads and actor mutations share the same lock; no mutable dictionary escapes it.
+private final class LockedMemoryRecords: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data]
+    private var unavailable: String?
+    init(_ values: [String: Data]) { self.values = Dictionary(uniqueKeysWithValues: values.map { ($0.key, $0.value) }) }
+    subscript(path: String) -> Data? {
+        get { lock.withLock { values[path] } }
+        set { lock.withLock { values[path] = newValue } }
+    }
+    var keys: [String] { lock.withLock { Array(values.keys) } }
+    func snapshot() -> [String: Data] { lock.withLock { values } }
+    func setUnavailable(_ reason: String?) { lock.withLock { unavailable = reason } }
+    func read(_ path: String) throws -> Data {
+        try lock.withLock {
+            if let unavailable { throw StorageError.unavailable(unavailable) }
+            guard let bytes = values[path] else { throw StorageError.unavailable("Missing record: " + path) }; return bytes
+        }
+    }
 }

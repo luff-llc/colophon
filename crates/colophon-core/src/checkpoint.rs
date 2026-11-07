@@ -93,6 +93,20 @@ impl CheckpointKey {
             .map_err(|_| Error("Checkpoint key derivation".into()))?;
         Ok(key)
     }
+    /// Binary private envelope for native caches, avoiding base64 copies of large indexes.
+    /// The ticket purpose and AEAD binding are identical to the JSON envelope.
+    pub fn protect_binary(&self, checkpoint: &[u8], seed: [u8; 32]) -> Result<Vec<u8>> {
+        ensure(checkpoint.len() <= MAX_BYTES, "Checkpoint too large")?;
+        let nonce = Entropy::new(seed).take::<12>()?;
+        let ciphertext = crypto::seal(&self.encryption_key()?, &nonce, checkpoint, &self.ticket)?;
+        let mut output = Vec::with_capacity(24 + self.ticket.len() + ciphertext.len());
+        output.extend_from_slice(b"COLOPRV3");
+        output.extend_from_slice(&(self.ticket.len() as u32).to_le_bytes());
+        output.extend_from_slice(&self.ticket);
+        output.extend_from_slice(&nonce);
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
     /// Encrypt an engine checkpoint for private host persistence, using fresh host entropy.
     /// The signed ticket is AEAD additional data, binding the recipient, library and sealed key.
     pub fn protect(&self, checkpoint: &[u8], seed: [u8; 32]) -> Result<Vec<u8>> {
@@ -120,7 +134,25 @@ impl CheckpointOpening {
             "Protected checkpoint too large",
         )?;
         member.validate()?;
-        let envelope: Envelope = serde_json::from_slice(bytes)?;
+        let envelope: Envelope = if bytes.starts_with(b"COLOPRV3") {
+            ensure(bytes.len() >= 24, "Truncated protected checkpoint")?;
+            let length = u32::from_le_bytes(
+                bytes[8..12]
+                    .try_into()
+                    .map_err(|_| Error("Checkpoint ticket length".into()))?,
+            ) as usize;
+            ensure(
+                length <= 16 * 1024 && bytes.len() >= 24 + length + 16,
+                "Invalid checkpoint ticket length",
+            )?;
+            Envelope {
+                ticket: bytes[12..12 + length].to_vec(),
+                nonce: bytes[12 + length..24 + length].to_vec(),
+                ciphertext: bytes[24 + length..].to_vec(),
+            }
+        } else {
+            serde_json::from_slice(bytes)?
+        };
         ensure(
             envelope.ticket.len() <= 16 * 1024,
             "Checkpoint ticket too large",

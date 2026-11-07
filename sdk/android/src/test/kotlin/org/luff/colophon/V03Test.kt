@@ -36,8 +36,8 @@ class V03Test {
                 external.write("listening.podcasts", "position", "{\"id\":\"e\",\"seconds\":40}".toByteArray(), written).get()
                 store.append(external.recordsAt(written))
             }
-            val refreshed = worker.refresh()
-            val state = JsonParser(String(refreshed.core!!.views.getValue("listening.podcasts").state)).parseValue() as Json.Obj
+            worker.refresh()
+            val state = JsonParser(String(worker.core.query("listening.podcasts", "read", "{}".toByteArray()))).parseValue() as Json.Obj
             val episode = state.array("episodes").first() as Json.Obj
             assertEquals(40.0, (episode.fields["seconds"] as Json.Number).raw.toDouble(), 0.0)
         } finally { home.deleteRecursively() }

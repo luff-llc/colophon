@@ -25,3 +25,7 @@ required-features = ["bindgen"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+aes-gcm.workspace = true
+base64.workspace = true

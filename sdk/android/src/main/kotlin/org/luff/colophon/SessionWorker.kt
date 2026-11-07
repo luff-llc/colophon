@@ -32,6 +32,7 @@ internal class SessionWorker(
     private val merged = HashSet<String>()
     private val requestPaths = sortedSetOf<String>()
     private val recordVersions = mutableMapOf<String, String>()
+    private var changeToken: String? = null
     private val liveBytes = mutableMapOf<String, ByteArray>()
     internal val blobs = SessionBlobEngine(this)
     private val journalFile: File = File(configuration.privateHome, "session.json")
@@ -116,6 +117,10 @@ internal class SessionWorker(
         if (!configuration.migrationWriter && marker != null && MigrationMarker.isActive(marker)) {
             return empty(SessionPhase.Migrating)
         }
+        if (opened && journal.pending.isEmpty() && last?.me?.since != 0uL) {
+            changeToken?.let { token -> storage().changes(token)?.let { return refreshDelta(it) } }
+        }
+        val observedToken = storage().changeToken()
         var stored = storage().paths(configuration.namespaces)
         if (stored.isEmpty() && journal.pending.isEmpty() && configuration.relay != null) {
             pullBeforeTrustingEmpty()
@@ -130,43 +135,36 @@ internal class SessionWorker(
             return empty(SessionPhase.NoLibrary)
         }
         ensureIdentity()
-        // Only records the open core has not seen are read: proportional to the change.
         val versions = storage().versions(stored)
-        val fresh = if (opened) stored.filter { it !in merged || versions[it] == null || versions[it] != recordVersions[it] } else stored.toList()
-        val authorityPaths = fresh.filter { it.startsWith("authority/") }
-        val authority = storage().read(authorityPaths).toMutableMap()
-        if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
-        authority.putAll(journal.pending.filterKeys { it.startsWith("authority/") })
-        if (opened) { if (authority.isNotEmpty()) core.merge(authority) }
-        else { core.open(authority, keys); core.setReadScope(configuration.namespaces); opened = true; merged.clear(); requestPaths.clear() }
-        val contentPaths = fresh.filter { !it.startsWith("authority/") }
-        val incoming = storage().read(contentPaths).toMutableMap()
-        if (incoming.keys != contentPaths.toSet()) throw StorageException.Unavailable("Record download pending")
-        incoming.putAll(authority)
-        val observedLive = incoming.filterKeys { RecordPath.isReplaceable(it) }
-        for ((path, data) in journal.pending) {
-            val old = incoming[path]
-            if (old != null && !old.contentEquals(data) && !RecordPath.isReplaceable(path)) throw StorageException.Conflict(path)
-            if (!opened || path !in merged || RecordPath.isReplaceable(path)) incoming[path] = data
-        }
-        if (opened) {
-            if (incoming.isNotEmpty()) core.merge(incoming)
+        val incoming: MutableMap<String, ByteArray>
+        if (!opened) {
+            core.openStorage(storage(), stored, versions, journal.pending, keys, configuration.namespaces,
+                CheckpointCache(File(configuration.privateHome, "Checkpoints")), journal.libraryID)
+            opened = true; merged.clear(); requestPaths.clear()
+            incoming = storage().read(stored.filter { it.startsWith("state/") || it.startsWith("requests/") }).toMutableMap()
+            track(stored + journal.pending.keys)
         } else {
-            try {
-                core.open(incoming, keys)
-            } catch (error: BindingException) {
-                if (error is BindingException.InvalidData && error.detail.startsWith("Unsupported storage layout")) {
-                    throw SessionLayoutException
-                }
-                throw error
+            val fresh = stored.filter { it !in merged || versions[it] == null || versions[it] != recordVersions[it] }
+            val authorityPaths = fresh.filter { it.startsWith("authority/") }
+            val authority = storage().read(authorityPaths).toMutableMap()
+            if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
+            authority.putAll(journal.pending.filterKeys { it.startsWith("authority/") })
+            if (authority.isNotEmpty()) core.mergeObserved(authority, versions)
+            val contentPaths = fresh.filter { !it.startsWith("authority/") }
+            incoming = storage().read(contentPaths).toMutableMap()
+            if (incoming.keys != contentPaths.toSet()) throw StorageException.Unavailable("Record download pending")
+            incoming.putAll(authority)
+            for ((path, data) in journal.pending) {
+                val old = incoming[path]
+                if (old != null && !old.contentEquals(data) && !RecordPath.isReplaceable(path)) throw StorageException.Conflict(path)
+                if (path !in merged || RecordPath.isReplaceable(path)) incoming[path] = data
             }
-            opened = true
-            merged.clear()
-            requestPaths.clear()
+            if (incoming.isNotEmpty()) core.mergeObserved(incoming, versions)
         }
-        liveBytes.putAll(observedLive)
+        liveBytes.putAll(incoming.filterKeys { RecordPath.isReplaceable(it) })
         track(incoming.keys)
         recordVersions.putAll(versions)
+        journal.observe(stored)
         var snapshot = snapshot()
         if (journal.libraryID != null && journal.libraryID != snapshot.libraryID) {
             throw SessionException.DestinationChanged
@@ -178,6 +176,7 @@ internal class SessionWorker(
             throw BindingException.KeyProvider("Key provider does not match the selected member")
         }
         journal.libraryID = snapshot.libraryID
+        changeToken = observedToken
         if (journal.pending.isNotEmpty()) publish()
         if (snapshot.me.since == 0uL) {
             val existing = snapshot.requests.firstOrNull { it.id == snapshot.me.id }
@@ -207,6 +206,37 @@ internal class SessionWorker(
             else -> SessionPhase.Ready
         }
         return makeSnapshot(snapshot, phase)
+    }
+
+    private fun refreshDelta(delta: RecordDelta): SessionSnapshot {
+        val paths = delta.paths.filter { !it.startsWith("history/") && RecordPath.listingIncludes(it, configuration.namespaces) }.toSet()
+        if (paths.isNotEmpty()) {
+            val versions = storage().versions(paths)
+            val authorityPaths = paths.filter { it.startsWith("authority/") }
+            val authority = storage().read(authorityPaths)
+            if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
+            if (authority.isNotEmpty()) core.mergeObserved(authority, versions)
+            val content = paths - authorityPaths.toSet()
+            val records = storage().read(content)
+            if (records.keys != content) throw StorageException.Unavailable("Record download pending")
+            if (records.isNotEmpty()) core.mergeObserved(records, versions)
+            liveBytes.putAll(records.filterKeys { RecordPath.isReplaceable(it) })
+            track(paths); recordVersions.putAll(versions)
+        }
+        val snapshot = snapshot()
+        if (paths.isNotEmpty()) remember(snapshot, paths)
+        changeToken = delta.token
+        val phase = when {
+            snapshot.me.revokedAt != null -> SessionPhase.Denied
+            snapshot.denials.values.any { it.reason == DenialReason.UNAVAILABLE || it.reason == DenialReason.NOT_READABLE } -> SessionPhase.Unavailable("Namespace keys or records are not available")
+            snapshot.denials.isNotEmpty() -> SessionPhase.Denied
+            else -> SessionPhase.Ready
+        }
+        return makeSnapshot(snapshot, phase)
+    }
+
+    suspend fun saveCheckpoint() = mutex.withLock {
+        if (opened && journal.pending.isEmpty()) core.saveCheckpoint()
     }
 
     private fun track(paths: Collection<String>) {
@@ -240,7 +270,7 @@ internal class SessionWorker(
     }
 
     private fun remember(snapshot: CoreSnapshot, observed: Collection<String>) {
-        journal.knownPaths.addAll(observed)
+        journal.observe(observed)
         recordIdentity(snapshot)
         journal.save(journalFile)
     }
@@ -349,8 +379,10 @@ internal class SessionWorker(
         val readback = storage().read(journal.pending.keys)
         val published = journal.pending.all { (path, bytes) -> readback[path]?.contentEquals(bytes) == true }
         if (!published) throw StorageException.Unavailable("Publication readback incomplete")
-        journal.knownPaths.addAll(journal.pending.keys)
-        recordVersions.putAll(storage().versions(journal.pending.keys))
+        journal.observe(journal.pending.keys)
+        val publishedVersions = storage().versions(journal.pending.keys)
+        core.updateVersions(publishedVersions, storage())
+        recordVersions.putAll(publishedVersions)
         journal.pending.clear()
         journal.save(journalFile)
     }
@@ -408,6 +440,7 @@ internal class SessionWorker(
         if (signing.isEmpty() || agreement.isEmpty()) {
             throw BindingException.KeyProvider("Key provider returned no public key")
         }
+        journal.libraryID?.let { CheckpointCache(File(configuration.privateHome, "Checkpoints")).remove(it) }
         val previousKeys = this.keys
         val previousLeft = journal.left
         val previousSigning = journal.signingPublicKey?.copyOf()
@@ -491,6 +524,7 @@ internal class SessionWorker(
             revision += 1u
             for (namespace in configuration.namespaces) {
                 if (!viewsEqual(previous?.views?.get(namespace), snapshot.views[namespace]) ||
+                    previous?.engineRevisions?.get(namespace) != snapshot.engineRevisions?.get(namespace) ||
                     previous?.denials?.get(namespace) != snapshot.denials[namespace]
                 ) {
                     namespaceRevisions[namespace] = (namespaceRevisions[namespace] ?: 0u) + 1u

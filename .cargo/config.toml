@@ -1,0 +1,4 @@
+# RustCrypto 0.8/0.6 require explicit opt-in for ARM crypto acceleration.
+# Both backends retain CPU feature detection and the constant-time fallback.
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]

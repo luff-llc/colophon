@@ -1,5 +1,23 @@
 # Android session SDK (0.3)
 
+Sessions use the storage engine through `NativeEngine`, with member-protected checkpoints in
+`CheckpointCache`. Checkpoints are scheduled after one idle second; `flushCheckpoint()` is an
+explicit persistence barrier. A valid cache skips covered history verification/decryption;
+named queries and passive writes use engine state and namespace revisions. Public session,
+domain-store, write and blob APIs remain source-compatible.
+
+The compatibility `ledger` is now lazy: Swift materializes on property access; Kotlin on List
+inspection (size, indexing, iteration or equality). Reading a large ledger can block the calling
+thread and is outside the fast launch path. Kotlin publishes lazy snapshot identities without
+forcing List equality during StateFlow updates. A retained, not-yet-inspected Kotlin ledger reads
+engine history when first inspected; it is not a frozen historical snapshot. Use named queries
+for app screens. See [design, checks and limitations](handoff-engine-sessions.md).
+
+Storage providers may supply complete change deltas. Built-in memory stores do; folder providers
+continue to enumerate metadata and compare versions. Providers without a synchronous Swift
+`engineReader()` implementation use the protocol's conservative snapshot fallback. Custom readers
+must be thread-safe, synchronous, coherent, and must not call the engine recursively.
+
 `sdk/android` is the Gradle Android library `org.luff.colophon:colophon-android`
 (minSdk 33, compileSdk 35). It packages the UniFFI Kotlin bindings, `libcolophon_ffi.so`
 for `arm64-v8a` and `x86_64`, an Android Keystore `KeyProvider`, a file-backed record
@@ -103,9 +121,8 @@ thread.
   points at an active `MigrationMarker`, exactly like Apple: such a session neither
   creates nor writes. Only the session with `migrationWriter = true` writes during the
   upgrade, and only it may publish `colophon.importBatch` source units (≤1 MiB), the
-  path that gives imported positions and states baseline semantics. Checkpoint bytes
-  persist in the private container and are not consumed until the verified-prefix
-  engine is wired, matching Apple.
+  path that gives imported positions and states baseline semantics. Member-protected checkpoint
+  bytes persist in the private container and feed verified-prefix restoration, matching Apple.
 - Blobs: `putBlob(bytes|file)`, `readBlob`/`blobBytes`/`blobFile`, `blobAvailability`,
   `setBlobReference`, `prefetchBlob`, `downloadRequiredBlobs`, `collectBlobGarbage` and the
   `blobDownloads` StateFlow match the Apple session ([sync](sync.md#blobs)).

@@ -1,5 +1,72 @@
 # Engine performance — Colophon 0.3
 
+## Native session engine migration
+
+November 7, 2026, this `engine-sessions` worktree. Actual `ColophonSession.restore()` and
+`perform()` calls on the development arm64 Mac: Swift 6.4.2 in release configuration, Kotlin
+on JDK 17 (2 GiB test heap), Rust 1.91.1 with release/LTO/opt-level 3. RustCrypto's accelerated
+ARM AES/POLYVAL backends are enabled for both columns. These are single confirmation runs,
+run sequentially after builds/tests. Process/JIT and filesystem caches are warm; **cold** means
+new session/worker/engine objects, not a fresh OS process. No physical-device claim is made.
+
+The before column uses test-only copies of the previous BindingSessionCore through the actual
+session, holding the current worker/provider and current Rust build constant. It is a controlled
+adapter comparison, not an untouched f5839c2 binary benchmark. That adapter has no persistent
+engine checkpoint; the after column reopens a member-protected checkpoint written through the
+session's `flushCheckpoint()`. The earlier Rust-only compatibility numbers below measure a
+narrower boundary and must not be substituted for these end-to-end session measurements.
+
+| Native session measurement | Swift before | Swift engine | Kotlin before | Kotlin engine |
+| --- | ---: | ---: | ---: | ---: |
+| 100k cold session reopen / checkpoint hit | 13,994.704 ms | 776.420 ms | 12,977.637 ms | 436.082 ms |
+| 100k + 1,000 new immutable records | 17,433.904 ms | 841.964 ms | 22,875.502 ms | 429.806 ms |
+| First passive podcast write after reopen | 31,243.455 ms | 5.911 ms | 30,283.626 ms | 14.966 ms |
+| Notes write | 32,438.967 ms | 4.539 ms | 40,873.773 ms | 8.246 ms |
+| Taupe-shaped open (no checkpoint) | 4.503 ms | 6.016 ms | 11.476 ms | 7.837 ms |
+
+**The requested <150 ms checkpoint-open and <5 ms passive-write targets are missed on both
+platforms.** Swift's checkpoint open is 18.0× faster than this session adapter baseline;
+Kotlin's is 29.8× faster. Large compatibility views and ledger marshaling explain why the
+before session numbers exceed the Rust-only adapter numbers. The small Swift Taupe case
+regressed by 1.5 ms; engine/key-ticket setup has fixed cost. Do not infer mobile launch success
+or steady-state/tail latency from one run. The oldest-supported-iPhone <500 ms target remains
+unmeasured.
+
+Both native harnesses assert **zero** covered operation reads, signature checks, decryptions
+and reducer applications on checkpoint restoration. The independent 1% suffix run asserts
+exactly **1,000** reads/verifications/decryptions/applications. Swift additionally asserts zero
+immutable reducer applications for the passive write. Authority/ticket validation and current
+key agreement still run. Passive preparation uses a single-episode projection; sessions no
+longer build full namespace views or the complete ledger for launch/write receipts.
+
+Fixture/store/key construction and content-version hashing are outside the timed region.
+Inside are session journal/cache reads, path discovery and version inventory, FFI, checkpoint
+opening/unlock, readiness publication, and (for writes) signing, private journal fsync, record
+publication/readback and receipt checks. Records use built-in memory providers; private files
+use the real filesystem. The 100k fixture has four domains; the 1,000-record suffix uses
+explicit seeks. The Taupe shape follows one show, establishes one episode and publishes 10,000
+passive samples: two immutable operations, one current live slot, and retained history evidence.
+No first-screen rendering, secure hardware-key access or real folder-provider launch is timed.
+
+Full path/version inventory, protected-cache decoding and known-path journal loading still
+scale with record count. File providers still enumerate metadata during refresh/write; memory
+providers implement complete change deltas. Explicit compatibility ledger/admin calls still
+materialize history. Background checkpoint serialization is excluded from write latency;
+records and pending-publication receipts are durable before `perform()` completes. See
+[the handoff](handoff-engine-sessions.md) for API behavior and remaining work.
+
+Reproduce after building the native artifacts (use the environment paths from the handoff/task):
+
+```sh
+CARGO_PROFILE_RELEASE_OPT_LEVEL=3 SKIP_VISIONOS=1 bash scripts/build-apple.sh
+bash scripts/bench-sessions.sh
+```
+
+The script generates signed fixtures when needed and runs both modes sequentially. Raw logs and
+JVM XML reports are in `target/engine-sessions/{swift,kotlin}-{legacy,engine}.{log,xml}`;
+[the checked-in result data](benchmarks/engine-sessions.json) records the measured boundary and
+numbers. Full validation logs are retained in `target/engine-sessions/validation/`.
+
 ## Colophon 0.3 — November 7, 2026
 
 Final measurements on the development arm64 Mac, Rust 1.91.1, release/LTO with
@@ -42,8 +109,8 @@ API and checkpoint boundary. It reports **1,600.736 ms** for a full rebuild, **1
 cold checkpoint open (which still verifies/decrypts records), and **96.452 ms** for a warm restore
 after verification/decryption. A passive podcast write including signing and merge takes
 **95.622 ms** with zero immutable reducer applications; a quieter notes write takes **0.542 ms**.
-These adapter timings must not be substituted with the faster storage-engine results. Native
-sessions use this adapter today: removing unchanged body reads does not eliminate its projection
+These adapter timings must not be substituted with the faster storage-engine results. At the 0.3 baseline, native
+sessions used this adapter: removing unchanged body reads does not eliminate its projection
 and merge CPU costs. Log: `target/v03-validation/bench-100k.log`.
 
 ### Taupe-shaped passive playback
@@ -89,8 +156,8 @@ Those persisted reads reopened/signature-checked zero old operation records; the
 excluded 37,500 sibling-namespace records. They used fresh Replica objects on a Mac with uncontrolled
 filesystem caching, not physical iPhone launches. The workload, cache representation and I/O boundary
 differ from the Rust tests above; these are contextual comparisons, not a measured cross-language
-speedup. The Rust native sessions still use the compatible `Library` adapter, not persistent
-storage-engine checkpoints. Their incremental-refresh tests assert zero unchanged record-body reads.
+speedup. At the 0.3 baseline, Rust native sessions used the compatible `Library` adapter, not persistent
+storage-engine checkpoints. Their incremental-refresh tests asserted zero unchanged record-body reads.
 
 Reproduce the 0.3 runs:
 

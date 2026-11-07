@@ -72,7 +72,7 @@ import Observation
         let loader = loader, evaluate = evaluate, session = session, namespace = namespace
         let task = Task<Result, any Error> { @MainActor in
             if let loader { return try await loader(query) }
-            return try await Self.compute(query, data: session.projection(namespace: namespace), evaluate: evaluate)
+            return try await Self.compute(query, data: await session.projection(namespace: namespace), evaluate: evaluate)
         }
         inFlight[query] = (observed, loadGeneration, task)
         reads += 1

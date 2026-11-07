@@ -4,6 +4,8 @@
 mod import_storage;
 mod migration;
 pub use import_storage::*;
+mod storage_engine;
+pub use storage_engine::*;
 mod types;
 use colophon_core::{
     library::{Call, CreateOptions, Library, PendingBatch},

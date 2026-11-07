@@ -152,11 +152,11 @@ verified-prefix trust and lazy historical content.
 
 ## Storage-backed Engine (stage 2)
 
-Native hosts should opt into `engine::Engine<S: RecordSource>`. `Library` remains the compatible
+Native Swift and Kotlin sessions now use `engine::Engine<S: RecordSource>` through `NativeEngine`. `Library` remains the compatible
 in-memory API, with every existing method signature and outcome shape intact. Both paths share
 exact-byte verification, payload validation and admission rules. The existing version-1
 `Library` checkpoints still replay cryptography; the new version-2 `Engine` checkpoint is a
-separate, library-wide cache. The additive `NativeLibrary.query` FFI method exposes named
+separate, library-wide cache. `NativeEngine.query` and the compatible `NativeLibrary.query` expose named
 reads directly, including names that also identify commands (`episode`, `queue`, `position`),
 without preparing writes or constructing history. Swift and Kotlin bindings include it;
 WASM export signatures are unchanged.

@@ -51,6 +51,8 @@ object RecordPath {
  * A complete readable snapshot, or an explicit error. Partial maps never escape this boundary.
  */
 interface RecordStore {
+    fun changeToken(): String? = null
+    fun changes(since: String): RecordDelta? = null
     fun read(): Map<String, ByteArray>
     /** Exact duplicates are idempotent. Existing different bytes are never overwritten. */
     fun append(records: Map<String, ByteArray>)
@@ -96,7 +98,9 @@ internal const val MAX_BLOB_CHUNK_BYTES = 65536 + 16
 class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordStore, BlobStore {
     private val lock = Any()
     private val records = initial.mapValues { it.value.copyOf() }.toMutableMap()
-    private val versionsByPath = mutableMapOf<String, Long>()
+    private val versionsByPath = initial.mapValues { java.util.Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(it.value)) }.toMutableMap()
+    private val recentChanges = java.util.ArrayDeque<Pair<Long, String>>()
+    private var changeFloor = 0L
     private var generation = 0L
     private val blobs = mutableMapOf<String, ByteArray>()
     private val blobTimes = mutableMapOf<String, Long>()
@@ -109,6 +113,15 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
     @Volatile var recordReads = 0
         private set
 
+    override fun changeToken(): String? = synchronized(lock) {
+        unavailable?.let { throw StorageException.Unavailable(it) }; generation.toString()
+    }
+    override fun changes(since: String): RecordDelta? = synchronized(lock) {
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        val previous = since.toLongOrNull() ?: return@synchronized null
+        if (previous < changeFloor || previous > generation) return@synchronized null
+        RecordDelta(generation.toString(), recentChanges.filter { it.first > previous }.map { it.second }.toSet())
+    }
     override fun paths(): Set<String> = synchronized(lock) {
         unavailable?.let { throw StorageException.Unavailable(it) }
         records.keys.toSet()
@@ -116,7 +129,7 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
 
     override fun versions(paths: Set<String>): Map<String, String> = synchronized(lock) {
         unavailable?.let { throw StorageException.Unavailable(it) }
-        paths.filter { it in records }.associateWith { (versionsByPath[it] ?: 0L).toString() }
+        paths.filter { it in records }.associateWith { versionsByPath[it] ?: "" }
     }
     override fun read(paths: Collection<String>): Map<String, ByteArray> = synchronized(lock) {
         unavailable?.let { throw StorageException.Unavailable(it) }
@@ -193,7 +206,9 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
                 val old = records[path]
                 if (old == null || RecordPath.isReplaceable(path) && !old.contentEquals(bytes)) {
                     generation += 1
-                    versionsByPath[path] = generation
+                    versionsByPath[path] = java.util.Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))
+                    recentChanges.addLast(generation to path)
+                    if (recentChanges.size > 4096) repeat(2048) { changeFloor = recentChanges.removeFirst().first }
                     records[path] = bytes.copyOf()
                     added = true
                 }
@@ -508,3 +523,5 @@ class CheckpointCache(private val folder: File) {
 }
 
 internal fun newId(): UUID = UUID.randomUUID()
+
+data class RecordDelta(val token: String, val paths: Set<String>)

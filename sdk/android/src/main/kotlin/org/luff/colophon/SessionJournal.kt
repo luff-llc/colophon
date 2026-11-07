@@ -17,6 +17,8 @@ internal data class SessionJournal(
     /** Paths already appended to the known-paths log beside the journal. */
     private var persistedKnown: MutableSet<String> = mutableSetOf()
     private var knownLogFile: File? = null
+    private val pendingKnown = mutableSetOf<String>()
+    fun observe(paths: Iterable<String>) { for (path in paths) if (knownPaths.add(path)) pendingKnown.add(path) }
 
     /**
      * Small state goes to [file]; observed paths go to an append-only `<name>-known.log`, so
@@ -29,14 +31,11 @@ internal data class SessionJournal(
             AtomicFile.write(ByteArray(0), log)
             persistedKnown = mutableSetOf()
             knownLogFile = log
+            pendingKnown.addAll(knownPaths)
         }
-        // Known paths only grow, and every logged path is known: equal sizes mean nothing new.
-        if (persistedKnown.size != knownPaths.size) {
-            val fresh = knownPaths.filter { it !in persistedKnown }
-            if (fresh.isNotEmpty()) {
-                AtomicFile.append(fresh.joinToString("") { it + "\n" }.toByteArray(Charsets.UTF_8), log)
-                persistedKnown.addAll(fresh)
-            }
+        if (pendingKnown.isNotEmpty()) {
+            AtomicFile.append(pendingKnown.joinToString("") { it + "\n" }.toByteArray(Charsets.UTF_8), log)
+            persistedKnown.addAll(pendingKnown); pendingKnown.clear()
         }
         AtomicFile.write(encode().toByteArray(Charsets.UTF_8), file)
     }

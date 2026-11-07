@@ -58,6 +58,7 @@ class ColophonSession internal constructor(
     @Volatile private var context: UUID = UUID.randomUUID()
     private val caches = mutableMapOf<UUID, (Set<String>, Boolean) -> Unit>()
     private val cacheLock = Any()
+    @Volatile private var activeEngine: com.luff.colophon.NativeEngine? = null
     @Volatile private var views: Map<String, NamespaceView> = emptyMap()
     private var watchHandle: AutoCloseable? = null
     private var expiryJob: Job? = null
@@ -75,8 +76,8 @@ class ColophonSession internal constructor(
     val memberID: StateFlow<String?> = _memberID.asStateFlow()
     private val _members = MutableStateFlow<List<Member>>(emptyList())
     val members: StateFlow<List<Member>> = _members.asStateFlow()
-    private val _ledger = MutableStateFlow<List<LedgerEntry>>(emptyList())
-    val ledger: StateFlow<List<LedgerEntry>> = _ledger.asStateFlow()
+    private val _ledger = LedgerFlow()
+    val ledger: StateFlow<List<LedgerEntry>> = _ledger
     private val _requests = MutableStateFlow<List<AccessRequest>>(emptyList())
     val requests: StateFlow<List<AccessRequest>> = _requests.asStateFlow()
     private val _lastError = MutableStateFlow<String?>(null)
@@ -590,6 +591,8 @@ class ColophonSession internal constructor(
         _ledger.value = snapshot.core?.ledger ?: emptyList()
         _requests.value = snapshot.core?.requests ?: emptyList()
         views = if (lost) emptyMap() else snapshot.core?.views ?: emptyMap()
+        activeEngine = if (lost) null else snapshot.core?.engine
+        if (!lost) scheduleCheckpoint()
         synchronized(cacheLock) {
             for (invalidate in caches.values) invalidate(changed, lost)
         }
@@ -636,6 +639,7 @@ class ColophonSession internal constructor(
         expiryJob = null
         context = UUID.randomUUID()
         views = emptyMap()
+        activeEngine = null
         _members.value = emptyList()
         _ledger.value = emptyList()
         _requests.value = emptyList()
@@ -678,6 +682,7 @@ class ColophonSession internal constructor(
         _phase.value = next
         if (next == SessionPhase.UpdateRequired || next == SessionPhase.WaitingForDownload || next == SessionPhase.Retry) return
         views = emptyMap()
+        activeEngine = null
         _ledger.value = emptyList()
         _members.value = emptyList()
         _requests.value = emptyList()
@@ -696,10 +701,29 @@ class ColophonSession internal constructor(
         synchronized(cacheLock) { caches.remove(id) }
     }
 
-    internal fun projection(namespace: String): ByteArray {
-        val view = views[namespace]
-        if (!hasUsableContent || view == null) throw SessionException.NotReady()
-        return view.state
+    suspend fun query(namespace: String, name: String, arguments: ByteArray): ByteArray {
+        restore()
+        if (!hasUsableContent) throw SessionException.NotReady()
+        val lease = context
+        val observed = namespaceRevisions.value[namespace]
+        val result = withContext(dispatcher) { worker.mutex.withLock {
+            val engine = activeEngine
+            if (engine == null) worker.core.query(namespace, name, arguments)
+            else when (val result = engine.query(namespace, name, arguments, EngineLibrary.now())) {
+                is com.luff.colophon.JsonOutcome.Success -> result.value
+                is com.luff.colophon.JsonOutcome.Failure -> throw AccessException(result.denial)
+            }
+        } }
+        if (lease != context || observed != namespaceRevisions.value[namespace] || !hasUsableContent) throw SessionException.StaleRevision
+        return result
+    }
+    internal suspend fun projection(namespace: String): ByteArray = query(namespace, "read", "{}".toByteArray())
+
+    suspend fun flushCheckpoint() = withContext(dispatcher) { checkpointJob?.cancel(); checkpointJob = null; worker.saveCheckpoint() }
+    private var checkpointJob: Job? = null
+    private fun scheduleCheckpoint() {
+        checkpointJob?.cancel()
+        checkpointJob = scope.launch { delay(1000); try { worker.saveCheckpoint() } catch (error: Exception) { if (error is CancellationException) throw error; fail(error) } }
     }
 
     companion object {

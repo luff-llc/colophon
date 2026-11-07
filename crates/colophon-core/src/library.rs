@@ -611,7 +611,12 @@ impl Library {
             .any(|j| j.header.meta.namespace == namespace)
         {
             Ok(Outcome::success(
-                self.projected(namespace, now)?.query(name, &args)?,
+                if namespace == "listening.podcasts" && name == "getEpisode" {
+                    self.projected_episode(namespace, args["id"].as_str().unwrap_or(""), now)?
+                        .query(name, &args)?
+                } else {
+                    self.projected(namespace, now)?.query(name, &args)?
+                },
             ))
         } else {
             Ok(Outcome::success(state.query(name, &args)?))
@@ -1190,7 +1195,7 @@ impl Library {
         let mut copies = Records::new();
         if live_slot.is_some() {
             let current = self
-                .projected(namespace, now)?
+                .projected_episode(namespace, payload["id"].as_str().unwrap_or(""), now)?
                 .query("getEpisode", &json!({"id": payload["id"]}))?;
             let informed = payload
                 .get("expect")
@@ -1835,17 +1840,42 @@ impl Library {
     }
     /// Build a current projection from immutable intent plus verified live heads. Never mutate
     /// the immutable reducer checkpoint with replaceable data; expiry is checked at query time.
+    fn projected_episode(&self, namespace: &str, id: &str, now: &str) -> Result<domain::State> {
+        let state = self
+            .namespaces
+            .get(namespace)
+            .ok_or_else(|| missing("namespace"))?
+            .state
+            .playback_slice(id);
+        self.overlay_live(namespace, now, Some(id), state)
+    }
     fn projected(&self, namespace: &str, now: &str) -> Result<domain::State> {
-        let mut state = self
+        let state = self
             .namespaces
             .get(namespace)
             .ok_or_else(|| missing("namespace"))?
             .state
             .clone();
+        self.overlay_live(namespace, now, None, state)
+    }
+    fn overlay_live(
+        &self,
+        namespace: &str,
+        now: &str,
+        episode: Option<&str>,
+        mut state: domain::State,
+    ) -> Result<domain::State> {
         let mut heads: Vec<_> = self
             .live
             .values()
-            .filter(|j| j.header.meta.namespace == namespace)
+            .filter(|j| {
+                j.header.meta.namespace == namespace
+                    && episode.is_none_or(|id| {
+                        j.operation
+                            .as_ref()
+                            .is_some_and(|op| op.payload["id"].as_str() == Some(id))
+                    })
+            })
             .collect();
         heads.sort_by(|a, b| order(&a.header.meta).cmp(&order(&b.header.meta)));
         for j in heads {

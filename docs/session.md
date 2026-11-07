@@ -1,5 +1,23 @@
 # Apple app SDK contracts
 
+Sessions use the storage engine through `NativeEngine`, with member-protected checkpoints in
+`CheckpointCache`. Checkpoints are scheduled after one idle second; `flushCheckpoint()` is an
+explicit persistence barrier. A valid cache skips covered history verification/decryption;
+named queries and passive writes use engine state and namespace revisions. Public session,
+domain-store, write and blob APIs remain source-compatible.
+
+The compatibility `ledger` is now lazy: Swift materializes on property access; Kotlin on List
+inspection (size, indexing, iteration or equality). Reading a large ledger can block the calling
+thread and is outside the fast launch path. Kotlin publishes lazy snapshot identities without
+forcing List equality during StateFlow updates. A retained, not-yet-inspected Kotlin ledger reads
+engine history when first inspected; it is not a frozen historical snapshot. Use named queries
+for app screens. See [design, checks and limitations](handoff-engine-sessions.md).
+
+Storage providers may supply complete change deltas. Built-in memory stores do; folder providers
+continue to enumerate metadata and compare versions. Providers without a synchronous Swift
+`engineReader()` implementation use the protocol's conservative snapshot fallback. Custom readers
+must be thread-safe, synchronous, coherent, and must not call the engine recursively.
+
 `ColophonKitStorage` and `ColophonSession` are additive 0.3 products in the root Swift package.
 They have no third-party Swift dependencies and compile in Swift 6 language mode. The 0.1
 products remain unchanged. The sample is a starting template, not acceptance evidence from
@@ -43,9 +61,8 @@ through `recoveryKeys()`; the host must protect it before relying on recovery. T
 supplies a separate persistent provider, but it does not implement recovery-kit export UI.
 
 `CheckpointCache(privateContainer:)` bounds opaque cache bytes and keys them by validated
-library ID, sets backup exclusion and can discard/reload them. The current bindings have no
-verified-prefix checkpoint API, so the session deliberately does **not** read projections from
-this cache. It must be connected only to the new engine's prefix validation, never to an app
+library ID, sets backup exclusion and can discard/reload them. Sessions store member-protected
+engine checkpoints here; restoration uses the engine's verified-prefix validation, never an app
 revision counter. Cache persistence errors are explicit. No cache is an authority or backup.
 
 ## Session and engine boundary
@@ -56,7 +73,8 @@ global revision and per-namespace revisions. Inaccessible namespaces prevent `re
 are invalidated immediately on loss of readiness. Revocation and expiry are checked on every
 refresh and command; an expiry task schedules a recheck even without a file notification.
 
-All storage, signing, FFI and projection work runs on background actors. `SessionWorker` has a
+Session storage, signing, FFI and query work runs on background actors; explicit synchronous
+compatibility-ledger access is the exception described above. `SessionWorker` has a
 suspension-aware FIFO gate around complete operations: a key-provider suspension cannot let a
 second write/rejoin interleave with its persistence. Leave completes preceding operations
 before invalidating the context. `ObservedRevision` binds an action to session context and
@@ -65,11 +83,10 @@ silently retries an unsigned stale command. Cancellation is checked before core 
 a committed operation must still be persisted. The API does not promise a cross-process CAS:
 concurrent authority writers may produce immutable-path conflicts, which stop publication.
 
-`SessionCore` is the one internal engine protocol; `BindingSessionCore` is its current adapter.
-The storage-backed engine is documented in `docs/engine.md`; its `RecordSource` and verified-prefix
-checkpoint APIs are not yet exposed by the native bindings. Today this adapter still obtains
-named records (`recordsAt`) and compares namespace evidence off-main to avoid falsely
-invalidating unrelated namespace caches. Writes and refresh are proportional to the change. SwiftUI only reads cached values. `NamespaceStore<Query, Result>` decodes
+`SessionCore` is the internal engine protocol; `BindingSessionCore` now uses `NativeEngine`.
+It obtains named records (`recordsAt`) and compares engine revision tokens to avoid invalidating
+unrelated namespace caches. Provider deltas avoid full listings where available. SwiftUI domain
+stores read cached query values. `NamespaceStore<Query, Result>` decodes
 on a concurrent executor, fences completion by context and namespace revision, bounds query
 entries, and publishes cold-load completion separately from journal changes. Cache registrations are removed on deinit; `close()` also allows explicit early disposal.
 
@@ -224,10 +241,9 @@ layouts stop at authority, including the relay download path, without touching c
 Native refresh enumerates only requested namespace paths, authority/requests and legacy flat paths
 whose namespace must be verified. It excludes engagement `history/`. Built-in stores report provider
 versions, so unchanged refresh reads zero record bodies and publication copies only written paths.
-Providers without version tokens conservatively reread candidates. Directory enumeration and snapshot
-projection/evidence comparison remain O(library indexes/projection); this is an I/O improvement, not
-an O(delta) claim for all CPU or serialized UI state. Native sessions still verify records on cold open;
-they do not yet use the storage-engine's persistent verified-prefix checkpoint.
+Providers without version tokens conservatively reread candidates during refresh. Directory
+enumeration remains O(library indexes); snapshots use small engine revision maps. Native sessions
+restore persistent verified-prefix checkpoints and only verify/decrypt new history on a valid hit.
 
 Passive podcast positions use signed replaceable `state/` slots with append-only `history/` evidence.
 Built-in stores implement atomic `replaceLive(path, expected, bytes)`. Custom providers must implement

@@ -1046,3 +1046,28 @@ fn partial_namespace_replica_never_undercounts_a_cross_namespace_budget() {
         colophon_core::model::Outcome::Failure { .. }
     ));
 }
+
+#[test]
+fn binary_private_checkpoint_roundtrip_and_tamper() {
+    use colophon_core::checkpoint::{CheckpointOpening, PreparedCheckpointKey};
+    let (library, owner, _) = create();
+    let prepared = PreparedCheckpointKey::new(library.id(), owner.public(), [201; 32]).unwrap();
+    let signature = owner.sign(prepared.signing_body());
+    let key = prepared.finish(signature).unwrap();
+    let bytes = key
+        .protect_binary(b"private checkpoint", [202; 32])
+        .unwrap();
+    let opening = CheckpointOpening::begin(&bytes, library.id(), &owner.public()).unwrap();
+    let shared = owner.agree(opening.agreement_peer()).unwrap();
+    assert_eq!(opening.finish(&shared).unwrap().1, b"private checkpoint");
+    let mut corrupt = bytes.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    let opening = CheckpointOpening::begin(&corrupt, library.id(), &owner.public()).unwrap();
+    assert!(opening.finish(&shared).is_err());
+    for length in [0, 8, 11, 24, bytes.len() - 20] {
+        assert!(CheckpointOpening::begin(&bytes[..length], library.id(), &owner.public()).is_err());
+    }
+    corrupt = bytes;
+    corrupt[12] ^= 1;
+    assert!(CheckpointOpening::begin(&corrupt, library.id(), &owner.public()).is_err());
+}

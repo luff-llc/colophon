@@ -43,7 +43,7 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
         unitTests.all {
-            it.jvmArgs("-Xmx512m")
+            it.jvmArgs(if (System.getenv("COLOPHON_SESSION_BENCH") != null) "-Xmx2g" else "-Xmx512m")
             val hostLibs = rootDir.resolve("../../target/release").canonicalPath
             it.systemProperty("jna.library.path", hostLibs)
             it.systemProperty("java.library.path", hostLibs)

@@ -17,6 +17,14 @@ public actor FolderRecordStore: RecordStore {
         }
     }
 
+    public func engineReader() -> RecordReader {
+        RecordReader { [self] path in
+            try RecordPath.validate(path); try rejectSymlinks(path)
+            let url = folder.appendingPathComponent(path)
+            try checkAvailability(url)
+            return try AtomicFile.read(url, maximumBytes: 16 * 1024 * 1024)
+        }
+    }
     public func read() throws -> [String: Data] {
         var result: [String: Data] = [:]
         for (path, file) in try enumerate() { result[path] = try AtomicFile.read(file, maximumBytes: 16 * 1024 * 1024) }
@@ -167,7 +175,7 @@ public actor FolderRecordStore: RecordStore {
     private func removePresenter(_ id: UUID) {
         if let presenter = presenters.removeValue(forKey: id) { NSFileCoordinator.removeFilePresenter(presenter) }
     }
-    private func rejectSymlinks(_ path: String) throws {
+    nonisolated private func rejectSymlinks(_ path: String) throws {
         var url = folder
         guard folder.resolvingSymlinksInPath().path == folder.path else { throw StorageError.invalidPath(folder.path) }
         for component in path.split(separator: "/") {

@@ -15,11 +15,17 @@ import com.luff.colophon.PlatformKeys
 import com.luff.colophon.requestInfo
 
 internal interface SessionCore {
+    fun openStorage(store: RecordStore, paths: Set<String>, versions: Map<String, String>, pending: Map<String, ByteArray>, keys: KeyProvider, namespaces: List<String>, cache: CheckpointCache, libraryID: String?) {
+        open(store.read(paths) + pending, keys); setReadScope(namespaces)
+    }
+    fun saveCheckpoint() {}
+    fun updateVersions(versions: Map<String, String>, store: RecordStore) {}
     fun open(records: Map<String, ByteArray>, keys: KeyProvider)
     fun create(configuration: SessionConfiguration)
     fun setReadScope(namespaces: List<String>) {}
     fun liveGeneration(path: String, bytes: ByteArray): ULong = throw SessionException.NotReady()
     fun merge(records: Map<String, ByteArray>)
+    fun mergeObserved(records: Map<String, ByteArray>, versions: Map<String, String>) { merge(records) }
     /** Whole record map. Only rare authority operations use it; writes use [recordsAt]. */
     fun records(): Map<String, ByteArray>
     fun recordsAt(paths: Collection<String>): Map<String, ByteArray> {
@@ -32,7 +38,17 @@ internal interface SessionCore {
     fun write(command: DomainCommand): OperationView
     /** Writes and reports the signed record paths, so only those records are persisted. */
     fun write(command: DomainCommand, written: MutableList<String>): OperationView = write(command)
-    fun query(namespace: String, name: String, arguments: ByteArray): ByteArray = throw SessionException.NotReady()
+    fun query(namespace: String, name: String, arguments: ByteArray): ByteArray {
+        val snapshot = snapshot(listOf(namespace), emptyMap())
+        snapshot.engine?.let { engine ->
+            return when (val result = engine.query(namespace, name, arguments, EngineLibrary.now())) {
+                is com.luff.colophon.JsonOutcome.Success -> result.value
+                is com.luff.colophon.JsonOutcome.Failure -> throw AccessException(result.denial)
+            }
+        }
+        if (name == "read") return snapshot.views[namespace]?.state ?: throw SessionException.NotReady()
+        throw SessionException.NotReady()
+    }
     fun beginBlob(namespace: String, mediaType: String): NativeBlobWriter = throw SessionException.NotReady()
     fun openBlobChunk(namespace: String, digest: String, index: Int, ciphertext: ByteArray): BlobReadOutcome =
         throw SessionException.NotReady()
@@ -44,37 +60,47 @@ internal interface SessionCore {
 }
 
 internal class BindingSessionCore : SessionCore {
-    private var library: ColophonLibrary? = null
+    private var library: EngineLibrary? = null
+    private var cache: CheckpointCache? = null
+    private var ledger: EngineLedger? = null
+    private var ledgerRevision: ULong? = null
     private var recoveryProvider: KeyProvider? = null
 
-    private fun requireLibrary(): ColophonLibrary =
+    private fun requireLibrary(): EngineLibrary =
         library ?: throw SessionException.NotReady()
 
+    override fun openStorage(store: RecordStore, paths: Set<String>, versions: Map<String, String>, pending: Map<String, ByteArray>, keys: KeyProvider, namespaces: List<String>, cache: CheckpointCache, libraryID: String?) {
+        val opened = EngineLibrary.open(store, paths, versions, pending, keys, namespaces, cache, libraryID)
+        library = opened; this.cache = cache; ledger = null; ledgerRevision = null
+    }
     override fun open(records: Map<String, ByteArray>, keys: KeyProvider) {
-        library?.close()
-        library = ColophonLibrary.open(records, keys)
+        val store = MemoryRecordStore(records)
+        val opened = EngineLibrary.open(store, records.keys, emptyMap(), emptyMap(), keys, emptyList(), null, null)
+        library = opened; ledger = null; ledgerRevision = null
     }
-
+    override fun updateVersions(versions: Map<String, String>, store: RecordStore) { requireLibrary().acknowledge(versions, store) }
+    override fun saveCheckpoint() { library?.let { it.native.verifyBatch(128u); cache?.save(it.checkpoint(), it.id) } }
     override fun create(configuration: SessionConfiguration) {
-        library?.close()
         val recovery = configuration.recoveryKeys ?: PlatformKeys.software()
-        library = ColophonLibrary.create(
-            configuration.keys,
-            configuration.memberLabel,
-            configuration.memberLabel,
-            configuration.libraryNamespaces,
-            recovery,
-        )
-        recoveryProvider = library?.recoveryKeys
+        ColophonLibrary.create(configuration.keys, configuration.memberLabel, configuration.memberLabel, configuration.libraryNamespaces, recovery).use { created ->
+            recoveryProvider = created.recoveryKeys
+            val records = created.records
+            openStorage(MemoryRecordStore(records), records.keys, emptyMap(), emptyMap(), configuration.keys, configuration.namespaces,
+                CheckpointCache(java.io.File(configuration.privateHome, "Checkpoints")), null)
+        }
+        cache = CheckpointCache(java.io.File(configuration.privateHome, "Checkpoints"))
     }
 
+    override fun mergeObserved(records: Map<String, ByteArray>, versions: Map<String, String>) {
+        val library = requireLibrary(); library.native.mergeObserved(records, records.keys.mapNotNull { path -> versions[path]?.let { path to it } }.toMap()); library.ready()
+    }
     override fun merge(records: Map<String, ByteArray>) {
         val library = requireLibrary()
         library.merge(records)
         library.ready()
     }
 
-    override fun setReadScope(namespaces: List<String>) { requireLibrary().native.setReadScope(namespaces) }
+    override fun setReadScope(namespaces: List<String>) {}
     override fun liveGeneration(path: String, bytes: ByteArray): ULong =
         requireLibrary().native.liveGeneration(path, bytes, java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS).toString())
     override fun records(): Map<String, ByteArray> = requireLibrary().records
@@ -109,25 +135,27 @@ internal class BindingSessionCore : SessionCore {
         val views = mutableMapOf<String, NamespaceView>()
         val denials = mutableMapOf<String, Denial>()
         for (namespace in namespaces) {
-            when (val result = library.view(namespace)) {
-                is Outcome.Success -> views[namespace] = result.value
-                is Outcome.Failure -> denials[namespace] = result.denial
-            }
+            val denial = library.native.access(namespace, EngineLibrary.now())
+            if (denial != null) denials[namespace] = denial
+            else views[namespace] = NamespaceView(namespace, emptyList(), emptyList(), emptyList(), byteArrayOf())
         }
         val members = library.members()
         val memberIds = members.map { it.id }.toSet()
         val requests = records.keys.sorted().filter { it.startsWith("requests/") }.map { path ->
             requestInfo(records.getValue(path), id)
         }.filter { it.id !in memberIds }
+        if (ledger == null || ledgerRevision != library.revision) { ledger = EngineLedger(library.native); ledgerRevision = library.revision }
         return CoreSnapshot(
             libraryID = id,
             me = library.me(),
             members = members,
-            ledger = library.ledger(),
+            ledger = ledger!!,
             requests = requests,
             views = views,
             denials = denials,
             revision = library.revision,
+            engineRevisions = library.native.revisions(),
+            engine = library.native,
         )
     }
 
@@ -153,7 +181,6 @@ internal class BindingSessionCore : SessionCore {
     }
 
     override fun close() {
-        library?.close()
         library = null
     }
 }

@@ -296,6 +296,17 @@ pub(crate) struct State {
     playback_order: std::collections::BTreeMap<String, (u64, String, String)>,
 }
 impl State {
+    pub(crate) fn playback_slice(&self, id: &str) -> Self {
+        let mut result = Self::new("listening.podcasts");
+        if let ProjectionState::Podcasts(state) = &self.projection {
+            result.projection = ProjectionState::Podcasts(Box::new(state.playback_slice(id)));
+        }
+        if let Some(order) = self.playback_order.get(id) {
+            result.playback_order.insert(id.into(), order.clone());
+        }
+        result
+    }
+
     pub fn new(namespace: &str) -> Self {
         Self {
             projection: ProjectionState::new(namespace),

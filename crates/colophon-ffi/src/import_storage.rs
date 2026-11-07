@@ -43,6 +43,13 @@ pub struct BlobChunkWrite {
 pub struct NativeBlobWriter {
     writer: Mutex<Option<BlobWriter>>,
 }
+impl NativeBlobWriter {
+    pub(crate) fn new(writer: BlobWriter) -> Self {
+        Self {
+            writer: Mutex::new(Some(writer)),
+        }
+    }
+}
 #[uniffi::export]
 impl NativeBlobWriter {
     pub fn push(&self, plaintext: Vec<u8>) -> Result<BlobChunkWrite> {

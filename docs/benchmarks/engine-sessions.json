@@ -1,0 +1,42 @@
+{
+  "date": "2026-11-07",
+  "platform": "arm64 macOS, Swift 6.4.2, Rust 1.91.1, JDK 17",
+  "units": "milliseconds",
+  "runs": 1,
+  "boundary": "fresh native session objects; warm process/filesystem; memory record provider; private cache and journal filesystem I/O included; fixture/store construction excluded",
+  "baseline": "previous BindingSessionCore via test adapter, current worker/provider and current Rust build; not untouched f5839c2 binaries",
+  "results": {
+    "swift": {
+      "legacy": {
+        "checkpoint_open": 13994.704,
+        "passive_write": 31243.455,
+        "notes_write": 32438.967,
+        "checkpoint_plus_1_percent": 17433.904,
+        "taupe_open": 4.503
+      },
+      "engine": {
+        "checkpoint_open": 776.42,
+        "passive_write": 5.911,
+        "notes_write": 4.539,
+        "checkpoint_plus_1_percent": 841.964,
+        "taupe_open": 6.016
+      }
+    },
+    "kotlin": {
+      "legacy": {
+        "checkpoint_open": 12977.637,
+        "passive_write": 30283.626,
+        "notes_write": 40873.773,
+        "checkpoint_plus_1_percent": 22875.502,
+        "taupe_open": 11.476
+      },
+      "engine": {
+        "checkpoint_open": 436.082,
+        "passive_write": 14.966,
+        "notes_write": 8.246,
+        "checkpoint_plus_1_percent": 429.806,
+        "taupe_open": 7.837
+      }
+    }
+  }
+}
