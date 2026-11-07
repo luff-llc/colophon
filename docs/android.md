@@ -58,6 +58,18 @@ val links = NamespaceStore.savedLinks(session)
 links.load(SavedLinksQuery())
 ```
 
+To share the library with other devices (an iPhone, another Android), add a relay slot
+([sync](sync.md)) and keep its token in app-private encrypted storage:
+
+```kotlin
+SessionConfiguration.app(filesDir, "My app", listOf("reading.saved"), keys,
+    relay = RelayConfiguration("https://relay.example.ts.net/v1/libraries/home", token))
+```
+
+Collect `session.syncState` and call `session.syncNow()` from `onResume`. With an empty local
+store the session stays `Unavailable` until the relay has been listed; it never reports
+`NoLibrary` for an unreachable relay.
+
 `KeystoreKeys` creates non-exportable P-256 signing and agreement keys.
 Construction does not touch Keystore; the first provider call runs on the
 session thread. StrongBox is requested first. A `ProviderException` or

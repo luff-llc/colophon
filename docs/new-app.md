@@ -33,6 +33,11 @@
    then call `approve`; use `revoke` to end access. See [session contracts](session.md) for
    the narrowly opt-in device-only starter policy, extensions, and leave/rejoin.
 
+8. To sync across devices (including Android), run the [reference relay](sync.md), store its
+   token with `RelayToken.save(_:service:)`, and pass
+   `relay: RelayConfiguration(url: slotURL, token: try RelayToken.load(service: "com.example.myapp"))`.
+   Show `session.syncState` in settings and call `await session.syncNow()` on foreground entry.
+
 Build the template for both platforms with `bash scripts/build-sample.sh`; restricted builders
 use `bash scripts/build-sample.sh --restricted`. No third-party generator is required.
 
