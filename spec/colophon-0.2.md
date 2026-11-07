@@ -376,3 +376,108 @@ counts, not an erasure promise or permission to discard retained immutable evide
 Earlier 0.2 implementations skip these unknown engine operations and cannot render their imported
 children. All participating apps MUST upgrade before enabling this extension. No 0.1 signature,
 codec, grant or historical agent authority is imported into the 0.2 trust chain.
+
+## 8. HTTP exchange
+
+This section defines how hosts move records between devices through an untrusted relay. It
+revises the 0.1 HTTP profile (§5.3 of 0.1) with an incremental change feed. The relay is a
+storage and transport service only: it never grants access, never holds namespace keys and
+cannot make a record admissible. Every pulled record is verified, admitted and decrypted by the
+receiving core exactly as if it had been read from a local folder (§4, §5).
+
+### 8.1 Libraries, paths and credentials
+
+A relay serves one or more **library slots**. `{base}` is the slot URL, for example
+`https://relay.example/v1/libraries/home`. A slot name is 1–64 bytes of lowercase ASCII
+letters, digits, `.`, `_` or `-`, starting with a letter or digit. A slot is named by the
+host, not by the library ID, because a device that is joining does not know the ID yet. A slot
+SHOULD hold a single library; clients MUST check it (§8.4).
+
+Record paths are exactly the §4 layout (`authority/<8 digits>.json`, `requests/<memberID>.json`,
+`ops/<authorID>/<clock>-<operationID>.json`) plus encrypted blob chunks
+`blobs/<64 lowercase hex>` (§7.2). Components MUST NOT be empty, `.`, `..`, start with `.`, or
+contain `\` or NUL; a path is shorter than 512 bytes. Relays MUST reject other paths with 400.
+
+Requests MAY carry `Authorization: Bearer <token>`. A relay that requires a token MUST compare
+it in constant time and answer 401 with `WWW-Authenticate: Bearer` for a missing, wrong or
+unknown-slot token (an unknown slot is indistinguishable from a wrong token). **A token grants
+storage access to one slot and nothing in the library**: it is not membership, cannot approve
+a request and is never sent to or interpreted by the core. Production relays MUST be reached
+over TLS (directly, or through a TLS-terminating proxy or a private network such as Tailscale).
+
+### 8.2 Endpoints
+
+| Request | Responses |
+| --- | --- |
+| `GET {base}` | 200 `{"protocol":"colophon/relay/2","slot","limits":{"recordBytes","blobBytes","pageEntries","waitSeconds"}}` |
+| `GET {base}/changes?after={cursor}&limit={n}&wait={s}` | 200 change page; 410 if the cursor can no longer be honored |
+| `GET {base}/records/{path}` | 200 exact bytes with `ETag: "<sha256 hex>"`; 404 |
+| `PUT {base}/records/{path}` with `If-None-Match: *` | 201 created; 200 identical bytes already present; 412 different bytes present |
+| `PUT {base}/records/requests/{name}` without `If-None-Match` | 200 replaced or 201 created (only under `requests/`) |
+| `DELETE {base}/records/requests/{name}` | 204 (only under `requests/`; absent is also 204) |
+
+A change page is `{"entries":[{"path","size","sha256"}],"cursor":"<opaque>","more":bool}`.
+Entries appear in the order the relay accepted them; `sha256` is the full lowercase digest of
+the stored bytes. `after` omitted (or empty) lists from the beginning. The returned cursor is
+passed back as `after` to receive only later entries; `more:true` means another page is
+immediately available. `limit` defaults to 500 and is clamped to the relay's `pageEntries`.
+With `wait` (0–30 seconds) and no entries after the cursor, the relay MAY hold the response
+until an entry arrives or the wait elapses, then answers with whatever it has (possibly an empty
+page and the same cursor). Cursors are opaque, slot-bound and only valid on the relay that issued
+them. A relay that lost its log, was restored from backup or compacted it MUST answer 410 for
+cursors it cannot continue; the client then lists again from the beginning. A path appears again
+after a `requests/` replacement with the new digest; a deleted request is listed with
+`"deleted":true` and no digest.
+
+`PUT` bodies are the exact record bytes (`Content-Type: application/octet-stream`; relays ignore
+the type) with a `Content-Length`. Without `If-None-Match: *` a `PUT` outside `requests/` is
+428. Re-sending identical bytes is idempotent and answers 200, so a client can retry any upload
+after a lost response. A `PUT` of different bytes to an existing immutable path is 412 and MUST
+NOT change the stored bytes. A blob chunk's name MUST equal the SHA-256 of its bytes; a relay
+MUST reject a mismatch with 400. `requests/` is the only mutable area, for parity with the 0.1
+profile and a person withdrawing a pending request. 0.2 SDK clients still treat requests as
+immutable (§4): they never replace or delete one, and they report a changed request as a
+conflict instead of overwriting their local copy.
+
+### 8.3 Limits and errors
+
+A relay MUST bound request size and SHOULD publish its limits at `GET {base}`. The defaults are
+16 MiB per record, 65,552 bytes per blob chunk (64 KiB plus the AEAD tag), 1,000 entries per page
+and a 30-second wait. Oversized bodies are 413, without storing a prefix. A relay MAY enforce a
+per-slot quota (507) and rate limits (429 or 503 with `Retry-After`). Writes MUST be atomic per
+record (no reader observes a partial file) and durable before 200 or 201. Publication is per
+record, not across a batch, matching §4.
+
+A relay MAY validate records (path grammar, blob digests, envelope shape, even signatures and the
+authority chain) and refuse ones it cannot accept with 400 or 422. It MUST NOT alter, re-encode,
+reorder fields of, or synthesize records, and MUST return exactly the stored bytes. A relay sees
+paths, sizes, digests, timing, the requesting address and token, the plaintext authority history
+and requests (member public keys, labels, kinds and grants), and the public operation metadata of
+§5 (namespace, author, epoch, clock, authority sequence and claimed date). It never sees namespace
+keys, operation kinds or payloads, or blob plaintext.
+
+### 8.4 Client synchronization
+
+Records are immutable and named by content-bound paths, so synchronization is set reconciliation.
+A client keeps its local store as the source of truth and repeatedly:
+
+1. **Lists** `changes` from its saved cursor until `more` is false, adding each entry to its
+   remembered remote set. On 410 it forgets the cursor and remote set and lists from the start.
+2. **Checks the library.** If both sides hold `authority/00000001.json` and the digests differ, the
+   slot holds a different library: the client MUST stop and report an error, pulling and pushing
+   nothing.
+3. **Pulls** each listed path the local store lacks, verifies its SHA-256 against the listing,
+   and appends the bytes to the local store (which rejects conflicts), then hands the new records
+   to the core as an external change. A listed path whose digest differs from the local record is
+   a conflict; the local bytes are kept and the conflict is reported.
+4. **Pushes** each local record the remote set lacks with `PUT … If-None-Match: *`. 200 and 201
+   both mean the relay now holds the record; 412 is a conflict, reported, never overwritten.
+
+Absence from a relay MUST NOT be read as deletion, and an unreachable, unauthorized or reset relay
+MUST NOT be read as an empty library: a client whose local store is empty MUST complete a
+successful listing before reporting that no library exists or creating one in that slot. Clients
+SHOULD retry transport failures with capped exponential backoff and jitter, honoring
+`Retry-After`, and SHOULD surface their state (idle, syncing, offline, unauthorized, error).
+Relay order, timing and listings carry no authority: admission, revocation and fold order are
+decided only by the core from signed records (§5). A relay can withhold or delay records (a
+freshness attack); it cannot forge, alter or reorder their meaning.
