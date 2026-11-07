@@ -123,7 +123,7 @@ actor SessionWorker {
         for (path, bytes) in journal.pending where path.hasPrefix("authority/") { authority[path] = bytes }
         do {
             if opened { if !authority.isEmpty { try await core.merge(authority) } }
-            else { try await core.open(records: authority, keys: keys); try await core.setReadScope(configuration.namespaces); opened = true; merged.removeAll(); requestPaths.removeAll() }
+            else { try await core.open(records: authority, keys: keys); try await core.setReadScope(configuration.namespaces); merged.removeAll(); requestPaths.removeAll() }
         } catch let error as BindingError {
             if case .InvalidData(let detail) = error, detail.hasPrefix("Unsupported storage layout") { throw SessionLayoutError.updateRequired }
             throw error
@@ -131,26 +131,15 @@ actor SessionWorker {
         let contentPaths = fresh.subtracting(authorityPaths)
         var incoming = try await storage().read(paths: Array(contentPaths))
         guard Set(incoming.keys) == contentPaths else { throw StorageError.unavailable("Record download pending") }
-        incoming.merge(authority) { old, _ in old }
         let observedLive = incoming.filter { RecordPath.isReplaceable($0.key) }
         for (path, data) in journal.pending {
+            if path.hasPrefix("authority/") { continue }
             if let old = incoming[path], old != data, !RecordPath.isReplaceable(path) { throw StorageError.conflict(path) }
             if !opened || !merged.contains(path) || RecordPath.isReplaceable(path) { incoming[path] = data }
         }
-        do {
-            if opened {
-                if !incoming.isEmpty { try await core.merge(incoming) }
-            } else {
-                try await core.open(records: incoming, keys: keys)
-                opened = true
-                merged.removeAll(); requestPaths.removeAll()
-            }
-        } catch {
-            if error.localizedDescription.hasPrefix("Unsupported storage layout") {
-                throw SessionLayoutError.updateRequired
-            }
-            throw error
-        }
+        if !incoming.isEmpty { try await core.merge(incoming) }
+        opened = true
+        track(authority.keys)
         liveBytes.merge(observedLive) { _, new in new }
         track(incoming.keys)
         recordVersions.merge(versions) { _, new in new }

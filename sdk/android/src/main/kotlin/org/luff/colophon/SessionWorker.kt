@@ -137,33 +137,28 @@ internal class SessionWorker(
         val authority = storage().read(authorityPaths).toMutableMap()
         if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
         authority.putAll(journal.pending.filterKeys { it.startsWith("authority/") })
-        if (opened) { if (authority.isNotEmpty()) core.merge(authority) }
-        else { core.open(authority, keys); core.setReadScope(configuration.namespaces); opened = true; merged.clear(); requestPaths.clear() }
+        try {
+            if (opened) { if (authority.isNotEmpty()) core.merge(authority) }
+            else { core.open(authority, keys); core.setReadScope(configuration.namespaces); merged.clear(); requestPaths.clear() }
+        } catch (error: BindingException) {
+            if (error is BindingException.InvalidData && error.detail.startsWith("Unsupported storage layout")) {
+                throw SessionLayoutException
+            }
+            throw error
+        }
         val contentPaths = fresh.filter { !it.startsWith("authority/") }
         val incoming = storage().read(contentPaths).toMutableMap()
         if (incoming.keys != contentPaths.toSet()) throw StorageException.Unavailable("Record download pending")
-        incoming.putAll(authority)
         val observedLive = incoming.filterKeys { RecordPath.isReplaceable(it) }
         for ((path, data) in journal.pending) {
+            if (path.startsWith("authority/")) continue
             val old = incoming[path]
             if (old != null && !old.contentEquals(data) && !RecordPath.isReplaceable(path)) throw StorageException.Conflict(path)
             if (!opened || path !in merged || RecordPath.isReplaceable(path)) incoming[path] = data
         }
-        if (opened) {
-            if (incoming.isNotEmpty()) core.merge(incoming)
-        } else {
-            try {
-                core.open(incoming, keys)
-            } catch (error: BindingException) {
-                if (error is BindingException.InvalidData && error.detail.startsWith("Unsupported storage layout")) {
-                    throw SessionLayoutException
-                }
-                throw error
-            }
-            opened = true
-            merged.clear()
-            requestPaths.clear()
-        }
+        if (incoming.isNotEmpty()) core.merge(incoming)
+        opened = true
+        track(authority.keys)
         liveBytes.putAll(observedLive)
         track(incoming.keys)
         recordVersions.putAll(versions)

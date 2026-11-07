@@ -11,6 +11,31 @@ class V03Test {
     private fun config(store: RecordStore, home: java.io.File, keys: SoftwareKeys) =
         SessionConfiguration("Playback", namespaces = listOf("listening.podcasts"), store = store, privateHome = home, keys = keys)
 
+    @Test fun coldOpenDoesNotMergeAuthorityTwiceAndTranslatesLayoutError() = runBlocking {
+        val keys = SoftwareKeys.ephemeral()
+        val home = Files.createTempDirectory("colophon-review-open").toFile()
+        try {
+            ColophonLibrary.create(keys, "Review", "Owner", listOf("listening.podcasts")).use { lib ->
+                val base = BindingSessionCore()
+                var authorityMerges = 0
+                val core = object : SessionCore by base {
+                    override fun merge(records: Map<String, ByteArray>) {
+                        authorityMerges += records.keys.count { it.startsWith("authority/") }
+                        base.merge(records)
+                    }
+                }
+                val worker = SessionWorker(config(MemoryRecordStore(lib.records), home, keys), core)
+                worker.refresh()
+                assertEquals(0, authorityMerges)
+                val action = (lib.native.beginLayout(99u, "2026-11-07T12:00:00Z") as PreparedAction.Ready).action
+                val future = lib.records + action.finish(action.signWith(keys))
+                val futureWorker = SessionWorker(config(MemoryRecordStore(future), java.io.File(home, "future"), keys))
+                try { futureWorker.refresh(); fail("Future layout opened") }
+                catch (error: Exception) { assertSame(SessionLayoutException, error) }
+            }
+        } finally { home.deleteRecursively() }
+    }
+
     @Test fun livePlaybackReceiptsAndIncrementalRefresh() = runBlocking {
         val store = MemoryRecordStore()
         val keys = SoftwareKeys.ephemeral()

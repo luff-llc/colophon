@@ -106,6 +106,8 @@ private func link(_ id: String = UUID().uuidString) throws -> DomainCommand {
         #expect(reading.cached(query)?.count == 1)
         #expect(notes.cached(0) == noteValue)
         #expect(session.hasUsableContent)
+        let retained = try await session.query(namespace: "reading.saved", name: "items", arguments: Data("{}".utf8))
+        #expect(!retained.isEmpty)
         reading.close(); notes.close()
     }
 

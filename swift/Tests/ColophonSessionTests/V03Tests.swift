@@ -7,6 +7,11 @@ import Testing
     private func config(_ store: MemoryRecordStore, _ home: URL, _ keys: SoftwareKeys) -> SessionConfiguration {
         .init(memberLabel: "Playback", namespaces: ["listening.podcasts"], location: .memory(store), privateContainer: home, keys: keys)
     }
+    @Test(arguments: ["2026-11-07T12:00:00Z", "2026-11-07T12:00:00.555Z"])
+    func expiryRefreshWaitsForHostClock(_ expires: String) throws {
+        let deadline = try #require(ColophonSession.grantExpiryRefreshDate(expires))
+        #expect(deadline.ISO8601Format() == "2026-11-07T12:00:01Z")
+    }
     @Test func livePlaybackReceiptsRefreshAndIncrementalReads() async throws {
         let store = MemoryRecordStore(), keys = SoftwareKeys()
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -258,3 +258,15 @@ import Testing
         #expect(LibraryWords.revocation.contains("Past contributions stay attributed"))
     }
 }
+
+@MainActor struct ReviewReadinessTests {
+    @Test func retainedPhasesAreUsable() {
+        let session = TestSession()
+        for phase in [SessionPhase.ready, .refreshing, .waitingForDownload, .retry] {
+            session.phase = phase
+            #expect(session.hasUsableContent)
+        }
+        session.phase = .opening
+        #expect(!session.hasUsableContent)
+    }
+}

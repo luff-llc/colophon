@@ -208,26 +208,42 @@ history/<author>/listening.podcasts/<clock, 12 digits>-<operationID>.json
 
 Each state file is a normal signed operation with the additional `live` stamp. The decrypted
 operation MUST match the stamp, slot and namespace. There is one current slot per episode per
-author. Revoked or expired writers' live slots MUST NOT supply current state. Historical
+author. Revoked or expired writers' live slots MUST NOT supply current state. Grants with an expiry or write budget MUST NOT publish live-stamped operations, including
+retained copies under `ops/`; backdating does not remove these restrictions. Other historical
 immutable admission is unchanged. Deliberate seeks (`seek: true`), completion, queue edits
 and recovery MUST stay on the immutable `ops/` path.
 
 Before an immutable action or a new live value relies on a replaceable revision, the exact
-signed predecessor MUST be retained at its immutable operation path. Every live write first
+signed predecessor MUST be retained at its immutable operation path. Retention includes live heads
+for the target episode and explicitly cited revisions, including nested completion references;
+unrelated commands MUST NOT retain every live head in the namespace. A storage-backed writer MUST
+fetch the exact predecessor envelope and match its verified digest before preparing that copy.
+Missing or changed predecessor bytes fail the write. Every live write first
 preserves its signed encrypted evidence under `history/`, then replaces its current slot.
 Evidence alone MUST NOT become current state. History is available for audit and export.
 
 A replacement that fails its expected-revision check MUST leave the previous admitted live
-value in place. An exact retained/live duplicate is folded once.
+value in place. Signature, library/path/stamp binding, grant and expiry at the referenced authority,
+and decrypted payload/slot binding MUST all verify before replacement. An unverified incoming date
+MUST NOT invalidate an existing head. A locked replica MUST retain its old bytes until it can fully
+verify the candidate. Lower generations cannot replace an observed head; different exact envelope
+bytes at the same slot/generation are explicit equivocation. An exact retained/live duplicate is folded once.
 
 **Fold order is `(clock, author, id)`, never `created`.** A writer increments the highest
 clock of an admitted, successfully authenticated operation in its namespace (zero if none).
 Held, refused, unavailable and invalid-payload records MUST NOT advance the local write clock.
+Live generations retain the signed clock encoding, but replaceable heads MUST NOT advance the
+immutable admission clock or immutable namespace/author ordering tails. A local command advances
+past relevant observed live heads only when continuing that slot or retaining its dependencies.
 Clocks are positive integers at most 2^53−1. In sorted header order, an otherwise admissible
 header MUST be no more than 1,024 above the highest earlier admitted header clock in its
 namespace (initially zero); larger jumps are refused as `clockJump` without reserving budget.
-This allows bounded gaps for partial replicas without letting a single header exhaust the
-interoperable integer range. Budget accounting uses the same order across namespaces.
+This bound applies to live heads and retained live-stamped predecessors too. Before a passive
+sample would exceed the durable prefix clock by 1,024, the writer MUST retain its current head and
+publish that sample as immutable intent. Subsequent live samples use the resulting durable anchor.
+Readers authenticate incoming immutable anchors before evaluating a live replacement in the same
+batch. This periodic anchoring bounds live forward jumps without namespace exhaustion or losing
+later deliberate writes. Budget accounting uses the same order across namespaces.
 Only authenticated, admissible payloads compete for a same-author operation ID; the first in
 fold order wins, and later authenticated competitors are refused as `duplicateID`. Invalid,
 held or out-of-scope competitors never disqualify a valid or kept record. Signed header budget
@@ -351,12 +367,14 @@ bind the format/reducer version, library, recipient, authority state, exact reco
 digests, namespace admitted prefixes, and the corresponding reducer states. Namespace keys
 shared with other members MUST NOT alone authorize a device-local verification cache.
 
-The Rust `Engine` version-3 cache (`COLOENG3`) uses a sorted path/digest index and per-namespace
+The Rust `Engine` cache (`COLOENG4`, version 4; supersedes `COLOENG3`) uses a sorted path/digest index and per-namespace
 rolling prefix hashes, authenticated together with a host-provided device-local 32-byte secret
 (member-sealed). Index digests cover exact **outer envelope bytes** (including signatures) and
 are independent of the provider content version; namespace prefix hashes cover admitted exact
 **signed body** digests, as used by `kept`. Each index entry also binds the author's signing-key
-digest and the namespace epoch. `RecordSource.content_version` supplies a coherent opaque
+digest, namespace epoch and referenced authority sequence. Restoration MUST compare the key
+digest to verified authority and the authenticated epoch to the epoch at that sequence; lazy fetches
+and audits also compare these bindings to the fetched header. `RecordSource.content_version` supplies a coherent opaque
 provider token per path; a changed token triggers fresh signature/decryption/admission checks,
 even if its bytes are identical. The cache binds the selected namespace list as well. Providers
 without versions require scheduled digest audits and cannot claim immediate detection of an
@@ -365,7 +383,13 @@ IDs, projected operations, and rejected/observed bytes. Rejected records and unv
 MUST NOT become admitted merely by being indexed. Epoch secret keys are not persisted in the
 cache. A storage-version, layout, reducer-schema, identity or library mismatch MUST cause
 re-verification. Changing bytes at a previously verified **immutable** path is equivocation
-and MUST fail closed. Replaceable `state/` paths MAY change. Hosts protect the local cache
+and MUST fail closed. Replaceable `state/` paths MAY change only after complete verification and
+monotonic generation checks. The engine checkpoint authenticates per-slot generation and exact
+envelope-digest witnesses; these survive authority/order/projection invalidation. A lower generation,
+same-generation different bytes, or invalid replacement fails closed and cannot be checkpointed as
+new trusted evidence. An integrity audit requires exact indexed live bytes too; hosts refresh legitimate
+replacements before auditing. A fresh replica without a witness cannot detect suppression of newer
+valid state. Hosts protect the local cache
 because reducer state can include plaintext. The Rust `checkpoint` module supplies a
 member-signed HPKE key ticket and an AES-256-GCM encrypted checkpoint envelope, bound to the
 exact library and member. Hosts use it (or equivalent protection) for persisted caches. Ticket
@@ -375,7 +399,9 @@ cold open, so no unprotected disk cache or cached authorization is introduced th
 
 SDK sessions distinguish first opening, waiting for download, ready, refreshing (usable
 verified content from the same connection is retained) and retry. Results MUST be bound to the
-exact session revision and connection. Pending data is never an empty library and never
+exact session revision and connection. Query-backed content remains usable during waiting-for-download
+and retry when the active connection retains a verified view. Grant-expiry refresh timers MUST accept
+both UTC timestamp formats and wait until host `now` is strictly beyond the inclusive expiry. Pending data is never an empty library and never
 enables absence-based writes. An authenticated unsupported layout surfaces `updateRequired`
 without touching content bytes or identity.
 
@@ -421,7 +447,8 @@ The engine3 extension uses the existing signed/encrypted operation envelope and 
 there is no new authority permission or public plaintext sidecar. Reducer generation 4 MUST
 invalidate older projection caches; generation 5 (blob eager-download hints and claimed
 creation/update dates in listening notes and notes) likewise invalidates generation 4 caches.
-Generation 6 adds immutable playback ordering barriers for live overlays and invalidates generation 5 caches. Reducers receive kind, immutable grant and root role from
+Generation 6 added immutable playback ordering barriers. Generation 7 enforces bounded live
+anchoring and rejects caveated live stamps; all older projection caches MUST be invalidated. Reducers receive kind, immutable grant and root role from
 verified authority, never from payload or historical source assertions.
 
 `colophon.importBatch` is a root-only engine operation carrying a bounded source-unit key,

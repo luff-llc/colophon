@@ -297,7 +297,9 @@ impl Library {
         ensure(member.member.revoked_at.is_none(), "Revoked live writer")?;
         ensure(
             member.member.grant.as_ref().is_none_or(|g| {
-                !expired(&g.expires, now).unwrap_or(true) && g.write_budget.is_none()
+                !expired(&g.expires, now).unwrap_or(true)
+                    && g.expires.is_none()
+                    && g.write_budget.is_none()
             }),
             "Expired or capped live writer",
         )?;
@@ -306,7 +308,9 @@ impl Library {
             &header.meta,
             &digest,
             &mut BTreeMap::new(),
-            0,
+            self.namespaces
+                .get(&header.meta.namespace)
+                .map_or(0, |n| n.clock),
             true,
         );
         ensure(
@@ -378,6 +382,7 @@ impl Library {
         // Keep an already authenticated high-water value when a provider returns an older
         // slot. Invalid higher generations never displace it. No canonical bytes are repaired.
         let mut ignored = Vec::new();
+        let mut staged = None;
         for (path, raw) in &incoming {
             if !crate::protocol::is_replaceable(path) {
                 continue;
@@ -385,19 +390,66 @@ impl Library {
             let Some(old) = self.records.get(path) else {
                 continue;
             };
-            let Some(old_header) = decode_header(old) else {
+            // A replacement must be completely authenticated before it can evict bytes,
+            // including while locked. Never use an incoming claimed date to validate old state.
+            let Some(new_header) = decode_header(raw) else {
+                ignored.push(path.clone());
                 continue;
             };
-            let now = decode_header(raw)
-                .map(|h| h.meta.created)
-                .unwrap_or_else(|| old_header.meta.created.clone());
-            if self.live_generation(path, old, &now).is_ok() {
-                match self.live_generation(path, raw, &now) {
-                    Ok(generation) if generation > old_header.meta.clock => (),
-                    Ok(generation) if generation == old_header.meta.clock => {
-                        return Err(Error("Equivocation at live generation".into()))
+            // A synchronized batch can bring a durable anchor and a newer live head together.
+            // Validate against the authenticated incoming immutable prefix in that case.
+            let validator = if new_header.meta.clock
+                > self
+                    .namespaces
+                    .get(&new_header.meta.namespace)
+                    .map_or(0, |n| n.clock)
+                    .saturating_add(1024)
+                && incoming.keys().any(|p| p.starts_with("ops/"))
+            {
+                if staged.is_none() {
+                    let mut candidate = self.clone();
+                    candidate.merge(
+                        incoming
+                            .iter()
+                            .filter(|(p, _)| !crate::protocol::is_replaceable(p))
+                            .map(|(p, b)| (p.clone(), b.clone()))
+                            .collect(),
+                    )?;
+                    staged = Some(candidate);
+                }
+                staged.as_ref().expect("staged immutable prefix")
+            } else {
+                &*self
+            };
+            let Ok(generation) = validator.live_generation(path, raw, &new_header.meta.created)
+            else {
+                // Even while locked, two authenticated envelopes for one generation are
+                // a writer conflict. Never silently choose between them.
+                if decode_header(old).is_some_and(|h| h.meta.clock == new_header.meta.clock) {
+                    let verified = self.verifiers.operations(
+                        &self.authority,
+                        &[(path, old), (path, raw)],
+                        None,
+                    )?;
+                    ensure(
+                        !verified.iter().all(Result::is_ok),
+                        "Equivocation at live generation",
+                    )?;
+                }
+                ignored.push(path.clone());
+                continue;
+            };
+            if let Some(old_header) = decode_header(old) {
+                if validator
+                    .live_generation(path, old, &old_header.meta.created)
+                    .is_ok()
+                {
+                    if generation == old_header.meta.clock {
+                        return Err(Error("Equivocation at live generation".into()));
                     }
-                    _ => ignored.push(path.clone()),
+                    if generation < old_header.meta.clock {
+                        ignored.push(path.clone());
+                    }
                 }
             }
         }
@@ -1108,9 +1160,25 @@ impl Library {
         &self,
         namespace: &str,
         kind: &str,
+        payload: Value,
+        now: &str,
+        seed: [u8; 32],
+    ) -> Result<Outcome<PendingBatch>> {
+        self.prepare_write(namespace, kind, payload, now, seed, |path| {
+            self.records
+                .get(path)
+                .cloned()
+                .ok_or_else(|| missing("live predecessor"))
+        })
+    }
+    fn prepare_write(
+        &self,
+        namespace: &str,
+        kind: &str,
         mut payload: Value,
         now: &str,
         seed: [u8; 32],
+        read_live: impl Fn(&str) -> Result<Vec<u8>>,
     ) -> Result<Outcome<PendingBatch>> {
         if let Some(denial) = self.authorize(namespace, Access::Write, now)? {
             return Ok(Outcome::failure(denial));
@@ -1167,7 +1235,11 @@ impl Library {
         };
         let mut clock = self.namespaces.get(namespace).map_or(0, |n| n.clock);
         for ((_, ns, _), slot) in &self.live {
-            if ns == namespace {
+            if ns == namespace
+                && (slot.operation.as_ref().is_some_and(|op| {
+                    targets_episode(kind, &payload, op.payload["id"].as_str().unwrap_or(""))
+                }) || contains_revision(&payload, &slot.header.meta.id))
+            {
                 clock = clock.max(slot.header.meta.clock);
             }
         }
@@ -1187,6 +1259,17 @@ impl Library {
                     .as_ref()
                     .is_none_or(|g| g.write_budget.is_none() && g.expires.is_none())
             });
+        // Periodically anchor playback in durable history. Overwritten ticks never advance
+        // admission's durable clock; every cold reader can validate the same bounded gap.
+        if clock
+            > self
+                .namespaces
+                .get(namespace)
+                .map_or(0, |n| n.clock)
+                .saturating_add(1024)
+        {
+            live_slot = None;
+        }
         let mut copies = Records::new();
         if live_slot.is_some() {
             let current = self
@@ -1232,21 +1315,29 @@ impl Library {
                 }
             }
         }
-        // Deliberate actions preserve all currently observed playback heads. This also covers
-        // nested completion events and references to another author's replaceable revision.
+        // Retain only targeted episode heads and explicit revision dependencies, including
+        // nested completion events and another author's replaceable revision.
         for j in self
             .live
             .values()
             .filter(|j| j.header.meta.namespace == namespace)
         {
             let cited = contains_revision(&payload, &j.header.meta.id);
-            if live_slot.is_none() || cited {
+            if cited
+                || (live_slot.is_none()
+                    && j.operation.as_ref().is_some_and(|op| {
+                        op.payload["id"]
+                            .as_str()
+                            .is_some_and(|id| targets_episode(kind, &payload, id))
+                    }))
+            {
                 let stamp = j.header.live.as_ref().expect("live stamp");
                 let path =
                     crate::protocol::live_state_path(&j.header.meta.author, namespace, &stamp.slot);
-                if let Some(raw) = self.records.get(&path) {
-                    copies.insert(crate::protocol::operation_path(&j.header.meta), raw.clone());
-                }
+                copies.insert(
+                    crate::protocol::operation_path(&j.header.meta),
+                    read_live(&path)?,
+                );
             }
         }
         let mut entropy = Entropy::new(seed);
@@ -1641,7 +1732,7 @@ impl Library {
                 Self::open_operation(&self.authority, &self.keys, j);
             }
             let meta = &j.header.meta;
-            let skip_clock_jump = j.from_live_slot;
+            let is_live = j.header.live.is_some();
             let mut status =
                 if !Self::budget_scope_complete(&self.authority, &self.read_scope, &meta.author) {
                     Status::Refused("budgetScopeUnavailable".into())
@@ -1656,7 +1747,7 @@ impl Library {
                             .get(&meta.namespace)
                             .copied()
                             .unwrap_or(0),
-                        skip_clock_jump,
+                        is_live,
                     )
                 };
             if j.from_live_slot
@@ -1669,7 +1760,7 @@ impl Library {
             {
                 status = Status::Refused("revoked".into());
             }
-            if status == Status::Admitted {
+            if status == Status::Admitted && !j.from_live_slot {
                 self.admission
                     .clocks
                     .insert(meta.namespace.clone(), meta.clock);
@@ -1698,25 +1789,27 @@ impl Library {
                     ));
                 }
             }
-            let tail = (meta.clock, meta.author.clone(), meta.id.clone());
-            self.admission
-                .namespace_tails
-                .entry(meta.namespace.clone())
-                .and_modify(|old| {
-                    if *old < tail {
-                        *old = tail.clone();
-                    }
-                })
-                .or_insert_with(|| tail.clone());
-            self.admission
-                .author_tails
-                .entry(meta.author.clone())
-                .and_modify(|old| {
-                    if *old < tail {
-                        *old = tail.clone();
-                    }
-                })
-                .or_insert(tail);
+            if !j.from_live_slot {
+                let tail = (meta.clock, meta.author.clone(), meta.id.clone());
+                self.admission
+                    .namespace_tails
+                    .entry(meta.namespace.clone())
+                    .and_modify(|old| {
+                        if *old < tail {
+                            *old = tail.clone();
+                        }
+                    })
+                    .or_insert_with(|| tail.clone());
+                self.admission
+                    .author_tails
+                    .entry(meta.author.clone())
+                    .and_modify(|old| {
+                        if *old < tail {
+                            *old = tail.clone();
+                        }
+                    })
+                    .or_insert(tail);
+            }
         }
         for (author, namespace, slot, id) in live_heads {
             self.judged.retain(|old| {
@@ -1933,7 +2026,7 @@ impl Library {
         digest: &str,
         spent: &mut BTreeMap<String, BTreeSet<String>>,
         clock: u64,
-        skip_clock_jump: bool,
+        is_live: bool,
     ) -> Status {
         let refuse = |s: &str| Status::Refused(s.into());
         let Some(member) = authority.members.get(&meta.author) else {
@@ -1955,14 +2048,14 @@ impl Library {
         {
             return refuse("notGranted");
         }
-        if skip_clock_jump
+        if is_live
             && member
                 .member
                 .grant
                 .as_ref()
-                .is_some_and(|g| g.write_budget.is_some())
+                .is_some_and(|g| g.write_budget.is_some() || g.expires.is_some())
         {
-            return refuse("cappedLiveWriter");
+            return refuse("caveatedLiveWriter");
         }
         if let Some(grant) = &member.member.grant {
             if expired(&grant.expires, &meta.created).unwrap_or(true) {
@@ -1985,8 +2078,8 @@ impl Library {
             return refuse("wrongEpoch");
         }
         // Bound each admitted header's forward jump, including a namespace's first header.
-        // Live slots skip this: replaced generations are not listed at open.
-        if !skip_clock_jump && meta.clock > clock.saturating_add(1024) {
+        // Replaceable ticks must be backed by a nearby durable anchor too.
+        if meta.clock > clock.saturating_add(1024) {
             return refuse("clockJump");
         }
         let count = spent.entry(meta.author.clone()).or_default();
@@ -2574,6 +2667,16 @@ fn operation_aad(meta: &OperationMeta) -> Result<Vec<u8>> {
         namespace: &meta.namespace,
         protocol: &meta.protocol,
     })?)
+}
+
+fn targets_episode(kind: &str, payload: &Value, id: &str) -> bool {
+    match kind {
+        "position" | "setState" | "episode" => payload["id"] == id,
+        "completePlayback" => payload["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["episode"] == id)),
+        _ => payload["episode"] == id,
+    }
 }
 
 fn contains_revision(value: &Value, id: &str) -> bool {

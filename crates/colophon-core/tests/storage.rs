@@ -1112,3 +1112,252 @@ fn parallel_domain_reduction_keeps_global_budget_admission_and_stream_order() {
     assert_eq!(cold.stats().records_read, 0);
     equal(&mut cold, &lib);
 }
+
+#[test]
+fn review_engine_retains_predecessor_without_replay() {
+    let (mut lib, owner, _) = create();
+    support::write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"ep","seconds":20}),
+        185,
+    );
+    let mut e = engine(&lib, &owner);
+    let revision = success(
+        e.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+            .unwrap(),
+    )["positionRevision"]
+        .clone();
+    let pending = success(
+        e.begin_write(
+            "listening.podcasts",
+            "position",
+            json!({"id":"ep","seconds":3,"seek":true,"expect":revision}),
+            NOW,
+            [186; 32],
+        )
+        .unwrap(),
+    );
+    assert_eq!(pending.copies.len(), 1);
+    let before = e.stats().applied_operations;
+    let records = finish(pending, &owner);
+    let source = e.source().clone();
+    source.add(records);
+    e.refresh(source.listing()).unwrap();
+    assert_eq!(e.stats().applied_operations - before, 2);
+    assert_eq!(
+        success(
+            e.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )["seconds"],
+        3.0
+    );
+    assert!(matches!(e.open_mode(), OpenMode::FullVerification));
+}
+
+#[test]
+fn review_engine_same_generation_equivocation_and_rollback_fail_closed() {
+    let (mut lib, owner, _) = create();
+    support::write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"ep","seconds":1}),
+        187,
+    );
+    let (path, old) = lib
+        .records()
+        .iter()
+        .find(|(p, _)| p.starts_with("state/"))
+        .map(|(p, b)| (p.clone(), b.clone()))
+        .unwrap();
+    let mut e = engine(&lib, &owner);
+    let source = e.source().clone();
+    let mut changed = old.clone();
+    changed.push(b' ');
+    source.add([(path.clone(), changed)].into());
+    assert!(
+        e.refresh(source.listing()).is_err(),
+        "same-generation envelope change accepted"
+    );
+    support::write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"ep","seconds":2}),
+        188,
+    );
+    let mut e = engine(&lib, &owner);
+    let cache = e.checkpoint().unwrap();
+    let source = e.source().clone();
+    source.add([(path, old)].into());
+    assert!(e.refresh(source.listing()).is_err(), "rollback accepted");
+    assert!(e.checkpoint().is_err(), "rollback may be checkpointed");
+    let mut reopened = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        Some(&cache),
+    )
+    .unwrap();
+    let results = reopened
+        .begin_unlock()
+        .into_iter()
+        .map(|s| (s.namespace, s.epoch, owner.agree(&s.peer).unwrap()))
+        .collect();
+    assert!(
+        reopened.finish_unlock_many(results).is_err(),
+        "checkpoint forgot live high water"
+    );
+}
+
+#[test]
+fn review_checkpoint_checks_author_and_epoch_bindings() {
+    let (mut lib, owner, _) = create();
+    write(&mut lib, &owner, 1);
+    let e = engine(&lib, &owner);
+    let cp = e.checkpoint().unwrap();
+    let meta_len = u32::from_le_bytes(cp[8..12].try_into().unwrap()) as usize;
+    let meta: serde_json::Value = serde_json::from_slice(&cp[12..12 + meta_len]).unwrap();
+    let authority_bytes = if meta["version"].as_u64().unwrap() >= 4 {
+        8
+    } else {
+        0
+    };
+    let mut pos = 12 + meta_len;
+    let count = u32::from_le_bytes(cp[pos..pos + 4].try_into().unwrap()) as usize;
+    pos += 4;
+    let mut target = 0;
+    for _ in 0..count {
+        let len = u32::from_le_bytes(cp[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        let path = std::str::from_utf8(&cp[pos..pos + len]).unwrap();
+        pos += len;
+        if path.starts_with("ops/") {
+            target = pos;
+            break;
+        }
+        pos += 32 + 2 + 1 + 32 + 8 + authority_bytes;
+        let version = u32::from_le_bytes(cp[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4 + version.saturating_sub(1);
+    }
+    assert_ne!(target, 0);
+    for offset in [target + 35, target + 67] {
+        let mut changed = cp[..cp.len() - 32].to_vec();
+        changed[offset] ^= 1;
+        let mut tag = [0; 32];
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(&[71; 32]), &changed)
+            .expand(b"colophon/verified-prefix/3", &mut tag)
+            .unwrap();
+        changed.extend(tag);
+        let source = e.source().clone();
+        let mut opened = Engine::open(
+            source.clone(),
+            source.listing(),
+            owner.public(),
+            options(&lib),
+            Some(&changed),
+        )
+        .unwrap();
+        assert!(
+            matches!(opened.open_mode(), OpenMode::Invalidated(_)),
+            "bad cache binding trusted"
+        );
+        unlock_engine(&mut opened, &owner);
+        equal(&mut opened, &lib);
+    }
+}
+
+#[test]
+fn review_bulk_live_refresh_keeps_new_digests_and_audits_binding() {
+    let (mut lib, owner, _) = create();
+    for i in 0..40 {
+        support::write(
+            &mut lib,
+            &owner,
+            "listening.podcasts",
+            "position",
+            json!({"id":format!("ep{i}"),"seconds":1}),
+            i,
+        );
+    }
+    let mut e = engine(&lib, &owner);
+    for i in 0..40 {
+        support::write(
+            &mut lib,
+            &owner,
+            "listening.podcasts",
+            "position",
+            json!({"id":format!("ep{i}"),"seconds":2}),
+            i + 40,
+        );
+    }
+    let source = e.source().clone();
+    source.add(lib.records().clone());
+    e.refresh(source.listing()).unwrap();
+    e.verify_batch(1000).unwrap();
+    let cache = e.checkpoint().unwrap();
+    let mut cold = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        Some(&cache),
+    )
+    .unwrap();
+    unlock_engine(&mut cold, &owner);
+    let path = source
+        .listing()
+        .into_iter()
+        .find(|p| p.starts_with("state/"))
+        .unwrap();
+    let bytes = source.0.borrow()[&path].clone();
+    source.add(
+        [(
+            path,
+            resign(&bytes, &owner, |h| h["library"] = json!("another-library")),
+        )]
+        .into(),
+    );
+    assert!(
+        cold.verify_batch(1000).is_err(),
+        "audit trusted a live header from another library"
+    );
+}
+
+#[test]
+fn review_received_retained_predecessor_does_not_invalidate_prefix() {
+    let (mut lib, owner, _) = create();
+    support::write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"ep","seconds":20}),
+        195,
+    );
+    let mut e = engine(&lib, &owner);
+    let pending = success(
+        lib.begin_write(
+            "listening.podcasts",
+            "position",
+            json!({"id":"ep","seconds":3,"seek":true}),
+            NOW,
+            [196; 32],
+        )
+        .unwrap(),
+    );
+    let source = e.source().clone();
+    source.add(finish(pending, &owner));
+    e.refresh(source.listing()).unwrap();
+    assert_eq!(
+        e.open_mode(),
+        &OpenMode::FullVerification,
+        "retained live predecessor invalidated immutable prefix"
+    );
+}
