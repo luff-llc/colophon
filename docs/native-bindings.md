@@ -198,9 +198,12 @@ for ECDH, then `finishUnlock`. The same stale-action rules apply. Close `HostAct
 `NativeLibrary` handles with `use`/`close` to release them deterministically. Generated records
 use `val`, but JVM byte arrays remain mutable; do not mutate shared input arrays concurrently.
 
-## Android AAR (scripted, not run on this machine)
+## Android AAR and session SDK
 
-Install Android command-line tools, an SDK platform, NDK r28 or newer, JDK 17, and `cargo-ndk`:
+Install Android command-line tools, SDK platform 35, NDK r28 or newer, JDK 17, and `cargo-ndk`.
+`sdk/android` is a Gradle Android library (`org.luff.colophon:colophon-android`, minSdk 33,
+compileSdk 35) that compiles the generated Kotlin, the session, Keystore keys, and the
+file-backed store, and packs both JNI ABIs.
 
 ```sh
 cargo install cargo-ndk --locked
@@ -210,22 +213,19 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/<installed-version>"
 bash scripts/build-android.sh
 ```
 
-The script installs the two Rust targets and builds `arm64-v8a` and `x86_64` shared libraries
-with cargo-ndk. It packs `sdk/android/build/colophon-0.2.0.aar` with `AndroidManifest.xml`,
-`classes.jar`, `jni/<abi>/libcolophon_ffi.so`, and consumer ProGuard rules. No Gradle Android
-plugin or SDK installation is added to this worktree. In the consuming app also declare
-`org.jetbrains.kotlin:kotlin-stdlib:2.2.21` and `net.java.dev.jna:jna:5.18.1@aar` so JNA's
-Android `libjnidispatch` is packaged; a local AAR alone does not carry dependency metadata.
+The script installs the two Rust targets, builds `arm64-v8a` and `x86_64` shared libraries
+with cargo-ndk (`-p 33`), and assembles `sdk/android/build/colophon-android-0.2.0.aar`.
+Consuming apps must also declare `org.jetbrains.kotlin:kotlin-stdlib:2.2.21`,
+`net.java.dev.jna:jna:5.18.1@aar`, and `org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2`
+so JNA's Android `libjnidispatch` is packaged; a local AAR alone does not carry POM metadata.
 Validate both the Rust and JNA libraries on a device, including 16 KB page-size compatibility.
 NDK r28+ enables 16 KB alignment by default; application packaging must support it too.
 [Android guidance](https://developer.android.com/guide/practices/page-sizes).
 
-The default minimum API is 31 because Android Keystore adds `PURPOSE_AGREE_KEY` there.
-Create separate P-256 signing and agreement aliases in `AndroidKeyStore`, with signing/SHA-256
-and agreement purposes respectively, then pass their `KeyPair` handles to `PlatformKeys`.
-Private-key export is never requested. Configure user authentication and StrongBox according
-to the host's policy; do not silently replace an unavailable hardware key with software.
-Hardware-backed Keystore and StrongBox are not exercised by the JVM tests.
+`KeystoreKeys` creates separate non-exportable P-256 signing (SHA-256) and agreement
+(`PURPOSE_AGREE_KEY`) aliases in `AndroidKeyStore`, using StrongBox when available and the
+TEE Keystore otherwise. It never mints software keys on a hardware failure. `SoftwareKeys`
+is the explicit test provider. See [Android session](android.md).
 [Android key purposes](https://developer.android.com/reference/android/security/keystore/KeyProperties#PURPOSE_AGREE_KEY),
 [cargo-ndk](https://github.com/bbqsrc/cargo-ndk).
 

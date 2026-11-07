@@ -110,6 +110,16 @@ stay as the record of what shipped.
 7. Delegation research for agent swarms (attenuating grants, approval laundering, tamper-evident
    forensics).
 
+## Android host pins (0.2)
+
+| Dependency | Version | Why |
+| --- | --- | --- |
+| `net.java.dev.jna:jna` (Android AAR) | 5.18.1 | UniFFI 0.32.2 Kotlin transport; the AAR ships `libjnidispatch` per ABI. The same library calls Android libc `renameat2(RENAME_NOREPLACE)` because private app storage denies `link(2)`. The JVM tests keep the JAR. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core` / `android` | 1.10.2 | Session `StateFlow`, single-thread dispatcher, and `withContext` off the main thread. |
+| Android Gradle Plugin | 8.7.3 | Library AAR at compileSdk 35 / minSdk 33, matching Gradle 8.14.3. |
+| Kotlin | 2.2.21 | Same pin as the JVM bindings. |
+| JUnit 4.13.2 / AndroidX Test 1.6.x | — | JVM unit tests and the instrumented emulator journey. |
+
 ## Implemented dependency pins (0.2)
 
 The workspace pins direct dependencies exactly and commits `Cargo.lock`. Runtime dependencies
@@ -165,6 +175,14 @@ a compatible change API. Unlock changes identify the namespace whose key became 
 UniFFI's transitive crates are pinned in `Cargo.lock`; its generator is a host build tool and is
 not linked into mobile binaries. The Kotlin JVM transport uses JNA 5.18.1, Kotlin 2.2.21, and
 Gradle 8.14.3; these are platform tooling/runtime dependencies, not additions to the Rust core.
+The Android library (`org.luff.colophon:colophon-android`) additionally depends on
+`net.java.dev.jna:jna:5.18.1@aar`. UniFFI's Kotlin bindings load `libjnidispatch` from that
+AAR; the JVM JNA JAR does not package Android JNI. The same JNA calls libc
+`renameat2(RENAME_NOREPLACE)` because private app storage denies `link(2)`. It also depends
+on `kotlinx-coroutines-core`/`android` 1.10.2 for `StateFlow` and the single-thread session
+dispatcher, and on Android Gradle Plugin 8.7.3 to assemble the AAR (`minSdk 33`,
+`compileSdk 35`). Instrumented tests use AndroidX Test 1.6.x. None of these enter the Rust
+core or the Swift products.
 The Swift 0.1 reference products retain their existing dependency-free build.
 
 ## Apple app lifecycle (0.2)
@@ -175,3 +193,5 @@ and iCloud location resolution, change notifications and private checkpoint byte
 and durable destination-bound ingress. Its internal `SessionCore` protocol isolates the current
 `ColophonKit` snapshot API from the incoming incremental engine. Neither platform storage nor
 extension envelopes grant authority. See [session contracts](session.md) and [new app](new-app.md).
+The Android `ColophonSession` in `sdk/android` mirrors that lifecycle over `StateFlow`,
+private files, and Android Keystore; see [Android session](android.md).

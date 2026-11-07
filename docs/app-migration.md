@@ -132,8 +132,9 @@ People already have 0.1 libraries (Taupe testers included). On first launch of t
 The `ffi` worktree implements `colophon-ffi`, the async `ColophonKit` facade and CryptoKit
 providers, generated Kotlin/JNA bindings, and the shared consent/write/revoke/reopen journeys.
 All five arm64 Apple slices build, including nightly-built visionOS, and the host JVM journey
-passes. Android's two-ABI AAR build is scripted; SDK/NDK and physical keystore validation remain.
-Storage, `ColophonSession`, and typed domain-store extraction remain the following steps.
+passes. The `android` worktree turns that AAR script into a Gradle library
+(`org.luff.colophon:colophon-android`) with both JNI ABIs, `ColophonSession`, Keystore keys,
+and a private file store. See [Android session](android.md).
 See [native bindings](native-bindings.md), [FFI measurements](performance.md#ffi), and the
 [bindings handoff](handoff-ffi.md) for the exact build gates and sandbox limitations.
 
