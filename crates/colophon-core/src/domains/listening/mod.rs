@@ -885,6 +885,8 @@ impl ListeningPodcasts {
             value["creationRevision"] = json!(op.id);
             value["creation"] = editor(op);
             value["creationOrder"] = json!(op.clock);
+            // First-class creation time: the signer's claimed operation date (§5 metadata).
+            value["created"] = json!(op.created);
             value["anchorClaimed"] = json!(p.get("anchor").is_some());
             if p.get("anchor").is_some() {
                 value["sourceStatus"] = json!("pendingSource");

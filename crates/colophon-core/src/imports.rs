@@ -114,6 +114,9 @@ pub(crate) struct ImportState {
     reserved: BTreeSet<String>,
     blobs: BTreeMap<String, crate::blobs::BlobManifest>,
     references: BTreeMap<String, BTreeSet<String>>,
+    /// Digests a writer marked for eager download on every device (`required: true`).
+    #[serde(default)]
+    required: BTreeSet<String>,
     invalid: BTreeSet<String>,
 }
 impl ImportState {
@@ -128,7 +131,20 @@ impl ImportState {
             reserved: BTreeSet::new(),
             blobs: BTreeMap::new(),
             references: BTreeMap::new(),
+            required: BTreeSet::new(),
             invalid: BTreeSet::new(),
+        }
+    }
+    /// `required: true|false` on a blob publication or reference changes the eager-download hint.
+    fn mark_required(&mut self, digest: &str, payload: &Value) {
+        match payload.get("required").and_then(Value::as_bool) {
+            Some(true) => {
+                self.required.insert(digest.into());
+            }
+            Some(false) => {
+                self.required.remove(digest);
+            }
+            None => {}
         }
     }
     pub fn validate_batch(
@@ -345,6 +361,7 @@ impl ImportState {
                 .entry(manifest.descriptor.digest.clone())
                 .or_default()
                 .insert(reference.into());
+            self.mark_required(&manifest.descriptor.digest, &op.payload);
             self.blobs
                 .entry(manifest.descriptor.digest.clone())
                 .or_insert(manifest);
@@ -367,6 +384,8 @@ impl ImportState {
             } else if op.payload["retain"] == false {
                 refs.remove(reference);
             }
+            let blob = blob.to_owned();
+            self.mark_required(&blob, &op.payload);
         } else {
             if creates_identity(&self.namespace, &op.kind, &op.payload)
                 && op.payload["id"].as_str().is_some_and(|id| {
@@ -494,8 +513,45 @@ impl ImportState {
                     .as_str()
                     .ok_or_else(|| Error("Missing digest".into()))?;
                 Ok(Some(
-                    json!({"manifest":self.blobs.get(key),"references":self.references.get(key).map_or(0,BTreeSet::len)}),
+                    json!({"manifest":self.blobs.get(key),"references":self.references.get(key).map_or(0,BTreeSet::len),"required":self.required.contains(key)}),
                 ))
+            }
+            "blobs" => {
+                // Bounded digest-ordered page of published manifests, without chunk metadata.
+                let limit = args
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(256)
+                    .clamp(1, 1000) as usize;
+                let after = args.get("after").and_then(Value::as_str).unwrap_or("");
+                let only_required = args.get("required").and_then(Value::as_bool);
+                let mut rows = Vec::new();
+                let mut next = Value::Null;
+                for (digest, manifest) in self
+                    .blobs
+                    .range::<str, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+                {
+                    let required = self.required.contains(digest);
+                    if only_required.is_some_and(|wanted| wanted != required) {
+                        continue;
+                    }
+                    if rows.len() == limit {
+                        next = json!(rows
+                            .last()
+                            .and_then(|row: &Value| row["digest"].as_str())
+                            .unwrap_or(""));
+                        break;
+                    }
+                    rows.push(json!({
+                        "digest": digest,
+                        "size": manifest.descriptor.size,
+                        "mediaType": manifest.descriptor.media_type,
+                        "chunks": manifest.chunks.len(),
+                        "references": self.references.get(digest).map_or(0, BTreeSet::len),
+                        "required": required,
+                    }));
+                }
+                Ok(Some(json!({"blobs": rows, "next": next})))
             }
             "importInvalid" => Ok(Some(json!(self
                 .invalid
@@ -515,6 +571,7 @@ pub fn query_names() -> &'static [&'static str] {
         "importReceipt",
         "importIdentity",
         "blob",
+        "blobs",
         "importInvalid",
     ]
 }

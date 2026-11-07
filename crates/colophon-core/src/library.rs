@@ -957,6 +957,10 @@ impl Library {
                 payload["reference"].as_str().is_some_and(|r| !r.is_empty()),
                 "Missing blob reference",
             )?;
+            ensure(
+                payload.get("required").is_none_or(Value::is_boolean),
+                "Blob required flag must be a boolean",
+            )?;
         } else {
             ensure(
                 domain::role_allows(namespace, kind, member.member.kind),

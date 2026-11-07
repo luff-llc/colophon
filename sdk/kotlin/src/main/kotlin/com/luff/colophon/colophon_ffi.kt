@@ -809,7 +809,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_open_blob_chunk(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_read_blob_chunk(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_records_at(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish(
     ): Int
@@ -913,7 +917,11 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_import(`ptr`: Long,`namespace`: RustBuffer.ByValue,`batch`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_open_blob_chunk(`ptr`: Long,`namespace`: RustBuffer.ByValue,`digest`: RustBuffer.ByValue,`index`: Int,`ciphertext`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_read_blob_chunk(`ptr`: Long,`namespace`: RustBuffer.ByValue,`digest`: RustBuffer.ByValue,`index`: Int,`now`: RustBuffer.ByValue,`source`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_records_at(`ptr`: Long,`paths`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_clone_nativeblobwriter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1172,7 +1180,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import() and 0xFFFF) != 32536) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_open_blob_chunk() and 0xFFFF) != 45787) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_read_blob_chunk() and 0xFFFF) != 11638) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_records_at() and 0xFFFF) != 8933) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish() and 0xFFFF) != 7658) {
@@ -2266,7 +2280,19 @@ public interface NativeLibraryInterface {
     
     fun `beginImport`(`namespace`: kotlin.String, `batch`: kotlin.ByteArray, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
     
+    /**
+     * Authenticate ciphertext the host already fetched for chunk `index` of a published blob.
+     * Same checks as `read_blob_chunk` (current grant, address, AEAD, chunk digest), no callback.
+     */
+    fun `openBlobChunk`(`namespace`: kotlin.String, `digest`: kotlin.String, `index`: kotlin.UInt, `ciphertext`: kotlin.ByteArray, `now`: kotlin.String): BlobReadOutcome
+    
     fun `readBlobChunk`(`namespace`: kotlin.String, `digest`: kotlin.String, `index`: kotlin.UInt, `now`: kotlin.String, `source`: BlobSource): BlobReadOutcome
+    
+    /**
+     * Exact bytes for the requested paths that this library holds; absent paths are omitted.
+     * Lets hosts persist a write's new records without copying the whole record map.
+     */
+    fun `recordsAt`(`paths`: List<kotlin.String>): Map<kotlin.String, kotlin.ByteArray>
     
     companion object
 }
@@ -2778,6 +2804,29 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
     
 
     
+    /**
+     * Authenticate ciphertext the host already fetched for chunk `index` of a published blob.
+     * Same checks as `read_blob_chunk` (current grant, address, AEAD, chunk digest), no callback.
+     */
+    @Throws(BindingException::class)override fun `openBlobChunk`(`namespace`: kotlin.String, `digest`: kotlin.String, `index`: kotlin.UInt, `ciphertext`: kotlin.ByteArray, `now`: kotlin.String): BlobReadOutcome {
+            return FfiConverterTypeBlobReadOutcome.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_open_blob_chunk(
+        it,
+        
+        FfiConverterString.lower(`namespace`),
+        FfiConverterString.lower(`digest`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterByteArray.lower(`ciphertext`),
+        FfiConverterString.lower(`now`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(BindingException::class)override fun `readBlobChunk`(`namespace`: kotlin.String, `digest`: kotlin.String, `index`: kotlin.UInt, `now`: kotlin.String, `source`: BlobSource): BlobReadOutcome {
             return FfiConverterTypeBlobReadOutcome.lift(
     callWithHandle {
@@ -2790,6 +2839,25 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
         FfiConverterUInt.lower(`index`),
         FfiConverterString.lower(`now`),
         FfiConverterTypeBlobSource.lower(`source`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Exact bytes for the requested paths that this library holds; absent paths are omitted.
+     * Lets hosts persist a write's new records without copying the whole record map.
+     */
+    @Throws(BindingException::class)override fun `recordsAt`(`paths`: List<kotlin.String>): Map<kotlin.String, kotlin.ByteArray> {
+            return FfiConverterMapStringByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_records_at(
+        it,
+        
+        FfiConverterSequenceString.lower(`paths`),_status)
 }
     }
     )

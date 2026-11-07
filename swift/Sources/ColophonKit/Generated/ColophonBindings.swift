@@ -937,7 +937,19 @@ public protocol NativeLibraryProtocol: AnyObject, Sendable {
     
     func beginImport(namespace: String, batch: Data, now: String, entropy: Data) throws  -> PreparedAction
     
+    /**
+     * Authenticate ciphertext the host already fetched for chunk `index` of a published blob.
+     * Same checks as `read_blob_chunk` (current grant, address, AEAD, chunk digest), no callback.
+     */
+    func openBlobChunk(namespace: String, digest: String, index: UInt32, ciphertext: Data, now: String) throws  -> BlobReadOutcome
+    
     func readBlobChunk(namespace: String, digest: String, index: UInt32, now: String, source: BlobSource) throws  -> BlobReadOutcome
+    
+    /**
+     * Exact bytes for the requested paths that this library holds; absent paths are omitted.
+     * Lets hosts persist a write's new records without copying the whole record map.
+     */
+    func recordsAt(paths: [String]) throws  -> [String: Data]
     
 }
 /**
@@ -1288,6 +1300,24 @@ open func beginImport(namespace: String, batch: Data, now: String, entropy: Data
 })
 }
     
+    /**
+     * Authenticate ciphertext the host already fetched for chunk `index` of a published blob.
+     * Same checks as `read_blob_chunk` (current grant, address, AEAD, chunk digest), no callback.
+     */
+open func openBlobChunk(namespace: String, digest: String, index: UInt32, ciphertext: Data, now: String)throws  -> BlobReadOutcome  {
+    return try  FfiConverterTypeBlobReadOutcome_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_open_blob_chunk(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(namespace),
+        FfiConverterString.lower(digest),
+        FfiConverterUInt32.lower(index),
+        FfiConverterData.lower(ciphertext),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
 open func readBlobChunk(namespace: String, digest: String, index: UInt32, now: String, source: BlobSource)throws  -> BlobReadOutcome  {
     return try  FfiConverterTypeBlobReadOutcome_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
         uniffiCallStatus in
@@ -1298,6 +1328,20 @@ open func readBlobChunk(namespace: String, digest: String, index: UInt32, now: S
         FfiConverterUInt32.lower(index),
         FfiConverterString.lower(now),
         FfiConverterCallbackInterfaceBlobSource_lower(source),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Exact bytes for the requested paths that this library holds; absent paths are omitted.
+     * Lets hosts persist a write's new records without copying the whole record map.
+     */
+open func recordsAt(paths: [String])throws  -> [String: Data]  {
+    return try  FfiConverterDictionaryStringData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_records_at(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(paths),uniffiCallStatus
     )
 })
 }
@@ -4732,7 +4776,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import() != 32536) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_open_blob_chunk() != 45787) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_read_blob_chunk() != 11638) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_records_at() != 8933) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish() != 7658) {

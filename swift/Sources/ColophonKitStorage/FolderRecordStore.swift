@@ -18,10 +18,32 @@ public actor FolderRecordStore: RecordStore {
     }
 
     public func read() throws -> [String: Data] {
+        var result: [String: Data] = [:]
+        for (path, file) in try enumerate() { result[path] = try AtomicFile.read(file, maximumBytes: 16 * 1024 * 1024) }
+        return result
+    }
+    /// Enumerates directories only; no record bytes are read.
+    public func paths() throws -> Set<String> { Set(try enumerate().keys) }
+    public func read(paths: [String]) throws -> [String: Data] {
+        do {
+            try checkAvailability(folder)
+            var result: [String: Data] = [:]
+            for path in paths {
+                try RecordPath.validate(path); try rejectSymlinks(path)
+                let url = folder.appendingPathComponent(path)
+                try checkAvailability(url)
+                guard FileManager.default.fileExists(atPath: url.path) else { continue }
+                result[path] = try AtomicFile.read(url, maximumBytes: 16 * 1024 * 1024)
+            }
+            return result
+        } catch let error as StorageError { throw error }
+        catch { throw StorageError.unavailable(error.localizedDescription) }
+    }
+    private func enumerate() throws -> [String: URL] {
         do {
             try checkAvailability(folder)
             let manager = FileManager.default
-            var result: [String: Data] = [:]
+            var result: [String: URL] = [:]
             for directory in ["authority", "requests", "ops"] {
                 let root = folder.appendingPathComponent(directory)
                 if !manager.fileExists(atPath: root.path) {
@@ -42,7 +64,7 @@ public actor FolderRecordStore: RecordStore {
                     guard canonical.hasPrefix(prefix) else { throw StorageError.invalidPath(file.path) }
                     let path = String(canonical.dropFirst(prefix.count))
                     try RecordPath.validate(path)
-                    result[path] = try AtomicFile.read(file, maximumBytes: 16 * 1024 * 1024)
+                    result[path] = file
                 }
                 if let scanError { throw scanError }
             }
@@ -155,6 +177,34 @@ extension FolderRecordStore: BlobStore {
         let url = folder.appendingPathComponent(path)
         try checkAvailability(url)
         return try AtomicFile.read(url, maximumBytes: 65536 + 16)
+    }
+    public func hasBlob(_ path: String) throws -> Bool {
+        try BlobPath.validate(path); try rejectSymlinks(path)
+        let url = folder.appendingPathComponent(path)
+        try checkAvailability(url)
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+    public func removeBlob(_ path: String) throws {
+        try BlobPath.validate(path); try rejectSymlinks(path)
+        let url = folder.appendingPathComponent(path)
+        do { try FileManager.default.removeItem(at: url) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile { }
+        catch { throw StorageError.unavailable(error.localizedDescription) }
+    }
+    public func blobPaths() throws -> [String: Date] {
+        let root = folder.appendingPathComponent("blobs")
+        guard FileManager.default.fileExists(atPath: root.path) else { try checkAvailability(root); return [:] }
+        let names: [String]
+        do { names = try FileManager.default.contentsOfDirectory(atPath: root.path) }
+        catch { throw StorageError.unavailable(error.localizedDescription) }
+        var result: [String: Date] = [:]
+        for name in names where !name.hasPrefix(".") {
+            let path = "blobs/" + name
+            guard (try? BlobPath.validate(path)) != nil else { continue }
+            let values = try? root.appendingPathComponent(name).resourceValues(forKeys: [.contentModificationDateKey])
+            result[path] = values?.contentModificationDate ?? .distantPast
+        }
+        return result
     }
     public func appendBlob(_ path: String, bytes: Data) throws {
         try BlobPath.validate(path); try rejectSymlinks(path)

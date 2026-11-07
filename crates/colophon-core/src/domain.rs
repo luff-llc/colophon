@@ -171,7 +171,7 @@ pub const NAMESPACES: [&str; 4] = [
 
 // Authenticated local-cache generation for the complete built-in reducer registry.
 // Increment on any projection schema or reducer semantic change, even if serde can decode it.
-pub(crate) const REDUCER_SCHEMA: u32 = 4;
+pub(crate) const REDUCER_SCHEMA: u32 = 5;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum ProjectionState {

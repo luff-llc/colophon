@@ -116,6 +116,47 @@ impl NativeLibrary {
             }),
         }
     }
+    /// Authenticate ciphertext the host already fetched for chunk `index` of a published blob.
+    /// Same checks as `read_blob_chunk` (current grant, address, AEAD, chunk digest), no callback.
+    pub fn open_blob_chunk(
+        &self,
+        namespace: String,
+        digest: String,
+        index: u32,
+        ciphertext: Vec<u8>,
+        now: String,
+    ) -> Result<BlobReadOutcome> {
+        let s = self.lock()?;
+        if let Outcome::Failure { reason, detail, .. } =
+            s.library.blob_manifest(&namespace, &digest, &now)?
+        {
+            return Ok(if reason == "unavailable" {
+                BlobReadOutcome::Missing
+            } else {
+                BlobReadOutcome::Inaccessible { detail }
+            });
+        }
+        match s
+            .library
+            .open_blob_chunk(&namespace, &digest, index as usize, &ciphertext, &now)
+        {
+            Ok(Outcome::Success { value, .. }) => Ok(BlobReadOutcome::Available { bytes: value }),
+            Ok(Outcome::Failure { detail, .. }) => Ok(BlobReadOutcome::Inaccessible { detail }),
+            Err(error) => Ok(BlobReadOutcome::Invalid {
+                detail: error.to_string(),
+            }),
+        }
+    }
+    /// Exact bytes for the requested paths that this library holds; absent paths are omitted.
+    /// Lets hosts persist a write's new records without copying the whole record map.
+    pub fn records_at(&self, paths: Vec<String>) -> Result<Records> {
+        let s = self.lock()?;
+        let records = s.library.records();
+        Ok(paths
+            .into_iter()
+            .filter_map(|path| records.get(&path).map(|bytes| (path, bytes.clone())))
+            .collect())
+    }
     pub fn read_blob_chunk(
         &self,
         namespace: String,

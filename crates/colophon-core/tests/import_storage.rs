@@ -861,3 +861,70 @@ fn invalid_children_are_atomic_and_reservations_are_category_scoped() {
     assert_eq!(query(&lib, "read", json!({})), before);
     assert!(query(&lib, "importReceipt", json!({"key":"bad-unit"})).is_null());
 }
+#[test]
+fn ordinary_blob_publication_marks_required_and_pages_manifests() {
+    let (mut lib, owner, _) = create();
+    let mut digests = Vec::new();
+    for (i, required) in [(0u8, true), (1, false), (2, true)] {
+        let mut writer = match lib
+            .begin_blob("notes", "text/plain".into(), NOW, [140 + i; 32])
+            .unwrap()
+        {
+            Outcome::Success { value, .. } => value,
+            _ => panic!(),
+        };
+        writer.push(format!("blob {i}").as_bytes()).unwrap();
+        let manifest = writer.finish().unwrap();
+        digests.push(manifest.descriptor.digest.clone());
+        write(
+            &mut lib,
+            &owner,
+            "notes",
+            "colophon.blobPublish",
+            json!({"manifest":manifest,"reference":format!("item-{i}"),"required":required}),
+            150 + i,
+        );
+    }
+    let blob = query(&lib, "blob", json!({"digest":digests[0]}));
+    assert_eq!(blob["required"], true);
+    assert_eq!(blob["references"], 1);
+    let all = query(&lib, "blobs", json!({"limit":2}));
+    assert_eq!(all["blobs"].as_array().unwrap().len(), 2);
+    let next = all["next"].as_str().unwrap().to_owned();
+    let rest = query(&lib, "blobs", json!({"after":next}));
+    assert_eq!(rest["blobs"].as_array().unwrap().len(), 1);
+    assert!(rest["next"].is_null());
+    let required = query(&lib, "blobs", json!({"required":true}));
+    let mut wanted: Vec<_> = vec![digests[0].clone(), digests[2].clone()];
+    wanted.sort();
+    let listed: Vec<_> = required["blobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["digest"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(listed, wanted);
+    assert_eq!(required["blobs"][0]["chunks"], 1);
+    // A reference write can clear the eager hint; replay reproduces it.
+    write(
+        &mut lib,
+        &owner,
+        "notes",
+        "colophon.blobReference",
+        json!({"digest":digests[0],"reference":"item-0","retain":false,"required":false}),
+        160,
+    );
+    let replay = opened(lib.records().clone(), &owner);
+    let blob = query(&replay, "blob", json!({"digest":digests[0]}));
+    assert_eq!(blob["required"], false);
+    assert_eq!(blob["references"], 0);
+    assert!(lib
+        .begin_write(
+            "notes",
+            "colophon.blobPublish",
+            json!({"manifest":blob["manifest"],"reference":"x","required":"yes"}),
+            NOW,
+            [161; 32],
+        )
+        .is_err());
+}

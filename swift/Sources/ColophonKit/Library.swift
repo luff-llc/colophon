@@ -108,6 +108,15 @@ public actor Library {
         }
     }
 
+    /// Authenticates ciphertext the host fetched for chunk `index` of a published blob. Rechecks
+    /// the current grant, the content address, AEAD and the chunk's plaintext digest.
+    public func openBlobChunk(namespace: String, digest: String, index: Int, ciphertext: Data) throws -> BlobReadOutcome {
+        try native.openBlobChunk(namespace: namespace, digest: digest, index: UInt32(index), ciphertext: ciphertext, now: HostInputs.now())
+    }
+
+    /// Exact bytes for the given paths, without copying the whole record map.
+    public func records(at paths: [String]) throws -> [String: Data] { try native.recordsAt(paths: paths) }
+
     public func write(namespace: String, kind: String, payload: Data) async throws -> Outcome<OperationView> {
         try await ready()
         let prepared = try native.beginWrite(namespace: namespace, kind: kind, payload: payload, now: HostInputs.now(), entropy: HostInputs.entropy())

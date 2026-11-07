@@ -246,6 +246,7 @@
             "alternativeCount": 1,
             "anchorClaimed": false,
             "authorLabel": "Owner",
+            "created": "2026-11-04T12:00:00.000Z",
             "creationRevision": "1a0aa0650f923b9afe9f4bb754090e81",
             "episode": "one",
             "id": "note",
@@ -274,6 +275,7 @@
           "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
           "authorLabel": "Owner",
           "clock": 12,
+          "created": "2026-11-04T12:00:00.000Z",
           "creation": {
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",

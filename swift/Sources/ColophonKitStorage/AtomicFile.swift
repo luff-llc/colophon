@@ -35,6 +35,23 @@ public enum AtomicFile {
         guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
+    /// Appends to a private log, creating it with mode 0600. The caller tolerates a torn tail.
+    public static func append(_ bytes: Data, to url: URL) throws {
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: url.path) {
+            try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+            guard manager.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+                throw StorageError.unavailable("Cannot create private log")
+            }
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: bytes)
+        try handle.synchronize()
+    }
+
     public static func read(_ url: URL, maximumBytes: Int) throws -> Data {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard attributes[.type] as? FileAttributeType == .typeRegular,

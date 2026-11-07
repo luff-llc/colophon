@@ -8,7 +8,7 @@ import ColophonKitStorage
 actor SessionWorker {
     let configuration: SessionConfiguration
     private var keys: any AsyncKeyProvider
-    private let core: any SessionCore
+    let core: any SessionCore
     private var store: (any RecordStore)?
     private var journal = SessionJournal()
     private var loaded = false
@@ -19,24 +19,26 @@ actor SessionWorker {
     private var occupied = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let journalURL: URL
-    private var relaySync: RelaySync?
+    var relaySync: RelaySync?
+    var blobIndex: Set<String>?
+    var completeRequired = Set<String>()
 
     init(configuration: SessionConfiguration, core: any SessionCore = BindingSessionCore(), store: (any RecordStore)? = nil) {
         self.configuration = configuration; self.keys = configuration.keys; self.core = core; self.store = store
         journalURL = configuration.privateContainer.appendingPathComponent("session.json")
     }
-    private func enter() async {
+    func enter() async {
         if occupied { await withCheckedContinuation { waiters.append($0) } } else { occupied = true }
     }
-    private func exit() {
+    func exit() {
         if waiters.isEmpty { occupied = false } else { waiters.removeFirst().resume() }
     }
-    private func storage() throws -> any RecordStore {
+    func storage() throws -> any RecordStore {
         if let store { return store }
         let resolved = try configuration.location.resolve(); store = resolved; return resolved
     }
     func changes() async throws -> AsyncStream<Void> { try await storage().changes() }
-    private func relay() throws -> RelaySync? {
+    func relay() throws -> RelaySync? {
         if let relaySync { return relaySync }
         guard let relay = configuration.relay else { return nil }
         let created = RelaySync(local: try storage(), endpoint: relay.endpoint, transport: relay.transport,
@@ -72,7 +74,7 @@ actor SessionWorker {
         if journal.left { return empty(.noLibrary) }
         return try await refreshLocked()
     }
-    private func refreshLocked() async throws -> SessionSnapshot {
+    func refreshLocked() async throws -> SessionSnapshot {
         if !configuration.migrationWriter, let marker = configuration.migrationMarker,
            try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
         var records = try await storage().read()
@@ -189,7 +191,8 @@ actor SessionWorker {
         }
         guard observed == revision else { throw SessionRefusal(snapshot: fresh, error: .staleRevision) }
         guard configuration.namespaces.contains(command.namespace), configuration.access.contains(.write) else { throw SessionError.invalidCommand }
-        guard command.payload.count <= (migrationKey != nil && command.kind == "colophon.importBatch" ? 1024 * 1024 : 256 * 1024) else { throw SessionError.invalidCommand }
+        let ceiling = migrationKey != nil && command.kind == "colophon.importBatch" || command.kind == "colophon.blobPublish" ? 1024 * 1024 : 256 * 1024
+        guard command.payload.count <= ceiling else { throw SessionError.invalidCommand }
         if let ingress {
             guard let snapshot = fresh.core, ingress.libraryID == snapshot.libraryID, ingress.memberID == snapshot.me.id else { throw SessionError.destinationChanged }
             if let receipt = journal.ingress[ingress.id] {

@@ -459,9 +459,19 @@ RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_begin_blob(uint64_t ptr, 
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_begin_import(uint64_t ptr, RustBuffer namespace, RustBuffer batch, RustBuffer now, RustBuffer entropy, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_OPEN_BLOB_CHUNK
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_OPEN_BLOB_CHUNK
+RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_open_blob_chunk(uint64_t ptr, RustBuffer namespace, RustBuffer digest, uint32_t index, RustBuffer ciphertext, RustBuffer now, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_READ_BLOB_CHUNK
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_READ_BLOB_CHUNK
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_read_blob_chunk(uint64_t ptr, RustBuffer namespace, RustBuffer digest, uint32_t index, RustBuffer now, uint64_t source, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_RECORDS_AT
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_RECORDS_AT
+RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_records_at(uint64_t ptr, RustBuffer paths, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_CLONE_NATIVEBLOBWRITER
@@ -1015,9 +1025,21 @@ uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_OPEN_BLOB_CHUNK
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_OPEN_BLOB_CHUNK
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_open_blob_chunk(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_READ_BLOB_CHUNK
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_READ_BLOB_CHUNK
 uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_read_blob_chunk(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_RECORDS_AT
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_RECORDS_AT
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_records_at(void
     
 );
 #endif

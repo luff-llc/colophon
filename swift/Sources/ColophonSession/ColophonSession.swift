@@ -20,7 +20,9 @@ import ColophonKitStorage
     public private(set) var lastSynced: Date?
     /// Paths whose relay bytes differ from this device's records, from the latest pass.
     public private(set) var syncConflicts: [String] = []
-    @ObservationIgnored private let worker: SessionWorker
+    /// In-progress blob downloads by digest; absent when nothing is downloading.
+    public internal(set) var blobDownloads: [String: BlobAvailability] = [:]
+    @ObservationIgnored let worker: SessionWorker
     @ObservationIgnored private var retryCreate = false
     @ObservationIgnored private var restoreTask: Task<Void, Never>?
     @ObservationIgnored private var watchTask: Task<Void, Never>?
@@ -29,7 +31,9 @@ import ColophonKitStorage
     @ObservationIgnored private var views: [String: NamespaceView] = [:]
     @ObservationIgnored private var caches: [UUID: @MainActor (Set<String>, Bool) -> Void] = [:]
     @ObservationIgnored private let relay: RelayConfiguration?
+    var relayConfigured: Bool { relay != nil }
     @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var requiredBlobsChecked = false
     @ObservationIgnored private let syncSignal = SyncSignal()
 
     public init(configuration: SessionConfiguration) {
@@ -182,6 +186,10 @@ import ColophonKitStorage
             } else { syncState = .idle }
             // Pulled records reach the core exactly like another process's folder writes.
             if (report?.pulled ?? 0) > 0 || phase != .ready { await refresh() }
+            if (report?.pulled ?? 0) > 0 || !requiredBlobsChecked {
+                requiredBlobsChecked = true
+                await downloadRequiredBlobs()
+            }
             return true
         } catch is CancellationError {
             return false
