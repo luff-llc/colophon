@@ -356,4 +356,32 @@ fn main() {
     let started = Instant::now();
     engine.verify_batch(128).unwrap();
     report("background verify 128", started);
+    // Exercise retention against the full cached prefix, independently of the timed 1% suffix.
+    let before = engine.stats();
+    for seek in [false, true] {
+        let pending = success(engine.begin_write("listening.podcasts", "position",
+            json!({"id":"review-live-episode","seconds":if seek { 3 } else { 20 },"seek":seek}), NOW, [if seek { 213 } else { 212 };32]).unwrap());
+        assert_eq!(pending.copies.len(), usize::from(seek));
+        let records = finish(pending, &owner);
+        let paths = records.keys().cloned().collect();
+        source.0.borrow_mut().extend(records);
+        engine.apply_paths(paths).unwrap();
+    }
+    let after = engine.stats();
+    assert_eq!(after.applied_operations - before.applied_operations, 2);
+    assert_eq!(after.signatures_verified - before.signatures_verified, 3);
+    assert_eq!(
+        success(
+            engine
+                .query(
+                    "listening.podcasts",
+                    "getEpisode",
+                    json!({"id":"review-live-episode"}),
+                    NOW
+                )
+                .unwrap()
+        )["seconds"],
+        3.0
+    );
+    println!("live then deliberate seek over {count}-operation prefix: 1 retained predecessor, 3 signatures, 2 applications, no prefix replay");
 }

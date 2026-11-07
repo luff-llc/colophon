@@ -51,6 +51,91 @@ fn cold_open(records: colophon_core::model::Records, owner: &SoftwareKeys, id: &
     elapsed
 }
 
+// Exercise the storage engine boundary, exact predecessor retention, and incremental replay.
+fn deliberate_seek(lib: &mut Library, owner: &SoftwareKeys) {
+    use colophon_core::{
+        engine::{Engine, EngineOptions, RecordSource},
+        model::Records,
+        Result,
+    };
+    use std::{cell::RefCell, rc::Rc};
+    #[derive(Clone)]
+    struct Source(Rc<RefCell<Records>>);
+    impl RecordSource for Source {
+        fn read(&self, path: &str) -> Result<Vec<u8>> {
+            Ok(self.0.borrow()[path].clone())
+        }
+    }
+    let source = Source(Rc::new(RefCell::new(lib.records().clone())));
+    let mut engine = Engine::open(
+        source.clone(),
+        source.0.borrow().keys().cloned().collect(),
+        owner.public(),
+        EngineOptions {
+            library_id: lib.id().into(),
+            checkpoint_key: [31; 32],
+            content_cache_bytes: 0,
+            namespaces: vec!["listening.podcasts".into()],
+        },
+        None,
+    )
+    .unwrap();
+    let shared = engine
+        .begin_unlock()
+        .into_iter()
+        .map(|s| (s.namespace, s.epoch, owner.agree(&s.peer).unwrap()))
+        .collect();
+    engine.finish_unlock_many(shared).unwrap();
+    let before = engine.stats();
+    let current = success(
+        engine
+            .query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+            .unwrap(),
+    );
+    let pending = success(
+        engine
+            .begin_write(
+                "listening.podcasts",
+                "position",
+                json!({"id":"ep","seconds":3,"seek":true,"expect":current["positionRevision"]}),
+                NOW,
+                [199; 32],
+            )
+            .unwrap(),
+    );
+    let copies = pending.copies.len();
+    if lib.authority().layout >= 2 {
+        assert_eq!(copies, 1);
+    }
+    let records = finish(pending, owner);
+    source.0.borrow_mut().extend(records.clone());
+    engine
+        .refresh(source.0.borrow().keys().cloned().collect())
+        .unwrap();
+    assert_eq!(
+        engine.stats().applied_operations - before.applied_operations,
+        (copies + 1) as u64
+    );
+    assert_eq!(
+        success(
+            engine
+                .query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )["seconds"],
+        3.0
+    );
+    lib.merge(records).unwrap();
+    let cold = opened(lib.records().clone(), owner);
+    assert_eq!(
+        success(
+            cold.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )["seconds"],
+        3.0
+    );
+    println!("post-playback seek: retained={copies}, applied={}, no prefix replay; cold reopen position=3",engine.stats().applied_operations-before.applied_operations);
+}
+
 fn main() {
     let n: u64 = std::env::args()
         .nth(1)
@@ -83,6 +168,7 @@ fn main() {
         position(&mut lib, &owner, i);
     }
     let immutable_ms = started.elapsed().as_secs_f64() * 1000.0;
+    deliberate_seek(&mut lib, &owner);
     let immutable_ops = lib
         .records()
         .keys()
@@ -113,6 +199,7 @@ fn main() {
         position(&mut live, &owner, i);
     }
     let live_ms = started.elapsed().as_secs_f64() * 1000.0;
+    deliberate_seek(&mut live, &owner);
     let live_ops = live
         .records()
         .keys()

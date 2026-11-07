@@ -1,0 +1,54 @@
+{
+  "date": "2026-11-07",
+  "platform": "arm64 macOS, Swift 6.4.2, Rust 1.91.1, JDK 17",
+  "units": "milliseconds",
+  "runs": 1,
+  "boundary": "fresh native session objects; warm process/filesystem; memory record provider; private cache and journal filesystem I/O included; fixture/store construction excluded; merged v03 review fixes, COLOENG4/reducer schema 7",
+  "baseline": "previous BindingSessionCore via test adapter, current worker/provider and current Rust build; not untouched f5839c2 binaries; includes merged review fixes in the current Rust core",
+  "results": {
+    "swift": {
+      "legacy": {
+        "checkpoint_open": 13543.807,
+        "passive_write": 31631.109,
+        "notes_write": 32998.636,
+        "checkpoint_plus_1_percent": 14785.222,
+        "taupe_open": 6.187
+      },
+      "engine": {
+        "checkpoint_open": 757.398,
+        "passive_write": 5.333,
+        "notes_write": 4.099,
+        "checkpoint_plus_1_percent": 789.14,
+        "taupe_open": 7.152
+      }
+    },
+    "kotlin": {
+      "legacy": {
+        "checkpoint_open": 12785.728,
+        "passive_write": 30511.383,
+        "notes_write": 40881.623,
+        "checkpoint_plus_1_percent": 22815.439,
+        "taupe_open": 10.221
+      },
+      "engine": {
+        "checkpoint_open": 463.756,
+        "passive_write": 11.411,
+        "notes_write": 8.188,
+        "checkpoint_plus_1_percent": 456.958,
+        "taupe_open": 9.528
+      }
+    }
+  },
+  "fixture": {
+    "immutable_base": 100000,
+    "immutable_suffix": 1000,
+    "taupe": {
+      "authority": 3,
+      "ops": 20,
+      "state": 1,
+      "history": 9991,
+      "passive_samples": 10000,
+      "final_seek": false
+    }
+  }
+}

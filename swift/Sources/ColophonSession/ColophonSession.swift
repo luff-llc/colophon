@@ -182,12 +182,12 @@ import ColophonKitStorage
     /// Reads a bounded core query. Results are fenced against namespace and identity changes.
     public func query(namespace: String, name: String, arguments: Data) async throws -> Data {
         await restore()
-        guard phase == .ready || phase == .refreshing else { throw SessionError.notReady }
+        guard hasUsableContent else { throw SessionError.notReady }
         let lease = context
         let observed = namespaceRevisions[namespace, default: 0]
         do {
             let bytes = try await worker.query(namespace: namespace, name: name, arguments: arguments)
-            guard context == lease, (phase == .ready || phase == .refreshing),
+            guard context == lease, hasUsableContent,
                   namespaceRevisions[namespace, default: 0] == observed else { throw SessionError.staleRevision }
             return bytes
         } catch {
@@ -330,14 +330,21 @@ import ColophonKitStorage
         if !lost { scheduleCheckpoint() }
         for invalidate in caches.values { invalidate(changed, lost) }
         expiryTask?.cancel(); expiryTask = nil
-        if let expires = snapshot.core?.me.grant?.expires,
-           let date = try? Date(expires, strategy: .iso8601), date > .now {
+        if hasUsableContent, let expires = snapshot.core?.me.grant?.expires,
+           let date = Self.grantExpiryRefreshDate(expires) {
             expiryTask = Task { [weak self] in
                 do { try await Task.sleep(for: .seconds(max(0, date.timeIntervalSinceNow))) } catch { return }
                 await self?.refresh()
             }
         }
         lastError = nil
+    }
+    // HostInputs.now() emits whole seconds and expiry is inclusive. Wake at the first
+    // representable host instant strictly after either accepted timestamp format.
+    static func grantExpiryRefreshDate(_ expires: String) -> Date? {
+        guard let date = (try? Date(expires, strategy: .iso8601)) ??
+            (try? Date(expires, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))) else { return nil }
+        return Date(timeIntervalSince1970: floor(date.timeIntervalSince1970) + 1)
     }
     private func invalidateContext() {
         context = UUID(); views = [:]; members = []; ledgerValue = []; ledgerEngine = nil; requests = []; libraryID = nil; memberID = nil

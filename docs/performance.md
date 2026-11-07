@@ -2,7 +2,54 @@
 
 ## Native session engine migration
 
-November 7, 2026, this `engine-sessions` worktree. Actual `ColophonSession.restore()` and
+### After merging the v03 review fixes
+
+November 7, 2026, this merged `engine-sessions` worktree. Single sequential confirmation runs
+on the same development arm64 Mac, Swift 6.4.2 release, JDK 17 (2 GiB test heap), and Rust 1.91.1
+release/LTO/opt-level 3 with ARM AES/POLYVAL acceleration. Both adapters use the merged Rust core.
+The compatibility column uses the previous BindingSessionCore through the current worker/provider;
+it is not an untouched older binary. The engine column restores a member-protected `COLOENG4`
+checkpoint with reducer schema 7 and validated author-key/epoch/authority bindings.
+
+| Native session measurement | Swift compatibility | Swift engine | Kotlin compatibility | Kotlin engine |
+| --- | ---: | ---: | ---: | ---: |
+| 100k cold session reopen / checkpoint hit | 13,543.807 ms | 757.398 ms | 12,785.728 ms | 463.756 ms |
+| 100k + 1,000 new immutable records | 14,785.222 ms | 789.140 ms | 22,815.439 ms | 456.958 ms |
+| First passive podcast write after reopen | 31,631.109 ms | 5.333 ms | 30,511.383 ms | 11.411 ms |
+| Notes write | 32,998.636 ms | 4.099 ms | 40,881.623 ms | 8.188 ms |
+| Taupe-shaped open (no checkpoint) | 6.187 ms | 7.152 ms | 10.221 ms | 9.528 ms |
+
+**The <150 ms checkpoint-open and <5 ms passive-write gates remain missed on both platforms.**
+These are warm-process/filesystem, new-session-object measurements with software keys and memory
+record bodies. They include private journal/cache filesystem I/O, inventory, FFI, signing,
+publication/readback and receipt checks; fixture/store construction and hashing are excluded.
+They are neither mobile launch measurements nor latency distributions. The oldest-supported-iPhone
+<500 ms goal remains unmeasured. Small differences from the historical run below are not evidence
+of a performance improvement or regression from one sample.
+
+Both languages assert zero covered operation reads/verifications/decryptions/applications on the
+100k checkpoint hit, exactly 1,000 of each for the independent suffix, and zero immutable reducer
+applications for the passive write. Named queries, lazy ledger loading, bounded episode preparation,
+provider deltas and delayed checkpoint saves remain active; no full historical materialization was
+introduced into the ordinary engine session path.
+
+The regenerated native Taupe fixture contains **20 immutable operations, one live slot, 9,991
+history records and three authority records** after 10,000 samples: 21 opening operation/state
+paths, 10,015 stored records. Nine bounded-clock anchors each retain a predecessor. It does not
+include the final seek used by v03's separate Rust-only Taupe table below, which has 22 immutable
+operations. Deliberate seek retention/reopen is covered by both native playback tests, the
+1,030-tick engine regression and the cross-platform relay journey. The older three-path native
+fixture below is retained only as historical evidence.
+
+Reproduction remains `bash scripts/bench-sessions.sh` after the release native artifact build.
+Raw merged logs/XML are `target/engine-sessions/{swift,kotlin}-{legacy,engine}.{log,xml}`;
+[merged result data](benchmarks/engine-sessions-v03-merge.json) preserves all four columns.
+Validation logs are in `target/engine-sessions/merge-validation/`. The historical native and v03
+Rust tables below retain their original measurement boundaries and numbers.
+
+### Before the v03 review merge (historical)
+
+November 7, 2026, `engine-sessions` before merging the v03 review fixes. Actual `ColophonSession.restore()` and
 `perform()` calls on the development arm64 Mac: Swift 6.4.2 in release configuration, Kotlin
 on JDK 17 (2 GiB test heap), Rust 1.91.1 with release/LTO/opt-level 3. RustCrypto's accelerated
 ARM AES/POLYVAL backends are enabled for both columns. These are single confirmation runs,
@@ -44,8 +91,10 @@ Inside are session journal/cache reads, path discovery and version inventory, FF
 opening/unlock, readiness publication, and (for writes) signing, private journal fsync, record
 publication/readback and receipt checks. Records use built-in memory providers; private files
 use the real filesystem. The 100k fixture has four domains; the 1,000-record suffix uses
-explicit seeks. The Taupe shape follows one show, establishes one episode and publishes 10,000
+explicit seeks. The historical Taupe shape follows one show, establishes one episode and publishes 10,000
 passive samples: two immutable operations, one current live slot, and retained history evidence.
+That pre-review fixture predates bounded-clock anchors; its path count and small-open timings
+must not be presented as the merged implementation's measurements.
 No first-screen rendering, secure hardware-key access or real folder-provider launch is timed.
 
 Full path/version inventory, protected-cache decoding and known-path journal loading still
@@ -63,83 +112,93 @@ bash scripts/bench-sessions.sh
 ```
 
 The script generates signed fixtures when needed and runs both modes sequentially. Raw logs and
-JVM XML reports are in `target/engine-sessions/{swift,kotlin}-{legacy,engine}.{log,xml}`;
+JVM XML reports from this historical run are archived in `target/engine-sessions/pre-merge-benchmarks/`;
 [the checked-in result data](benchmarks/engine-sessions.json) records the measured boundary and
 numbers. Full validation logs are retained in `target/engine-sessions/validation/`.
 
-## Colophon 0.3 — November 7, 2026
+## Colophon 0.3 — November 7, 2026, after review fixes
 
-Final measurements on the development arm64 Mac, Rust 1.91.1, release/LTO with
-`CARGO_PROFILE_RELEASE_OPT_LEVEL=3`. These are single confirmation runs after the build/test jobs
+Measurements on the development arm64 Mac, Rust 1.91.1, release/LTO with
+`CARGO_PROFILE_RELEASE_OPT_LEVEL=3`. These are single confirmation runs after build/test jobs
 completed, with uncontrolled/warm filesystem caching. They are not mobile launch timings, medians,
-tail-latency guarantees or measurements of secure-key access. Logs: `target/v03-validation/`.
+tail-latency guarantees or secure-key access measurements. Raw logs are
+`target/v03-validation/review-{bench-100k,storage-bench,storage-cold-suffix,taupe-bench}.log`.
+These v03-branch results supersede that branch's earlier 0.3 measurements. They are preserved
+as the reviewed Rust-only boundary, not a rerun of the merged native sessions above.
 
 ### 100k immutable operations
 
 The four-domain fixture contains 100,000 immutable operations and 100,010 indexed records. The
-1% suffix now explicitly uses deliberate seeks: passive positions would become live state in 0.3
-and would no longer test 1,000 new immutable records. Fixture generation and listing construction
-are excluded. Checkpoint timings measure the raw storage-engine checkpoint, including unlock;
-the new optional encrypted private-envelope encoding/decoding and native session UI are excluded.
+1% suffix uses deliberate seeks, so it tests 1,000 new immutable records. Fixture generation and
+listing construction are excluded. Checkpoint timings include storage-engine unlock; the optional
+encrypted private-envelope encoding/decoding and native session UI are excluded.
 
-| Measurement | Colophon 0.3 | Earlier target |
+| Measurement | Reviewed Colophon 0.3 | Earlier target |
 | --- | ---: | ---: |
-| Full rebuild including unlock | **1,335.215 ms** | <1,500 ms, met |
-| Unchanged checkpoint open including unlock | **92.261 ms** | <100 ms, met |
-| Local immutable write, software sign, memory persistence and apply | **0.899 ms** | <2 ms, met |
-| In-memory checkpoint plus 1,000 new operations | 109.433 ms | <100 ms, missed |
-| Fresh-process disk checkpoint plus 1,000 new operations | **116.858 ms** | <100 ms, missed |
-| Checkpoint serialization | 102.995 ms | No gate |
-| Lazy 50-operation history page | 6.271 ms | No gate |
-| Independent 128-record audit | 33.991 ms | No gate |
+| Full rebuild including unlock | **1,377.192 ms** | <1,500 ms, met |
+| Unchanged checkpoint open including unlock | **124.977 ms** | <100 ms, missed |
+| Local immutable write, software sign, memory persistence and apply | **1.007 ms** | <2 ms, met |
+| In-memory checkpoint plus 1,000 new operations | **136.695 ms** | <100 ms, missed |
+| Fresh-process disk checkpoint plus 1,000 new operations | **142.493 ms** | <100 ms, missed |
+| Checkpoint serialization | 106.635 ms | No gate |
+| Lazy 50-operation history page | 6.106 ms | No gate |
+| Independent 128-record audit | 34.062 ms | No gate |
 
-The final checkpoint is **25,589,380 bytes**. It now includes namespaced paths, author/epoch and
-provider-version bindings and playback ordering barriers. The previous engine3 checkpoint was
-19,249,071 bytes; its fresh-process suffix measurement was 95.297 ms. The stronger 0.3 index does
-not meet that earlier suffix-time target in this run. This is an explicit remaining performance
-limit, not a failing correctness check or an assertion that the old gate remains satisfied.
-A linear merge walk compares current and cached sorted listings; unchanged restoration reads,
-verifies, decrypts and applies **zero** operation records. Both suffix runs read/verify/decrypt/apply
-exactly **1,000** operations. Full rebuild verifies/decrypts/applies all **100,000** operations.
-History fetches only the requested 50 payloads and retains 11,539 cache bytes. All projection and
-work-counter assertions passed. RSS was not remeasured.
+The checkpoint is **26,389,480 bytes**, using `COLOENG4` and reducer schema 7. It includes
+validated author-key/epoch/authority bindings and a map for live generation/digest witnesses.
+The earlier 0.3 checkpoint was 25,589,380 bytes, with unchecked key/epoch fields and no persisted
+live high-water witnesses. Current restoration validates these bindings. Both unchanged and
+suffix opens miss the earlier 100 ms target; no claim is made that those timing gates remain met.
 
-The separately rerun compatibility `Library` benchmark uses the same 100k fixture, but a different
-API and checkpoint boundary. It reports **1,600.736 ms** for a full rebuild, **1,279.650 ms** for a
-cold checkpoint open (which still verifies/decrypts records), and **96.452 ms** for a warm restore
-after verification/decryption. A passive podcast write including signing and merge takes
-**95.622 ms** with zero immutable reducer applications; a quieter notes write takes **0.542 ms**.
-These adapter timings must not be substituted with the faster storage-engine results. At the 0.3 baseline, native
-sessions used this adapter: removing unchanged body reads does not eliminate its projection
-and merge CPU costs. Log: `target/v03-validation/bench-100k.log`.
+Unchanged restoration reads, verifies, decrypts and applies **zero** operation records, while
+still authenticating and scanning the cache/index. Both suffix runs read/verify/decrypt/apply
+exactly **1,000** operations. Full rebuild verifies/decrypts/applies **100,000** operations.
+History fetches 50 payloads and retains 11,539 cache bytes. RSS was not remeasured.
 
-### Taupe-shaped passive playback
+The storage harness now also publishes a live sample followed by a deliberate seek over the full
+100k base and its suffix. It asserts **one retained predecessor, three signature verifications,
+and two immutable applications**, with no prefix replay. This correctness assertion is separate
+from the timed 1,000-operation suffix and does not change its saved fixture.
 
-Synthetic workload: follow one show, establish one episode, then publish **10,000 passive position
-samples**. Before/after use the same commands and keys: implicit layout 1 stores samples as immutable
-operations; layout 2 uses live state. Each cold open creates a new storage engine with no checkpoint,
-authenticates authority, unlocks keys, verifies/decrypts opening records and prepares the current
-state. Source maps/listings and fixture generation are outside timing; first UI/query rendering is
-not timed. This is a shape comparison, not a production Taupe trace.
+The compatibility `Library` benchmark uses the same fixture but a different API/cache boundary:
+**1,595.063 ms** full rebuild, **1,223.594 ms** cold checkpoint open (still verifying/decrypting
+records), and **97.020 ms** warm restore after verification/decryption. A passive podcast write
+including signing/merge takes **96.795 ms**, with zero immutable reducer applications; a quieter
+notes write takes **0.567 ms**. Before the engine migration, native sessions used this adapter. Removing unchanged record-body
+reads does not remove its projection/merge CPU cost.
 
-| Measurement | Immutable samples (layout 1) | Live samples (layout 2) |
+### Taupe-shaped passive playback, then deliberate intent
+
+The workload follows one show, establishes one episode, publishes **10,000 passive samples**, and
+then performs a **deliberate seek through Engine**, explicitly referencing the observed position.
+Both layouts must retain any required predecessor, apply the seek and reopen at position 3.
+The live case asserts one predecessor copy and two incremental immutable applications. This fixes
+the old passive-only harness, which could not reveal lost intent or retention-triggered replay.
+
+Each timed cold open creates a new storage engine without a checkpoint, authenticates authority,
+unlocks keys and verifies/decrypts opening records. Source maps/listings and fixture generation
+are excluded; first UI/query rendering is not timed. Sample-write timing excludes the final seek
+and its correctness checks. This is a synthetic shape comparison, not a production Taupe trace.
+
+| Measurement after final seek | Immutable samples (layout 1) | Live samples (layout 2) |
 | --- | ---: | ---: |
-| Immutable `ops/` records | 10,002 | **2** |
+| Immutable `ops/` records | 10,003 | **22** |
 | Current `state/` slots | 0 | **1** |
-| Append-only `history/` evidence records | 0 | **10,000** |
-| Opening operation/state paths | 10,002 | **3** |
-| All stored records, including authority and evidence | 10,004 | 10,006 |
-| Cold open | **143.115 ms** | **1.971 ms** |
-| Total sample-write time | 4,142.103 ms | 5,909.767 ms |
-| Opening operation signatures/decryptions | 10,002 | 3 |
-| Immutable reducer applications | 10,002 | 2 |
+| Append-only `history/` records | 0 | **9,991** |
+| Opening operation/state paths | 10,003 | **23** |
+| All stored records, including authority/evidence | 10,005 | **10,017** |
+| Cold open | **124.812 ms** | **4.989 ms** |
+| Total passive-sample write time | 4,147.377 ms | 5,961.259 ms |
+| Opening operation signatures/decryptions | 10,003 | **23** |
+| Immutable reducer applications | 10,003 | **22** |
 
-Opening paths shrink **3,334×**, immutable operation count falls **99.98%**, and this cold-open run
-is **72.6× faster**. Evidence is deliberately retained: total file count and signed publication work
-do not disappear. Live publication is slower in this synthetic write loop because it preserves
-history, verifies replacements and updates the slot. Deliberate actions or explicit references can
-also retain live predecessors as immutable operations; this passive-only case does not exercise that
-additional retention. Tests cover seeks, references, stale writers, revocation, expiry and rebuilding.
+Opening paths shrink **434.9×**; this cold-open run is **25.0× faster**. The old claims of three
+opening paths and two immutable operations no longer apply. The bounded-clock rule creates nine
+immutable sample anchors, retaining each preceding live head, and the final seek retains another
+head. The 9,991 other sample envelopes remain in `history/`; all 10,000 samples retain signed
+evidence, with copies where dependencies require them. Total files and publication work do not
+disappear. Legitimate out-of-order immutable arrivals can still require replay; these assertions
+cover append-order retention of observed live heads, not arbitrary history reordering.
 
 ### Swift-side comparison supplied by Marginalia
 

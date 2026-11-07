@@ -11,6 +11,35 @@ class V03Test {
     private fun config(store: RecordStore, home: java.io.File, keys: SoftwareKeys) =
         SessionConfiguration("Playback", namespaces = listOf("listening.podcasts"), store = store, privateHome = home, keys = keys)
 
+    @Test fun coldOpenDoesNotMergeAuthorityTwiceAndTranslatesLayoutError() = runBlocking {
+        val keys = SoftwareKeys.ephemeral()
+        val home = Files.createTempDirectory("colophon-review-open").toFile()
+        try {
+            ColophonLibrary.create(keys, "Review", "Owner", listOf("listening.podcasts")).use { lib ->
+                val base = BindingSessionCore()
+                var authorityMerges = 0
+                val core = object : SessionCore by base {
+                    override fun merge(records: Map<String, ByteArray>) {
+                        authorityMerges += records.keys.count { it.startsWith("authority/") }
+                        base.merge(records)
+                    }
+                    override fun mergeObserved(records: Map<String, ByteArray>, versions: Map<String, String>) {
+                        authorityMerges += records.keys.count { it.startsWith("authority/") }
+                        base.mergeObserved(records, versions)
+                    }
+                }
+                val worker = SessionWorker(config(MemoryRecordStore(lib.records), home, keys), core)
+                worker.refresh()
+                assertEquals(0, authorityMerges)
+                val action = (lib.native.beginLayout(99u, "2026-11-07T12:00:00Z") as PreparedAction.Ready).action
+                val future = lib.records + action.finish(action.signWith(keys))
+                val futureWorker = SessionWorker(config(MemoryRecordStore(future), java.io.File(home, "future"), keys))
+                try { futureWorker.refresh(); fail("Future layout opened") }
+                catch (error: Exception) { assertSame(SessionLayoutException, error) }
+            }
+        } finally { home.deleteRecursively() }
+    }
+
     @Test fun livePlaybackReceiptsAndIncrementalRefresh() = runBlocking {
         val store = MemoryRecordStore()
         val keys = SoftwareKeys.ephemeral()
@@ -40,6 +69,21 @@ class V03Test {
             val state = JsonParser(String(worker.core.query("listening.podcasts", "read", "{}".toByteArray()))).parseValue() as Json.Obj
             val episode = state.array("episodes").first() as Json.Obj
             assertEquals(40.0, (episode.fields["seconds"] as Json.Number).raw.toDouble(), 0.0)
+            val livePath = store.paths().single { it.startsWith("state/") }
+            val predecessor = store.read(listOf(livePath)).getValue(livePath)
+            snapshot = worker.refresh()
+            val revision = (episode.fields["positionRevision"] as Json.Text).value
+            val seek = DomainCommand("listening.podcasts", "position", """{"id":"e","seconds":3,"seek":true,"expect":"$revision"}""".toByteArray())
+            val (receipt, _) = worker.write(seek, snapshot.revision)
+            assertTrue(receipt is WriteReceipt.Saved)
+            val immutable = store.read(store.paths().filter { it.startsWith("ops/") })
+            assertEquals(2, immutable.size)
+            assertTrue(immutable.values.any { it.contentEquals(predecessor) })
+            worker.saveCheckpoint()
+            val reopened = SessionWorker(config(store, home, keys))
+            reopened.refresh()
+            val restored = JsonParser(String(reopened.core.query("listening.podcasts", "getEpisode", """{"id":"e"}""".toByteArray()))).parseValue() as Json.Obj
+            assertEquals(3.0, (restored.fields["seconds"] as Json.Number).raw.toDouble(), 0.0)
         } finally { home.deleteRecursively() }
     }
 

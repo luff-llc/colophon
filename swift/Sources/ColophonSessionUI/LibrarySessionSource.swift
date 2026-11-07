@@ -24,4 +24,4 @@ import Foundation
 
 extension ColophonSession: LibrarySessionSource {}
 
-extension LibrarySessionSource { public var hasUsableContent: Bool { phase == .ready || phase == .refreshing } }
+extension LibrarySessionSource { public var hasUsableContent: Bool { [SessionPhase.ready, .refreshing, .waitingForDownload, .retry].contains(phase) } }

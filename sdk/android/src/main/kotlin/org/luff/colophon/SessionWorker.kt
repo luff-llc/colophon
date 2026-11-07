@@ -137,31 +137,45 @@ internal class SessionWorker(
         ensureIdentity()
         val versions = storage().versions(stored)
         val incoming: MutableMap<String, ByteArray>
-        if (!opened) {
-            core.openStorage(storage(), stored, versions, journal.pending, keys, configuration.namespaces,
-                CheckpointCache(File(configuration.privateHome, "Checkpoints")), journal.libraryID)
-            opened = true; merged.clear(); requestPaths.clear()
-            incoming = storage().read(stored.filter { it.startsWith("state/") || it.startsWith("requests/") }).toMutableMap()
-            track(stored + journal.pending.keys)
-        } else {
-            val fresh = stored.filter { it !in merged || versions[it] == null || versions[it] != recordVersions[it] }
-            val authorityPaths = fresh.filter { it.startsWith("authority/") }
-            val authority = storage().read(authorityPaths).toMutableMap()
-            if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
-            authority.putAll(journal.pending.filterKeys { it.startsWith("authority/") })
-            if (authority.isNotEmpty()) core.mergeObserved(authority, versions)
-            val contentPaths = fresh.filter { !it.startsWith("authority/") }
-            incoming = storage().read(contentPaths).toMutableMap()
-            if (incoming.keys != contentPaths.toSet()) throw StorageException.Unavailable("Record download pending")
-            incoming.putAll(authority)
-            for ((path, data) in journal.pending) {
-                val old = incoming[path]
-                if (old != null && !old.contentEquals(data) && !RecordPath.isReplaceable(path)) throw StorageException.Conflict(path)
-                if (path !in merged || RecordPath.isReplaceable(path)) incoming[path] = data
+        val observedLive: Map<String, ByteArray>
+        try {
+            if (!opened) {
+                core.openStorage(storage(), stored, versions, journal.pending, keys, configuration.namespaces,
+                    CheckpointCache(File(configuration.privateHome, "Checkpoints")), journal.libraryID)
+                merged.clear(); requestPaths.clear()
+                val hostPaths = stored.filter { it.startsWith("state/") || it.startsWith("requests/") }
+                incoming = storage().read(hostPaths).toMutableMap()
+                if (incoming.keys != hostPaths.toSet()) throw StorageException.Unavailable("Record download pending")
+                observedLive = incoming.filterKeys { RecordPath.isReplaceable(it) }
+                opened = true
+                track(stored + journal.pending.keys)
+            } else {
+                val fresh = stored.filter { it !in merged || versions[it] == null || versions[it] != recordVersions[it] }
+                val authorityPaths = fresh.filter { it.startsWith("authority/") }
+                val authority = storage().read(authorityPaths).toMutableMap()
+                if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
+                authority.putAll(journal.pending.filterKeys { it.startsWith("authority/") })
+                if (authority.isNotEmpty()) core.mergeObserved(authority, versions)
+                val contentPaths = fresh.filter { !it.startsWith("authority/") }
+                incoming = storage().read(contentPaths).toMutableMap()
+                if (incoming.keys != contentPaths.toSet()) throw StorageException.Unavailable("Record download pending")
+                observedLive = incoming.filterKeys { RecordPath.isReplaceable(it) }
+                track(authority.keys)
+                for ((path, data) in journal.pending) {
+                    if (path.startsWith("authority/")) continue
+                    val old = incoming[path]
+                    if (old != null && !old.contentEquals(data) && !RecordPath.isReplaceable(path)) throw StorageException.Conflict(path)
+                    if (path !in merged || RecordPath.isReplaceable(path)) incoming[path] = data
+                }
+                if (incoming.isNotEmpty()) core.mergeObserved(incoming, versions)
             }
-            if (incoming.isNotEmpty()) core.mergeObserved(incoming, versions)
+        } catch (error: BindingException) {
+            if (error is BindingException.InvalidData && error.detail.startsWith("Unsupported storage layout")) {
+                throw SessionLayoutException
+            }
+            throw error
         }
-        liveBytes.putAll(incoming.filterKeys { RecordPath.isReplaceable(it) })
+        liveBytes.putAll(observedLive)
         track(incoming.keys)
         recordVersions.putAll(versions)
         journal.observe(stored)
@@ -215,7 +229,14 @@ internal class SessionWorker(
             val authorityPaths = paths.filter { it.startsWith("authority/") }
             val authority = storage().read(authorityPaths)
             if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
-            if (authority.isNotEmpty()) core.mergeObserved(authority, versions)
+            try {
+                if (authority.isNotEmpty()) core.mergeObserved(authority, versions)
+            } catch (error: BindingException) {
+                if (error is BindingException.InvalidData && error.detail.startsWith("Unsupported storage layout")) {
+                    throw SessionLayoutException
+                }
+                throw error
+            }
             val content = paths - authorityPaths.toSet()
             val records = storage().read(content)
             if (records.keys != content) throw StorageException.Unavailable("Record download pending")

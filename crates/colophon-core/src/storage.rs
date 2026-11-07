@@ -109,8 +109,8 @@ const SPENT: u8 = 2;
 const AUTHENTICATED: u8 = 4;
 const PROJECTED: u8 = 8;
 const NO_NAMESPACE: u16 = u16::MAX;
-const MAGIC: &[u8; 8] = b"COLOENG3";
-const CACHE_VERSION: u32 = 3;
+const MAGIC: &[u8; 8] = b"COLOENG4";
+const CACHE_VERSION: u32 = 4;
 const STORAGE_VERSION: u32 = 3;
 const BATCH: usize = 8192;
 
@@ -124,6 +124,7 @@ struct Entry {
     author_key: [u8; 32],
     /// Namespace epoch from the verified header; zero until the header verifies.
     epoch: u64,
+    authority: u64,
     version: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
@@ -150,6 +151,7 @@ struct CacheMeta {
     spent: BTreeMap<String, BTreeSet<String>>,
     unlocked: BTreeSet<(String, u64)>,
     rejections: BTreeMap<String, (String, Rejection, bool)>,
+    live_witnesses: BTreeMap<String, (u64, [u8; 32])>,
 }
 // DefaultHasher::new uses fixed keys. RandomState would pull OS entropy into the pure core.
 // Keys here are authenticated SHA-derived identities, not arbitrary untrusted strings;
@@ -172,6 +174,7 @@ pub struct Engine<S: RecordSource> {
     member_writes: BTreeMap<[u8; 32], AuthenticatedIds>,
     counts: BTreeMap<String, u64>,
     rejections: BTreeMap<String, (String, Rejection, bool)>,
+    live_witnesses: BTreeMap<String, (u64, [u8; 32])>,
     cached_unlocked: BTreeSet<(String, u64)>,
     cache: VecDeque<(String, Vec<u8>)>,
     stats: EngineStats,
@@ -212,6 +215,7 @@ impl<S: RecordSource> Engine<S> {
         let restored =
             checkpoint.map(|bytes| decode_cache(bytes, &options, &me, &listing, &source));
         let mut integrity_baseline = Vec::new();
+        let mut live_witnesses = BTreeMap::new();
         let (mut library, entries, pending, counts, rejections, unlocked, mode, reads) =
             match restored {
                 Some(Ok(DecodedCache {
@@ -219,6 +223,7 @@ impl<S: RecordSource> Engine<S> {
                     entries,
                     pending: Ok(pending),
                 })) => {
+                    live_witnesses = meta.live_witnesses;
                     let counts = meta
                         .projections
                         .iter()
@@ -253,11 +258,12 @@ impl<S: RecordSource> Engine<S> {
                         Some(Ok(DecodedCache {
                             entries,
                             pending: Err(e),
-                            ..
+                            meta,
                         })) => {
                             if e.0 == "Checkpoint record missing from listing" {
                                 return Err(e);
                             }
+                            live_witnesses = meta.live_witnesses;
                             integrity_baseline = entries;
                             OpenMode::Invalidated(e.0)
                         }
@@ -316,6 +322,7 @@ impl<S: RecordSource> Engine<S> {
             authenticated,
             counts,
             rejections,
+            live_witnesses,
             cached_unlocked: unlocked,
             cache: VecDeque::new(),
             stats: EngineStats {
@@ -452,8 +459,7 @@ impl<S: RecordSource> Engine<S> {
                 }
             }
             if crate::protocol::is_replaceable(path)
-                && entry.flags & (VERIFIED | SPENT | AUTHENTICATED)
-                    == (VERIFIED | SPENT | AUTHENTICATED)
+                && entry.flags & (VERIFIED | AUTHENTICATED) == (VERIFIED | AUTHENTICATED)
             {
                 for judged in self.library.live.values() {
                     if judged.header.meta.namespace == namespace
@@ -581,7 +587,18 @@ impl<S: RecordSource> Engine<S> {
     ) -> Result<Outcome<PendingBatch>> {
         self.check_ready()?;
         self.library
-            .begin_write(namespace, kind, payload, now, seed)
+            .prepare_write(namespace, kind, payload, now, seed, |path| {
+                let at = self
+                    .entries
+                    .binary_search_by(|e| e.path.as_str().cmp(path))
+                    .map_err(|_| missing("live predecessor index"))?;
+                let raw = self.source.read(path)?;
+                ensure(
+                    <[u8; 32]>::from(Sha256::digest(&raw)) == self.entries[at].digest,
+                    "Integrity error: live predecessor changed before retention",
+                )?;
+                Ok(raw)
+            })
     }
     /// Refresh after the host persists immutable records. Authority/removal/order changes rebuild.
     /// An I/O/backend/integrity error poisons this instance; reopen after the host resolves it.
@@ -836,9 +853,23 @@ impl<S: RecordSource> Engine<S> {
                     flags: 0,
                     author_key: [0; 32],
                     epoch: 0,
+                    authority: 0,
                     version: self.source.content_version(path)?,
                 };
                 check_expected(&self.integrity_baseline, path, &entry.digest)?;
+                if let Some((generation, digest)) = self.live_witnesses.get(*path) {
+                    if *digest != entry.digest {
+                        // Signature/payload/admission are checked below before promotion. An
+                        // unverified or older candidate cannot change trusted index evidence.
+                        let header = decode_header(raw).ok_or_else(|| {
+                            Error("Integrity error: invalid live replacement".into())
+                        })?;
+                        ensure(
+                            header.meta.clock > *generation,
+                            "Equivocation or rollback at live generation",
+                        )?;
+                    }
+                }
                 if path.starts_with("history/") {
                     continue;
                 }
@@ -854,6 +885,7 @@ impl<S: RecordSource> Engine<S> {
                             self.stats.signatures_verified += 1;
                             entry.flags |= VERIFIED;
                             entry.epoch = header.meta.epoch;
+                            entry.authority = header.meta.authority;
                             if let Some(member) =
                                 self.library.authority.members.get(&header.meta.author)
                             {
@@ -902,6 +934,10 @@ impl<S: RecordSource> Engine<S> {
                             continue;
                         }
                         Err(error) => {
+                            ensure(
+                                !self.live_witnesses.contains_key(*path),
+                                "Integrity error: unverified live replacement",
+                            )?;
                             let header =
                                 serde_json::from_slice::<SignedRecord>(raw)
                                     .ok()
@@ -974,7 +1010,7 @@ impl<S: RecordSource> Engine<S> {
                             .get(&meta.namespace)
                             .copied()
                             .unwrap_or(0),
-                        j.from_live_slot,
+                        j.header.live.is_some(),
                     )
                 };
                 if j.from_live_slot
@@ -988,7 +1024,7 @@ impl<S: RecordSource> Engine<S> {
                 {
                     status = Status::Refused("revoked".into());
                 }
-                if status == Status::Admitted {
+                if status == Status::Admitted && !j.from_live_slot {
                     entry.flags |= SPENT;
                     self.library
                         .admission
@@ -1015,17 +1051,19 @@ impl<S: RecordSource> Engine<S> {
                 {
                     self.library.admission.spent.remove(&meta.author);
                 }
-                let tail = (meta.clock, meta.author.clone(), meta.id.clone());
-                update_tail(
-                    &mut self.library.admission.namespace_tails,
-                    &meta.namespace,
-                    &tail,
-                );
-                update_tail(
-                    &mut self.library.admission.author_tails,
-                    &meta.author,
-                    &tail,
-                );
+                if !j.from_live_slot {
+                    let tail = (meta.clock, meta.author.clone(), meta.id.clone());
+                    update_tail(
+                        &mut self.library.admission.namespace_tails,
+                        &meta.namespace,
+                        &tail,
+                    );
+                    update_tail(
+                        &mut self.library.admission.author_tails,
+                        &meta.author,
+                        &tail,
+                    );
+                }
                 if j.status == Status::Admitted {
                     self.member_writes
                         .entry(entry.author_key)
@@ -1033,7 +1071,10 @@ impl<S: RecordSource> Engine<S> {
                         .insert(path_identity_parts(&meta.author, &meta.id)?);
                 }
                 if j.from_live_slot {
+                    let valid_live = j.status == Status::Admitted && j.operation.is_some();
                     if j.status == Status::Admitted && j.operation.is_some() {
+                        self.live_witnesses
+                            .insert(entry.path.clone(), (meta.clock, entry.digest));
                         let stamp = j.header.live.as_ref().expect("verified live stamp");
                         let key = (
                             meta.author.clone(),
@@ -1068,6 +1109,16 @@ impl<S: RecordSource> Engine<S> {
                                     }
                                 }
                             }
+                        }
+                    }
+                    if !valid_live {
+                        // Revocation can invalidate an unchanged head; changed unverified bytes
+                        // must never overwrite the last authenticated witness or index.
+                        if let Some((_, digest)) = self.live_witnesses.get(&entry.path) {
+                            ensure(
+                                *digest == entry.digest,
+                                "Integrity error: inadmissible live replacement",
+                            )?;
                         }
                     }
                     new_entries.push(entry);
@@ -1171,7 +1222,7 @@ impl<S: RecordSource> Engine<S> {
             }
         } else {
             self.entries.extend(new_entries);
-            self.entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+            self.entries.sort_by(|a, b| a.path.cmp(&b.path));
             self.entries.dedup_by(|a, b| {
                 if a.path == b.path {
                     *b = a.clone();
@@ -1252,6 +1303,7 @@ impl<S: RecordSource> Engine<S> {
             spent: self.library.admission.spent.clone(),
             unlocked: self.cached_unlocked.clone(),
             rejections: self.rejections.clone(),
+            live_witnesses: self.live_witnesses.clone(),
         };
         let json = serde_json::to_vec(&meta)?;
         let mut output = Vec::new();
@@ -1267,6 +1319,7 @@ impl<S: RecordSource> Engine<S> {
             output.push(entry.flags);
             output.extend(entry.author_key);
             output.extend(entry.epoch.to_le_bytes());
+            output.extend(entry.authority.to_le_bytes());
             if let Some(version) = &entry.version {
                 put_length(&mut output, version.len() + 1)?;
                 output.extend_from_slice(version.as_bytes());
@@ -1370,6 +1423,11 @@ impl<S: RecordSource> Engine<S> {
         )?;
         let record: SignedRecord = serde_json::from_slice(&raw)?;
         let header: OperationHeader = serde_json::from_slice(&record.body)?;
+        let at = self
+            .entries
+            .binary_search_by(|e| e.path.as_str().cmp(path))
+            .map_err(|_| missing("operation index"))?;
+        validate_entry_header(&self.entries[at], &header, &self.library.authority)?;
         let mut j = Judged {
             header,
             digest: records::digest(&record.body),
@@ -1488,7 +1546,7 @@ impl<S: RecordSource> Engine<S> {
                     .read(&entry.path)
                     .map_err(|e| Error(format!("Integrity error at {}: {e}", entry.path)))?;
                 self.stats.records_read += 1;
-                if !crate::protocol::is_replaceable(&entry.path) {
+                {
                     ensure(
                         <[u8; 32]>::from(Sha256::digest(&raw)) == entry.digest,
                         &format!(
@@ -1539,7 +1597,7 @@ impl<S: RecordSource> Engine<S> {
             let result = (|| -> Result<()> {
                 let raw = self.source.read(&entry.path)?;
                 self.stats.records_read += 1;
-                if !crate::protocol::is_replaceable(&entry.path) {
+                {
                     ensure(
                         <[u8; 32]>::from(Sha256::digest(&raw)) == entry.digest,
                         &format!("{}: record digest mismatch", crate::protocol::EQUIVOCATION),
@@ -1554,6 +1612,7 @@ impl<S: RecordSource> Engine<S> {
                         .members
                         .get(&header.meta.author)
                         .ok_or_else(|| missing("author"))?;
+                    validate_entry_header(entry, &header, &self.library.authority)?;
                     // Deliberately use the independent standard RustCrypto path for background audits.
                     record.verify(&member.public.signing)?;
                     self.stats.signatures_verified += 1;
@@ -1855,6 +1914,8 @@ fn decode_cache<S: RecordSource>(
         author_key.copy_from_slice(reader.take(32)?);
         let mut epoch = [0; 8];
         epoch.copy_from_slice(reader.take(8)?);
+        let mut authority = [0; 8];
+        authority.copy_from_slice(reader.take(8)?);
         entries.push(Entry {
             path,
             digest,
@@ -1862,6 +1923,7 @@ fn decode_cache<S: RecordSource>(
             flags,
             author_key,
             epoch: u64::from_le_bytes(epoch),
+            authority: u64::from_le_bytes(authority),
             version: {
                 let length = reader.length()?;
                 if length == 0 {
@@ -1875,6 +1937,37 @@ fn decode_cache<S: RecordSource>(
                 }
             },
         });
+    }
+    for entry in &entries {
+        if entry.flags & VERIFIED != 0 {
+            let author = entry
+                .path
+                .split('/')
+                .nth(1)
+                .ok_or_else(|| missing("indexed author"))?;
+            let member = meta
+                .authority
+                .members
+                .get(author)
+                .ok_or_else(|| missing("indexed member"))?;
+            ensure(
+                entry.author_key == <[u8; 32]>::from(Sha256::digest(&member.public.signing)),
+                "Checkpoint author key mismatch",
+            )?;
+            if let Some(ns) = meta.authority.namespaces.get(usize::from(entry.namespace)) {
+                // Refused future-epoch headers may be indexed, but cannot be trusted payloads.
+                ensure(
+                    entry.flags & AUTHENTICATED == 0
+                        || meta.authority.epoch_at(ns, entry.authority) == Some(entry.epoch),
+                    "Checkpoint epoch mismatch",
+                )?;
+            } else {
+                ensure(
+                    entry.flags & AUTHENTICATED == 0,
+                    "Checkpoint namespace mismatch",
+                )?;
+            }
+        }
     }
     ensure(reader.0.is_empty(), "Trailing checkpoint bytes")?;
     ensure(
@@ -1976,4 +2069,33 @@ impl<S: RecordSource> Engine<S> {
             other => Ok(other),
         }
     }
+}
+
+fn validate_entry_header(
+    entry: &Entry,
+    header: &OperationHeader,
+    authority: &Authority,
+) -> Result<()> {
+    let member = authority
+        .members
+        .get(&header.meta.author)
+        .ok_or_else(|| missing("author"))?;
+    ensure(
+        header.meta.library == authority.id && header.meta.protocol == crate::protocol::OPERATION,
+        "Indexed library/protocol mismatch",
+    )?;
+    crate::protocol::match_header_path(&entry.path, &header.meta, header.live.as_ref())?;
+    ensure(
+        header.meta.authority == entry.authority
+            && header.meta.epoch == entry.epoch
+            && entry.author_key == <[u8; 32]>::from(Sha256::digest(&member.public.signing)),
+        "Indexed author key/epoch mismatch",
+    )?;
+    if entry.flags & AUTHENTICATED != 0 {
+        ensure(
+            authority.epoch_at(&header.meta.namespace, header.meta.authority) == Some(entry.epoch),
+            "Indexed authority epoch mismatch",
+        )?;
+    }
+    Ok(())
 }

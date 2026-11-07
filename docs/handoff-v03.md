@@ -14,7 +14,7 @@ incomplete, relay replacement was unconditional, provider versions were not inte
 could miss their FFI receipt. These paths are repaired and exercised by added tests.
 
 Stale 0.2 records left in the renamed conformance directory were moved out: the directory now contains
-exactly the 28 records in `conformance/0.3/library.json`. Misplaced tracked XCFramework contents at
+exactly the 27 records in `conformance/0.3/library.json`. Misplaced tracked XCFramework contents at
 `sdk/apple/` were moved into the ignored validation directory; the rebuilt artifact is correctly at
 `sdk/apple/ColophonFFI.xcframework`. Both sets of WIP artifacts remain recoverable under
 `target/v03-validation/`.
@@ -56,7 +56,7 @@ writes conservatively retain observed live heads at immutable operation paths; e
 references are retained too. Own causal live chains collapse their expectation to the durable
 predecessor. Live heads are overlays over immutable reducers, never checkpointed as durable intent.
 Successful playback operations form ordering barriers so later deliberate state supersedes older
-live heads. Retained/live duplicates fold once. Reducer schema 6 invalidates old projections.
+live heads. Retained/live duplicates fold once. The review fixes below raise reducer schema 6 to 7.
 
 The relay supports namespace-filtered feeds. Live creation requires `If-None-Match: *`; replacement
 requires the exact prior digest in `If-Match`. Racing replacement returns 412, unconditional replacement
@@ -146,9 +146,9 @@ checkpoint API is pure Rust and does not introduce a native session persistence 
 - Native sessions still use the compatible `Library` adapter and verify records on cold open; they
   do not yet persist the storage-engine checkpoint. Adding that adapter is separate from fixing
   refresh/publication I/O. The protected checkpoint API is available to storage-engine hosts now.
-- No persistent per-slot live high-water witness or global freshness proof is claimed. A fresh client
-  cannot detect replay of an older valid live head without private witness data. In-process monotonic
-  checks, exact CAS, immutable referenced predecessors and current authority checks are implemented.
+- The reviewed storage engine now persists per-slot high-water witnesses in its authenticated cache.
+  A fresh client without a witness still cannot detect replay of an older valid live head. No global
+  freshness proof or protection against rollback of the entire private cache is claimed.
 - Engagement evidence remains append-only; live state reduces opening/replay work, not the number of
   signed evidence files or total retained storage. No engagement compaction or live-witness retention
   policy was invented.
@@ -156,3 +156,53 @@ checkpoint API is pure Rust and does not introduce a native session persistence 
   an incoherent or permanently offline provider into a trustworthy source.
 - No simulator/device testing or visionOS runtime claim is made. The requested macOS Swift tests,
   Android JVM tests and Apple–Android relay journey are the available executable platform checks.
+
+## Review fixes
+
+Addressed all eleven findings in [review-v03-agy.md](review-v03-agy.md). This section and the
+rerun [performance report](performance.md) supersede the earlier validation/timing summary above.
+Changes remain uncommitted. No FFI API or `crates/colophon-ffi` source changed; session edits are
+limited to the expiry/readiness checks and the cold-open authority barrier.
+
+| Finding | Fix | Regression and result |
+| --- | --- | --- |
+| 1. Forward-generation exhaustion / lost durable actions | Live heads obey the 1,024 forward-clock bound and never advance the durable admission clock. Before exceeding the bound, passive publication retains its head and writes an immutable anchor. Local clocks consider only relevant live dependencies. Batched incoming anchors are authenticated before live replacement. A signed, inadmissible initial maximum-generation record cannot pin a slot either. | `review_long_playback_then_deliberate_write_survives_reopen` exercises 1,030 ticks, a lagging reader, a seek and cold reopen. `review_forward_exhaustion_is_refused` rejects a signed maximum generation, permits an immutable write and recovers that same live slot. Passed. |
+| 2. Engine loses referenced live envelopes | The shared write preparer obtains predecessor bytes through a callback. Engine reads the exact source envelope, checks its indexed digest and supplies it to `PendingBatch.copies`; missing/changed bytes fail instead of silently omitting the copy. | `review_engine_retains_predecessor_without_replay` requires one exact copy and verifies the conditional seek. Both updated benchmark harnesses exercise this boundary. Passed. |
+| 3. Unverified replacements evict valid state | Every replacement must pass signature, stamp/path/library, referenced grant/epoch and payload binding checks. Incoming dates never invalidate the old head; malformed or unavailable replacements leave old bytes intact. Locked same-generation signed conflicts are explicit. | `review_malformed_and_locked_replacements_preserve_head`, `review_locked_equivocation_is_explicit`, plus the existing forged-signature/stale-generation test. Passed. |
+| 4. Expiring/backdated live writers become durable | Admission refuses any live-stamped operation from an expiring or budget-capped grant, including a retained `ops/` copy. Such records never enter the live map, admitted views, member/ledger admission or retention batches. | Strengthened `live_expiry_and_plaintext_slot_binding_are_checked_at_read_time` now checks refusal before expiry, after expiry, after copying to `ops/`, and before an honest writer prepares retention. Passed. |
+| 5. Engine equivocation, rollback, index dedup and audits | Authenticated per-slot generation/envelope-digest witnesses survive checkpoints and replay invalidation. Rollback, equal-generation different bytes and invalid replacements fail closed and cannot be checkpointed. Stable sorting keeps the newest index entry. Audits require exact indexed bytes and check library/path/key/epoch bindings. | `review_engine_same_generation_equivocation_and_rollback_fail_closed` includes checkpoint reopen; `review_bulk_live_refresh_keeps_new_digests_and_audits_binding` updates 40 slots and rejects a foreign-library audit. Passed. |
+| 6. Retention invalidates the immutable prefix / retains unrelated heads | Only immutable records advance namespace/author replay tails. Retention selects target episode heads (including completion events) and explicit revision references. | `review_received_retained_predecessor_does_not_invalidate_prefix`, `review_unrelated_commands_do_not_retain_all_live_slots`, and the storage benchmark's full-prefix live/seek assertion. Passed. |
+| 7. Swift expiry timer | Parse both accepted ISO 8601 forms and schedule at the first whole-second host instant strictly after the inclusive expiry. Existing cancellation ownership is preserved. | `expiryRefreshWaitsForHostClock` tests whole seconds and `.555Z`; both deadlines are the following second. Passed. |
+| 8. Checkpoint key/epoch fields unused | Cache entries now also bind the referenced authority sequence. Restore validates author-key digests and authenticated epoch/authority pairs; lazy fetches and audits compare the exact header bindings. Container `COLOENG4` / metadata version 4 invalidates old containers. Reducer schema 7 invalidates older projections. | `review_checkpoint_checks_author_and_epoch_bindings` changes each field and recomputes a valid local tag; both caches invalidate and replay correctly. Passed. |
+| 9. Kotlin double merge / misplaced layout catch | Both workers open/authenticate authority once, merge content and journal before setting `opened`, track authority separately and remove the unreachable second-open branch. Kotlin translates unsupported layout at the actual authority barrier. | `coldOpenDoesNotMergeAuthorityTwiceAndTranslatesLayoutError` uses a counting core and calls the worker directly for unsupported layout. Existing incremental-I/O and future-layout tests also pass. |
+| 10. Readiness inconsistency | Swift queries and the UI protocol default accept retained-content refresh/download/retry phases. Query results still require the same connection/revision, and core access checks remain in force. | `namespaceCachesAndStaleActions` performs a real query while storage is unavailable; `retainedPhasesAreUsable` checks the protocol default. Passed. |
+| 11. Benchmark/docs overstatement | Taupe now performs a deliberate Engine seek after 10,000 passive ticks, checks retention/incremental application and cold-open position. The storage benchmark also tests live-to-durable retention over its full 100k prefix. Current schema/cache docs and measured path counts/timings are corrected. | All benchmark assertions pass; measurements and limits are in `performance.md`. The conformance vector was regenerated for narrower queue retention and now contains exactly 27 records. |
+
+The original implementation was replayed against nine new core regressions and the strengthened
+expiry case: all failed, then passed with the fixes. The Kotlin cold-open regression likewise failed
+against the original worker. Swift readiness tests failed against the original session/protocol;
+the timer test seam was temporarily given the original parsing/deadline policy, and both timestamp
+cases failed. These experiments restored the working files afterwards. Logs are
+`target/v03-validation/review-before-*.log`; no Git writes were used.
+
+Final validation (software keys, JDK 17; logs under `target/v03-validation/review-*`):
+
+| Check | Result |
+| --- | --- |
+| `cargo test --offline` | 162 passed, 0 failed, 1 opt-in benchmark ignored; 24 focused 0.3 tests and 19 storage tests |
+| `cargo clippy --offline --workspace --all-targets -- -D warnings` | Passed |
+| `cargo fmt --all --check` and `git diff --check` | Passed |
+| `COLOPHON_SOFTWARE_KEYS=1 bash scripts/test-swift.sh` | All five products passed: 29 + 36 + 1 + 9 + 12 = 87 reported tests; 2 opt-in cases skipped |
+| `node --test relay/` | 12 passed |
+| `npm --prefix js ci`, `npm --prefix js run build`, `npm --prefix js test` | Passed, including regenerated-fixture Rust/WASM parity |
+| `bash scripts/test-android.sh` | 59 passed; default cross-journey case skipped and exercised separately below |
+| `bash scripts/test-relay-cross.sh` | All six Apple/Android stages passed, including live replacement, deliberate rewind and blobs |
+| `SKIP_VISIONOS=1 bash scripts/build-apple.sh` | Passed; generated binding sources unchanged, rebuilt 167 MiB macOS/iOS/iOS-simulator XCFramework |
+| Release `bench`, `storage_bench`, fresh-process `--cold-suffix`, `taupe_bench 10000` | Passed; corrected measurements in `performance.md` |
+
+The Swift wrapper runs the requested `swift test` with workspace module caches and
+`--disable-sandbox`, as required by this nested macOS sandbox. Xcode's unavailable CoreSimulator
+service and the existing Gradle/SDK/FSEvents warnings did not fail the checks. No visionOS runtime
+or simulator execution is claimed. Per-slot witnesses protect an existing Engine/cache; a fresh
+replica without witnesses still cannot prove global freshness or detect rollback of an entire
+otherwise valid private cache.

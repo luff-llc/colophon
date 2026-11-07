@@ -7,6 +7,11 @@ import Testing
     private func config(_ store: MemoryRecordStore, _ home: URL, _ keys: SoftwareKeys) -> SessionConfiguration {
         .init(memberLabel: "Playback", namespaces: ["listening.podcasts"], location: .memory(store), privateContainer: home, keys: keys)
     }
+    @Test(arguments: ["2026-11-07T12:00:00Z", "2026-11-07T12:00:00.555Z"])
+    func expiryRefreshWaitsForHostClock(_ expires: String) throws {
+        let deadline = try #require(ColophonSession.grantExpiryRefreshDate(expires))
+        #expect(deadline.ISO8601Format() == "2026-11-07T12:00:01Z")
+    }
     @Test func livePlaybackReceiptsRefreshAndIncrementalReads() async throws {
         let store = MemoryRecordStore(), keys = SoftwareKeys()
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -35,6 +40,23 @@ import Testing
         let projection = try #require(JSONSerialization.jsonObject(with: state) as? [String: Any])
         let episodes = try #require(projection["episodes"] as? [[String: Any]])
         #expect(episodes.first?["seconds"] as? Double == 40)
+        let livePath = try #require(try await store.paths().first { $0.hasPrefix("state/") })
+        let predecessor = try #require(try await store.read(paths: [livePath])[livePath])
+        snapshot = try await worker.refresh()
+        let seek = try DomainCommand(namespace: "listening.podcasts", kind: "position", payloadJSON: JSONSerialization.data(withJSONObject: [
+            "id": "e", "seconds": 3, "seek": true, "expect": try #require(episodes.first?["positionRevision"])
+        ]))
+        let (receipt, _) = try await worker.write(seek, observed: snapshot.revision)
+        guard case .saved = receipt else { Issue.record("Seek must retain its live predecessor"); return }
+        let immutablePaths = try await store.paths().filter { $0.hasPrefix("ops/") }
+        let immutable = try await store.read(paths: Array(immutablePaths))
+        #expect(immutable.count == 2)
+        #expect(immutable.values.contains(predecessor))
+        try await worker.saveCheckpoint()
+        let reopened = SessionWorker(configuration: config(store, home, keys))
+        _ = try await reopened.refresh()
+        let episode = try await reopened.query(namespace: "listening.podcasts", name: "getEpisode", arguments: Data(#"{"id":"e"}"#.utf8))
+        #expect((try JSONSerialization.jsonObject(with: episode) as? [String: Any])?["seconds"] as? Double == 3)
     }
     @Test func futureLayoutStopsBeforeContentAndKeepsIdentity() async throws {
         let keys = SoftwareKeys()

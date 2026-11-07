@@ -45,9 +45,10 @@ class SessionPerformanceTest {
             if (mode != "legacy") {
                 val work = cores.getValue(reopened).snapshot(emptyList(), emptyMap()).engine!!.work()
                 println("SESSION_WORK checkpoint $work")
-                assertEquals(0uL, work.signaturesVerified); assertEquals(0uL, work.payloadsDecrypted); assertEquals(0uL, work.appliedOperations)
+                assertEquals(0uL, work.recordsRead); assertEquals(0uL, work.signaturesVerified); assertEquals(0uL, work.payloadsDecrypted); assertEquals(0uL, work.appliedOperations)
             }
             start=System.nanoTime(); reopened.perform(DomainCommand("listening.podcasts","position","""{"id":"ep1","seconds":300000}""".toByteArray()),reopened.observedRevision); report("passive_write",start)
+            if (mode != "legacy") assertEquals(0uL, cores.getValue(reopened).snapshot(emptyList(), emptyMap()).engine!!.work().appliedOperations)
             start=System.nanoTime(); reopened.perform(DomainCommand("notes","addNote","""{"id":"session-bench-note","notebook":"journal","text":"Measured note"}""".toByteArray()),reopened.observedRevision); report("notes_write",start)
             reopened.close()
             val added=session(MemoryRecordStore(records+suffix),suffixHome)
@@ -55,7 +56,7 @@ class SessionPerformanceTest {
             if (mode != "legacy") {
                 val work = cores.getValue(added).snapshot(emptyList(), emptyMap()).engine!!.work()
                 println("SESSION_WORK suffix $work")
-                assertEquals(1000uL, work.signaturesVerified); assertEquals(1000uL, work.payloadsDecrypted); assertEquals(1000uL, work.appliedOperations)
+                assertEquals(1000uL, work.recordsRead); assertEquals(1000uL, work.signaturesVerified); assertEquals(1000uL, work.payloadsDecrypted); assertEquals(1000uL, work.appliedOperations)
             }
             added.close()
             val small=session(MemoryRecordStore(taupe),File(home,"taupe"),true)

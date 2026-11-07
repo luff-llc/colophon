@@ -39,7 +39,7 @@ import Testing
             let snapshot = try await reopened.worker.core.snapshot(namespaces: ["notes"], requestPaths: [])
             let work = try #require(snapshot.engine).work()
             print("SESSION_WORK checkpoint", work)
-            #expect(work.signaturesVerified == 0 && work.payloadsDecrypted == 0 && work.appliedOperations == 0)
+            #expect(work.recordsRead == 0 && work.signaturesVerified == 0 && work.payloadsDecrypted == 0 && work.appliedOperations == 0)
         }
         started = .now
         let passive = try DomainCommand(namespace: "listening.podcasts", kind: "position", payloadJSON: Data(#"{"id":"ep1","seconds":300000}"#.utf8))
@@ -64,7 +64,7 @@ import Testing
             let snapshot = try await added.worker.core.snapshot(namespaces: [], requestPaths: [])
             let work = try #require(snapshot.engine).work()
             print("SESSION_WORK suffix", work)
-            #expect(work.signaturesVerified == 1000 && work.payloadsDecrypted == 1000 && work.appliedOperations == 1000)
+            #expect(work.recordsRead == 1000 && work.signaturesVerified == 1000 && work.payloadsDecrypted == 1000 && work.appliedOperations == 1000)
         }
         let small = session(MemoryRecordStore(records: taupe), home.appendingPathComponent("taupe"), taupeOnly: true)
         started = .now

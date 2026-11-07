@@ -121,13 +121,18 @@ actor SessionWorker {
         }
         let versions = try await storage().versions(paths: stored)
         var incoming: [String: Data] = [:]
+        var observedLive: [String: Data] = [:]
         do {
             if !opened {
                 try await core.openStorage(store: storage(), paths: stored, versions: versions, pending: journal.pending,
                     keys: keys, namespaces: configuration.namespaces, cache: CheckpointCache(privateContainer: configuration.privateContainer), libraryID: journal.libraryID)
-                opened = true; merged.removeAll(); requestPaths.removeAll()
+                merged.removeAll(); requestPaths.removeAll()
                 // The source lazily supplies history. Only live CAS bytes and requests are host state.
-                incoming = try await storage().read(paths: stored.filter { $0.hasPrefix("state/") || $0.hasPrefix("requests/") })
+                let hostPaths = stored.filter { $0.hasPrefix("state/") || $0.hasPrefix("requests/") }
+                incoming = try await storage().read(paths: Array(hostPaths))
+                guard Set(incoming.keys) == hostPaths else { throw StorageError.unavailable("Record download pending") }
+                observedLive = incoming.filter { RecordPath.isReplaceable($0.key) }
+                opened = true
                 track(stored.union(journal.pending.keys))
             } else {
                 let fresh = stored.filter { !merged.contains($0) || versions[$0] == nil || versions[$0] != recordVersions[$0] }
@@ -139,8 +144,10 @@ actor SessionWorker {
                 let contentPaths = fresh.subtracting(authorityPaths)
                 incoming = try await storage().read(paths: Array(contentPaths))
                 guard Set(incoming.keys) == contentPaths else { throw StorageError.unavailable("Record download pending") }
-                incoming.merge(authority) { old, _ in old }
+                observedLive = incoming.filter { RecordPath.isReplaceable($0.key) }
+                track(authority.keys)
                 for (path, bytes) in journal.pending {
+                    if path.hasPrefix("authority/") { continue }
                     if let old = incoming[path], old != bytes, !RecordPath.isReplaceable(path) { throw StorageError.conflict(path) }
                     if !merged.contains(path) || RecordPath.isReplaceable(path) { incoming[path] = bytes }
                 }
@@ -150,7 +157,7 @@ actor SessionWorker {
             if case .InvalidData(let detail) = error, detail.hasPrefix("Unsupported storage layout") { throw SessionLayoutError.updateRequired }
             throw error
         }
-        liveBytes.merge(incoming.filter { RecordPath.isReplaceable($0.key) }) { _, new in new }
+        liveBytes.merge(observedLive) { _, new in new }
         track(incoming.keys)
         recordVersions.merge(versions) { _, new in new }
         requestPaths.formUnion(stored.filter { $0.hasPrefix("requests/") })

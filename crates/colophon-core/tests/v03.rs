@@ -790,7 +790,27 @@ fn live_expiry_and_plaintext_slot_binding_are_checked_at_read_time() {
         .into(),
     )
     .unwrap();
-    assert_eq!(episode_seconds(&lib, "e"), 12.0);
+    assert!(success(lib.view("listening.podcasts", NOW).unwrap())
+        .admitted
+        .is_empty());
+    // A retained copy cannot turn a caveated live stamp into durable intent either.
+    let raw = lib.records()[&path].clone();
+    lib.merge([(protocol::operation_path(&header.meta), raw)].into())
+        .unwrap();
+    assert!(success(lib.view("listening.podcasts", NOW).unwrap())
+        .admitted
+        .is_empty());
+    let pending = success(
+        lib.begin_write(
+            "listening.podcasts",
+            "follow",
+            json!({"id":"show","url":"https://example.org/feed"}),
+            NOW,
+            [117; 32],
+        )
+        .unwrap(),
+    );
+    assert!(pending.copies.is_empty());
     let expired = success(
         lib.query(
             "listening.podcasts",
@@ -1070,4 +1090,223 @@ fn binary_private_checkpoint_roundtrip_and_tamper() {
     corrupt = bytes;
     corrupt[12] ^= 1;
     assert!(CheckpointOpening::begin(&corrupt, library.id(), &owner.public()).is_err());
+}
+
+#[test]
+fn review_long_playback_then_deliberate_write_survives_reopen() {
+    let (mut lib, owner, _) = create();
+    let mut reader = lib.clone();
+    for n in 0u64..1030 {
+        let mut seed = [0; 32];
+        seed[..8].copy_from_slice(&n.to_le_bytes());
+        let pending = success(
+            lib.begin_write(
+                "listening.podcasts",
+                "position",
+                json!({"id":"e","seconds":n}),
+                NOW,
+                seed,
+            )
+            .unwrap(),
+        );
+        apply(&mut lib, pending, &owner);
+        if n == 0 {
+            reader.merge(lib.records().clone()).unwrap();
+        }
+    }
+    reader.merge(lib.records().clone()).unwrap();
+    assert_eq!(episode_seconds(&reader, "e"), 1029.0);
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":3,"seek":true}),
+        180,
+    );
+    let cold = opened(lib.records().clone(), &owner);
+    assert_eq!(episode_seconds(&cold, "e"), 3.0);
+    assert!(success(cold.view("listening.podcasts", NOW).unwrap())
+        .refused
+        .is_empty());
+}
+
+#[test]
+fn review_malformed_and_locked_replacements_preserve_head() {
+    let (mut lib, owner, _) = create();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":1}),
+        181,
+    );
+    let (path, old) = lib
+        .records()
+        .iter()
+        .find(|(p, _)| p.starts_with("state/"))
+        .map(|(p, b)| (p.clone(), b.clone()))
+        .unwrap();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":2}),
+        182,
+    );
+    let current = lib.records()[&path].clone();
+    lib.merge([(path.clone(), b"invalid JSON".to_vec())].into())
+        .unwrap();
+    assert_eq!(lib.records()[&path], current);
+    let mut locked = Library::open(lib.records().clone(), owner.public()).unwrap();
+    locked.merge([(path.clone(), old)].into()).unwrap();
+    assert_eq!(locked.records()[&path], current);
+}
+
+#[test]
+fn review_forward_exhaustion_is_refused() {
+    use colophon_core::{
+        model::{LiveStamp, Operation, OperationHeader},
+        records::{canonical, SignedRecord},
+    };
+    let (mut lib, owner, _) = create();
+    let raw = adversarial(
+        &lib,
+        &owner,
+        &owner,
+        "listening.podcasts",
+        Operation {
+            id: String::new(),
+            kind: "position".into(),
+            v: 1,
+            clock: 9_007_199_254_740_991,
+            authority: lib.authority().latest,
+            created: NOW.into(),
+            payload: json!({"id":"e","seconds":99}),
+        },
+        1,
+        183,
+    )
+    .into_values()
+    .next()
+    .unwrap();
+    let record: SignedRecord = serde_json::from_slice(&raw).unwrap();
+    let mut header: OperationHeader = serde_json::from_slice(&record.body).unwrap();
+    let slot = protocol::live_slot_name("e");
+    header.live = Some(LiveStamp {
+        library_id: lib.id().into(),
+        slot: slot.clone(),
+        generation: header.meta.clock,
+        operation_id: header.meta.id.clone(),
+    });
+    let body = canonical(&header).unwrap();
+    let raw = SignedRecord {
+        signature: owner.sign(&body),
+        body,
+    }
+    .encode()
+    .unwrap();
+    lib.merge(
+        [(
+            protocol::live_state_path(&owner.public().id(), "listening.podcasts", &slot),
+            raw,
+        )]
+        .into(),
+    )
+    .unwrap();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"good","seconds":1,"seek":true}),
+        184,
+    );
+    assert_eq!(
+        episode_seconds(&opened(lib.records().clone(), &owner), "good"),
+        1.0
+    );
+    // A signed but inadmissible initial head must not pin this slot at the maximum either.
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":2}),
+        185,
+    );
+    assert_eq!(episode_seconds(&lib, "e"), 2.0);
+}
+
+#[test]
+fn review_unrelated_commands_do_not_retain_all_live_slots() {
+    let (mut lib, owner, _) = create();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"one","seconds":1}),
+        190,
+    );
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"two","seconds":1}),
+        191,
+    );
+    let pending = success(
+        lib.begin_write(
+            "listening.podcasts",
+            "follow",
+            json!({"id":"show","url":"https://example.org/feed"}),
+            NOW,
+            [192; 32],
+        )
+        .unwrap(),
+    );
+    assert!(pending.copies.is_empty());
+    let pending = success(
+        lib.begin_write(
+            "listening.podcasts",
+            "position",
+            json!({"id":"one","seconds":0,"seek":true}),
+            NOW,
+            [193; 32],
+        )
+        .unwrap(),
+    );
+    assert_eq!(pending.copies.len(), 1);
+}
+
+#[test]
+fn review_locked_equivocation_is_explicit() {
+    let (mut first, owner, _) = create();
+    let mut second = first.clone();
+    write(
+        &mut first,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":1}),
+        200,
+    );
+    write(
+        &mut second,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":2}),
+        201,
+    );
+    let mut locked = Library::open(first.records().clone(), owner.public()).unwrap();
+    assert!(protocol::is_equivocation(
+        &locked.merge(second.records().clone()).unwrap_err()
+    ));
+    unlock(&mut locked, &owner);
+    assert_eq!(episode_seconds(&locked, "e"), 1.0);
 }
