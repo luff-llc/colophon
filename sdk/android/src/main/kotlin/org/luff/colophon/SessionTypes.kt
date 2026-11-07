@@ -24,7 +24,8 @@ sealed class SessionPhase {
 }
 
 sealed class SessionException(message: String) : Exception(message) {
-    data object NotReady : SessionException("The library is not ready. Restore access and retry.")
+    /** A new instance per throw. A singleton exception keeps its first stack and coroutines may not catch it again. */
+    class NotReady : SessionException("The library is not ready. Restore access and retry.")
     data object StaleRevision : SessionException("The library changed while this action was open. Review the current values and try again.")
     data object DestinationChanged : SessionException("The selected library or member changed. Start this action again.")
     data object InvalidCommand : SessionException("This command or extension envelope is invalid.")

@@ -114,7 +114,24 @@ internal object AtomicFile {
         }
     }
 
+    /**
+     * Desktop libc (glibc 2.28+) also exports `renameat2`. Probing it makes host JVM
+     * tests observe `ENOENT` instead of the POSIX `Files.copy` fallback. Android is
+     * the only runtime that needs this call: `link(2)` is denied in private app storage.
+     */
+    internal fun isAndroidRuntime(
+        buildPropExists: Boolean = File("/system/build.prop").isFile,
+        vmName: String = System.getProperty("java.vm.name") ?: "",
+        runtimeName: String = System.getProperty("java.runtime.name") ?: "",
+    ): Boolean {
+        if (buildPropExists) return true
+        if (vmName.contains("Dalvik", ignoreCase = true)) return true
+        if (runtimeName.contains("Android", ignoreCase = true)) return true
+        return false
+    }
+
     private fun resolveRenameAt2(): Function? {
+        if (!isAndroidRuntime()) return null
         val names = listOf("c", "libc.so", "/system/lib64/libc.so", "/system/lib/libc.so")
         for (name in names) {
             if (name.startsWith("/") && !File(name).isFile) continue

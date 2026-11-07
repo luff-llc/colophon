@@ -2,11 +2,13 @@ package org.luff.colophon
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.luff.colophon.BindingException
 import com.luff.colophon.MemberKind
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -184,6 +186,65 @@ class SessionInstrumentedTest {
         assertFalse(missing.phase.value is SessionPhase.WaitingForApproval)
         assertEquals(beforeRecords, recordPaths(libraryDir))
         missing.close()
+    }
+
+    @Test
+    fun rejoinWithIncompleteKeystoreIdentityFailsClosed() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val ownerPrefix = "colophon.owner.${UUID.randomUUID()}"
+        val ownerKeys = keys(ownerPrefix)
+        val libraryDir = File(root, "library")
+        val home = File(root, "home")
+        val session = ColophonSession(
+            SessionConfiguration(
+                memberLabel = "Owner",
+                namespaces = listOf("reading.saved"),
+                privateHome = home,
+                keys = ownerKeys,
+                store = FileRecordStore(libraryDir),
+            ),
+        )
+        session.restore()
+        session.create()
+        session.perform(DomainCommand.saveLink(url = "https://example.com/r", title = "R"), session.observedRevision)
+        assertEquals(SessionPhase.Ready, session.phase.value)
+        val libraryId = session.libraryID.value
+        val before = recordPaths(libraryDir)
+
+        val brokenPrefix = "colophon.broken.${UUID.randomUUID()}"
+        aliases += "$brokenPrefix.signing"
+        aliases += "$brokenPrefix.agreement"
+        val created = KeystoreKeys.openOrCreate(context, brokenPrefix)
+        assertEquals(65, created.signingPublicKey().size)
+        val store = keystore()
+        assertTrue(store.containsAlias("$brokenPrefix.signing"))
+        assertTrue(store.containsAlias("$brokenPrefix.agreement"))
+        store.deleteEntry("$brokenPrefix.agreement")
+        val incomplete = KeystoreKeys.openOrCreate(context, brokenPrefix)
+        try {
+            session.rejoin(incomplete)
+            fail("an incomplete keystore identity must not rejoin")
+        } catch (error: Exception) {
+            assertTrue(
+                "was ${error.javaClass.name}: ${error.message}",
+                error is BindingException.KeyProvider,
+            )
+        }
+        assertTrue("phase ${session.phase.value}", session.phase.value is SessionPhase.Failed)
+        assertFalse(session.phase.value is SessionPhase.WaitingForApproval)
+        assertNotNull(session.lastError.value)
+        assertEquals(libraryId, session.libraryID.value)
+        assertEquals(before, recordPaths(libraryDir))
+        val after = keystore()
+        assertTrue("the surviving alias must be left in place", after.containsAlias("$brokenPrefix.signing"))
+        assertFalse(after.containsAlias("$brokenPrefix.agreement"))
+        try {
+            session.projection("reading.saved")
+            fail("failed rejoin must not keep serving the previous views")
+        } catch (error: SessionException) {
+            assertTrue(error is SessionException.NotReady)
+        }
+        session.close()
     }
 
     @Test

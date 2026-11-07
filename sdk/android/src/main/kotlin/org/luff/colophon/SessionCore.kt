@@ -32,7 +32,7 @@ internal class BindingSessionCore : SessionCore {
     private var recoveryProvider: KeyProvider? = null
 
     private fun requireLibrary(): ColophonLibrary =
-        library ?: throw SessionException.NotReady
+        library ?: throw SessionException.NotReady()
 
     override fun open(records: Map<String, ByteArray>, keys: KeyProvider) {
         library?.close()

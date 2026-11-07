@@ -147,7 +147,33 @@ class StorageTest {
 
     @Test
     fun hostProcessHasNoAndroidRenameAt2() {
-        assertNull(AtomicFile.renameNoReplace("/tmp/colophon-missing-a", "/tmp/colophon-missing-b"))
+        assertFalse(
+            AtomicFile.isAndroidRuntime(
+                buildPropExists = false,
+                vmName = "OpenJDK 64-Bit Server VM",
+                runtimeName = "OpenJDK Runtime Environment",
+            ),
+        )
+        assertTrue(
+            AtomicFile.isAndroidRuntime(
+                buildPropExists = true,
+                vmName = "OpenJDK 64-Bit Server VM",
+                runtimeName = "OpenJDK Runtime Environment",
+            ),
+        )
+        assertTrue(
+            AtomicFile.isAndroidRuntime(
+                buildPropExists = false,
+                vmName = "Dalvik",
+                runtimeName = "Android Runtime",
+            ),
+        )
+        val result = AtomicFile.renameNoReplace("/tmp/colophon-missing-a", "/tmp/colophon-missing-b")
+        if (AtomicFile.isAndroidRuntime()) {
+            assertEquals("ENOENT on an Android host", Integer.valueOf(2), result)
+        } else {
+            assertNull("desktop libc must not answer renameat2, got $result", result)
+        }
     }
 
     @Test

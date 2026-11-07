@@ -5,7 +5,6 @@ import com.luff.colophon.BindingException
 import com.luff.colophon.DenialReason
 import com.luff.colophon.GrantOptions
 import com.luff.colophon.KeyProvider
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -31,7 +30,7 @@ internal class SessionWorker(
     private val mutex = Mutex()
     private val journalFile: File = File(configuration.privateHome, "session.json")
     private var acceptNewIdentity = false
-    private var closed = false
+    @Volatile private var closed = false
 
     private fun storage(): RecordStore {
         store?.let { return it }
@@ -101,6 +100,11 @@ internal class SessionWorker(
             val request = existing ?: run {
                 val created = core.request(configuration, keys)
                 core.merge(mapOf("requests/${created.id}.json" to created.record))
+                snapshot = core.snapshot(configuration.namespaces)
+                // Identity is part of the journal write that queues the request. persistDelta
+                // saves before publish; recording it afterwards leaves session.json anonymous
+                // when publication throws.
+                recordIdentity(snapshot)
                 persistDelta()
                 snapshot = core.snapshot(configuration.namespaces)
                 created
@@ -130,8 +134,8 @@ internal class SessionWorker(
         }
     }
 
-    private fun remember(snapshot: CoreSnapshot) {
-        journal.knownPaths.addAll(snapshot.records.keys)
+    /** Public keys and member id only. Does not mark records known or touch disk. */
+    private fun recordIdentity(snapshot: CoreSnapshot) {
         if (acceptNewIdentity || journal.signingPublicKey == null) {
             journal.signingPublicKey = keys.signingPublicKey().copyOf()
             journal.agreementPublicKey = keys.agreementPublicKey().copyOf()
@@ -139,6 +143,11 @@ internal class SessionWorker(
         } else if (journal.memberID == null) {
             journal.memberID = snapshot.me.id
         }
+    }
+
+    private fun remember(snapshot: CoreSnapshot) {
+        journal.knownPaths.addAll(snapshot.records.keys)
+        recordIdentity(snapshot)
         journal.save(journalFile)
     }
 
@@ -151,7 +160,11 @@ internal class SessionWorker(
         core.create(configuration)
         opened = true
         journal.left = false
-        journal.libraryID = core.snapshot(configuration.namespaces).libraryID
+        val created = core.snapshot(configuration.namespaces)
+        journal.libraryID = created.libraryID
+        // persistDelta writes session.json before publication. The identity has to be in
+        // that write, or a lost key file on the next open looks like a brand-new member.
+        recordIdentity(created)
         persistDelta()
         refreshLocked()
     }
@@ -159,7 +172,7 @@ internal class SessionWorker(
     suspend fun write(command: DomainCommand, observed: ULong): Pair<WriteReceipt, SessionSnapshot> = mutex.withLock {
         ensureUsable()
         val fresh = refreshLocked()
-        if (fresh.phase != SessionPhase.Ready) throw SessionRefusal(fresh, SessionException.NotReady)
+        if (fresh.phase != SessionPhase.Ready) throw SessionRefusal(fresh, SessionException.NotReady())
         if (observed != revision) throw SessionRefusal(fresh, SessionException.StaleRevision)
         if (command.namespace !in configuration.namespaces || Access.WRITE !in configuration.access) {
             throw SessionException.InvalidCommand
@@ -168,7 +181,7 @@ internal class SessionWorker(
         val operation = try {
             core.write(command)
         } catch (error: Exception) {
-            if (error is CancellationException) throw error
+            if (error is CancellationException || error is SessionException.NotReady) throw error
             val after = core.records()
             val added = after.keys.filter { it.startsWith("ops/") && fresh.core?.records?.get(it) == null }
             if (added.isNotEmpty()) {
@@ -221,7 +234,7 @@ internal class SessionWorker(
         try {
             core.approve(request, grant)
         } catch (error: Exception) {
-            if (error is CancellationException) throw error
+            if (error is CancellationException || error is SessionException.NotReady) throw error
             persistDelta()
             throw error
         }
@@ -235,7 +248,7 @@ internal class SessionWorker(
         try {
             core.revoke(memberID)
         } catch (error: Exception) {
-            if (error is CancellationException) throw error
+            if (error is CancellationException || error is SessionException.NotReady) throw error
             persistDelta()
             throw error
         }
@@ -262,8 +275,17 @@ internal class SessionWorker(
         if (journal.pending.isNotEmpty()) {
             throw StorageException.Unavailable("Retry pending publication before rejoining")
         }
+        // A provider failure must surface before the live core is closed or the identity switches.
+        val signing = keys.signingPublicKey()
+        val agreement = keys.agreementPublicKey()
+        if (signing.isEmpty() || agreement.isEmpty()) {
+            throw BindingException.KeyProvider("Key provider returned no public key")
+        }
         val previousKeys = this.keys
         val previousLeft = journal.left
+        val previousSigning = journal.signingPublicKey?.copyOf()
+        val previousAgreement = journal.agreementPublicKey?.copyOf()
+        val previousMember = journal.memberID
         this.keys = keys
         opened = false
         last = null
@@ -273,9 +295,15 @@ internal class SessionWorker(
         try {
             refreshLocked()
         } catch (error: Exception) {
-            this.keys = previousKeys
-            journal.left = previousLeft
-            acceptNewIdentity = false
+            // The new request is already in the journal. Reverting the provider would
+            // leave session.json between the old identity and the queued request.
+            if (journal.pending.isEmpty()) {
+                this.keys = previousKeys
+                journal.left = previousLeft
+                journal.signingPublicKey = previousSigning
+                journal.agreementPublicKey = previousAgreement
+                journal.memberID = previousMember
+            }
             opened = false
             last = null
             core.close()
@@ -293,19 +321,29 @@ internal class SessionWorker(
         refreshLocked()
     }
 
-    fun close() {
-        runBlocking {
-            mutex.withLock {
-                closed = true
-                core.close()
-                opened = false
-                last = null
-            }
+    fun markClosed() {
+        closed = true
+    }
+
+    /** Already on the session thread. Taking the mutex here deadlocks if this stack holds it. */
+    fun closeCoreNow() {
+        closed = true
+        core.close()
+        opened = false
+        last = null
+    }
+
+    suspend fun closeCoreSuspended() {
+        mutex.withLock {
+            closed = true
+            core.close()
+            opened = false
+            last = null
         }
     }
 
     private fun ensureUsable() {
-        if (closed) throw CancellationException("Session is closed")
+        if (closed) throw SessionException.NotReady()
     }
 
     fun recovery(): KeyProvider? = core.recovery()

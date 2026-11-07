@@ -255,3 +255,78 @@ Exit 0 (`OK: killing emulator, bye bye` and `OK`). A later `adb devices` listed 
 ```
 
 Exit 0 (`AVD 'colophon-review-arm64' deleted.`). `avdmanager list avd` then printed `Available Android Virtual Devices:` and no entries.
+
+## Second review fixes
+
+These close the two partly fixed findings in `docs/review-android-sdk-agy-2.md` (finding 2, Keystore identity; finding 6, session lifecycle) and the four new problems. The earlier "Still untested" note that `rejoin` does not roll back a journal write after `remember()` saved new keys is superseded for the cases below: a queued request keeps the new identity, and a failure before any request is queued restores the old one.
+
+1. High. `rejoin()` dropped `handleCommandError`, leaked `PendingPublication`, and could wedge `session.json` between the old identity and a queued request. `SessionWorker.rejoin` now reads `signingPublicKey()` and `agreementPublicKey()` before it switches providers or calls `core.close()`. An empty key throws `BindingException.KeyProvider` with the live core still open. `refreshLocked`'s new-request branch calls `recordIdentity` before `persistDelta`. `recordIdentity` writes the three identity fields only; it does not add `knownPaths`, so the unpublished records still go into `journal.pending`. If `refreshLocked` throws and `journal.pending` is already non-empty, the worker keeps the new keys and the new identity. If pending is still empty, it restores the previous keys, `left`, and the three identity fields, then closes the core again. `ColophonSession.rejoin` maps `PendingPublication` to `StorageException.Unavailable`, then `handleCommandError`, then rethrows that public error. `CancellationException` and `SessionException.NotReady` still propagate. `leaveAndRejoinWithPendingPublicationDoNotWipeTheLibrary` now asserts the library id is unchanged and the phase stays `Unavailable`, because the early pending rejection goes through `handleCommandError` and may rewrite the reason string.
+   - `SessionReviewTest.rejoinKeyFailureFailsTheSessionBeforeClosingTheCore` (0.015s). A provider that throws `BindingException.KeyProvider` must leave the phase `Failed`, set `lastError`, keep the library id and the store keys, leave the core's close count at 0, and make `projection` throw `SessionException.NotReady`. The old `rejoin` closed the core first and rethrew without `handleCommandError`, so the phase stayed ready and the close count was 1.
+   - `SessionReviewTest.rejoinPublicationFailureKeepsTheNewIdentity` (0.064s). After a revoked member's fresh rejoin fails to publish, the caller sees `StorageException.Unavailable`, the phase is `Unavailable`, and `session.json` has `left` false, the fresh public keys, a new member id, and a `requests/` entry in `pending`. Clearing the fault and calling `refresh` reaches `WaitingForApproval`. A cold reopen with the fresh keys stays `WaitingForApproval`. A cold reopen with the revoked keys is `Failed`. The old order wrote the request into `session.json` under the old identity and then reverted the in-memory keys, so refresh opened the revoked member and a cold reopen with the new keys failed in `ensureIdentity`.
+   - `SessionReviewTest.rejoinStorageFailureBeforeARequestKeepsTheOldIdentity` (0.027s). A `read()` failure before any request is queued returns `StorageException.Unavailable`, sets `Unavailable` and `lastError`, keeps the original signing key, and a later `refresh` returns `Ready` on that same key. The old catch left the phase ready with a closed core.
+   - Device: `SessionInstrumentedTest.rejoinWithIncompleteKeystoreIdentityFailsClosed` (0.056s). An owner library is created with `KeystoreKeys`. A second prefix materializes both aliases, the agreement alias is deleted, and `rejoin` with that incomplete provider throws `BindingException.KeyProvider`. The phase is `Failed`, `lastError` is set, the library id and record paths are unchanged, the surviving signing alias remains, and `projection` throws `SessionException.NotReady`. The old path closed the core before the key read and left the phase ready.
+
+2. Medium. `SessionWorker.create` called `persistDelta` before any identity was stored, so a failed publication wrote `session.json` with `libraryID` and pending authority records and null `signingPublicKey`, `agreementPublicKey`, and `memberID`. A later reopen with a different key file then skipped `ensureIdentity` and entered `WaitingForApproval`. `create` now calls `recordIdentity` on the create snapshot before `persistDelta`. Same constraint as rejoin: identity fields only, so `knownPaths` stays empty and the authority records are still queued.
+   - `SessionReviewTest.createRecordsIdentityBeforeAFailedPublication` (0.01s). The journal is loaded before any successful refresh. Signing key, agreement key, and member id are non-null and match the provider, `pending` is non-empty, and no `requests/` path is queued. After the fault clears, `refresh` reaches `Ready`. A second session with different `SoftwareKeys` stays `Failed` and writes no `requests/` record. The old order left the three identity fields null, so the replacement key was accepted as a new member.
+
+3. Medium. `ColophonSession.close` used `runBlocking` on the process-wide `colophon-session` dispatcher, and `ensureUsable` threw `CancellationException`. `close` now sets `worker.markClosed()` immediately. On the session thread it calls `closeCoreNow` without taking the worker mutex (publication observers run while `write` holds that mutex). From any other thread it launches `closeCoreSuspended` on a fresh `SupervisorJob` plus the session dispatcher. `ensureUsable` throws `SessionException.NotReady()`. `NotReady` is a class, a new instance per throw, because a `data object` keeps the first stack and coroutines can fail to catch that same instance again. Catches that used to rethrow `CancellationException` also rethrow `NotReady`, so a closed session is not turned into `Failed`. `launchRefresh` and the expiry job swallow `NotReady` so a watch that fires after `close` is not an uncaught session-scope failure. Public `perform` and `refresh` still propagate it.
+   - `SessionReviewTest.closeOnTheSessionThreadReturns` (0.015s). After `create`, the next `perform` publishes through a store `append` that calls `session.close()` on the session thread while the worker mutex is held. `close` must return and the latch must open within 5 seconds. The old `runBlocking(dispatcher)` deadlocks on that thread.
+   - `SessionReviewTest.closeReturnsWhileSessionWorkIsInFlight` (0.022s). `core.write` blocks. A caller thread's `close()` must return within 1 second while that write is still inside the dispatcher. The old `runBlocking` waited for the write.
+   - `SessionReviewTest.joinRecoveryKeysAndClose` (0.037s) now waits until the core is closed, then `perform` must throw `SessionException.NotReady` and that exception is not a `CancellationException`.
+
+4. Low. `AtomicFile.resolveRenameAt2` probed `"c"` and `"libc.so"` on every JVM. glibc 2.28+ resolves `renameat2`, so `hostProcessHasNoAndroidRenameAt2` would see errno 2 on Linux. `resolveRenameAt2` now returns null unless `isAndroidRuntime` is true (`/system/build.prop`, a VM name containing `Dalvik`, or a runtime name containing `Android`). Desktop hosts keep the `Files.copy` (`O_CREAT|O_EXCL`) fallback. Device publication still uses `renameat2`, because `link(2)` is denied in private app storage. This Mac already returned null before the gate; the Linux host was not run here.
+   - `StorageTest.hostProcessHasNoAndroidRenameAt2` (0.001s). `isAndroidRuntime(false, OpenJDK, OpenJDK)` is false, a present build prop is true, and `Dalvik` / `Android Runtime` is true. `renameNoReplace` of two missing paths is null on this host. Removing the gate makes the Linux `assertNull` fail with errno 2.
+   - Device: `SessionInstrumentedTest.renameAt2ReportsEexistAndShorterConflictsStayPut` (0.027s) still requires a successful `renameat2` (return 0) and `EEXIST` (17).
+
+### Commands and results
+
+`bash scripts/test-android.sh` — exit 0. `cargo build --locked -p colophon-ffi --release` finished in 0.04s. `testDebugUnitTest` `BUILD SUCCESSFUL in 10s`, 15 actionable tasks, 2 executed, 13 up-to-date. Result XML timestamp `2026-11-07T01:15:16Z` through `2026-11-07T01:15:19Z`: `SessionReviewTest` 23, `SessionTest` 5, `StorageTest` 10, `KeystoreFallbackTest` 4, `PackagingTest` 2. 44 tests, 0 failures, 0 errors, 0 skipped. The eight `SessionReviewTest` methods and `hostProcessHasNoAndroidRenameAt2` listed above are in those files with no `<failure>` element. Pre-existing warnings only: `Storage.kt:58` parameter name `records`, and `PackagingTest` `String?` mismatches.
+
+`cargo test --locked` — exit 0. `Finished test profile in 0.09s`. Per-target `test result: ok`: conformance 5 passed (1.25s), crypto 2 passed (0.02s), domain_books 19 passed (3.69s), domain_listening 15 passed (0.48s), domain_notes 16 passed and 1 ignored (`indexed_hundred_thousand_cell_notebook`, 3.65s), domain_saved 18 passed (4.28s), engine 8 passed (5.65s), protocol 16 passed (0.33s). Library, FFI, wasm, and doc-test targets ran 0 tests. 99 passed, 1 ignored, 0 failed. No Rust sources changed.
+
+`bash scripts/build-android.sh` — exit 0. Both `rust-std` Android targets were already installed. Host release finished in 0.04s. `colophon-ffi` and `uniffi-bindgen` dev profile finished in 2.03s. `cargo ndk` arm64-v8a release 0.06s, x86_64 release 0.05s, copied to `sdk/android/native/jni`. `assembleRelease` `BUILD SUCCESSFUL in 9s`, 29 actionable tasks, 5 executed, 24 up-to-date. `compileReleaseKotlin` printed the existing `Storage.kt:58` warning. `unzip -l sdk/android/build/colophon-android-0.2.0.aar`:
+
+| Path | Bytes |
+| --- | --- |
+| `classes.jar` | 556554 |
+| `jni/arm64-v8a/libcolophon_ffi.so` | 5169016 |
+| `jni/x86_64/libcolophon_ffi.so` | 5139312 |
+| total | 10865487 |
+
+`llvm-readelf` alignment was not re-run. The `.so` sizes match the previous handoff, and both `cargo ndk` builds finished from cache.
+
+AVD from the installed `system-images;android-36;google_apis;arm64-v8a` image:
+
+```text
+printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n colophon-review2-arm64 -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_6
+```
+
+Exit 0. `Auto-selecting single ABI arm64-v8a`. `avdmanager list avd` showed `colophon-review2-arm64`, device `pixel_6`, path `/Users/mikelxc/.android/avd/colophon-review2-arm64.avd`, Android 16.0 ("Baklava") `google_apis/arm64-v8a`, sdcard 512 MB.
+
+```text
+"$ANDROID_HOME/emulator/emulator" -avd colophon-review2-arm64 -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect
+```
+
+Emulator 37.2.12.0, system image `system-images/android-36/google_apis/arm64-v8a`, SwiftShader. `Boot completed in 23182 ms`. The boot watcher printed `DONE: emulator boot_completed`. `adb devices -l` showed `emulator-5554 device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emu64a`.
+
+```text
+GRADLE_USER_HOME=/Users/mikelxc/projects/colophon-wt/android/.gradle-home sdk/android/gradlew -p sdk/android --no-daemon connectedDebugAndroidTest
+```
+
+Exit 0. `BUILD SUCCESSFUL in 12s`, 50 actionable tasks, 7 executed, 43 up-to-date. Started and finished 5 tests on `colophon-review2-arm64(AVD) - 16`. Result XML `tests="5" failures="0" errors="0" skipped="0" time="0.719" timestamp="2026-11-07T01:20:22"`: `keystoreMaterialIsDeferredAndAPartialOrMissingIdentityFailsClosed` 0.15s, `unreadableDirectoryAndInternalSymlinkAreNotAnEmptyLibrary` 0.0s, `rejoinWithIncompleteKeystoreIdentityFailsClosed` 0.056s, `renameAt2ReportsEexistAndShorterConflictsStayPut` 0.027s, `keystoreCreateWriteQueryRevokeAndColdReopen` 0.211s.
+
+Shutdown and delete:
+
+```text
+"$ANDROID_HOME/platform-tools/adb" emu kill
+```
+
+Exit 0 (`OK: killing emulator, bye bye` and `OK`). The emulator process then exited 0. A later `adb devices` printed `List of devices attached` and no devices.
+
+```text
+"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" delete avd -n colophon-review2-arm64
+```
+
+Exit 0 (`AVD 'colophon-review2-arm64' deleted.`). `avdmanager list avd` then printed `Available Android Virtual Devices:` and no entries.
+
+Not re-verified in this round: x86_64 execution, an API 33 boot, StrongBox success, `SessionPhase.Migrating`, `CheckpointCache` consumption, and the ECDH default-provider branch. `keystoreCreateWriteQueryRevokeAndColdReopen` passed again on this API 36 image; the earlier handoff recorded `usedStrongBox == false` for that test. A glibc host was not run, so the Linux `renameat2` probe is covered by the `isAndroidRuntime` gate and the host assertions above, not by a Linux JVM execution.

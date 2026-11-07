@@ -22,7 +22,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -89,7 +88,7 @@ class ColophonSession internal constructor(
                 try {
                     apply(worker.restore())
                 } catch (error: Exception) {
-                    if (error is CancellationException) throw error
+                    if (error is CancellationException || error is SessionException.NotReady) throw error
                     fail(error)
                 }
             }.also { restoreDeferred = it }
@@ -108,7 +107,7 @@ class ColophonSession internal constructor(
                     startWatching()
                 }
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException || error is SessionException.NotReady) throw error
                 if (lease == context) fail(error)
             }
         }
@@ -123,7 +122,7 @@ class ColophonSession internal constructor(
                 apply(worker.create())
                 startWatching()
             } catch (error: Exception) {
-                if (error is CancellationException) {
+                if (error is CancellationException || error is SessionException.NotReady) {
                     if (_phase.value == SessionPhase.Creating) _phase.value = SessionPhase.NoLibrary
                     throw error
                 }
@@ -155,7 +154,7 @@ class ColophonSession internal constructor(
                 }
                 throw refusal.error
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException || error is SessionException.NotReady) throw error
                 if (observed.context == context) handleCommandError(error)
                 throw error
             }
@@ -170,7 +169,7 @@ class ColophonSession internal constructor(
                 val snapshot = worker.approve(request.record, grant)
                 if (lease == context) apply(snapshot)
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException || error is SessionException.NotReady) throw error
                 if (lease == context) handleCommandError(error)
                 throw error
             }
@@ -185,7 +184,7 @@ class ColophonSession internal constructor(
                 val snapshot = worker.revoke(memberID)
                 if (lease == context) apply(snapshot)
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException || error is SessionException.NotReady) throw error
                 if (lease == context) handleCommandError(error)
                 throw error
             }
@@ -201,7 +200,7 @@ class ColophonSession internal constructor(
                 invalidateContext()
                 _phase.value = SessionPhase.NoLibrary
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException || error is SessionException.NotReady) throw error
                 handleCommandError(error)
                 throw error
             }
@@ -218,8 +217,15 @@ class ColophonSession internal constructor(
             val snapshot = try {
                 worker.rejoin(keys)
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
-                throw error
+                if (error is CancellationException || error is SessionException.NotReady) throw error
+                // PendingPublication is an internal publication signal. Callers see storage failure.
+                val publicError: Exception = if (error is PendingPublication) {
+                    StorageException.Unavailable(error.reason)
+                } else {
+                    error
+                }
+                handleCommandError(publicError)
+                throw publicError
             }
             invalidateContext()
             apply(snapshot)
@@ -236,7 +242,7 @@ class ColophonSession internal constructor(
                 val snapshot = worker.importRequest(data)
                 if (lease == context) apply(snapshot)
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException || error is SessionException.NotReady) throw error
                 if (lease == context) handleCommandError(error)
                 throw error
             }
@@ -251,17 +257,26 @@ class ColophonSession internal constructor(
         expiryJob?.cancel()
         expiryJob = null
         scope.cancel()
-        runBlocking(dispatcher) { worker.close() }
+        // The session dispatcher is one thread. runBlocking onto it deadlocks when close()
+        // runs on that thread, and it stalls the caller behind whatever that thread is doing.
+        worker.markClosed()
+        if (Thread.currentThread().name.startsWith("colophon-session")) {
+            worker.closeCoreNow()
+        } else {
+            CoroutineScope(SupervisorJob() + dispatcher).launch {
+                worker.closeCoreSuspended()
+            }
+        }
     }
 
     private fun startWatching() {
         if (watchHandle != null) return
         try {
             watchHandle = worker.watch {
-                scope.launch { refresh() }
+                launchRefresh()
             }
         } catch (error: Exception) {
-            if (error is CancellationException) throw error
+            if (error is CancellationException || error is SessionException.NotReady) throw error
             _lastError.value = error.message
         }
     }
@@ -301,7 +316,21 @@ class ColophonSession internal constructor(
         if (delayMs <= 0L) return
         expiryJob = scope.launch {
             delay(delayMs)
-            refresh()
+            try {
+                refresh()
+            } catch (_: SessionException.NotReady) {
+                // close() won the race with the expiry wake-up.
+            }
+        }
+    }
+
+    /** File and expiry wakes are session jobs. A closed session is not a crash. */
+    private fun launchRefresh() {
+        scope.launch {
+            try {
+                refresh()
+            } catch (_: SessionException.NotReady) {
+            }
         }
     }
 
@@ -362,7 +391,7 @@ class ColophonSession internal constructor(
 
     internal fun projection(namespace: String): ByteArray {
         val view = views[namespace]
-        if (_phase.value != SessionPhase.Ready || view == null) throw SessionException.NotReady
+        if (_phase.value != SessionPhase.Ready || view == null) throw SessionException.NotReady()
         return view.state
     }
 
