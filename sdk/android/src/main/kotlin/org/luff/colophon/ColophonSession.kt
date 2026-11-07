@@ -11,16 +11,24 @@ import com.luff.colophon.Member
 import com.luff.colophon.NamespaceView
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
 
 /**
@@ -43,12 +51,13 @@ class ColophonSession internal constructor(
     private val worker = SessionWorker(configuration, core, store ?: configuration.store)
     private val dispatcher = dispatcher
     private val restoreMutex = Mutex()
-    @Volatile private var restoreStarted = false
+    private var restoreDeferred: Deferred<Unit>? = null
     @Volatile private var context: UUID = UUID.randomUUID()
     private val caches = mutableMapOf<UUID, (Set<String>, Boolean) -> Unit>()
     private val cacheLock = Any()
-    private var views: Map<String, NamespaceView> = emptyMap()
+    @Volatile private var views: Map<String, NamespaceView> = emptyMap()
     private var watchHandle: AutoCloseable? = null
+    private var expiryJob: Job? = null
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
     private val _phase = MutableStateFlow<SessionPhase>(SessionPhase.Opening)
@@ -74,18 +83,18 @@ class ColophonSession internal constructor(
 
     /** Shared completion barrier. Dependent startup work awaits this before using the session. */
     suspend fun restore() {
-        restoreMutex.withLock {
-            if (restoreStarted) return
-            restoreStarted = true
-            withContext(dispatcher) {
+        val deferred = restoreMutex.withLock {
+            restoreDeferred ?: scope.async {
                 startWatching()
                 try {
                     apply(worker.restore())
                 } catch (error: Exception) {
+                    if (error is CancellationException) throw error
                     fail(error)
                 }
-            }
+            }.also { restoreDeferred = it }
         }
+        deferred.await()
     }
 
     suspend fun refresh() {
@@ -99,6 +108,7 @@ class ColophonSession internal constructor(
                     startWatching()
                 }
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
                 if (lease == context) fail(error)
             }
         }
@@ -106,13 +116,17 @@ class ColophonSession internal constructor(
 
     suspend fun create() {
         restore()
-        if (_phase.value != SessionPhase.NoLibrary) return
-        _phase.value = SessionPhase.Creating
         withContext(dispatcher) {
+            if (_phase.value != SessionPhase.NoLibrary) return@withContext
+            _phase.value = SessionPhase.Creating
             try {
                 apply(worker.create())
                 startWatching()
             } catch (error: Exception) {
+                if (error is CancellationException) {
+                    if (_phase.value == SessionPhase.Creating) _phase.value = SessionPhase.NoLibrary
+                    throw error
+                }
                 fail(error)
             }
         }
@@ -141,6 +155,7 @@ class ColophonSession internal constructor(
                 }
                 throw refusal.error
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
                 if (observed.context == context) handleCommandError(error)
                 throw error
             }
@@ -155,6 +170,7 @@ class ColophonSession internal constructor(
                 val snapshot = worker.approve(request.record, grant)
                 if (lease == context) apply(snapshot)
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
                 if (lease == context) handleCommandError(error)
                 throw error
             }
@@ -169,6 +185,7 @@ class ColophonSession internal constructor(
                 val snapshot = worker.revoke(memberID)
                 if (lease == context) apply(snapshot)
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
                 if (lease == context) handleCommandError(error)
                 throw error
             }
@@ -179,23 +196,49 @@ class ColophonSession internal constructor(
     suspend fun leave() {
         restore()
         withContext(dispatcher) {
-            worker.leave()
-            invalidateContext()
-            _phase.value = SessionPhase.NoLibrary
+            try {
+                worker.leave()
+                invalidateContext()
+                _phase.value = SessionPhase.NoLibrary
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                handleCommandError(error)
+                throw error
+            }
         }
     }
 
-    /** Revoked identities need fresh, independently persisted keys; unchanged requests are immutable. */
+    /**
+     * Revoked identities need fresh, independently persisted keys; unchanged requests are immutable.
+     * Context is invalidated only after [SessionWorker.rejoin] accepts the new provider.
+     */
     suspend fun rejoin(keys: KeyProvider) {
         restore()
-        invalidateContext()
-        _phase.value = SessionPhase.Opening
+        withContext(dispatcher) {
+            val snapshot = try {
+                worker.rejoin(keys)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                throw error
+            }
+            invalidateContext()
+            apply(snapshot)
+            startWatching()
+        }
+    }
+
+    /** Imports an external member's signed pairing request into this library. */
+    suspend fun importRequest(data: ByteArray) {
+        restore()
+        val lease = context
         withContext(dispatcher) {
             try {
-                apply(worker.rejoin(keys))
-                startWatching()
+                val snapshot = worker.importRequest(data)
+                if (lease == context) apply(snapshot)
             } catch (error: Exception) {
-                fail(error)
+                if (error is CancellationException) throw error
+                if (lease == context) handleCommandError(error)
+                throw error
             }
         }
     }
@@ -205,7 +248,10 @@ class ColophonSession internal constructor(
     fun close() {
         watchHandle?.close()
         watchHandle = null
-        worker.recovery()
+        expiryJob?.cancel()
+        expiryJob = null
+        scope.cancel()
+        runBlocking(dispatcher) { worker.close() }
     }
 
     private fun startWatching() {
@@ -215,6 +261,7 @@ class ColophonSession internal constructor(
                 scope.launch { refresh() }
             }
         } catch (error: Exception) {
+            if (error is CancellationException) throw error
             _lastError.value = error.message
         }
     }
@@ -234,10 +281,33 @@ class ColophonSession internal constructor(
         synchronized(cacheLock) {
             for (invalidate in caches.values) invalidate(changed, lost)
         }
+        scheduleExpiry(snapshot)
         _lastError.value = null
     }
 
+    private fun scheduleExpiry(snapshot: SessionSnapshot) {
+        expiryJob?.cancel()
+        expiryJob = null
+        if (snapshot.phase != SessionPhase.Ready) return
+        val expires = snapshot.core?.me?.grant?.expires ?: return
+        val expiryMs = try {
+            Instant.parse(expires).toEpochMilli()
+        } catch (_: Exception) {
+            return
+        }
+        // The engine keeps a grant through its expiry instant (`now > expires`).
+        // Waking on that exact millisecond would refresh too early and then not reschedule.
+        val delayMs = expiryMs + 1 - System.currentTimeMillis()
+        if (delayMs <= 0L) return
+        expiryJob = scope.launch {
+            delay(delayMs)
+            refresh()
+        }
+    }
+
     private fun invalidateContext() {
+        expiryJob?.cancel()
+        expiryJob = null
         context = UUID.randomUUID()
         views = emptyMap()
         _members.value = emptyList()
@@ -251,8 +321,11 @@ class ColophonSession internal constructor(
     }
 
     private fun handleCommandError(error: Exception) {
-        if (error is AccessException || error is StorageException || error is PendingPublication) fail(error)
-        else _lastError.value = error.message ?: error.toString()
+        if (error is AccessException || error is StorageException || error is PendingPublication || error is BindingException) {
+            fail(error)
+        } else {
+            _lastError.value = error.message ?: error.toString()
+        }
     }
 
     private fun fail(error: Exception) {

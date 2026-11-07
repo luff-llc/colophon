@@ -31,7 +31,8 @@ android {
     sourceSets {
         getByName("main") {
             kotlin.srcDir("../kotlin/src/main/kotlin")
-            jniLibs.srcDir(layout.buildDirectory.dir("native/jni"))
+            // Outside layout.buildDirectory so `clean` cannot drop the cargo-ndk libraries.
+            jniLibs.srcDir(layout.projectDirectory.dir("native/jni"))
         }
     }
     packaging {
@@ -47,6 +48,9 @@ android {
             it.systemProperty("jna.library.path", hostLibs)
             it.systemProperty("java.library.path", hostLibs)
             it.environment("DYLD_LIBRARY_PATH", hostLibs)
+            it.systemProperty("colophon.consumerRules", rootDir.resolve("consumer-rules.pro").absolutePath)
+            it.systemProperty("colophon.buildGradle", rootDir.resolve("build.gradle.kts").absolutePath)
+            it.systemProperty("colophon.buildScript", rootDir.resolve("../../scripts/build-android.sh").canonicalPath)
         }
     }
     publishing {
@@ -68,6 +72,24 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
     androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+}
+
+val checkNativeLibs = tasks.register("checkNativeLibs") {
+    val nativeDir = layout.projectDirectory.dir("native/jni").asFile
+    doLast {
+        for (abi in listOf("arm64-v8a", "x86_64")) {
+            val so = nativeDir.resolve("$abi/libcolophon_ffi.so")
+            if (!so.isFile) {
+                throw GradleException("Missing JNI library ${so.absolutePath}")
+            }
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "mergeReleaseJniLibFolders" || name == "mergeDebugJniLibFolders") {
+        dependsOn(checkNativeLibs)
+    }
 }
 
 tasks.withType<Test>().configureEach {

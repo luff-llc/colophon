@@ -12,6 +12,7 @@ dist/
 /sdk/kotlin/.gradle/
 /sdk/kotlin/build/
 /sdk/android/build/
+/sdk/android/native/
 /sdk/android/.gradle/
 /sdk/android/local.properties
 /.gradle-home/

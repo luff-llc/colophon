@@ -31,12 +31,16 @@ export ANDROID_SDK_ROOT="$ANDROID_HOME"
 rustup target add aarch64-linux-android x86_64-linux-android
 # The host generator and generated sources must match the native library exactly.
 bash scripts/generate-bindings.sh
-jni="$PWD/sdk/android/build/native/jni"
+# Staged outside Gradle build/ so clean cannot package an AAR with no JNI libraries.
+jni="$PWD/sdk/android/native/jni"
 mkdir -p "$jni"
 cargo ndk -t arm64-v8a -t x86_64 --platform 33 -o "$jni" build --locked -p colophon-ffi --release
 sdk/android/gradlew -p sdk/android --no-daemon assembleRelease
-aar_src=$(find sdk/android/build/outputs/aar -name '*.aar' | head -n 1)
-[[ -n "$aar_src" ]] || { echo 'Gradle did not produce an AAR' >&2; exit 1; }
+aar_src="sdk/android/build/outputs/aar/colophon-android-release.aar"
+if [[ ! -f "$aar_src" ]]; then
+  echo 'Gradle did not produce the release AAR' >&2
+  exit 1
+fi
 mkdir -p sdk/android/build
 cp "$aar_src" sdk/android/build/colophon-android-0.2.0.aar
 # Keep a stable name matching earlier packaging docs.

@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.concurrent.CancellationException
 
 /**
  * A bounded set of typed query slices. Rendering reads [cached], never decodes or folds.
@@ -26,7 +27,7 @@ class NamespaceStore<Query, Result>(
     private val results = linkedMapOf<Query, Result>()
     private var registration: UUID? = session.registerCache { changed, lost ->
         if (!lost && namespace !in changed) return@registerCache
-        results.clear()
+        synchronized(results) { results.clear() }
         _revision.value = session.namespaceRevisions.value[namespace] ?: 0u
         _state.value = if (lost) State.Unavailable else State.Idle
     }
@@ -55,6 +56,7 @@ class NamespaceStore<Query, Result>(
             _state.value = State.Ready
             result
         } catch (error: Exception) {
+            if (error is CancellationException) throw error
             _state.value = State.Unavailable
             throw error
         }

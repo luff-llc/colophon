@@ -2,11 +2,13 @@ package org.luff.colophon
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermission
 
 class StorageTest {
     private fun temp(): java.io.File = Files.createTempDirectory("colophon-store-").toFile().also { it.deleteOnExit() }
@@ -98,6 +100,100 @@ class StorageTest {
             SessionJournal.load(file)
             fail("corrupt journal must fail closed")
         } catch (_: StorageException) {
+        }
+        journal.signingPublicKey = ByteArray(65) { 4 }
+        journal.agreementPublicKey = ByteArray(65) { 5 }
+        journal.memberID = "member-id"
+        journal.save(file)
+        val identified = SessionJournal.load(file)
+        assertArrayEquals(journal.signingPublicKey, identified.signingPublicKey)
+        assertArrayEquals(journal.agreementPublicKey, identified.agreementPublicKey)
+        assertEquals("member-id", identified.memberID)
+    }
+
+    @Test
+    fun shorterImmutableWriteConflictsInsteadOfLimitExceeded() {
+        val file = java.io.File(temp(), "authority.json")
+        AtomicFile.write("longer-record".toByteArray(), file)
+        try {
+            AtomicFile.write("short".toByteArray(), file, immutable = true)
+            fail("expected conflict")
+        } catch (error: StorageException) {
+            assertTrue("shorter conflict must not be LimitExceeded: ${error.javaClass.simpleName}", error is StorageException.Conflict)
+        }
+        assertEquals("longer-record", file.readText())
+    }
+
+    @Test
+    fun exclusiveFallbackDoesNotReplaceAnExistingRecord() {
+        val root = temp()
+        val dest = java.io.File(root, "record.json")
+        dest.writeBytes("longer".toByteArray())
+        val staged = java.io.File(root, "staged")
+        staged.writeBytes("new".toByteArray())
+        try {
+            AtomicFile.moveIfAbsent(staged, dest, "new".toByteArray())
+            fail("expected conflict")
+        } catch (error: StorageException) {
+            assertTrue(error is StorageException.Conflict)
+        }
+        assertEquals("longer", dest.readText())
+        val created = java.io.File(root, "fresh.json")
+        val source = java.io.File(root, "source")
+        source.writeBytes("body".toByteArray())
+        AtomicFile.moveIfAbsent(source, created, "body".toByteArray())
+        assertEquals("body", created.readText())
+    }
+
+    @Test
+    fun hostProcessHasNoAndroidRenameAt2() {
+        assertNull(AtomicFile.renameNoReplace("/tmp/colophon-missing-a", "/tmp/colophon-missing-b"))
+    }
+
+    @Test
+    fun symlinkInsideTheLibraryIsRejected() {
+        val root = temp()
+        val folder = java.io.File(root, "library")
+        val store = FileRecordStore(folder)
+        val outside = java.io.File(root, "outside.json")
+        outside.writeBytes("secret".toByteArray())
+        val authority = java.io.File(folder, "authority")
+        assertTrue(authority.mkdirs())
+        val link = java.io.File(authority, "00000001.json")
+        Files.createSymbolicLink(link.toPath(), outside.toPath())
+        try {
+            store.read()
+            fail("symlink must be rejected")
+        } catch (error: StorageException) {
+            assertTrue(error is StorageException.InvalidPath)
+        }
+        try {
+            store.append(mapOf("authority/00000001.json" to "other".toByteArray()))
+            fail("append through a symlink must be rejected")
+        } catch (error: StorageException) {
+            assertTrue(error is StorageException.InvalidPath)
+        }
+        assertEquals("secret", outside.readText())
+    }
+
+    @Test
+    fun unreadableLibraryIsUnavailableRatherThanEmpty() {
+        val folder = java.io.File(temp(), "library")
+        val authority = java.io.File(folder, "authority")
+        assertTrue(authority.mkdirs())
+        java.io.File(authority, "00000001.json").writeBytes("one".toByteArray())
+        val perms = java.nio.file.attribute.PosixFilePermissions.fromString("---------")
+        Files.setPosixFilePermissions(authority.toPath(), perms)
+        try {
+            val read = FileRecordStore(folder).read()
+            fail("unreadable directory returned ${read.keys}")
+        } catch (error: StorageException.Unavailable) {
+            assertFalse(error.message.orEmpty().contains("NoLibrary"))
+        } finally {
+            Files.setPosixFilePermissions(
+                authority.toPath(),
+                setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE),
+            )
         }
     }
 }

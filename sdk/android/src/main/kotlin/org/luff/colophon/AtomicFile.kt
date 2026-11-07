@@ -1,6 +1,7 @@
 package org.luff.colophon
 
 import com.sun.jna.Function
+import com.sun.jna.LastErrorException
 import com.sun.jna.Native
 import com.sun.jna.NativeLibrary
 import java.io.File
@@ -17,8 +18,9 @@ import java.util.UUID
  * Stage, fsync, then publish. Immutable records are published exclusively: a hard link
  * where the platform allows it, otherwise `renameat2(RENAME_NOREPLACE)`. Android denies
  * `link(2)` in private app storage, and a plain rename would replace an existing record.
- * Mutable files (the session journal, checkpoints) use an atomic rename that replaces
- * an existing file. Android's [File.renameTo] does not.
+ * When `renameat2` is missing, publication copies with `O_CREAT|O_EXCL` and never renames
+ * over an existing file. Mutable files (the session journal, checkpoints) use an atomic
+ * rename that replaces an existing file. Android's [File.renameTo] does not.
  */
 internal object AtomicFile {
     const val MAX_RECORD_BYTES = 16 * 1024 * 1024
@@ -30,6 +32,12 @@ internal object AtomicFile {
     private const val EEXIST = 17
     private const val EINVAL = 22
     private const val ENOSYS = 38
+
+    /**
+     * Resolved once. `THROW_LAST_ERROR` captures `errno` in the native call so a failed
+     * `renameat2` is not reported as `-1` after `errno` has been clobbered.
+     */
+    private val renameAt2: Function? by lazy { resolveRenameAt2() }
 
     fun write(bytes: ByteArray, to: File, immutable: Boolean = false) {
         if (bytes.size > MAX_JOURNAL_BYTES) throw StorageException.LimitExceeded
@@ -65,10 +73,6 @@ internal object AtomicFile {
     }
 
     private fun publishImmutable(staged: File, to: File, bytes: ByteArray) {
-        if (to.exists()) {
-            ensureSame(to, bytes)
-            return
-        }
         try {
             Files.createLink(to.toPath(), staged.toPath())
         } catch (_: FileAlreadyExistsException) {
@@ -90,44 +94,50 @@ internal object AtomicFile {
 
     /**
      * Linux `rename(2)` replaces the destination. `RENAME_NOREPLACE` keeps the conflict
-     * check atomic. Returns null when this process has no Android libc.
+     * check atomic. Returns null when this process has no `renameat2`.
+     * `0` is success. A positive value is `errno`.
      */
-    private fun renameNoReplace(from: String, to: String): Int? {
-        val renameat2 = androidRenameAt2() ?: return null
+    internal fun renameNoReplace(from: String, to: String): Int? {
+        val renameat2 = renameAt2 ?: return null
         return try {
             val args = arrayOf<Any>(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE)
             val rc = renameat2.invokeInt(args)
-            if (rc == 0) {
-                0
-            } else {
+            if (rc == 0) 0 else {
                 val errno = Native.getLastError()
                 if (errno != 0) errno else rc
             }
+        } catch (error: LastErrorException) {
+            val errno = error.errorCode
+            if (errno != 0) errno else -1
         } catch (_: UnsatisfiedLinkError) {
             null
         }
     }
 
-    private fun androidRenameAt2(): Function? {
-        val path = listOf("/system/lib64/libc.so", "/system/lib/libc.so").firstOrNull { File(it).isFile } ?: return null
-        return try {
-            NativeLibrary.getInstance(path).getFunction("renameat2")
-        } catch (_: Throwable) {
-            null
+    private fun resolveRenameAt2(): Function? {
+        val names = listOf("c", "libc.so", "/system/lib64/libc.so", "/system/lib/libc.so")
+        for (name in names) {
+            if (name.startsWith("/") && !File(name).isFile) continue
+            try {
+                return NativeLibrary.getInstance(name).getFunction("renameat2", Function.THROW_LAST_ERROR)
+            } catch (_: Throwable) {
+                // Try the next libc name. Hosts without Android bionic return null.
+            }
         }
+        return null
     }
 
-    private fun moveIfAbsent(staged: File, to: File, bytes: ByteArray) {
-        if (to.exists()) {
-            ensureSame(to, bytes)
-            return
-        }
+    /**
+     * Last-resort exclusive publish. `Files.copy` uses `O_CREAT|O_EXCL` on POSIX and
+     * throws [FileAlreadyExistsException] instead of replacing the destination.
+     * `Files.move(ATOMIC_MOVE)` is `rename(2)`, which would clobber an existing record.
+     */
+    internal fun moveIfAbsent(staged: File, to: File, bytes: ByteArray) {
         try {
-            Files.move(staged.toPath(), to.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            Files.copy(staged.toPath(), to.toPath())
+            FileOutputStream(to, true).use { it.fd.sync() }
         } catch (_: FileAlreadyExistsException) {
             ensureSame(to, bytes)
-        } catch (_: AtomicMoveNotSupportedException) {
-            if (to.exists()) ensureSame(to, bytes) else Files.move(staged.toPath(), to.toPath())
         }
     }
 
@@ -145,6 +155,7 @@ internal object AtomicFile {
     }
 
     private fun ensureSame(to: File, bytes: ByteArray) {
+        if (to.length() != bytes.size.toLong()) throw StorageException.Conflict(to.path)
         val existing = read(to, bytes.size.coerceAtLeast(1))
         if (!existing.contentEquals(bytes)) throw StorageException.Conflict(to.path)
     }

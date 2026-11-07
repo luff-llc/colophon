@@ -9,6 +9,10 @@ internal data class SessionJournal(
     var left: Boolean = false,
     var knownPaths: MutableSet<String> = mutableSetOf(),
     var pending: MutableMap<String, ByteArray> = mutableMapOf(),
+    /** Uncompressed P-256 points recorded when this home selected an identity. */
+    var signingPublicKey: ByteArray? = null,
+    var agreementPublicKey: ByteArray? = null,
+    var memberID: String? = null,
 ) {
     fun save(file: File) {
         AtomicFile.write(encode().toByteArray(Charsets.UTF_8), file)
@@ -32,7 +36,13 @@ internal data class SessionJournal(
             append(':')
             append(jsonString(Base64.getEncoder().encodeToString(pending[path])))
         }
-        append("}}")
+        append("},\"signingPublicKey\":")
+        append(signingPublicKey?.let { jsonString(Base64.getEncoder().encodeToString(it)) } ?: "null")
+        append(",\"agreementPublicKey\":")
+        append(agreementPublicKey?.let { jsonString(Base64.getEncoder().encodeToString(it)) } ?: "null")
+        append(",\"memberID\":")
+        append(memberID?.let { jsonString(it) } ?: "null")
+        append('}')
     }
 
     companion object {
@@ -61,6 +71,9 @@ internal data class SessionJournal(
             journal.left = obj.bool("left") ?: false
             journal.knownPaths = obj.stringList("knownPaths").toMutableSet()
             journal.pending = obj.stringMap("pending").mapValues { Base64.getDecoder().decode(it.value) }.toMutableMap()
+            journal.signingPublicKey = obj.string("signingPublicKey")?.let { Base64.getDecoder().decode(it) }
+            journal.agreementPublicKey = obj.string("agreementPublicKey")?.let { Base64.getDecoder().decode(it) }
+            journal.memberID = obj.string("memberID")
             return journal
         }
     }

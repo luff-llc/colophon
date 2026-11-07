@@ -1,6 +1,9 @@
 package org.luff.colophon
 
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -92,20 +95,22 @@ class FileRecordStore(val folder: File) : RecordStore {
 
     override fun read(): Map<String, ByteArray> = synchronized(lock) {
         try {
+            ensureFolderAccessible()
             val result = mutableMapOf<String, ByteArray>()
             for (directory in listOf("authority", "requests", "ops")) {
-                val root = File(folder, directory)
-                if (!root.exists()) continue
-                if (!root.isDirectory) throw StorageException.Unavailable("Cannot enumerate $directory")
-                root.walkTopDown().forEach { file ->
-                    if (!file.isFile || file.name.startsWith(".")) return@forEach
-                    val canonical = file.canonicalFile
-                    val prefix = folder.canonicalFile.path + File.separator
-                    if (!canonical.path.startsWith(prefix)) throw StorageException.InvalidPath(file.path)
-                    val path = canonical.path.removePrefix(prefix).replace(File.separatorChar, '/')
-                    RecordPath.validate(path)
-                    result[path] = AtomicFile.read(file, AtomicFile.MAX_RECORD_BYTES)
+                val root = folder.toPath().resolve(directory)
+                if (Files.isSymbolicLink(root)) throw StorageException.InvalidPath(root.toString())
+                if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+                    if (!Files.notExists(root, LinkOption.NOFOLLOW_LINKS)) {
+                        throw StorageException.Unavailable("Cannot access $root")
+                    }
+                    continue
                 }
+                if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
+                    throw StorageException.Unavailable("Cannot enumerate $directory")
+                }
+                if (!Files.isReadable(root)) throw StorageException.Unavailable("Cannot read $root")
+                collect(root, result)
             }
             if (!knownPaths.all { it in result.keys }) {
                 throw StorageException.Unavailable("Previously observed records are missing")
@@ -131,6 +136,7 @@ class FileRecordStore(val folder: File) : RecordStore {
                 }
                 for (path in records.keys.sorted()) {
                     val bytes = records[path] ?: continue
+                    rejectSymlinkPath(path)
                     val target = File(folder, path.replace('/', File.separatorChar))
                     AtomicFile.write(bytes, target, immutable = true)
                 }
@@ -150,6 +156,55 @@ class FileRecordStore(val folder: File) : RecordStore {
 
     private fun notifyObservers() {
         for (observer in observers) observer()
+    }
+
+    /** Absence is an empty library. An unreadable or indeterminate path is not absence. */
+    private fun ensureFolderAccessible() {
+        val path = folder.toPath()
+        if (Files.isSymbolicLink(path)) throw StorageException.InvalidPath(folder.path)
+        val exists = Files.exists(path, LinkOption.NOFOLLOW_LINKS)
+        val missing = Files.notExists(path, LinkOption.NOFOLLOW_LINKS)
+        if (!exists && !missing) throw StorageException.Unavailable("Cannot access ${folder.path}")
+        if (!exists) return
+        if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) || !Files.isReadable(path)) {
+            throw StorageException.Unavailable("Cannot read ${folder.path}")
+        }
+    }
+
+    private fun collect(root: Path, result: MutableMap<String, ByteArray>) {
+        val entries = try {
+            Files.newDirectoryStream(root)
+        } catch (error: Exception) {
+            throw StorageException.Unavailable("Cannot enumerate $root: ${error.message ?: error}")
+        }
+        entries.use { stream ->
+            for (entry in stream) {
+                if (Files.isSymbolicLink(entry)) throw StorageException.InvalidPath(entry.toString())
+                val name = entry.fileName.toString()
+                if (name.startsWith(".")) continue
+                if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) {
+                    if (!Files.isReadable(entry)) throw StorageException.Unavailable("Cannot read $entry")
+                    collect(entry, result)
+                } else if (Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
+                    val file = entry.toFile()
+                    val prefix = folder.canonicalFile.path + File.separator
+                    val canonical = file.canonicalFile
+                    if (!canonical.path.startsWith(prefix)) throw StorageException.InvalidPath(file.path)
+                    val path = canonical.path.removePrefix(prefix).replace(File.separatorChar, '/')
+                    RecordPath.validate(path)
+                    result[path] = AtomicFile.read(file, AtomicFile.MAX_RECORD_BYTES)
+                }
+            }
+        }
+    }
+
+    private fun rejectSymlinkPath(relative: String) {
+        var current = folder.toPath()
+        if (Files.isSymbolicLink(current)) throw StorageException.InvalidPath(folder.path)
+        for (part in relative.split('/')) {
+            current = current.resolve(part)
+            if (Files.isSymbolicLink(current)) throw StorageException.InvalidPath(relative)
+        }
     }
 }
 

@@ -1,12 +1,15 @@
 package org.luff.colophon
 
 import com.luff.colophon.Access
+import com.luff.colophon.BindingException
 import com.luff.colophon.DenialReason
 import com.luff.colophon.GrantOptions
 import com.luff.colophon.KeyProvider
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.util.concurrent.CancellationException
 
 /**
  * All filesystem, FFI, projections and signing run off the main thread. The mutex serializes
@@ -27,6 +30,8 @@ internal class SessionWorker(
     private var namespaceRevisions: MutableMap<String, ULong> = mutableMapOf()
     private val mutex = Mutex()
     private val journalFile: File = File(configuration.privateHome, "session.json")
+    private var acceptNewIdentity = false
+    private var closed = false
 
     private fun storage(): RecordStore {
         store?.let { return it }
@@ -46,12 +51,14 @@ internal class SessionWorker(
     }
 
     suspend fun restore(): SessionSnapshot = mutex.withLock {
+        ensureUsable()
         loadJournal()
         if (journal.left) return empty(SessionPhase.NoLibrary)
         refreshLocked()
     }
 
     suspend fun refresh(): SessionSnapshot = mutex.withLock {
+        ensureUsable()
         loadJournal()
         if (journal.left) return empty(SessionPhase.NoLibrary)
         refreshLocked()
@@ -67,6 +74,7 @@ internal class SessionWorker(
             if (journal.libraryID != null) throw StorageException.Unavailable("Selected library is unavailable")
             return empty(SessionPhase.NoLibrary)
         }
+        ensureIdentity()
         val combined = records.toMutableMap()
         for ((path, data) in journal.pending) {
             val old = combined[path]
@@ -80,6 +88,11 @@ internal class SessionWorker(
         var snapshot = core.snapshot(configuration.namespaces)
         if (journal.libraryID != null && journal.libraryID != snapshot.libraryID) {
             throw SessionException.DestinationChanged
+        }
+        if (!acceptNewIdentity && journal.memberID != null && journal.memberID != snapshot.me.id) {
+            opened = false
+            core.close()
+            throw BindingException.KeyProvider("Key provider does not match the selected member")
         }
         journal.libraryID = snapshot.libraryID
         if (journal.pending.isNotEmpty()) publish()
@@ -106,12 +119,31 @@ internal class SessionWorker(
         return makeSnapshot(snapshot, phase)
     }
 
+    private fun ensureIdentity() {
+        if (acceptNewIdentity) return
+        val expectedSigning = journal.signingPublicKey ?: return
+        val expectedAgreement = journal.agreementPublicKey
+        val signing = keys.signingPublicKey()
+        val agreement = keys.agreementPublicKey()
+        if (expectedAgreement == null || !expectedSigning.contentEquals(signing) || !expectedAgreement.contentEquals(agreement)) {
+            throw BindingException.KeyProvider("Key provider does not match the selected library identity")
+        }
+    }
+
     private fun remember(snapshot: CoreSnapshot) {
         journal.knownPaths.addAll(snapshot.records.keys)
+        if (acceptNewIdentity || journal.signingPublicKey == null) {
+            journal.signingPublicKey = keys.signingPublicKey().copyOf()
+            journal.agreementPublicKey = keys.agreementPublicKey().copyOf()
+            journal.memberID = snapshot.me.id
+        } else if (journal.memberID == null) {
+            journal.memberID = snapshot.me.id
+        }
         journal.save(journalFile)
     }
 
     suspend fun create(): SessionSnapshot = mutex.withLock {
+        ensureUsable()
         loadJournal()
         if (opened || journal.libraryID != null || storage().read().isNotEmpty()) {
             throw SessionException.DestinationChanged
@@ -125,6 +157,7 @@ internal class SessionWorker(
     }
 
     suspend fun write(command: DomainCommand, observed: ULong): Pair<WriteReceipt, SessionSnapshot> = mutex.withLock {
+        ensureUsable()
         val fresh = refreshLocked()
         if (fresh.phase != SessionPhase.Ready) throw SessionRefusal(fresh, SessionException.NotReady)
         if (observed != revision) throw SessionRefusal(fresh, SessionException.StaleRevision)
@@ -135,6 +168,7 @@ internal class SessionWorker(
         val operation = try {
             core.write(command)
         } catch (error: Exception) {
+            if (error is CancellationException) throw error
             val after = core.records()
             val added = after.keys.filter { it.startsWith("ops/") && fresh.core?.records?.get(it) == null }
             if (added.isNotEmpty()) {
@@ -182,10 +216,12 @@ internal class SessionWorker(
     }
 
     suspend fun approve(request: ByteArray, grant: GrantOptions?): SessionSnapshot = mutex.withLock {
+        ensureUsable()
         refreshLocked()
         try {
             core.approve(request, grant)
         } catch (error: Exception) {
+            if (error is CancellationException) throw error
             persistDelta()
             throw error
         }
@@ -194,10 +230,12 @@ internal class SessionWorker(
     }
 
     suspend fun revoke(memberID: String): SessionSnapshot = mutex.withLock {
+        ensureUsable()
         refreshLocked()
         try {
             core.revoke(memberID)
         } catch (error: Exception) {
+            if (error is CancellationException) throw error
             persistDelta()
             throw error
         }
@@ -206,6 +244,7 @@ internal class SessionWorker(
     }
 
     suspend fun leave() = mutex.withLock {
+        ensureUsable()
         loadJournal()
         if (journal.pending.isNotEmpty()) {
             throw StorageException.Unavailable("Retry pending publication before leaving")
@@ -218,17 +257,55 @@ internal class SessionWorker(
     }
 
     suspend fun rejoin(keys: KeyProvider): SessionSnapshot = mutex.withLock {
+        ensureUsable()
         loadJournal()
         if (journal.pending.isNotEmpty()) {
             throw StorageException.Unavailable("Retry pending publication before rejoining")
         }
+        val previousKeys = this.keys
+        val previousLeft = journal.left
         this.keys = keys
         opened = false
         last = null
         journal.left = false
-        journal.save(journalFile)
+        acceptNewIdentity = true
         core.close()
+        try {
+            refreshLocked()
+        } catch (error: Exception) {
+            this.keys = previousKeys
+            journal.left = previousLeft
+            acceptNewIdentity = false
+            opened = false
+            last = null
+            core.close()
+            throw error
+        } finally {
+            acceptNewIdentity = false
+        }
+    }
+
+    suspend fun importRequest(data: ByteArray): SessionSnapshot = mutex.withLock {
+        ensureUsable()
         refreshLocked()
+        core.importRequest(data)
+        persistDelta()
+        refreshLocked()
+    }
+
+    fun close() {
+        runBlocking {
+            mutex.withLock {
+                closed = true
+                core.close()
+                opened = false
+                last = null
+            }
+        }
+    }
+
+    private fun ensureUsable() {
+        if (closed) throw CancellationException("Session is closed")
     }
 
     fun recovery(): KeyProvider? = core.recovery()

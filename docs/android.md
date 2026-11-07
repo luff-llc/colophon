@@ -58,19 +58,32 @@ val links = NamespaceStore.savedLinks(session)
 links.load(SavedLinksQuery())
 ```
 
-`KeystoreKeys` creates non-exportable P-256 signing and agreement keys, with
-StrongBox when the device provides it, and never replaces an unreadable
-identity with software. Use `SoftwareKeys.stored(file)` in tests. Writes carry
-the revision observed when the action began; a stale observation fails closed.
-Core FFI, storage and signing run on one background thread.
+`KeystoreKeys` creates non-exportable P-256 signing and agreement keys.
+Construction does not touch Keystore; the first provider call runs on the
+session thread. StrongBox is requested first. A `ProviderException` or
+`InvalidAlgorithmParameterException` on that attempt falls back to the TEE and
+deletes aliases that attempt created. On the API 36 `google_apis` arm64
+emulator, `usedStrongBox` was false. An incomplete alias pair fails closed and
+is left in place. If both aliases are missing for a library that already
+recorded an identity, the session enters `Failed` and does not submit a pairing
+request. Keystore may still generate a new pair, which the journal refuses.
+Hardware failure does not substitute a software key. Use `SoftwareKeys.stored(file)`
+in tests; a corrupt file is left in place. Writes carry the revision observed
+when the action began. Core FFI, storage, and signing run on one background
+thread.
 
 ## How this differs from the Apple session
 
 - Observation is `StateFlow<SessionPhase>` rather than an `@Observable @MainActor` type.
-- Storage is the app's private files directory with atomic rename; there is no
-  App Group, iCloud, or `NSFileCoordinator` location policy.
-- Identity is Android Keystore (TEE, StrongBox when available) rather than
-  Secure Enclave / Keychain. Software keys are an explicit test provider.
+- Storage is the app's private files directory. Immutable records try `link(2)`,
+  then `renameat2(RENAME_NOREPLACE)`, then `Files.copy` (`O_CREAT|O_EXCL`).
+  The API 36 emulator denies `link(2)` in private app storage, so publication
+  uses `renameat2`. The journal and checkpoint use a replacing atomic rename.
+  There is no App Group, iCloud, or `NSFileCoordinator` location policy.
+- Identity is Android Keystore. StrongBox is requested and falls back to the TEE
+  when generation throws a provider or parameter error. The instrumented image
+  reported a TEE key (`usedStrongBox == false`). Software keys are an explicit
+  test provider. The Apple session uses the Secure Enclave and Keychain.
 - Pairing, create, approve, revoke, leave and rejoin match the Apple session.
   Device-only App Group starter enrollment and the extension ingress inbox are
   Apple-only in this release.

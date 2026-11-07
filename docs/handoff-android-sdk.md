@@ -15,19 +15,28 @@ Nothing was committed, pushed, or published.
   commands carrying the observed revision. Namespace revision flows and cached query results
   live on `NamespaceStore`. Core calls run on one background thread. An inaccessible library
   stays `Unavailable`; key failures surface as `Failed`.
-- `KeystoreKeys` creates two non-exportable P-256 aliases (sign and agree). StrongBox is
-  requested first and the TEE is the fallback. An incomplete alias pair is deleted. Hardware
-  failure does not mint a software key. `SoftwareKeys` is the explicit test provider.
+- `KeystoreKeys` creates two non-exportable P-256 aliases (sign and agree) on first use,
+  on the session thread. StrongBox is requested first. A `ProviderException` or
+  `InvalidAlgorithmParameterException` falls back to the TEE and deletes aliases that
+  attempt created. An incomplete alias pair already present fails closed and is left in
+  place. A missing pair for an existing journal identity fails closed and does not enter
+  `WaitingForApproval`. Keystore may still generate a new pair, which the journal refuses.
+  Hardware failure does not mint a software key. `SoftwareKeys` is the explicit test
+  provider; a corrupt stored file is left in place.
 - `FileRecordStore` keeps records in the app's private files directory. Writes are staged
-  and fsynced. Immutable records are hard-linked where `link(2)` works, and otherwise
-  published with `renameat2(RENAME_NOREPLACE)` through the existing JNA. The journal and
-  checkpoint cache use an atomic replacing rename. `CheckpointCache` is device-local and
-  opaque. `SessionPhase.Migrating` exists and is not entered.
+  and fsynced. Immutable records try `link(2)`, then cached JNA
+  `renameat2(RENAME_NOREPLACE)` with `Function.THROW_LAST_ERROR`, then `Files.copy`
+  (`O_CREAT|O_EXCL`). A shorter conflicting write is `StorageException.Conflict`. The
+  journal and checkpoint cache use a replacing atomic rename. `CheckpointCache` is
+  device-local and opaque. `SessionPhase.Migrating` exists and is not entered.
 - `docs/android.md` covers adding the AAR, a short session example, and the Apple
   differences. `scripts/build-android.sh` and `scripts/test-android.sh` build and test it.
   Homebrew's `JAVA_HOME` prefix is rewritten to the JDK home that contains `release`.
 
 ## Commands and results
+
+The measurements in this section are the first device pass. The review-fix pass, including
+the rebuilt AAR and the four instrumented tests, is under [Review fixes](#review-fixes).
 
 Host: Apple Silicon. `JAVA_HOME` for Gradle was
 `/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home`. `GRADLE_USER_HOME` was
@@ -99,11 +108,11 @@ After `Signature.getInstance("SHA256withECDSA")` with no provider: exit 1.
 `expected:<Ready> but was:<Unavailable(reason=.../authority/00000001.json -> .../.stage-...)>`.
 `Files.createLink` is denied for app private files. Exclusive `renameat2` replaced that path.
 
-Final device run, on the code now in the tree: exit 0. `BUILD SUCCESSFUL in 23s`.
+Final device run of that pass: exit 0. `BUILD SUCCESSFUL in 23s`.
 Started and finished 1 test on `colophon-android-test(AVD) - 16`. The test creates a
 Keystore owner, signs, creates a library, saves a link, queries it, joins a second
 Keystore member, approves, revokes, and cold-reopens the owner from disk. The reopened
-private key's `encoded` form is null. The test does not read `KeyInfo.securityLevel`.
+private key's `encoded` form is null. That test does not read `KeyInfo.securityLevel`.
 
 Shutdown:
 
@@ -114,18 +123,15 @@ Shutdown:
 Exit 0 (`OK: killing emulator, bye bye`). A later `adb devices` listed no devices, and
 `pgrep -lf colophon-android-test` found no process.
 
-Deleting the AVD was blocked by the session permission check, so it is still installed:
+Deleting the AVD was blocked by the session permission check, so `colophon-android-test`
+was still installed at the end of that pass:
 
 ```text
 "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" list avd
 ```
 
-shows `colophon-android-test` at `/Users/mikelxc/.android/avd/colophon-android-test.avd`,
-target `google_apis/arm64-v8a` Android 16. Remove it with:
-
-```text
-"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" delete avd -n colophon-android-test
-```
+showed `colophon-android-test` at `/Users/mikelxc/.android/avd/colophon-android-test.avd`,
+target `google_apis/arm64-v8a` Android 16. The review-fix pass later found no AVDs.
 
 ## Dependencies
 
@@ -151,21 +157,101 @@ It was left in place.
 - `SessionPhase.Migrating` is not entered. The 0.1 importer is not wired.
 - `CheckpointCache` is persisted and not consumed. There is no verified-prefix engine on
   this host yet, matching Apple.
-- StrongBox was not measured. The Pixel 6 Google APIs image does not provide it, and the
-  provider falls back to the TEE when StrongBox generation throws. The test proved only
-  that the Keystore private key is non-exportable (`encoded == null`).
+- StrongBox on this image was measured in the review-fix pass: `usedStrongBox` was false.
+  The JVM fallback tests cover a StrongBox `ProviderException` and
+  `InvalidAlgorithmParameterException`. No device with a working StrongBox was booted.
 - API 33 itself was not booted. compileSdk is 35; the device run was API 36.
 - Android Keystore does not advertise `SHA256withECDSA`. Signing uses
   `Signature.getInstance("SHA256withECDSA")` with no provider so the platform workaround
   selects the Keystore key. ECDH tries provider `AndroidKeyStore`, then the default
-  provider. The device journey exercises both.
-- `link(2)` in app private storage fails (the message is `dest -> stage` with no errno
-  text). Publication falls back to `renameat2(RENAME_NOREPLACE)`. A plain `rename(2)`
-  would replace an existing record. If `renameat2` is missing, the last fallback is an
-  exists-check plus `Files.move`, which is not cross-process exclusive.
+  provider. On API 31+ the AndroidKeyStore call succeeds, so the device journey does not
+  exercise the default-provider branch.
+- `link(2)` in app private storage fails. The instrumented test requires
+  `Files.createLink` to throw, and `renameat2` then returns `0` or errno `17` (`EEXIST`).
+  If `renameat2` is missing, the last fallback is `Files.copy` (`O_CREAT|O_EXCL`), which
+  does not replace an existing record.
 - AGP reports SDK XML version 4 while its command-line tools understand up to 3.
 - `kotlinOptions.jvmTarget` is deprecated on this Kotlin pin. `MemoryRecordStore.append`
   warns that its parameter name differs from `RecordStore.records`.
 - `target/aarch64-linux-android` and `target/x86_64-linux-android` were left on disk.
   The host `target/release` dylib is what the JVM tests load.
-- AVD `colophon-android-test` is shut down and not deleted. See the command above.
+- No AVD remains. This pass created `colophon-review-arm64`, shut it down, and deleted it.
+  A later `avdmanager list avd` printed no devices. See [Review fixes](#review-fixes).
+
+## Review fixes
+
+Each finding in `docs/review-android-sdk-agy.md` is mapped to the change and the test that fails on the old behavior.
+
+1. Immutable publish (`AtomicFile`). `ensureSame` compares length first and throws `StorageException.Conflict`. Publication goes through `link(2)`, then a cached `renameat2(RENAME_NOREPLACE)` opened with `Function.THROW_LAST_ERROR`, then `Files.copy` (`O_CREAT|O_EXCL`). JVM: `StorageTest.shorterImmutableWriteConflictsInsteadOfLimitExceeded`, `exclusiveFallbackDoesNotReplaceAnExistingRecord`, `hostProcessHasNoAndroidRenameAt2` (this host returns null). Device: `SessionInstrumentedTest.renameAt2ReportsEexistAndShorterConflictsStayPut` (success returns 0, a second publish returns errno 17, `Files.createLink` throws, a shorter write is `Conflict` and the bytes stay).
+
+2. Keystore identity and key failures. `KeystoreKeys.openOrCreate` is lazy. An incomplete alias pair throws `BindingException.KeyProvider` and is left on the device. StrongBox generation falls back to the TEE on `ProviderException` or `InvalidAlgorithmParameterException`, and deletes aliases that attempt created. An unrelated exception does not fall back. `SessionWorker.ensureIdentity` compares the journal's signing and agreement public keys and refuses a replacement unless `rejoin` set `acceptNewIdentity`. `handleCommandError` includes `BindingException`, so a key failure becomes `SessionPhase.Failed`. JVM: `KeystoreFallbackTest.strongBoxPurposeFailureFallsBackToTheTee`, `invalidAlgorithmParameterOnStrongBoxFallsBack`, `unrelatedGenerationFailureDoesNotFallBack`, `providerExceptionDuringTeeFallbackStillDeletesThePartialIdentity`; `SessionReviewTest.keyFailureDuringRestoreAndCommandIsFailed` (phase `Failed`, and the provider thread name starts with `colophon-session`), `commandKeyFailureBecomesFailed`, `replacedIdentityFailsClosedWithoutANewRequest`, `softwareKeyFileIsDeferredAndCorruptMaterialIsKept`. Device: `keystoreMaterialIsDeferredAndAPartialOrMissingIdentityFailsClosed` (no aliases until `signingPublicKey()`; a one-alias pair stays `Failed` with the surviving alias left in place; both aliases missing stays `Failed` and does not enter `WaitingForApproval`; record paths unchanged). `keystoreCreateWriteQueryRevokeAndColdReopen` asserts `encoded == null` and `usedStrongBox == false`.
+
+3. Cancellation. `restore` is one shared `Deferred` on the session scope. Every `catch (Exception)` in `ColophonSession` and `NamespaceStore.load` rethrows `CancellationException`. JVM: `SessionReviewTest.cancelledRestoreDoesNotFailTheSession`, `cancelledLoadDoesNotPoisonTheNamespaceOrSession`.
+
+4. Unreadable directories and internal symlinks. `FileRecordStore` enumerates with NIO and `LinkOption.NOFOLLOW_LINKS`. A symlink is `StorageException.InvalidPath`. An unreadable or indeterminate directory is `StorageException.Unavailable`, and restore stays `Unavailable`. JVM: `StorageTest.symlinkInsideTheLibraryIsRejected`, `unreadableLibraryIsUnavailableRatherThanEmpty`; `SessionReviewTest.unreadableLibraryRestoreIsUnavailable`. Device: `SessionInstrumentedTest.unreadableDirectoryAndInternalSymlinkAreNotAnEmptyLibrary` (POSIX mode `000` on `filesDir`).
+
+5. Consumer R8 rules. `consumer-rules.pro` keeps `*Annotation*,EnclosingMethod,InnerClasses,Signature` and has `-dontwarn java.awt.**`. JVM: `PackagingTest.consumerRulesKeepAnnotationsAndIgnoreAwt`. The release AAR's `proguard.txt` contains both lines.
+
+6. Session lifecycle versus the Apple session. `scheduleExpiry` wakes at `expiryMs + 1` and skips a non-`Ready` phase or a non-positive delay. `close()` cancels the scope and closes the native core. `create` reports `Creating` only while the worker is inside the session dispatcher, and a failed create leaves that phase. `rejoin` invalidates context only after `worker.rejoin` returns. `leave` routes errors through `handleCommandError`. `importRequest` is on `ColophonSession`. `views` is `@Volatile`. `NamespaceStore.results` is used only inside `synchronized(results)`. JVM: `SessionReviewTest.futureGrantExpiryRefreshesWithoutAnotherCall`, `narrowedExpiredAndBudgetedGrantsFailClosed` (notes-only grant is `Denied`; `2000-01-01T00:00:00Z` is `Denied`; `writeBudget` `0uL` is `Ready`, then the write throws `AccessException` and the phase is `Denied`), `leaveAndRejoinWithPendingPublicationDoNotWipeTheLibrary`, `rejoinDoesNotInvalidateWhileAWriteIsInFlight`, `importRequestApprovesAnExternalMember`, `joinRecoveryKeysAndClose`, `failedCreateDoesNotStayCreating`, `queuedPublicationRetriesOnRefresh`, `postCommitFailureIsQueuedAndRefreshKeepsTheWrite`, `publishedViewsAreVisibleToOtherThreads`. `SessionTest.namespaceCachesAndStaleActions` reads the cache from the caller after the session thread clears it. There is no stress test that forces a `LinkedHashMap` race; `HashMap.get` during `clear` does not fail reliably.
+
+7. JNI staging and AAR selection. `jniLibs` is `layout.projectDirectory.dir("native/jni")`, outside `build/`. `checkNativeLibs` fails the merge if either ABI's `libcolophon_ffi.so` is missing. `scripts/build-android.sh` copies `colophon-android-release.aar` by that path. JVM: `PackagingTest.nativeLibrariesAreOutsideTheBuildDirectoryAndTheReleaseAarIsExplicit`. The release build below contains both ABIs.
+
+8. Docs. `docs/android.md` and the Delivered and Gaps sections above now match the code and these runs. The earlier command log stays as the first-pass record. Its AAR byte counts and single instrumented test are not the current artifact.
+
+Still untested, and not claimed as verified:
+
+- The x86_64 `.so` is packaged and 16 KB aligned. It was not executed. No x86_64 system image is installed.
+- API 33 was not booted. The device run is API 36.
+- `SessionPhase.Migrating` is not entered. `CheckpointCache` is stored and not consumed.
+- ECDH's default-provider branch is not exercised. `KeyAgreement.getInstance("ECDH", "AndroidKeyStore")` succeeds on this image.
+- StrongBox success was not measured. This image reported `usedStrongBox == false`.
+- When both aliases are missing, Keystore may generate a new pair before the journal rejects it. The device test checks phase and record paths. It does not assert that generation was skipped.
+- `rejoin` restores the in-memory provider if `refreshLocked` throws. If `remember()` already saved the new public keys, that journal write is not rolled back. Current tests do not hit that order.
+
+### Commands and results
+
+`cargo test --locked` — exit 0, 23.32s. `conformance` 5 passed, `crypto` 2 passed, `domain_books` 19 passed, `domain_listening` 15 passed, `domain_notes` 16 passed and 1 ignored (`indexed_hundred_thousand_cell_notebook`), `domain_saved` 18 passed, `engine` 8 passed, `protocol` 16 passed. Library, FFI, wasm, and doc-test targets ran 0 tests. 99 passed, 1 ignored, 0 failed.
+
+`bash scripts/build-android.sh` — exit 0. Both Rust targets were already installed. `cargo ndk` release builds finished in 0.07s each and copied libraries to `sdk/android/native/jni`. `assembleRelease` `BUILD SUCCESSFUL in 12s`. `unzip -l sdk/android/build/colophon-android-0.2.0.aar`:
+
+| Path | Bytes |
+| --- | --- |
+| `classes.jar` | 556422 |
+| `jni/arm64-v8a/libcolophon_ffi.so` | 5169016 |
+| `jni/x86_64/libcolophon_ffi.so` | 5139312 |
+| total | 10865355 |
+
+`unzip -p sdk/android/build/colophon-android-0.2.0.aar proguard.txt` printed the keep rules, `-keepattributes *Annotation*,EnclosingMethod,InnerClasses,Signature`, and `-dontwarn java.awt.**`.
+
+`llvm-readelf -l` (NDK `toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-readelf`) on both `sdk/android/native/jni/*/libcolophon_ffi.so`: every `LOAD` is `Align 0x4000`, and `p_offset % p_align == p_vaddr % p_align`.
+
+AVD, created earlier in this task from the installed `system-images;android-36;google_apis;arm64-v8a` image:
+
+```text
+printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n colophon-review-arm64 -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_6
+"$ANDROID_HOME/emulator/emulator" -avd colophon-review-arm64 -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect
+```
+
+Create exited 0. The boot watcher printed `DONE: emulator boot_completed`. Before the instrumented run, `adb devices` showed `emulator-5554 device`.
+
+```text
+JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home GRADLE_USER_HOME=/Users/mikelxc/projects/colophon-wt/android/.gradle-home sdk/android/gradlew -p sdk/android --no-daemon connectedDebugAndroidTest
+```
+
+Exit 0. `BUILD SUCCESSFUL in 14s`. Started and finished 4 tests on `colophon-review-arm64(AVD) - 16`. The result XML reports `tests="4" failures="0" errors="0" skipped="0" time="0.644"`: `keystoreMaterialIsDeferredAndAPartialOrMissingIdentityFailsClosed`, `unreadableDirectoryAndInternalSymlinkAreNotAnEmptyLibrary`, `renameAt2ReportsEexistAndShorterConflictsStayPut`, `keystoreCreateWriteQueryRevokeAndColdReopen`.
+
+`bash scripts/test-android.sh` — exit 0, after the `views` volatility test was added. `cargo build --locked -p colophon-ffi --release` finished in 0.05s. `testDebugUnitTest` `BUILD SUCCESSFUL in 10s`, 38 tests completed, 0 failed. That includes the 10 original session and storage tests, the four `KeystoreFallbackTest`s, both `PackagingTest`s, and the `SessionReviewTest`s named above.
+
+Shutdown and delete:
+
+```text
+"$ANDROID_HOME/platform-tools/adb" emu kill
+```
+
+Exit 0 (`OK: killing emulator, bye bye` and `OK`). A later `adb devices` listed no devices.
+
+```text
+"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" delete avd -n colophon-review-arm64
+```
+
+Exit 0 (`AVD 'colophon-review-arm64' deleted.`). `avdmanager list avd` then printed `Available Android Virtual Devices:` and no entries.
