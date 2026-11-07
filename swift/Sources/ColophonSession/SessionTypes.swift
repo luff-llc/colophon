@@ -79,14 +79,30 @@ public struct SessionConfiguration: Sendable {
     /// Only the verified source root's migration session may bypass the rollout barrier.
     public let migrationWriter: Bool
     public let recoveryKeys: (any AsyncKeyProvider)?
+    /// Optional relay (spec §8). The local location stays the source of truth.
+    public let relay: RelayConfiguration?
     public init(memberLabel: String, memberKind: MemberKind = .app, namespaces: [String], access: [Access] = [.read, .write],
                 libraryNamespaces: [String]? = nil, location: StorageLocation, privateContainer: URL,
-                keys: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil, enrollment: EnrollmentPolicy = .pairing, migrationMarker: URL? = nil, migrationWriter: Bool = false) {
-        self.migrationMarker = migrationMarker; self.migrationWriter = migrationWriter
+                keys: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil, enrollment: EnrollmentPolicy = .pairing, migrationMarker: URL? = nil, migrationWriter: Bool = false,
+                relay: RelayConfiguration? = nil) {
+        self.migrationMarker = migrationMarker; self.migrationWriter = migrationWriter; self.relay = relay
         self.memberLabel = memberLabel; self.memberKind = memberKind; self.namespaces = namespaces
         self.access = access; self.libraryNamespaces = libraryNamespaces ?? namespaces
         self.enrollment = enrollment
         self.location = location; self.privateContainer = privateContainer; self.keys = keys; self.recoveryKeys = recoveryKeys
+    }
+}
+
+/// A relay slot URL and its storage token. Load the token from the Keychain (`RelayToken`);
+/// it grants relay storage only, never library membership.
+public struct RelayConfiguration: Sendable {
+    public let endpoint: RelayEndpoint
+    /// When true the session syncs in the background: after local changes, on relay long-poll
+    /// wake-ups and with capped backoff after failures. When false, call `syncNow()`.
+    public let automatic: Bool
+    public let transport: any RelayTransport
+    public init(url: URL, token: String?, automatic: Bool = true, transport: any RelayTransport = URLSessionRelayTransport()) {
+        endpoint = RelayEndpoint(url: url, token: token); self.automatic = automatic; self.transport = transport
     }
 }
 

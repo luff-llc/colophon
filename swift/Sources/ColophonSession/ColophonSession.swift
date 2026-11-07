@@ -15,6 +15,11 @@ import ColophonKitStorage
     public private(set) var requests: [AccessRequest] = []
     public private(set) var lastError: String?
     public private(set) var context = UUID()
+    /// Relay synchronization (spec §8). `.disabled` without a configured relay.
+    public private(set) var syncState: RelaySyncState = .disabled
+    public private(set) var lastSynced: Date?
+    /// Paths whose relay bytes differ from this device's records, from the latest pass.
+    public private(set) var syncConflicts: [String] = []
     @ObservationIgnored private let worker: SessionWorker
     @ObservationIgnored private var retryCreate = false
     @ObservationIgnored private var restoreTask: Task<Void, Never>?
@@ -23,12 +28,19 @@ import ColophonKitStorage
     @ObservationIgnored private var expiryTask: Task<Void, Never>?
     @ObservationIgnored private var views: [String: NamespaceView] = [:]
     @ObservationIgnored private var caches: [UUID: @MainActor (Set<String>, Bool) -> Void] = [:]
+    @ObservationIgnored private let relay: RelayConfiguration?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private let syncSignal = SyncSignal()
 
-    public init(configuration: SessionConfiguration) { worker = SessionWorker(configuration: configuration) }
-    init(configuration: SessionConfiguration, store: any RecordStore, core: any SessionCore = BindingSessionCore()) {
-        worker = SessionWorker(configuration: configuration, core: core, store: store)
+    public init(configuration: SessionConfiguration) {
+        worker = SessionWorker(configuration: configuration); relay = configuration.relay
+        if relay != nil { syncState = .idle }
     }
-    deinit { restoreTask?.cancel(); watchTask?.cancel(); batchTask?.cancel(); expiryTask?.cancel() }
+    init(configuration: SessionConfiguration, store: any RecordStore, core: any SessionCore = BindingSessionCore()) {
+        worker = SessionWorker(configuration: configuration, core: core, store: store); relay = configuration.relay
+        if relay != nil { syncState = .idle }
+    }
+    deinit { restoreTask?.cancel(); watchTask?.cancel(); batchTask?.cancel(); expiryTask?.cancel(); syncTask?.cancel() }
 
     /// A shared completion barrier. Dependent startup work awaits this before using the session.
     public func restore() async {
@@ -38,6 +50,7 @@ import ColophonKitStorage
             await startWatching()
             do { apply(try await worker.restore()) }
             catch { fail(error) }
+            startSyncLoop()
         }
         restoreTask = task
         await task.value
@@ -119,13 +132,14 @@ import ColophonKitStorage
     public func leave() async throws {
         await restore()
         try await worker.leave()
+        stopSync()
         invalidateContext(); phase = .noLibrary
     }
     /// Revoked identities need fresh, independently persisted keys; unchanged requests are immutable.
     public func rejoin(keys: any AsyncKeyProvider) async {
         await restore()
         invalidateContext(); phase = .opening
-        do { apply(try await worker.rejoin(keys: keys)); await startWatching() }
+        do { apply(try await worker.rejoin(keys: keys)); await startWatching(); startSyncLoop() }
         catch { fail(error) }
     }
     public func importRequest(from url: URL) async throws {
@@ -152,6 +166,73 @@ import ColophonKitStorage
     }
 
     public func recoveryKeys() async -> (any AsyncKeyProvider)? { await worker.recovery() }
+
+    /// Runs one relay pass now (list, pull, push) and refreshes when records arrived. A barrier
+    /// for tests and for hosts that sync on foreground entry. Returns false when the pass failed.
+    @discardableResult public func syncNow() async -> Bool {
+        guard relay != nil else { return false }
+        await restore()
+        if syncState != .syncing { syncState = .syncing }
+        do {
+            let report = try await worker.syncRelay()
+            syncConflicts = report?.conflicts ?? []
+            lastSynced = .now
+            if let first = report?.conflicts.first {
+                syncState = .error(reason: "The relay holds different bytes for \(first)")
+            } else { syncState = .idle }
+            // Pulled records reach the core exactly like another process's folder writes.
+            if (report?.pulled ?? 0) > 0 || phase != .ready { await refresh() }
+            return true
+        } catch is CancellationError {
+            return false
+        } catch let error as RelayError {
+            switch error {
+            case .offline(let reason): syncState = .offline(reason: reason)
+            case .unauthorized: syncState = .unauthorized
+            case .busy: syncState = .offline(reason: error.localizedDescription)
+            default: syncState = .error(reason: error.localizedDescription)
+            }
+            return false
+        } catch {
+            syncState = .error(reason: error.localizedDescription)
+            return false
+        }
+    }
+
+    /// Wakes the background sync loop, for example after a host learns the network returned.
+    public func requestSync() { Task { await syncSignal.fire() } }
+
+    /// Stops background relay sync. Local storage and the session keep working.
+    public func stopSync() { syncTask?.cancel(); syncTask = nil }
+
+    private func startSyncLoop() {
+        guard let relay, relay.automatic, syncTask == nil else { return }
+        syncTask = Task { [weak self] in
+            var failures = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                let ok = await self.syncNow()
+                let unauthorized = self.syncState == .unauthorized
+                failures = ok ? 0 : failures + 1
+                let signal = self.syncSignal, worker = self.worker
+                // Success: long-poll the relay or wait for a local change. Failure: capped,
+                // jittered exponential backoff that a local change or requestSync() cuts short.
+                let backoff = unauthorized ? 300.0 : min(60.0, pow(2.0, Double(max(0, failures - 1)))) * Double.random(in: 0.5...1.0)
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await signal.wait() }
+                    group.addTask {
+                        if ok {
+                            let started = ContinuousClock.now
+                            let changed = (try? await worker.waitForRemoteChanges(seconds: 25)) ?? false
+                            // A relay that answers at once without long-polling is polled instead.
+                            if !changed, ContinuousClock.now - started < .seconds(2) { try? await Task.sleep(for: .seconds(15)) }
+                        } else { try? await Task.sleep(for: .seconds(backoff)) }
+                    }
+                    await group.next(); group.cancelAll()
+                }
+            }
+        }
+    }
 
     /// Returns per-envelope outcomes; invalid items stay queued for user review, never acknowledged.
     public func drain(_ inbox: IngressInbox) async throws -> [UUID: WriteReceipt] {
@@ -201,6 +282,7 @@ import ColophonKitStorage
         await refresh()
     }
     private func apply(_ snapshot: SessionSnapshot) {
+        if relay != nil, snapshot.revision != revision || snapshot.phase != phase { Task { [syncSignal] in await syncSignal.fire() } }
         let changed = Set(snapshot.namespaceRevisions.keys.filter { namespaceRevisions[$0] != snapshot.namespaceRevisions[$0] })
         let lost = snapshot.phase != .ready
         phase = snapshot.phase; revision = snapshot.revision; namespaceRevisions = snapshot.namespaceRevisions
@@ -247,4 +329,24 @@ import ColophonKitStorage
         guard phase == .ready, let view = views[namespace] else { throw SessionError.notReady }
         return view.state
     }
+}
+
+/// A one-shot wake-up for the sync loop. Firing while nobody waits is remembered once.
+actor SyncSignal {
+    private var pending = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    func fire() {
+        if let waiter { self.waiter = nil; waiter.resume() } else { pending = true }
+    }
+    func wait() async {
+        if pending { pending = false; return }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled || pending { pending = false; continuation.resume() } else {
+                    waiter?.resume(); waiter = continuation
+                }
+            }
+        } onCancel: { Task { await self.cancelWait() } }
+    }
+    private func cancelWait() { waiter?.resume(); waiter = nil }
 }

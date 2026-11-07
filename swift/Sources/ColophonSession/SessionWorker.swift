@@ -19,6 +19,7 @@ actor SessionWorker {
     private var occupied = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let journalURL: URL
+    private var relaySync: RelaySync?
 
     init(configuration: SessionConfiguration, core: any SessionCore = BindingSessionCore(), store: (any RecordStore)? = nil) {
         self.configuration = configuration; self.keys = configuration.keys; self.core = core; self.store = store
@@ -35,6 +36,25 @@ actor SessionWorker {
         let resolved = try configuration.location.resolve(); store = resolved; return resolved
     }
     func changes() async throws -> AsyncStream<Void> { try await storage().changes() }
+    private func relay() throws -> RelaySync? {
+        if let relaySync { return relaySync }
+        guard let relay = configuration.relay else { return nil }
+        let created = RelaySync(local: try storage(), endpoint: relay.endpoint, transport: relay.transport,
+                                stateFile: configuration.privateContainer.appendingPathComponent("relay.json"))
+        relaySync = created; return created
+    }
+    /// One relay pass outside the worker gate: the relay only appends verified-digest records to
+    /// local storage, and the session then refreshes them through the normal merge.
+    func syncRelay() async throws -> RelaySync.Report? { try await relay()?.sync() }
+    func waitForRemoteChanges(seconds: Int) async throws -> Bool { try await relay()?.waitForRemoteChanges(seconds: seconds) ?? false }
+    /// An empty local store is not an empty library while a configured relay has not been listed.
+    private func pullBeforeTrustingEmpty() async throws {
+        guard let relay = try relay() else { return }
+        do { try await relay.sync() }
+        catch let error as RelayError {
+            throw StorageError.unavailable("Waiting for the relay before opening this library. " + (error.errorDescription ?? ""))
+        }
+    }
     private func loadJournal() throws {
         if !loaded { journal = try SessionJournal.load(at: journalURL); loaded = true }
     }
@@ -55,7 +75,11 @@ actor SessionWorker {
     private func refreshLocked() async throws -> SessionSnapshot {
         if !configuration.migrationWriter, let marker = configuration.migrationMarker,
            try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
-        let records = try await storage().read()
+        var records = try await storage().read()
+        if records.isEmpty && journal.pending.isEmpty && configuration.relay != nil {
+            try await pullBeforeTrustingEmpty()
+            records = try await storage().read()
+        }
         guard journal.knownPaths.isSubset(of: Set(records.keys).union(journal.pending.keys)) else {
             throw StorageError.unavailable("Previously observed library records are unavailable")
         }
@@ -116,6 +140,11 @@ actor SessionWorker {
         await enter(); defer { exit() }
         if !configuration.migrationWriter, let marker = configuration.migrationMarker,
            try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
+        if configuration.relay != nil, try await storage().read().isEmpty {
+            try await pullBeforeTrustingEmpty()
+            // The relay already holds a library for this slot: join it instead of forking it.
+            if !(try await storage().read().isEmpty) { return try await refreshLocked() }
+        }
         guard !opened, journal.libraryID == nil, try await storage().read().isEmpty else { throw SessionError.destinationChanged }
         try await core.create(configuration: configuration); opened = true
         journal.left = false
