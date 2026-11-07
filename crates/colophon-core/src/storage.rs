@@ -3,7 +3,7 @@ use super::*;
 use crate::verification::{BatchVerifier, Verifiers};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{hash_map::DefaultHasher, HashSet, VecDeque},
+    collections::{hash_map::DefaultHasher, BTreeSet, HashSet, VecDeque},
     hash::BuildHasherDefault,
     sync::Arc,
 };
@@ -48,6 +48,8 @@ pub struct EngineOptions {
     pub checkpoint_key: [u8; 32],
     /// Maximum encoded plaintext bytes in the history cache; zero disables caching.
     pub content_cache_bytes: usize,
+    /// Namespaces this replica lists. Empty means every namespace.
+    pub namespaces: Vec<String>,
 }
 /// Why this open used or invalidated a verified-prefix checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,7 +100,9 @@ const SPENT: u8 = 2;
 const AUTHENTICATED: u8 = 4;
 const PROJECTED: u8 = 8;
 const NO_NAMESPACE: u16 = u16::MAX;
-const MAGIC: &[u8; 8] = b"COLOENG2";
+const MAGIC: &[u8; 8] = b"COLOENG3";
+const CACHE_VERSION: u32 = 3;
+const STORAGE_VERSION: u32 = 3;
 const BATCH: usize = 8192;
 
 #[derive(Clone)]
@@ -107,6 +111,10 @@ struct Entry {
     digest: [u8; 32],
     namespace: u16,
     flags: u8,
+    /// SHA-256 of the author's uncompressed signing key; zero until the header verifies.
+    author_key: [u8; 32],
+    /// Namespace epoch from the verified header; zero until the header verifies.
+    epoch: u64,
 }
 #[derive(Serialize, Deserialize)]
 struct Projection {
@@ -119,6 +127,8 @@ struct Projection {
 #[derive(Serialize, Deserialize)]
 struct CacheMeta {
     version: u32,
+    storage_version: u32,
+    layout: u32,
     reducer_schema: u32,
     identity: PublicIdentity,
     authority: Authority,
@@ -182,6 +192,10 @@ impl<S: RecordSource> Engine<S> {
         verifier: Option<Arc<dyn BatchVerifier>>,
     ) -> Result<Self> {
         me.validate()?;
+        listing.retain(|p| {
+            crate::protocol::listing_includes(p, &options.namespaces)
+                && !crate::protocol::is_history(p)
+        });
         validate_listing(&mut listing)?;
         let restored = checkpoint.map(|bytes| decode_cache(bytes, &options, &me, &listing));
         let mut integrity_baseline = Vec::new();
@@ -256,7 +270,7 @@ impl<S: RecordSource> Engine<S> {
         let mut authenticated =
             AuthenticatedIds::with_capacity_and_hasher(entries.len(), Default::default());
         for entry in &entries {
-            if entry.flags & AUTHENTICATED != 0 {
+            if entry.flags & AUTHENTICATED != 0 && !crate::protocol::is_replaceable(&entry.path) {
                 authenticated.insert(path_identity(&entry.path)?);
             }
         }
@@ -394,6 +408,10 @@ impl<S: RecordSource> Engine<S> {
     /// An I/O/backend/integrity error poisons this instance; reopen after the host resolves it.
     pub fn refresh(&mut self, mut listing: Vec<String>) -> Result<ChangeSummary> {
         self.check_ready()?;
+        listing.retain(|p| {
+            crate::protocol::listing_includes(p, &self.options.namespaces)
+                && !crate::protocol::is_history(p)
+        });
         validate_listing(&mut listing)?;
         let result = self.refresh_inner(listing);
         if let Err(error) = &result {
@@ -416,13 +434,23 @@ impl<S: RecordSource> Engine<S> {
         let generation = self.generation;
         let mut authority_changed = false;
         for path in paths {
+            if crate::protocol::is_replaceable(&path) {
+                if let Err(at) = self.listing.binary_search(&path) {
+                    self.listing.insert(at, path.clone());
+                }
+                self.pending.push(path);
+                continue;
+            }
             match self.entries.binary_search_by(|e| e.path.cmp(&path)) {
                 Ok(at) => {
                     let raw = self.source.read(&path)?;
                     self.stats.records_read += 1;
                     ensure(
                         <[u8; 32]>::from(Sha256::digest(raw)) == self.entries[at].digest,
-                        "Integrity error: immutable record conflict",
+                        &format!(
+                            "Integrity error: {} at {path}: immutable record bytes changed",
+                            crate::protocol::EQUIVOCATION
+                        ),
                     )?;
                 }
                 Err(_) => {
@@ -582,7 +610,7 @@ impl<S: RecordSource> Engine<S> {
             self.stats.records_read += records.len() as u64;
             let ops: Vec<_> = records
                 .iter()
-                .filter(|(p, _)| p.starts_with("ops/"))
+                .filter(|(p, _)| p.starts_with("ops/") || p.starts_with("state/"))
                 .map(|(p, r)| (*p, r.as_slice()))
                 .collect();
             let parsed = self.library.verifiers.operations(
@@ -598,19 +626,30 @@ impl<S: RecordSource> Engine<S> {
                     digest: Sha256::digest(raw).into(),
                     namespace: NO_NAMESPACE,
                     flags: 0,
+                    author_key: [0; 32],
+                    epoch: 0,
                 };
                 check_expected(&self.integrity_baseline, path, &entry.digest)?;
+                if path.starts_with("history/") {
+                    continue;
+                }
                 if path.starts_with("authority/") {
                     ensure(
                         self.library.records.get(*path) == Some(raw),
                         "Integrity error: authority changed during read",
                     )?;
                 }
-                if path.starts_with("ops/") {
+                if path.starts_with("ops/") || path.starts_with("state/") {
                     match results.next().expect("one result per operation") {
                         Ok((header, digest)) => {
                             self.stats.signatures_verified += 1;
                             entry.flags |= VERIFIED;
+                            entry.epoch = header.meta.epoch;
+                            if let Some(member) =
+                                self.library.authority.members.get(&header.meta.author)
+                            {
+                                entry.author_key = Sha256::digest(&member.public.signing).into();
+                            }
                             entry.namespace = self
                                 .library
                                 .authority
@@ -619,8 +658,20 @@ impl<S: RecordSource> Engine<S> {
                                 .position(|ns| ns == &header.meta.namespace)
                                 .and_then(|i| u16::try_from(i).ok())
                                 .unwrap_or(NO_NAMESPACE);
-                            if !self.entries.is_empty() && self.needs_replay(&header.meta) {
+                            if !self.entries.is_empty()
+                                && !path.starts_with("state/")
+                                && self.needs_replay(&header.meta)
+                            {
                                 invalidates = true;
+                            }
+                            if path.starts_with("state/") {
+                                if let Ok(at) =
+                                    self.entries.binary_search_by(|e| e.path.as_str().cmp(path))
+                                {
+                                    if self.entries[at].digest == entry.digest {
+                                        continue;
+                                    }
+                                }
                             }
                             candidates.push((
                                 entry,
@@ -630,6 +681,7 @@ impl<S: RecordSource> Engine<S> {
                                     operation: None,
                                     opened: false,
                                     status: Status::Admitted,
+                                    from_live_slot: path.starts_with("state/"),
                                 },
                             ));
                             continue;
@@ -683,12 +735,13 @@ impl<S: RecordSource> Engine<S> {
             });
             type Reduction<'a> = (OperationView, Option<&'a domain::AuthorContext>);
             let mut reductions: BTreeMap<String, Vec<Reduction>> = BTreeMap::new();
+            candidates.sort_by(|(_, a), (_, b)| order(&a.header.meta).cmp(&order(&b.header.meta)));
             for (mut entry, mut j) in candidates {
                 if j.opened {
                     self.stats.payloads_decrypted += 1;
                 }
                 let meta = &j.header.meta;
-                let status = Library::judge(
+                let mut status = Library::judge(
                     &self.library.authority,
                     meta,
                     &j.digest,
@@ -699,7 +752,19 @@ impl<S: RecordSource> Engine<S> {
                         .get(&meta.namespace)
                         .copied()
                         .unwrap_or(0),
+                    j.from_live_slot,
                 );
+                if j.from_live_slot
+                    && status == Status::Admitted
+                    && self
+                        .library
+                        .authority
+                        .members
+                        .get(&meta.author)
+                        .is_some_and(|m| m.member.revoked_at.is_some())
+                {
+                    status = Status::Refused("revoked".into());
+                }
                 if status == Status::Admitted {
                     entry.flags |= SPENT;
                     self.library
@@ -710,7 +775,8 @@ impl<S: RecordSource> Engine<S> {
                 j.status = status;
                 if j.status == Status::Admitted && j.operation.is_some() {
                     entry.flags |= AUTHENTICATED;
-                    if !self.authenticated.insert(path_identity(&entry.path)?) {
+                    if !j.from_live_slot && !self.authenticated.insert(path_identity(&entry.path)?)
+                    {
                         j.status = Status::Refused("duplicateID".into());
                     }
                 }
@@ -828,20 +894,36 @@ impl<S: RecordSource> Engine<S> {
         }
         if new_entries.len() <= 32 {
             for entry in new_entries {
-                let at = self
-                    .entries
-                    .binary_search_by(|e| e.path.cmp(&entry.path))
-                    .expect_err("new path");
-                self.entries.insert(at, entry);
+                match self.entries.binary_search_by(|e| e.path.cmp(&entry.path)) {
+                    Ok(at) => self.entries[at] = entry,
+                    Err(at) => self.entries.insert(at, entry),
+                }
             }
         } else {
             self.entries.extend(new_entries);
             self.entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+            self.entries.dedup_by(|a, b| {
+                if a.path == b.path {
+                    *b = a.clone();
+                    true
+                } else {
+                    false
+                }
+            });
         }
         self.verify_cursor = audit_after.as_ref().map_or(0, |path| {
             self.entries.partition_point(|entry| entry.path <= *path)
         });
         self.integrity_baseline = Vec::new();
+        let mut live_touched = BTreeSet::new();
+        self.library.apply_live(&mut live_touched);
+        for ns in live_touched {
+            self.library
+                .namespaces
+                .entry(ns.clone())
+                .or_insert_with(|| Namespace::new(&ns))
+                .revision += 1;
+        }
         // Authority bytes were retained only to check the initial read against this batch.
         // Parsed authority and exact digest indexes suffice between host reads.
         self.library.records.clear();
@@ -893,7 +975,9 @@ impl<S: RecordSource> Engine<S> {
             })
             .collect();
         let meta = CacheMeta {
-            version: 2,
+            version: CACHE_VERSION,
+            storage_version: STORAGE_VERSION,
+            layout: self.library.authority.layout,
             reducer_schema: domain::REDUCER_SCHEMA,
             identity: self.library.me.clone(),
             authority: self.library.authority.clone(),
@@ -917,6 +1001,8 @@ impl<S: RecordSource> Engine<S> {
             output.extend(entry.digest);
             output.extend(entry.namespace.to_le_bytes());
             output.push(entry.flags);
+            output.extend(entry.author_key);
+            output.extend(entry.epoch.to_le_bytes());
         }
         output.extend(cache_tag(&self.options.checkpoint_key, &output)?);
         Ok(output)
@@ -961,7 +1047,11 @@ impl<S: RecordSource> Engine<S> {
                     .entries
                     .iter()
                     .enumerate()
-                    .filter(|(_, e)| e.namespace == index && e.flags & PROJECTED != 0)
+                    .filter(|(_, e)| {
+                        e.namespace == index
+                            && e.flags & PROJECTED != 0
+                            && !crate::protocol::is_replaceable(&e.path)
+                    })
                     .map(|(i, e)| (path_order(&e.path).0, i))
                     .collect();
                 selected.sort_unstable_by(|(a, i), (b, j)| {
@@ -1016,6 +1106,7 @@ impl<S: RecordSource> Engine<S> {
             operation: None,
             opened: false,
             status: Status::Admitted,
+            from_live_slot: false,
         };
         Library::open_operation(&self.library.authority, &self.library.keys, &mut j);
         self.stats.payloads_decrypted += 1;
@@ -1109,10 +1200,16 @@ impl<S: RecordSource> Engine<S> {
                     .read(&entry.path)
                     .map_err(|e| Error(format!("Integrity error at {}: {e}", entry.path)))?;
                 self.stats.records_read += 1;
-                ensure(
-                    <[u8; 32]>::from(Sha256::digest(&raw)) == entry.digest,
-                    &format!("Integrity error at {}: record digest mismatch", entry.path),
-                )?;
+                if !crate::protocol::is_replaceable(&entry.path) {
+                    ensure(
+                        <[u8; 32]>::from(Sha256::digest(&raw)) == entry.digest,
+                        &format!(
+                            "Integrity error at {}: {}: record digest mismatch",
+                            entry.path,
+                            crate::protocol::EQUIVOCATION
+                        ),
+                    )?;
+                }
                 records.insert(entry.path.clone(), raw);
             }
             let mut library = Library::open(records, self.library.me.clone())?;
@@ -1154,10 +1251,12 @@ impl<S: RecordSource> Engine<S> {
             let result = (|| -> Result<()> {
                 let raw = self.source.read(&entry.path)?;
                 self.stats.records_read += 1;
-                ensure(
-                    <[u8; 32]>::from(Sha256::digest(&raw)) == entry.digest,
-                    "Record digest mismatch",
-                )?;
+                if !crate::protocol::is_replaceable(&entry.path) {
+                    ensure(
+                        <[u8; 32]>::from(Sha256::digest(&raw)) == entry.digest,
+                        &format!("{}: record digest mismatch", crate::protocol::EQUIVOCATION),
+                    )?;
+                }
                 if entry.flags & VERIFIED != 0 {
                     let record: SignedRecord = serde_json::from_slice(&raw)?;
                     let header: OperationHeader = serde_json::from_slice(&record.body)?;
@@ -1229,6 +1328,7 @@ fn empty_library(authority: Authority, me: PublicIdentity) -> Library {
         changes: ChangeSummary::default(),
         pending_checkpoints: BTreeMap::new(),
         verifiers,
+        live: BTreeMap::new(),
     }
 }
 fn read_authority(
@@ -1271,10 +1371,16 @@ fn read_failure(entries: &[Entry], path: &str, error: Error) -> Error {
     }
 }
 fn check_expected(entries: &[Entry], path: &str, digest: &[u8; 32]) -> Result<()> {
+    if crate::protocol::is_replaceable(path) {
+        return Ok(());
+    }
     if let Ok(index) = entries.binary_search_by(|e| e.path.as_str().cmp(path)) {
         ensure(
             entries[index].digest == *digest,
-            &format!("Integrity error at {path}: record digest mismatch during invalidation"),
+            &format!(
+                "Integrity error: {} at {path}: immutable record bytes changed",
+                crate::protocol::EQUIVOCATION
+            ),
         )?;
     }
     Ok(())
@@ -1287,7 +1393,11 @@ fn validate_listing(listing: &mut [String]) -> Result<()> {
     )?;
     ensure(
         listing.iter().all(|p| {
-            p.starts_with("authority/") || p.starts_with("ops/") || p.starts_with("requests/")
+            p.starts_with("authority/")
+                || p.starts_with("ops/")
+                || p.starts_with("requests/")
+                || p.starts_with("state/")
+                || p.starts_with("history/")
         }),
         "Unknown storage path",
     )
@@ -1296,22 +1406,51 @@ fn compare_listing(entries: &[Entry], listing: &[String]) -> Result<Vec<String>>
     let mut index = 0;
     let mut pending = Vec::new();
     for path in listing {
+        if crate::protocol::is_history(path) {
+            continue;
+        }
+        while entries
+            .get(index)
+            .is_some_and(|e| e.path.as_str() < path.as_str() && !listing_requires(&e.path, listing))
+        {
+            index += 1;
+        }
         if entries.get(index).is_some_and(|e| e.path == *path) {
             index += 1;
         } else {
             ensure(
-                entries.get(index).is_none_or(|e| e.path > *path),
+                entries
+                    .get(index)
+                    .is_none_or(|e| e.path.as_str() > path.as_str()),
                 "Checkpoint record missing from listing",
             )?;
             ensure(!path.starts_with("authority/"), "Authority listing changed")?;
             pending.push(path.clone());
         }
     }
-    ensure(
-        index == entries.len(),
-        "Checkpoint record missing from listing",
-    )?;
+    while index < entries.len() {
+        ensure(
+            !listing_requires(&entries[index].path, listing),
+            "Checkpoint record missing from listing",
+        )?;
+        index += 1;
+    }
     Ok(pending)
+}
+fn listing_requires(path: &str, listing: &[String]) -> bool {
+    if crate::protocol::is_replaceable(path) || crate::protocol::is_history(path) {
+        return false;
+    }
+    match crate::protocol::path_scope(path) {
+        Some(crate::protocol::PathScope::Namespace(ns)) => listing.iter().any(|p| {
+            matches!(
+                crate::protocol::path_scope(p),
+                Some(crate::protocol::PathScope::Namespace(other)) if other == ns
+            )
+        }),
+        Some(crate::protocol::PathScope::Always | crate::protocol::PathScope::Unknown) => true,
+        None => listing.binary_search(&path.to_string()).is_ok(),
+    }
 }
 fn update_tail(
     map: &mut BTreeMap<String, (u64, String, String)>,
@@ -1327,14 +1466,11 @@ fn update_tail(
         .or_insert_with(|| tail.clone());
 }
 fn path_order(path: &str) -> (u64, &str, &str) {
-    let Some(rest) = path.strip_prefix("ops/") else {
-        return (0, "", path);
-    };
-    let Some((author, file)) = rest.split_once('/') else {
+    let Some((author, file)) = crate::protocol::operation_file(path) else {
         return (0, "", path);
     };
     let Some((clock, id)) = file.split_once('-') else {
-        return (0, "", path);
+        return (0, author, file);
     };
     (clock.parse().unwrap_or(0), author, id)
 }
@@ -1343,6 +1479,9 @@ fn path_identity(path: &str) -> Result<[u8; 32]> {
     let id = id
         .strip_suffix(".json")
         .ok_or_else(|| Error("Invalid indexed operation path".into()))?;
+    path_identity_parts(author, id)
+}
+fn path_identity_parts(author: &str, id: &str) -> Result<[u8; 32]> {
     let mut result = [0; 32];
     ensure(
         author.len() == 32 && id.len() == 32,
@@ -1359,7 +1498,7 @@ fn path_identity(path: &str) -> Result<[u8; 32]> {
 fn cache_tag(key: &[u8], body: &[u8]) -> Result<[u8; 32]> {
     let mut tag = [0; 32];
     hkdf::Hkdf::<Sha256>::new(Some(key), body)
-        .expand(b"colophon/verified-prefix/2", &mut tag)
+        .expand(b"colophon/verified-prefix/3", &mut tag)
         .map_err(|_| Error("Cache authentication failed".into()))?;
     Ok(tag)
 }
@@ -1408,7 +1547,9 @@ fn decode_cache(
     let length = reader.length()?;
     let meta: CacheMeta = serde_json::from_slice(reader.take(length)?)?;
     ensure(
-        meta.version == 2
+        meta.version == CACHE_VERSION
+            && meta.storage_version == STORAGE_VERSION
+            && meta.layout == meta.authority.layout
             && meta.reducer_schema == domain::REDUCER_SCHEMA
             && meta.identity == *identity
             && meta.authority.id == options.library_id,
@@ -1420,7 +1561,7 @@ fn decode_cache(
     )?;
     let length = reader.length()?;
     ensure(
-        length <= reader.0.len() / 39,
+        length <= reader.0.len() / 79,
         "Invalid checkpoint index length",
     )?;
     let mut entries = Vec::with_capacity(length);
@@ -1434,11 +1575,17 @@ fn decode_cache(
         let mut ns = [0; 2];
         ns.copy_from_slice(reader.take(2)?);
         let flags = reader.take(1)?[0];
+        let mut author_key = [0; 32];
+        author_key.copy_from_slice(reader.take(32)?);
+        let mut epoch = [0; 8];
+        epoch.copy_from_slice(reader.take(8)?);
         entries.push(Entry {
             path,
             digest,
             namespace: u16::from_le_bytes(ns),
             flags,
+            author_key,
+            epoch: u64::from_le_bytes(epoch),
         });
     }
     ensure(reader.0.is_empty(), "Trailing checkpoint bytes")?;

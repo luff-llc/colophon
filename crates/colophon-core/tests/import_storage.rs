@@ -357,6 +357,7 @@ fn blobs_stream_encrypt_authenticate_reference_count_and_lazy_host_reads() {
             library_id: lib.id().into(),
             checkpoint_key: [8; 32],
             content_cache_bytes: 0,
+            namespaces: Vec::new(),
         },
         None,
     )
@@ -388,6 +389,7 @@ fn blobs_stream_encrypt_authenticate_reference_count_and_lazy_host_reads() {
             library_id: lib.id().into(),
             checkpoint_key: [8; 32],
             content_cache_bytes: 0,
+            namespaces: Vec::new(),
         },
         Some(&cache),
     )
@@ -738,6 +740,7 @@ fn blob_availability_and_revocation_never_expose_an_empty_success() {
             library_id: lib.id().into(),
             checkpoint_key: [2; 32],
             content_cache_bytes: 0,
+            namespaces: Vec::new(),
         },
         None,
     )
@@ -766,6 +769,7 @@ fn blob_availability_and_revocation_never_expose_an_empty_success() {
             library_id: lib.id().into(),
             checkpoint_key: [2; 32],
             content_cache_bytes: 0,
+            namespaces: Vec::new(),
         },
         None,
     )

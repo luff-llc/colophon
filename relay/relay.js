@@ -1,4 +1,4 @@
-// Colophon 0.2 reference relay (spec §8). Stores opaque immutable records per library slot.
+// Colophon 0.3 reference relay (spec §8). Stores opaque records per library slot.
 // Dependency-free: node:http, node:https, node:fs, node:path and node:crypto only.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp } from 'node:fs';
@@ -6,7 +6,7 @@ import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
 
-export const PROTOCOL = 'colophon/relay/2';
+export const PROTOCOL = 'colophon/relay/3';
 export const DEFAULT_LIMITS = Object.freeze({
   recordBytes: 16 * 1024 * 1024,
   blobBytes: 65536 + 16,
@@ -32,7 +32,21 @@ export function classifyPath(p) {
   if (parts.length === 2 && parts[0] === 'authority') return 'record';
   if (parts.length === 2 && parts[0] === 'requests') return 'request';
   if (parts.length === 3 && parts[0] === 'ops') return 'record';
+  if (parts.length === 4 && parts[0] === 'ops') return 'record';
+  if (parts.length === 4 && parts[0] === 'history') return 'record';
+  if (parts.length === 4 && parts[0] === 'state') return 'state';
   return null;
+}
+
+/** Authority, requests and legacy three-part ops always match; namespaced paths match `ns`. */
+export function pathInNamespace(p, ns) {
+  const parts = p.split('/');
+  if (parts[0] === 'authority' || parts[0] === 'requests') return true;
+  if (parts.length === 3 && parts[0] === 'ops') return true;
+  if (parts.length === 4 && (parts[0] === 'ops' || parts[0] === 'state' || parts[0] === 'history')) {
+    return parts[2] === ns;
+  }
+  return false;
 }
 
 export function newToken() {
@@ -183,7 +197,7 @@ class Slot {
     } finally { await handle.close(); }
   }
 
-  changes(after, limit) {
+  changes(after, limit, namespaces = []) {
     let start = 0;
     if (after) {
       const dot = after.lastIndexOf('.');
@@ -194,9 +208,15 @@ class Slot {
       }
       start = seq;
     }
-    const page = this.entries.slice(start, start + limit);
-    const next = start + page.length;
-    return { entries: page, cursor: `${this.instance}.${next}`, more: next < this.entries.length };
+    const page = [];
+    let i = start;
+    while (i < this.entries.length && page.length < limit) {
+      const e = this.entries[i];
+      i += 1;
+      if (namespaces.length && !namespaces.some((ns) => pathInNamespace(e.path, ns))) continue;
+      page.push(e);
+    }
+    return { entries: page, cursor: `${this.instance}.${i}`, more: i < this.entries.length };
   }
 
   waitForEntry(ms) {
@@ -371,11 +391,12 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
       const after = url.searchParams.get('after') ?? '';
       const limit = clampInt(url.searchParams.get('limit'), 500, 1, effective.pageEntries);
       const wait = clampInt(url.searchParams.get('wait'), 0, 0, effective.waitSeconds);
-      let page = s.changes(after, limit);
+      const namespaces = url.searchParams.getAll('namespace').filter((n) => n.length > 0);
+      let page = s.changes(after, limit, namespaces);
       if (page.entries.length === 0 && wait > 0) {
         await Promise.race([s.waitForEntry(wait * 1000), closed(res)]);
         if (res.destroyed) return undefined;
-        page = s.changes(after, limit);
+        page = s.changes(after, limit, namespaces);
       }
       return send(res, 200, page);
     }
@@ -398,7 +419,7 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
       let status;
       if (conditional === '*') status = await s.putImmutable(recordPath, body);
       else if (conditional !== undefined) throw new HttpError(400, 'Only If-None-Match: * is supported');
-      else if (kind === 'request') status = await s.replaceRequest(recordPath, body);
+      else if (kind === 'request' || kind === 'state') status = await s.replaceRequest(recordPath, body);
       else throw new HttpError(428, 'Immutable records require If-None-Match: *');
       res.writeHead(status, { etag: `"${sha256(body)}"`, 'content-length': 0 });
       return res.end();

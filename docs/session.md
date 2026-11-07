@@ -1,16 +1,16 @@
 # Apple app SDK contracts
 
-`ColophonKitStorage` and `ColophonSession` are additive 0.2 products in the root Swift package.
+`ColophonKitStorage` and `ColophonSession` are additive 0.3 products in the root Swift package.
 They have no third-party Swift dependencies and compile in Swift 6 language mode. The 0.1
 products remain unchanged. The sample is a starting template, not acceptance evidence from
 Later, Taupe, Shelf or Scribenda.
 
 ## Storage, restoration and private state
 
-`FolderRecordStore` stores the spec's `authority`, `requests` and `ops` paths unchanged. Each
-write batch uses `NSFileCoordinator`; files are staged with mode 0600, synchronized, and linked
-into place without replacing an existing record. Equal bytes are idempotent; different bytes
-at one path are a conflict. Directory synchronization precedes success. Publication is atomic
+`FolderRecordStore` stores the spec's `authority`, `requests`, `ops`, `state` and `history`
+paths. Each write batch uses `NSFileCoordinator`; files are staged with mode 0600, synchronized,
+and linked into place. Immutable paths never replace different bytes; `state/` live slots may.
+Refresh and publication read only the records that changed. Directory synchronization precedes success. Publication is atomic
 per record, **not across a batch**. Partial batches remain retryable; an incomplete authority
 chain never produces a ready session. Records are capped at 16 MiB per file in this adapter.
 
@@ -68,9 +68,8 @@ concurrent authority writers may produce immutable-path conflicts, which stop pu
 `SessionCore` is the one internal engine protocol; `BindingSessionCore` is its current adapter.
 The storage-backed engine is documented in `docs/engine.md`; its `RecordSource` and verified-prefix
 checkpoint APIs are not yet exposed by the native bindings. Today this adapter still obtains
-full record/view snapshots and compares namespace evidence off-main to avoid falsely
-invalidating unrelated namespace caches. This is **not** the incremental engine or a 100k-op
-performance claim. SwiftUI only reads cached values. `NamespaceStore<Query, Result>` decodes
+named records (`recordsAt`) and compares namespace evidence off-main to avoid falsely
+invalidating unrelated namespace caches. Writes and refresh are proportional to the change. SwiftUI only reads cached values. `NamespaceStore<Query, Result>` decodes
 on a concurrent executor, fences completion by context and namespace revision, bounds query
 entries, and publishes cold-load completion separately from journal changes. Cache registrations are removed on deinit; `close()` also allows explicit early disposal.
 

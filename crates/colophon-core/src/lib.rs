@@ -1,4 +1,4 @@
-//! Pure Colophon 0.2 protocol evaluation. Hosts own storage, time, entropy and private keys.
+//! Pure Colophon 0.3 protocol evaluation. Hosts own storage, time, entropy and private keys.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -12,6 +12,7 @@ pub mod hpke;
 pub mod imports;
 pub mod library;
 pub mod model;
+pub mod protocol;
 pub mod records;
 pub mod verification;
 

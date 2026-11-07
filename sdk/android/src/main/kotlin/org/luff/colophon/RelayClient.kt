@@ -9,7 +9,7 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 
 /**
- * A Colophon 0.2 HTTP exchange endpoint (spec §8): one library slot URL and its storage token.
+ * A Colophon 0.3 HTTP exchange endpoint (spec §8): one library slot URL and its storage token.
  * The token grants relay storage only; it is never library membership.
  */
 data class RelayEndpoint(val url: String, val token: String?) {
@@ -134,10 +134,13 @@ class RelayClient(val endpoint: RelayEndpoint, private val transport: RelayTrans
     /** `GET {base}`: proves the slot and token are accepted. */
     fun info(): ByteArray = request("GET", "").also { check(it, 200) }.body
 
-    fun changes(after: String?, limit: Int = 500, wait: Int = 0): ChangePage {
+    fun changes(after: String?, limit: Int = 500, wait: Int = 0, namespaces: List<String> = emptyList()): ChangePage {
         val query = StringBuilder("?limit=$limit")
         if (!after.isNullOrEmpty()) query.append("&after=").append(URLEncoder.encode(after, Charsets.UTF_8))
         if (wait > 0) query.append("&wait=$wait")
+        for (namespace in namespaces) {
+            query.append("&namespace=").append(URLEncoder.encode(namespace, Charsets.UTF_8))
+        }
         val response = request("GET", "/changes$query", timeoutMillis = (wait + 30) * 1000)
         check(response, 200)
         return try {
@@ -167,9 +170,11 @@ class RelayClient(val endpoint: RelayEndpoint, private val transport: RelayTrans
     }
 
     fun putIfAbsent(path: String, bytes: ByteArray): PutResult {
+        val headers = mutableMapOf("Content-Type" to "application/octet-stream")
+        if (!path.startsWith("state/")) headers["If-None-Match"] = "*"
         val response = request(
             "PUT", "/records/$path", bytes,
-            mapOf("If-None-Match" to "*", "Content-Type" to "application/octet-stream"), 60_000,
+            headers, 60_000,
         )
         return when (response.status) {
             201 -> PutResult.CREATED

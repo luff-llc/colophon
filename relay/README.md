@@ -1,8 +1,8 @@
 # Colophon reference relay
 
-A small, dependency-free Node 22+ server implementing the Colophon 0.2 HTTP exchange
-([spec §8](../spec/colophon-0.2.md#8-http-exchange)). It stores each library slot's immutable,
-signed, encrypted records on disk and moves them between devices. It holds no keys and grants
+A small, dependency-free Node 22+ server implementing the Colophon 0.3 HTTP exchange
+([spec §8](../spec/colophon-0.3.md#8-http-exchange)). It stores each library slot's signed,
+encrypted records on disk and moves them between devices. It holds no keys and grants
 nothing: a relay token is storage access, never library membership.
 
 Only `node:http`, `node:https`, `node:fs`, `node:path` and `node:crypto` are used.

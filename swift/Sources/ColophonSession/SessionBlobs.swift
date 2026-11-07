@@ -205,16 +205,16 @@ extension ColophonSession {
     }
 
     /// Removes local encrypted chunks this session wrote or downloaded that no live reference
-    /// needs: chunks of blobs with zero references, and chunks of failed uploads older than
-    /// `gracePeriod`. With `evictReplicated`, chunks the relay already holds are also evicted
-    /// unless their blob is `required`; they are fetched again on demand. Chunks other apps wrote
+    /// needs, after a holder elsewhere is confirmed (relay receipt) or the owner passes
+    /// `discardSoleCopy`. Failed uploads older than `gracePeriod` may go. With `evictReplicated`,
+    /// chunks the relay already holds are also evicted unless required. Chunks other apps wrote
     /// into a shared App Group store are never touched. Stops without deleting anything when a
     /// configured namespace is unreadable.
     @discardableResult
-    public func collectBlobGarbage(gracePeriod: TimeInterval = 24 * 60 * 60, evictReplicated: Bool = false) async throws -> BlobCollection {
+    public func collectBlobGarbage(gracePeriod: TimeInterval = 24 * 60 * 60, evictReplicated: Bool = false, discardSoleCopy: Bool = false) async throws -> BlobCollection {
         await restore()
         guard phase == .ready else { throw SessionError.notReady }
-        return try await worker.collectBlobGarbage(gracePeriod: gracePeriod, evictReplicated: evictReplicated)
+        return try await worker.collectBlobGarbage(gracePeriod: gracePeriod, evictReplicated: evictReplicated, discardSoleCopy: discardSoleCopy)
     }
 
     private func download(namespace: String, manifest: BlobManifestInfo) async throws {

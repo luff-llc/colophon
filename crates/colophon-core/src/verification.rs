@@ -1,7 +1,6 @@
 //! Exact-byte signature verification with an optional trusted host backend.
 use crate::{
-    authority::Authority, ensure, library::operation_path, model::*, records::SignedRecord, Error,
-    Result,
+    authority::Authority, ensure, model::*, protocol, records::SignedRecord, Error, Result,
 };
 use p256::{
     ecdsa::{Signature, VerifyingKey},
@@ -129,7 +128,7 @@ impl Verifiers {
         let validate = |path: &str, header: &OperationHeader| -> Result<()> {
             let meta = &header.meta;
             ensure(
-                meta.protocol == "colophon/operation/2" && meta.library == authority.id,
+                meta.protocol == protocol::OPERATION && meta.library == authority.id,
                 "Wrong operation protocol or library",
             )?;
             ensure(
@@ -140,7 +139,7 @@ impl Verifiers {
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                 "Invalid operation ID",
             )?;
-            ensure(path == operation_path(meta), "Operation path mismatch")?;
+            protocol::match_header_path(path, meta, header.live.as_ref())?;
             ensure(
                 meta.clock > 0
                     && meta.clock <= 9_007_199_254_740_991

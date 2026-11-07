@@ -40,9 +40,9 @@ fn operation(
         created: NOW.into(),
         payload,
     };
-    op.id = colophon_core::records::id(&canonical(&json!({"purpose":"colophon/operation-id/2","namespace":ns,"author":signer.public().id(),"epoch":1,"nonce":nonce,"operation":op})).unwrap());
+    op.id = colophon_core::records::id(&canonical(&json!({"purpose":colophon_core::protocol::OPERATION_ID,"namespace":ns,"author":signer.public().id(),"epoch":1,"nonce":nonce,"operation":op})).unwrap());
     let meta = OperationMeta {
-        protocol: "colophon/operation/2".into(),
+        protocol: colophon_core::protocol::OPERATION.into(),
         library: lib.id().into(),
         namespace: ns.into(),
         author: signer.public().id(),
@@ -71,6 +71,7 @@ fn operation(
         meta,
         nonce,
         ciphertext,
+        live: None,
     })
     .unwrap();
     let signature = signer.sign(&body);

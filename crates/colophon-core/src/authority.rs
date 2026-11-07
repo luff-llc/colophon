@@ -3,6 +3,7 @@ use crate::{
     crypto::PublicIdentity,
     ensure,
     model::*,
+    protocol,
     records::{self, bytes, SignedRecord},
     Error, Result,
 };
@@ -101,6 +102,11 @@ pub enum Action {
         /// Fresh consecutive epochs, each sealed to exactly the eligible recipients.
         epochs: Vec<Epoch>,
     },
+    /// Raises the required storage layout. Never lowers it. Root-signed.
+    Layout {
+        /// Required storage layout; this implementation writes and reads layout 2.
+        layout: u32,
+    },
 }
 /// Internal member identity and admission history, exposed for protocol inspectors.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -135,6 +141,9 @@ pub struct Authority {
     pub epochs: BTreeMap<String, BTreeMap<u64, (u64, Epoch)>>,
     /// Verified entries for ledger generation.
     pub entries: Vec<AuthorityEntry>,
+    /// Required storage layout; 1 when no `layout` entry has been applied.
+    #[serde(default = "default_layout")]
+    pub layout: u32,
     roots: Vec<(u64, String)>,
     pending_roots: BTreeMap<String, (PublicIdentity, String)>,
 }
@@ -204,18 +213,34 @@ impl Authority {
             members,
             epochs: BTreeMap::new(),
             entries: Vec::new(),
+            layout: protocol::DEFAULT_LAYOUT,
             roots: vec![(1, root.id())],
             pending_roots: BTreeMap::new(),
         };
         for (path, raw) in list {
             let record: SignedRecord = serde_json::from_slice(raw)?;
-            let entry: AuthorityEntry = serde_json::from_slice(&record.body)?;
             ensure(
                 path == &format!("authority/{:08}.json", state.latest + 1),
                 "Authority gap or invalid path",
             )?;
+            let entry = match serde_json::from_slice::<AuthorityEntry>(&record.body) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    authenticate_authority(&record, &state)?;
+                    match parse_entry(&record.body, state.latest + 1) {
+                        Err(error) => return Err(error),
+                        Ok(_) => {
+                            return Err(Error(format!(
+                                "{} (this client supports layout {})",
+                                protocol::UNSUPPORTED_LAYOUT,
+                                protocol::LAYOUT
+                            )))
+                        }
+                    }
+                }
+            };
             ensure(
-                entry.protocol == "colophon/authority/2" && entry.seq == state.latest + 1,
+                entry.protocol == protocol::AUTHORITY && entry.seq == state.latest + 1,
                 "Authority version or sequence",
             )?;
             ensure(
@@ -244,9 +269,14 @@ impl Authority {
                     record.verify(&state.recovery.signing)?;
                 }
                 _ => {
-                    return Err(Error(
-                        "Unknown authority signer; newer client required".into(),
-                    ))
+                    record
+                        .verify(&state.root.signing)
+                        .or_else(|_| record.verify(&state.recovery.signing))?;
+                    return Err(Error(format!(
+                        "{} (unknown signer; this client supports layout {})",
+                        protocol::UNSUPPORTED_LAYOUT,
+                        protocol::LAYOUT
+                    )));
                 }
             }
             state.apply(&entry)?;
@@ -254,6 +284,15 @@ impl Authority {
             state.last_digest = records::digest(&record.body);
             state.entries.push(entry);
         }
+        ensure(
+            state.layout <= protocol::LAYOUT,
+            &format!(
+                "{} {} (this client supports {})",
+                protocol::UNSUPPORTED_LAYOUT,
+                state.layout,
+                protocol::LAYOUT
+            ),
+        )?;
         Ok(state)
     }
     /// Root in force at an authority sequence.
@@ -393,6 +432,11 @@ impl Authority {
                 self.add_shares(shares, &root.id(), &self.namespaces.clone())?;
                 self.replace_root(root, label, kept, entry.seq)?;
                 self.replace_epochs(epochs, entry)?;
+            }
+            Action::Layout { layout } => {
+                ensure(*layout >= self.layout, "Layout cannot be lowered")?;
+                ensure(*layout >= 1, "Invalid layout")?;
+                self.layout = *layout;
             }
         }
         Ok(())
@@ -542,9 +586,54 @@ fn validate_seals(epoch: &Epoch) -> Result<()> {
     }
     Ok(())
 }
+fn default_layout() -> u32 {
+    protocol::DEFAULT_LAYOUT
+}
+
+fn authenticate_authority(record: &SignedRecord, state: &Authority) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Probe {
+        by: Option<String>,
+    }
+    let probe: Probe = serde_json::from_slice(&record.body).unwrap_or(Probe { by: None });
+    match probe.by.as_deref() {
+        Some("recovery") => record.verify(&state.recovery.signing),
+        _ => record.verify(&state.root.signing),
+    }
+}
+
+fn parse_entry(body: &[u8], seq: u64) -> Result<AuthorityEntry> {
+    match serde_json::from_slice::<AuthorityEntry>(body) {
+        Ok(entry) => Ok(entry),
+        Err(_) => {
+            #[derive(Deserialize)]
+            struct Probe {
+                kind: Option<String>,
+                layout: Option<u32>,
+            }
+            let probe: Probe = serde_json::from_slice(body).unwrap_or(Probe {
+                kind: None,
+                layout: None,
+            });
+            let layout = probe.layout.unwrap_or(0);
+            Err(Error(format!(
+                "{} {} (this client supports {}; newer authority kind {:?})",
+                protocol::UNSUPPORTED_LAYOUT,
+                layout.max(u32::try_from(seq).unwrap_or(u32::MAX)),
+                protocol::LAYOUT,
+                probe.kind.unwrap_or_else(|| "unknown".into())
+            )))
+        }
+    }
+}
+
 /// HPKE context encoding; fields cannot contain newlines under the namespace and ID rules.
 pub fn key_info(library: &str, namespace: &str, epoch: u64, recipient: &str) -> Vec<u8> {
-    format!("colophon/epoch/2\n{library}\n{namespace}\n{epoch}\n{recipient}").into_bytes()
+    format!(
+        "{}\n{library}\n{namespace}\n{epoch}\n{recipient}",
+        protocol::EPOCH
+    )
+    .into_bytes()
 }
 /// Verify self-signed access request and its library binding before displaying it.
 pub fn verify_request(raw: &[u8], library: &str) -> Result<Request> {
@@ -553,7 +642,7 @@ pub fn verify_request(raw: &[u8], library: &str) -> Result<Request> {
     request.member.validate()?;
     record.verify(&request.member.signing)?;
     ensure(
-        request.protocol == "colophon/request/2" && request.library_id == library,
+        request.protocol == protocol::REQUEST && request.library_id == library,
         "Request belongs to another protocol or library",
     )?;
     Grant {

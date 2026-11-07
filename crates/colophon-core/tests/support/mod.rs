@@ -69,7 +69,7 @@ pub fn request(
     namespaces: Vec<String>,
 ) -> Vec<u8> {
     let p = Library::begin_request(Request {
-        protocol: "colophon/request/2".into(),
+        protocol: colophon_core::protocol::REQUEST.into(),
         library_id: lib.id().into(),
         member: member.public(),
         label: label.into(),
@@ -148,9 +148,9 @@ pub fn adversarial(
     let mut op = operation;
     op.id.clear();
     let nonce = vec![seed; 12];
-    op.id = colophon_core::records::id(&canonical(&serde_json::json!({"purpose":"colophon/operation-id/2","namespace":ns,"author":signer.public().id(),"epoch":epoch,"nonce":nonce,"operation":op})).unwrap());
+    op.id = colophon_core::records::id(&canonical(&serde_json::json!({"purpose":colophon_core::protocol::OPERATION_ID,"namespace":ns,"author":signer.public().id(),"epoch":epoch,"nonce":nonce,"operation":op})).unwrap());
     let meta = OperationMeta {
-        protocol: "colophon/operation/2".into(),
+        protocol: colophon_core::protocol::OPERATION.into(),
         library: lib.id().into(),
         namespace: ns.into(),
         author: signer.public().id(),
@@ -175,6 +175,7 @@ pub fn adversarial(
         meta,
         nonce,
         ciphertext,
+        live: None,
     })
     .unwrap();
     let signature = signer.sign(&body);

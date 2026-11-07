@@ -757,6 +757,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_hostaction_finish(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_hostaction_record_paths(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_hostaction_sign_with(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_hostaction_signing_steps(
@@ -858,6 +860,8 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_free_hostaction(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_colophon_ffi_fn_method_hostaction_finish(`ptr`: Long,`signatures`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_hostaction_record_paths(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_hostaction_sign_with(`ptr`: Long,`keys`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1100,6 +1104,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_finish() and 0xFFFF) != 36295) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_record_paths() and 0xFFFF) != 45698) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_sign_with() and 0xFFFF) != 38414) {
@@ -1650,6 +1657,11 @@ public interface HostActionInterface {
      */
     fun `finish`(`signatures`: List<kotlin.ByteArray>): Map<kotlin.String, kotlin.ByteArray>
     
+    /**
+     * Every path this batch will persist: signed steps, live-state aliases and retained copies.
+     */
+    fun `recordPaths`(): List<kotlin.String>
+    
     fun `signWith`(`keys`: KeyProvider): List<kotlin.ByteArray>
     
     fun `signingSteps`(): List<SigningStep>
@@ -1771,6 +1783,22 @@ open class HostAction: Disposable, AutoCloseable, HostActionInterface
         it,
         
         FfiConverterSequenceByteArray.lower(`signatures`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Every path this batch will persist: signed steps, live-state aliases and retained copies.
+     */override fun `recordPaths`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_hostaction_record_paths(
+        it,
+        _status)
 }
     }
     )

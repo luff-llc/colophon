@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, describe, test } from 'node:test';
-import { classifyPath, startRelay } from '../relay.js';
+import { classifyPath, pathInNamespace, startRelay } from '../relay.js';
 
 const TOKEN = 'test-token-0123456789abcdef';
 const sha = (b) => createHash('sha256').update(b).digest('hex');
@@ -44,9 +44,16 @@ describe('reference relay', () => {
     assert.equal(classifyPath('authority/00000001.json'), 'record');
     assert.equal(classifyPath('requests/abc.json'), 'request');
     assert.equal(classifyPath('ops/a/000000000001-x.json'), 'record');
+    assert.equal(classifyPath('ops/a/notes/000000000001-x.json'), 'record');
+    assert.equal(classifyPath('state/a/listening.podcasts/slot.json'), 'state');
+    assert.equal(classifyPath('history/a/listening.podcasts/000000000001-x.json'), 'record');
     assert.equal(classifyPath(`blobs/${'a'.repeat(64)}`), 'blob');
+    assert.equal(pathInNamespace('ops/a/notes/000000000001-x.json', 'notes'), true);
+    assert.equal(pathInNamespace('ops/a/notes/000000000001-x.json', 'listening.podcasts'), false);
+    assert.equal(pathInNamespace('authority/00000001.json', 'notes'), true);
+    assert.equal(pathInNamespace('ops/a/000000000001-x.json', 'notes'), true);
     for (const bad of ['../x.json', 'authority/../x.json', 'ops/a.json', 'authority/.x.json', 'authority/x.txt',
-      'ops/a/b/c.json', 'other/x.json', 'authority//x.json', `blobs/${'A'.repeat(64)}`, 'authority/a%2f.json', 'authority/a\\b.json']) {
+      'ops/a/b/c/d.json', 'other/x.json', 'authority//x.json', `blobs/${'A'.repeat(64)}`, 'authority/a%2f.json', 'authority/a\\b.json']) {
       assert.equal(classifyPath(bad), null, bad);
     }
   });
@@ -58,7 +65,7 @@ describe('reference relay', () => {
     assert.equal(unknown.status, 401, 'unknown slots look like wrong tokens');
     assert.equal(unknown.headers.get('www-authenticate'), 'Bearer');
     const info = await (await fetch(relay.home, { headers: auth })).json();
-    assert.equal(info.protocol, 'colophon/relay/2');
+    assert.equal(info.protocol, 'colophon/relay/3');
     assert.equal(info.limits.recordBytes, 16 * 1024 * 1024);
     assert.equal((await fetch(`${relay.base}/open`)).status, 200, 'open slots need no token');
   });
@@ -109,6 +116,26 @@ describe('reference relay', () => {
     assert.ok(Date.now() - started < 5000);
     const idle = await (await fetch(`${relay.home}/changes?after=${page.cursor}&wait=1`, { headers: auth })).json();
     assert.deepEqual(idle, { entries: [], cursor: page.cursor, more: false }, 'an elapsed wait returns an empty page');
+  });
+
+  test('namespaced ops, live state replacement and namespace-filtered changes', async () => {
+    const notes = `${relay.home}/records/ops/a/notes/000000000001-n1.json`;
+    const listen = `${relay.home}/records/ops/a/listening.podcasts/000000000001-l1.json`;
+    const slot = `${relay.home}/records/state/a/listening.podcasts/${'b'.repeat(64)}.json`;
+    const hist = `${relay.home}/records/history/a/listening.podcasts/000000000002-h1.json`;
+    assert.equal((await put(notes, Buffer.from('notes-op'))).status, 201);
+    assert.equal((await put(listen, Buffer.from('listen-op'))).status, 201);
+    assert.equal((await put(hist, Buffer.from('history-op'))).status, 201);
+    assert.equal((await put(slot, Buffer.from('live-1'), auth)).status, 201, 'state creates without If-None-Match');
+    assert.equal((await put(slot, Buffer.from('live-2'), auth)).status, 200, 'state replaces');
+    const got = await fetch(slot, { headers: auth });
+    assert.equal(Buffer.from(await got.arrayBuffer()).toString(), 'live-2');
+    const filtered = await (await fetch(`${relay.home}/changes?namespace=notes&limit=1000`, { headers: auth })).json();
+    const paths = filtered.entries.map((e) => e.path);
+    assert.ok(paths.includes('ops/a/notes/000000000001-n1.json'));
+    assert.ok(!paths.includes('ops/a/listening.podcasts/000000000001-l1.json'));
+    assert.ok(!paths.includes(`state/a/listening.podcasts/${'b'.repeat(64)}.json`));
+    assert.ok(paths.some((p) => p.startsWith('authority/')));
   });
 
   test('requests/ is the only mutable area', async () => {

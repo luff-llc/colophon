@@ -11,14 +11,15 @@ signed, encrypted operations, and every client folds the admitted operations int
 state. Storage and transport never grant access: a folder, iCloud Drive or a relay only
 moves bytes it can't read. There is no vendor account.
 
-This repository holds the Colophon 0.2 Rust core and JavaScript package, the
+This repository holds the Colophon 0.3 Rust core and JavaScript package, the
 playground demo, plus the 0.1 specification, conformance vectors and shipped
 Swift reference implementation in `reference/swift/`. The root Swift package is **ColophonSDK**,
-with the Rust-backed 0.2 products under `swift/`.
+with the Rust-backed 0.3 products under `swift/`. In LUFF's Marginalia repository,
+"Colophon 0.2" names the Swift layout-2 step whose design 0.3 absorbs.
 
 ## Try it
 
-The fastest way to see Colophon: the playground runs the real 0.2 Rust core as
+The fastest way to see Colophon: the playground runs the real 0.3 Rust core as
 WebAssembly in one browser tab, where an AI agent knocks, gets narrow access,
 does useful work, and is shown the door.
 
@@ -50,7 +51,7 @@ makes access explicit instead:
 - **Honest.** Missing history, keys or files remain visible, retryable states. Nothing
   is reported as an empty library because a member lacks permission.
 
-## Rust core and JavaScript package (0.2)
+## Rust core and JavaScript package (0.3)
 
 The pure Rust core implements records, P-256 host key steps, HPKE, grants, admission, epoch
 rotation, recovery, four domain folds, the ledger and generated agent tools. It performs no
@@ -90,8 +91,8 @@ npm --prefix js test            # WebCrypto smoke and Rust/WASM fixture parity
 ES modules. Build artifacts and local dependency caches are not committed. No package has been
 published by this worktree.
 
-See the [0.2 spec](spec/colophon-0.2.md), [JavaScript contract](docs/js-api.md),
-[architecture and dependency pins](docs/architecture.md), and [0.2 conformance library](conformance/0.2/).
+See the [0.3 spec](spec/colophon-0.3.md), [JavaScript contract](docs/js-api.md),
+[architecture and dependency pins](docs/architecture.md), and [0.3 conformance library](conformance/0.3/).
 Regenerate the deterministic fixture with
 `COLOPHON_UPDATE_VECTORS=1 cargo test -p colophon-core --test conformance`.
 
@@ -159,7 +160,7 @@ they don't interpret. Conflicts are recorded, never silently resolved (spec §9)
 ## Tests and conformance
 
 ```sh
-COLOPHON_SOFTWARE_KEYS=1 swift test        # root 0.2 SDK
+COLOPHON_SOFTWARE_KEYS=1 swift test        # root 0.3 SDK
 COLOPHON_SOFTWARE_KEYS=1 swift test --package-path reference/swift  # 0.1 + real migration adapter
 COLOPHON_SOFTWARE_KEYS=1 COLOPHON_WRITE_VECTORS=1 swift test --package-path reference/swift --filter writeVectors
 ```

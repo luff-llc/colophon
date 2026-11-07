@@ -1,0 +1,845 @@
+{
+  "beforeRevokeNotes": {
+    "admitted": [
+      {
+        "author": "c43a940400a43bc7599b17f53049338f",
+        "authorLabel": "Owner",
+        "clock": 1,
+        "created": "2026-11-04T12:00:00.000Z",
+        "id": "f4990eef9818b56bc7f6360005ad62a4",
+        "kind": "createNotebook",
+        "origin": "person",
+        "payload": {
+          "futureField": {
+            "kept": true
+          },
+          "id": "inbox",
+          "title": "Inbox"
+        }
+      },
+      {
+        "author": "9da125c7e34ff473e36a70db162a481d",
+        "authorLabel": "Research agent",
+        "clock": 2,
+        "created": "2026-11-04T12:00:00.000Z",
+        "id": "29c00c4510c9c076bf340fe5e7a1edb0",
+        "kind": "addNote",
+        "origin": "ai",
+        "payload": {
+          "id": "ai-note",
+          "notebook": "inbox",
+          "origin": "person",
+          "text": "An agent contribution"
+        }
+      },
+      {
+        "author": "9da125c7e34ff473e36a70db162a481d",
+        "authorLabel": "Research agent",
+        "clock": 3,
+        "created": "2026-11-04T12:00:00.000Z",
+        "id": "16656bd5bcd62e4f0d24d8b011ced8f0",
+        "kind": "editNote",
+        "origin": "ai",
+        "payload": {
+          "id": "ai-note",
+          "notebook": "inbox",
+          "text": "An edited contribution"
+        }
+      }
+    ],
+    "held": [],
+    "namespace": "notes",
+    "refused": [
+      {
+        "author": "9da125c7e34ff473e36a70db162a481d",
+        "id": "8b81e631660497da970c3f433b0f88f5",
+        "reason": "budgetSpent"
+      }
+    ],
+    "state": {
+      "attachments": [],
+      "cells": [
+        {
+          "author": "9da125c7e34ff473e36a70db162a481d",
+          "authorLabel": "Research agent",
+          "clock": 3,
+          "created": "2026-11-04T12:00:00.000Z",
+          "extensions": {
+            "origin": "person"
+          },
+          "id": "ai-note",
+          "kind": "markdown",
+          "notebook": "inbox",
+          "origin": "ai",
+          "revision": "16656bd5bcd62e4f0d24d8b011ced8f0",
+          "source": "An edited contribution",
+          "updated": "2026-11-04T12:00:00.000Z"
+        }
+      ],
+      "conflicts": [],
+      "entries": [],
+      "invalid": [],
+      "notebooks": [
+        {
+          "archived": false,
+          "author": "c43a940400a43bc7599b17f53049338f",
+          "authorLabel": "Owner",
+          "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
+          "extensions": {
+            "futureField": {
+              "kept": true
+            }
+          },
+          "id": "inbox",
+          "kind": "notebook",
+          "orderRevision": "29c00c4510c9c076bf340fe5e7a1edb0",
+          "origin": "person",
+          "revision": "f4990eef9818b56bc7f6360005ad62a4",
+          "title": "Inbox",
+          "touched": [
+            3,
+            "9da125c7e34ff473e36a70db162a481d",
+            "16656bd5bcd62e4f0d24d8b011ced8f0"
+          ],
+          "updated": "2026-11-04T12:00:00.000Z"
+        }
+      ],
+      "notes": [
+        {
+          "author": "9da125c7e34ff473e36a70db162a481d",
+          "authorLabel": "Research agent",
+          "clock": 3,
+          "created": "2026-11-04T12:00:00.000Z",
+          "extensions": {
+            "origin": "person"
+          },
+          "id": "ai-note",
+          "kind": "markdown",
+          "notebook": "inbox",
+          "origin": "ai",
+          "revision": "16656bd5bcd62e4f0d24d8b011ced8f0",
+          "source": "An edited contribution",
+          "text": "An edited contribution",
+          "updated": "2026-11-04T12:00:00.000Z"
+        }
+      ],
+      "proposals": [],
+      "runs": []
+    }
+  },
+  "ledger": [
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "created",
+      "sequence": 1,
+      "text": "Owner created this library. Listening, notes and reading are sealed with keys only its members hold."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "rekeyed",
+      "sequence": 2,
+      "text": "Owner required storage layout 2."
+    },
+    {
+      "actor": "78738c04a053a0cf86b3c95080d463c3",
+      "actorLabel": "Laptop",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "requested",
+      "sequence": 3,
+      "subject": "78738c04a053a0cf86b3c95080d463c3",
+      "text": "Laptop asked to read and write listening, notes and reading."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "granted",
+      "sequence": 4,
+      "subject": "78738c04a053a0cf86b3c95080d463c3",
+      "text": "Owner let Laptop read and write listening, notes and reading."
+    },
+    {
+      "actor": "fff85e4427a3a298a119a1551bece308",
+      "actorLabel": "Reader app",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "requested",
+      "sequence": 5,
+      "subject": "fff85e4427a3a298a119a1551bece308",
+      "text": "Reader app asked to read and write listening, notes and reading."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "granted",
+      "sequence": 6,
+      "subject": "fff85e4427a3a298a119a1551bece308",
+      "text": "Owner let Reader app read and write reading."
+    },
+    {
+      "actor": "9da125c7e34ff473e36a70db162a481d",
+      "actorLabel": "Research agent",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "requested",
+      "sequence": 7,
+      "subject": "9da125c7e34ff473e36a70db162a481d",
+      "text": "Research agent asked to read and write listening, notes and reading."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "granted",
+      "sequence": 8,
+      "subject": "9da125c7e34ff473e36a70db162a481d",
+      "text": "Owner let Research agent read and write notes with a budget of 2 writes."
+    },
+    {
+      "actor": "78738c04a053a0cf86b3c95080d463c3",
+      "actorLabel": "Laptop",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "queue",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 9,
+      "subject": "b686fd0d2a3eeb56ef43bc8541efed47",
+      "text": "Laptop updated the listening queue."
+    },
+    {
+      "actor": "78738c04a053a0cf86b3c95080d463c3",
+      "actorLabel": "Laptop",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "episode",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 10,
+      "subject": "cd591eb868b5f8bfefdaff6340f85cc0",
+      "text": "Laptop added an episode."
+    },
+    {
+      "actor": "78738c04a053a0cf86b3c95080d463c3",
+      "actorLabel": "Laptop",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "follow",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 11,
+      "subject": "f2e97c0c22105a7df824a3fe435b911e",
+      "text": "Laptop followed a show."
+    },
+    {
+      "actor": "78738c04a053a0cf86b3c95080d463c3",
+      "actorLabel": "Laptop",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "position",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 12,
+      "subject": "fef19f28d102c34c7c6dcd20fdb54804",
+      "text": "Laptop updated playback."
+    },
+    {
+      "actor": "9da125c7e34ff473e36a70db162a481d",
+      "actorLabel": "Research agent",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "editNote",
+      "namespace": "notes",
+      "origin": "ai",
+      "sequence": 13,
+      "subject": "16656bd5bcd62e4f0d24d8b011ced8f0",
+      "text": "Research agent edited a note."
+    },
+    {
+      "actor": "9da125c7e34ff473e36a70db162a481d",
+      "actorLabel": "Research agent",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "addNote",
+      "namespace": "notes",
+      "origin": "ai",
+      "sequence": 14,
+      "subject": "29c00c4510c9c076bf340fe5e7a1edb0",
+      "text": "Research agent added a note."
+    },
+    {
+      "actor": "9da125c7e34ff473e36a70db162a481d",
+      "actorLabel": "Research agent",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "held",
+      "sequence": 15,
+      "subject": "8b81e631660497da970c3f433b0f88f5",
+      "text": "Research agent has an update waiting: it arrived after access ended and was not preserved."
+    },
+    {
+      "actor": "9da125c7e34ff473e36a70db162a481d",
+      "actorLabel": "Research agent",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "refused",
+      "sequence": 16,
+      "subject": "f408e5dc3cbaf3fc8b72d614e6e328d6",
+      "text": "Research agent's update is refused: its author does not have permission here."
+    },
+    {
+      "actor": "9da125c7e34ff473e36a70db162a481d",
+      "actorLabel": "Research agent",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "held",
+      "sequence": 17,
+      "subject": "f490860c3e2d1a3148c2d2b683444682",
+      "text": "Research agent has an update waiting: it arrived after access ended and was not preserved."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "createNotebook",
+      "namespace": "notes",
+      "origin": "person",
+      "sequence": 18,
+      "subject": "f4990eef9818b56bc7f6360005ad62a4",
+      "text": "Owner started a notebook."
+    },
+    {
+      "actor": "fff85e4427a3a298a119a1551bece308",
+      "actorLabel": "Reader app",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "editMetadata",
+      "namespace": "reading.saved",
+      "origin": "person",
+      "sequence": 19,
+      "subject": "26bd59da7bc552eea6047ddf4c0fbfca",
+      "text": "Reader app edited a link."
+    },
+    {
+      "actor": "fff85e4427a3a298a119a1551bece308",
+      "actorLabel": "Reader app",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "setState",
+      "namespace": "reading.saved",
+      "origin": "person",
+      "sequence": 20,
+      "subject": "ac18bba7c58f67b17b35ebe547f003cf",
+      "text": "Reader app updated reading progress."
+    },
+    {
+      "actor": "fff85e4427a3a298a119a1551bece308",
+      "actorLabel": "Reader app",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "capture",
+      "namespace": "reading.saved",
+      "origin": "person",
+      "sequence": 21,
+      "subject": "c3c159a4559222dbdae48be6ec420681",
+      "text": "Reader app saved a link."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "revoked",
+      "sequence": 22,
+      "subject": "9da125c7e34ff473e36a70db162a481d",
+      "text": "Owner ended Research agent's access. Its 1 note stays; what it already read can't be unread."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "rekeyed",
+      "sequence": 23,
+      "subject": "9da125c7e34ff473e36a70db162a481d",
+      "text": "Notes was rekeyed without Research agent."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "rekeyed",
+      "sequence": 24,
+      "text": "Listening and reading were rekeyed."
+    },
+    {
+      "actor": "c43a940400a43bc7599b17f53049338f",
+      "actorLabel": "Owner",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "capture",
+      "namespace": "reading.saved",
+      "origin": "person",
+      "sequence": 25,
+      "subject": "85afd7aefda604f4898c6ec4dd66e195",
+      "text": "Owner saved a link."
+    },
+    {
+      "actor": "2d2991872f305e3d7b4650d69865ff3b",
+      "actorLabel": "Recovery identity",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "granted",
+      "sequence": 26,
+      "subject": "09bfc6b30c41d374ed1de2deafe12a04",
+      "text": "Recovery restored control of this library and access to its past."
+    },
+    {
+      "actor": "2d2991872f305e3d7b4650d69865ff3b",
+      "actorLabel": "Recovery identity",
+      "at": "2026-11-04T12:01:00.000Z",
+      "event": "rekeyed",
+      "sequence": 27,
+      "text": "Listening, notes and reading were rekeyed without the former owner."
+    }
+  ],
+  "libraryID": "fa62aa24aa237e1877e11ffad6e95bd8",
+  "localRefusals": {
+    "afterRevoke": "revoked",
+    "budget": "budgetSpent",
+    "outsideGrant": "notGranted"
+  },
+  "members": [
+    {
+      "grant": null,
+      "id": "09bfc6b30c41d374ed1de2deafe12a04",
+      "kind": "device",
+      "label": "Recovered owner",
+      "revokedAt": null,
+      "since": 9,
+      "writes": 0
+    },
+    {
+      "grant": {
+        "access": [
+          "read",
+          "write"
+        ],
+        "namespaces": [
+          "reading.saved",
+          "listening.podcasts",
+          "notes"
+        ]
+      },
+      "id": "78738c04a053a0cf86b3c95080d463c3",
+      "kind": "device",
+      "label": "Laptop",
+      "revokedAt": null,
+      "since": 4,
+      "writes": 4
+    },
+    {
+      "grant": {
+        "access": [
+          "read",
+          "write"
+        ],
+        "namespaces": [
+          "notes"
+        ],
+        "writeBudget": 2
+      },
+      "id": "9da125c7e34ff473e36a70db162a481d",
+      "kind": "agent",
+      "label": "Research agent",
+      "revokedAt": 7,
+      "since": 6,
+      "writes": 2
+    },
+    {
+      "grant": null,
+      "id": "c43a940400a43bc7599b17f53049338f",
+      "kind": "device",
+      "label": "Owner",
+      "revokedAt": 9,
+      "since": 1,
+      "writes": 2
+    },
+    {
+      "grant": {
+        "access": [
+          "read",
+          "write"
+        ],
+        "namespaces": [
+          "reading.saved"
+        ]
+      },
+      "id": "fff85e4427a3a298a119a1551bece308",
+      "kind": "app",
+      "label": "Reader app",
+      "revokedAt": null,
+      "since": 5,
+      "writes": 3
+    }
+  ],
+  "recovery": {
+    "epochCount": 9,
+    "root": "09bfc6b30c41d374ed1de2deafe12a04"
+  },
+  "views": {
+    "listening.podcasts": {
+      "admitted": [
+        {
+          "author": "78738c04a053a0cf86b3c95080d463c3",
+          "authorLabel": "Laptop",
+          "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "f2e97c0c22105a7df824a3fe435b911e",
+          "kind": "follow",
+          "origin": "person",
+          "payload": {
+            "id": "show",
+            "title": "A podcast",
+            "url": "https://example.org/feed.xml"
+          }
+        },
+        {
+          "author": "78738c04a053a0cf86b3c95080d463c3",
+          "authorLabel": "Laptop",
+          "clock": 2,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "cd591eb868b5f8bfefdaff6340f85cc0",
+          "kind": "episode",
+          "origin": "person",
+          "payload": {
+            "id": "episode",
+            "show": "show",
+            "title": "An episode",
+            "transcriptExcerpt": "A short transcript excerpt."
+          }
+        },
+        {
+          "author": "78738c04a053a0cf86b3c95080d463c3",
+          "authorLabel": "Laptop",
+          "clock": 4,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "b686fd0d2a3eeb56ef43bc8541efed47",
+          "kind": "queue",
+          "origin": "person",
+          "payload": {
+            "episodes": [
+              "episode"
+            ]
+          }
+        }
+      ],
+      "held": [],
+      "namespace": "listening.podcasts",
+      "refused": [],
+      "state": {
+        "conflicts": [],
+        "contributions": [],
+        "episodes": [
+          {
+            "author": "78738c04a053a0cf86b3c95080d463c3",
+            "authorLabel": "Laptop",
+            "clock": 2,
+            "id": "episode",
+            "metadataAvailable": true,
+            "metadataRevision": "cd591eb868b5f8bfefdaff6340f85cc0",
+            "origin": "person",
+            "revision": "cd591eb868b5f8bfefdaff6340f85cc0",
+            "show": "show",
+            "title": "An episode",
+            "transcriptExcerpt": "A short transcript excerpt."
+          }
+        ],
+        "invalid": [],
+        "jobs": [],
+        "notes": [],
+        "playlists": [],
+        "preferences": {},
+        "queue": {
+          "author": "78738c04a053a0cf86b3c95080d463c3",
+          "authorLabel": "Laptop",
+          "clock": 4,
+          "episodes": [
+            "episode"
+          ],
+          "origin": "person",
+          "revision": "b686fd0d2a3eeb56ef43bc8541efed47"
+        },
+        "receipts": {},
+        "recordings": {},
+        "shows": [
+          {
+            "author": "78738c04a053a0cf86b3c95080d463c3",
+            "authorLabel": "Laptop",
+            "clock": 1,
+            "followed": true,
+            "following": true,
+            "id": "show",
+            "origin": "person",
+            "revision": "f2e97c0c22105a7df824a3fe435b911e",
+            "title": "A podcast",
+            "url": "https://example.org/feed.xml"
+          }
+        ],
+        "transcripts": []
+      }
+    },
+    "notes": {
+      "admitted": [
+        {
+          "author": "c43a940400a43bc7599b17f53049338f",
+          "authorLabel": "Owner",
+          "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "f4990eef9818b56bc7f6360005ad62a4",
+          "kind": "createNotebook",
+          "origin": "person",
+          "payload": {
+            "futureField": {
+              "kept": true
+            },
+            "id": "inbox",
+            "title": "Inbox"
+          }
+        },
+        {
+          "author": "9da125c7e34ff473e36a70db162a481d",
+          "authorLabel": "Research agent",
+          "clock": 2,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "29c00c4510c9c076bf340fe5e7a1edb0",
+          "kind": "addNote",
+          "origin": "ai",
+          "payload": {
+            "id": "ai-note",
+            "notebook": "inbox",
+            "origin": "person",
+            "text": "An agent contribution"
+          }
+        },
+        {
+          "author": "9da125c7e34ff473e36a70db162a481d",
+          "authorLabel": "Research agent",
+          "clock": 3,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "16656bd5bcd62e4f0d24d8b011ced8f0",
+          "kind": "editNote",
+          "origin": "ai",
+          "payload": {
+            "id": "ai-note",
+            "notebook": "inbox",
+            "text": "An edited contribution"
+          }
+        }
+      ],
+      "held": [
+        {
+          "author": "9da125c7e34ff473e36a70db162a481d",
+          "id": "8b81e631660497da970c3f433b0f88f5",
+          "reason": "revokedBackdated"
+        },
+        {
+          "author": "9da125c7e34ff473e36a70db162a481d",
+          "id": "f490860c3e2d1a3148c2d2b683444682",
+          "reason": "revokedBackdated"
+        }
+      ],
+      "namespace": "notes",
+      "refused": [],
+      "state": {
+        "attachments": [],
+        "cells": [
+          {
+            "author": "9da125c7e34ff473e36a70db162a481d",
+            "authorLabel": "Research agent",
+            "clock": 3,
+            "created": "2026-11-04T12:00:00.000Z",
+            "extensions": {
+              "origin": "person"
+            },
+            "id": "ai-note",
+            "kind": "markdown",
+            "notebook": "inbox",
+            "origin": "ai",
+            "revision": "16656bd5bcd62e4f0d24d8b011ced8f0",
+            "source": "An edited contribution",
+            "updated": "2026-11-04T12:00:00.000Z"
+          }
+        ],
+        "conflicts": [],
+        "entries": [],
+        "invalid": [],
+        "notebooks": [
+          {
+            "archived": false,
+            "author": "c43a940400a43bc7599b17f53049338f",
+            "authorLabel": "Owner",
+            "clock": 1,
+            "created": "2026-11-04T12:00:00.000Z",
+            "extensions": {
+              "futureField": {
+                "kept": true
+              }
+            },
+            "id": "inbox",
+            "kind": "notebook",
+            "orderRevision": "29c00c4510c9c076bf340fe5e7a1edb0",
+            "origin": "person",
+            "revision": "f4990eef9818b56bc7f6360005ad62a4",
+            "title": "Inbox",
+            "touched": [
+              3,
+              "9da125c7e34ff473e36a70db162a481d",
+              "16656bd5bcd62e4f0d24d8b011ced8f0"
+            ],
+            "updated": "2026-11-04T12:00:00.000Z"
+          }
+        ],
+        "notes": [
+          {
+            "author": "9da125c7e34ff473e36a70db162a481d",
+            "authorLabel": "Research agent",
+            "clock": 3,
+            "created": "2026-11-04T12:00:00.000Z",
+            "extensions": {
+              "origin": "person"
+            },
+            "id": "ai-note",
+            "kind": "markdown",
+            "notebook": "inbox",
+            "origin": "ai",
+            "revision": "16656bd5bcd62e4f0d24d8b011ced8f0",
+            "source": "An edited contribution",
+            "text": "An edited contribution",
+            "updated": "2026-11-04T12:00:00.000Z"
+          }
+        ],
+        "proposals": [],
+        "runs": []
+      }
+    },
+    "reading.saved": {
+      "admitted": [
+        {
+          "author": "fff85e4427a3a298a119a1551bece308",
+          "authorLabel": "Reader app",
+          "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "c3c159a4559222dbdae48be6ec420681",
+          "kind": "capture",
+          "origin": "person",
+          "payload": {
+            "custom": "preserved",
+            "id": "link",
+            "title": "Article",
+            "url": "https://example.org/article"
+          }
+        },
+        {
+          "author": "fff85e4427a3a298a119a1551bece308",
+          "authorLabel": "Reader app",
+          "clock": 2,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "ac18bba7c58f67b17b35ebe547f003cf",
+          "kind": "setState",
+          "origin": "person",
+          "payload": {
+            "id": "link",
+            "state": "reading"
+          }
+        },
+        {
+          "author": "fff85e4427a3a298a119a1551bece308",
+          "authorLabel": "Reader app",
+          "clock": 3,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "26bd59da7bc552eea6047ddf4c0fbfca",
+          "kind": "editMetadata",
+          "origin": "person",
+          "payload": {
+            "id": "link",
+            "title": "Edited title"
+          }
+        },
+        {
+          "author": "c43a940400a43bc7599b17f53049338f",
+          "authorLabel": "Owner",
+          "clock": 4,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "85afd7aefda604f4898c6ec4dd66e195",
+          "kind": "capture",
+          "origin": "person",
+          "payload": {
+            "id": "after-rekey",
+            "url": "https://example.org/new"
+          }
+        }
+      ],
+      "held": [],
+      "namespace": "reading.saved",
+      "refused": [
+        {
+          "author": "9da125c7e34ff473e36a70db162a481d",
+          "id": "f408e5dc3cbaf3fc8b72d614e6e328d6",
+          "reason": "notGranted"
+        }
+      ],
+      "state": {
+        "annotations": {},
+        "answers": {},
+        "checkpoints": {},
+        "conflicts": [],
+        "connections": {},
+        "diagnostics": [],
+        "exportBlocked": false,
+        "feeds": {},
+        "images": {},
+        "invalid": [],
+        "items": [
+          {
+            "added": "2026-11-04T12:00:00.000Z",
+            "author": "fff85e4427a3a298a119a1551bece308",
+            "authorLabel": "Reader app",
+            "clock": 3,
+            "consumption": "inProgress",
+            "extensions": {
+              "custom": "preserved"
+            },
+            "id": "link",
+            "origin": "person",
+            "retention": "saved",
+            "revision": "26bd59da7bc552eea6047ddf4c0fbfca",
+            "state": "reading",
+            "title": "Edited title",
+            "url": "https://example.org/article"
+          },
+          {
+            "added": "2026-11-04T12:00:00.000Z",
+            "author": "c43a940400a43bc7599b17f53049338f",
+            "authorLabel": "Owner",
+            "clock": 4,
+            "id": "after-rekey",
+            "origin": "person",
+            "retention": "saved",
+            "revision": "85afd7aefda604f4898c6ec4dd66e195",
+            "title": "https://example.org/new",
+            "url": "https://example.org/new"
+          }
+        ],
+        "pendingCount": 0,
+        "receipts": {},
+        "reviewHistory": [],
+        "savedViews": {},
+        "sourceMetadata": {},
+        "sources": {},
+        "subscriptions": {},
+        "unsupported": [],
+        "visibility": {}
+      }
+    }
+  }
+}

@@ -120,6 +120,15 @@ impl HostAction {
             })
             .collect()
     }
+    /// Every path this batch will persist: signed steps, live-state aliases and retained copies.
+    pub fn record_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.pending.steps.iter().map(|s| s.path.clone()).collect();
+        for (_, to) in &self.pending.aliases {
+            paths.push(to.clone());
+        }
+        paths.extend(self.pending.copies.keys().cloned());
+        paths
+    }
 }
 
 struct Session {
@@ -541,7 +550,7 @@ pub fn begin_request(
 ) -> Result<Arc<HostAction>> {
     Ok(Arc::new(HostAction {
         pending: Library::begin_request(model::Request {
-            protocol: "colophon/request/2".into(),
+            protocol: colophon_core::protocol::REQUEST.into(),
             library_id,
             member: keys.into(),
             label,

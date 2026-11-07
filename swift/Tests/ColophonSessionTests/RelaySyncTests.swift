@@ -137,9 +137,9 @@ private func link(_ id: String) throws -> DomainCommand {
         await relay.setOffline(true)
         let session = ColophonSession(configuration: configuration(home, store: MemoryRecordStore(), relay: relay), store: MemoryRecordStore())
         await session.restore()
-        guard case .unavailable = session.phase else { Issue.record("Expected unavailable, got \(session.phase)"); return }
+        guard case .waitingForDownload = session.phase else { Issue.record("Expected waitingForDownload, got \(session.phase)"); return }
         await session.create()
-        guard case .unavailable = session.phase else { Issue.record("Create must not fork an unknown library"); return }
+        guard case .waitingForDownload = session.phase else { Issue.record("Create must not fork an unknown library, got \(session.phase)"); return }
         #expect(await session.syncNow() == false)
         guard case .offline = session.syncState else { Issue.record("Expected offline, got \(session.syncState)"); return }
 
@@ -150,7 +150,7 @@ private func link(_ id: String) throws -> DomainCommand {
 
         let wrong = ColophonSession(configuration: configuration(other, store: MemoryRecordStore(), relay: relay, token: "wrong-token"), store: MemoryRecordStore())
         await wrong.restore()
-        guard case .unavailable = wrong.phase else { Issue.record("Expected unavailable"); return }
+        guard case .waitingForDownload = wrong.phase else { Issue.record("Expected waitingForDownload, got \(wrong.phase)"); return }
         #expect(await wrong.syncNow() == false)
         #expect(wrong.syncState == .unauthorized)
     }

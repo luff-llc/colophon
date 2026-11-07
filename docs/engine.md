@@ -197,7 +197,7 @@ available unlock tasks to avoid repeated rebuilds. All results authenticate befo
 
 ### Cache identity and invalidation
 
-The format is an authenticated binary container: `COLOENG2`, little-endian u32 JSON-metadata
+The format is an authenticated binary container: `COLOENG3`, little-endian u32 JSON-metadata
 length, metadata bytes, u32 record count, sorted entries, then a 32-byte tag. Each entry contains
 u32 UTF-8 path length, path bytes, 32-byte **SHA-256 of the entire exact envelope**, u16 namespace
 index (65535 means none), and one byte of flags. This implementation supports fewer than 65,535
@@ -223,7 +223,7 @@ IKM, `colophon/verified-prefix/2` as expansion info and 32 output bytes. Compari
 tag bytes before parsing metadata or index. Container changes must bump version and magic. Reducer schema/semantic changes increment the
 required authenticated `reducer_schema` generation in both cache APIs. Missing or mismatching
 generations fall back to replay, including caches made before all four full domains were merged.
-This preserves the `COLOENG2` layout, exact-envelope index, tag construction and prefix digests.
+This preserves the `COLOENG3` layout, exact-envelope index, tag construction and prefix digests.
 The key must be random and protected separately from the shared folder. This is an additional
 host-supplied device secret, independent of namespace AES keys and the version-1 ECDH-derived
 `Library` cache key. Checkpoint state is plaintext; protect the local cache itself as well.

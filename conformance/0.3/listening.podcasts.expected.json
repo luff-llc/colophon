@@ -1,0 +1,518 @@
+[
+  {
+    "arguments": {},
+    "query": "shows",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [
+          {
+            "following": true,
+            "id": "show",
+            "revision": "2ed5b6dc7bd8f52b961704ff0d6a9274",
+            "title": "Synthetic show",
+            "url": "https://example.org/podcast.xml"
+          }
+        ],
+        "total": 1
+      }
+    }
+  },
+  {
+    "arguments": {
+      "id": "show"
+    },
+    "query": "show",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "episodeCount": 2,
+        "show": {
+          "author": "c43a940400a43bc7599b17f53049338f",
+          "authorLabel": "Owner",
+          "clock": 1,
+          "extensions": {
+            "future": {
+              "retained": true
+            }
+          },
+          "followed": true,
+          "following": true,
+          "id": "show",
+          "origin": "person",
+          "revision": "2ed5b6dc7bd8f52b961704ff0d6a9274",
+          "title": "Synthetic show",
+          "url": "https://example.org/podcast.xml"
+        },
+        "skipIntro": null,
+        "skipOutro": null
+      }
+    }
+  },
+  {
+    "arguments": {
+      "limit": 1
+    },
+    "query": "episodes",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": "eyJuYW1lc3BhY2UiOiJsaXN0ZW5pbmcucG9kY2FzdHMiLCJxdWVyeSI6ImVwaXNvZGVzIiwiYXJncyI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJyZXZpc2lvbiI6IjNjZDQwNjRlNzRjNGUxZjdhZDc1NjNmZGNkNjg3MDQxOTc5NGE3YzMzYjM2MDQ1NWVlNmJmMzkzZTI2MmQ1ZjUiLCJsYXN0IjpbIjIwMjYxMTA1MDAwMDAwMDAwOm9uZSIsIm9uZSJdfQ",
+        "rows": [
+          {
+            "consumption": "inProgress",
+            "id": "one",
+            "metadataAvailable": true,
+            "noteCount": 1,
+            "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
+            "seconds": 5.0,
+            "show": "show",
+            "stateRevision": "0559b514f1ceb7615b0f040d9a9b010a",
+            "title": "First episode",
+            "transcriptAvailable": true,
+            "updated": "2026-11-04T12:00:00.000Z"
+          }
+        ],
+        "total": 2
+      }
+    }
+  },
+  {
+    "arguments": {
+      "id": "one"
+    },
+    "query": "episode",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "extensions": {},
+        "heads": {
+          "metadata": "5dd9c39a03fe795a48c049b282e486e9",
+          "position": "7ba51fe2e049e063aa1b1442edd51b1e",
+          "state": "0559b514f1ceb7615b0f040d9a9b010a"
+        },
+        "metadata": {
+          "id": "one",
+          "published": "2026-11-05T00:00:00Z",
+          "show": "show",
+          "title": "First episode"
+        },
+        "row": {
+          "consumption": "inProgress",
+          "id": "one",
+          "metadataAvailable": true,
+          "noteCount": 1,
+          "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
+          "seconds": 5.0,
+          "show": "show",
+          "stateRevision": "0559b514f1ceb7615b0f040d9a9b010a",
+          "title": "First episode",
+          "transcriptAvailable": true,
+          "updated": "2026-11-04T12:00:00.000Z"
+        }
+      }
+    }
+  },
+  {
+    "arguments": {
+      "limit": 1
+    },
+    "query": "queue",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "head": "94f83b13bd99ddc29cdfd59b1090c2bf",
+        "page": {
+          "next": "eyJuYW1lc3BhY2UiOiJsaXN0ZW5pbmcucG9kY2FzdHMiLCJxdWVyeSI6InF1ZXVlIiwiYXJncyI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJyZXZpc2lvbiI6IjNjZDQwNjRlNzRjNGUxZjdhZDc1NjNmZGNkNjg3MDQxOTc5NGE3YzMzYjM2MDQ1NWVlNmJmMzkzZTI2MmQ1ZjUiLCJsYXN0IjpbIjAwMDAwMDAwIiwidHdvIl19",
+          "rows": [
+            {
+              "id": "two",
+              "metadataAvailable": true,
+              "noteCount": 0,
+              "seconds": 0.0,
+              "show": "show",
+              "title": "Second episode",
+              "transcriptAvailable": false
+            }
+          ],
+          "total": 2
+        }
+      }
+    }
+  },
+  {
+    "arguments": {
+      "episode": "one",
+      "recording": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "query": "playbackContext",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "chapterHead": "90031395934601aa023e4042bab45fde",
+        "episode": {
+          "consumption": "inProgress",
+          "id": "one",
+          "metadataAvailable": true,
+          "noteCount": 1,
+          "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
+          "seconds": 5.0,
+          "show": "show",
+          "stateRevision": "0559b514f1ceb7615b0f040d9a9b010a",
+          "title": "First episode",
+          "transcriptAvailable": true,
+          "updated": "2026-11-04T12:00:00.000Z"
+        },
+        "next": null,
+        "preferenceHeads": {
+          "global::speed": "bb32f14608d9e02cf2be4d2a59681339"
+        },
+        "preferences": {
+          "speed": 1.25
+        },
+        "queueHead": "94f83b13bd99ddc29cdfd59b1090c2bf",
+        "segmentHead": null,
+        "transcriptID": "transcript"
+      }
+    }
+  },
+  {
+    "arguments": {},
+    "query": "playlists",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [
+          {
+            "alternativeCount": 0,
+            "id": "daily",
+            "mode": "automatic",
+            "name": "Daily",
+            "revision": "8ce88077f9bb054eda33dd36ecbf28b6"
+          }
+        ],
+        "total": 1
+      }
+    }
+  },
+  {
+    "arguments": {
+      "id": "daily"
+    },
+    "query": "playlist",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "alternativeCount": 0,
+        "extensions": null,
+        "revision": "8ce88077f9bb054eda33dd36ecbf28b6",
+        "rule": {
+          "allShows": false,
+          "archived": false,
+          "episodes": [],
+          "excluded": [],
+          "id": "daily",
+          "includeFinished": false,
+          "included": [],
+          "mode": "automatic",
+          "name": "Daily",
+          "order": "newest",
+          "pinned": [],
+          "progress": "any",
+          "shows": [
+            "show"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "arguments": {
+      "episode": "one"
+    },
+    "query": "notes",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [
+          {
+            "alternativeCount": 1,
+            "anchorClaimed": false,
+            "authorLabel": "Owner",
+            "created": "2026-11-04T12:00:00.000Z",
+            "creationRevision": "2ec21fd1b0858f15f5986d11982e3b27",
+            "episode": "one",
+            "id": "note",
+            "origin": "person",
+            "revision": "2ec21fd1b0858f15f5986d11982e3b27",
+            "seconds": 12,
+            "textPreview": "Synthetic thought",
+            "truncated": false
+          }
+        ],
+        "total": 1
+      }
+    }
+  },
+  {
+    "arguments": {
+      "id": "deleted"
+    },
+    "query": "note",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "alternativeCount": 1,
+        "note": {
+          "anchorClaimed": false,
+          "author": "c43a940400a43bc7599b17f53049338f",
+          "authorLabel": "Owner",
+          "clock": 12,
+          "created": "2026-11-04T12:00:00.000Z",
+          "creation": {
+            "author": "c43a940400a43bc7599b17f53049338f",
+            "authorLabel": "Owner",
+            "clock": 11,
+            "origin": "person",
+            "revision": "9773f67f8beff6bfea1077190a35f459"
+          },
+          "creationOrder": 11,
+          "creationRevision": "9773f67f8beff6bfea1077190a35f459",
+          "deleted": true,
+          "episode": "one",
+          "id": "deleted",
+          "lastTextEditor": {
+            "author": "c43a940400a43bc7599b17f53049338f",
+            "authorLabel": "Owner",
+            "clock": 11,
+            "origin": "person",
+            "revision": "9773f67f8beff6bfea1077190a35f459"
+          },
+          "origin": "person",
+          "revision": "891de1455373476ec866182512959b5a",
+          "show": "show",
+          "text": "Retained tombstone"
+        },
+        "outcome": "deleted"
+      }
+    }
+  },
+  {
+    "arguments": {
+      "episode": "one",
+      "kind": "chapters",
+      "recording": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "query": "recordingContent",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "contentOrigin": "id3",
+        "head": "90031395934601aa023e4042bab45fde",
+        "page": {
+          "next": null,
+          "rows": [
+            {
+              "id": "90031395934601aa023e4042bab45fde:1",
+              "start": 0,
+              "title": "First"
+            },
+            {
+              "id": "90031395934601aa023e4042bab45fde:0",
+              "start": 30,
+              "title": "Second"
+            }
+          ],
+          "total": 2
+        },
+        "source": "publisher"
+      }
+    }
+  },
+  {
+    "arguments": {
+      "episode": "one"
+    },
+    "query": "transcripts",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [
+          {
+            "blob": {
+              "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "mediaType": "application/json",
+              "size": 10
+            },
+            "episode": "one",
+            "id": "transcript",
+            "recording": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "revision": "a4aaeff23ba98f1cfb9f5b9da92dee48",
+            "selected": true,
+            "source": "publisher",
+            "sourceStatus": "pendingSource",
+            "timed": true
+          }
+        ],
+        "total": 1
+      }
+    }
+  },
+  {
+    "arguments": {
+      "scope": "global"
+    },
+    "query": "preferences",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [
+          {
+            "author": "c43a940400a43bc7599b17f53049338f",
+            "authorLabel": "Owner",
+            "field": "speed",
+            "key": "global::speed",
+            "origin": "person",
+            "revision": "bb32f14608d9e02cf2be4d2a59681339",
+            "scope": "global",
+            "value": 1.25
+          }
+        ],
+        "total": 1
+      }
+    }
+  },
+  {
+    "arguments": {
+      "episode": "one"
+    },
+    "query": "recordings",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [
+          {
+            "contentOrigin": "id3",
+            "count": 2,
+            "episode": "one",
+            "head": "90031395934601aa023e4042bab45fde",
+            "kind": "chapters",
+            "personReviewed": false,
+            "recording": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "show": "show",
+            "source": "publisher"
+          }
+        ],
+        "total": 1
+      }
+    }
+  },
+  {
+    "arguments": {
+      "mode": "importedSession"
+    },
+    "query": "history",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [],
+        "total": 0
+      }
+    }
+  },
+  {
+    "arguments": {
+      "mode": "latestEpisode"
+    },
+    "query": "history",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [
+          {
+            "consumption": "inProgress",
+            "id": "one",
+            "metadataAvailable": true,
+            "noteCount": 1,
+            "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
+            "seconds": 5.0,
+            "show": "show",
+            "stateRevision": "0559b514f1ceb7615b0f040d9a9b010a",
+            "title": "First episode",
+            "transcriptAvailable": true,
+            "updated": "2026-11-04T12:00:00.000Z"
+          }
+        ],
+        "total": 1
+      }
+    }
+  },
+  {
+    "arguments": {
+      "kind": "question"
+    },
+    "query": "jobs",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [],
+        "total": 0
+      }
+    }
+  },
+  {
+    "arguments": {
+      "kind": "answer"
+    },
+    "query": "contributions",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [],
+        "total": 0
+      }
+    }
+  },
+  {
+    "arguments": {},
+    "query": "listeningCounts",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "conflicts": 2,
+        "episodes": 2,
+        "finished": 0,
+        "followed": 1,
+        "inProgress": 1,
+        "notes": 1,
+        "pendingJobs": 0,
+        "queued": 2,
+        "transcripts": 1
+      }
+    }
+  },
+  {
+    "arguments": {
+      "object": "one"
+    },
+    "query": "conflicts",
+    "result": {
+      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "value": {
+        "next": null,
+        "rows": [],
+        "total": 0
+      }
+    }
+  }
+]

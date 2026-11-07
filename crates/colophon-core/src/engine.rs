@@ -129,6 +129,15 @@ impl Namespace {
         }
         changed
     }
+    /// Apply a replaceable live operation to the projection without recording it in history hashes.
+    pub fn apply_overlay(
+        &mut self,
+        op: &OperationView,
+        kind: Option<crate::domain::AuthorContext>,
+    ) {
+        self.state.apply_with_context(op, kind.as_ref());
+        self.clock = self.clock.max(op.clock);
+    }
     pub fn query(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value> {
         self.state.query(name, args)
     }

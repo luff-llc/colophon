@@ -13,7 +13,7 @@ func object(_ data: Data) throws -> [String: Any] { try #require(JSONSerializati
 func syntheticKeys(_ seed: UInt8) throws -> SoftwareKeys {
     let key = SymmetricKey(data: Data(repeating: seed, count: 32))
     func scalar(_ n: UInt8) -> Data {
-        let value = HKDF<SHA256>.deriveKey(inputKeyMaterial: key, salt: Data("colophon/entropy/2".utf8), info: Data(repeating: 0, count: 7) + Data([n]), outputByteCount: 32)
+        let value = HKDF<SHA256>.deriveKey(inputKeyMaterial: key, salt: Data("colophon/entropy/3".utf8), info: Data(repeating: 0, count: 7) + Data([n]), outputByteCount: 32)
         return value.withUnsafeBytes { Data($0) }
     }
     return try SoftwareKeys(signingPrivateKey: scalar(0), agreementPrivateKey: scalar(1))
@@ -29,15 +29,15 @@ func syntheticKeys(_ seed: UInt8) throws -> SoftwareKeys {
         switch domain {
         case "Books":
             namespace = "reading.books"; seed = 5
-            queries = try #require(object(fixture("conformance/0.2/reading.books/expected.json"))["queries"] as? [[String: Any]])
-            encodedRecords = try JSONDecoder().decode([String: String].self, from: fixture("conformance/0.2/reading.books/records.json"))
+            queries = try #require(object(fixture("conformance/0.3/reading.books/expected.json"))["queries"] as? [[String: Any]])
+            encodedRecords = try JSONDecoder().decode([String: String].self, from: fixture("conformance/0.3/reading.books/records.json"))
         case "Listening":
             namespace = "listening.podcasts"; seed = 1
-            queries = try #require(JSONSerialization.jsonObject(with: fixture("conformance/0.2/listening.podcasts.expected.json")) as? [[String: Any]])
-            encodedRecords = try JSONDecoder().decode([String: String].self, from: fixture("conformance/0.2/listening.podcasts.records.json"))
+            queries = try #require(JSONSerialization.jsonObject(with: fixture("conformance/0.3/listening.podcasts.expected.json")) as? [[String: Any]])
+            encodedRecords = try JSONDecoder().decode([String: String].self, from: fixture("conformance/0.3/listening.podcasts.records.json"))
         default:
             namespace = domain == "Saved" ? "reading.saved" : "notes"; seed = 1
-            let value = try object(fixture("conformance/0.2/\(namespace).json"))
+            let value = try object(fixture("conformance/0.3/\(namespace).json"))
             queries = try #require(value["queries"] as? [[String: Any]])
             encodedRecords = try #require(value["records"] as? [String: String])
         }

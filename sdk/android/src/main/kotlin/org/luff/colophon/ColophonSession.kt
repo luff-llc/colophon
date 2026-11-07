@@ -120,6 +120,7 @@ class ColophonSession internal constructor(
     suspend fun refresh() {
         restore()
         val lease = context
+        if (_phase.value == SessionPhase.Ready) _phase.value = SessionPhase.Refreshing
         withContext(dispatcher) {
             try {
                 val snapshot = worker.refresh()
@@ -461,10 +462,10 @@ class ColophonSession internal constructor(
      * chunks the relay already holds are evicted too unless required; they are fetched again on
      * demand. Never touches chunks other writers stored; deletes nothing if a namespace is unreadable.
      */
-    suspend fun collectBlobGarbage(graceMillis: Long = 24L * 60 * 60 * 1000, evictReplicated: Boolean = false): BlobCollection {
+    suspend fun collectBlobGarbage(graceMillis: Long = 24L * 60 * 60 * 1000, evictReplicated: Boolean = false, discardSoleCopy: Boolean = false): BlobCollection {
         restore()
         if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
-        return withContext(dispatcher) { worker.blobs.collect(graceMillis, evictReplicated) }
+        return withContext(dispatcher) { worker.blobs.collect(graceMillis, evictReplicated, discardSoleCopy) }
     }
 
     private suspend fun download(manifest: BlobManifestInfo) {
@@ -569,7 +570,7 @@ class ColophonSession internal constructor(
     private fun apply(snapshot: SessionSnapshot) {
         if (relay != null && (snapshot.revision != _revision.value || snapshot.phase != _phase.value)) syncKick.trySend(Unit)
         val changed = snapshot.namespaceRevisions.keys.filter { _namespaceRevisions.value[it] != snapshot.namespaceRevisions[it] }.toSet()
-        val lost = snapshot.phase != SessionPhase.Ready
+        val lost = snapshot.phase != SessionPhase.Ready && snapshot.phase != SessionPhase.Refreshing
         _phase.value = snapshot.phase
         _revision.value = snapshot.revision
         _namespaceRevisions.value = snapshot.namespaceRevisions
@@ -644,17 +645,17 @@ class ColophonSession internal constructor(
     }
 
     private fun fail(error: Exception) {
-        views = emptyMap()
-        _ledger.value = emptyList()
-        _members.value = emptyList()
-        _requests.value = emptyList()
-        synchronized(cacheLock) {
-            for (invalidate in caches.values) invalidate(emptySet(), true)
-        }
-        _lastError.value = error.message ?: error.toString()
-        _phase.value = when (error) {
+        val next = when (error) {
+            is SessionLayoutException -> SessionPhase.UpdateRequired
+            is BindingException.InvalidData ->
+                if (error.detail.startsWith("Unsupported storage layout")) SessionPhase.UpdateRequired
+                else SessionPhase.Failed(error.detail)
             is PendingPublication -> SessionPhase.Unavailable(error.reason)
-            is StorageException.Unavailable -> SessionPhase.Unavailable(error.message ?: "unavailable")
+            is StorageException.Unavailable -> {
+                val reason = error.message ?: "unavailable"
+                if (reason.contains("Waiting for the relay")) SessionPhase.WaitingForDownload
+                else SessionPhase.Unavailable(reason)
+            }
             is AccessException -> if (error.denial.reason == DenialReason.NOT_READABLE || error.denial.reason == DenialReason.UNAVAILABLE) {
                 SessionPhase.Unavailable(error.denial.detail)
             } else {
@@ -662,6 +663,16 @@ class ColophonSession internal constructor(
             }
             is BindingException.KeyProvider -> SessionPhase.Failed(error.detail)
             else -> SessionPhase.Failed(error.message ?: error.toString())
+        }
+        _lastError.value = error.message ?: error.toString()
+        _phase.value = next
+        if (next == SessionPhase.UpdateRequired || next == SessionPhase.WaitingForDownload) return
+        views = emptyMap()
+        _ledger.value = emptyList()
+        _members.value = emptyList()
+        _requests.value = emptyList()
+        synchronized(cacheLock) {
+            for (invalidate in caches.values) invalidate(emptySet(), true)
         }
     }
 

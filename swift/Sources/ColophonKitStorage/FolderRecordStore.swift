@@ -44,7 +44,7 @@ public actor FolderRecordStore: RecordStore {
             try checkAvailability(folder)
             let manager = FileManager.default
             var result: [String: URL] = [:]
-            for directory in ["authority", "requests", "ops"] {
+            for directory in ["authority", "requests", "ops", "state", "history"] {
                 let root = folder.appendingPathComponent(directory)
                 if !manager.fileExists(atPath: root.path) {
                     try checkAvailability(root)
@@ -68,7 +68,9 @@ public actor FolderRecordStore: RecordStore {
                 }
                 if let scanError { throw scanError }
             }
-            guard knownPaths.isSubset(of: Set(result.keys)) else { throw StorageError.unavailable("Previously observed records are missing") }
+            guard knownPaths.filter({ RecordPath.missingBlocks($0) }).isSubset(of: Set(result.keys)) else {
+                throw StorageError.unavailable("Previously observed records are missing")
+            }
             knownPaths.formUnion(result.keys)
             return result
         } catch let error as StorageError { throw error }
@@ -95,7 +97,7 @@ public actor FolderRecordStore: RecordStore {
                     target.appendPathComponent(String(component))
                     try self.checkAvailability(target)
                 }
-                try AtomicFile.write(bytes, to: root.appendingPathComponent(path), immutable: true)
+                try AtomicFile.write(bytes, to: root.appendingPathComponent(path), immutable: !RecordPath.isReplaceable(path))
             }
         }
         if coordinated {

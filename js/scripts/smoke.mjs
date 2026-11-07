@@ -71,13 +71,13 @@ assert.equal((await restored.call('reading.saved__getPosition', { item: 'native'
 
 
 // Replay Rust's fixed vectors through WASM with a host WebCrypto key derived solely for fixtures.
-const encoded = JSON.parse(await readFile(new URL('../../conformance/0.2/library.json', import.meta.url), 'utf8'));
-const expected = JSON.parse(await readFile(new URL('../../conformance/0.2/expected.json', import.meta.url), 'utf8'));
+const encoded = JSON.parse(await readFile(new URL('../../conformance/0.3/library.json', import.meta.url), 'utf8'));
+const expected = JSON.parse(await readFile(new URL('../../conformance/0.3/expected.json', import.meta.url), 'utf8'));
 // Fixture seed 5 is deliberately public. Production callers use WebCryptoKeys.generate().
 async function deriveScalar(seed, counter) {
   const material = await crypto.subtle.importKey('raw', seed, 'HKDF', false, ['deriveBits']);
   const info = new Uint8Array(8); new DataView(info.buffer).setBigUint64(0, BigInt(counter));
-  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('colophon/entropy/2'), info }, material, 256));
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('colophon/entropy/3'), info }, material, 256));
 }
 const { createECDH } = await import('node:crypto');
 async function fixturePair(counter, algorithm, usages, seed = 5) {
@@ -94,7 +94,7 @@ const fixture = await Library.open(new Map(Object.entries(encoded).map(([path,b6
 assert.equal(fixture.id, expected.libraryID);
 for (const [namespace, view] of Object.entries(expected.views)) assert.deepEqual(fixture.view(namespace).value, view);
 assert.deepEqual(fixture.ledger(), expected.ledger);
-const notesVector = JSON.parse(await readFile(new URL('../../conformance/0.2/notes.json', import.meta.url), 'utf8'));
+const notesVector = JSON.parse(await readFile(new URL('../../conformance/0.3/notes.json', import.meta.url), 'utf8'));
 const notesKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
 const notesFixture = await Library.open(new Map(Object.entries(notesVector.records).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), notesKeys);
 for (const query of notesVector.queries) {
@@ -103,7 +103,7 @@ for (const query of notesVector.queries) {
   assert.deepEqual(result.value, query.result);
 }
 
-const savedVector = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.saved.json', import.meta.url), 'utf8'));
+const savedVector = JSON.parse(await readFile(new URL('../../conformance/0.3/reading.saved.json', import.meta.url), 'utf8'));
 const savedKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
 const savedFixture = await Library.open(new Map(Object.entries(savedVector.records).map(([path,b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), savedKeys);
 for (const query of savedVector.queries) {
@@ -114,8 +114,8 @@ for (const query of savedVector.queries) {
 }
 
 // Replay the podcast domain vector through generated bounded query tools.
-const podcastRecords = JSON.parse(await readFile(new URL('../../conformance/0.2/listening.podcasts.records.json', import.meta.url), 'utf8'));
-const podcastExpected = JSON.parse(await readFile(new URL('../../conformance/0.2/listening.podcasts.expected.json', import.meta.url), 'utf8'));
+const podcastRecords = JSON.parse(await readFile(new URL('../../conformance/0.3/listening.podcasts.records.json', import.meta.url), 'utf8'));
+const podcastExpected = JSON.parse(await readFile(new URL('../../conformance/0.3/listening.podcasts.expected.json', import.meta.url), 'utf8'));
 const podcastKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
 const podcasts = await Library.open(new Map(Object.entries(podcastRecords).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), podcastKeys);
 for (const test of podcastExpected) {
@@ -146,8 +146,8 @@ for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entri
 console.log('Node 24 smoke passed: non-extractable keys, narrowed grants, tools, AI attribution, budget, revoke/keep, rekey, recovery, and Rust/WASM fixture parity.');
 
 // The books fixture uses the same deliberately public seed-5 fixture identity.
-const booksRecords = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.books/records.json', import.meta.url), 'utf8'));
-const booksExpected = JSON.parse(await readFile(new URL('../../conformance/0.2/reading.books/expected.json', import.meta.url), 'utf8'));
+const booksRecords = JSON.parse(await readFile(new URL('../../conformance/0.3/reading.books/records.json', import.meta.url), 'utf8'));
+const booksExpected = JSON.parse(await readFile(new URL('../../conformance/0.3/reading.books/expected.json', import.meta.url), 'utf8'));
 const booksFixture = await Library.open(new Map(Object.entries(booksRecords).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), fixtureKeys);
 for (const { name, args, result } of booksExpected.queries) {
   const actual = await booksFixture.call(`reading.books__${name}`, args);

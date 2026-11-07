@@ -50,7 +50,7 @@ internal class SessionWorker(
     @Synchronized internal fun relay(): RelaySync? {
         relaySync?.let { return it }
         val relay = configuration.relay ?: return null
-        return RelaySync(storage(), relay.endpoint, relay.transport, File(configuration.privateHome, "relay.json"))
+        return RelaySync(storage(), relay.endpoint, relay.transport, File(configuration.privateHome, "relay.json"), configuration.namespaces)
             .also { relaySync = it }
     }
 
@@ -99,12 +99,13 @@ internal class SessionWorker(
         if (!configuration.migrationWriter && marker != null && MigrationMarker.isActive(marker)) {
             return empty(SessionPhase.Migrating)
         }
-        var stored = storage().paths()
+        var stored = storage().paths().filter { RecordPath.listingIncludes(it, configuration.namespaces) }.toSet()
         if (stored.isEmpty() && journal.pending.isEmpty() && configuration.relay != null) {
             pullBeforeTrustingEmpty()
-            stored = storage().paths()
+            stored = storage().paths().filter { RecordPath.listingIncludes(it, configuration.namespaces) }.toSet()
         }
-        if (!journal.knownPaths.all { it in stored || it in journal.pending }) {
+        val available = stored + journal.pending.keys
+        if (!journal.knownPaths.filter { RecordPath.missingBlocks(it) }.all { it in available }) {
             throw StorageException.Unavailable("Previously observed library records are unavailable")
         }
         if (stored.isEmpty() && journal.pending.isEmpty()) {
@@ -123,7 +124,14 @@ internal class SessionWorker(
         if (opened) {
             if (incoming.isNotEmpty()) core.merge(incoming)
         } else {
-            core.open(incoming, keys)
+            try {
+                core.open(incoming, keys)
+            } catch (error: BindingException) {
+                if (error is BindingException.InvalidData && error.detail.startsWith("Unsupported storage layout")) {
+                    throw SessionLayoutException
+                }
+                throw error
+            }
             opened = true
             merged.clear()
             requestPaths.clear()
@@ -280,9 +288,14 @@ internal class SessionWorker(
      * out of the core (ordinary writes); without, the whole map is diffed (rare authority actions).
      */
     private fun persistDelta(paths: Collection<String>? = null) {
-        val records = if (paths != null) core.recordsAt(paths.filter { it !in journal.knownPaths }) else core.records()
+        val wanted = if (paths != null) {
+            paths.filter { it !in journal.knownPaths || RecordPath.isReplaceable(it) }
+        } else {
+            core.records().keys.filter { it !in journal.knownPaths || RecordPath.isReplaceable(it) }
+        }
+        val records = core.recordsAt(wanted)
         for ((path, bytes) in records) {
-            if (path !in journal.knownPaths) journal.pending[path] = bytes
+            journal.pending[path] = bytes
         }
         track(journal.pending.keys)
         journal.save(journalFile)

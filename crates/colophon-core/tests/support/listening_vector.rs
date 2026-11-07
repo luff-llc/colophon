@@ -98,13 +98,27 @@ pub fn check() {
         ("listeningCounts", json!({})),
         ("conflicts", json!({"object":"one"})),
     ];
-    let expected:Vec<_>=queries.iter().map(|(name,args)|json!({"query":name,"arguments":args,"result":success(root.query("listening.podcasts",name,args.clone(),NOW).unwrap())})).collect();
     let encoded: BTreeMap<_, _> = root
         .records()
         .iter()
         .map(|(p, b)| (p.clone(), STANDARD.encode(b)))
         .collect();
-    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2");
+    let records: Records = encoded
+        .iter()
+        .map(|(p, b)| (p.clone(), STANDARD.decode(b).unwrap()))
+        .collect();
+    let replayed = opened(records, &owner);
+    let expected: Vec<_> = queries
+        .iter()
+        .map(|(name, args)| {
+            json!({
+                "query": name,
+                "arguments": args,
+                "result": success(replayed.query("listening.podcasts", name, args.clone(), NOW).unwrap())
+            })
+        })
+        .collect();
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3");
     if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
         fs::write(
             folder.join("listening.podcasts.records.json"),

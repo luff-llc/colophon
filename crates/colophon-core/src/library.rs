@@ -32,10 +32,16 @@ pub struct SigningStep {
     pub signing: Vec<u8>,
 }
 /// An action's complete prepared record batch. Persist/merge atomically after all signatures verify.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PendingBatch {
     /// Host signing steps in authority order.
     pub steps: Vec<SigningStep>,
+    /// Extra paths that receive a copy of the signed envelope at the first matching `steps` path.
+    #[serde(default)]
+    pub aliases: Vec<(String, String)>,
+    /// Already-signed records to store (retained live predecessors).
+    #[serde(default)]
+    pub copies: Records,
 }
 impl PendingBatch {
     /// Finish all signatures without changing a library. A wrong signature rejects the whole batch.
@@ -44,14 +50,19 @@ impl PendingBatch {
             self.steps.len() == signatures.len(),
             "Signature count mismatch",
         )?;
-        self.steps
-            .into_iter()
-            .zip(signatures)
-            .map(|(step, signature)| {
-                let record = SignedRecord::finish_sign(step.body, signature, &step.signing)?;
-                Ok((step.path, record.encode()?))
-            })
-            .collect()
+        let mut records = self.copies;
+        for (step, signature) in self.steps.into_iter().zip(signatures) {
+            let record = SignedRecord::finish_sign(step.body, signature, &step.signing)?;
+            records.insert(step.path, record.encode()?);
+        }
+        for (from, to) in self.aliases {
+            let bytes = records
+                .get(&from)
+                .cloned()
+                .ok_or_else(|| Error("Missing signed alias source".into()))?;
+            records.insert(to, bytes);
+        }
+        Ok(records)
     }
 }
 /// An ECDH task for the host's non-extractable agreement key.
@@ -94,6 +105,8 @@ pub struct Library {
     changes: ChangeSummary,
     pending_checkpoints: BTreeMap<String, Vec<u8>>,
     verifiers: std::sync::Arc<crate::verification::Verifiers>,
+    /// Current live slots keyed by (author, namespace, slot).
+    live: BTreeMap<(String, String, String), Judged>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Status {
@@ -116,6 +129,7 @@ struct Judged {
     operation: Option<OperationView>,
     opened: bool,
     status: Status,
+    from_live_slot: bool,
 }
 impl Library {
     /// Prepare genesis and initial epochs. Every new epoch is sealed to owner and recovery.
@@ -124,7 +138,7 @@ impl Library {
         opts.recovery.validate()?;
         time_key(now)?;
         let genesis = AuthorityEntry {
-            protocol: "colophon/authority/2".into(),
+            protocol: crate::protocol::AUTHORITY.into(),
             seq: 1,
             previous: None,
             issued: now.into(),
@@ -154,12 +168,23 @@ impl Library {
             })
             .collect::<Result<Vec<_>>>()?;
         let rekey = AuthorityEntry {
-            protocol: "colophon/authority/2".into(),
+            protocol: crate::protocol::AUTHORITY.into(),
             seq: 2,
             previous: Some(records::digest(&body)),
             issued: now.into(),
             by: "root".into(),
             action: Action::Rekey { epochs },
+        };
+        let rekey_body = canonical(&rekey)?;
+        let layout = AuthorityEntry {
+            protocol: crate::protocol::AUTHORITY.into(),
+            seq: 3,
+            previous: Some(records::digest(&rekey_body)),
+            issued: now.into(),
+            by: "root".into(),
+            action: Action::Layout {
+                layout: crate::protocol::LAYOUT,
+            },
         };
         Ok(PendingBatch {
             steps: vec![
@@ -170,10 +195,16 @@ impl Library {
                 },
                 SigningStep {
                     path: "authority/00000002.json".into(),
-                    body: canonical(&rekey)?,
+                    body: rekey_body,
+                    signing: opts.owner.signing.clone(),
+                },
+                SigningStep {
+                    path: "authority/00000003.json".into(),
+                    body: canonical(&layout)?,
                     signing: opts.owner.signing,
                 },
             ],
+            ..PendingBatch::default()
         })
     }
     /// Verify and open records without private keys. Call begin/finish unlock for readable epochs.
@@ -201,11 +232,12 @@ impl Library {
             checkpoint_policy: CheckpointPolicy::default(),
             changes: ChangeSummary::default(),
             pending_checkpoints: BTreeMap::new(),
+            live: BTreeMap::new(),
         };
         let paths = library
             .records
             .keys()
-            .filter(|p| p.starts_with("ops/"))
+            .filter(|p| crate::protocol::is_operation_record(p))
             .cloned()
             .collect::<Vec<_>>();
         library.ingest(&paths, true, &[]);
@@ -237,16 +269,24 @@ impl Library {
             ensure(
                 path.starts_with("authority/")
                     || path.starts_with("requests/")
-                    || path.starts_with("ops/"),
+                    || path.starts_with("ops/")
+                    || path.starts_with("state/")
+                    || path.starts_with("history/"),
                 "Unknown storage path",
             )?;
             if let Some(old) = self.records.get(path) {
+                if crate::protocol::is_replaceable(path) {
+                    continue;
+                }
                 ensure(old == raw, "Immutable record conflict")?;
             }
         }
         let incoming: Records = incoming
             .into_iter()
-            .filter(|(p, _)| !self.records.contains_key(p))
+            .filter(|(p, raw)| {
+                self.records.get(p) != Some(raw)
+                    && (crate::protocol::is_replaceable(p) || !self.records.contains_key(p))
+            })
             .collect();
         let authority_changed = incoming.keys().any(|p| p.starts_with("authority/"));
         if authority_changed {
@@ -270,9 +310,19 @@ impl Library {
         }
         let mut paths: Vec<_> = incoming
             .keys()
-            .filter(|p| p.starts_with("ops/"))
+            .filter(|p| crate::protocol::is_operation_record(p))
             .cloned()
             .collect();
+        for path in &paths {
+            if crate::protocol::is_replaceable(path) {
+                if let Some((_, slot)) = path.rsplit_once('/') {
+                    let slot = slot.trim_end_matches(".json");
+                    self.live.retain(|(author, ns, s), _| {
+                        !(s == slot && path == &crate::protocol::live_state_path(author, ns, s))
+                    });
+                }
+            }
+        }
         self.records.extend(incoming);
         if authority_changed {
             paths.extend(self.invalid.keys().cloned());
@@ -543,7 +593,10 @@ impl Library {
     pub fn begin_request(request: Request) -> Result<PendingBatch> {
         request.member.validate()?;
         time_key(&request.created)?;
-        ensure(request.protocol == "colophon/request/2", "Request protocol")?;
+        ensure(
+            request.protocol == crate::protocol::REQUEST,
+            "Request protocol",
+        )?;
         Grant {
             namespaces: request.namespaces.clone(),
             access: request.access.clone(),
@@ -557,6 +610,7 @@ impl Library {
                 body: canonical(&request)?,
                 signing: request.member.signing,
             }],
+            ..PendingBatch::default()
         })
     }
     /// Verify a completed request and derive its six-digit display code.
@@ -716,7 +770,7 @@ impl Library {
         )?;
         let first = batch.steps.first().ok_or_else(|| missing("reshare"))?;
         let entry = AuthorityEntry {
-            protocol: "colophon/authority/2".into(),
+            protocol: crate::protocol::AUTHORITY.into(),
             seq: self.authority.latest + 2,
             previous: Some(records::digest(&first.body)),
             issued: now.into(),
@@ -827,7 +881,7 @@ impl Library {
     fn action(&self, action: Action, now: &str, by: &str) -> Result<PendingBatch> {
         time_key(now)?;
         let entry = AuthorityEntry {
-            protocol: "colophon/authority/2".into(),
+            protocol: crate::protocol::AUTHORITY.into(),
             seq: self.authority.latest + 1,
             previous: Some(self.authority.last_digest.clone()),
             issued: now.into(),
@@ -840,6 +894,7 @@ impl Library {
                 body: canonical(&entry)?,
                 signing: self.me.signing.clone(),
             }],
+            ..PendingBatch::default()
         })
     }
     fn root_denial(&self) -> Option<Denial> {
@@ -986,16 +1041,48 @@ impl Library {
                 "Unlock the namespace epoch before writing",
             )));
         };
-        let clock = self
-            .namespaces
-            .get(namespace)
-            .map_or(0, |n| n.clock)
+        let mut clock = self.namespaces.get(namespace).map_or(0, |n| n.clock);
+        for ((_, ns, _), slot) in &self.live {
+            if ns == namespace {
+                clock = clock.max(slot.header.meta.clock);
+            }
+        }
+        let clock = clock
             .checked_add(1)
             .ok_or_else(|| Error("Logical clock exhausted".into()))?;
         ensure(
             clock <= 9_007_199_254_740_991,
             "Logical clock exceeds interoperable integer range",
         )?;
+        let live_slot = crate::protocol::live_slot(namespace, kind, &payload);
+        let mut copies = Records::new();
+        if let Some(slot) = &live_slot {
+            if let Some(raw) = self.records.get(&crate::protocol::live_state_path(
+                &self.me.id(),
+                namespace,
+                slot,
+            )) {
+                if let Some(previous) = decode_header(raw) {
+                    let cited = payload
+                        .get("expect")
+                        .and_then(Value::as_str)
+                        .or_else(|| payload.get("expectedPosition").and_then(Value::as_str));
+                    if cited == Some(previous.meta.id.as_str()) {
+                        copies.insert(crate::protocol::operation_path(&previous.meta), raw.clone());
+                    }
+                }
+            }
+        } else if matches!(kind, "position" | "setState" | "recoverPosition") {
+            if let Some(id) = payload.get("id").and_then(Value::as_str) {
+                let slot = crate::protocol::live_slot_name(id);
+                let path = crate::protocol::live_state_path(&self.me.id(), namespace, &slot);
+                if let Some(raw) = self.records.get(&path) {
+                    if let Some(previous) = decode_header(raw) {
+                        copies.insert(crate::protocol::operation_path(&previous.meta), raw.clone());
+                    }
+                }
+            }
+        }
         let mut entropy = Entropy::new(seed);
         let nonce = entropy.take::<12>()?.to_vec();
         let mut operation = Operation {
@@ -1010,31 +1097,62 @@ impl Library {
         operation.id = operation_id(namespace, &self.me.id(), epoch, &nonce, &operation)?;
         let id = operation.id.clone();
         let meta = OperationMeta {
-            protocol: "colophon/operation/2".into(),
+            protocol: crate::protocol::OPERATION.into(),
             library: self.id().into(),
             namespace: namespace.into(),
             author: self.me.id(),
             epoch,
-            id,
+            id: id.clone(),
             clock,
             authority: self.authority.latest,
             created: now.into(),
         };
+        let live = live_slot.map(|slot| crate::model::LiveStamp {
+            library_id: self.id().into(),
+            slot,
+            generation: clock,
+            operation_id: id,
+        });
         let ciphertext =
             crypto::seal(key, &nonce, &canonical(&operation)?, &operation_aad(&meta)?)?;
-        let path = operation_path(&meta);
+        let history = live.as_ref().map(|_| {
+            crate::protocol::history_path(&meta.author, &meta.namespace, meta.clock, &meta.id)
+        });
+        let state = live.as_ref().map(|stamp| {
+            crate::protocol::live_state_path(&meta.author, &meta.namespace, &stamp.slot)
+        });
+        let path = history
+            .clone()
+            .unwrap_or_else(|| crate::protocol::operation_path(&meta));
         let body = canonical(&OperationHeader {
             meta,
             nonce,
             ciphertext,
+            live,
         })?;
+        let aliases = match (history, state) {
+            (Some(h), Some(s)) => vec![(h, s)],
+            _ => Vec::new(),
+        };
         Ok(Outcome::success(PendingBatch {
             steps: vec![SigningStep {
                 path,
                 body,
                 signing: self.me.signing.clone(),
             }],
+            aliases,
+            copies,
         }))
+    }
+    /// Root-signed layout raise. New libraries already write layout 2 at creation.
+    pub fn begin_layout(&self, layout: u32, now: &str) -> Result<Outcome<PendingBatch>> {
+        if let Some(d) = self.root_denial() {
+            return Ok(Outcome::failure(d));
+        }
+        ensure(layout >= self.authority.layout, "Layout cannot be lowered")?;
+        ensure(layout >= 1, "Invalid layout")?;
+        self.action(Action::Layout { layout }, now, "root")
+            .map(Outcome::success)
     }
     /// Read a namespace after grant and expiry checks. Cached keys never override ended access.
     pub fn view(&self, namespace: &str, now: &str) -> Result<Outcome<NamespaceView>> {
@@ -1070,7 +1188,9 @@ impl Library {
             };
             match &j.status {
                 Status::Admitted => {
-                    if let Some(operation) = &j.operation {
+                    if j.from_live_slot {
+                        // Live slots are current overlay, not immutable admitted history.
+                    } else if let Some(operation) = &j.operation {
                         view.admitted.push(operation.clone());
                     } else if self
                         .keys
@@ -1241,6 +1361,7 @@ impl Library {
         let mut candidates = Vec::new();
         let input: Vec<_> = paths
             .iter()
+            .filter(|p| p.starts_with("ops/") || p.starts_with("state/"))
             .filter_map(|p| self.records.get(p).map(|r| (p.as_str(), r.as_slice())))
             .collect();
         let results = self
@@ -1258,6 +1379,7 @@ impl Library {
                         operation: None,
                         opened: false,
                         status: Status::Admitted,
+                        from_live_slot: path.starts_with("state/"),
                     });
                 }
                 Err(error) => {
@@ -1289,6 +1411,7 @@ impl Library {
             }
         }
         candidates.sort_by(|a, b| order(&a.header.meta).cmp(&order(&b.header.meta)));
+        replay |= candidates.iter().any(|c| c.from_live_slot);
         // Namespace clock checks are independent. Only a capped author's grant-wide budget
         // adds an ordering dependency across namespaces. This permits cheap local appends to
         // a quieter namespace even when another namespace has a much higher clock.
@@ -1329,6 +1452,7 @@ impl Library {
             self.admission = Admission::default();
         }
         let start = if replay { 0 } else { old_len };
+        let mut live_heads: Vec<(String, String, String, String)> = Vec::new();
         for j in &mut self.judged[start..] {
             let meta = &j.header.meta;
             if !j.opened
@@ -1339,6 +1463,7 @@ impl Library {
                 Self::open_operation(&self.authority, &self.keys, j);
             }
             let meta = &j.header.meta;
+            let skip_clock_jump = j.from_live_slot;
             let mut status = Self::judge(
                 &self.authority,
                 meta,
@@ -1349,7 +1474,18 @@ impl Library {
                     .get(&meta.namespace)
                     .copied()
                     .unwrap_or(0),
+                skip_clock_jump,
             );
+            if j.from_live_slot
+                && status == Status::Admitted
+                && self
+                    .authority
+                    .members
+                    .get(&meta.author)
+                    .is_some_and(|m| m.member.revoked_at.is_some())
+            {
+                status = Status::Refused("revoked".into());
+            }
             if status == Status::Admitted {
                 self.admission
                     .clocks
@@ -1357,6 +1493,7 @@ impl Library {
             }
             if status == Status::Admitted
                 && j.operation.is_some()
+                && !j.from_live_slot
                 && !self
                     .admission
                     .authenticated_ids
@@ -1368,6 +1505,16 @@ impl Library {
                 touched.insert(meta.namespace.clone());
             }
             j.status = status;
+            if j.from_live_slot && j.status == Status::Admitted {
+                if let Some(stamp) = j.header.live.as_ref() {
+                    live_heads.push((
+                        j.header.meta.author.clone(),
+                        j.header.meta.namespace.clone(),
+                        stamp.slot.clone(),
+                        j.header.meta.id.clone(),
+                    ));
+                }
+            }
             let tail = (meta.clock, meta.author.clone(), meta.id.clone());
             self.admission
                 .namespace_tails
@@ -1388,10 +1535,19 @@ impl Library {
                 })
                 .or_insert(tail);
         }
+        for (author, namespace, slot, id) in live_heads {
+            self.judged.retain(|old| {
+                !(old.from_live_slot
+                    && old.header.meta.author == author
+                    && old.header.meta.namespace == namespace
+                    && old.header.meta.id != id
+                    && old.header.live.as_ref().map(|s| s.slot.as_str()) == Some(slot.as_str()))
+            });
+        }
         if replay {
             let mut grouped: BTreeMap<String, Vec<(&str, &OperationView)>> = BTreeMap::new();
             for j in &self.judged {
-                if j.status == Status::Admitted {
+                if j.status == Status::Admitted && !j.from_live_slot {
                     if let Some(op) = &j.operation {
                         grouped
                             .entry(j.header.meta.namespace.clone())
@@ -1434,7 +1590,7 @@ impl Library {
         } else {
             for j in &self.judged[start..] {
                 let ns = &j.header.meta.namespace;
-                if j.status == Status::Admitted {
+                if j.status == Status::Admitted && !j.from_live_slot {
                     if let Some(op) = &j.operation {
                         let view = op;
                         let state = self
@@ -1467,6 +1623,33 @@ impl Library {
                     });
             }
         }
+        self.apply_live(&mut touched);
+        let mut live_ops: Vec<(String, OperationView, Option<domain::AuthorContext>, u64)> = self
+            .live
+            .values()
+            .filter_map(|judged| {
+                let op = judged.operation.as_ref()?.clone();
+                let ctx = self.authority.members.get(&op.author).map(|member| {
+                    domain::AuthorContext::from_member(&member.member, &self.authority.id)
+                });
+                Some((
+                    judged.header.meta.namespace.clone(),
+                    op,
+                    ctx,
+                    judged.header.meta.clock,
+                ))
+            })
+            .collect();
+        live_ops.sort_by(|a, b| a.3.cmp(&b.3).then(a.1.id.cmp(&b.1.id)));
+        for (ns, op, ctx, clock) in live_ops {
+            let state = self
+                .namespaces
+                .entry(ns.clone())
+                .or_insert_with(|| Namespace::new(&ns));
+            if clock > state.clock {
+                state.apply_overlay(&op, ctx);
+            }
+        }
         // Invalid records affect rejection queries even when they never enter admitted order.
         for ns in touched {
             if self.authority.namespaces.contains(&ns) && !self.changes.namespaces.contains_key(&ns)
@@ -1478,6 +1661,75 @@ impl Library {
                 state.revision += 1;
                 self.changes.namespaces.insert(ns, state.revision);
             }
+        }
+    }
+    pub(crate) fn apply_live(&mut self, touched: &mut BTreeSet<String>) {
+        let _ = touched;
+        self.live.clear();
+        let paths: Vec<String> = self
+            .records
+            .keys()
+            .filter(|p| crate::protocol::is_replaceable(p))
+            .cloned()
+            .collect();
+        for path in paths {
+            let Some(raw) = self.records.get(&path) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<crate::records::SignedRecord>(raw) else {
+                continue;
+            };
+            let Some(header) = decode_header(raw) else {
+                continue;
+            };
+            let Some(stamp) = header.live.clone() else {
+                continue;
+            };
+            if crate::protocol::match_header_path(&path, &header.meta, header.live.as_ref())
+                .is_err()
+            {
+                continue;
+            }
+            if self
+                .authority
+                .members
+                .get(&header.meta.author)
+                .is_some_and(|m| m.member.revoked_at.is_some())
+            {
+                continue;
+            }
+            let mut judged = Judged {
+                header,
+                digest: crate::records::digest(&record.body),
+                operation: None,
+                opened: false,
+                status: Status::Admitted,
+                from_live_slot: true,
+            };
+            Self::open_operation(&self.authority, &self.keys, &mut judged);
+            if judged.operation.is_none() {
+                continue;
+            }
+            let key = (
+                judged.header.meta.author.clone(),
+                judged.header.meta.namespace.clone(),
+                stamp.slot,
+            );
+            let generation = judged
+                .header
+                .live
+                .as_ref()
+                .map(|s| s.generation)
+                .unwrap_or(0);
+            if self
+                .live
+                .get(&key)
+                .and_then(|old| old.header.live.as_ref())
+                .is_some_and(|old| old.generation > generation)
+            {
+                continue;
+            }
+            self.live.insert(key, judged);
         }
     }
     fn open_operation(
@@ -1531,6 +1783,7 @@ impl Library {
         digest: &str,
         spent: &mut BTreeMap<String, BTreeSet<String>>,
         clock: u64,
+        skip_clock_jump: bool,
     ) -> Status {
         let refuse = |s: &str| Status::Refused(s.into());
         let Some(member) = authority.members.get(&meta.author) else {
@@ -1573,7 +1826,8 @@ impl Library {
             return refuse("wrongEpoch");
         }
         // Bound each admitted header's forward jump, including a namespace's first header.
-        if meta.clock > clock.saturating_add(1024) {
+        // Live slots skip this: replaced generations are not listed at open.
+        if !skip_clock_jump && meta.clock > clock.saturating_add(1024) {
             return refuse("clockJump");
         }
         let count = spent.entry(meta.author.clone()).or_default();
@@ -1752,6 +2006,13 @@ impl Library {
                         rekey_description(epochs, Some("the former owner")),
                     );
                     previous_root = root.id();
+                }
+                Action::Layout { layout } => {
+                    add(
+                        "rekeyed",
+                        None,
+                        format!("{label} required storage layout {layout}."),
+                    );
                 }
             }
         }
@@ -2046,8 +2307,11 @@ fn make_epoch(
     })
 }
 /// Immutable storage path of an operation.
-pub fn operation_path(meta: &OperationMeta) -> String {
-    format!("ops/{}/{:012}-{}.json", meta.author, meta.clock, meta.id)
+pub use crate::protocol::operation_path;
+
+fn decode_header(raw: &[u8]) -> Option<OperationHeader> {
+    let record: SignedRecord = serde_json::from_slice(raw).ok()?;
+    serde_json::from_slice(&record.body).ok()
 }
 fn operation_id(
     namespace: &str,
@@ -2091,7 +2355,7 @@ fn operation_id(
             payload: &operation.payload,
             v: operation.v,
         },
-        purpose: "colophon/operation-id/2",
+        purpose: crate::protocol::OPERATION_ID,
     };
     Ok(records::id(&serde_json::to_vec(&preimage)?))
 }
@@ -2122,7 +2386,7 @@ fn checkpoint_tag(key: &[u8], body: &[u8]) -> Result<Vec<u8>> {
     // A separate expansion label keeps this authentication purpose separate from wire crypto.
     let mut tag = vec![0; 32];
     hkdf::Hkdf::<sha2::Sha256>::new(Some(key), body)
-        .expand(b"colophon/device-checkpoint/1", &mut tag)
+        .expand(crate::protocol::CHECKPOINT, &mut tag)
         .map_err(|_| Error("Checkpoint authentication failed".into()))?;
     Ok(tag)
 }

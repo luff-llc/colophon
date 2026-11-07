@@ -231,7 +231,7 @@ impl WasmLibrary {
     ) -> Result<HostAction, JsValue> {
         let mut value: Value = serde_json::from_str(metadata).map_err(js_error)?;
         value["member"] = json!(identity(signing, agreement));
-        value["protocol"] = json!("colophon/request/2");
+        value["protocol"] = json!(colophon_core::protocol::REQUEST);
         let request: Request = serde_json::from_value(value).map_err(js_error)?;
         Library::begin_request(request)
             .map(HostAction::pending)

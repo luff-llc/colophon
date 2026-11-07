@@ -8,7 +8,10 @@ protocol SessionCore: Sendable {
     func create(configuration: SessionConfiguration) async throws
     func merge(_ records: [String: Data]) async throws
     func records() async throws -> [String: Data]
+    func records(at paths: [String]) async throws -> [String: Data]
+    func lastWrittenPaths() async throws -> [String]
     func snapshot(namespaces: [String]) async throws -> CoreSnapshot
+    func snapshot(namespaces: [String], requestPaths: [String]) async throws -> CoreSnapshot
     func request(configuration: SessionConfiguration, keys: any AsyncKeyProvider) async throws -> AccessRequest
     func query(namespace: String, name: String, arguments: Data) async throws -> Data
     func beginBlob(namespace: String, mediaType: String) async throws -> NativeBlobWriter
@@ -52,6 +55,8 @@ actor BindingSessionCore: SessionCore {
         try await library.ready()
     }
     func records() async throws -> [String: Data] { try await requireLibrary().records }
+    func records(at paths: [String]) async throws -> [String: Data] { try await requireLibrary().records(at: paths) }
+    func lastWrittenPaths() async throws -> [String] { try await requireLibrary().lastWrittenPaths }
     func importRequest(_ data: Data) async throws -> AccessRequest {
         let library = try requireLibrary()
         let request = try requestInfo(record: data, libraryId: await library.id)
@@ -60,9 +65,13 @@ actor BindingSessionCore: SessionCore {
     }
     func recovery() -> (any AsyncKeyProvider)? { recoveryProvider }
     func snapshot(namespaces: [String]) async throws -> CoreSnapshot {
+        let keys = Array((try await requireLibrary().records.keys).filter { $0.hasPrefix("requests/") })
+        return try await snapshot(namespaces: namespaces, requestPaths: keys)
+    }
+    func snapshot(namespaces: [String], requestPaths: [String]) async throws -> CoreSnapshot {
         let library = try requireLibrary()
         let id = try await library.id
-        let records = try await library.records
+        let records = try await library.records(at: requestPaths)
         var views: [String: NamespaceView] = [:]
         var denials: [String: Denial] = [:]
         for namespace in namespaces {
@@ -104,5 +113,15 @@ extension SessionCore {
     func openBlobChunk(namespace: String, digest: String, index: Int, ciphertext: Data) async throws -> BlobReadOutcome { throw SessionError.notReady }
     func query(namespace: String, name: String, arguments: Data) async throws -> Data {
         throw SessionError.notReady
+    }
+    func records(at paths: [String]) async throws -> [String: Data] {
+        let all = try await records()
+        var result: [String: Data] = [:]
+        for path in paths { if let bytes = all[path] { result[path] = bytes } }
+        return result
+    }
+    func lastWrittenPaths() async throws -> [String] { [] }
+    func snapshot(namespaces: [String], requestPaths: [String]) async throws -> CoreSnapshot {
+        try await snapshot(namespaces: namespaces)
     }
 }

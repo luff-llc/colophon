@@ -25,7 +25,7 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
     }
     public var body: some View {
         Group {
-            if session.phase == .ready { content() }
+            if session.phase == .ready || session.phase == .refreshing { content() }
             else {
                 VStack {
                     phaseView
@@ -65,6 +65,13 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
             }
             .disabled(action.isWorking)
         case .opening: progress(title: "Opening Your Library", id: "library.opening")
+        case .waitingForDownload: progress(title: "Waiting for Your Library", id: "library.waitingForDownload")
+        case .refreshing: progress(title: "Updating Your Library", id: "library.refreshing")
+        case .retry: failure(title: "Couldn’t Open Your Library", reason: "Retry to try again.", id: "library.retryPhase")
+        case .updateRequired:
+            LibraryStatusView(title: "Update Required", message: "This library uses a newer storage layout. Update this app to open it. Your folder, identity and records are unchanged.", artwork: artwork) {
+                retryButton
+            }.accessibilityIdentifier("library.updateRequired")
         case .creating: progress(title: "Creating Your Library", id: "library.creating")
         case .migrating:
             LibraryStatusView(title: "Your Library Is Being Upgraded", message: "Your existing library is kept while the upgrade completes.", artwork: artwork) {

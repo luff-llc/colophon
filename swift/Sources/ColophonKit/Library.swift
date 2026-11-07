@@ -17,13 +17,15 @@ public struct AccessError: Error, Sendable {
     public let denial: Denial
 }
 
-/// In-memory Colophon 0.2 replica. Hosts own storage, sync, and key persistence.
+/// In-memory Colophon 0.3 replica. Hosts own storage, sync, and key persistence.
 /// Actor reentrancy is safe: a merge during signing makes commit throw BindingError.StaleAction.
 /// Retry such an action explicitly; no stale grant or authority change is silently committed.
 public actor Library {
     public nonisolated let native: NativeLibrary
     public nonisolated let recoveryKeys: (any AsyncKeyProvider)?
     private let keys: any AsyncKeyProvider
+    /// Paths last written by `write`, including live-state aliases and retained copies.
+    public private(set) var lastWrittenPaths: [String] = []
 
     private init(native: NativeLibrary, keys: any AsyncKeyProvider, recovery: (any AsyncKeyProvider)? = nil) {
         self.native = native
@@ -121,8 +123,9 @@ public actor Library {
         try await ready()
         let prepared = try native.beginWrite(namespace: namespace, kind: kind, payload: payload, now: HostInputs.now(), entropy: HostInputs.entropy())
         switch prepared {
-        case .failure(let denial): return .failure(denial)
+        case .failure(let denial): lastWrittenPaths = []; return .failure(denial)
         case .ready(let action):
+            lastWrittenPaths = action.recordPaths()
             try await commit(action)
             return operationOutcome(try native.writtenOperation(action: action, namespace: namespace, now: HostInputs.now()))
         }

@@ -260,7 +260,7 @@ fn scenario() -> (Records, Value) {
 #[test]
 fn deterministic_library_conformance() {
     let (records, expected) = scenario();
-    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2");
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3");
     let encoded: BTreeMap<_, _> = records
         .iter()
         .map(|(p, b)| (p.clone(), STANDARD.encode(b)))
@@ -315,12 +315,12 @@ fn deterministic_library_conformance() {
 
 #[test]
 fn deterministic_books_conformance() {
-    support::books::check(false);
+    support::books::check(true);
 }
 
 #[test]
 fn notes_domain_queries_match_signed_vector() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/notes.json");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/notes.json");
     let vector: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     let records: Records = vector["records"]
         .as_object()
@@ -349,7 +349,7 @@ fn notes_domain_queries_match_signed_vector() {
             ));
         }
         let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/notes.json");
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/notes.json");
         fs::write(path, serde_json::to_vec_pretty(&updated).unwrap()).unwrap();
         return;
     }
@@ -373,7 +373,7 @@ fn notes_domain_queries_match_signed_vector() {
 #[test]
 fn saved_domain_conformance() {
     let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/reading.saved.json");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/reading.saved.json");
     let fixture: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     let records: Records = fixture["records"]
         .as_object()

@@ -4,10 +4,16 @@ import Foundation
 
 public enum SessionPhase: Equatable, Sendable {
     case opening, noLibrary, creating, migrating
+    case waitingForDownload
     case waitingForApproval(code: String)
     case denied
     case unavailable(reason: String)
+    /// Authenticated layout this client cannot evaluate. Folder, identity and bytes stay put.
+    case updateRequired
     case ready
+    /// A refresh is in flight; previously verified content from this connection is still usable.
+    case refreshing
+    case retry
     case failed(error: SessionFailure)
 }
 

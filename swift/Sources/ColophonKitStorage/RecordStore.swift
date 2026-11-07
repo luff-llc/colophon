@@ -34,9 +34,31 @@ public enum RecordPath {
     public static func validate(_ path: String) throws {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         let validComponent: (String) -> Bool = { !$0.isEmpty && $0 != "." && $0 != ".." && !$0.hasPrefix(".") && !$0.contains("\\") && !$0.contains("\0") }
-        guard parts.allSatisfy(validComponent), path.utf8.count < 512,
-              (parts.count == 2 && ["authority", "requests"].contains(parts[0]) || parts.count == 3 && parts[0] == "ops"),
-              path.hasSuffix(".json") else { throw StorageError.invalidPath(path) }
+        guard parts.allSatisfy(validComponent), path.utf8.count < 512, path.hasSuffix(".json") else {
+            throw StorageError.invalidPath(path)
+        }
+        switch parts.count {
+        case 2 where ["authority", "requests"].contains(parts[0]): return
+        case 3 where parts[0] == "ops": return
+        case 4 where ["ops", "state", "history"].contains(parts[0]): return
+        default: throw StorageError.invalidPath(path)
+        }
+    }
+    public static func isReplaceable(_ path: String) -> Bool { path.hasPrefix("state/") }
+    /// Empty `namespaces` means every namespace. Authority, requests and legacy three-part ops always match.
+    public static func listingIncludes(_ path: String, namespaces: [String]) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        if parts.count == 2 && ["authority", "requests"].contains(parts[0]) { return true }
+        if parts.count == 3 && parts[0] == "ops" { return true }
+        if parts.count == 4 && ["ops", "state", "history"].contains(parts[0]) {
+            return namespaces.isEmpty || namespaces.contains(parts[2])
+        }
+        return false
+    }
+    /// Missing namespaced records never block another namespace; authority, requests and unknown ops still do.
+    public static func missingBlocks(_ path: String) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        return parts.count == 2 || (parts.count == 3 && parts[0] == "ops")
     }
 }
 
@@ -77,10 +99,12 @@ public actor MemoryRecordStore: RecordStore {
         if let unavailable { throw StorageError.unavailable(unavailable) }
         for (path, bytes) in incoming {
             try RecordPath.validate(path)
-            if let old = records[path], old != bytes { throw StorageError.conflict(path) }
+            if let old = records[path], old != bytes, !RecordPath.isReplaceable(path) {
+                throw StorageError.conflict(path)
+            }
         }
-        let changed = incoming.contains { records[$0.key] == nil }
-        records.merge(incoming) { old, _ in old }
+        let changed = incoming.contains { records[$0.key] != $0.value }
+        for (path, bytes) in incoming { records[path] = bytes }
         if changed { notify() }
     }
     public func changes() -> AsyncStream<Void> {

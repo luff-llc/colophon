@@ -599,6 +599,11 @@ public protocol HostActionProtocol: AnyObject, Sendable {
      */
     func finish(signatures: [Data]) throws  -> [String: Data]
     
+    /**
+     * Every path this batch will persist: signed steps, live-state aliases and retained copies.
+     */
+    func recordPaths()  -> [String]
+    
     func signWith(keys: KeyProvider) throws  -> [Data]
     
     func signingSteps()  -> [SigningStep]
@@ -667,6 +672,18 @@ open func finish(signatures: [Data])throws  -> [String: Data]  {
     uniffi_colophon_ffi_fn_method_hostaction_finish(
             self.uniffiCloneHandle(),
         FfiConverterSequenceData.lower(signatures),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Every path this batch will persist: signed steps, live-state aliases and retained copies.
+     */
+open func recordPaths() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_hostaction_record_paths(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -4696,6 +4713,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_hostaction_finish() != 36295) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_hostaction_record_paths() != 45698) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_hostaction_sign_with() != 38414) {

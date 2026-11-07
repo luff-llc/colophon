@@ -66,7 +66,7 @@ class ColophonLibrary private constructor(val native: NativeLibrary, private val
         return when (val result = native.beginWrite(namespace, kind, payload, now(), entropy())) {
             is PreparedAction.Failure -> Outcome.Failure(result.denial)
             is PreparedAction.Ready -> result.action.use { action ->
-                written?.addAll(action.signingSteps().map { it.path })
+                written?.addAll(action.recordPaths())
                 commit(action)
                 when (val done = native.writtenOperation(action, namespace, now())) {
                     is OperationOutcome.Success -> Outcome.Success(done.value)

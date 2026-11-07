@@ -314,6 +314,11 @@ void uniffi_colophon_ffi_fn_free_hostaction(uint64_t handle, RustCallStatus *_No
 RustBuffer uniffi_colophon_ffi_fn_method_hostaction_finish(uint64_t ptr, RustBuffer signatures, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_HOSTACTION_RECORD_PATHS
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_HOSTACTION_RECORD_PATHS
+RustBuffer uniffi_colophon_ffi_fn_method_hostaction_record_paths(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_HOSTACTION_SIGN_WITH
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_HOSTACTION_SIGN_WITH
 RustBuffer uniffi_colophon_ffi_fn_method_hostaction_sign_with(uint64_t ptr, uint64_t keys, RustCallStatus *_Nonnull out_status
@@ -866,6 +871,12 @@ uint16_t uniffi_colophon_ffi_checksum_func_import_legacy_batch(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_HOSTACTION_FINISH
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_HOSTACTION_FINISH
 uint16_t uniffi_colophon_ffi_checksum_method_hostaction_finish(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_HOSTACTION_RECORD_PATHS
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_HOSTACTION_RECORD_PATHS
+uint16_t uniffi_colophon_ffi_checksum_method_hostaction_record_paths(void
     
 );
 #endif

@@ -63,8 +63,9 @@ public actor RelaySync {
     /// `stateFile` (private container, never the shared library) remembers the cursor; the
     /// relay's known paths are kept beside it in `<name>-remote.log`. Without it every launch
     /// relists the slot.
-    public init(local: any RecordStore, endpoint: RelayEndpoint, transport: any RelayTransport = URLSessionRelayTransport(), stateFile: URL? = nil) {
-        self.local = local; self.endpoint = endpoint; self.stateFile = stateFile
+    private let namespaces: [String]
+    public init(local: any RecordStore, endpoint: RelayEndpoint, transport: any RelayTransport = URLSessionRelayTransport(), stateFile: URL? = nil, namespaces: [String] = []) {
+        self.local = local; self.endpoint = endpoint; self.stateFile = stateFile; self.namespaces = namespaces
         client = RelayClient(endpoint: endpoint, transport: transport)
     }
 
@@ -105,8 +106,18 @@ public actor RelaySync {
                 report.pulled += fetched.count
             }
         }
-        // Conflicts: only paths whose listing changed in this pass and that this store already held.
-        let compare = listed.keys.filter { localPaths.contains($0) && !pulledPaths.contains($0) && (try? RecordPath.validate($0)) != nil }
+        // Replaceable live slots: a changed digest is a replacement, not an immutable conflict.
+        let liveChanged = listed.keys.filter { RecordPath.isReplaceable($0) && localPaths.contains($0) && !pulledPaths.contains($0) }
+        if !liveChanged.isEmpty {
+            let fetched = try await fetch(Array(liveChanged))
+            if !fetched.isEmpty {
+                try await local.append(fetched)
+                pulledPaths.formUnion(fetched.keys)
+                report.pulled += fetched.count
+            }
+        }
+        // Conflicts: only immutable paths whose listing changed in this pass and that this store already held.
+        let compare = listed.keys.filter { localPaths.contains($0) && !pulledPaths.contains($0) && (try? RecordPath.validate($0)) != nil && !RecordPath.isReplaceable($0) }
         if !compare.isEmpty {
             let bytes = try await local.read(paths: compare)
             report.localRecordReads += bytes.count
@@ -189,7 +200,7 @@ public actor RelaySync {
     /// Returns true when the relay reports entries this device has not listed yet.
     public func waitForRemoteChanges(seconds: Int) async throws -> Bool {
         try loadState()
-        let page = try await client.changes(after: cursor, limit: 1, wait: max(0, min(30, seconds)))
+        let page = try await client.changes(after: cursor, limit: 1, wait: max(0, min(30, seconds)), namespaces: namespaces)
         return !page.entries.isEmpty
     }
 
@@ -205,7 +216,7 @@ public actor RelaySync {
         var listed: [String: String] = [:]
         while true {
             let page: RelayClient.ChangePage
-            do { page = try await client.changes(after: cursor, limit: 1000) }
+            do { page = try await client.changes(after: cursor, limit: 1000, namespaces: namespaces) }
             catch RelayError.cursorReset where !restarted {
                 // The relay lost or rebuilt its log. Forget what it held and relist from the start.
                 restarted = true; cursor = nil; remote = [:]; listed = [:]; genesisChecked = false

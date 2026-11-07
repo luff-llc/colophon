@@ -1016,7 +1016,7 @@ fn signed_notes_vector() -> Value {
 fn deterministic_notes_conformance_vector() {
     let vector = signed_notes_vector();
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.2/notes.json");
+        .join("../../conformance/0.3/notes.json");
     if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
         std::fs::write(&path, serde_json::to_vec_pretty(&vector).unwrap()).unwrap();
     }

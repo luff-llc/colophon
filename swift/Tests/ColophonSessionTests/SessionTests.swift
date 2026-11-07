@@ -297,7 +297,39 @@ private actor FailingPublicationStore: RecordStore {
         try Data().write(to: root.appendingPathComponent("authority/.00000001.json.icloud"))
         let session = ColophonSession(configuration: configuration(home, store: MemoryRecordStore()), store: FolderRecordStore(folder: root))
         await session.restore()
-        guard case .unavailable = session.phase else { Issue.record("Cloud placeholder must not become noLibrary"); return }
+        guard case .waitingForDownload = session.phase else { Issue.record("Cloud placeholder must not become noLibrary"); return }
+    }
+    @Test func writesAndRefreshAreProportionalToTheChange() async throws {
+        let store = MemoryRecordStore(), home = temporary()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let session = ColophonSession(configuration: configuration(home, store: store))
+        await session.create()
+        let fullAfterCreate = await store.fullReads
+        try await session.perform(link(), observed: session.observedRevision)
+        #expect(await store.fullReads == fullAfterCreate, "A write must not reread the whole library")
+        await session.refresh()
+        #expect(await store.fullReads == fullAfterCreate, "A no-op refresh must not reread the whole library")
+    }
+    @Test func namespacedOperationsAndLivePlayback() async throws {
+        let store = MemoryRecordStore(), home = temporary()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let session = ColophonSession(configuration: .init(
+            memberLabel: "Test", namespaces: ["listening.podcasts", "notes"],
+            location: .memory(store), privateContainer: home, keys: SoftwareKeys()))
+        await session.create()
+        try await session.perform(try DomainCommand(namespace: "notes", kind: "createNotebook",
+            payloadJSON: Data(#"{"id":"n","title":"N"}"#.utf8)), observed: session.observedRevision)
+        let paths = try await store.paths()
+        #expect(paths.contains { $0.contains("/notes/") })
+        try await session.perform(try DomainCommand(namespace: "listening.podcasts", kind: "position",
+            payloadJSON: Data(#"{"id":"ep","seconds":12}"#.utf8)), observed: session.observedRevision)
+        let after = try await store.paths()
+        #expect(after.contains { $0.hasPrefix("state/") })
+        #expect(after.contains { $0.hasPrefix("history/") })
+        try await session.perform(try DomainCommand(namespace: "listening.podcasts", kind: "position",
+            payloadJSON: Data(#"{"id":"ep","seconds":40}"#.utf8)), observed: session.observedRevision)
+        let statePaths = (try await store.paths()).filter { $0.hasPrefix("state/") }
+        #expect(statePaths.count == 1, "One live slot per episode")
     }
     @Test func ingressRejectsReadOnlyGrantAndQueueOverflow() async throws {
         let a = temporary(), b = temporary(), shared = temporary(), store = MemoryRecordStore()
@@ -362,6 +394,7 @@ private actor PostCommitFailureCore: SessionCore {
     func merge(_ records: [String: Data]) async throws { try await base.merge(records) }
     func records() async throws -> [String: Data] { try await base.records() }
     func snapshot(namespaces: [String]) async throws -> CoreSnapshot { try await base.snapshot(namespaces: namespaces) }
+    func lastWrittenPaths() async throws -> [String] { try await base.lastWrittenPaths() }
     func request(configuration: SessionConfiguration, keys: any AsyncKeyProvider) async throws -> AccessRequest { try await base.request(configuration: configuration, keys: keys) }
     func write(_ command: DomainCommand) async throws -> OperationView {
         let operation = try await base.write(command)

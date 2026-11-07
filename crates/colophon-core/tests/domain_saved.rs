@@ -736,7 +736,7 @@ fn deterministic_saved_vector() {
         .collect();
     let vector = json!({"namespace":"reading.saved","queries":queries,"records":records});
     let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/reading.saved.json");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/reading.saved.json");
     if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
         fs::write(&path, serde_json::to_vec_pretty(&vector).unwrap()).unwrap();
     }
@@ -964,7 +964,7 @@ fn feed_browse_window_does_not_delete_kept_items() {
 #[test]
 fn saved_records_random_delivery_and_checkpoint_replay() {
     let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/reading.saved.json");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/reading.saved.json");
     let vector: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     let mut records: Vec<_> = vector["records"]
         .as_object()

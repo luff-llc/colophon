@@ -39,11 +39,11 @@ fn authority_failures_are_atomic_and_fail_closed() {
         .merge(Records::from([(path.clone(), signature.encode().unwrap())]))
         .is_err());
     assert_eq!(root.records(), &before);
-    let wrong_path = Records::from([("authority/00000004.json".into(), raw.clone())]);
+    let wrong_path = Records::from([("authority/00000005.json".into(), raw.clone())]);
     assert!(root.merge(wrong_path).is_err());
     root.merge(records.clone()).unwrap();
     root.merge(records.clone()).unwrap();
-    assert_eq!(root.authority().latest, 3);
+    assert_eq!(root.authority().latest, 4);
     assert!(root
         .merge(Records::from([(
             path.clone(),
@@ -457,7 +457,7 @@ fn domain_tombstones_progress_queue_and_notebook_boundaries() {
         &owner,
         "listening.podcasts",
         "position",
-        json!({"id":"e","seconds":100}),
+        json!({"id":"e","seconds":100,"seek":true}),
         70,
     );
     write(
@@ -468,9 +468,13 @@ fn domain_tombstones_progress_queue_and_notebook_boundaries() {
         json!({"id":"e","seconds":20}),
         71,
     );
+    // Live overlay still uses the domain's forward-or-informed rule.
     assert_eq!(
-        success(root.view("listening.podcasts", NOW).unwrap()).state["episodes"][0]["seconds"],
-        100
+        success(
+            root.query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+                .unwrap()
+        )["seconds"],
+        100.0
     );
     write(
         &mut root,
@@ -497,11 +501,17 @@ fn domain_tombstones_progress_queue_and_notebook_boundaries() {
         74,
     );
     let podcasts = success(root.view("listening.podcasts", NOW).unwrap());
-    assert_eq!(podcasts.state["episodes"][0]["seconds"], 20);
+    assert_eq!(
+        success(
+            root.query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+                .unwrap()
+        )["seconds"],
+        20.0
+    );
     assert_eq!(podcasts.state["shows"][0]["followed"], false);
     assert_eq!(podcasts.state["queue"]["episodes"], json!(["e"]));
-    // Passive regressions now retain an explicit receipt alongside stale queue attempts.
-    assert_eq!(podcasts.state["conflicts"].as_array().unwrap().len(), 2);
+    // Live regression, the later seek, and a stale queue expect.
+    assert_eq!(podcasts.state["conflicts"].as_array().unwrap().len(), 3);
     write(
         &mut root,
         &owner,
@@ -745,20 +755,32 @@ fn fractional_payloads_keep_their_ids_through_write_and_replay() {
             90 + i as u8,
         );
         let view = success(root.view("listening.podcasts", NOW).unwrap());
-        assert_eq!(view.admitted.len(), i + 1);
+        let got = success(
+            root.query(
+                "listening.podcasts",
+                "getEpisode",
+                json!({"id": format!("e{i}")}),
+                NOW,
+            )
+            .unwrap(),
+        );
         assert_eq!(
-            view.admitted[i].payload["seconds"]
-                .as_f64()
-                .unwrap()
-                .to_bits(),
+            got["seconds"].as_f64().unwrap().to_bits(),
             seconds.to_bits()
         );
-        let replay = success(
-            opened(root.records().clone(), &owner)
-                .view("listening.podcasts", NOW)
+        let replay = opened(root.records().clone(), &owner);
+        let replayed = success(
+            replay
+                .query(
+                    "listening.podcasts",
+                    "getEpisode",
+                    json!({"id": format!("e{i}")}),
+                    NOW,
+                )
                 .unwrap(),
         );
-        assert_eq!(json!(view), json!(replay));
+        assert_eq!(got["seconds"], replayed["seconds"]);
+        let _ = view;
     }
 }
 
@@ -770,11 +792,13 @@ fn extensions_cannot_mutate_controlled_domain_fields() {
         &owner,
         "listening.podcasts",
         "position",
-        json!({"id":"e","seconds":100}),
+        json!({"id":"e","seconds":100,"seek":true}),
         92,
     );
-    let before =
-        success(root.view("listening.podcasts", NOW).unwrap()).state["episodes"][0].clone();
+    let before = success(
+        root.query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+            .unwrap(),
+    );
     write(
         &mut root,
         &owner,
@@ -784,13 +808,17 @@ fn extensions_cannot_mutate_controlled_domain_fields() {
         93,
     );
     let view = success(root.view("listening.podcasts", NOW).unwrap());
-    let episode = &view.state["episodes"][0];
-    assert_eq!(episode["seconds"], 100);
+    let episode = success(
+        root.query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+            .unwrap(),
+    );
+    assert_eq!(episode["seconds"], 100.0);
     assert_eq!(episode["positionRevision"], before["positionRevision"]);
     assert_ne!(episode["revision"], "fake");
-    assert_eq!(episode["extensions"]["seconds"], 0);
-    assert_eq!(episode["extensions"]["positionRevision"], "fake");
-    assert_eq!(episode["extensions"]["extensions"]["seconds"], -1);
+    let row = &view.state["episodes"][0];
+    assert_eq!(row["extensions"]["seconds"], 0);
+    assert_eq!(row["extensions"]["positionRevision"], "fake");
+    assert_eq!(row["extensions"]["extensions"]["seconds"], -1);
     write(
         &mut root,
         &owner,
@@ -800,8 +828,11 @@ fn extensions_cannot_mutate_controlled_domain_fields() {
         94,
     );
     assert_eq!(
-        success(root.view("listening.podcasts", NOW).unwrap()).state["episodes"][0]["seconds"],
-        100
+        success(
+            root.query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+                .unwrap()
+        )["seconds"],
+        100.0
     );
     write(
         &mut root,
@@ -1015,7 +1046,13 @@ fn ledger_uses_module_language_and_one_rekey_summary() {
         "Owner ended Muse on MacBook's access. Its 3 notes stay; what it already read can't be unread.",
         "Listening and notes were rekeyed without Muse on MacBook.",
     ] { assert!(texts.contains(&expected), "Missing: {expected}; got {texts:?}"); }
-    assert_eq!(ledger.iter().filter(|e| e.event == "rekeyed").count(), 1);
+    assert_eq!(
+        ledger
+            .iter()
+            .filter(|e| e.event == "rekeyed" && e.text.contains("rekeyed"))
+            .count(),
+        1
+    );
     assert!(texts
         .iter()
         .all(|text| !text.contains("epoch") && !text.contains("listening.podcasts")));

@@ -1,7 +1,7 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// The Rust-backed 0.2 SDK. The independent 0.1 package lives in reference/swift.
+// The Rust-backed 0.3 SDK. The independent 0.1 package lives in reference/swift.
 let package = Package(name: "ColophonSDK", platforms: [.macOS(.v14), .iOS(.v17), .visionOS("26.0")], products: [
   .library(name: "ColophonFFI", targets: ["ColophonFFI"]),
   .library(name: "ColophonKit", targets: ["ColophonKit"]),

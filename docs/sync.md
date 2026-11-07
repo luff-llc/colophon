@@ -1,7 +1,7 @@
 # Cross-device sync through a relay
 
 An iPhone app and an Android app can share one library through a **relay**: an untrusted HTTP
-store of immutable, signed, encrypted records ([spec §8](../spec/colophon-0.2.md#8-http-exchange)).
+store of signed, encrypted records ([spec §8](../spec/colophon-0.3.md#8-http-exchange)).
 Each device keeps its own local store as the source of truth. The SDKs list the relay's change
 feed, pull the records they lack, push the records the relay lacks, and hand pulled records to
 the core like any other external change. The relay never decides who is a member.

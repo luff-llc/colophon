@@ -152,7 +152,7 @@ pub fn scenario() -> (Records, Value) {
 pub fn check(update: bool) {
     let (records, expected) = scenario();
     let folder =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/reading.books");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/reading.books");
     let encoded: BTreeMap<_, _> = records
         .iter()
         .map(|(p, b)| (p.clone(), STANDARD.encode(b)))

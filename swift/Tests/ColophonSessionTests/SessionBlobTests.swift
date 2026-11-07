@@ -98,8 +98,10 @@ private func content(_ count: Int, seed: UInt8 = 7) -> Data {
         let foreign = "blobs/" + String(repeating: "d", count: 64)
         try await store.appendBlob(foreign, bytes: Data("other app".utf8))
         try await session.setBlobReference(released, reference: "released", retain: false)
-        let fresh = try await session.collectBlobGarbage()
-        #expect(fresh.removedChunks == 2, "Zero-reference chunks go; the fresh orphan waits for its grace period")
+        let keptSole = try await session.collectBlobGarbage()
+        #expect(keptSole.removedChunks == 0, "A zero-reference blob with no other holder is the only copy")
+        let fresh = try await session.collectBlobGarbage(discardSoleCopy: true)
+        #expect(fresh.removedChunks == 2, "The owner may discard the sole copy; the fresh orphan waits for its grace period")
         for (path, _) in try await store.blobPaths() { await store.setBlobDate(path, .distantPast) }
         let stale = try await session.collectBlobGarbage()
         #expect(stale.removedChunks == 1)

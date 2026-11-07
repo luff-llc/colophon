@@ -267,7 +267,7 @@ internal class SessionBlobEngine(private val worker: SessionWorker) {
         }
     }
 
-    suspend fun collect(graceMillis: Long, evictReplicated: Boolean): BlobCollection = worker.mutex.withLock {
+    suspend fun collect(graceMillis: Long, evictReplicated: Boolean, discardSoleCopy: Boolean = false): BlobCollection = worker.mutex.withLock {
         val blobs = store()
         val live = mutableSetOf<String>()
         val dead = mutableSetOf<String>()
@@ -291,7 +291,7 @@ internal class SessionBlobEngine(private val worker: SessionWorker) {
             if (path !in indexed) continue
             val remove = when {
                 path in live -> evictReplicated && path !in pinned && relay?.relayHolds(path) == true
-                path in dead -> true
+                path in dead -> discardSoleCopy || relay?.relayHolds(path) == true
                 // A chunk no manifest names: an upload that never published.
                 else -> modified + graceMillis < now
             }

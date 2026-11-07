@@ -36,6 +36,7 @@ class RelaySync(
     transport: RelayTransport = HttpUrlConnectionTransport(),
     /** Private container, never the shared library. Without it each process relists the slot. */
     private val stateFile: File? = null,
+    private val namespaces: List<String> = emptyList(),
 ) {
     data class Report(
         val pulled: Int = 0,
@@ -104,8 +105,24 @@ class RelaySync(
                 pulled += fetched.size
             }
         }
-        // Conflicts: only entries new in this pass that this store already held.
-        val compare = listed.filter { it in localPaths && it !in pulledPaths && validRecord(it) }
+        val liveChanged = listed.filter { RecordPath.isReplaceable(it) && it in localPaths && it !in pulledPaths }
+        if (liveChanged.isNotEmpty()) {
+            val fetched = parallel(liveChanged) { path -> path to client.get(path) }
+                .mapNotNull { (path, bytes) ->
+                    bytes ?: return@mapNotNull null
+                    if (sha256Hex(bytes) != remote[path]) {
+                        throw RelayException.ProtocolViolation("Record bytes do not match the listed digest: $path")
+                    }
+                    path to bytes
+                }.toMap()
+            if (fetched.isNotEmpty()) {
+                local.append(fetched)
+                pulledPaths.addAll(fetched.keys)
+                pulled += fetched.size
+            }
+        }
+        // Conflicts: only immutable entries new in this pass that this store already held.
+        val compare = listed.filter { it in localPaths && it !in pulledPaths && validRecord(it) && !RecordPath.isReplaceable(it) }
         if (compare.isNotEmpty()) {
             val bytes = local.read(compare)
             reads += bytes.size
@@ -184,7 +201,7 @@ class RelaySync(
     /** Long-polls the change feed after the saved cursor, outside the pass lock. */
     fun waitForRemoteChanges(seconds: Int): Boolean {
         lock.withLock { loadState() }
-        val page = client.changes(cursor, limit = 1, wait = seconds.coerceIn(0, 30))
+        val page = client.changes(cursor, limit = 1, wait = seconds.coerceIn(0, 30), namespaces = namespaces)
         return page.entries.isNotEmpty()
     }
 
@@ -194,7 +211,7 @@ class RelaySync(
         val listed = mutableSetOf<String>()
         while (true) {
             val page = try {
-                client.changes(cursor, limit = 1000)
+                client.changes(cursor, limit = 1000, namespaces = namespaces)
             } catch (reset: RelayException.CursorReset) {
                 if (restarted) throw reset
                 // The relay lost or rebuilt its log. Forget what it held and relist from the start.

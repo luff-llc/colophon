@@ -158,7 +158,7 @@ extension SessionWorker {
         return result
     }
 
-    func collectBlobGarbage(gracePeriod: TimeInterval, evictReplicated: Bool) async throws -> BlobCollection {
+    func collectBlobGarbage(gracePeriod: TimeInterval, evictReplicated: Bool, discardSoleCopy: Bool = false) async throws -> BlobCollection {
         await enter(); defer { exit() }
         let blobs = try blobStore()
         var live = Set<String>(), dead = Set<String>(), pinned = Set<String>()
@@ -181,7 +181,9 @@ extension SessionWorker {
             if live.contains(path) {
                 if evictReplicated, !pinned.contains(path), let relay, try await relay.relayHolds(path) { remove = true }
             } else if dead.contains(path) {
-                remove = true
+                // A zero-reference blob on a device without a confirmed other holder is the only copy.
+                if discardSoleCopy { remove = true }
+                else if let relay, try await relay.relayHolds(path) { remove = true }
             } else if modified.addingTimeInterval(gracePeriod) < .now {
                 // A chunk no manifest names: an upload that never published.
                 remove = true

@@ -16,10 +16,14 @@ public struct SupportReport: Encodable, Equatable, Sendable {
         case .noLibrary: phase = "noLibrary"
         case .creating: phase = "creating"
         case .migrating: phase = "migrating"
+        case .waitingForDownload: phase = "waitingForDownload"
         case .waitingForApproval: phase = "waitingForApproval"
         case .denied: phase = "denied"
         case .unavailable: phase = "unavailable"
+        case .updateRequired: phase = "updateRequired"
         case .ready: phase = "ready"
+        case .refreshing: phase = "refreshing"
+        case .retry: phase = "retry"
         case .failed: phase = "failed"
         }
         switch session.phase {

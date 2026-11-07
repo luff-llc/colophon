@@ -89,7 +89,7 @@ pub struct Member {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
-    /// Protocol marker; must be `colophon/request/2`.
+    /// Protocol marker; must be `colophon/request/3`.
     pub protocol: String,
     /// Binds consent to one library.
     #[serde(rename = "libraryID")]
@@ -142,7 +142,7 @@ pub struct Epoch {
 pub struct Operation {
     /// Unique entropy-derived ID.
     pub id: String,
-    /// Clean 0.2 domain kind.
+    /// Clean domain kind.
     pub kind: String,
     /// Operation version (one).
     pub v: u32,
@@ -177,6 +177,21 @@ pub struct OperationMeta {
     /// Author's date (public for expiry evaluation).
     pub created: String,
 }
+/// Signed identity of one replaceable live-state slot. Generation is the namespace Lamport clock.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveStamp {
+    /// Library binding.
+    #[serde(rename = "libraryID")]
+    pub library_id: String,
+    /// Slot name; for playback, `SHA-256(episode ID)` hex.
+    pub slot: String,
+    /// Namespace Lamport clock of this revision, not a wall clock.
+    pub generation: u64,
+    /// Operation ID of the decrypted payload.
+    #[serde(rename = "operationID")]
+    pub operation_id: String,
+}
 /// Signed operation envelope body.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OperationHeader {
@@ -189,6 +204,9 @@ pub struct OperationHeader {
     /// Sealed plaintext, including tag.
     #[serde(with = "bytes")]
     pub ciphertext: Vec<u8>,
+    /// Present on replaceable live-state and its retained/history copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveStamp>,
 }
 /// Admitted operation with trusted attribution.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

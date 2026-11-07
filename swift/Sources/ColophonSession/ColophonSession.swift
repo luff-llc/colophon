@@ -62,6 +62,7 @@ import ColophonKitStorage
     public func refresh() async {
         await restore()
         let lease = context
+        if phase == .ready { phase = .refreshing }
         do {
             let snapshot = try await worker.refresh()
             guard lease == context else { return }
@@ -155,7 +156,7 @@ import ColophonKitStorage
     /// Reads a bounded core query. Results are fenced against namespace and identity changes.
     public func query(namespace: String, name: String, arguments: Data) async throws -> Data {
         await restore()
-        guard phase == .ready else { throw SessionError.notReady }
+        guard phase == .ready || phase == .refreshing else { throw SessionError.notReady }
         let lease = context
         let observed = namespaceRevisions[namespace, default: 0]
         do {
@@ -292,7 +293,7 @@ import ColophonKitStorage
     private func apply(_ snapshot: SessionSnapshot) {
         if relay != nil, snapshot.revision != revision || snapshot.phase != phase { Task { [syncSignal] in await syncSignal.fire() } }
         let changed = Set(snapshot.namespaceRevisions.keys.filter { namespaceRevisions[$0] != snapshot.namespaceRevisions[$0] })
-        let lost = snapshot.phase != .ready
+        let lost = snapshot.phase != .ready && snapshot.phase != .refreshing
         phase = snapshot.phase; revision = snapshot.revision; namespaceRevisions = snapshot.namespaceRevisions
         libraryID = snapshot.core?.libraryID ?? libraryID; memberID = snapshot.core?.me.id ?? memberID
         members = snapshot.core?.members ?? []; ledger = snapshot.core?.ledger ?? []; requests = snapshot.core?.requests ?? []
@@ -317,17 +318,25 @@ import ColophonKitStorage
         else { lastError = error.localizedDescription }
     }
     private func fail(_ error: any Error) {
-        views = [:]; ledger = []; members = []; requests = []
-        for invalidate in caches.values { invalidate([], true) }
         lastError = error.localizedDescription
         switch error {
+        case SessionLayoutError.updateRequired:
+            phase = .updateRequired
+            return
         case let keys as SessionKeyFailure: phase = .failed(error: .keysUnavailable(detail: keys.detail))
         case let pending as PendingPublication: phase = .unavailable(reason: pending.reason)
-        case StorageError.unavailable(let reason): phase = .unavailable(reason: reason)
+        case StorageError.unavailable(let reason):
+            if reason.contains("iCloud download pending") || reason.contains("Waiting for the relay") {
+                phase = .waitingForDownload
+                return
+            }
+            phase = .unavailable(reason: reason)
         case let access as AccessError:
             phase = [.notReadable, .unavailable].contains(access.denial.reason) ? .unavailable(reason: access.denial.detail) : .denied
         default: phase = .failed(error: .other(detail: error.localizedDescription))
         }
+        views = [:]; ledger = []; members = []; requests = []
+        for invalidate in caches.values { invalidate([], true) }
     }
     func registerCache(_ callback: @escaping @MainActor (Set<String>, Bool) -> Void) -> UUID {
         let id = UUID(); caches[id] = callback; return id

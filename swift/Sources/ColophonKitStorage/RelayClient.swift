@@ -1,6 +1,6 @@
 import Foundation
 
-/// A Colophon 0.2 HTTP exchange endpoint (spec §8): one library slot URL and its storage token.
+/// A Colophon 0.3 HTTP exchange endpoint (spec §8): one library slot URL and its storage token.
 /// The token grants relay storage only; it is never library membership.
 public struct RelayEndpoint: Sendable, Equatable {
     public let url: URL
@@ -143,7 +143,7 @@ public struct RelayClient: Sendable {
         try check(response, allowing: [200]); return response.body
     }
 
-    public func changes(after cursor: String?, limit: Int = 500, wait: Int = 0) async throws -> ChangePage {
+    public func changes(after cursor: String?, limit: Int = 500, wait: Int = 0, namespaces: [String] = []) async throws -> ChangePage {
         var query = "?limit=\(limit)"
         if let cursor, !cursor.isEmpty {
             guard let escaped = cursor.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) else {
@@ -152,6 +152,12 @@ public struct RelayClient: Sendable {
             query += "&after=" + escaped
         }
         if wait > 0 { query += "&wait=\(wait)" }
+        for namespace in namespaces {
+            guard let escaped = namespace.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) else {
+                throw RelayError.protocolViolation("Invalid namespace")
+            }
+            query += "&namespace=" + escaped
+        }
         let response = try await transport.send(request("GET", "/changes" + query, timeout: TimeInterval(wait + 30)))
         try check(response, allowing: [200])
         do { return try JSONDecoder().decode(ChangePage.self, from: response.body) }
@@ -168,8 +174,10 @@ public struct RelayClient: Sendable {
     }
 
     public func putIfAbsent(_ path: String, bytes: Data) async throws -> PutResult {
+        var headers = ["Content-Type": "application/octet-stream"]
+        if !path.hasPrefix("state/") { headers["If-None-Match"] = "*" }
         let response = try await transport.send(request("PUT", "/records/" + path, body: bytes,
-            headers: ["If-None-Match": "*", "Content-Type": "application/octet-stream"], timeout: 60))
+            headers: headers, timeout: 60))
         switch response.status {
         case 201: return .created
         case 200: return .present

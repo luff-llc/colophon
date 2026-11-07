@@ -15,11 +15,17 @@ sealed class SessionPhase {
     data object Opening : SessionPhase()
     data object NoLibrary : SessionPhase()
     data object Creating : SessionPhase()
+    data object WaitingForDownload : SessionPhase()
     data class WaitingForApproval(val code: String) : SessionPhase()
     data object Denied : SessionPhase()
     data class Unavailable(val reason: String) : SessionPhase()
     data object Migrating : SessionPhase()
+    /** Authenticated layout this client cannot evaluate. Folder, identity and bytes stay put. */
+    data object UpdateRequired : SessionPhase()
     data object Ready : SessionPhase()
+    /** A refresh is in flight; previously verified content from this connection is still usable. */
+    data object Refreshing : SessionPhase()
+    data object Retry : SessionPhase()
     data class Failed(val reason: String) : SessionPhase()
 }
 
@@ -142,6 +148,7 @@ internal data class SessionSnapshot(
 
 internal class PendingPublication(val reason: String) : Exception(reason)
 internal class SessionRefusal(val snapshot: SessionSnapshot, val error: SessionException) : Exception(error.message)
+internal object SessionLayoutException : Exception("Unsupported storage layout")
 
 internal fun jsonString(value: String): String {
     val escaped = buildString(value.length + 2) {

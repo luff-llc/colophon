@@ -57,7 +57,7 @@ impl Entropy {
     /// Derive the next pseudorandom byte array with domain separation.
     pub fn take<const N: usize>(&mut self) -> Result<[u8; N]> {
         let mut out = [0; N];
-        Hkdf::<Sha256>::new(Some(b"colophon/entropy/2"), &self.seed)
+        Hkdf::<Sha256>::new(Some(crate::protocol::ENTROPY), &self.seed)
             .expand(&self.counter.to_be_bytes(), &mut out)
             .map_err(|_| Error("Entropy length".into()))?;
         self.counter = self
@@ -92,7 +92,7 @@ impl SoftwareKeys {
     /// Derive a recovery identity from the exact 32-byte secret recovery kit.
     pub fn recovery(kit: [u8; 32]) -> Result<Self> {
         let mut seed = [0; 32];
-        Hkdf::<Sha256>::new(Some(b"colophon/recovery/2"), &kit)
+        Hkdf::<Sha256>::new(Some(crate::protocol::RECOVERY), &kit)
             .expand(b"identity", &mut seed)
             .map_err(|_| Error("Recovery derivation".into()))?;
         Self::from_seed(seed)

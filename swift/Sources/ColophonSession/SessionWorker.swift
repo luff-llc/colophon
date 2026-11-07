@@ -22,6 +22,9 @@ actor SessionWorker {
     var relaySync: RelaySync?
     var blobIndex: Set<String>?
     var completeRequired = Set<String>()
+    /// Record paths already merged into the open core; storage reads skip these.
+    private var merged = Set<String>()
+    private var requestPaths = Set<String>()
 
     init(configuration: SessionConfiguration, core: any SessionCore = BindingSessionCore(), store: (any RecordStore)? = nil) {
         self.configuration = configuration; self.keys = configuration.keys; self.core = core; self.store = store
@@ -42,7 +45,8 @@ actor SessionWorker {
         if let relaySync { return relaySync }
         guard let relay = configuration.relay else { return nil }
         let created = RelaySync(local: try storage(), endpoint: relay.endpoint, transport: relay.transport,
-                                stateFile: configuration.privateContainer.appendingPathComponent("relay.json"))
+                                stateFile: configuration.privateContainer.appendingPathComponent("relay.json"),
+                                namespaces: configuration.namespaces)
         relaySync = created; return created
     }
     /// One relay pass outside the worker gate: the relay only appends verified-digest records to
@@ -77,26 +81,50 @@ actor SessionWorker {
     func refreshLocked() async throws -> SessionSnapshot {
         if !configuration.migrationWriter, let marker = configuration.migrationMarker,
            try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
-        var records = try await storage().read()
-        if records.isEmpty && journal.pending.isEmpty && configuration.relay != nil {
+        var stored = try await storage().paths()
+        stored = Set(stored.filter { RecordPath.listingIncludes($0, namespaces: configuration.namespaces) })
+        if stored.isEmpty && journal.pending.isEmpty && configuration.relay != nil {
             try await pullBeforeTrustingEmpty()
-            records = try await storage().read()
+            stored = Set((try await storage().paths()).filter { RecordPath.listingIncludes($0, namespaces: configuration.namespaces) })
         }
-        guard journal.knownPaths.isSubset(of: Set(records.keys).union(journal.pending.keys)) else {
+        let available = stored.union(journal.pending.keys)
+        let blocking = journal.knownPaths.filter { RecordPath.missingBlocks($0) }
+        guard blocking.isSubset(of: available) else {
             throw StorageError.unavailable("Previously observed library records are unavailable")
         }
-        if records.isEmpty && journal.pending.isEmpty {
+        if stored.isEmpty && journal.pending.isEmpty {
             guard journal.libraryID == nil else { throw StorageError.unavailable("Selected library is unavailable") }
             return empty(.noLibrary)
         }
-        var combined = records
+        let fresh = opened ? stored.filter { !merged.contains($0) } : stored
+        var incoming = try await storage().read(paths: Array(fresh))
         for (path, data) in journal.pending {
-            if let old = combined[path], old != data { throw StorageError.conflict(path) }
-            combined[path] = data
+            if let old = incoming[path], old != data { throw StorageError.conflict(path) }
+            if !opened || !merged.contains(path) { incoming[path] = data }
         }
-        if opened { try await core.merge(combined) }
-        else { try await core.open(records: combined, keys: keys); opened = true }
-        var snapshot = try await core.snapshot(namespaces: configuration.namespaces)
+        do {
+            if opened {
+                if !incoming.isEmpty { try await core.merge(incoming) }
+            } else {
+                try await core.open(records: incoming, keys: keys)
+                opened = true
+                merged.removeAll(); requestPaths.removeAll()
+            }
+        } catch {
+            if error.localizedDescription.hasPrefix("Unsupported storage layout") {
+                throw SessionLayoutError.updateRequired
+            }
+            throw error
+        }
+        track(incoming.keys)
+        let unseenRequests = stored.filter { $0.hasPrefix("requests/") && !merged.contains($0) }
+        if !unseenRequests.isEmpty {
+            let extra = try await storage().read(paths: Array(unseenRequests))
+            if opened, !extra.isEmpty { try await core.merge(extra) }
+            track(extra.keys)
+        }
+        requestPaths.formUnion(stored.filter { $0.hasPrefix("requests/") })
+        var snapshot = try await core.snapshot(namespaces: configuration.namespaces, requestPaths: Array(requestPaths))
         guard journal.libraryID == nil || journal.libraryID == snapshot.libraryID else { throw SessionError.destinationChanged }
         journal.libraryID = snapshot.libraryID
         if !journal.pending.isEmpty { try await publish() }
@@ -105,27 +133,30 @@ actor SessionWorker {
             if let existing = snapshot.requests.first(where: { $0.id == snapshot.me.id }) { request = existing }
             else {
                 request = try await core.request(configuration: configuration, keys: keys)
-                let additions = ["requests/\(request.id).json": request.record]
-                try await core.merge(additions)
-                try await persistDelta()
-                snapshot = try await core.snapshot(namespaces: configuration.namespaces)
+                let path = "requests/\(request.id).json"
+                try await core.merge([path: request.record])
+                track([path])
+                journal.pending[path] = request.record
+                snapshot = try await core.snapshot(namespaces: configuration.namespaces, requestPaths: Array(requestPaths))
+                try remember(snapshot, observed: [path])
+                try await publish()
+                snapshot = try await core.snapshot(namespaces: configuration.namespaces, requestPaths: Array(requestPaths))
             }
             if let starter = configuration.starterKeys {
                 do {
                     try await core.approveWithStarter(request.record, keys: starter)
                     try await persistDelta()
-                    snapshot = try await core.snapshot(namespaces: configuration.namespaces)
+                    snapshot = try await core.snapshot(namespaces: configuration.namespaces, requestPaths: Array(requestPaths))
                 } catch is AccessError {
-                    // A former starter has no authority after protection/handover. Pair normally.
-                    try remember(snapshot)
+                    try remember(snapshot, observed: incoming.keys)
                     return makeSnapshot(snapshot, phase: .waitingForApproval(code: request.pairingCode))
                 }
             } else {
-                try remember(snapshot)
+                try remember(snapshot, observed: incoming.keys)
                 return makeSnapshot(snapshot, phase: .waitingForApproval(code: request.pairingCode))
             }
         }
-        try remember(snapshot)
+        try remember(snapshot, observed: incoming.keys)
         let phase: SessionPhase
         if snapshot.me.revokedAt != nil { phase = .denied }
         else if snapshot.denials.values.contains(where: { [.unavailable, .notReadable].contains($0.reason) }) {
@@ -134,20 +165,23 @@ actor SessionWorker {
         else { phase = .ready }
         return makeSnapshot(snapshot, phase: phase)
     }
-    private func remember(_ snapshot: CoreSnapshot) throws {
-        journal.knownPaths.formUnion(snapshot.records.keys)
+    private func track(_ paths: some Collection<String>) {
+        merged.formUnion(paths)
+        for path in paths where path.hasPrefix("requests/") { requestPaths.insert(path) }
+    }
+    private func remember(_ snapshot: CoreSnapshot, observed: some Collection<String>) throws {
+        journal.knownPaths.formUnion(observed)
         try journal.save(at: journalURL)
     }
     func create() async throws -> SessionSnapshot {
         await enter(); defer { exit() }
         if !configuration.migrationWriter, let marker = configuration.migrationMarker,
            try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
-        if configuration.relay != nil, try await storage().read().isEmpty {
+        if configuration.relay != nil, try await storage().paths().isEmpty {
             try await pullBeforeTrustingEmpty()
-            // The relay already holds a library for this slot: join it instead of forking it.
-            if !(try await storage().read().isEmpty) { return try await refreshLocked() }
+            if !(try await storage().paths().isEmpty) { return try await refreshLocked() }
         }
-        guard !opened, journal.libraryID == nil, try await storage().read().isEmpty else { throw SessionError.destinationChanged }
+        guard !opened, journal.libraryID == nil, try await storage().paths().isEmpty else { throw SessionError.destinationChanged }
         try await core.create(configuration: configuration); opened = true
         journal.left = false
         journal.libraryID = try await core.snapshot(namespaces: configuration.namespaces).libraryID
@@ -212,12 +246,15 @@ actor SessionWorker {
             try journal.save(at: journalURL)
         }
         let operation: OperationView
-        do { operation = try await core.write(command) }
+        var written: [String] = []
+        do {
+            operation = try await core.write(command)
+            written = try await core.lastWrittenPaths()
+        }
         catch {
             // A provider can fail after commit. Bind the durable receipt to the operation path
             // emitted by the core, so a subsequent drain never signs the same envelope twice.
-            let after = try await core.records()
-            let added = after.keys.filter { $0.hasPrefix("ops/") && fresh.core?.records[$0] == nil }
+            let added = (try await core.lastWrittenPaths()).filter { $0.hasPrefix("ops/") || $0.hasPrefix("state/") || $0.hasPrefix("history/") }
             if !added.isEmpty {
                 if let migrationKey {
                     let parts = URL(fileURLWithPath: added[0]).deletingPathExtension().lastPathComponent.split(separator: "-")
@@ -239,7 +276,7 @@ actor SessionWorker {
         }
         if let ingress { journal.ingress[ingress.id]?.operationID = operation.id }
         if let migrationKey { journal.migration?[migrationKey]?.operationID = operation.id }
-        do { try await persistDelta() }
+        do { try await persistDelta(paths: written.isEmpty ? nil : written) }
         catch is PendingPublication {
             return (.queued, empty(.unavailable(reason: "Write queued for durable publication")))
         }
@@ -269,10 +306,16 @@ actor SessionWorker {
         if let rows = projection[collection] as? [[String: Any]], rows.contains(where: { $0["id"] as? String == id }) { throw SessionError.migrationCollision }
     }
     /// Replay pending exact bytes before accepting more commands. Conflicts stop; no silent rebase.
-    private func persistDelta() async throws {
-        let records = try await core.records()
-        for (path, bytes) in records where !journal.knownPaths.contains(path) { journal.pending[path] = bytes }
-        // Only a successfully persisted journal can produce a queued receipt.
+    private func persistDelta(paths: [String]? = nil) async throws {
+        let candidates: [String]
+        if let paths {
+            candidates = paths.filter { !journal.knownPaths.contains($0) || RecordPath.isReplaceable($0) }
+        } else {
+            candidates = Array((try await core.records()).keys.filter { !journal.knownPaths.contains($0) || RecordPath.isReplaceable($0) })
+        }
+        let records = try await core.records(at: candidates)
+        for (path, bytes) in records { journal.pending[path] = bytes }
+        track(journal.pending.keys)
         try journal.save(at: journalURL)
         do { try await publish() }
         catch StorageError.unavailable(let reason) { throw PendingPublication(reason: reason) }
@@ -280,7 +323,7 @@ actor SessionWorker {
     private func publish() async throws {
         guard !journal.pending.isEmpty else { return }
         try await storage().append(journal.pending)
-        let readback = try await storage().read()
+        let readback = try await storage().read(paths: Array(journal.pending.keys))
         guard journal.pending.allSatisfy({ readback[$0.key] == $0.value }) else { throw StorageError.unavailable("Publication readback incomplete") }
         journal.knownPaths.formUnion(journal.pending.keys)
         journal.pending = [:]
@@ -307,13 +350,13 @@ actor SessionWorker {
         try loadJournal()
         guard journal.pending.isEmpty else { throw StorageError.unavailable("Retry pending publication before leaving") }
         journal.left = true; try journal.save(at: journalURL)
-        opened = false; last = nil
+        opened = false; last = nil; merged.removeAll(); requestPaths.removeAll()
     }
     func rejoin(keys: any AsyncKeyProvider) async throws -> SessionSnapshot {
         await enter(); defer { exit() }
         try loadJournal()
         guard journal.pending.isEmpty else { throw StorageError.unavailable("Retry pending publication before rejoining") }
-        self.keys = keys; opened = false; last = nil; journal.left = false
+        self.keys = keys; opened = false; last = nil; merged.removeAll(); requestPaths.removeAll(); journal.left = false
         try journal.save(at: journalURL)
         return try await refreshLocked()
     }
@@ -339,7 +382,7 @@ actor SessionWorker {
     private func makeSnapshot(_ snapshot: CoreSnapshot, phase: SessionPhase) -> SessionSnapshot {
         // Legacy bindings report broad change hints. Compare complete per-namespace evidence
         // here, off-main; replace this work with native engine deltas when available.
-        let changed = last?.records != snapshot.records || last?.denials != snapshot.denials || last?.views != snapshot.views
+        let changed = last?.records != snapshot.records || last?.denials != snapshot.denials || last?.views != snapshot.views || last?.ledger != snapshot.ledger
         if changed {
             revision += 1
             for namespace in configuration.namespaces where last?.views[namespace] != snapshot.views[namespace] || last?.denials[namespace] != snapshot.denials[namespace] {
@@ -352,5 +395,7 @@ actor SessionWorker {
 }
 
 struct PendingPublication: Error, Sendable { let reason: String }
+
+enum SessionLayoutError: Error, Sendable { case updateRequired }
 
 struct SessionRefusal: Error, Sendable { let snapshot: SessionSnapshot; let error: SessionError }

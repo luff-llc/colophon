@@ -93,7 +93,7 @@ and drops what only existed for the apps that shipped first:
   Richer delegation (attenuating sub-grants for agent swarms) is the next research step.
 - **The keyring and WebAuthn controllers wait** until after 0.2's core is stable.
 
-`spec/colophon-0.2.md` states the format. `conformance/0.2/` holds vectors the Rust core writes
+`spec/colophon-0.3.md` states the format. `conformance/0.3/` holds vectors the Rust core writes
 and every other implementation must reproduce. The Swift reference and `conformance/` (0.1)
 stay as the record of what shipped.
 

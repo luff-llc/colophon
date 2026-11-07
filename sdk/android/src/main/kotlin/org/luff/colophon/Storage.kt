@@ -23,9 +23,27 @@ object RecordPath {
                 '\\' !in part && '\u0000' !in part
         }
         val ok = parts.all(valid) && path.toByteArray().size < 512 && path.endsWith(".json") &&
-            ((parts.size == 2 && parts[0] in setOf("authority", "requests")) ||
-                (parts.size == 3 && parts[0] == "ops"))
+            when (parts.size) {
+                2 -> parts[0] in setOf("authority", "requests")
+                3 -> parts[0] == "ops"
+                4 -> parts[0] in setOf("ops", "state", "history")
+                else -> false
+            }
         if (!ok) throw StorageException.InvalidPath(path)
+    }
+    fun isReplaceable(path: String) = path.startsWith("state/")
+    fun listingIncludes(path: String, namespaces: List<String>): Boolean {
+        val parts = path.split("/", limit = 0)
+        if (parts.size == 2 && parts[0] in setOf("authority", "requests")) return true
+        if (parts.size == 3 && parts[0] == "ops") return true
+        if (parts.size == 4 && parts[0] in setOf("ops", "state", "history")) {
+            return namespaces.isEmpty() || parts[2] in namespaces
+        }
+        return false
+    }
+    fun missingBlocks(path: String): Boolean {
+        val parts = path.split("/", limit = 0)
+        return parts.size == 2 || (parts.size == 3 && parts[0] == "ops")
     }
 }
 
@@ -154,11 +172,14 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
             for ((path, bytes) in incoming) {
                 RecordPath.validate(path)
                 val old = records[path]
-                if (old != null && !old.contentEquals(bytes)) throw StorageException.Conflict(path)
+                if (old != null && !old.contentEquals(bytes) && !RecordPath.isReplaceable(path)) {
+                    throw StorageException.Conflict(path)
+                }
             }
             var added = false
             for ((path, bytes) in incoming) {
-                if (records[path] == null) {
+                val old = records[path]
+                if (old == null || RecordPath.isReplaceable(path) && !old.contentEquals(bytes)) {
                     records[path] = bytes.copyOf()
                     added = true
                 }
@@ -196,7 +217,7 @@ class FileRecordStore(val folder: File) : RecordStore, BlobStore {
         try {
             ensureFolderAccessible()
             val found = mutableSetOf<String>()
-            for (directory in listOf("authority", "requests", "ops")) {
+            for (directory in listOf("authority", "requests", "ops", "state", "history")) {
                 val root = folder.toPath().resolve(directory)
                 if (Files.isSymbolicLink(root)) throw StorageException.InvalidPath(root.toString())
                 if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
@@ -205,7 +226,9 @@ class FileRecordStore(val folder: File) : RecordStore, BlobStore {
                 }
                 collect(root, null, found)
             }
-            if (!knownPaths.all { it in found }) throw StorageException.Unavailable("Previously observed records are missing")
+            if (!knownPaths.filter { RecordPath.missingBlocks(it) }.all { it in found }) {
+                throw StorageException.Unavailable("Previously observed records are missing")
+            }
             knownPaths.addAll(found)
             index = found
             found.toSet()
@@ -275,7 +298,7 @@ class FileRecordStore(val folder: File) : RecordStore, BlobStore {
         try {
             ensureFolderAccessible()
             val result = mutableMapOf<String, ByteArray>()
-            for (directory in listOf("authority", "requests", "ops")) {
+            for (directory in listOf("authority", "requests", "ops", "state", "history")) {
                 val root = folder.toPath().resolve(directory)
                 if (Files.isSymbolicLink(root)) throw StorageException.InvalidPath(root.toString())
                 if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
@@ -317,7 +340,7 @@ class FileRecordStore(val folder: File) : RecordStore, BlobStore {
                     val bytes = records[path] ?: continue
                     rejectSymlinkPath(path)
                     val target = File(folder, path.replace('/', File.separatorChar))
-                    AtomicFile.write(bytes, target, immutable = true)
+                    AtomicFile.write(bytes, target, immutable = !RecordPath.isReplaceable(path))
                     index?.add(path)
                 }
             } catch (error: StorageException) {

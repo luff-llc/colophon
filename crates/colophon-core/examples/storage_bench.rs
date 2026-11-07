@@ -124,6 +124,7 @@ fn main() {
             library_id: library.id().into(),
             checkpoint_key: [61; 32],
             content_cache_bytes: 64 * 1024,
+            namespaces: Vec::new(),
         };
         drop(library);
         if args.iter().any(|a| a == "--source-only") {
@@ -163,6 +164,7 @@ fn main() {
             library_id: library.id().into(),
             checkpoint_key: [61; 32],
             content_cache_bytes: 64 * 1024,
+            namespaces: Vec::new(),
         };
         drop(library);
         let started = Instant::now();
@@ -209,6 +211,7 @@ fn main() {
         library_id: library.id().into(),
         checkpoint_key: [61; 32],
         content_cache_bytes: 64 * 1024,
+        namespaces: Vec::new(),
     };
     drop(library);
     let source = Source(Rc::new(RefCell::new(records)));
