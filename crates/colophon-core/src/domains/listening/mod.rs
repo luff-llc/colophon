@@ -669,6 +669,15 @@ impl ListeningPodcasts {
                 }
                 let mut value = merged(&old, op);
                 value["personReviewed"] = json!(person);
+                // Provenance claim lives beside, never in place of, authenticated `origin`.
+                match p.get("origin") {
+                    Some(origin) if origin.is_string() => value["contentOrigin"] = origin.clone(),
+                    _ => {
+                        if let Some(o) = value.as_object_mut() {
+                            o.remove("contentOrigin");
+                        }
+                    }
+                }
                 let field = if kind == "segments" {
                     "segments"
                 } else {

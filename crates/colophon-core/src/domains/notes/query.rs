@@ -182,7 +182,12 @@ fn output_current(s: &NotesState, c: &Item) -> bool {
 }
 fn book_row(s: &NotesState, id: &str) -> Value {
     let v = &s.books[id];
-    let mut row = select(v, &["id", "title", "kind", "topic", "touched", "revision"]);
+    let mut row = select(
+        v,
+        &[
+            "id", "title", "kind", "topic", "touched", "revision", "created", "updated",
+        ],
+    );
     let c = s.book_counts.get(id).cloned().unwrap_or_default();
     row["entryCount"] = json!(c.entries);
     row["cellCount"] = json!(c.cells);
@@ -192,7 +197,9 @@ fn entry_row(s: &NotesState, id: &str) -> Value {
     let e = &s.entries[id];
     let mut v = select(
         &e.value,
-        &["id", "title", "date", "tags", "touched", "revision"],
+        &[
+            "id", "title", "date", "tags", "touched", "revision", "created", "updated",
+        ],
     );
     v["cellCount"] = json!(s.entry_counts.get(id).map_or(0, |c| c.cells));
     v["alternativeCount"] = json!(e.alternatives.len());
@@ -339,6 +346,8 @@ fn inner(s: &NotesState, name: &str, args: &Value) -> Result<Value> {
                 "archived",
                 "revision",
                 "orderRevision",
+                "created",
+                "updated",
                 "extensions",
             ],
         );
@@ -359,7 +368,7 @@ fn inner(s: &NotesState, name: &str, args: &Value) -> Result<Value> {
             };
             let c = s.entry_counts.get(id).cloned().unwrap_or_default();
             Ok(
-                json!({"id":id,"current":select(&e.value,&["title","date","tags","revision","author","authorLabel"]),"cellCount":c.cells,"attachmentCount":c.materials,"proposalCount":s.proposal_index.get(&parent(book,Some(id))).map_or(0,BTreeSet::len),"alternativeCount":e.alternatives.len()}),
+                json!({"id":id,"current":select(&e.value,&["title","date","tags","revision","author","authorLabel","created","updated"]),"cellCount":c.cells,"attachmentCount":c.materials,"proposalCount":s.proposal_index.get(&parent(book,Some(id))).map_or(0,BTreeSet::len),"alternativeCount":e.alternatives.len()}),
             )
         }
         "cells" => {
@@ -392,6 +401,8 @@ fn inner(s: &NotesState, name: &str, args: &Value) -> Result<Value> {
                     "authorLabel",
                     "origin",
                     "clock",
+                    "created",
+                    "updated",
                 ],
             );
             v["outputIsCurrent"] = json!(output_current(s, c));

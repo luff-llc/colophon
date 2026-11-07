@@ -160,8 +160,10 @@ public struct EpisodeRow: Codable, Equatable, Sendable, Identifiable {
     public var metadataAvailable: Bool
     public var transcriptAvailable: Bool
     public var noteCount: Int
+    public var positionBaseline: Bool?
+    public var stateBaseline: Bool?
     public var additionalFields: [String: DomainJSON]
-    public init(id: String, show: String? = nil, title: String? = nil, showTitle: String? = nil, seconds: Double, duration: Double? = nil, consumption: String? = nil, updated: String? = nil, positionRevision: String? = nil, stateRevision: String? = nil, metadataAvailable: Bool, transcriptAvailable: Bool, noteCount: Int, additionalFields: [String: DomainJSON] = [:]) {
+    public init(id: String, show: String? = nil, title: String? = nil, showTitle: String? = nil, seconds: Double, duration: Double? = nil, consumption: String? = nil, updated: String? = nil, positionRevision: String? = nil, stateRevision: String? = nil, metadataAvailable: Bool, transcriptAvailable: Bool, noteCount: Int, positionBaseline: Bool? = nil, stateBaseline: Bool? = nil, additionalFields: [String: DomainJSON] = [:]) {
         self.id = id
         self.show = show
         self.title = title
@@ -175,6 +177,8 @@ public struct EpisodeRow: Codable, Equatable, Sendable, Identifiable {
         self.metadataAvailable = metadataAvailable
         self.transcriptAvailable = transcriptAvailable
         self.noteCount = noteCount
+        self.positionBaseline = positionBaseline
+        self.stateBaseline = stateBaseline
         self.additionalFields = additionalFields
     }
     public init(from decoder: any Decoder) throws {
@@ -192,15 +196,17 @@ public struct EpisodeRow: Codable, Equatable, Sendable, Identifiable {
         metadataAvailable = try c.decode(Bool.self, forKey: .init("metadataAvailable"))
         transcriptAvailable = try c.decode(Bool.self, forKey: .init("transcriptAvailable"))
         noteCount = try c.decode(Int.self, forKey: .init("noteCount"))
+        positionBaseline = try c.decodeIfPresent(Bool.self, forKey: .init("positionBaseline"))
+        stateBaseline = try c.decodeIfPresent(Bool.self, forKey: .init("stateBaseline"))
         additionalFields = [:]
-        let known: Set<String> = ["id", "show", "title", "showTitle", "seconds", "duration", "consumption", "updated", "positionRevision", "stateRevision", "metadataAvailable", "transcriptAvailable", "noteCount"]
+        let known: Set<String> = ["id", "show", "title", "showTitle", "seconds", "duration", "consumption", "updated", "positionRevision", "stateRevision", "metadataAvailable", "transcriptAvailable", "noteCount", "positionBaseline", "stateBaseline"]
         for key in c.allKeys where !known.contains(key.stringValue) {
             additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
         }
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DomainCodingKey.self)
-        let known: Set<String> = ["id", "show", "title", "showTitle", "seconds", "duration", "consumption", "updated", "positionRevision", "stateRevision", "metadataAvailable", "transcriptAvailable", "noteCount"]
+        let known: Set<String> = ["id", "show", "title", "showTitle", "seconds", "duration", "consumption", "updated", "positionRevision", "stateRevision", "metadataAvailable", "transcriptAvailable", "noteCount", "positionBaseline", "stateBaseline"]
         for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
         try c.encode(id, forKey: .init("id"))
         try c.encodeIfPresent(show, forKey: .init("show"))
@@ -215,6 +221,8 @@ public struct EpisodeRow: Codable, Equatable, Sendable, Identifiable {
         try c.encode(metadataAvailable, forKey: .init("metadataAvailable"))
         try c.encode(transcriptAvailable, forKey: .init("transcriptAvailable"))
         try c.encode(noteCount, forKey: .init("noteCount"))
+        try c.encodeIfPresent(positionBaseline, forKey: .init("positionBaseline"))
+        try c.encodeIfPresent(stateBaseline, forKey: .init("stateBaseline"))
     }
 }
 
@@ -594,13 +602,14 @@ public struct PodcastNoteRow: Codable, Equatable, Sendable, Identifiable {
     public var quotePreview: String?
     public var revision: String
     public var creationRevision: String
+    public var created: String?
     public var authorLabel: String
     public var origin: String
     public var anchorClaimed: Bool
     public var alternativeCount: Int
     public var truncated: Bool?
     public var additionalFields: [String: DomainJSON]
-    public init(id: String, episode: String, seconds: Double? = nil, textPreview: String, quotePreview: String? = nil, revision: String, creationRevision: String, authorLabel: String, origin: String, anchorClaimed: Bool, alternativeCount: Int, truncated: Bool? = nil, additionalFields: [String: DomainJSON] = [:]) {
+    public init(id: String, episode: String, seconds: Double? = nil, textPreview: String, quotePreview: String? = nil, revision: String, creationRevision: String, created: String? = nil, authorLabel: String, origin: String, anchorClaimed: Bool, alternativeCount: Int, truncated: Bool? = nil, additionalFields: [String: DomainJSON] = [:]) {
         self.id = id
         self.episode = episode
         self.seconds = seconds
@@ -608,6 +617,7 @@ public struct PodcastNoteRow: Codable, Equatable, Sendable, Identifiable {
         self.quotePreview = quotePreview
         self.revision = revision
         self.creationRevision = creationRevision
+        self.created = created
         self.authorLabel = authorLabel
         self.origin = origin
         self.anchorClaimed = anchorClaimed
@@ -624,20 +634,21 @@ public struct PodcastNoteRow: Codable, Equatable, Sendable, Identifiable {
         quotePreview = try c.decodeIfPresent(String.self, forKey: .init("quotePreview"))
         revision = try c.decode(String.self, forKey: .init("revision"))
         creationRevision = try c.decode(String.self, forKey: .init("creationRevision"))
+        created = try c.decodeIfPresent(String.self, forKey: .init("created"))
         authorLabel = try c.decode(String.self, forKey: .init("authorLabel"))
         origin = try c.decode(String.self, forKey: .init("origin"))
         anchorClaimed = try c.decode(Bool.self, forKey: .init("anchorClaimed"))
         alternativeCount = try c.decode(Int.self, forKey: .init("alternativeCount"))
         truncated = try c.decodeIfPresent(Bool.self, forKey: .init("truncated"))
         additionalFields = [:]
-        let known: Set<String> = ["id", "episode", "seconds", "textPreview", "quotePreview", "revision", "creationRevision", "authorLabel", "origin", "anchorClaimed", "alternativeCount", "truncated"]
+        let known: Set<String> = ["id", "episode", "seconds", "textPreview", "quotePreview", "revision", "creationRevision", "created", "authorLabel", "origin", "anchorClaimed", "alternativeCount", "truncated"]
         for key in c.allKeys where !known.contains(key.stringValue) {
             additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
         }
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DomainCodingKey.self)
-        let known: Set<String> = ["id", "episode", "seconds", "textPreview", "quotePreview", "revision", "creationRevision", "authorLabel", "origin", "anchorClaimed", "alternativeCount", "truncated"]
+        let known: Set<String> = ["id", "episode", "seconds", "textPreview", "quotePreview", "revision", "creationRevision", "created", "authorLabel", "origin", "anchorClaimed", "alternativeCount", "truncated"]
         for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
         try c.encode(id, forKey: .init("id"))
         try c.encode(episode, forKey: .init("episode"))
@@ -646,6 +657,7 @@ public struct PodcastNoteRow: Codable, Equatable, Sendable, Identifiable {
         try c.encodeIfPresent(quotePreview, forKey: .init("quotePreview"))
         try c.encode(revision, forKey: .init("revision"))
         try c.encode(creationRevision, forKey: .init("creationRevision"))
+        try c.encodeIfPresent(created, forKey: .init("created"))
         try c.encode(authorLabel, forKey: .init("authorLabel"))
         try c.encode(origin, forKey: .init("origin"))
         try c.encode(anchorClaimed, forKey: .init("anchorClaimed"))
@@ -837,11 +849,13 @@ public struct CaptureDescriptor: Codable, Equatable, Sendable {
 public struct RecordingPage: Codable, Equatable, Sendable {
     public var head: String?
     public var source: String?
+    public var contentOrigin: String?
     public var page: DomainPage<RecordingRow>
     public var additionalFields: [String: DomainJSON]
-    public init(head: String? = nil, source: String? = nil, page: DomainPage<RecordingRow>, additionalFields: [String: DomainJSON] = [:]) {
+    public init(head: String? = nil, source: String? = nil, contentOrigin: String? = nil, page: DomainPage<RecordingRow>, additionalFields: [String: DomainJSON] = [:]) {
         self.head = head
         self.source = source
+        self.contentOrigin = contentOrigin
         self.page = page
         self.additionalFields = additionalFields
     }
@@ -849,20 +863,134 @@ public struct RecordingPage: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: DomainCodingKey.self)
         head = try c.decodeIfPresent(String.self, forKey: .init("head"))
         source = try c.decodeIfPresent(String.self, forKey: .init("source"))
+        contentOrigin = try c.decodeIfPresent(String.self, forKey: .init("contentOrigin"))
         page = try c.decode(DomainPage<RecordingRow>.self, forKey: .init("page"))
         additionalFields = [:]
-        let known: Set<String> = ["head", "source", "page"]
+        let known: Set<String> = ["head", "source", "contentOrigin", "page"]
         for key in c.allKeys where !known.contains(key.stringValue) {
             additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
         }
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DomainCodingKey.self)
-        let known: Set<String> = ["head", "source", "page"]
+        let known: Set<String> = ["head", "source", "contentOrigin", "page"]
         for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
         try c.encodeIfPresent(head, forKey: .init("head"))
         try c.encodeIfPresent(source, forKey: .init("source"))
+        try c.encodeIfPresent(contentOrigin, forKey: .init("contentOrigin"))
         try c.encode(page, forKey: .init("page"))
+    }
+}
+
+public struct RecordingSummary: Codable, Equatable, Sendable {
+    public var episode: String
+    public var show: String?
+    public var recording: String
+    public var kind: String
+    public var head: String?
+    public var source: String?
+    public var contentOrigin: String?
+    public var personReviewed: Bool?
+    public var count: Int
+    public var additionalFields: [String: DomainJSON]
+    public init(episode: String, show: String? = nil, recording: String, kind: String, head: String? = nil, source: String? = nil, contentOrigin: String? = nil, personReviewed: Bool? = nil, count: Int, additionalFields: [String: DomainJSON] = [:]) {
+        self.episode = episode
+        self.show = show
+        self.recording = recording
+        self.kind = kind
+        self.head = head
+        self.source = source
+        self.contentOrigin = contentOrigin
+        self.personReviewed = personReviewed
+        self.count = count
+        self.additionalFields = additionalFields
+    }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: DomainCodingKey.self)
+        episode = try c.decode(String.self, forKey: .init("episode"))
+        show = try c.decodeIfPresent(String.self, forKey: .init("show"))
+        recording = try c.decode(String.self, forKey: .init("recording"))
+        kind = try c.decode(String.self, forKey: .init("kind"))
+        head = try c.decodeIfPresent(String.self, forKey: .init("head"))
+        source = try c.decodeIfPresent(String.self, forKey: .init("source"))
+        contentOrigin = try c.decodeIfPresent(String.self, forKey: .init("contentOrigin"))
+        personReviewed = try c.decodeIfPresent(Bool.self, forKey: .init("personReviewed"))
+        count = try c.decode(Int.self, forKey: .init("count"))
+        additionalFields = [:]
+        let known: Set<String> = ["episode", "show", "recording", "kind", "head", "source", "contentOrigin", "personReviewed", "count"]
+        for key in c.allKeys where !known.contains(key.stringValue) {
+            additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
+        }
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: DomainCodingKey.self)
+        let known: Set<String> = ["episode", "show", "recording", "kind", "head", "source", "contentOrigin", "personReviewed", "count"]
+        for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
+        try c.encode(episode, forKey: .init("episode"))
+        try c.encodeIfPresent(show, forKey: .init("show"))
+        try c.encode(recording, forKey: .init("recording"))
+        try c.encode(kind, forKey: .init("kind"))
+        try c.encodeIfPresent(head, forKey: .init("head"))
+        try c.encodeIfPresent(source, forKey: .init("source"))
+        try c.encodeIfPresent(contentOrigin, forKey: .init("contentOrigin"))
+        try c.encodeIfPresent(personReviewed, forKey: .init("personReviewed"))
+        try c.encode(count, forKey: .init("count"))
+    }
+}
+
+public struct PreferenceRow: Codable, Equatable, Sendable {
+    public var key: String
+    public var scope: String
+    public var target: String?
+    public var field: String
+    public var value: DomainJSON?
+    public var revision: String
+    public var author: String
+    public var authorLabel: String
+    public var origin: String
+    public var additionalFields: [String: DomainJSON]
+    public init(key: String, scope: String, target: String? = nil, field: String, value: DomainJSON? = nil, revision: String, author: String, authorLabel: String, origin: String, additionalFields: [String: DomainJSON] = [:]) {
+        self.key = key
+        self.scope = scope
+        self.target = target
+        self.field = field
+        self.value = value
+        self.revision = revision
+        self.author = author
+        self.authorLabel = authorLabel
+        self.origin = origin
+        self.additionalFields = additionalFields
+    }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: DomainCodingKey.self)
+        key = try c.decode(String.self, forKey: .init("key"))
+        scope = try c.decode(String.self, forKey: .init("scope"))
+        target = try c.decodeIfPresent(String.self, forKey: .init("target"))
+        field = try c.decode(String.self, forKey: .init("field"))
+        value = try c.decodeIfPresent(DomainJSON.self, forKey: .init("value"))
+        revision = try c.decode(String.self, forKey: .init("revision"))
+        author = try c.decode(String.self, forKey: .init("author"))
+        authorLabel = try c.decode(String.self, forKey: .init("authorLabel"))
+        origin = try c.decode(String.self, forKey: .init("origin"))
+        additionalFields = [:]
+        let known: Set<String> = ["key", "scope", "target", "field", "value", "revision", "author", "authorLabel", "origin"]
+        for key in c.allKeys where !known.contains(key.stringValue) {
+            additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
+        }
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: DomainCodingKey.self)
+        let known: Set<String> = ["key", "scope", "target", "field", "value", "revision", "author", "authorLabel", "origin"]
+        for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
+        try c.encode(key, forKey: .init("key"))
+        try c.encode(scope, forKey: .init("scope"))
+        try c.encodeIfPresent(target, forKey: .init("target"))
+        try c.encode(field, forKey: .init("field"))
+        try c.encodeIfPresent(value, forKey: .init("value"))
+        try c.encode(revision, forKey: .init("revision"))
+        try c.encode(author, forKey: .init("author"))
+        try c.encode(authorLabel, forKey: .init("authorLabel"))
+        try c.encode(origin, forKey: .init("origin"))
     }
 }
 

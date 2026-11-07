@@ -63,6 +63,7 @@
           "author": "20d7bfe152532d0cbccd2143db7644ac",
           "authorLabel": "Research agent",
           "clock": 3,
+          "created": "2026-11-04T12:00:00.000Z",
           "extensions": {
             "origin": "person"
           },
@@ -71,7 +72,8 @@
           "notebook": "inbox",
           "origin": "ai",
           "revision": "2035296080664a57663f99c660a4256f",
-          "source": "An edited contribution"
+          "source": "An edited contribution",
+          "updated": "2026-11-04T12:00:00.000Z"
         }
       ],
       "conflicts": [],
@@ -83,6 +85,7 @@
           "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
           "authorLabel": "Owner",
           "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
           "extensions": {
             "futureField": {
               "kept": true
@@ -98,7 +101,8 @@
             3,
             "20d7bfe152532d0cbccd2143db7644ac",
             "2035296080664a57663f99c660a4256f"
-          ]
+          ],
+          "updated": "2026-11-04T12:00:00.000Z"
         }
       ],
       "notes": [
@@ -106,6 +110,7 @@
           "author": "20d7bfe152532d0cbccd2143db7644ac",
           "authorLabel": "Research agent",
           "clock": 3,
+          "created": "2026-11-04T12:00:00.000Z",
           "extensions": {
             "origin": "person"
           },
@@ -115,7 +120,8 @@
           "origin": "ai",
           "revision": "2035296080664a57663f99c660a4256f",
           "source": "An edited contribution",
-          "text": "An edited contribution"
+          "text": "An edited contribution",
+          "updated": "2026-11-04T12:00:00.000Z"
         }
       ],
       "proposals": [],
@@ -660,6 +666,7 @@
             "author": "20d7bfe152532d0cbccd2143db7644ac",
             "authorLabel": "Research agent",
             "clock": 3,
+            "created": "2026-11-04T12:00:00.000Z",
             "extensions": {
               "origin": "person"
             },
@@ -668,7 +675,8 @@
             "notebook": "inbox",
             "origin": "ai",
             "revision": "2035296080664a57663f99c660a4256f",
-            "source": "An edited contribution"
+            "source": "An edited contribution",
+            "updated": "2026-11-04T12:00:00.000Z"
           }
         ],
         "conflicts": [],
@@ -680,6 +688,7 @@
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
             "clock": 1,
+            "created": "2026-11-04T12:00:00.000Z",
             "extensions": {
               "futureField": {
                 "kept": true
@@ -695,7 +704,8 @@
               3,
               "20d7bfe152532d0cbccd2143db7644ac",
               "2035296080664a57663f99c660a4256f"
-            ]
+            ],
+            "updated": "2026-11-04T12:00:00.000Z"
           }
         ],
         "notes": [
@@ -703,6 +713,7 @@
             "author": "20d7bfe152532d0cbccd2143db7644ac",
             "authorLabel": "Research agent",
             "clock": 3,
+            "created": "2026-11-04T12:00:00.000Z",
             "extensions": {
               "origin": "person"
             },
@@ -712,7 +723,8 @@
             "origin": "ai",
             "revision": "2035296080664a57663f99c660a4256f",
             "source": "An edited contribution",
-            "text": "An edited contribution"
+            "text": "An edited contribution",
+            "updated": "2026-11-04T12:00:00.000Z"
           }
         ],
         "proposals": [],

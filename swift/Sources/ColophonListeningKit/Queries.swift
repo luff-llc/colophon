@@ -290,6 +290,70 @@ public struct TranscriptsQuery: ListeningDomainQuery, PagedDomainQuery {
     }
 }
 
+public enum PreferencesQueryScope: String, Codable, Hashable, Sendable {
+    case global = "global"
+    case show = "show"
+    case episode = "episode"
+}
+
+public struct PreferencesQuery: ListeningDomainQuery, PagedDomainQuery {
+    public static let name = "preferences"
+    public typealias Value = DomainPage<PreferenceRow>
+    public var cursor: String?
+    public var limit: Int?
+    public var scope: PreferencesQueryScope?
+    public var target: String?
+    public init(cursor: String? = nil, limit: Int? = nil, scope: PreferencesQueryScope? = nil, target: String? = nil) {
+        self.cursor = cursor
+        self.limit = limit
+        self.scope = scope
+        self.target = target
+    }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: DomainCodingKey.self)
+        cursor = c.contains(.init("cursor")) ? try c.decode(String.self, forKey: .init("cursor")) : nil
+        limit = c.contains(.init("limit")) ? try c.decode(Int.self, forKey: .init("limit")) : nil
+        scope = c.contains(.init("scope")) ? try c.decode(PreferencesQueryScope.self, forKey: .init("scope")) : nil
+        target = c.contains(.init("target")) ? try c.decode(String.self, forKey: .init("target")) : nil
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: DomainCodingKey.self)
+        try c.encodeIfPresent(cursor, forKey: .init("cursor"))
+        try c.encodeIfPresent(limit, forKey: .init("limit"))
+        try c.encodeIfPresent(scope, forKey: .init("scope"))
+        try c.encodeIfPresent(target, forKey: .init("target"))
+    }
+}
+
+public struct RecordingsQuery: ListeningDomainQuery, PagedDomainQuery {
+    public static let name = "recordings"
+    public typealias Value = DomainPage<RecordingSummary>
+    public var cursor: String?
+    public var episode: String?
+    public var kind: RecordingContentQueryKind?
+    public var limit: Int?
+    public init(cursor: String? = nil, episode: String? = nil, kind: RecordingContentQueryKind? = nil, limit: Int? = nil) {
+        self.cursor = cursor
+        self.episode = episode
+        self.kind = kind
+        self.limit = limit
+    }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: DomainCodingKey.self)
+        cursor = c.contains(.init("cursor")) ? try c.decode(String.self, forKey: .init("cursor")) : nil
+        episode = c.contains(.init("episode")) ? try c.decode(String.self, forKey: .init("episode")) : nil
+        kind = c.contains(.init("kind")) ? try c.decode(RecordingContentQueryKind.self, forKey: .init("kind")) : nil
+        limit = c.contains(.init("limit")) ? try c.decode(Int.self, forKey: .init("limit")) : nil
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: DomainCodingKey.self)
+        try c.encodeIfPresent(cursor, forKey: .init("cursor"))
+        try c.encodeIfPresent(episode, forKey: .init("episode"))
+        try c.encodeIfPresent(kind, forKey: .init("kind"))
+        try c.encodeIfPresent(limit, forKey: .init("limit"))
+    }
+}
+
 public enum HistoryQueryMode: String, Codable, Hashable, Sendable {
     case latestEpisode = "latestEpisode"
     case importedSession = "importedSession"

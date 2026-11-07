@@ -11,8 +11,10 @@ public struct NotebookRow: Codable, Equatable, Sendable, Identifiable {
     public var entryCount: Int
     public var cellCount: Int
     public var revision: String
+    public var created: String?
+    public var updated: String?
     public var additionalFields: [String: DomainJSON]
-    public init(id: String, title: String, kind: String, topic: String? = nil, touched: FoldOrder, entryCount: Int, cellCount: Int, revision: String, additionalFields: [String: DomainJSON] = [:]) {
+    public init(id: String, title: String, kind: String, topic: String? = nil, touched: FoldOrder, entryCount: Int, cellCount: Int, revision: String, created: String? = nil, updated: String? = nil, additionalFields: [String: DomainJSON] = [:]) {
         self.id = id
         self.title = title
         self.kind = kind
@@ -21,6 +23,8 @@ public struct NotebookRow: Codable, Equatable, Sendable, Identifiable {
         self.entryCount = entryCount
         self.cellCount = cellCount
         self.revision = revision
+        self.created = created
+        self.updated = updated
         self.additionalFields = additionalFields
     }
     public init(from decoder: any Decoder) throws {
@@ -33,15 +37,17 @@ public struct NotebookRow: Codable, Equatable, Sendable, Identifiable {
         entryCount = try c.decode(Int.self, forKey: .init("entryCount"))
         cellCount = try c.decode(Int.self, forKey: .init("cellCount"))
         revision = try c.decode(String.self, forKey: .init("revision"))
+        created = try c.decodeIfPresent(String.self, forKey: .init("created"))
+        updated = try c.decodeIfPresent(String.self, forKey: .init("updated"))
         additionalFields = [:]
-        let known: Set<String> = ["id", "title", "kind", "topic", "touched", "entryCount", "cellCount", "revision"]
+        let known: Set<String> = ["id", "title", "kind", "topic", "touched", "entryCount", "cellCount", "revision", "created", "updated"]
         for key in c.allKeys where !known.contains(key.stringValue) {
             additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
         }
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DomainCodingKey.self)
-        let known: Set<String> = ["id", "title", "kind", "topic", "touched", "entryCount", "cellCount", "revision"]
+        let known: Set<String> = ["id", "title", "kind", "topic", "touched", "entryCount", "cellCount", "revision", "created", "updated"]
         for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
         try c.encode(id, forKey: .init("id"))
         try c.encode(title, forKey: .init("title"))
@@ -51,6 +57,8 @@ public struct NotebookRow: Codable, Equatable, Sendable, Identifiable {
         try c.encode(entryCount, forKey: .init("entryCount"))
         try c.encode(cellCount, forKey: .init("cellCount"))
         try c.encode(revision, forKey: .init("revision"))
+        try c.encodeIfPresent(created, forKey: .init("created"))
+        try c.encodeIfPresent(updated, forKey: .init("updated"))
     }
 }
 
@@ -62,12 +70,14 @@ public struct NotebookDetail: Codable, Equatable, Sendable, Identifiable {
     public var archived: Bool
     public var revision: String
     public var orderRevision: String?
+    public var created: String?
+    public var updated: String?
     public var entryCount: Int
     public var cellCount: Int
     public var materialCount: Int
     public var extensions: [String:DomainJSON]
     public var additionalFields: [String: DomainJSON]
-    public init(id: String, title: String, kind: String, topic: String? = nil, archived: Bool, revision: String, orderRevision: String? = nil, entryCount: Int, cellCount: Int, materialCount: Int, extensions: [String:DomainJSON], additionalFields: [String: DomainJSON] = [:]) {
+    public init(id: String, title: String, kind: String, topic: String? = nil, archived: Bool, revision: String, orderRevision: String? = nil, created: String? = nil, updated: String? = nil, entryCount: Int, cellCount: Int, materialCount: Int, extensions: [String:DomainJSON], additionalFields: [String: DomainJSON] = [:]) {
         self.id = id
         self.title = title
         self.kind = kind
@@ -75,6 +85,8 @@ public struct NotebookDetail: Codable, Equatable, Sendable, Identifiable {
         self.archived = archived
         self.revision = revision
         self.orderRevision = orderRevision
+        self.created = created
+        self.updated = updated
         self.entryCount = entryCount
         self.cellCount = cellCount
         self.materialCount = materialCount
@@ -90,19 +102,21 @@ public struct NotebookDetail: Codable, Equatable, Sendable, Identifiable {
         archived = try c.decode(Bool.self, forKey: .init("archived"))
         revision = try c.decode(String.self, forKey: .init("revision"))
         orderRevision = try c.decodeIfPresent(String.self, forKey: .init("orderRevision"))
+        created = try c.decodeIfPresent(String.self, forKey: .init("created"))
+        updated = try c.decodeIfPresent(String.self, forKey: .init("updated"))
         entryCount = try c.decode(Int.self, forKey: .init("entryCount"))
         cellCount = try c.decode(Int.self, forKey: .init("cellCount"))
         materialCount = try c.decode(Int.self, forKey: .init("materialCount"))
         extensions = try c.decode([String:DomainJSON].self, forKey: .init("extensions"))
         additionalFields = [:]
-        let known: Set<String> = ["id", "title", "kind", "topic", "archived", "revision", "orderRevision", "entryCount", "cellCount", "materialCount", "extensions"]
+        let known: Set<String> = ["id", "title", "kind", "topic", "archived", "revision", "orderRevision", "created", "updated", "entryCount", "cellCount", "materialCount", "extensions"]
         for key in c.allKeys where !known.contains(key.stringValue) {
             additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
         }
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DomainCodingKey.self)
-        let known: Set<String> = ["id", "title", "kind", "topic", "archived", "revision", "orderRevision", "entryCount", "cellCount", "materialCount", "extensions"]
+        let known: Set<String> = ["id", "title", "kind", "topic", "archived", "revision", "orderRevision", "created", "updated", "entryCount", "cellCount", "materialCount", "extensions"]
         for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
         try c.encode(id, forKey: .init("id"))
         try c.encode(title, forKey: .init("title"))
@@ -111,6 +125,8 @@ public struct NotebookDetail: Codable, Equatable, Sendable, Identifiable {
         try c.encode(archived, forKey: .init("archived"))
         try c.encode(revision, forKey: .init("revision"))
         try c.encodeIfPresent(orderRevision, forKey: .init("orderRevision"))
+        try c.encodeIfPresent(created, forKey: .init("created"))
+        try c.encodeIfPresent(updated, forKey: .init("updated"))
         try c.encode(entryCount, forKey: .init("entryCount"))
         try c.encode(cellCount, forKey: .init("cellCount"))
         try c.encode(materialCount, forKey: .init("materialCount"))
@@ -125,16 +141,20 @@ public struct EntryRow: Codable, Equatable, Sendable, Identifiable {
     public var tags: [String]
     public var touched: FoldOrder
     public var revision: String
+    public var created: String?
+    public var updated: String?
     public var cellCount: Int
     public var alternativeCount: Int
     public var additionalFields: [String: DomainJSON]
-    public init(id: String, title: String? = nil, date: String? = nil, tags: [String], touched: FoldOrder, revision: String, cellCount: Int, alternativeCount: Int, additionalFields: [String: DomainJSON] = [:]) {
+    public init(id: String, title: String? = nil, date: String? = nil, tags: [String], touched: FoldOrder, revision: String, created: String? = nil, updated: String? = nil, cellCount: Int, alternativeCount: Int, additionalFields: [String: DomainJSON] = [:]) {
         self.id = id
         self.title = title
         self.date = date
         self.tags = tags
         self.touched = touched
         self.revision = revision
+        self.created = created
+        self.updated = updated
         self.cellCount = cellCount
         self.alternativeCount = alternativeCount
         self.additionalFields = additionalFields
@@ -147,17 +167,19 @@ public struct EntryRow: Codable, Equatable, Sendable, Identifiable {
         tags = try c.decode([String].self, forKey: .init("tags"))
         touched = try c.decode(FoldOrder.self, forKey: .init("touched"))
         revision = try c.decode(String.self, forKey: .init("revision"))
+        created = try c.decodeIfPresent(String.self, forKey: .init("created"))
+        updated = try c.decodeIfPresent(String.self, forKey: .init("updated"))
         cellCount = try c.decode(Int.self, forKey: .init("cellCount"))
         alternativeCount = try c.decode(Int.self, forKey: .init("alternativeCount"))
         additionalFields = [:]
-        let known: Set<String> = ["id", "title", "date", "tags", "touched", "revision", "cellCount", "alternativeCount"]
+        let known: Set<String> = ["id", "title", "date", "tags", "touched", "revision", "created", "updated", "cellCount", "alternativeCount"]
         for key in c.allKeys where !known.contains(key.stringValue) {
             additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
         }
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DomainCodingKey.self)
-        let known: Set<String> = ["id", "title", "date", "tags", "touched", "revision", "cellCount", "alternativeCount"]
+        let known: Set<String> = ["id", "title", "date", "tags", "touched", "revision", "created", "updated", "cellCount", "alternativeCount"]
         for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
         try c.encode(id, forKey: .init("id"))
         try c.encodeIfPresent(title, forKey: .init("title"))
@@ -165,6 +187,8 @@ public struct EntryRow: Codable, Equatable, Sendable, Identifiable {
         try c.encode(tags, forKey: .init("tags"))
         try c.encode(touched, forKey: .init("touched"))
         try c.encode(revision, forKey: .init("revision"))
+        try c.encodeIfPresent(created, forKey: .init("created"))
+        try c.encodeIfPresent(updated, forKey: .init("updated"))
         try c.encode(cellCount, forKey: .init("cellCount"))
         try c.encode(alternativeCount, forKey: .init("alternativeCount"))
     }
@@ -221,14 +245,18 @@ public struct EntryValue: Codable, Equatable, Sendable {
     public var revision: String
     public var author: String
     public var authorLabel: String
+    public var created: String?
+    public var updated: String?
     public var additionalFields: [String: DomainJSON]
-    public init(title: String? = nil, date: String? = nil, tags: [String], revision: String, author: String, authorLabel: String, additionalFields: [String: DomainJSON] = [:]) {
+    public init(title: String? = nil, date: String? = nil, tags: [String], revision: String, author: String, authorLabel: String, created: String? = nil, updated: String? = nil, additionalFields: [String: DomainJSON] = [:]) {
         self.title = title
         self.date = date
         self.tags = tags
         self.revision = revision
         self.author = author
         self.authorLabel = authorLabel
+        self.created = created
+        self.updated = updated
         self.additionalFields = additionalFields
     }
     public init(from decoder: any Decoder) throws {
@@ -239,15 +267,17 @@ public struct EntryValue: Codable, Equatable, Sendable {
         revision = try c.decode(String.self, forKey: .init("revision"))
         author = try c.decode(String.self, forKey: .init("author"))
         authorLabel = try c.decode(String.self, forKey: .init("authorLabel"))
+        created = try c.decodeIfPresent(String.self, forKey: .init("created"))
+        updated = try c.decodeIfPresent(String.self, forKey: .init("updated"))
         additionalFields = [:]
-        let known: Set<String> = ["title", "date", "tags", "revision", "author", "authorLabel"]
+        let known: Set<String> = ["title", "date", "tags", "revision", "author", "authorLabel", "created", "updated"]
         for key in c.allKeys where !known.contains(key.stringValue) {
             additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
         }
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DomainCodingKey.self)
-        let known: Set<String> = ["title", "date", "tags", "revision", "author", "authorLabel"]
+        let known: Set<String> = ["title", "date", "tags", "revision", "author", "authorLabel", "created", "updated"]
         for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
         try c.encodeIfPresent(title, forKey: .init("title"))
         try c.encodeIfPresent(date, forKey: .init("date"))
@@ -255,6 +285,8 @@ public struct EntryValue: Codable, Equatable, Sendable {
         try c.encode(revision, forKey: .init("revision"))
         try c.encode(author, forKey: .init("author"))
         try c.encode(authorLabel, forKey: .init("authorLabel"))
+        try c.encodeIfPresent(created, forKey: .init("created"))
+        try c.encodeIfPresent(updated, forKey: .init("updated"))
     }
 }
 

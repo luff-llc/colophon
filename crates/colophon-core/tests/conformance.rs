@@ -334,6 +334,25 @@ fn notes_domain_queries_match_signed_vector() {
         })
         .collect();
     let library = opened(records, &keys(1));
+    if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
+        let mut updated = vector.clone();
+        for query in updated["queries"].as_array_mut().unwrap() {
+            query["result"] = json!(success(
+                library
+                    .query(
+                        "notes",
+                        query["name"].as_str().unwrap(),
+                        query["args"].clone(),
+                        NOW
+                    )
+                    .unwrap()
+            ));
+        }
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.2/notes.json");
+        fs::write(path, serde_json::to_vec_pretty(&updated).unwrap()).unwrap();
+        return;
+    }
     for query in vector["queries"].as_array().unwrap() {
         assert_eq!(
             success(

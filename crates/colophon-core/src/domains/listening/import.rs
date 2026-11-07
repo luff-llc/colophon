@@ -287,6 +287,7 @@ pub fn import_operation(op: &VerifiedOperation, c: &ImportContext) -> ImportPlan
             issues.push(format!("unmappedRevision:{component}"));
             return;
         }
+        normalize_legacy(kind, &mut payload);
         payload["importSource"] = source.clone();
         payload["importSource"]["childIndex"] = json!(commands.len());
         if validation::payload(kind, &payload) {
@@ -410,7 +411,8 @@ pub fn import_operation(op: &VerifiedOperation, c: &ImportContext) -> ImportPlan
                 }
                 emit("queue", v, "queue", "queue");
                 for m in items(&p["metadata"]) {
-                    let descriptor = rename(m, &[("episode", "id"), ("audio", "audioURL")]);
+                    let mut descriptor = rename(m, &[("episode", "id"), ("audio", "audioURL")]);
+                    normalize_legacy("episode", &mut descriptor);
                     if validation::descriptor_valid(&descriptor) {
                         emit("episode", descriptor, "episode", "metadata");
                     } else {
@@ -420,7 +422,8 @@ pub fn import_operation(op: &VerifiedOperation, c: &ImportContext) -> ImportPlan
             }
             "queue.retain" => {
                 for m in items(&p["metadata"]) {
-                    let descriptor = rename(m, &[("episode", "id"), ("audio", "audioURL")]);
+                    let mut descriptor = rename(m, &[("episode", "id"), ("audio", "audioURL")]);
+                    normalize_legacy("episode", &mut descriptor);
                     if validation::descriptor_valid(&descriptor) {
                         emit("episode", descriptor, "episode", "metadata");
                     } else {
@@ -778,4 +781,108 @@ fn preference_change(k: &str, v: &Value) -> Option<Value> {
         return validation::preference(&change).then_some(change);
     }
     None
+}
+
+/// Shipping 0.1 payloads write explicit `null` for absent optional fields and Unix-second
+/// `published` dates. Normalize both against the 0.2 schema here, so every host adapter need not:
+/// a null is dropped only where the destination field does not accept null (heads such as
+/// `expect: null` keep their meaning), and numeric `published` becomes an RFC 3339 UTC string.
+/// The original payload stays unchanged in the import evidence.
+pub(crate) fn normalize_legacy(kind: &str, payload: &mut Value) {
+    let Some(spec) = super::operation_specs().iter().find(|s| s.name == kind) else {
+        return;
+    };
+    normalize_value(&spec.input_schema, payload);
+}
+fn normalize_value(schema: &Value, value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            let properties = schema.get("properties");
+            fields.retain(|key, v| {
+                !(v.is_null()
+                    && properties
+                        .and_then(|p| p.get(key))
+                        .is_some_and(|field| !validation::valid(field, &Value::Null)))
+            });
+            for (key, v) in fields.iter_mut() {
+                if key == "published" {
+                    if let Some(seconds) = v.as_f64() {
+                        if let Some(date) = unix_seconds_rfc3339(seconds) {
+                            *v = json!(date);
+                        }
+                    }
+                }
+                if let Some(field) = properties.and_then(|p| p.get(key)) {
+                    normalize_value(field, v);
+                }
+            }
+        }
+        Value::Array(entries) => {
+            if let Some(item) = schema.get("items") {
+                for v in entries {
+                    normalize_value(item, v);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+/// Civil-from-days (Howard Hinnant), UTC, second precision; None outside years 1970–9999.
+fn unix_seconds_rfc3339(seconds: f64) -> Option<String> {
+    if !seconds.is_finite() || !(0.0..253_402_300_800.0).contains(&seconds) {
+        return None;
+    }
+    let total = seconds.floor() as i64;
+    let (days, rem) = (total.div_euclid(86_400), total.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    ))
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::*;
+    #[test]
+    fn unix_seconds_and_nulls_normalize_against_the_schema() {
+        assert_eq!(
+            unix_seconds_rfc3339(0.0).as_deref(),
+            Some("1970-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            unix_seconds_rfc3339(1_762_473_600.5).as_deref(),
+            Some("2025-11-07T00:00:00Z")
+        );
+        assert_eq!(
+            unix_seconds_rfc3339(951_782_400.0).as_deref(),
+            Some("2000-02-29T00:00:00Z")
+        );
+        let mut note =
+            json!({"id":"n","episode":"e","show":"s","text":"t","quote":null,"seconds":null});
+        normalize_legacy("addNote", &mut note);
+        assert_eq!(note, json!({"id":"n","episode":"e","show":"s","text":"t"}));
+        assert!(validation::payload("addNote", &note));
+        let mut episode =
+            json!({"id":"e","show":"s","title":"T","published":1_762_473_600,"duration":null});
+        normalize_legacy("episode", &mut episode);
+        assert_eq!(episode["published"], "2025-11-07T00:00:00Z");
+        assert!(episode.get("duration").is_none());
+        let mut queue = json!({"episodes":["e"],"expect":null});
+        normalize_legacy("queue", &mut queue);
+        assert!(
+            queue["expect"].is_null() && queue.get("expect").is_some(),
+            "null heads keep their meaning"
+        );
+    }
 }

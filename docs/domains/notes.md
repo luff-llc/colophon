@@ -112,9 +112,9 @@ attachments require explicit source access; do not duplicate source permissions 
 
 | Query(arguments) | Result value | UI path |
 | --- | --- | --- |
-| `notebooks(archived:Bool=false,search?:Text,cursor?,limit?)` | Page `{id,title,kind,topic?,touched,entryCount,cellCount,revision}` | Sidebar/intent picker, touched descending then ID. |
+| `notebooks(archived:Bool=false,search?:Text,cursor?,limit?)` | Page `{id,title,kind,topic?,touched,entryCount,cellCount,revision,created,updated}` | Sidebar/intent picker, touched descending then ID. |
 | `notebook(id)` | `{id,title,kind,topic?,archived,revision,orderRevision,entryCount,cellCount,materialCount,extensions}` | Workspace header. |
-| `entries(notebook,cursor?,limit?)` | Page `{id,title?,date?,tags,touched,revision,cellCount,alternativeCount}` | Entry list; touched descending then ID. |
+| `entries(notebook,cursor?,limit?)` | Page `{id,title?,date?,tags,touched,revision,created,updated,cellCount,alternativeCount}` | Entry list; touched descending then ID. |
 | `entry(notebook,id)` | `{id,current:{title?,date?,tags,revision,author,authorLabel},cellCount,attachmentCount,proposalCount,alternativeCount}` | Entry detail, no embedded collections. |
 | `cells(notebook,entry?:ID,cursor?,limit?=30)` | Page `{id,kind,language?,entry?,sourcePreview,revision,alternativeCount,outputIsCurrent,latestRun?}` | Virtual document/editor; notebook sequence order. Omitted entry=all; null=unassigned. |
 | `cell(notebook,id)` | `{cell:Attributed,kind,source,language?,entry?,outputIsCurrent,latestRun?,extensions}` | One editor or execution input. |
@@ -158,3 +158,10 @@ attachments remain missing; they must not be replaced with empty files.
 - Confirm attachment removal and notebook hard deletion as future features; 0.1 has neither.
 - Exact nested source-pointer rewriting and preserved kept proposals need synthetic import
   vectors. Static call-path review is high confidence; runtime performance remains unmeasured.
+
+## Wall-clock dates
+
+Notebooks, entries and cells carry `created` (claimed date of the first effective write) and
+`updated` (claimed date of the latest effective write) beside the logical `clock`/`touched` order.
+They are the signers' claimed operation dates (§5 metadata): display values, never ordering or
+authority. Entry `current` and cell/notebook details include them; content comparisons ignore them.

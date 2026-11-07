@@ -14,6 +14,12 @@ import ColophonSession
         guard let key = try? DomainQueryKey(query) else { return nil }
         return cache.cached(key) as? DomainQueryResult<Q.Value>
     }
+    /// The last result for `query`, current or not: render it while `load` refreshes.
+    public func latest<Q: ListeningDomainQuery>(_ query: Q) -> (value: DomainQueryResult<Q.Value>, current: Bool)? {
+        guard let key = try? DomainQueryKey(query), let entry = cache.latest(key),
+              let typed = entry.value as? DomainQueryResult<Q.Value> else { return nil }
+        return (typed, entry.current)
+    }
     @discardableResult public func load<Q: ListeningDomainQuery>(_ query: Q) async throws -> DomainQueryResult<Q.Value> {
         let result = try await cache.load(DomainQueryKey(query))
         guard let typed = result as? DomainQueryResult<Q.Value> else { throw SessionError.invalidCommand }

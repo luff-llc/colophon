@@ -472,9 +472,10 @@ fn bounded_pages_cursors_filters_and_unknown_prefixes() {
         q(&s, "episode", json!({"id":"missing"}))["outcome"],
         "notFound"
     );
+    // Imported session history is a page of baseline-imported episodes (none here), not unavailable.
     assert_eq!(
-        q(&s, "history", json!({"mode":"importedSession"}))["outcome"],
-        "unavailable"
+        q(&s, "history", json!({"mode":"importedSession"}))["total"],
+        0
     );
     assert_eq!(
         q(&s, "listeningCounts", json!({"show":"show"}))["episodes"],

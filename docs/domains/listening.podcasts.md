@@ -122,7 +122,7 @@ are shared by this service. `captureThought` is an extension on note.add:
 voicePlain:Digest|null,voiceMimeType:Text|null,targetAgentID:ID|null}`. Surrounding text≤2k UTF-16,
 thought≤10k, voice≤6 MiB. Original note text remains original; responses are separate.
 
-Derived: following sorted by title; episode fraction capped to 1; note time/sequence order;
+Note rows and details carry `created`, the signer's claimed date of the `addNote` operation (wall-clock display; order stays logical). Derived: following sorted by title; episode fraction capped to 1; note time/sequence order;
 active playlists; transcript rank; skip/chapter lookups by recording; latest episode state
 history. `L/SeekHistory.swift`, `PlaybackProgressJournal.swift`, `PlaybackAudioOwnership.swift`,
 `TranscriptPreparationJournal.swift` are device-local recovery/ownership, not extra shared opcodes.
@@ -187,7 +187,7 @@ chapter titles≤160 characters. Queries below expose status when evidence bytes
 | `deleteNote` | `id;expect:Rev?` | Tombstone, preserve late edits. |
 | `setSegments` | `episode,show,recording:Digest,source:detected\|person,segments:[{start,end:Number,kind:Text}];detector:Text?,expect:Rev?` | Per-recording CAS; validate all entries (no partial filtering); authenticated person review outranks detection; empty clears. |
 | `saveTranscript` | `id,episode,show,blob:Blob,source:Text,timed:Bool;language:Text?,recording:Digest?,receipt:JSON?` | Retain all immutable versions; selection rank timed/person/publisher/other then fold order. Source assertions don't change authenticated origin. |
-| `setChapters` | `episode,show,recording:Digest,source:Text,entries:[{start:Number,title:Text}];expect:Rev?` | Per-recording CAS, person protection; nonempty valid sorted entries. |
+| `setChapters` | `episode,show,recording:Digest,source:Text,entries:[{start:Number,title:Text}];origin:Text?,expect:Rev?` | Per-recording CAS, person protection; nonempty valid sorted entries. `origin` is a provenance self-claim (≤128, e.g. `id3`), stored and returned as `contentOrigin`; row `origin` stays the authenticated person/ai attribution. |
 | `savePlaylist` | `id,name,mode;allShows,includeFinished,archived:Bool=false;shows,episodes,excluded,pinned,included:ID[]=[];order=newest,progress=any,maxMinutes:Int?,titleContains:Text?,expect:Rev?` | Whole rule,≤1,024 IDs per array, preserve full alternatives; local feed resolution never writes rule membership. |
 | `saveAnswer` | `id,question,claims:Claim[]` | Immutable cited answer; old bounded claims rules; exact source refs, byte verification remains host-derived. |
 | `requestTranscript` | `id,episode,show,worker:ID,audio:Blob,recording:Digest,language:Text` | App/device, immutable delegated request; no network URL authority or automatic execution from import. |
@@ -223,7 +223,7 @@ progress outboxes, speech engine state, transcript layouts/search indexes and ne
 caches remain local. Shared personal preference choices and retained transcript/audio originals
 remain shared descriptors/blobs. Never substitute a cached URL for pinned recording identity.
 
-## Named queries (17)
+## Named queries (19)
 
 `EpisodeRow={id,show,title?,showTitle?,seconds,duration?,consumption?,updated?,positionRevision?,
 stateRevision?,metadataAvailable:Bool,transcriptAvailable:Bool,noteCount:Int}`; availability here
@@ -241,9 +241,11 @@ means a retained descriptor, with host byte status separate. Page and Attributed
 | `playlist(id)` | `{rule:JSON,revision,alternativeCount,extensions}` | Rule editing; evaluate public feed results in host index with its own pagination |
 | `notes(episode?:ID,cursor?,limit?)` | Page `{id,episode,seconds?,textPreview,quotePreview?,revision,creationRevision,authorLabel,origin,anchorClaimed,alternativeCount}`; seconds/order/ID within episode, creation descending globally | Notes/mark history |
 | `note(id)` | `{note:Attributed,text,quote?,anchor?,capture?,creationRevision,lastTextEditor,alternativeCount}` | Editor/source review |
-| `recordingContent(episode,recording,kind:segments\|chapters,cursor?,limit?)` | Page segment/chapter descriptors plus `{head,source}`; start then stable ID | Page initially, local active-time lookup per tick |
+| `recordingContent(episode,recording,kind:segments\|chapters,cursor?,limit?)` | Page segment/chapter descriptors plus `{head,source,contentOrigin?}`; start then stable ID | Page initially, local active-time lookup per tick |
+| `recordings(episode?,kind?:segments\|chapters,cursor?,limit?)` | Page `{episode,show,recording,kind,head,source,contentOrigin?,personReviewed,count}`; recording key order | Which recordings carry chapters/segments, without their entries |
+| `preferences(scope?:global\|show\|episode,target?,cursor?,limit?)` | Page `{key,scope,target?,field,value,revision,author,authorLabel,origin}`; key order | Settings screens: current heads to pass as `expect` in `setPreferences` |
 | `transcripts(episode?:ID,cursor?,limit?)` | Page `{id,episode,blob,source,timed,recording?,language?,selected,revision}` | Transcript library/detail; blob/chunk text from host |
-| `history(mode:latestEpisode\|importedSession,finishedOnly:Bool=false,cursor?,limit?)` | Page EpisodeRow or `{sourceID,episode?,started,ended,elapsed,recording,hidden,provenance}`; claimed activity date then ID for display | History, clearly distinct modes |
+| `history(mode:latestEpisode\|importedSession,finishedOnly:Bool=false,cursor?,limit?)` | Page EpisodeRow. `importedSession` lists episodes whose position or state is an authenticated imported baseline, with `positionBaseline`/`stateBaseline` flags; claimed activity date then ID | History, clearly distinct modes |
 | `jobs(kind:transcript\|question\|capture,episode?:ID,status?:Text,cursor?,limit?=20)` | Page `{id,kind,requestRevision,worker?,status,responseRevision?,sourceRefs,deadline?}` | Background broker/status |
 | `contributions(kind:answer\|context,id?:ID,episode?:ID,cursor?,limit?=20)` | Page `{id,textPreview?,question?,claims?,reference?,proposalRevision?,acceptanceRevision?,author,origin,sourceStatus}`; id requests full bounded record | Answers/context review |
 | `listeningCounts(show?:ID)` | `{followed,episodes,inProgress,finished,queued,notes,transcripts,pendingJobs,conflicts}` | Sidebar/badges |
@@ -315,3 +317,11 @@ the shared library: report the missing source rather than fabricate bridge verif
 - The 0.2 preview position command identifies an episode by id; confirm adding show and
   distinct state/position heads with existing consumers. Blob and host-index APIs need a
   shared binding contract. No playback timing benchmarks or real-library import were run.
+
+## Legacy importer normalization
+
+The importer normalizes shipping 0.1 payloads against the destination schema before validating a
+child: an explicit `null` is dropped where the destination field does not accept null (heads such as
+`expect: null` keep their meaning), and a numeric Unix-second `published` (episode and queue
+descriptors) becomes an RFC 3339 UTC string. The original payload stays unchanged in evidence, so
+host evaluators no longer patch these in `effectivePayload`.

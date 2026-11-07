@@ -159,11 +159,25 @@ fn attribute(v: &mut Value, op: &AdmittedOperation) {
     v["authorLabel"] = json!(op.author_label);
     v["origin"] = json!(op.origin);
     v["clock"] = json!(op.clock);
+    // Wall-clock dates are the signers' claimed operation dates (§5 metadata), for display only;
+    // logical order stays `clock`/`touched`.
+    if v.get("created").is_none_or(Value::is_null) {
+        v["created"] = json!(op.created);
+    }
+    v["updated"] = json!(op.created);
 }
 fn data(v: &Value) -> Value {
     let mut result = v.clone();
     if let Some(m) = result.as_object_mut() {
-        for k in ["revision", "author", "authorLabel", "origin", "clock"] {
+        for k in [
+            "revision",
+            "author",
+            "authorLabel",
+            "origin",
+            "clock",
+            "created",
+            "updated",
+        ] {
             m.remove(k);
         }
     }

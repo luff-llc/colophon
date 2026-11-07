@@ -127,7 +127,7 @@ models('Listening','''
 ShowRow id:String title:String url:String following:Bool revision:String
 ShowValue id:String title:String url:String following:Bool revision:String author:String authorLabel:String origin:String clock:Int skipIntro:Double? skipOutro:Double? extensions:[String:DomainJSON]?
 ShowDetail show:ShowValue skipIntro:Double? skipOutro:Double? episodeCount:Int
-EpisodeRow id:String show:String? title:String? showTitle:String? seconds:Double duration:Double? consumption:String? updated:String? positionRevision:String? stateRevision:String? metadataAvailable:Bool transcriptAvailable:Bool noteCount:Int
+EpisodeRow id:String show:String? title:String? showTitle:String? seconds:Double duration:Double? consumption:String? updated:String? positionRevision:String? stateRevision:String? metadataAvailable:Bool transcriptAvailable:Bool noteCount:Int positionBaseline:Bool? stateBaseline:Bool?
 EpisodeDetail row:EpisodeRow metadata:EpisodeMetadata? heads:EpisodeHeads extensions:[String:DomainJSON]
 EpisodeMetadata id:String? episode:String? show:String? feed:String? guid:String? title:String? showTitle:String? audioURL:String? duration:Double? published:String? transcriptExcerpt:String?
 EpisodeHeads metadata:String? position:String? state:String?
@@ -136,12 +136,14 @@ PlaybackContext episode:EpisodeRow queueHead:String? next:EpisodeRow? preference
 PlaylistRow id:String name:String mode:String revision:String alternativeCount:Int
 PlaylistDetail rule:PlaylistRule revision:String alternativeCount:Int extensions:[String:DomainJSON]?
 PlaylistRule id:String name:String mode:String allShows:Bool includeFinished:Bool archived:Bool shows:[String] episodes:[String] excluded:[String] pinned:[String] included:[String] order:String progress:String maxMinutes:Int? titleContains:String?
-PodcastNoteRow id:String episode:String seconds:Double? textPreview:String quotePreview:String? revision:String creationRevision:String authorLabel:String origin:String anchorClaimed:Bool alternativeCount:Int truncated:Bool?
+PodcastNoteRow id:String episode:String seconds:Double? textPreview:String quotePreview:String? revision:String creationRevision:String created:String? authorLabel:String origin:String anchorClaimed:Bool alternativeCount:Int truncated:Bool?
 NoteDetail note:Attribution text:String quote:String? anchor:TranscriptAnchor? capture:CaptureDescriptor? creationRevision:String creation:Attribution? lastTextEditor:Attribution alternativeCount:Int
 TranscriptReference transcript:String revision:String blob:BlobDescriptor episode:String? show:String? libraryID:String?
 TranscriptAnchor reference:TranscriptReference startUTF16:Int lengthUTF16:Int quote:String
 CaptureDescriptor requestID:String originalText:String voice:BlobDescriptor? voiceMimeType:String? surroundingText:String? targetAgentID:String?
-RecordingPage head:String? source:String? page:DomainPage<RecordingRow>
+RecordingPage head:String? source:String? contentOrigin:String? page:DomainPage<RecordingRow>
+RecordingSummary episode:String show:String? recording:String kind:String head:String? source:String? contentOrigin:String? personReviewed:Bool? count:Int
+PreferenceRow key:String scope:String target:String? field:String value:DomainJSON? revision:String author:String authorLabel:String origin:String
 RecordingRow id:String start:Double end:Double? kind:String? title:String?
 TranscriptRow id:String episode:String blob:BlobDescriptor source:String timed:Bool recording:String? language:String? selected:Bool revision:String sourceStatus:String?
 JobRow id:String kind:String requestRevision:String worker:String? status:String responseRevision:String? sourceRefs:DomainJSON? deadline:String?
@@ -149,13 +151,13 @@ ContributionRow id:String textPreview:String? question:String? reference:Transcr
 ContributionDetail id:String kind:String? question:String? text:String? claims:[AnswerClaim]? reference:TranscriptReference? proposalRevision:String? acceptanceRevision:String? author:String? origin:String? sourceStatus:String?
 AnswerClaim text:String citations:[TranscriptAnchor]
 ListeningCounts followed:Int episodes:Int inProgress:Int finished:Int queued:Int notes:Int transcripts:Int pendingJobs:Int conflicts:Int
-''','shows:DomainPage<ShowRow> show:ShowDetail episodes:DomainPage<EpisodeRow> getEpisode:EpisodeDetail getQueue:QueuePage playbackContext:PlaybackContext playlists:DomainPage<PlaylistRow> playlist:PlaylistDetail notes:DomainPage<PodcastNoteRow> note:NoteDetail recordingContent:RecordingPage transcripts:DomainPage<TranscriptRow> history:DomainPage<EpisodeRow> jobs:DomainPage<JobRow> contributions:ContributionResult listeningCounts:ListeningCounts conflicts:DomainPage<ConflictRow> invalid:DomainPage<String>')
+''','shows:DomainPage<ShowRow> show:ShowDetail episodes:DomainPage<EpisodeRow> getEpisode:EpisodeDetail getQueue:QueuePage playbackContext:PlaybackContext playlists:DomainPage<PlaylistRow> playlist:PlaylistDetail notes:DomainPage<PodcastNoteRow> note:NoteDetail recordingContent:RecordingPage recordings:DomainPage<RecordingSummary> preferences:DomainPage<PreferenceRow> transcripts:DomainPage<TranscriptRow> history:DomainPage<EpisodeRow> jobs:DomainPage<JobRow> contributions:ContributionResult listeningCounts:ListeningCounts conflicts:DomainPage<ConflictRow> invalid:DomainPage<String>')
 models('Notes','''
-NotebookRow id:String title:String kind:String topic:String? touched:FoldOrder entryCount:Int cellCount:Int revision:String
-NotebookDetail id:String title:String kind:String topic:String? archived:Bool revision:String orderRevision:String? entryCount:Int cellCount:Int materialCount:Int extensions:[String:DomainJSON]
-EntryRow id:String title:String? date:String? tags:[String] touched:FoldOrder revision:String cellCount:Int alternativeCount:Int
+NotebookRow id:String title:String kind:String topic:String? touched:FoldOrder entryCount:Int cellCount:Int revision:String created:String? updated:String?
+NotebookDetail id:String title:String kind:String topic:String? archived:Bool revision:String orderRevision:String? created:String? updated:String? entryCount:Int cellCount:Int materialCount:Int extensions:[String:DomainJSON]
+EntryRow id:String title:String? date:String? tags:[String] touched:FoldOrder revision:String created:String? updated:String? cellCount:Int alternativeCount:Int
 EntryDetail id:String current:EntryValue cellCount:Int attachmentCount:Int proposalCount:Int alternativeCount:Int
-EntryValue title:String? date:String? tags:[String] revision:String author:String authorLabel:String
+EntryValue title:String? date:String? tags:[String] revision:String author:String authorLabel:String created:String? updated:String?
 CellRow id:String kind:String language:String? entry:String? sourcePreview:String revision:String alternativeCount:Int outputIsCurrent:Bool latestRun:String? truncated:Bool?
 CellDetail cell:Attribution kind:String source:String language:String? entry:String? outputIsCurrent:Bool latestRun:String? extensions:[String:DomainJSON]
 AttachmentRow id:String role:String name:String mime:String? blob:BlobDescriptor? source:SourceReference? revision:String authorLabel:String
@@ -263,6 +265,12 @@ import ColophonSession
     public func cached<Q: {domain}DomainQuery>(_ query: Q) -> DomainQueryResult<Q.Value>? {{
         guard let key = try? DomainQueryKey(query) else {{ return nil }}
         return cache.cached(key) as? DomainQueryResult<Q.Value>
+    }}
+    /// The last result for `query`, current or not: render it while `load` refreshes.
+    public func latest<Q: {domain}DomainQuery>(_ query: Q) -> (value: DomainQueryResult<Q.Value>, current: Bool)? {{
+        guard let key = try? DomainQueryKey(query), let entry = cache.latest(key),
+              let typed = entry.value as? DomainQueryResult<Q.Value> else {{ return nil }}
+        return (typed, entry.current)
     }}
     @discardableResult public func load<Q: {domain}DomainQuery>(_ query: Q) async throws -> DomainQueryResult<Q.Value> {{
         let result = try await cache.load(DomainQueryKey(query))

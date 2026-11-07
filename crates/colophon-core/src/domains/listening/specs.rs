@@ -395,6 +395,9 @@ pub(super) fn operations() -> Vec<Spec> {
                 ("show", id()),
                 ("recording", digest()),
                 ("source", text(1024)),
+                // Chapter provenance self-claim (for example "publisher", "id3"); returned as
+                // contentOrigin, because row `origin` is the authenticated person/ai attribution.
+                ("origin", text(128)),
                 (
                     "entries",
                     array(
@@ -601,6 +604,22 @@ pub(super) fn queries() -> Vec<Spec> {
             ],
         ),
         ("transcripts", vec![], vec![("episode", id())]),
+        (
+            "preferences",
+            vec![],
+            vec![
+                ("scope", enumeration(&["global", "show", "episode"])),
+                ("target", text(256)),
+            ],
+        ),
+        (
+            "recordings",
+            vec![],
+            vec![
+                ("episode", id()),
+                ("kind", enumeration(&["segments", "chapters"])),
+            ],
+        ),
         (
             "history",
             vec!["mode"],

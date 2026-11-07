@@ -521,10 +521,27 @@ fn query_value(s: &PodcastsState, name: &str, a: &Value) -> crate::Result<Value>
         "note"=>Ok(s.notes.get(id).map(|v|if v["deleted"]==true {json!({"outcome":"deleted","note":v,"alternativeCount":s.conflicts.get(id).map_or(0,Vec::len)})} else {json!({"note":fields(v,&["id","episode","show","seconds","revision","author","authorLabel","origin","clock","created","extensions","sourceStatus"]),"text":v["text"],"quote":v["quote"],"anchor":v["anchor"],"capture":v["capture"],"creationRevision":v["creationRevision"],"creation":v["creation"],"lastTextEditor":v["lastTextEditor"],"alternativeCount":s.conflicts.get(id).map_or(0,Vec::len)})}).unwrap_or_else(||outcome("notFound"))),
         "recordingContent"=>{
             let Some(v)=s.recordings.get(&recording_key(episode,text(a,"recording"),text(a,"kind"))) else {return Ok(outcome("notFound"));};let list=items(&v[if a["kind"]=="segments" {"segments"} else {"entries"}]);
-            Ok(json!({"head":v["revision"],"source":v["source"],"page":page(s,name,a,list.len(),list.iter().map(|v|(format!("{}:{}",number(&v["start"]),text(v,"id")),text(v,"id").into(),v.clone())))?}))
+            Ok(json!({"head":v["revision"],"source":v["source"],"contentOrigin":v["contentOrigin"],"page":page(s,name,a,list.len(),list.iter().map(|v|(format!("{}:{}",number(&v["start"]),text(v,"id")),text(v,"id").into(),v.clone())))?}))
         },
         "transcripts"=>indexed(s,name,a,&["transcripts",episode],|id|{let v=&s.transcripts[id];let mut row=fields(v,&["id","episode","blob","source","timed","recording","language","revision","sourceStatus"]);row["selected"]=json!(s.selected.get(text(v,"episode")).is_some_and(|selected|selected==id));row}),
-        "history"=>if a["mode"]=="importedSession" {Ok(json!({"outcome":"unavailable","reason":"importEvidenceAdapterRequired"}))} else {indexed(s,name,a,&["history",if a["finishedOnly"]==true {"finished"} else {"all"}],|id|{let mut row=s.row(id);if let Some(date)=s.episodes[id].get("stateUpdated") {row["updated"]=date.clone();}row})},
+        "preferences"=>{
+            // Shared preference heads, so a writer can supply `expect` for setPreferences.
+            let scope=text(a,"scope");let target=a.get("target").and_then(Value::as_str);
+            let rows:Vec<_>=s.preferences.iter().filter(|(_,v)|(scope.is_empty()||v["scope"]==scope)&&target.is_none_or(|t|v["target"].as_str().unwrap_or("")==t)).collect();
+            page(s,name,a,rows.len(),rows.into_iter().map(|(k,v)|{let mut row=fields(v,&["scope","target","field","value","revision","author","authorLabel","origin"]);row["key"]=json!(k);(k.clone(),k.clone(),row)}))
+        },
+        "recordings"=>{
+            // Which recordings carry chapters or segments, without reading their entries.
+            let kind=text(a,"kind");
+            let rows:Vec<_>=s.recordings.iter().filter(|(_,v)|(episode.is_empty()||v["episode"]==episode)&&(kind.is_empty()||v.get(if kind=="segments" {"segments"} else {"entries"}).is_some())).collect();
+            page(s,name,a,rows.len(),rows.into_iter().map(|(k,v)|{let kind=if v.get("segments").is_some() {"segments"} else {"chapters"};let count=items(&v[if kind=="segments" {"segments"} else {"entries"}]).len();(k.clone(),k.clone(),json!({"episode":v["episode"],"show":v["show"],"recording":v["recording"],"kind":kind,"head":v["revision"],"source":v["source"],"contentOrigin":v["contentOrigin"],"personReviewed":v["personReviewed"],"count":count}))}))
+        },
+        "history"=>if a["mode"]=="importedSession" {
+            // Episodes whose position or state came from an authenticated imported baseline.
+            let empty=BTreeSet::new();let set=s.indexes.get(&index(&["history","all"])).unwrap_or(&empty);
+            let rows:Vec<_>=set.iter().filter(|(_,id)|s.episodes.get(id).is_some_and(|e|e["positionBaseline"]==true||e["stateBaseline"]==true)).collect();
+            page(s,name,a,rows.len(),rows.into_iter().map(|(sort,id)|{let mut row=s.row(id);let e=&s.episodes[id];if let Some(date)=e.get("stateUpdated") {row["updated"]=date.clone();}row["positionBaseline"]=json!(e["positionBaseline"]==true);row["stateBaseline"]=json!(e["stateBaseline"]==true);(sort.clone(),id.clone(),row)}))
+        } else {indexed(s,name,a,&["history",if a["finishedOnly"]==true {"finished"} else {"all"}],|id|{let mut row=s.row(id);if let Some(date)=s.episodes[id].get("stateUpdated") {row["updated"]=date.clone();}row})},
         "jobs"=>indexed(s,name,a,&["jobs",text(a,"kind"),episode,text(a,"status")],|id|fields(&s.jobs[id],&["id","kind","requestRevision","worker","status","responseRevision","sourceRefs","deadline"])),
         "contributions"=>if !id.is_empty() {Ok(s.contributions.get(&key(&[text(a,"kind"),id])).cloned().unwrap_or_else(||outcome("notFound")))} else {indexed(s,name,a,&["contributions",text(a,"kind"),episode],|id|{let v=&s.contributions[id];let mut row=fields(v,&["id","question","reference","proposalRevision","acceptanceRevision","author","origin","sourceStatus"]);if let Some(claims)=v["claims"].as_array() {row["claimCount"]=json!(claims.len());row["truncated"]=json!(true);}
             if let Some(t)=v["text"].as_str() {let (short,truncated)=preview(t);row["textPreview"]=json!(short);row["truncated"]=json!(truncated);}row})},

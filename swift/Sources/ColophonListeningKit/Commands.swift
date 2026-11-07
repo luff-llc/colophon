@@ -1082,14 +1082,16 @@ public struct SetChapters: ListeningDomainCommand {
     public var entries: [SetChaptersEntriesElement]
     public var episode: String
     public var expect: DomainNullable<String>?
+    public var origin: String?
     public var recording: String
     public var show: String
     public var source: String
     public var additionalFields: [String: DomainJSON]
-    public init(entries: [SetChaptersEntriesElement], episode: String, expect: DomainNullable<String>? = nil, recording: String, show: String, source: String, additionalFields: [String: DomainJSON] = [:]) {
+    public init(entries: [SetChaptersEntriesElement], episode: String, expect: DomainNullable<String>? = nil, origin: String? = nil, recording: String, show: String, source: String, additionalFields: [String: DomainJSON] = [:]) {
         self.entries = entries
         self.episode = episode
         self.expect = expect
+        self.origin = origin
         self.recording = recording
         self.show = show
         self.source = source
@@ -1100,22 +1102,24 @@ public struct SetChapters: ListeningDomainCommand {
         entries = try c.decode([SetChaptersEntriesElement].self, forKey: .init("entries"))
         episode = try c.decode(String.self, forKey: .init("episode"))
         expect = c.contains(.init("expect")) ? try c.decode(DomainNullable<String>.self, forKey: .init("expect")) : nil
+        origin = c.contains(.init("origin")) ? try c.decode(String.self, forKey: .init("origin")) : nil
         recording = try c.decode(String.self, forKey: .init("recording"))
         show = try c.decode(String.self, forKey: .init("show"))
         source = try c.decode(String.self, forKey: .init("source"))
         additionalFields = [:]
-        let known: Set<String> = ["entries", "episode", "expect", "recording", "show", "source"]
+        let known: Set<String> = ["entries", "episode", "expect", "origin", "recording", "show", "source"]
         for key in c.allKeys where !known.contains(key.stringValue) {
             additionalFields[key.stringValue] = try c.decode(DomainJSON.self, forKey: key)
         }
     }
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: DomainCodingKey.self)
-        let known: Set<String> = ["entries", "episode", "expect", "recording", "show", "source"]
+        let known: Set<String> = ["entries", "episode", "expect", "origin", "recording", "show", "source"]
         for (key, value) in additionalFields where !known.contains(key) { try c.encode(value, forKey: .init(key)) }
         try c.encode(entries, forKey: .init("entries"))
         try c.encode(episode, forKey: .init("episode"))
         try c.encodeIfPresent(expect, forKey: .init("expect"))
+        try c.encodeIfPresent(origin, forKey: .init("origin"))
         try c.encode(recording, forKey: .init("recording"))
         try c.encode(show, forKey: .init("show"))
         try c.encode(source, forKey: .init("source"))

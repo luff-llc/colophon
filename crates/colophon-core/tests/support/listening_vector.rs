@@ -53,7 +53,7 @@ pub fn check() {
         ),
         (
             "setChapters",
-            json!({"episode":"one","show":"show","recording":"a".repeat(64),"source":"publisher","entries":[{"start":30,"title":"Second"},{"start":0,"title":"First"}]}),
+            json!({"episode":"one","show":"show","recording":"a".repeat(64),"source":"publisher","origin":"id3","entries":[{"start":30,"title":"Second"},{"start":0,"title":"First"}]}),
         ),
         (
             "saveTranscript",
@@ -89,6 +89,9 @@ pub fn check() {
             json!({"episode":"one","recording":"a".repeat(64),"kind":"chapters"}),
         ),
         ("transcripts", json!({"episode":"one"})),
+        ("preferences", json!({"scope":"global"})),
+        ("recordings", json!({"episode":"one"})),
+        ("history", json!({"mode":"importedSession"})),
         ("history", json!({"mode":"latestEpisode"})),
         ("jobs", json!({"kind":"question"})),
         ("contributions", json!({"kind":"answer"})),

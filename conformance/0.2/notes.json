@@ -27,6 +27,7 @@
           "rows": [
             {
               "cellCount": 1,
+              "created": "2026-11-04T12:00:00.000Z",
               "entryCount": 1,
               "id": "b",
               "kind": "seminar",
@@ -37,7 +38,8 @@
                 17,
                 "ce53efe0dd5d2c9b4d1f8b91a0705f74",
                 "c02b4b23e232dd69b0855d17745728d2"
-              ]
+              ],
+              "updated": "2026-11-04T12:00:00.000Z"
             }
           ],
           "total": 1
@@ -54,6 +56,7 @@
         "value": {
           "archived": true,
           "cellCount": 1,
+          "created": "2026-11-04T12:00:00.000Z",
           "entryCount": 1,
           "extensions": {
             "future": {
@@ -66,7 +69,8 @@
           "orderRevision": "312affb6bdc81a52a0c7048726f14ed1",
           "revision": "c02b4b23e232dd69b0855d17745728d2",
           "title": "Notebook renamed",
-          "topic": "Conformance"
+          "topic": "Conformance",
+          "updated": "2026-11-04T12:00:00.000Z"
         }
       }
     },
@@ -83,6 +87,7 @@
             {
               "alternativeCount": 0,
               "cellCount": 1,
+              "created": "2026-11-04T12:00:00.000Z",
               "date": null,
               "id": "e",
               "revision": "d6398664b13d108218bc1b0dbe990962",
@@ -94,7 +99,8 @@
                 10,
                 "ce53efe0dd5d2c9b4d1f8b91a0705f74",
                 "d6398664b13d108218bc1b0dbe990962"
-              ]
+              ],
+              "updated": "2026-11-04T12:00:00.000Z"
             }
           ],
           "total": 1
@@ -116,12 +122,14 @@
           "current": {
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
+            "created": "2026-11-04T12:00:00.000Z",
             "date": null,
             "revision": "d6398664b13d108218bc1b0dbe990962",
             "tags": [
               "reviewed"
             ],
-            "title": "Resolved entry"
+            "title": "Resolved entry",
+            "updated": "2026-11-04T12:00:00.000Z"
           },
           "id": "e",
           "proposalCount": 1
@@ -167,10 +175,12 @@
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
             "clock": 5,
+            "created": "2026-11-04T12:00:00.000Z",
             "id": "d",
             "notebook": "b",
             "origin": "person",
-            "revision": "023c187a953b3325f2408d4ba90f871f"
+            "revision": "023c187a953b3325f2408d4ba90f871f",
+            "updated": "2026-11-04T12:00:00.000Z"
           },
           "entry": "e",
           "extensions": {},
@@ -263,6 +273,7 @@
             "authorLabel": "Owner",
             "cell": "c",
             "clock": 4,
+            "created": "2026-11-04T12:00:00.000Z",
             "extensions": {},
             "id": "run",
             "notebook": "b",
@@ -276,7 +287,8 @@
             ],
             "revision": "7e0815420221f6e179bcecdbff512a2d",
             "runtime": "fixture",
-            "sourceDigest": "72fce59447a01f488b1169d2d742679cfe306a89772d67fef018bcfe95431f68"
+            "sourceDigest": "72fce59447a01f488b1169d2d742679cfe306a89772d67fef018bcfe95431f68",
+            "updated": "2026-11-04T12:00:00.000Z"
           },
           "versions": {
             "next": null,
@@ -300,6 +312,7 @@
             "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
             "authorLabel": "Owner",
             "clock": 11,
+            "created": "2026-11-04T12:00:00.000Z",
             "entry": "e",
             "extensions": {},
             "id": "p",
@@ -318,7 +331,8 @@
             "reviewerLabel": "Owner",
             "revision": "74ac395e3c14835a4e747dde38b9ccd5",
             "status": "kept",
-            "tags": []
+            "tags": [],
+            "updated": "2026-11-04T12:00:00.000Z"
           },
           "versions": {
             "next": null,
@@ -349,6 +363,7 @@
                   "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
                   "authorLabel": "Owner",
                   "clock": 15,
+                  "created": "2026-11-04T12:00:00.000Z",
                   "deleted": true,
                   "entry": "e",
                   "extensions": {},
@@ -358,10 +373,12 @@
                   "notebook": "b",
                   "origin": "person",
                   "revision": "6654c432e9861f0946d2768d601d9c2f",
-                  "source": "Recover under a new ID"
+                  "source": "Recover under a new ID",
+                  "updated": "2026-11-04T12:00:00.000Z"
                 },
                 "clock": 15,
                 "component": "lateEdit",
+                "created": "2026-11-04T12:00:00.000Z",
                 "expected": null,
                 "found": "312affb6bdc81a52a0c7048726f14ed1",
                 "historical": false,
@@ -374,7 +391,8 @@
                   "notebook": "b",
                   "source": "Recover under a new ID"
                 },
-                "revision": "6654c432e9861f0946d2768d601d9c2f"
+                "revision": "6654c432e9861f0946d2768d601d9c2f",
+                "updated": "2026-11-04T12:00:00.000Z"
               }
             ],
             "total": 1
@@ -490,6 +508,7 @@
                 "author": "ce53efe0dd5d2c9b4d1f8b91a0705f74",
                 "authorLabel": "Owner",
                 "clock": 6,
+                "created": "2026-11-04T12:00:00.000Z",
                 "entry": "e",
                 "extensions": {},
                 "id": "c",
@@ -498,10 +517,12 @@
                 "notebook": "b",
                 "origin": "person",
                 "revision": "14d3ba83b3422c7faa2c6e597e5dd43e",
-                "source": "stale source"
+                "source": "stale source",
+                "updated": "2026-11-04T12:00:00.000Z"
               },
               "clock": 6,
               "component": "cell",
+              "created": "2026-11-04T12:00:00.000Z",
               "expected": "unobserved",
               "found": "161a439a598714c09b06f8ab40be6758",
               "historical": false,
@@ -515,7 +536,8 @@
                 "notebook": "b",
                 "source": "stale source"
               },
-              "revision": "14d3ba83b3422c7faa2c6e597e5dd43e"
+              "revision": "14d3ba83b3422c7faa2c6e597e5dd43e",
+              "updated": "2026-11-04T12:00:00.000Z"
             }
           ],
           "total": 3

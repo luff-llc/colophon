@@ -127,6 +127,20 @@ enum ListeningTestDispatch {
             let encoded = try JSONEncoder().encode(actual)
             let decoded = try decoder.decode(DomainQueryResult<ColophonListeningKit.TranscriptsQuery.Value>.self, from: encoded)
             #expect(actual == decoded)
+        case "preferences":
+            let query = try decoder.decode(ColophonListeningKit.PreferencesQuery.self, from: arguments)
+            let actual = try await store.load(query)
+            if let expected { let wanted = try decoder.decode(DomainQueryResult<ColophonListeningKit.PreferencesQuery.Value>.self, from: expected); #expect(actual == wanted) }
+            let encoded = try JSONEncoder().encode(actual)
+            let decoded = try decoder.decode(DomainQueryResult<ColophonListeningKit.PreferencesQuery.Value>.self, from: encoded)
+            #expect(actual == decoded)
+        case "recordings":
+            let query = try decoder.decode(ColophonListeningKit.RecordingsQuery.self, from: arguments)
+            let actual = try await store.load(query)
+            if let expected { let wanted = try decoder.decode(DomainQueryResult<ColophonListeningKit.RecordingsQuery.Value>.self, from: expected); #expect(actual == wanted) }
+            let encoded = try JSONEncoder().encode(actual)
+            let decoded = try decoder.decode(DomainQueryResult<ColophonListeningKit.RecordingsQuery.Value>.self, from: encoded)
+            #expect(actual == decoded)
         case "history":
             let query = try decoder.decode(ColophonListeningKit.HistoryQuery.self, from: arguments)
             let actual = try await store.load(query)
