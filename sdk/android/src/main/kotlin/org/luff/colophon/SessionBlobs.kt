@@ -293,7 +293,7 @@ internal class SessionBlobEngine(private val worker: SessionWorker) {
                 path in live -> evictReplicated && path !in pinned && relay?.relayHolds(path) == true
                 path in dead -> discardSoleCopy || relay?.relayHolds(path) == true
                 // A chunk no manifest names: an upload that never published.
-                else -> modified + graceMillis < now
+                else -> modified + graceMillis < now && (discardSoleCopy || relay?.relayHolds(path) == true)
             }
             if (remove) {
                 bytes += runCatching { blobs.readBlob(path).size.toLong() }.getOrDefault(0L)

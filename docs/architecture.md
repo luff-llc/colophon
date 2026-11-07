@@ -11,8 +11,8 @@ crates/        the Rust core, the one implementation every platform runs
   colophon-ffi/    UniFFI bindings for Swift and Kotlin; host-owned keys
 js/            @colophon/core: the npm package wrapping colophon-wasm, plus a WebCrypto key provider
 playground/    the interactive introduction: a library and an agent, in a browser tab
-Package.swift  ColophonSDK: only the Rust-backed 0.2 Apple SDK
-swift/         0.2 SDK sources and tests
+Package.swift  ColophonSDK: only the Rust-backed 0.3 Apple SDK
+swift/         0.3 SDK sources and tests
 reference/swift/ independent 0.1 reference package, CLI, tests and legacy migration adapter
 docs/          this file and design notes
 ```
@@ -20,7 +20,7 @@ docs/          this file and design notes
 ## The core is a pure function of records
 
 The core owns everything that must mean the same thing on every device (section numbers
-refer to the 0.1 spec, which 0.2 revises):
+refer to the 0.1 spec, which 0.3 revises):
 
 - reading and writing records (spec §2): signed bodies, verification over the stored bytes,
   key-derived IDs;
@@ -74,9 +74,9 @@ only. Native bindings additionally use `uniffi` (proc-macro mode) to generate ma
 Kotlin transports, typed outcomes, and host key-provider callbacks. Every
 addition is recorded here with its reason.
 
-## Colophon 0.2: a clean break
+## Colophon 0.3: a clean break
 
-The Rust core implements Colophon 0.2. It keeps 0.1's model (members with their own keys, a
+The Rust core implements Colophon 0.3. It keeps 0.1's model (members with their own keys, a
 user-held authority history, scoped grants, revocation that keeps the past, deterministic folds)
 and drops what only existed for the apps that shipped first:
 
@@ -89,9 +89,9 @@ and drops what only existed for the apps that shipped first:
 - **Member kinds are part of the grant**: `device`, `app`, `agent` or `server`. Everything an
   `agent` writes is marked `origin: ai` by the core from the author's key, never by a payload
   field.
-- **Caveats are a small closed set** in 0.2: namespaces, read/write, expiry and a write budget.
+- **Caveats are a small closed set** in 0.3: namespaces, read/write, expiry and a write budget.
   Richer delegation (attenuating sub-grants for agent swarms) is the next research step.
-- **The keyring and WebAuthn controllers wait** until after 0.2's core is stable.
+- **The keyring and WebAuthn controllers wait** until after 0.3's core is stable.
 
 `spec/colophon-0.3.md` states the format. `conformance/0.3/` holds vectors the Rust core writes
 and every other implementation must reproduce. The Swift reference and `conformance/` (0.1)
@@ -99,7 +99,7 @@ stay as the record of what shipped.
 
 ## Roadmap
 
-1. Rust core (0.2): records, authority, admission, sealing and the `reading.saved`,
+1. Rust core (0.3): records, authority, admission, sealing and the `reading.saved`,
    `listening.podcasts` and `notes` folds, with its own conformance vectors.
 2. WASM bindings, the `@colophon/core` package and the playground.
 3. UniFFI bindings; Swift apps adopt the core behind their existing API.
@@ -110,7 +110,7 @@ stay as the record of what shipped.
 7. Delegation research for agent swarms (attenuating grants, approval laundering, tamper-evident
    forensics).
 
-## Android host pins (0.2)
+## Android host pins (0.3)
 
 | Dependency | Version | Why |
 | --- | --- | --- |
@@ -120,7 +120,7 @@ stay as the record of what shipped.
 | Kotlin | 2.2.21 | Same pin as the JVM bindings. |
 | JUnit 4.13.2 / AndroidX Test 1.6.x | — | JVM unit tests and the instrumented emulator journey. |
 
-## Implemented dependency pins (0.2)
+## Implemented dependency pins (0.3)
 
 The workspace pins direct dependencies exactly and commits `Cargo.lock`. Runtime dependencies
 remain within the allowlist above:
@@ -145,7 +145,7 @@ Revocation embeds replacement epochs in its authority record. Recovery embeds hi
 reshares and fresh epochs in its recovery-signed record. Planned handover writes historical
 reshares first, then transfers authority with fresh epochs excluding the former root. These
 atomic transitions prevent a verified prefix from ending access without advancing encryption.
-See the [0.2 specification](../spec/colophon-0.2.md) for the precise wire fields.
+See the [0.3 specification](../spec/colophon-0.3.md) for the precise wire fields.
 
 ## Incremental engine and local caches
 
@@ -185,7 +185,7 @@ dispatcher, and on Android Gradle Plugin 8.7.3 to assemble the AAR (`minSdk 33`,
 core or the Swift products.
 The Swift 0.1 reference products retain their existing dependency-free build.
 
-## Apple app lifecycle (0.2)
+## Apple app lifecycle (0.3)
 
 The additive `ColophonKitStorage` product owns coordinated immutable folder records, App Group
 and iCloud location resolution, change notifications and private checkpoint bytes. The

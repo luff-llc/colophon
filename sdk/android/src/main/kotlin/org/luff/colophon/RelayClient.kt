@@ -169,9 +169,9 @@ class RelayClient(val endpoint: RelayEndpoint, private val transport: RelayTrans
         return response.body
     }
 
-    fun putIfAbsent(path: String, bytes: ByteArray): PutResult {
+    fun putIfAbsent(path: String, bytes: ByteArray, replacing: String? = null): PutResult {
         val headers = mutableMapOf("Content-Type" to "application/octet-stream")
-        if (!path.startsWith("state/")) headers["If-None-Match"] = "*"
+        if (replacing != null) headers["If-Match"] = "\"$replacing\"" else headers["If-None-Match"] = "*"
         val response = request(
             "PUT", "/records/$path", bytes,
             headers, 60_000,

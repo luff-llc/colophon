@@ -23,8 +23,8 @@ public actor FolderRecordStore: RecordStore {
         return result
     }
     /// Enumerates directories only; no record bytes are read.
-    public func paths() throws -> Set<String> { Set(try enumerate().keys) }
-    public func read(paths: [String]) throws -> [String: Data] {
+    public func paths() async throws -> Set<String> { Set(try enumerate().keys) }
+    public func read(paths: [String]) async throws -> [String: Data] {
         do {
             try checkAvailability(folder)
             var result: [String: Data] = [:]
@@ -39,12 +39,26 @@ public actor FolderRecordStore: RecordStore {
         } catch let error as StorageError { throw error }
         catch { throw StorageError.unavailable(error.localizedDescription) }
     }
-    private func enumerate() throws -> [String: URL] {
+    public func paths(namespaces: [String]) async throws -> Set<String> { Set(try enumerate(namespaces: namespaces).keys) }
+    public func syncPaths(namespaces: [String]) async throws -> Set<String> { Set(try enumerate(namespaces: namespaces, includeHistory: true).keys) }
+    public func versions(paths: Set<String>) async throws -> [String: String] {
+        var result: [String: String] = [:]
+        for path in paths {
+            try RecordPath.validate(path); try rejectSymlinks(path)
+            let url = folder.appendingPathComponent(path)
+            try checkAvailability(url)
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            result[path] = "\(attributes[.systemFileNumber] ?? ""):\(attributes[.size] ?? ""):\((attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
+        }
+        return result
+    }
+    private func enumerate(namespaces: [String]? = nil, includeHistory: Bool = false) throws -> [String: URL] {
         do {
             try checkAvailability(folder)
             let manager = FileManager.default
             var result: [String: URL] = [:]
             for directory in ["authority", "requests", "ops", "state", "history"] {
+                if namespaces != nil && !includeHistory && directory == "history" { continue }
                 let root = folder.appendingPathComponent(directory)
                 if !manager.fileExists(atPath: root.path) {
                     try checkAvailability(root)
@@ -55,6 +69,12 @@ public actor FolderRecordStore: RecordStore {
                     scanError = error; return false
                 }) else { throw StorageError.unavailable("Cannot enumerate \(directory)") }
                 for case let file as URL in enumerator {
+                    if let namespaces, !namespaces.isEmpty {
+                        let relative = String(file.path.dropFirst(folder.path.count + 1)).split(separator: "/")
+                        if relative.count >= 3 && ["ops", "state", "history"].contains(String(relative[0])) && !relative[2].hasSuffix(".json") && !namespaces.contains(String(relative[2])) {
+                            enumerator.skipDescendants(); continue
+                        }
+                    }
                     try checkAvailability(file)
                     let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
                     guard values.isSymbolicLink != true else { throw StorageError.invalidPath(file.path) }
@@ -68,7 +88,7 @@ public actor FolderRecordStore: RecordStore {
                 }
                 if let scanError { throw scanError }
             }
-            guard knownPaths.filter({ RecordPath.missingBlocks($0) }).isSubset(of: Set(result.keys)) else {
+            guard knownPaths.filter({ RecordPath.missingBlocks($0) && (namespaces == nil || RecordPath.listingIncludes($0, namespaces: namespaces ?? [])) }).isSubset(of: Set(result.keys)) else {
                 throw StorageError.unavailable("Previously observed records are missing")
             }
             knownPaths.formUnion(result.keys)
@@ -112,6 +132,29 @@ public actor FolderRecordStore: RecordStore {
         for presenter in presenters.values { presenter.signal() }
     }
 
+    public func replaceLive(_ path: String, expected: Data?, bytes: Data) async throws -> Bool {
+        try RecordPath.validate(path); try rejectSymlinks(path)
+        guard RecordPath.isReplaceable(path) else { throw StorageError.invalidPath(path) }
+        var replaced = false
+        let write: (URL) throws -> Bool = { root in
+            let url = root.appendingPathComponent(path)
+            try self.checkAvailability(url)
+            let old = FileManager.default.fileExists(atPath: url.path) ? try AtomicFile.read(url, maximumBytes: 16 * 1024 * 1024) : nil
+            if old == bytes { return true }
+            guard old == expected else { return false }
+            try AtomicFile.write(bytes, to: url); return true
+        }
+        if coordinated {
+            var coordinationError: NSError?, writeError: (any Error)?
+            NSFileCoordinator().coordinate(writingItemAt: folder, options: [], error: &coordinationError) { root in
+                do { replaced = try write(root) } catch { writeError = error }
+            }
+            if let coordinationError { throw StorageError.unavailable(coordinationError.localizedDescription) }
+            if let writeError { throw writeError }
+        } else { replaced = try write(folder) }
+        if replaced { for presenter in presenters.values { presenter.signal() } }
+        return replaced
+    }
     public func changes() -> AsyncStream<Void> {
         let id = UUID()
         let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))

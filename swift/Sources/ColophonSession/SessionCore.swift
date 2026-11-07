@@ -6,6 +6,8 @@ import ColophonKit
 protocol SessionCore: Sendable {
     func open(records: [String: Data], keys: any AsyncKeyProvider) async throws
     func create(configuration: SessionConfiguration) async throws
+    func setReadScope(_ namespaces: [String]) async throws
+    func liveGeneration(path: String, bytes: Data) async throws -> UInt64
     func merge(_ records: [String: Data]) async throws
     func records() async throws -> [String: Data]
     func records(at paths: [String]) async throws -> [String: Data]
@@ -53,6 +55,12 @@ actor BindingSessionCore: SessionCore {
         let library = try requireLibrary()
         try await library.merge(records: records)
         try await library.ready()
+    }
+    func setReadScope(_ namespaces: [String]) async throws {
+        try requireLibrary().native.setReadScope(namespaces: namespaces)
+    }
+    func liveGeneration(path: String, bytes: Data) async throws -> UInt64 {
+        try requireLibrary().native.liveGeneration(path: path, bytes: bytes, now: Date.now.ISO8601Format())
     }
     func records() async throws -> [String: Data] { try await requireLibrary().records }
     func records(at paths: [String]) async throws -> [String: Data] { try await requireLibrary().records(at: paths) }
@@ -109,6 +117,8 @@ actor BindingSessionCore: SessionCore {
 
 // Existing test/host adapters need not implement named queries until they support them.
 extension SessionCore {
+    func setReadScope(_ namespaces: [String]) async throws {}
+    func liveGeneration(path: String, bytes: Data) async throws -> UInt64 { throw SessionError.notReady }
     func beginBlob(namespace: String, mediaType: String) async throws -> NativeBlobWriter { throw SessionError.notReady }
     func openBlobChunk(namespace: String, digest: String, index: Int, ciphertext: Data) async throws -> BlobReadOutcome { throw SessionError.notReady }
     func query(namespace: String, name: String, arguments: Data) async throws -> Data {

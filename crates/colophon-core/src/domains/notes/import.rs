@@ -108,7 +108,7 @@ pub fn head_key(category: &str, id: &str) -> String {
 /// A clean command for the destination importer identity to sign.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Command {
-    /// Clean 0.2 kind.
+    /// Clean 0.3 kind.
     pub kind: String,
     /// Validated payload, including separately labelled importSource provenance.
     pub payload: Value,

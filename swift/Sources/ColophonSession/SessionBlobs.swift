@@ -85,7 +85,7 @@ extension ColophonSession {
 
     private func putBlob(_ input: BlobInput, namespace: String, mediaType: String, reference: String, required: Bool) async throws -> ColophonBlob {
         await restore()
-        guard phase == .ready else { throw SessionError.notReady }
+        guard phase == .ready || phase == .refreshing else { throw SessionError.notReady }
         let lease = context
         let staged = try await worker.stageBlob(namespace: namespace, mediaType: mediaType, input: input)
         guard lease == context else { throw SessionError.destinationChanged }
@@ -118,7 +118,7 @@ extension ColophonSession {
     public func blobAvailability(namespace: String, digest: String) async -> BlobAvailability {
         await restore()
         if let progress = blobDownloads[digest] { return progress }
-        guard phase == .ready else { return .inaccessible(reason: "The library is not ready") }
+        guard phase == .ready || phase == .refreshing else { return .inaccessible(reason: "The library is not ready") }
         do { return try await worker.blobAvailability(namespace: namespace, digest: digest) }
         catch let error as BlobError {
             if case .inaccessible(let reason) = error { return .inaccessible(reason: reason) }
@@ -164,7 +164,7 @@ extension ColophonSession {
             do {
                 guard let self else { throw SessionError.notReady }
                 await self.restore()
-                guard self.phase == .ready else { throw SessionError.notReady }
+                guard self.phase == .ready || self.phase == .refreshing else { throw SessionError.notReady }
                 let lease = self.context
                 let manifest = try await worker.blobManifest(namespace: namespace, digest: digest)
                 guard manifest.descriptor.size <= UInt64(max(0, maximumBytes)) else { throw BlobError.tooLarge }
@@ -188,7 +188,7 @@ extension ColophonSession {
     /// published in `blobDownloads` while it runs.
     public func prefetchBlob(namespace: String, digest: String) async throws {
         await restore()
-        guard phase == .ready else { throw SessionError.notReady }
+        guard phase == .ready || phase == .refreshing else { throw SessionError.notReady }
         let manifest = try await worker.blobManifest(namespace: namespace, digest: digest)
         try await download(namespace: namespace, manifest: manifest)
     }
@@ -213,7 +213,7 @@ extension ColophonSession {
     @discardableResult
     public func collectBlobGarbage(gracePeriod: TimeInterval = 24 * 60 * 60, evictReplicated: Bool = false, discardSoleCopy: Bool = false) async throws -> BlobCollection {
         await restore()
-        guard phase == .ready else { throw SessionError.notReady }
+        guard phase == .ready || phase == .refreshing else { throw SessionError.notReady }
         return try await worker.collectBlobGarbage(gracePeriod: gracePeriod, evictReplicated: evictReplicated, discardSoleCopy: discardSoleCopy)
     }
 

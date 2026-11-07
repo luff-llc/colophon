@@ -1,7 +1,7 @@
 # Domain port specifications
 
 Proposed, 2026-11-06. These documents extend, rather than describe implemented parity in,
-[Colophon 0.2](../../spec/colophon-0.2.md). Read the [migration plan](../app-migration.md)
+[Colophon 0.3](../../spec/colophon-0.3.md). Read the [migration plan](../app-migration.md)
 first. No Rust code or production library was changed or examined for this inventory.
 
 The source baseline is Marginalia commit `3503057517a0e14e2f21325403fa1bc3a23e487c`.
@@ -29,7 +29,7 @@ dominate the work. The five-kind podcast and three-kind notes preview are not ap
 **Types.** `ID`, `Rev`, `Text`, `URL` are strings; `Digest` is 64 lowercase hex characters;
 `Int` is an interoperable integer (absolute value at most 2^53−1); `Number` is finite binary64;
 `Bool` is boolean; `JSON` is arbitrary finite JSON. `T?` means optional/nullable only where
-the row permits it; `T[]` is an array and `{K:T}` a map. Dates in new payloads use the 0.2 UTC
+the row permits it; `T[]` is an array and `{K:T}` a map. Dates in new payloads use the 0.3 UTC
 instant grammar. Calendar days use validated Gregorian `YYYY-MM-DD` and never shift zones.
 Legacy Swift `Date` wire encoding must be decoded by its codec, not guessed from its type.
 Import preserves the original date representation in evidence; claimed dates never arbitrate
@@ -76,7 +76,7 @@ object belong to their receipt/evidence record. Byte-sensitive imported structur
 original bytes as well as parsed fields; re-encoding through a lossy Swift model is not preservation.
 
 **Attribution.** `revision`, `author`, `authorLabel`, `origin`, `clock` derive from authenticated
-0.2 metadata. `origin=ai` iff the authenticated member kind is `agent`. Book-author text is
+0.3 metadata. `origin=ai` iff the authenticated member kind is `agent`. Book-author text is
 `creator`, to avoid collision with signer `author`. Legacy payload `origin`, original authors,
 publisher assertions and accepted-by claims remain explicitly historical claims. App/device
 role fences in 0.1 map to `app|device`; legacy `service` is not silently upgraded to `server`.
@@ -114,7 +114,7 @@ Host resolution returns `available|missing|inaccessible|invalid` and verifies di
 format and anchor boundaries. Search/extraction caches, downloads, file bookmarks, credentials,
 playback engines, drafts, scroll geometry and pending outboxes remain device-local. Do not
 drop retained user originals merely because a cache also holds a copy. Blob encryption/storage
-is a proposed extension requiring coordination with the core worker; 0.2 §7 does not specify it.
+is a proposed extension requiring coordination with the core worker; 0.3 §7 does not specify it.
 
 ## Import contract used by every mapping table
 
@@ -150,7 +150,7 @@ the old archive. No claimed source author/role can grant new capabilities.
 Catch-up is idempotent by the full source tuple and transform version, never just the highest
 clock. Re-evaluate the complete source admission and affected fold prefix when new records
 arrive; compare prior effects. Late old writes become normal conditional commands against
-the last imported component heads. Native 0.2 changes win over imported baselines; changed
+the last imported component heads. Native 0.3 changes win over imported baselines; changed
 source outcomes or conflicts require explicit alternatives/reconciliation, not deletion or
 rewriting of signed destination history. Don't automatically rerun jobs, revive grants,
 activate browser presence or re-enroll agents. Migration is complete only when every source

@@ -25,7 +25,17 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
     }
     public var body: some View {
         Group {
-            if session.phase == .ready || session.phase == .refreshing { content() }
+            if session.hasUsableContent {
+                VStack(spacing: 0) {
+                    if session.phase != .ready {
+                        HStack {
+                            Text(session.phase == .retry ? "Refresh failed" : "Updating Your Library…")
+                            if session.phase == .retry || session.phase == .waitingForDownload { retryButton }
+                        }.font(.caption).padding(8)
+                    }
+                    content()
+                }
+            }
             else {
                 VStack {
                     phaseView

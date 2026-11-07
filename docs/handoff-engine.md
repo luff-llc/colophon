@@ -50,7 +50,7 @@ state. Its library-wide version-2 checkpoint authenticates a sorted path/exact-e
 index, authority, identity, admission evidence, key-availability names, per-namespace prefix
 counts/digests and reducer states with an explicit host-supplied device-local 32-byte secret.
 It persists no epoch secret keys. Reducer state is plaintext, so the host must protect the cache.
-The format is a device-local optimization only; [spec section 7.1](../spec/colophon-0.2.md#71-device-local-verified-prefix-optimization-no-wire-change)
+The format is a device-local optimization only; [spec section 7.1](../spec/colophon-0.3.md#71-device-local-verified-prefix-optimization-no-wire-change)
 documents the shared-folder attacker model and required integrity behavior. There is no wire change.
 
 Missing, unauthenticated, wrong-version/identity/library caches fall back to full verification.

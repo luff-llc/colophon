@@ -139,16 +139,16 @@ class RelaySyncTest {
         val closedPort = ServerSocket(0).use { it.localPort }
         val offline = ColophonSession(configuration(home(), MemoryRecordStore(), url = "http://127.0.0.1:$closedPort/v1/libraries/home"))
         offline.restore()
-        assertTrue("Expected unavailable, got ${offline.phase.value}", offline.phase.value is SessionPhase.Unavailable)
+        assertTrue("Expected unavailable, got ${offline.phase.value}", offline.phase.value == SessionPhase.WaitingForDownload)
         offline.create()
-        assertTrue("Create must not fork an unknown library", offline.phase.value is SessionPhase.Unavailable)
+        assertTrue("Create must not fork an unknown library", offline.phase.value == SessionPhase.WaitingForDownload)
         assertFalse(offline.syncNow())
         assertTrue(offline.syncState.value is SyncState.Offline)
         offline.close()
 
         val wrong = ColophonSession(configuration(home(), MemoryRecordStore(), token = "wrong-token-000000000000"))
         wrong.restore()
-        assertTrue(wrong.phase.value is SessionPhase.Unavailable)
+        assertTrue(wrong.phase.value == SessionPhase.WaitingForDownload)
         assertFalse(wrong.syncNow())
         assertEquals(SyncState.Unauthorized, wrong.syncState.value)
         wrong.close()
@@ -173,7 +173,7 @@ class RelaySyncTest {
         owner.restore()
         assertEquals(SessionPhase.NoLibrary, owner.phase.value)
         owner.create()
-        assertEquals(SessionPhase.Ready, owner.phase.value)
+        assertReadyContent(owner)
         owner.perform(link("from-owner"), owner.observedRevision)
         assertTrue(owner.syncNow())
 
@@ -190,7 +190,7 @@ class RelaySyncTest {
         assertTrue(owner.syncNow())
 
         assertTrue(member.syncNow())
-        assertEquals(SessionPhase.Ready, member.phase.value)
+        assertReadyContent(member)
         member.perform(link("from-member"), member.observedRevision)
         assertTrue(member.syncNow())
         assertTrue(owner.syncNow())
@@ -220,7 +220,7 @@ class RelaySyncTest {
     fun automaticSyncDeliversWithoutBarriers() = runBlocking {
         val owner = ColophonSession(configuration(home(), MemoryRecordStore(), automatic = true))
         owner.create()
-        assertEquals(SessionPhase.Ready, owner.phase.value)
+        assertReadyContent(owner)
         val member = ColophonSession(configuration(home(), MemoryRecordStore(), automatic = true))
         member.restore()
         eventually { owner.requests.value.isNotEmpty() }

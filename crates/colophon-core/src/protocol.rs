@@ -53,13 +53,25 @@ pub enum PathScope<'a> {
 
 /// Classify a well-formed library path. `None` is not a library record path.
 pub fn path_scope(path: &str) -> Option<PathScope<'_>> {
-    let parts: Vec<&str> = path.split('/').collect();
-    match parts.as_slice() {
-        ["authority", file] | ["requests", file] if file.ends_with(".json") => {
+    let mut parts = path.split('/');
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (Some("authority" | "requests"), Some(file), None, None, None)
+            if file.ends_with(".json") =>
+        {
             Some(PathScope::Always)
         }
-        ["ops", _, file] if file.ends_with(".json") => Some(PathScope::Unknown),
-        ["ops" | "state" | "history", _, namespace, file] if file.ends_with(".json") => {
+        (Some("ops"), Some(_), Some(file), None, None) if file.ends_with(".json") => {
+            Some(PathScope::Unknown)
+        }
+        (Some("ops" | "state" | "history"), Some(_), Some(namespace), Some(file), None)
+            if file.ends_with(".json") =>
+        {
             Some(PathScope::Namespace(namespace))
         }
         _ => None,
@@ -114,6 +126,13 @@ pub fn live_slot(namespace: &str, kind: &str, payload: &serde_json::Value) -> Op
     if payload.get("seek") == Some(&serde_json::Value::Bool(true)) {
         return None;
     }
+    if payload
+        .as_object()?
+        .keys()
+        .any(|k| !["id", "show", "seconds", "duration", "seek", "expect"].contains(&k.as_str()))
+    {
+        return None;
+    }
     let id = payload.get("id")?.as_str()?;
     if id.is_empty() || id.len() > 256 {
         return None;
@@ -141,11 +160,12 @@ pub fn operation_file(path: &str) -> Option<(&str, &str)> {
     let rest = path
         .strip_prefix("ops/")
         .or_else(|| path.strip_prefix("history/"))?;
-    let parts: Vec<&str> = rest.split('/').collect();
-    match parts.as_slice() {
-        [author, file] => Some((author, file)),
-        [author, _namespace, file] => Some((author, file)),
-        _ => None,
+    let (author, suffix) = rest.split_once('/')?;
+    let file = suffix.split_once('/').map_or(suffix, |(_, file)| file);
+    if file.contains('/') {
+        None
+    } else {
+        Some((author, file))
     }
 }
 

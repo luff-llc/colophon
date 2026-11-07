@@ -4,6 +4,7 @@
 
 pub mod authority;
 pub mod blobs;
+pub mod checkpoint;
 pub mod crypto;
 pub mod domain;
 pub mod domains;

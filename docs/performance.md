@@ -1,4 +1,111 @@
-# Engine performance — integrated domains, November 6, 2026
+# Engine performance — Colophon 0.3
+
+## Colophon 0.3 — November 7, 2026
+
+Final measurements on the development arm64 Mac, Rust 1.91.1, release/LTO with
+`CARGO_PROFILE_RELEASE_OPT_LEVEL=3`. These are single confirmation runs after the build/test jobs
+completed, with uncontrolled/warm filesystem caching. They are not mobile launch timings, medians,
+tail-latency guarantees or measurements of secure-key access. Logs: `target/v03-validation/`.
+
+### 100k immutable operations
+
+The four-domain fixture contains 100,000 immutable operations and 100,010 indexed records. The
+1% suffix now explicitly uses deliberate seeks: passive positions would become live state in 0.3
+and would no longer test 1,000 new immutable records. Fixture generation and listing construction
+are excluded. Checkpoint timings measure the raw storage-engine checkpoint, including unlock;
+the new optional encrypted private-envelope encoding/decoding and native session UI are excluded.
+
+| Measurement | Colophon 0.3 | Earlier target |
+| --- | ---: | ---: |
+| Full rebuild including unlock | **1,335.215 ms** | <1,500 ms, met |
+| Unchanged checkpoint open including unlock | **92.261 ms** | <100 ms, met |
+| Local immutable write, software sign, memory persistence and apply | **0.899 ms** | <2 ms, met |
+| In-memory checkpoint plus 1,000 new operations | 109.433 ms | <100 ms, missed |
+| Fresh-process disk checkpoint plus 1,000 new operations | **116.858 ms** | <100 ms, missed |
+| Checkpoint serialization | 102.995 ms | No gate |
+| Lazy 50-operation history page | 6.271 ms | No gate |
+| Independent 128-record audit | 33.991 ms | No gate |
+
+The final checkpoint is **25,589,380 bytes**. It now includes namespaced paths, author/epoch and
+provider-version bindings and playback ordering barriers. The previous engine3 checkpoint was
+19,249,071 bytes; its fresh-process suffix measurement was 95.297 ms. The stronger 0.3 index does
+not meet that earlier suffix-time target in this run. This is an explicit remaining performance
+limit, not a failing correctness check or an assertion that the old gate remains satisfied.
+A linear merge walk compares current and cached sorted listings; unchanged restoration reads,
+verifies, decrypts and applies **zero** operation records. Both suffix runs read/verify/decrypt/apply
+exactly **1,000** operations. Full rebuild verifies/decrypts/applies all **100,000** operations.
+History fetches only the requested 50 payloads and retains 11,539 cache bytes. All projection and
+work-counter assertions passed. RSS was not remeasured.
+
+The separately rerun compatibility `Library` benchmark uses the same 100k fixture, but a different
+API and checkpoint boundary. It reports **1,600.736 ms** for a full rebuild, **1,279.650 ms** for a
+cold checkpoint open (which still verifies/decrypts records), and **96.452 ms** for a warm restore
+after verification/decryption. A passive podcast write including signing and merge takes
+**95.622 ms** with zero immutable reducer applications; a quieter notes write takes **0.542 ms**.
+These adapter timings must not be substituted with the faster storage-engine results. Native
+sessions use this adapter today: removing unchanged body reads does not eliminate its projection
+and merge CPU costs. Log: `target/v03-validation/bench-100k.log`.
+
+### Taupe-shaped passive playback
+
+Synthetic workload: follow one show, establish one episode, then publish **10,000 passive position
+samples**. Before/after use the same commands and keys: implicit layout 1 stores samples as immutable
+operations; layout 2 uses live state. Each cold open creates a new storage engine with no checkpoint,
+authenticates authority, unlocks keys, verifies/decrypts opening records and prepares the current
+state. Source maps/listings and fixture generation are outside timing; first UI/query rendering is
+not timed. This is a shape comparison, not a production Taupe trace.
+
+| Measurement | Immutable samples (layout 1) | Live samples (layout 2) |
+| --- | ---: | ---: |
+| Immutable `ops/` records | 10,002 | **2** |
+| Current `state/` slots | 0 | **1** |
+| Append-only `history/` evidence records | 0 | **10,000** |
+| Opening operation/state paths | 10,002 | **3** |
+| All stored records, including authority and evidence | 10,004 | 10,006 |
+| Cold open | **143.115 ms** | **1.971 ms** |
+| Total sample-write time | 4,142.103 ms | 5,909.767 ms |
+| Opening operation signatures/decryptions | 10,002 | 3 |
+| Immutable reducer applications | 10,002 | 2 |
+
+Opening paths shrink **3,334×**, immutable operation count falls **99.98%**, and this cold-open run
+is **72.6× faster**. Evidence is deliberately retained: total file count and signed publication work
+do not disappear. Live publication is slower in this synthetic write loop because it preserves
+history, verifies replacements and updates the slot. Deliberate actions or explicit references can
+also retain live predecessors as immutable operations; this passive-only case does not exercise that
+additional retention. Tests cover seeks, references, stale writers, revocation, expiry and rebuilding.
+
+### Swift-side comparison supplied by Marginalia
+
+Committed `apps/apple/docs/verification.md` at Marginalia HEAD
+`6c29f3ea12ce4768c31dad39a8eeddd975e8dad0`, in the layout-2 acceptance record associated with the
+`b93cc923` work, reports this separate **50,000-record** host benchmark:
+
+| Swift Replica mode | Cold read | Persisted verified-cache read |
+| --- | ---: | ---: |
+| Legacy layout | 55,720 ms | 1,324 ms |
+| Layout 2 | 13,799 ms | 710 ms |
+
+Those persisted reads reopened/signature-checked zero old operation records; the layout-2 case
+excluded 37,500 sibling-namespace records. They used fresh Replica objects on a Mac with uncontrolled
+filesystem caching, not physical iPhone launches. The workload, cache representation and I/O boundary
+differ from the Rust tests above; these are contextual comparisons, not a measured cross-language
+speedup. The Rust native sessions still use the compatible `Library` adapter, not persistent
+storage-engine checkpoints. Their incremental-refresh tests assert zero unchanged record-body reads.
+
+Reproduce the 0.3 runs:
+
+```sh
+CARGO_PROFILE_RELEASE_OPT_LEVEL=3 cargo build --release --offline -p colophon-core --examples
+# Loads an existing fixture, or generates it when absent; generation is excluded.
+target/release/examples/bench 100000 target/v03-validation/100k.records
+target/release/examples/storage_bench target/v03-validation/100k.records
+target/release/examples/storage_bench target/v03-validation/100k.records --cold-suffix
+target/release/examples/taupe_bench 10000
+```
+
+The storage harness writes its temporary checkpoint/suffix files in `/tmp/colophon-engine-v2*`
+(the historical harness filenames are local scratch paths, not the protocol version). The cold-suffix
+command is a separate process. Historical measurements below are retained with their original scope.
 
 ## Engine3 final verification
 

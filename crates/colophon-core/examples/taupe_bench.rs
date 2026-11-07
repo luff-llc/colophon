@@ -7,24 +7,14 @@ use serde_json::json;
 use std::time::Instant;
 use support::*;
 
-fn unlock(lib: &mut Library, owner: &SoftwareKeys) {
-    let results = lib
-        .begin_unlock()
-        .into_iter()
-        .map(|s| (s.namespace, s.epoch, owner.agree(&s.peer).unwrap()))
-        .collect();
-    lib.finish_unlock_many(results).unwrap();
-}
-
-fn position(lib: &mut Library, owner: &SoftwareKeys, seconds: u64, seek: bool) {
+fn position(lib: &mut Library, owner: &SoftwareKeys, seconds: u64) {
     let mut entropy = [0u8; 32];
     entropy[..8].copy_from_slice(&seconds.to_le_bytes());
-    entropy[8] = if seek { 1 } else { 0 };
     let pending = success(
         lib.begin_write(
             "listening.podcasts",
             "position",
-            json!({"id":"ep","seconds":seconds as f64,"seek":seek}),
+            json!({"id":"ep","seconds":seconds as f64,"seek":false}),
             NOW,
             entropy,
         )
@@ -33,11 +23,32 @@ fn position(lib: &mut Library, owner: &SoftwareKeys, seconds: u64, seek: bool) {
     apply(lib, pending, owner);
 }
 
-fn cold_open(records: colophon_core::model::Records, owner: &SoftwareKeys) -> f64 {
+fn cold_open(records: colophon_core::model::Records, owner: &SoftwareKeys, id: &str) -> f64 {
+    use colophon_core::engine::{Engine, EngineOptions};
+    let listing = records.keys().cloned().collect();
     let started = Instant::now();
-    let mut lib = Library::open(records, owner.public()).unwrap();
-    unlock(&mut lib, owner);
-    started.elapsed().as_secs_f64() * 1000.0
+    let mut engine = Engine::open(
+        records,
+        listing,
+        owner.public(),
+        EngineOptions {
+            library_id: id.into(),
+            checkpoint_key: [31; 32],
+            content_cache_bytes: 0,
+            namespaces: vec!["listening.podcasts".into()],
+        },
+        None,
+    )
+    .unwrap();
+    let shared = engine
+        .begin_unlock()
+        .into_iter()
+        .map(|s| (s.namespace, s.epoch, owner.agree(&s.peer).unwrap()))
+        .collect();
+    engine.finish_unlock_many(shared).unwrap();
+    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    println!("cold-open work: {:?}", engine.stats());
+    elapsed
 }
 
 fn main() {
@@ -45,7 +56,11 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(2_000);
-    let (mut lib, owner, _) = create();
+    let (original, owner, _) = create();
+    // Same passive sample commands, with layout 1 forcing the pre-live immutable journal.
+    let mut records = original.records().clone();
+    records.remove("authority/00000003.json");
+    let mut lib = opened(records, &owner);
     write(
         &mut lib,
         &owner,
@@ -65,7 +80,7 @@ fn main() {
     let baseline = lib.records().len();
     let started = Instant::now();
     for i in 0..n {
-        position(&mut lib, &owner, i, true);
+        position(&mut lib, &owner, i);
     }
     let immutable_ms = started.elapsed().as_secs_f64() * 1000.0;
     let immutable_ops = lib
@@ -74,7 +89,7 @@ fn main() {
         .filter(|p| p.starts_with("ops/"))
         .count();
     let immutable_records = lib.records().len();
-    let immutable_open = cold_open(lib.records().clone(), &owner);
+    let immutable_open = cold_open(lib.records().clone(), &owner, lib.id());
 
     let (mut live, owner, _) = create();
     write(
@@ -95,7 +110,7 @@ fn main() {
     );
     let started = Instant::now();
     for i in 0..n {
-        position(&mut live, &owner, i, false);
+        position(&mut live, &owner, i);
     }
     let live_ms = started.elapsed().as_secs_f64() * 1000.0;
     let live_ops = live
@@ -114,7 +129,7 @@ fn main() {
         .filter(|p| p.starts_with("history/"))
         .count();
     let live_records = live.records().len();
-    let live_open = cold_open(live.records().clone(), &owner);
+    let live_open = cold_open(live.records().clone(), &owner, live.id());
 
     let immutable_open_paths = lib
         .records()
@@ -127,7 +142,7 @@ fn main() {
         .filter(|p| p.starts_with("ops/") || p.starts_with("state/"))
         .count();
     println!("taupe-shaped {n} playback samples (baseline records {baseline})");
-    println!("immutable seek:true ops={immutable_ops} opening-paths={immutable_open_paths} records={immutable_records} write={immutable_ms:.3} ms cold-open={immutable_open:.3} ms");
+    println!("layout-1 passive ops={immutable_ops} opening-paths={immutable_open_paths} records={immutable_records} write={immutable_ms:.3} ms cold-open={immutable_open:.3} ms");
     println!("live state: ops={live_ops} state={live_state} history={live_history} opening-paths={live_open_paths} records={live_records} write={live_ms:.3} ms cold-open={live_open:.3} ms");
     println!(
         "opening-path ratio (immutable/live): {:.1}",

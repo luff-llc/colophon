@@ -79,7 +79,7 @@ import Observation
         defer { if inFlight[query]?.generation == loadGeneration, inFlight[query]?.revision == observed { inFlight[query] = nil } }
         do {
             let result = try await task.value
-            guard !isClosed, generation == loadGeneration, session.context == lease, session.phase == .ready,
+            guard !isClosed, generation == loadGeneration, session.context == lease, session.hasUsableContent,
                   currentRevision == observed else { throw SessionError.staleRevision }
             store(query, Entry(result: result, revision: observed))
             revision = observed; state = .ready

@@ -1,6 +1,6 @@
 # listening.podcasts
 
-Proposed 0.2 port; [README](README.md) defines shared types, provenance and query bounds.
+Proposed 0.3 port; [README](README.md) defines shared types, provenance and query bounds.
 Source prefix `L` is `packages/Colophon/Sources/ColophonListening/`; `T` is `apps/suite/Taupe/`.
 There are **29 kinds in Podcasts.kinds**, plus four service-only kinds not advertised there.
 The service projections must be migrated too; `Listening` alone is insufficient.
@@ -160,7 +160,7 @@ These run on command/background boundaries, not UI render paths. Generic module 
 advertise only their operation specs; a kind's presence in history does not imply it is a
 generic tool or that the current app has a button for it.
 
-## Proposed 0.2 commands and reducer
+## Proposed 0.3 commands and reducer
 
 Thirty clean kinds, all v1. Common validation: finite nonnegative seconds, positive finite
 duration when supplied, bound strings/arrays before allocation, lowercase digests, proper
@@ -265,7 +265,7 @@ historical attribution; importer signs clean effects. Preserve all transcript ca
 invalid anchors, not just the old selected record. Map operation references through typed
 component maps and source references through digest-preserving blob resealing.
 
-| 0.1 kind | 0.2 operation(s) / disposition |
+| 0.1 kind | 0.3 operation(s) / disposition |
 | --- | --- |
 | `show.follow` | `follow`, preserving first stored title/feed and whether reactivation was effective. |
 | `show.unfollow` | `unfollow`, including pre-creation unfollow marker. |
@@ -276,7 +276,7 @@ component maps and source references through digest-preserving blob resealing.
 | `position.recover` | `recoverPosition` with both mapped heads only if originally effective; stale recovery evidence retained. |
 | `queue.set` | `queue`, collapse duplicate IDs preserving first occurrence for new unique queue, record original duplicate order in evidence. Valid metadata→episode descriptors; malformed optional metadata never drops queue order. |
 | `queue.retain` | `episode` descriptors for actually retained missing metadata; preserve expected old queue head and receipt in provenance. No queue mutation. |
-| `playback.naturalEnd.batch` | `completePlayback` for applied pending events; carry event identities/receipts, map exact heads. Old seconds/duration ceiling fields retained only in evidence: 0.2 has grant writeBudget, not these caveats. |
+| `playback.naturalEnd.batch` | `completePlayback` for applied pending events; carry event identities/receipts, map exact heads. Old seconds/duration ceiling fields retained only in evidence: 0.3 has grant writeBudget, not these caveats. |
 | `note.add` | `addNote`; note ID lifecycle map, pinned anchor map and capture descriptor; malformed anchor remains explicitly unverified evidence. |
 | `note.edit` | `editNote`; stale complete alternatives in evidence with original editor recovered. |
 | `note.resolve` | `resolveNote` for effective resolution and exact translated alternatives; stale attempt remains evidence. |
@@ -314,7 +314,7 @@ the shared library: report the missing source rather than fabricate bridge verif
   imported data. This proposal preserves rank as a historical fact and new authenticated roles.
 - Confirm limits and pagination for a >1,024-entry queue; import currently preserves overflow
   as evidence and reports it, rather than silently losing the tail.
-- The 0.2 preview position command identifies an episode by id; confirm adding show and
+- The 0.3 preview position command identifies an episode by id; confirm adding show and
   distinct state/position heads with existing consumers. Blob and host-index APIs need a
   shared binding contract. No playback timing benchmarks or real-library import were run.
 

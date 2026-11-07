@@ -25,7 +25,7 @@ func crossBlob(seed: Int) -> Data { Data((0..<150_000).map { UInt8(truncatingIfN
             try JSONEncoder().encode([keys.signingPrivateKey, keys.agreementPrivateKey]).write(to: keyFile)
         }
         let library = dir.appendingPathComponent("apple-library")
-        let session = ColophonSession(configuration: .init(memberLabel: "iPhone", namespaces: ["reading.saved", "notes"], location: .folder(library),
+        let session = ColophonSession(configuration: .init(memberLabel: "iPhone", namespaces: ["reading.saved", "notes", "listening.podcasts"], location: .folder(library),
                                                            privateContainer: dir.appendingPathComponent("apple-home"), keys: keys,
                                                            relay: RelayConfiguration(url: url, token: token, automatic: false)),
                                       store: FolderRecordStore(folder: library, coordinated: false))
@@ -36,6 +36,10 @@ func crossBlob(seed: Int) -> Data { Data((0..<150_000).map { UInt8(truncatingIfN
             await session.create()
             #expect(session.phase == .ready)
             try await session.perform(.saveLink(id: "from-apple", url: #require(URL(string: "https://example.com/apple")), title: "Apple"), observed: session.observedRevision)
+            for seconds in [10, 20, 30] {
+                let command = try DomainCommand(namespace: "listening.podcasts", kind: "position", payloadJSON: Data("{\"id\":\"cross-episode\",\"seconds\":\(seconds)}".utf8))
+                try await session.perform(command, observed: session.observedRevision)
+            }
             // A lazily fetched blob: Android reads it on demand through the relay.
             let blob = try await session.putBlob(crossBlob(seed: 1), namespace: "notes", mediaType: "application/octet-stream", reference: "apple-attachment")
             try Data(blob.digest.utf8).write(to: dir.appendingPathComponent("apple-blob.txt"))
@@ -49,6 +53,11 @@ func crossBlob(seed: Int) -> Data { Data((0..<150_000).map { UInt8(truncatingIfN
             let ids = try await store.load(.init()).map(\.id).sorted()
             store.close()
             #expect(ids == ["from-android", "from-apple"])
+            let episode = try await session.query(namespace: "listening.podcasts", name: "getEpisode", arguments: Data(#"{"id":"cross-episode"}"#.utf8))
+            let row = try #require(JSONSerialization.jsonObject(with: episode) as? [String: Any])
+            #expect(row["seconds"] as? Double == 50, "Playback row: \(row)")
+            let seek = try DomainCommand(namespace: "listening.podcasts", kind: "position", payloadJSON: Data(#"{"id":"cross-episode","seconds":5,"seek":true}"#.utf8))
+            try await session.perform(seek, observed: session.observedRevision)
             // Android marked its blob required: the pass that delivered its manifest downloaded it.
             let digest = try String(decoding: Data(contentsOf: dir.appendingPathComponent("android-blob.txt")), as: UTF8.self)
             #expect(await session.blobAvailability(namespace: "notes", digest: digest) == .available)

@@ -1,6 +1,6 @@
 # reading.books
 
-Proposed 0.2 port; baseline and conventions are in [README](README.md). Source prefix `B` is
+Proposed 0.3 port; baseline and conventions are in [README](README.md). Source prefix `B` is
 `packages/Colophon/Sources/ColophonBooks/`; `S` is `apps/suite/Shelf/` in Marginalia.
 
 ## 0.1 operations and projection
@@ -62,7 +62,7 @@ No committed Shelf share extension or widget writer was found. Shared suite life
 Legacy/Android paths do not prove signed 0.1 library compatibility; their journal import is a
 separate adapter. No reading timer or per-frame book write was identified in Shelf.
 
-## Proposed 0.2 design
+## Proposed 0.3 design
 
 Ten clean kinds, all `v:1`. Apply the shared extension, attribution, invalid and tombstone rules.
 Text title must be nonblank, ≤16 KiB; creator ≤4 KiB; note text ≤256 KiB; quotes ≤256 KiB and

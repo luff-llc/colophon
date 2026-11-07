@@ -2,7 +2,8 @@
 
 **Status: implemented preview, November 7, 2026.** The normative implementation is
 `crates/colophon-core`; `conformance/0.3/` contains its reproducible library. This is a clean break
-from [0.1](colophon-0.1.md) and a wire-compatible successor of the unpublished 0.2 Rust core.
+from [0.1](colophon-0.1.md) and the successor of the unpublished 0.2 Rust core. Protocol and digest markers change to /3;
+0.2 Rust wire records are not silently reinterpreted.
 MUST and SHOULD express protocol requirements.
 
 In LUFF's Marginalia repository, **"Colophon 0.2" names the Swift layout-2 step** whose design
@@ -114,6 +115,12 @@ path. The signed header's author and namespace MUST match their path. Clients MU
 their requested namespaces, plus legacy three-part `ops/<author>/<clock>-<id>.json` records
 whose namespace is unknown until the header is verified. A missing record in another known
 namespace MUST NOT block this namespace. Missing legacy records remain conservatively unknown.
+A replica selecting only part of a capped writer's grant cannot count that grant-wide budget.
+It MUST refuse that writer's contributions with explicit `budgetScopeUnavailable` evidence, and
+refuse local writes under that partial grant, rather than undercount unseen sibling operations.
+Other writers remain readable. Select the complete grant scope, or issue single-namespace capped
+grants, to evaluate those contributions. `Library::set_read_scope`, storage-engine options and
+both SDK sessions enforce this rule.
 
 `state/` is replaceable live playback state (see §5.1). `history/` is append-only engagement
 evidence and MUST NOT participate in opening the library. Exact duplicate immutable records
@@ -347,15 +354,24 @@ shared with other members MUST NOT alone authorize a device-local verification c
 The Rust `Engine` version-3 cache (`COLOENG3`) uses a sorted path/digest index and per-namespace
 rolling prefix hashes, authenticated together with a host-provided device-local 32-byte secret
 (member-sealed). Index digests cover exact **outer envelope bytes** (including signatures) and
-are the analog of a provider content version; namespace prefix hashes cover admitted exact
+are independent of the provider content version; namespace prefix hashes cover admitted exact
 **signed body** digests, as used by `kept`. Each index entry also binds the author's signing-key
-digest and the namespace epoch. The cache separately marks verified headers, payload-authenticated
+digest and the namespace epoch. `RecordSource.content_version` supplies a coherent opaque
+provider token per path; a changed token triggers fresh signature/decryption/admission checks,
+even if its bytes are identical. The cache binds the selected namespace list as well. Providers
+without versions require scheduled digest audits and cannot claim immediate detection of an
+unannounced in-place edit. The cache separately marks verified headers, payload-authenticated
 IDs, projected operations, and rejected/observed bytes. Rejected records and unvalidated requests
 MUST NOT become admitted merely by being indexed. Epoch secret keys are not persisted in the
 cache. A storage-version, layout, reducer-schema, identity or library mismatch MUST cause
 re-verification. Changing bytes at a previously verified **immutable** path is equivocation
 and MUST fail closed. Replaceable `state/` paths MAY change. Hosts protect the local cache
-because reducer state can include plaintext. See [the engine format/API](../docs/engine.md#storage-backed-engine-stage-2).
+because reducer state can include plaintext. The Rust `checkpoint` module supplies a
+member-signed HPKE key ticket and an AES-256-GCM encrypted checkpoint envelope, bound to the
+exact library and member. Hosts use it (or equivalent protection) for persisted caches. Ticket
+authentication precedes host ECDH; the member-sealed random key is separate from namespace keys. Key inaccessibility must fail/retry, never generate a new identity. The current
+native session adapters do not persist verified-prefix caches; they verify source records on
+cold open, so no unprotected disk cache or cached authorization is introduced there. See [the engine format/API](../docs/engine.md#storage-backed-engine-stage-2).
 
 SDK sessions distinguish first opening, waiting for download, ready, refreshing (usable
 verified content from the same connection is retained) and retry. Results MUST be bound to the
@@ -369,16 +385,17 @@ It MUST fully verify, authenticate and admit new operations before applying them
 access/expiry/revocation and current key availability for queries and writes, including after
 cache restoration. A missing, stale, unknown-version, wrong-identity/library or unauthenticated
 cache MUST fall back to full verification, never to an empty successful projection. Authority
-listing changes, missing covered paths, earlier arrivals that can affect admission, and changed
-payload-key availability invalidate admission/projection evidence. This implementation rebuilds
-fully on those events; a future implementation may safely use more precise explicit invalidation.
+listing additions, earlier arrivals that can affect admission, and changed
+payload-key availability invalidate admission/projection evidence. A missing covered immutable path
+is explicit unavailability, not permission to rebuild an empty namespace. This implementation rebuilds
+fully on the invalidation events; a future implementation may safely use more precise explicit invalidation.
 
 Path membership does not prove that the folder still holds the previously verified bytes. An
 attacker who can rewrite the shared folder but cannot forge the local cache authentication can
 suppress unseen records or replace/delete a covered record at its old path. A fast open can
 continue displaying the earlier authenticated state until bytes are fetched. The attacker cannot
 choose replacement reducer state or grant themselves authority through the cached path. Listing
-a missing prefix path as absent invalidates the cache; withholding an unseen suffix is not
+a missing prefix path as absent makes the selected namespace unavailable; withholding an unseen suffix is not
 observable. Neither this optimization nor ordinary signatures establish global freshness or
 prevent rollback of a valid old local cache if local storage is also controlled by the attacker.
 
@@ -403,7 +420,8 @@ WASM remains single-threaded. Record storage and on-demand full-view allocations
 The engine3 extension uses the existing signed/encrypted operation envelope and namespace epochs;
 there is no new authority permission or public plaintext sidecar. Reducer generation 4 MUST
 invalidate older projection caches; generation 5 (blob eager-download hints and claimed
-creation/update dates in listening notes and notes) likewise invalidates generation 4 caches. Reducers receive kind, immutable grant and root role from
+creation/update dates in listening notes and notes) likewise invalidates generation 4 caches.
+Generation 6 adds immutable playback ordering barriers for live overlays and invalidates generation 5 caches. Reducers receive kind, immutable grant and root role from
 verified authority, never from payload or historical source assertions.
 
 `colophon.importBatch` is a root-only engine operation carrying a bounded source-unit key,
@@ -444,9 +462,9 @@ in digest order as `{digest,size,mediaType,chunks,references,required}` without 
 `blob({digest})` additionally reports `required`. A client MAY remove its local copy of a chunk
 only when another holder is confirmed (a relay receipt or another member's live reference) or
 when the owner explicitly asks to discard the sole copy. Chunks no manifest names MAY be
-removed after a grace period. Local removal never deletes relay copies; the relay has no blob GC.
+removed after a grace period only under the same confirmed-custody or explicit-discard rule. Local removal never deletes relay copies; the relay has no blob GC.
 
-Earlier 0.2 implementations skip these unknown engine operations and cannot render their imported
+Earlier 0.3 clients that lack this extension skip these unknown engine operations and cannot render their imported
 children. All participating apps MUST upgrade before enabling this extension. No 0.1 signature,
 codec, grant or historical agent authority is imported into the 0.3 trust chain.
 
@@ -488,7 +506,7 @@ over TLS (directly, or through a TLS-terminating proxy or a private network such
 | `GET {base}/changes?after={cursor}&limit={n}&wait={s}&namespace={ns}` | 200 change page; 410 if the cursor can no longer be honored. Repeat `namespace` to include several; omitted means every namespace. Authority, requests and legacy three-part ops are always included. |
 | `GET {base}/records/{path}` | 200 exact bytes with `ETag: "<sha256 hex>"`; 404 |
 | `PUT {base}/records/{path}` with `If-None-Match: *` | 201 created; 200 identical bytes already present; 412 different bytes present |
-| `PUT {base}/records/state/{…}` without `If-None-Match` | 200 replaced or 201 created (only under `state/`) |
+| `PUT {base}/records/state/{…}` with `If-Match: "<prior sha256>"` | 200 replaced; 412 if the current bytes differ or no slot exists. Creation uses `If-None-Match: *`. |
 | `PUT {base}/records/requests/{name}` without `If-None-Match` | 200 replaced or 201 created (only under `requests/`) |
 | `DELETE {base}/records/requests/{name}` | 204 (only under `requests/`; absent is also 204) |
 
@@ -502,18 +520,25 @@ until an entry arrives or the wait elapses, then answers with whatever it has (p
 page and the same cursor). Cursors are opaque, slot-bound and only valid on the relay that issued
 them. A relay that lost its log, was restored from backup or compacted it MUST answer 410 for
 cursors it cannot continue; the client then lists again from the beginning. A path appears again
-after a `requests/` replacement with the new digest; a deleted request is listed with
+after a `requests/` or `state/` replacement with the new digest; a deleted request is listed with
 `"deleted":true` and no digest.
 
 `PUT` bodies are the exact record bytes (`Content-Type: application/octet-stream`; relays ignore
-the type) with a `Content-Length`. Without `If-None-Match: *` a `PUT` outside `requests/` is
-428. Re-sending identical bytes is idempotent and answers 200, so a client can retry any upload
+the type) with a `Content-Length`. An immutable `PUT` requires `If-None-Match: *`. A live-slot
+replacement requires `If-Match` naming the exact bytes the client verified; an unconditional
+`state/` PUT is 428. Re-sending identical bytes is idempotent and answers 200, so a client can retry any upload
 after a lost response. A `PUT` of different bytes to an existing immutable path is 412 and MUST
 NOT change the stored bytes. A blob chunk's name MUST equal the SHA-256 of its bytes; a relay
-MUST reject a mismatch with 400. `requests/` is the only mutable area, for parity with the 0.1
-profile and a person withdrawing a pending request. 0.3 SDK clients still treat requests as
+MUST reject a mismatch with 400. `requests/` alone supports unconditional replacement and
+deletion, for parity with the 0.1 profile and a person withdrawing a pending request. 0.3 SDK clients still treat requests as
 immutable (§4): they never replace or delete one, and they report a changed request as a
 conflict instead of overwriting their local copy.
+
+Live promotion MUST validate signature, current authority/grant, expiry/revocation, signed generation,
+operation ID and decrypted slot binding. Compare generations only after verification. Upload/download
+referenced immutable predecessors and append-only history first, then CAS the exact old live bytes.
+Keep a newer local head on a race; re-list and retry instead of overwriting it. Namespace selection
+is part of a client's persisted cursor identity. A relay does not perform these semantic checks.
 
 ### 8.3 Limits and errors
 
@@ -534,19 +559,20 @@ keys, operation kinds or payloads, or blob plaintext.
 
 ### 8.4 Client synchronization
 
-Records are immutable and named by content-bound paths, so synchronization is set reconciliation.
+Immutable intent/evidence uses set reconciliation; live slots use verified conditional replacement.
 A client keeps its local store as the source of truth and repeatedly:
 
 1. **Lists** `changes` from its saved cursor until `more` is false, adding each entry to its
    remembered remote set. On 410 it forgets the cursor and remote set and lists from the start.
 2. **Checks the library.** If both sides hold `authority/00000001.json` and the digests differ, the
    slot holds a different library: the client MUST stop and report an error, pulling and pushing
-   nothing.
-3. **Pulls** each listed path the local store lacks, verifies its SHA-256 against the listing,
+   nothing. Clients fetch and authenticate authority before any content, rejecting an unsupported
+   layout even on their first relay-backed opening.
+3. **Pulls** each listed immutable path the local store lacks, verifies its SHA-256 against the listing,
    and appends the bytes to the local store (which rejects conflicts), then hands the new records
    to the core as an external change. A listed path whose digest differs from the local record is
    a conflict; the local bytes are kept and the conflict is reported.
-4. **Pushes** each local record the remote set lacks with `PUT … If-None-Match: *`. 200 and 201
+4. **Pushes** each local immutable record the remote set lacks with `PUT … If-None-Match: *`. 200 and 201
    both mean the relay now holds the record; 412 is a conflict, reported, never overwritten.
 5. **Blob chunks** (`blobs/<sha256>`) are pushed before the records of the same pass, so a peer
    never admits a manifest whose ciphertext the relay lacks. They are never pulled as part of the

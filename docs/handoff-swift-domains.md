@@ -74,7 +74,7 @@ agent response across replay/checkpoint restoration.
 The local engine checkpoint format is now **version 2**. Version-1 caches are rejected/replayed;
 otherwise they could retain the old incomplete role-sensitive projection. This is a disposable
 cache-format change, not a protocol-record rewrite. Updated only the affected expectations in
-`conformance/0.2/notes.json` and `conformance/0.2/reading.books/expected.json`; signed records did
+`conformance/0.3/notes.json` and `conformance/0.3/reading.books/expected.json`; signed records did
 not change. Owner proposal reviews now produce kept proposals, and owner loans take effect.
 
 **Coordination with `migration`.** Session edits are limited to the additive query bridge,

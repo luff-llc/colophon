@@ -211,3 +211,32 @@ downloaded (a private `blob-index.log`), never another app's chunks in a shared 
 `latest` keeps the last value (with `current: false`) so views do not blank; only queries loaded
 again are re-read, concurrent loads share one read, and the bound evicts stale entries first. The
 generated `*Store` types expose the same `latest`.
+
+## Colophon 0.3 readiness and storage
+
+Both sessions distinguish opening, waiting for download, ready, refreshing, retry and update-required.
+`hasUsableContent` retains verified content from the same connection during refresh/retry; pending
+content never establishes an empty library. Writes still refresh and validate the exact observed
+session revision and connection before signing. Query completion also checks the connection and
+namespace revision. Rejoin invalidates results from the previous identity. Unsupported authenticated
+layouts stop at authority, including the relay download path, without touching content or resetting keys.
+
+Native refresh enumerates only requested namespace paths, authority/requests and legacy flat paths
+whose namespace must be verified. It excludes engagement `history/`. Built-in stores report provider
+versions, so unchanged refresh reads zero record bodies and publication copies only written paths.
+Providers without version tokens conservatively reread candidates. Directory enumeration and snapshot
+projection/evidence comparison remain O(library indexes/projection); this is an I/O improvement, not
+an O(delta) claim for all CPU or serialized UI state. Native sessions still verify records on cold open;
+they do not yet use the storage-engine's persistent verified-prefix checkpoint.
+
+Passive podcast positions use signed replaceable `state/` slots with append-only `history/` evidence.
+Built-in stores implement atomic `replaceLive(path, expected, bytes)`. Custom providers must implement
+that conditional operation to publish live state; the compatibility default fails explicitly.
+Relay sync verifies live generations before conditional replacement and publishes evidence first.
+Low-level `RelaySync` users must supply `verifyLive` and `validateAuthority` callbacks to obtain the
+same semantic barriers as sessions; a relay transport by itself cannot authenticate a library.
+
+`collectBlobGarbage(discardSoleCopy: true)` (Kotlin named argument `discardSoleCopy = true`) is an
+explicit owner-authorized discard. By default even zero-reference or stale-orphan chunks remain
+unless a relay receipt confirms another holder. A sibling member's reference is not treated as
+proof of custody. Required/referenced chunks retain the existing pinning rules.

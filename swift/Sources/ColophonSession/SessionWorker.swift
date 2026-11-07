@@ -25,6 +25,8 @@ actor SessionWorker {
     /// Record paths already merged into the open core; storage reads skip these.
     private var merged = Set<String>()
     private var requestPaths = Set<String>()
+    private var recordVersions: [String: String] = [:]
+    private var liveBytes: [String: Data] = [:]
 
     init(configuration: SessionConfiguration, core: any SessionCore = BindingSessionCore(), store: (any RecordStore)? = nil) {
         self.configuration = configuration; self.keys = configuration.keys; self.core = core; self.store = store
@@ -41,13 +43,29 @@ actor SessionWorker {
         let resolved = try configuration.location.resolve(); store = resolved; return resolved
     }
     func changes() async throws -> AsyncStream<Void> { try await storage().changes() }
+    private var relayLiveVerifier: Library?
     func relay() throws -> RelaySync? {
         if let relaySync { return relaySync }
         guard let relay = configuration.relay else { return nil }
         let created = RelaySync(local: try storage(), endpoint: relay.endpoint, transport: relay.transport,
                                 stateFile: configuration.privateContainer.appendingPathComponent("relay.json"),
-                                namespaces: configuration.namespaces)
+                                namespaces: configuration.namespaces, verifyLive: { [weak self] path, bytes in
+                                    guard let self else { throw SessionError.notReady }
+                                    return try await self.verifySyncLive(path, bytes: bytes)
+                                },
+                                validateAuthority: { [weak self] records in try await self?.validateSyncAuthority(records) })
         relaySync = created; return created
+    }
+    private func validateSyncAuthority(_ records: [String: Data]) async throws {
+        do { relayLiveVerifier = try await Library.open(records: records, me: keys) }
+        catch let error as BindingError {
+            if case .InvalidData(let detail) = error, detail.hasPrefix("Unsupported storage layout") { throw SessionLayoutError.updateRequired }
+            throw error
+        }
+    }
+    private func verifySyncLive(_ path: String, bytes: Data) throws -> UInt64 {
+        guard let verifier = relayLiveVerifier else { throw SessionError.notReady }
+        return try verifier.native.liveGeneration(path: path, bytes: bytes, now: Date.now.ISO8601Format())
     }
     /// One relay pass outside the worker gate: the relay only appends verified-digest records to
     /// local storage, and the session then refreshes them through the normal merge.
@@ -81,14 +99,14 @@ actor SessionWorker {
     func refreshLocked() async throws -> SessionSnapshot {
         if !configuration.migrationWriter, let marker = configuration.migrationMarker,
            try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
-        var stored = try await storage().paths()
+        var stored = try await storage().paths(namespaces: configuration.namespaces)
         stored = Set(stored.filter { RecordPath.listingIncludes($0, namespaces: configuration.namespaces) })
         if stored.isEmpty && journal.pending.isEmpty && configuration.relay != nil {
             try await pullBeforeTrustingEmpty()
-            stored = Set((try await storage().paths()).filter { RecordPath.listingIncludes($0, namespaces: configuration.namespaces) })
+            stored = Set((try await storage().paths(namespaces: configuration.namespaces)).filter { RecordPath.listingIncludes($0, namespaces: configuration.namespaces) })
         }
         let available = stored.union(journal.pending.keys)
-        let blocking = journal.knownPaths.filter { RecordPath.missingBlocks($0) }
+        let blocking = journal.knownPaths.filter { RecordPath.missingBlocks($0) && RecordPath.listingIncludes($0, namespaces: configuration.namespaces) }
         guard blocking.isSubset(of: available) else {
             throw StorageError.unavailable("Previously observed library records are unavailable")
         }
@@ -96,11 +114,28 @@ actor SessionWorker {
             guard journal.libraryID == nil else { throw StorageError.unavailable("Selected library is unavailable") }
             return empty(.noLibrary)
         }
-        let fresh = opened ? stored.filter { !merged.contains($0) } : stored
-        var incoming = try await storage().read(paths: Array(fresh))
+        let versions = try await storage().versions(paths: stored)
+        let fresh = opened ? stored.filter { !merged.contains($0) || versions[$0] == nil || versions[$0] != recordVersions[$0] } : stored
+        // Authenticate the authority barrier before fetching any content body.
+        let authorityPaths = fresh.filter { $0.hasPrefix("authority/") }
+        var authority = try await storage().read(paths: Array(authorityPaths))
+        guard Set(authority.keys) == authorityPaths else { throw StorageError.unavailable("Authority download pending") }
+        for (path, bytes) in journal.pending where path.hasPrefix("authority/") { authority[path] = bytes }
+        do {
+            if opened { if !authority.isEmpty { try await core.merge(authority) } }
+            else { try await core.open(records: authority, keys: keys); try await core.setReadScope(configuration.namespaces); opened = true; merged.removeAll(); requestPaths.removeAll() }
+        } catch let error as BindingError {
+            if case .InvalidData(let detail) = error, detail.hasPrefix("Unsupported storage layout") { throw SessionLayoutError.updateRequired }
+            throw error
+        }
+        let contentPaths = fresh.subtracting(authorityPaths)
+        var incoming = try await storage().read(paths: Array(contentPaths))
+        guard Set(incoming.keys) == contentPaths else { throw StorageError.unavailable("Record download pending") }
+        incoming.merge(authority) { old, _ in old }
+        let observedLive = incoming.filter { RecordPath.isReplaceable($0.key) }
         for (path, data) in journal.pending {
-            if let old = incoming[path], old != data { throw StorageError.conflict(path) }
-            if !opened || !merged.contains(path) { incoming[path] = data }
+            if let old = incoming[path], old != data, !RecordPath.isReplaceable(path) { throw StorageError.conflict(path) }
+            if !opened || !merged.contains(path) || RecordPath.isReplaceable(path) { incoming[path] = data }
         }
         do {
             if opened {
@@ -116,7 +151,9 @@ actor SessionWorker {
             }
             throw error
         }
+        liveBytes.merge(observedLive) { _, new in new }
         track(incoming.keys)
+        recordVersions.merge(versions) { _, new in new }
         let unseenRequests = stored.filter { $0.hasPrefix("requests/") && !merged.contains($0) }
         if !unseenRequests.isEmpty {
             let extra = try await storage().read(paths: Array(unseenRequests))
@@ -182,7 +219,7 @@ actor SessionWorker {
             if !(try await storage().paths().isEmpty) { return try await refreshLocked() }
         }
         guard !opened, journal.libraryID == nil, try await storage().paths().isEmpty else { throw SessionError.destinationChanged }
-        try await core.create(configuration: configuration); opened = true
+        try await core.create(configuration: configuration); try await core.setReadScope(configuration.namespaces); opened = true
         journal.left = false
         journal.libraryID = try await core.snapshot(namespaces: configuration.namespaces).libraryID
         try await persistDelta()
@@ -269,7 +306,7 @@ actor SessionWorker {
                     } else { journal.ingress[ingress.id]?.uncertain = true }
                 }
                 do { try await persistDelta() } catch is PendingPublication { }
-                return (.queued, empty(.unavailable(reason: "Committed write awaits confirmation; refresh to retry publication")))
+                return (.queued, SessionSnapshot(phase: .retry, core: fresh.core, revision: fresh.revision, namespaceRevisions: fresh.namespaceRevisions))
             }
             try await persistDelta()
             throw error
@@ -278,7 +315,7 @@ actor SessionWorker {
         if let migrationKey { journal.migration?[migrationKey]?.operationID = operation.id }
         do { try await persistDelta(paths: written.isEmpty ? nil : written) }
         catch is PendingPublication {
-            return (.queued, empty(.unavailable(reason: "Write queued for durable publication")))
+            return (.queued, SessionSnapshot(phase: .retry, core: fresh.core, revision: fresh.revision, namespaceRevisions: fresh.namespaceRevisions))
         }
         return (.saved(operationID: operation.id), try await refreshLocked())
     }
@@ -322,7 +359,15 @@ actor SessionWorker {
     }
     private func publish() async throws {
         guard !journal.pending.isEmpty else { return }
-        try await storage().append(journal.pending)
+        try await storage().append(journal.pending.filter { !RecordPath.isReplaceable($0.key) })
+        for (path, bytes) in journal.pending where RecordPath.isReplaceable(path) {
+            let generation = try await core.liveGeneration(path: path, bytes: bytes)
+            if let old = liveBytes[path], old != bytes, let oldGeneration = try? await core.liveGeneration(path: path, bytes: old), oldGeneration >= generation { throw StorageError.conflict(path) }
+            guard try await storage().replaceLive(path, expected: liveBytes[path], bytes: bytes) else {
+                throw StorageError.conflict(path)
+            }
+            liveBytes[path] = bytes
+        }
         let readback = try await storage().read(paths: Array(journal.pending.keys))
         guard journal.pending.allSatisfy({ readback[$0.key] == $0.value }) else { throw StorageError.unavailable("Publication readback incomplete") }
         journal.knownPaths.formUnion(journal.pending.keys)

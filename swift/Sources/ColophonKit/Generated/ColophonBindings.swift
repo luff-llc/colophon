@@ -897,6 +897,11 @@ public protocol NativeLibraryProtocol: AnyObject, Sendable {
     
     func beginHandover(newRoot: PublicKeys, label: String, now: String, entropy: Data) throws  -> PreparedAction
     
+    /**
+     * Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+     */
+    func beginLayout(layout: UInt32, now: String) throws  -> PreparedAction
+    
     func beginRecover(newRoot: PublicKeys, label: String, now: String, entropy: Data) throws  -> PreparedAction
     
     func beginRevoke(memberId: String, now: String, entropy: Data) throws  -> PreparedAction
@@ -912,6 +917,11 @@ public protocol NativeLibraryProtocol: AnyObject, Sendable {
     func id() throws  -> String
     
     func ledger() throws  -> [LedgerEntry]
+    
+    /**
+     * Verify/decrypt a live slot before host-side conditional promotion.
+     */
+    func liveGeneration(path: String, bytes: Data, now: String) throws  -> UInt64
     
     func me() throws  -> Member
     
@@ -935,6 +945,8 @@ public protocol NativeLibraryProtocol: AnyObject, Sendable {
     func records() throws  -> [String: Data]
     
     func revision() throws  -> UInt64
+    
+    func setReadScope(namespaces: [String]) throws 
     
     func tools(now: String) throws  -> [Tool]
     
@@ -1074,6 +1086,20 @@ open func beginHandover(newRoot: PublicKeys, label: String, now: String, entropy
 })
 }
     
+    /**
+     * Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+     */
+open func beginLayout(layout: UInt32, now: String)throws  -> PreparedAction  {
+    return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_layout(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(layout),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
 open func beginRecover(newRoot: PublicKeys, label: String, now: String, entropy: Data)throws  -> PreparedAction  {
     return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
         uniffiCallStatus in
@@ -1162,6 +1188,21 @@ open func ledger()throws  -> [LedgerEntry]  {
 })
 }
     
+    /**
+     * Verify/decrypt a live slot before host-side conditional promotion.
+     */
+open func liveGeneration(path: String, bytes: Data, now: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_live_generation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),
+        FfiConverterData.lower(bytes),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
 open func me()throws  -> Member  {
     return try  FfiConverterTypeMember_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
         uniffiCallStatus in
@@ -1238,6 +1279,15 @@ open func revision()throws  -> UInt64  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+open func setReadScope(namespaces: [String])throws   {try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_set_read_scope(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(namespaces),uniffiCallStatus
+    )
+}
 }
     
 open func tools(now: String)throws  -> [Tool]  {
@@ -4733,6 +4783,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_handover() != 34363) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout() != 57923) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recover() != 26094) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4757,6 +4810,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_ledger() != 64037) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_live_generation() != 8161) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_me() != 13095) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4776,6 +4832,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_revision() != 60341) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_set_read_scope() != 29113) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_tools() != 56617) {

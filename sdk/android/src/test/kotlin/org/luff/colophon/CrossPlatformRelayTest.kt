@@ -21,7 +21,7 @@ class CrossPlatformRelayTest {
         val session = ColophonSession(
             SessionConfiguration(
                 memberLabel = "Android",
-                namespaces = listOf("reading.saved", "notes"),
+                namespaces = listOf("reading.saved", "notes", "listening.podcasts"),
                 privateHome = File(dir, "android-home"),
                 keys = SoftwareKeys.stored(File(dir, "android-keys.bin")),
                 store = FileRecordStore(File(dir, "android-library")),
@@ -36,8 +36,13 @@ class CrossPlatformRelayTest {
             )
             "write" -> {
                 assertTrue(session.syncNow())
-                assertEquals(SessionPhase.Ready, session.phase.value)
+                assertReadyContent(session)
                 session.perform(DomainCommand.saveLink("from-android", "https://example.com/android", "Android"), session.observedRevision)
+                val initial = (JsonParser(String(session.projection("listening.podcasts"))).parseValue() as Json.Obj).array("episodes").first() as Json.Obj
+                assertEquals(30.0, (initial.fields["seconds"] as Json.Number).raw.toDouble(), 0.0)
+                for (seconds in listOf(40, 50)) {
+                    session.perform(DomainCommand("listening.podcasts", "position", "{\"id\":\"cross-episode\",\"seconds\":$seconds}".toByteArray()), session.observedRevision)
+                }
                 // Apple's blob arrives lazily: the manifest synced, the chunks are fetched on read.
                 val appleDigest = File(dir, "apple-blob.txt").readText()
                 assertTrue(session.blobAvailability("notes", appleDigest) is BlobAvailability.Missing)
@@ -48,6 +53,8 @@ class CrossPlatformRelayTest {
             }
             "verify" -> {
                 assertTrue(session.syncNow())
+                val episode = (JsonParser(String(session.projection("listening.podcasts"))).parseValue() as Json.Obj).array("episodes").first() as Json.Obj
+                assertEquals("The deliberate Apple rewind supersedes live progress", 5.0, (episode.fields["seconds"] as Json.Number).raw.toDouble(), 0.0)
                 val store = NamespaceStore.savedLinks(session)
                 assertEquals(listOf("from-android", "from-apple"), store.load(SavedLinksQuery()).map { it.id }.sorted())
                 store.close()

@@ -42,9 +42,9 @@ if [[ ! -f "$aar_src" ]]; then
   exit 1
 fi
 mkdir -p sdk/android/build
-cp "$aar_src" sdk/android/build/colophon-android-0.2.0.aar
+cp "$aar_src" sdk/android/build/colophon-android-0.3.0.aar
 # Keep a stable name matching earlier packaging docs.
-cp sdk/android/build/colophon-android-0.2.0.aar sdk/android/build/colophon-0.2.0.aar
-echo "Built sdk/android/build/colophon-android-0.2.0.aar"
-unzip -l sdk/android/build/colophon-android-0.2.0.aar | sed -n '1,80p'
+cp sdk/android/build/colophon-android-0.3.0.aar sdk/android/build/colophon-0.3.0.aar
+echo "Built sdk/android/build/colophon-android-0.3.0.aar"
+unzip -l sdk/android/build/colophon-android-0.3.0.aar | sed -n '1,80p'
 echo 'App dependencies: org.jetbrains.kotlin:kotlin-stdlib:2.2.21, net.java.dev.jna:jna:5.18.1@aar, org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'

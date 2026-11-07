@@ -171,7 +171,7 @@ pub const NAMESPACES: [&str; 4] = [
 
 // Authenticated local-cache generation for the complete built-in reducer registry.
 // Increment on any projection schema or reducer semantic change, even if serde can decode it.
-pub(crate) const REDUCER_SCHEMA: u32 = 5;
+pub(crate) const REDUCER_SCHEMA: u32 = 6;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum ProjectionState {
@@ -292,17 +292,45 @@ pub fn role_allows(namespace: &str, kind: &str, member: crate::model::MemberKind
 pub(crate) struct State {
     pub(crate) projection: ProjectionState,
     sidecar: crate::imports::ImportState,
+    #[serde(default)]
+    playback_order: std::collections::BTreeMap<String, (u64, String, String)>,
 }
 impl State {
     pub fn new(namespace: &str) -> Self {
         Self {
             projection: ProjectionState::new(namespace),
             sidecar: crate::imports::ImportState::new(namespace),
+            playback_order: Default::default(),
         }
     }
     pub fn apply_with_context(&mut self, op: &AdmittedOperation, context: Option<&AuthorContext>) {
         let Some(context) = context else { return };
         self.sidecar.apply(&mut self.projection, op, context);
+        if matches!(
+            op.kind.as_str(),
+            "position" | "setState" | "recoverPosition" | "completePlayback"
+        ) {
+            let mut ids = Vec::new();
+            if let Some(id) = op.payload["id"].as_str() {
+                ids.push(id);
+            }
+            if let Some(events) = op.payload["events"].as_array() {
+                ids.extend(events.iter().filter_map(|e| e["episode"].as_str()));
+            }
+            for id in ids {
+                if let ProjectionState::Podcasts(state) = &self.projection {
+                    if state.playback_revision_is(id, &op.id) {
+                        self.playback_order
+                            .insert(id.into(), (op.clock, op.author.clone(), op.id.clone()));
+                    }
+                }
+            }
+        }
+    }
+    pub(crate) fn live_is_after(&self, op: &AdmittedOperation) -> bool {
+        self.playback_order
+            .get(op.payload["id"].as_str().unwrap_or(""))
+            .is_none_or(|order| (op.clock, &op.author, &op.id) > (order.0, &order.1, &order.2))
     }
     pub fn query(&self, name: &str, args: &Value) -> crate::Result<Value> {
         if let Some(value) = self.sidecar.query(name, args, &self.projection)? {

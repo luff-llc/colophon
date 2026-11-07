@@ -26,7 +26,7 @@ private func link(_ id: String = UUID().uuidString) throws -> DomainCommand {
         let id = try #require(session.libraryID)
         await store.setUnavailable("offline")
         await session.refresh()
-        #expect(session.phase == .unavailable(reason: "offline"))
+        #expect(session.phase == .retry)
         #expect(session.libraryID == id)
         await store.setUnavailable(nil)
         await session.refresh()
@@ -103,8 +103,9 @@ private func link(_ id: String = UUID().uuidString) throws -> DomainCommand {
         #expect(links.count == 1)
         await #expect(throws: SessionError.staleRevision) { try await session.perform(link(), observed: old) }
         await store.setUnavailable("gone"); await session.refresh()
-        #expect(reading.cached(query) == nil)
-        #expect(notes.cached(0) == nil)
+        #expect(reading.cached(query)?.count == 1)
+        #expect(notes.cached(0) == noteValue)
+        #expect(session.hasUsableContent)
         reading.close(); notes.close()
     }
 
@@ -278,11 +279,11 @@ private actor FailingPublicationStore: RecordStore {
     @Test func missingKnownRecordsAndCorruptSelectionFailClosed() async throws {
         let home = temporary(), keys = SoftwareKeys(), store = MemoryRecordStore()
         defer { try? FileManager.default.removeItem(at: home) }
-        let session = ColophonSession(configuration: configuration(home, store: store, keys: keys))
-        await session.create()
+        let session = SessionWorker(configuration: configuration(home, store: store, keys: keys))
+        _ = try await session.create()
         let missing = ColophonSession(configuration: configuration(home, store: MemoryRecordStore(), keys: keys))
         await missing.restore()
-        guard case .unavailable = missing.phase else { Issue.record("Selected library must not become empty"); return }
+        guard case .retry = missing.phase else { Issue.record("Selected library must not become empty"); return }
         try AtomicFile.write(Data("invalid".utf8), to: home.appendingPathComponent("session.json"))
         let corrupt = ColophonSession(configuration: configuration(home, store: store, keys: keys))
         await corrupt.restore()

@@ -31,10 +31,14 @@ internal class SessionWorker(
     /** Every record path merged into the open core; storage reads skip these. */
     private val merged = HashSet<String>()
     private val requestPaths = sortedSetOf<String>()
+    private val recordVersions = mutableMapOf<String, String>()
+    private val liveBytes = mutableMapOf<String, ByteArray>()
     internal val blobs = SessionBlobEngine(this)
     private val journalFile: File = File(configuration.privateHome, "session.json")
     private var acceptNewIdentity = false
     @Volatile private var closed = false
+    @Volatile internal var connectionGeneration: Long = 0
+        private set
     @Volatile private var relaySync: RelaySync? = null
 
     internal fun storage(): RecordStore {
@@ -47,10 +51,23 @@ internal class SessionWorker(
 
     fun watch(onChange: () -> Unit): AutoCloseable = storage().watch(onChange)
 
+    private var relayLiveVerifier: com.luff.colophon.ColophonLibrary? = null
     @Synchronized internal fun relay(): RelaySync? {
         relaySync?.let { return it }
         val relay = configuration.relay ?: return null
-        return RelaySync(storage(), relay.endpoint, relay.transport, File(configuration.privateHome, "relay.json"), configuration.namespaces)
+        return RelaySync(storage(), relay.endpoint, relay.transport, File(configuration.privateHome, "relay.json"), configuration.namespaces, verifyLive = { path, bytes ->
+            (relayLiveVerifier ?: throw SessionException.NotReady()).native.liveGeneration(path, bytes, java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS).toString())
+        }, validateAuthority = { records ->
+            try {
+                val verifier = com.luff.colophon.ColophonLibrary.open(records, keys)
+                relayLiveVerifier?.close()
+                relayLiveVerifier = verifier
+            }
+            catch (error: BindingException.InvalidData) {
+                if (error.detail.startsWith("Unsupported storage layout")) throw SessionLayoutException
+                throw error
+            }
+        })
             .also { relaySync = it }
     }
 
@@ -99,13 +116,13 @@ internal class SessionWorker(
         if (!configuration.migrationWriter && marker != null && MigrationMarker.isActive(marker)) {
             return empty(SessionPhase.Migrating)
         }
-        var stored = storage().paths().filter { RecordPath.listingIncludes(it, configuration.namespaces) }.toSet()
+        var stored = storage().paths(configuration.namespaces)
         if (stored.isEmpty() && journal.pending.isEmpty() && configuration.relay != null) {
             pullBeforeTrustingEmpty()
-            stored = storage().paths().filter { RecordPath.listingIncludes(it, configuration.namespaces) }.toSet()
+            stored = storage().paths(configuration.namespaces)
         }
         val available = stored + journal.pending.keys
-        if (!journal.knownPaths.filter { RecordPath.missingBlocks(it) }.all { it in available }) {
+        if (!journal.knownPaths.filter { RecordPath.missingBlocks(it) && RecordPath.listingIncludes(it, configuration.namespaces) }.all { it in available }) {
             throw StorageException.Unavailable("Previously observed library records are unavailable")
         }
         if (stored.isEmpty() && journal.pending.isEmpty()) {
@@ -114,12 +131,23 @@ internal class SessionWorker(
         }
         ensureIdentity()
         // Only records the open core has not seen are read: proportional to the change.
-        val fresh = if (opened) stored.filter { it !in merged } else stored.toList()
-        val incoming = storage().read(fresh).toMutableMap()
+        val versions = storage().versions(stored)
+        val fresh = if (opened) stored.filter { it !in merged || versions[it] == null || versions[it] != recordVersions[it] } else stored.toList()
+        val authorityPaths = fresh.filter { it.startsWith("authority/") }
+        val authority = storage().read(authorityPaths).toMutableMap()
+        if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
+        authority.putAll(journal.pending.filterKeys { it.startsWith("authority/") })
+        if (opened) { if (authority.isNotEmpty()) core.merge(authority) }
+        else { core.open(authority, keys); core.setReadScope(configuration.namespaces); opened = true; merged.clear(); requestPaths.clear() }
+        val contentPaths = fresh.filter { !it.startsWith("authority/") }
+        val incoming = storage().read(contentPaths).toMutableMap()
+        if (incoming.keys != contentPaths.toSet()) throw StorageException.Unavailable("Record download pending")
+        incoming.putAll(authority)
+        val observedLive = incoming.filterKeys { RecordPath.isReplaceable(it) }
         for ((path, data) in journal.pending) {
             val old = incoming[path]
-            if (old != null && !old.contentEquals(data)) throw StorageException.Conflict(path)
-            if (!opened || path !in merged) incoming[path] = data
+            if (old != null && !old.contentEquals(data) && !RecordPath.isReplaceable(path)) throw StorageException.Conflict(path)
+            if (!opened || path !in merged || RecordPath.isReplaceable(path)) incoming[path] = data
         }
         if (opened) {
             if (incoming.isNotEmpty()) core.merge(incoming)
@@ -136,7 +164,9 @@ internal class SessionWorker(
             merged.clear()
             requestPaths.clear()
         }
+        liveBytes.putAll(observedLive)
         track(incoming.keys)
+        recordVersions.putAll(versions)
         var snapshot = snapshot()
         if (journal.libraryID != null && journal.libraryID != snapshot.libraryID) {
             throw SessionException.DestinationChanged
@@ -231,6 +261,7 @@ internal class SessionWorker(
             throw SessionException.DestinationChanged
         }
         core.create(configuration)
+        core.setReadScope(configuration.namespaces)
         opened = true
         merged.clear()
         requestPaths.clear()
@@ -267,9 +298,7 @@ internal class SessionWorker(
                     persistDelta()
                 } catch (_: PendingPublication) {
                 }
-                return WriteReceipt.Queued to empty(
-                    SessionPhase.Unavailable("Committed write awaits confirmation; refresh to retry publication"),
-                )
+                return WriteReceipt.Queued to fresh.copy(phase = SessionPhase.Retry)
             }
             persistDelta()
             throw error
@@ -278,7 +307,7 @@ internal class SessionWorker(
             // Only the signed records of this write are copied and persisted.
             persistDelta(written.ifEmpty { null })
         } catch (_: PendingPublication) {
-            return WriteReceipt.Queued to empty(SessionPhase.Unavailable("Write queued for durable publication"))
+            return WriteReceipt.Queued to fresh.copy(phase = SessionPhase.Retry)
         }
         WriteReceipt.Saved(operation.id) to refreshLocked()
     }
@@ -308,11 +337,20 @@ internal class SessionWorker(
 
     private fun publish() {
         if (journal.pending.isEmpty()) return
-        storage().append(journal.pending)
+        storage().append(journal.pending.filterKeys { !RecordPath.isReplaceable(it) })
+        for ((path, bytes) in journal.pending.filterKeys { RecordPath.isReplaceable(it) }) {
+            val generation = core.liveGeneration(path, bytes)
+            val old = liveBytes[path]
+            val oldGeneration = old?.let { runCatching { core.liveGeneration(path, it) }.getOrNull() }
+            if (old != null && !old.contentEquals(bytes) && oldGeneration != null && oldGeneration >= generation) throw StorageException.Conflict(path)
+            if (!storage().replaceLive(path, liveBytes[path], bytes)) throw StorageException.Conflict(path)
+            liveBytes[path] = bytes
+        }
         val readback = storage().read(journal.pending.keys)
         val published = journal.pending.all { (path, bytes) -> readback[path]?.contentEquals(bytes) == true }
         if (!published) throw StorageException.Unavailable("Publication readback incomplete")
         journal.knownPaths.addAll(journal.pending.keys)
+        recordVersions.putAll(storage().versions(journal.pending.keys))
         journal.pending.clear()
         journal.save(journalFile)
     }
@@ -382,7 +420,9 @@ internal class SessionWorker(
         acceptNewIdentity = true
         core.close()
         try {
-            refreshLocked()
+            val snapshot = refreshLocked()
+            connectionGeneration += 1
+            snapshot
         } catch (error: Exception) {
             // The new request is already in the journal. Reverting the provider would
             // leave session.json between the old identity and the queued request.
@@ -392,6 +432,8 @@ internal class SessionWorker(
                 journal.signingPublicKey = previousSigning
                 journal.agreementPublicKey = previousAgreement
                 journal.memberID = previousMember
+            } else {
+                connectionGeneration += 1
             }
             opened = false
             last = null

@@ -1,4 +1,4 @@
-# Native bindings (0.2)
+# Native bindings (0.3)
 
 `colophon-ffi` wraps the public Rust `Library` API; it does not implement protocol rules or
 storage. `ColophonKit` is the Swift product. `sdk/kotlin` contains the JVM bindings and a local
@@ -10,7 +10,7 @@ namespace evidence, changes, and expected refusals have generated types.
 
 Install Xcode with the iOS and visionOS SDKs, select it with `xcode-select`, and use Swift 6.2+
 (the async facade uses `@concurrent`). The root `Package.swift` is named **ColophonSDK**
-and exports only 0.2 products. The 0.1 reference package and CLI live in `reference/swift/`.
+and exports only 0.3 products. The 0.1 reference package and CLI live in `reference/swift/`.
 The local binary artifact is ignored by Git and must be built before SwiftPM resolves the package.
 
 ```sh
@@ -84,7 +84,7 @@ targets: [
 
 In Xcode, remove the external SDK reference ending in `colophon` (retain the app's local
 Colophon reference), choose Add Local Package for `packages/ColophonSDK`, and attach only the
-0.2 products each target needs. Update any project generator's local package path too, regenerate
+0.3 products each target needs. Update any project generator's local package path too, regenerate
 it, then resolve packages and build the entire app graph. Relative paths are relative to the
 consumer manifest/project, so adjust them for an `apps/suite` project.
 
@@ -214,7 +214,7 @@ bash scripts/build-android.sh
 ```
 
 The script installs the two Rust targets, builds `arm64-v8a` and `x86_64` shared libraries
-with cargo-ndk (`-p 33`), and assembles `sdk/android/build/colophon-android-0.2.0.aar`.
+with cargo-ndk (`-p 33`), and assembles `sdk/android/build/colophon-android-0.3.0.aar`.
 Consuming apps must also declare `org.jetbrains.kotlin:kotlin-stdlib:2.2.21`,
 `net.java.dev.jna:jna:5.18.1@aar`, and `org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2`
 so JNA's Android `libjnidispatch` is packaged; a local AAR alone does not carry POM metadata.
@@ -235,8 +235,8 @@ Development uses `.binaryTarget(name: "ColophonFFI", path: "sdk/apple/ColophonFF
 After building and testing all slices, create the archive and checksum:
 
 ```sh
-(cd sdk/apple && zip -qry ColophonFFI-0.2.0.xcframework.zip ColophonFFI.xcframework)
-swift package compute-checksum sdk/apple/ColophonFFI-0.2.0.xcframework.zip
+(cd sdk/apple && zip -qry ColophonFFI-0.3.0.xcframework.zip ColophonFFI.xcframework)
+swift package compute-checksum sdk/apple/ColophonFFI-0.3.0.xcframework.zip
 ```
 
 Publish that exact archive as a release asset only after review, then replace the path target
@@ -274,7 +274,7 @@ checkpoint interfaces still need a native bridge before this adapter can consume
 `NativeLibrary.query(namespace:name:arguments:now:) -> JsonOutcome` is an additive read path.
 `Library.query(namespace:name:arguments:)` wraps it asynchronously. It calls core `Library::query`
 directly, requires read access, and cannot prepare or commit writes. This preserves the bounded
-0.2 query envelopes even when names such as podcast `episode`/`queue` also name operations.
+0.3 query envelopes even when names such as podcast `episode`/`queue` also name operations.
 The four typed domain products use this through `ColophonSession`; apps normally use their stores.
 
 ## Pure 0.1 migration bridge
@@ -318,3 +318,12 @@ verify the complete plaintext descriptor before certifying the full original. Th
 regression exercises publication, evidence, deterministic bindings, blob read/missing/corruption,
 and a reentrant callback. The Swift migration regression queries evidence through synchronized
 records and verifies source-unit crash/retry behavior.
+
+## 0.3 scoped replicas
+
+Session adapters call `NativeLibrary.setReadScope(namespaces)` after authority-only opening and before
+merging content. Low-level hosts that filter storage must do the same (or use Rust storage-engine
+`EngineOptions.namespaces`). The empty list means a complete library listing. Queries outside the
+selected scope are unavailable, and capped grants extending beyond that scope yield explicit
+`budgetScopeUnavailable` rejections: their grant-wide budget cannot safely be counted from a subset.
+This does not block unrelated writers or require reading sibling namespaces.

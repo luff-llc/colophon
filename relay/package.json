@@ -1,7 +1,7 @@
 {
   "name": "@colophon/relay",
-  "version": "0.2.0",
-  "description": "Colophon 0.2 reference relay: an untrusted, dependency-free HTTP exchange for immutable records",
+  "version": "0.3.0",
+  "description": "Colophon 0.3 reference relay: an untrusted, dependency-free HTTP exchange for intent, live state and blobs",
   "type": "module",
   "private": true,
   "license": "Apache-2.0",

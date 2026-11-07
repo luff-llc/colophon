@@ -1,11 +1,11 @@
-//! Pure, ordered 0.1 migration adapter. No legacy kinds enter the 0.2 reducer.
+//! Pure, ordered 0.1 migration adapter. No legacy kinds enter the 0.3 reducer.
 //!
 //! The verifier supplies exact signed-body digests and admission outcomes; the host
 //! archives source envelopes and persists every evidence entry. Apply returned commands
 //! in order as the importer, then call `bind_output` with actual signed destination IDs
 //! before importing the next source operation. Planned output keys are NOT operation IDs.
 //! Re-evaluating changed source admission requires a fresh source-prefix replay and host
-//! reconciliation against native 0.2 edits, never rewriting destination history.
+//! reconciliation against native 0.3 edits, never rewriting destination history.
 use super::*;
 
 /// A source record authenticated by the 0.1 reader, or an explicitly unresolved entry.
@@ -35,7 +35,7 @@ pub struct SourceOperation {
     /// `admitted` only after verification; all other dispositions are evidence-only.
     pub admission: String,
 }
-/// One proposed 0.2 write; host signs as importer, not the historical author.
+/// One proposed 0.3 write; host signs as importer, not the historical author.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportCommand {
@@ -43,7 +43,7 @@ pub struct ImportCommand {
     pub output_key: String,
     /// Stable zero-based child index within the source operation.
     pub child_index: usize,
-    /// Clean 0.2 kind.
+    /// Clean 0.3 kind.
     pub kind: String,
     /// Clean payload including explicitly historical `importSource` provenance.
     pub payload: Value,

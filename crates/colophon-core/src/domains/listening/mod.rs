@@ -54,6 +54,13 @@ pub struct PodcastsState {
     indexes: BTreeMap<String, BTreeSet<(String, String)>>,
     memberships: BTreeMap<String, Vec<(String, String)>>,
 }
+impl PodcastsState {
+    pub(crate) fn playback_revision_is(&self, episode: &str, revision: &str) -> bool {
+        self.episodes.get(episode).is_some_and(|row| {
+            row["positionRevision"] == revision || row["stateRevision"] == revision
+        })
+    }
+}
 impl Default for PodcastsState {
     fn default() -> Self {
         Self {

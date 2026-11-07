@@ -126,8 +126,10 @@ describe('reference relay', () => {
     assert.equal((await put(notes, Buffer.from('notes-op'))).status, 201);
     assert.equal((await put(listen, Buffer.from('listen-op'))).status, 201);
     assert.equal((await put(hist, Buffer.from('history-op'))).status, 201);
-    assert.equal((await put(slot, Buffer.from('live-1'), auth)).status, 201, 'state creates without If-None-Match');
-    assert.equal((await put(slot, Buffer.from('live-2'), auth)).status, 200, 'state replaces');
+    assert.equal((await put(slot, Buffer.from('live-1'))).status, 201);
+    assert.equal((await put(slot, Buffer.from('live-2'), auth)).status, 428, 'unconditional live replacement is forbidden');
+    assert.equal((await put(slot, Buffer.from('live-2'), { ...auth, 'if-match': `"${sha(Buffer.from('live-1'))}"` })).status, 200);
+    assert.equal((await put(slot, Buffer.from('stale'), { ...auth, 'if-match': `"${sha(Buffer.from('live-1'))}"` })).status, 412, 'stale CAS cannot overwrite');
     const got = await fetch(slot, { headers: auth });
     assert.equal(Buffer.from(await got.arrayBuffer()).toString(), 'live-2');
     const filtered = await (await fetch(`${relay.home}/changes?namespace=notes&limit=1000`, { headers: auth })).json();
@@ -138,7 +140,7 @@ describe('reference relay', () => {
     assert.ok(paths.some((p) => p.startsWith('authority/')));
   });
 
-  test('requests/ is the only mutable area', async () => {
+  test('requests/ supports unconditional replacement and deletion', async () => {
     const url = `${relay.home}/records/requests/member.json`;
     assert.equal((await put(url, Buffer.from('one'), auth)).status, 201);
     assert.equal((await put(url, Buffer.from('two'), auth)).status, 200);

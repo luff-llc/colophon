@@ -187,15 +187,15 @@ in this pure transformation module.
 
 New synthetic signed records and expected results:
 
-- `conformance/0.2/listening.podcasts.records.json`
-- `conformance/0.2/listening.podcasts.expected.json`
+- `conformance/0.3/listening.podcasts.records.json`
+- `conformance/0.3/listening.podcasts.expected.json`
 
 `tests/support/listening_vector.rs` generates the vector, checks stored bytes through a fresh
 replica, and is run from both `tests/domain_listening.rs` and the existing conformance test.
 The vector exercises all 17 specified query surfaces. JS smoke replays the same records through
 WASM and generated tools, including episodeDetail/getQueue aliases.
 
-The existing `conformance/0.2/expected.json` was regenerated only for the richer podcast state
+The existing `conformance/0.3/expected.json` was regenerated only for the richer podcast state
 (component heads, availability, claimed update date, following alias and additional collections).
 Existing signed library bytes, other namespaces and ledger outputs are unchanged. One existing
 protocol assertion now expects the additional passive-regression conflict. Original ledger

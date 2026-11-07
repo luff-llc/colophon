@@ -43,7 +43,7 @@ class NamespaceStore<Query, Result>(
         _state.value = State.Warming
         return try {
             val result = withContext(Dispatchers.Default) { evaluate(query, data) }
-            if (session.observedRevision.context != lease || session.phase.value != SessionPhase.Ready ||
+            if (session.observedRevision.context != lease || !session.hasUsableContent ||
                 (session.namespaceRevisions.value[namespace] ?: 0u) != observed
             ) {
                 throw SessionException.StaleRevision

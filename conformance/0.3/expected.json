@@ -248,6 +248,18 @@
       "text": "Laptop updated playback."
     },
     {
+      "actor": "78738c04a053a0cf86b3c95080d463c3",
+      "actorLabel": "Laptop",
+      "at": "2026-11-04T12:00:00.000Z",
+      "event": "wrote",
+      "kind": "position",
+      "namespace": "listening.podcasts",
+      "origin": "person",
+      "sequence": 13,
+      "subject": "fef19f28d102c34c7c6dcd20fdb54804",
+      "text": "Laptop updated playback."
+    },
+    {
       "actor": "9da125c7e34ff473e36a70db162a481d",
       "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
@@ -255,7 +267,7 @@
       "kind": "editNote",
       "namespace": "notes",
       "origin": "ai",
-      "sequence": 13,
+      "sequence": 14,
       "subject": "16656bd5bcd62e4f0d24d8b011ced8f0",
       "text": "Research agent edited a note."
     },
@@ -267,7 +279,7 @@
       "kind": "addNote",
       "namespace": "notes",
       "origin": "ai",
-      "sequence": 14,
+      "sequence": 15,
       "subject": "29c00c4510c9c076bf340fe5e7a1edb0",
       "text": "Research agent added a note."
     },
@@ -276,7 +288,7 @@
       "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
       "event": "held",
-      "sequence": 15,
+      "sequence": 16,
       "subject": "8b81e631660497da970c3f433b0f88f5",
       "text": "Research agent has an update waiting: it arrived after access ended and was not preserved."
     },
@@ -285,7 +297,7 @@
       "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
       "event": "refused",
-      "sequence": 16,
+      "sequence": 17,
       "subject": "f408e5dc3cbaf3fc8b72d614e6e328d6",
       "text": "Research agent's update is refused: its author does not have permission here."
     },
@@ -294,7 +306,7 @@
       "actorLabel": "Research agent",
       "at": "2026-11-04T12:00:00.000Z",
       "event": "held",
-      "sequence": 17,
+      "sequence": 18,
       "subject": "f490860c3e2d1a3148c2d2b683444682",
       "text": "Research agent has an update waiting: it arrived after access ended and was not preserved."
     },
@@ -306,7 +318,7 @@
       "kind": "createNotebook",
       "namespace": "notes",
       "origin": "person",
-      "sequence": 18,
+      "sequence": 19,
       "subject": "f4990eef9818b56bc7f6360005ad62a4",
       "text": "Owner started a notebook."
     },
@@ -318,7 +330,7 @@
       "kind": "editMetadata",
       "namespace": "reading.saved",
       "origin": "person",
-      "sequence": 19,
+      "sequence": 20,
       "subject": "26bd59da7bc552eea6047ddf4c0fbfca",
       "text": "Reader app edited a link."
     },
@@ -330,7 +342,7 @@
       "kind": "setState",
       "namespace": "reading.saved",
       "origin": "person",
-      "sequence": 20,
+      "sequence": 21,
       "subject": "ac18bba7c58f67b17b35ebe547f003cf",
       "text": "Reader app updated reading progress."
     },
@@ -342,7 +354,7 @@
       "kind": "capture",
       "namespace": "reading.saved",
       "origin": "person",
-      "sequence": 21,
+      "sequence": 22,
       "subject": "c3c159a4559222dbdae48be6ec420681",
       "text": "Reader app saved a link."
     },
@@ -351,7 +363,7 @@
       "actorLabel": "Owner",
       "at": "2026-11-04T12:01:00.000Z",
       "event": "revoked",
-      "sequence": 22,
+      "sequence": 23,
       "subject": "9da125c7e34ff473e36a70db162a481d",
       "text": "Owner ended Research agent's access. Its 1 note stays; what it already read can't be unread."
     },
@@ -360,7 +372,7 @@
       "actorLabel": "Owner",
       "at": "2026-11-04T12:01:00.000Z",
       "event": "rekeyed",
-      "sequence": 23,
+      "sequence": 24,
       "subject": "9da125c7e34ff473e36a70db162a481d",
       "text": "Notes was rekeyed without Research agent."
     },
@@ -369,7 +381,7 @@
       "actorLabel": "Owner",
       "at": "2026-11-04T12:01:00.000Z",
       "event": "rekeyed",
-      "sequence": 24,
+      "sequence": 25,
       "text": "Listening and reading were rekeyed."
     },
     {
@@ -380,7 +392,7 @@
       "kind": "capture",
       "namespace": "reading.saved",
       "origin": "person",
-      "sequence": 25,
+      "sequence": 26,
       "subject": "85afd7aefda604f4898c6ec4dd66e195",
       "text": "Owner saved a link."
     },
@@ -389,7 +401,7 @@
       "actorLabel": "Recovery identity",
       "at": "2026-11-04T12:01:00.000Z",
       "event": "granted",
-      "sequence": 26,
+      "sequence": 27,
       "subject": "09bfc6b30c41d374ed1de2deafe12a04",
       "text": "Recovery restored control of this library and access to its past."
     },
@@ -398,7 +410,7 @@
       "actorLabel": "Recovery identity",
       "at": "2026-11-04T12:01:00.000Z",
       "event": "rekeyed",
-      "sequence": 27,
+      "sequence": 28,
       "text": "Listening, notes and reading were rekeyed without the former owner."
     }
   ],
@@ -521,6 +533,19 @@
         {
           "author": "78738c04a053a0cf86b3c95080d463c3",
           "authorLabel": "Laptop",
+          "clock": 3,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "fef19f28d102c34c7c6dcd20fdb54804",
+          "kind": "position",
+          "origin": "person",
+          "payload": {
+            "id": "episode",
+            "seconds": 42
+          }
+        },
+        {
+          "author": "78738c04a053a0cf86b3c95080d463c3",
+          "authorLabel": "Laptop",
           "clock": 4,
           "created": "2026-11-04T12:00:00.000Z",
           "id": "b686fd0d2a3eeb56ef43bc8541efed47",
@@ -543,15 +568,19 @@
           {
             "author": "78738c04a053a0cf86b3c95080d463c3",
             "authorLabel": "Laptop",
-            "clock": 2,
+            "clock": 3,
             "id": "episode",
             "metadataAvailable": true,
             "metadataRevision": "cd591eb868b5f8bfefdaff6340f85cc0",
             "origin": "person",
-            "revision": "cd591eb868b5f8bfefdaff6340f85cc0",
+            "positionBaseline": false,
+            "positionRevision": "fef19f28d102c34c7c6dcd20fdb54804",
+            "revision": "fef19f28d102c34c7c6dcd20fdb54804",
+            "seconds": 42,
             "show": "show",
             "title": "An episode",
-            "transcriptExcerpt": "A short transcript excerpt."
+            "transcriptExcerpt": "A short transcript excerpt.",
+            "updated": "2026-11-04T12:00:00.000Z"
           }
         ],
         "invalid": [],

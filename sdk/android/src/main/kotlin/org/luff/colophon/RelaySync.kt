@@ -37,6 +37,8 @@ class RelaySync(
     /** Private container, never the shared library. Without it each process relists the slot. */
     private val stateFile: File? = null,
     private val namespaces: List<String> = emptyList(),
+    private val verifyLive: ((String, ByteArray) -> ULong)? = null,
+    private val validateAuthority: ((Map<String, ByteArray>) -> Unit)? = null,
 ) {
     data class Report(
         val pulled: Int = 0,
@@ -62,6 +64,7 @@ class RelaySync(
     @Volatile var hasListed = false
         private set
 
+    private val stateScope get() = endpoint.url + "|colophon/relay/3|" + namespaces.sorted().joinToString(",")
     private val remoteLog: File? get() = stateFile?.let { File(it.parentFile, it.nameWithoutExtension + "-remote.log") }
 
     /** True when the relay's listing, as last seen, holds [path] (a record or blob chunk). */
@@ -75,7 +78,7 @@ class RelaySync(
         loadState()
         val listed = list()
         var reads = 0
-        val localPaths = local.paths()
+        val localPaths = local.syncPaths(namespaces)
         val genesis = "authority/00000001.json"
         val theirs = remote[genesis]
         if (genesis in localPaths && theirs != null && (!genesisChecked || genesis in listed)) {
@@ -88,27 +91,24 @@ class RelaySync(
         var pushed = 0
         var pushedBlobs = 0
         val pulledPaths = mutableSetOf<String>()
-        val missing = remote.keys.filter { path -> path !in localPaths && validRecord(path) }.sortedWith(PULL_ORDER)
+        var missing = remote.keys.filter { path -> path !in localPaths && validRecord(path) && !RecordPath.isReplaceable(path) }.sortedWith(PULL_ORDER)
+        validateAuthority?.let { validate ->
+            val authorityMissing = missing.filter { it.startsWith("authority/") }
+            val fetched = authorityMissing.associateWith { path ->
+                val bytes = client.get(path) ?: throw RelayException.ProtocolViolation("Authority download pending")
+                if (sha256Hex(bytes) != remote[path]) throw RelayException.ProtocolViolation("Authority digest mismatch")
+                bytes
+            }
+            if (fetched.isNotEmpty()) { local.append(fetched); pulledPaths.addAll(fetched.keys); pulled += fetched.size }
+            val authority = local.read(localPaths.filter { it.startsWith("authority/") } + authorityMissing)
+            reads += authority.size
+            if (authority.isNotEmpty()) validate(authority)
+            missing = missing.filterNot { it.startsWith("authority/") }
+        }
         for (batch in missing.chunked(256)) {
             val fetched = parallel(batch) { path -> path to client.get(path) }
                 .mapNotNull { (path, bytes) ->
                     // Listed but gone (a withdrawn request, or a racing relay rebuild): skip it.
-                    bytes ?: return@mapNotNull null
-                    if (sha256Hex(bytes) != remote[path]) {
-                        throw RelayException.ProtocolViolation("Record bytes do not match the listed digest: $path")
-                    }
-                    path to bytes
-                }.toMap()
-            if (fetched.isNotEmpty()) {
-                local.append(fetched)
-                pulledPaths.addAll(fetched.keys)
-                pulled += fetched.size
-            }
-        }
-        val liveChanged = listed.filter { RecordPath.isReplaceable(it) && it in localPaths && it !in pulledPaths }
-        if (liveChanged.isNotEmpty()) {
-            val fetched = parallel(liveChanged) { path -> path to client.get(path) }
-                .mapNotNull { (path, bytes) ->
                     bytes ?: return@mapNotNull null
                     if (sha256Hex(bytes) != remote[path]) {
                         throw RelayException.ProtocolViolation("Record bytes do not match the listed digest: $path")
@@ -153,7 +153,7 @@ class RelaySync(
                 }
             }
         }
-        val unpushed = localPaths.filter { it !in remote }.sortedWith(PULL_ORDER)
+        val unpushed = localPaths.filter { it !in remote && !RecordPath.isReplaceable(it) }.sortedWith(PULL_ORDER)
         for (group in unpushed.chunked(64)) {
             val records = local.read(group)
             reads += records.size
@@ -169,6 +169,24 @@ class RelaySync(
                         RelayClient.PutResult.CONFLICT -> conflicts += triple.first
                     }
                 }
+            }
+        }
+        verifyLive?.let { verify ->
+            val slots = (localPaths + remote.keys).filter { RecordPath.isReplaceable(it) }.sorted()
+            for (path in slots) {
+                val mine = local.read(listOf(path))[path]
+                if (mine != null) reads += 1
+                if (mine != null && sha256Hex(mine) == remote[path]) continue
+                val theirs = client.get(path)
+                if (theirs != null && sha256Hex(theirs) != remote[path]) continue
+                val mineGeneration = mine?.let { runCatching { verify(path, it) }.getOrNull() }
+                val theirGeneration = theirs?.let { runCatching { verify(path, it) }.getOrNull() }
+                if (theirs != null && theirGeneration != null && (mineGeneration == null || theirGeneration > mineGeneration)) {
+                    if (local.replaceLive(path, mine, theirs)) pulled += 1
+                } else if (mine != null && mineGeneration != null && (theirGeneration == null || mineGeneration > theirGeneration)) {
+                    val result = client.putIfAbsent(path, mine, theirs?.let(::sha256Hex))
+                    if (result != RelayClient.PutResult.CONFLICT) { remember(path, sha256Hex(mine)); pushed += 1 }
+                } else if (mineGeneration != null && theirs != null && !mine!!.contentEquals(theirs)) conflicts += path
             }
         }
         saveState()
@@ -278,7 +296,7 @@ class RelaySync(
         // A corrupt or foreign state file only costs a full relisting.
         try {
             val root = JsonParser(AtomicFile.read(file, AtomicFile.MAX_JOURNAL_BYTES).decodeToString()).parseValue() as Json.Obj
-            if (root.string("relay") != endpoint.url) return
+            if (root.string("relay") != stateScope) return
             cursor = root.string("cursor")
             conflicts.addAll(root.stringList("conflicts"))
             val legacy = root.fields["remote"]
@@ -337,7 +355,7 @@ class RelaySync(
             unsaved.clear()
         }
         val text = buildString {
-            append("{\"relay\":").append(jsonString(endpoint.url))
+            append("{\"relay\":").append(jsonString(stateScope))
             append(",\"cursor\":").append(cursor?.let { jsonString(it) } ?: "null")
             append(",\"conflicts\":[").append(conflicts.joinToString(",") { jsonString(it) }).append("]}")
         }

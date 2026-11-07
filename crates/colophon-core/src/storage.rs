@@ -13,6 +13,12 @@ use std::{
 pub trait RecordSource {
     /// Fetch the exact stored envelope, including its original body bytes.
     fn read(&self, path: &str) -> Result<Vec<u8>>;
+    /// Provider content-version token (etag, inode/mtime version, etc.). A changed token
+    /// invalidates cached verification even when bytes happen to be identical. None means
+    /// the provider has no version contract; hosts must audit immutable records explicitly.
+    fn content_version(&self, _path: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Lazy blob fetch. Override to distinguish missing hydration from inaccessible storage.
     fn read_blob(&self, path: &str) -> Result<crate::blobs::BlobRead> {
         self.read(path).map(crate::blobs::BlobRead::Available)
@@ -32,6 +38,9 @@ impl RecordSource for Records {
     }
 }
 impl<T: RecordSource + ?Sized> RecordSource for Arc<T> {
+    fn content_version(&self, path: &str) -> Result<Option<String>> {
+        (**self).content_version(path)
+    }
     fn read_blob(&self, path: &str) -> Result<crate::blobs::BlobRead> {
         (**self).read_blob(path)
     }
@@ -115,6 +124,7 @@ struct Entry {
     author_key: [u8; 32],
     /// Namespace epoch from the verified header; zero until the header verifies.
     epoch: u64,
+    version: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct Projection {
@@ -129,6 +139,7 @@ struct CacheMeta {
     version: u32,
     storage_version: u32,
     layout: u32,
+    namespaces: Vec<String>,
     reducer_schema: u32,
     identity: PublicIdentity,
     authority: Authority,
@@ -197,76 +208,81 @@ impl<S: RecordSource> Engine<S> {
                 && !crate::protocol::is_history(p)
         });
         validate_listing(&mut listing)?;
-        let restored = checkpoint.map(|bytes| decode_cache(bytes, &options, &me, &listing));
+        let restored =
+            checkpoint.map(|bytes| decode_cache(bytes, &options, &me, &listing, &source));
         let mut integrity_baseline = Vec::new();
-        let (library, entries, pending, counts, rejections, unlocked, mode, reads) = match restored
-        {
-            Some(Ok(DecodedCache {
-                meta,
-                entries,
-                pending: Ok(pending),
-            })) => {
-                let counts = meta
-                    .projections
-                    .iter()
-                    .map(|(ns, p)| (ns.clone(), p.count))
-                    .collect();
-                let mut library = empty_library(meta.authority, me);
-                library.admission.clocks = meta.clocks;
-                library.admission.namespace_tails = meta.namespace_tails;
-                library.admission.author_tails = meta.author_tails;
-                library.admission.spent = meta.spent;
-                for (ns, p) in meta.projections {
-                    let mut state = Namespace::new(&ns);
-                    state.state = p.state;
-                    state.clock = p.clock;
-                    state.revision = p.revision;
-                    state.hashes = vec![p.digest];
-                    library.namespaces.insert(ns, state);
-                }
-                (
-                    library,
+        let (mut library, entries, pending, counts, rejections, unlocked, mode, reads) =
+            match restored {
+                Some(Ok(DecodedCache {
+                    meta,
                     entries,
-                    pending,
-                    counts,
-                    meta.rejections,
-                    meta.unlocked,
-                    OpenMode::VerifiedPrefix,
-                    0,
-                )
-            }
-            invalid => {
-                let mode = match invalid {
-                    Some(Ok(DecodedCache {
-                        entries,
-                        pending: Err(e),
-                        ..
-                    })) => {
-                        integrity_baseline = entries;
-                        OpenMode::Invalidated(e.0)
+                    pending: Ok(pending),
+                })) => {
+                    let counts = meta
+                        .projections
+                        .iter()
+                        .map(|(ns, p)| (ns.clone(), p.count))
+                        .collect();
+                    let mut library = empty_library(meta.authority, me);
+                    library.admission.clocks = meta.clocks;
+                    library.admission.namespace_tails = meta.namespace_tails;
+                    library.admission.author_tails = meta.author_tails;
+                    library.admission.spent = meta.spent;
+                    for (ns, p) in meta.projections {
+                        let mut state = Namespace::new(&ns);
+                        state.state = p.state;
+                        state.clock = p.clock;
+                        state.revision = p.revision;
+                        state.hashes = vec![p.digest];
+                        library.namespaces.insert(ns, state);
                     }
-                    Some(Err(e)) => OpenMode::Invalidated(e.0),
-                    _ => OpenMode::FullVerification,
-                };
-                let (library, reads) = read_authority(
-                    &source,
-                    &listing,
-                    me,
-                    &options.library_id,
-                    &integrity_baseline,
-                )?;
-                (
-                    library,
-                    Vec::new(),
-                    listing.clone(),
-                    BTreeMap::new(),
-                    BTreeMap::new(),
-                    BTreeSet::new(),
-                    mode,
-                    reads,
-                )
-            }
-        };
+                    (
+                        library,
+                        entries,
+                        pending,
+                        counts,
+                        meta.rejections,
+                        meta.unlocked,
+                        OpenMode::VerifiedPrefix,
+                        0,
+                    )
+                }
+                invalid => {
+                    let mode = match invalid {
+                        Some(Ok(DecodedCache {
+                            entries,
+                            pending: Err(e),
+                            ..
+                        })) => {
+                            if e.0 == "Checkpoint record missing from listing" {
+                                return Err(e);
+                            }
+                            integrity_baseline = entries;
+                            OpenMode::Invalidated(e.0)
+                        }
+                        Some(Err(e)) => OpenMode::Invalidated(e.0),
+                        _ => OpenMode::FullVerification,
+                    };
+                    let (library, reads) = read_authority(
+                        &source,
+                        &listing,
+                        me,
+                        &options.library_id,
+                        &integrity_baseline,
+                    )?;
+                    (
+                        library,
+                        Vec::new(),
+                        listing.clone(),
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                        BTreeSet::new(),
+                        mode,
+                        reads,
+                    )
+                }
+            };
+        library.read_scope = options.namespaces.clone();
         let mut authenticated =
             AuthenticatedIds::with_capacity_and_hasher(entries.len(), Default::default());
         for entry in &entries {
@@ -422,6 +438,10 @@ impl<S: RecordSource> Engine<S> {
     /// Apply an explicit host delta of persisted immutable paths without rescanning the listing.
     /// Use refresh for removals/full listings. Replayed paths are checked for byte equality.
     pub fn apply_paths(&mut self, mut paths: Vec<String>) -> Result<ChangeSummary> {
+        paths.retain(|p| {
+            crate::protocol::listing_includes(p, &self.options.namespaces)
+                && !crate::protocol::is_history(p)
+        });
         self.check_ready()?;
         validate_listing(&mut paths)?;
         let result = self.apply_paths_inner(paths);
@@ -493,7 +513,21 @@ impl<S: RecordSource> Engine<S> {
             .iter()
             .map(|(ns, n)| (ns.clone(), n.revision))
             .collect();
-        let difference = compare_listing(&self.entries, &listing);
+        let difference = compare_listing(&self.entries, &listing).and_then(|pending| {
+            for entry in &self.entries {
+                if !crate::protocol::is_replaceable(&entry.path)
+                    && self.source.content_version(&entry.path)? != entry.version
+                {
+                    return Err(Error("Provider content version changed".into()));
+                }
+            }
+            Ok(pending)
+        });
+        if let Err(error) = &difference {
+            if error.0 == "Checkpoint record missing from listing" {
+                return Err(error.clone());
+            }
+        }
         self.listing = listing;
         match difference {
             Ok(pending) => self.pending = pending,
@@ -545,6 +579,7 @@ impl<S: RecordSource> Engine<S> {
             }
         }
         self.library = library;
+        self.library.read_scope = self.options.namespaces.clone();
         self.generation += 1;
         self.mode = OpenMode::Invalidated(reason.into());
         self.library.admission = Admission::default();
@@ -578,7 +613,16 @@ impl<S: RecordSource> Engine<S> {
         // Parse numeric clocks once rather than on every sorting comparison.
         let mut paths: Vec<_> = std::mem::take(&mut self.pending)
             .into_iter()
-            .map(|path| (path_order(&path).0, path))
+            .map(|path| {
+                (
+                    if crate::protocol::is_replaceable(&path) {
+                        u64::MAX
+                    } else {
+                        path_order(&path).0
+                    },
+                    path,
+                )
+            })
             .collect();
         paths.sort_unstable_by(|(a, p), (b, q)| {
             a.cmp(b).then_with(|| path_order(p).cmp(&path_order(q)))
@@ -628,6 +672,7 @@ impl<S: RecordSource> Engine<S> {
                     flags: 0,
                     author_key: [0; 32],
                     epoch: 0,
+                    version: self.source.content_version(path)?,
                 };
                 check_expected(&self.integrity_baseline, path, &entry.digest)?;
                 if path.starts_with("history/") {
@@ -668,7 +713,13 @@ impl<S: RecordSource> Engine<S> {
                                 if let Ok(at) =
                                     self.entries.binary_search_by(|e| e.path.as_str().cmp(path))
                                 {
-                                    if self.entries[at].digest == entry.digest {
+                                    if self.entries[at].digest == entry.digest
+                                        && self
+                                            .library
+                                            .live
+                                            .values()
+                                            .any(|j| j.header.meta.id == header.meta.id)
+                                    {
                                         continue;
                                     }
                                 }
@@ -741,19 +792,27 @@ impl<S: RecordSource> Engine<S> {
                     self.stats.payloads_decrypted += 1;
                 }
                 let meta = &j.header.meta;
-                let mut status = Library::judge(
+                let mut status = if !Library::budget_scope_complete(
                     &self.library.authority,
-                    meta,
-                    &j.digest,
-                    &mut self.library.admission.spent,
-                    self.library
-                        .admission
-                        .clocks
-                        .get(&meta.namespace)
-                        .copied()
-                        .unwrap_or(0),
-                    j.from_live_slot,
-                );
+                    &self.options.namespaces,
+                    &meta.author,
+                ) {
+                    Status::Refused("budgetScopeUnavailable".into())
+                } else {
+                    Library::judge(
+                        &self.library.authority,
+                        meta,
+                        &j.digest,
+                        &mut self.library.admission.spent,
+                        self.library
+                            .admission
+                            .clocks
+                            .get(&meta.namespace)
+                            .copied()
+                            .unwrap_or(0),
+                        j.from_live_slot,
+                    )
+                };
                 if j.from_live_slot
                     && status == Status::Admitted
                     && self
@@ -803,6 +862,31 @@ impl<S: RecordSource> Engine<S> {
                     &meta.author,
                     &tail,
                 );
+                if j.from_live_slot {
+                    if j.status == Status::Admitted && j.operation.is_some() {
+                        let stamp = j.header.live.as_ref().expect("verified live stamp");
+                        let key = (
+                            meta.author.clone(),
+                            meta.namespace.clone(),
+                            stamp.slot.clone(),
+                        );
+                        if self
+                            .library
+                            .live
+                            .get(&key)
+                            .is_none_or(|old| old.header.meta.clock <= meta.clock)
+                        {
+                            self.library
+                                .namespaces
+                                .entry(meta.namespace.clone())
+                                .or_insert_with(|| Namespace::new(&meta.namespace))
+                                .revision += 1;
+                            self.library.live.insert(key, j);
+                        }
+                    }
+                    new_entries.push(entry);
+                    continue;
+                }
                 let state = self
                     .library
                     .namespaces
@@ -915,15 +999,6 @@ impl<S: RecordSource> Engine<S> {
             self.entries.partition_point(|entry| entry.path <= *path)
         });
         self.integrity_baseline = Vec::new();
-        let mut live_touched = BTreeSet::new();
-        self.library.apply_live(&mut live_touched);
-        for ns in live_touched {
-            self.library
-                .namespaces
-                .entry(ns.clone())
-                .or_insert_with(|| Namespace::new(&ns))
-                .revision += 1;
-        }
         // Authority bytes were retained only to check the initial read against this batch.
         // Parsed authority and exact digest indexes suffice between host reads.
         self.library.records.clear();
@@ -978,6 +1053,7 @@ impl<S: RecordSource> Engine<S> {
             version: CACHE_VERSION,
             storage_version: STORAGE_VERSION,
             layout: self.library.authority.layout,
+            namespaces: self.options.namespaces.clone(),
             reducer_schema: domain::REDUCER_SCHEMA,
             identity: self.library.me.clone(),
             authority: self.library.authority.clone(),
@@ -1003,6 +1079,12 @@ impl<S: RecordSource> Engine<S> {
             output.push(entry.flags);
             output.extend(entry.author_key);
             output.extend(entry.epoch.to_le_bytes());
+            if let Some(version) = &entry.version {
+                put_length(&mut output, version.len() + 1)?;
+                output.extend_from_slice(version.as_bytes());
+            } else {
+                put_length(&mut output, 0)?;
+            }
         }
         output.extend(cache_tag(&self.options.checkpoint_key, &output)?);
         Ok(output)
@@ -1160,6 +1242,24 @@ impl<S: RecordSource> Engine<S> {
                 break;
             }
         }
+        for j in self
+            .library
+            .live
+            .values()
+            .filter(|j| j.header.meta.namespace == namespace)
+        {
+            if let Some(op) = &j.operation {
+                if !view
+                    .admitted
+                    .iter()
+                    .any(|old| old.id == op.id && old.author == op.author)
+                {
+                    view.admitted.push(op.clone());
+                }
+            }
+        }
+        view.admitted
+            .sort_by(|a, b| (a.clock, &a.author, &a.id).cmp(&(b.clock, &b.author, &b.id)));
         let mut rejections: Vec<_> = self
             .rejections
             .iter()
@@ -1313,6 +1413,7 @@ fn empty_library(authority: Authority, me: PublicIdentity) -> Library {
     let verifiers = Arc::new(Verifiers::new(&authority));
     Library {
         records: Records::new(),
+        read_scope: Vec::new(),
         authority,
         me,
         keys: BTreeMap::new(),
@@ -1403,55 +1504,39 @@ fn validate_listing(listing: &mut [String]) -> Result<()> {
     )
 }
 fn compare_listing(entries: &[Entry], listing: &[String]) -> Result<Vec<String>> {
-    let mut index = 0;
+    // Both inputs are sorted. A merge walk keeps unchanged opens linear in index size,
+    // while checking every missing immutable path before allowing authority invalidation.
     let mut pending = Vec::new();
+    let mut previous = entries.iter().peekable();
+    let mut authority_changed = false;
     for path in listing {
-        if crate::protocol::is_history(path) {
-            continue;
-        }
-        while entries
-            .get(index)
-            .is_some_and(|e| e.path.as_str() < path.as_str() && !listing_requires(&e.path, listing))
-        {
-            index += 1;
-        }
-        if entries.get(index).is_some_and(|e| e.path == *path) {
-            index += 1;
-        } else {
+        while previous.peek().is_some_and(|entry| entry.path < *path) {
+            let entry = previous.next().expect("peeked entry");
             ensure(
-                entries
-                    .get(index)
-                    .is_none_or(|e| e.path.as_str() > path.as_str()),
+                crate::protocol::is_replaceable(&entry.path),
                 "Checkpoint record missing from listing",
             )?;
-            ensure(!path.starts_with("authority/"), "Authority listing changed")?;
+        }
+        if previous.peek().is_some_and(|entry| entry.path == *path) {
+            previous.next();
+            if crate::protocol::is_replaceable(path) {
+                pending.push(path.clone());
+            }
+        } else {
+            authority_changed |= path.starts_with("authority/");
             pending.push(path.clone());
         }
     }
-    while index < entries.len() {
+    for entry in previous {
         ensure(
-            !listing_requires(&entries[index].path, listing),
+            crate::protocol::is_replaceable(&entry.path),
             "Checkpoint record missing from listing",
         )?;
-        index += 1;
     }
+    ensure(!authority_changed, "Authority listing changed")?;
     Ok(pending)
 }
-fn listing_requires(path: &str, listing: &[String]) -> bool {
-    if crate::protocol::is_replaceable(path) || crate::protocol::is_history(path) {
-        return false;
-    }
-    match crate::protocol::path_scope(path) {
-        Some(crate::protocol::PathScope::Namespace(ns)) => listing.iter().any(|p| {
-            matches!(
-                crate::protocol::path_scope(p),
-                Some(crate::protocol::PathScope::Namespace(other)) if other == ns
-            )
-        }),
-        Some(crate::protocol::PathScope::Always | crate::protocol::PathScope::Unknown) => true,
-        None => listing.binary_search(&path.to_string()).is_ok(),
-    }
-}
+
 fn update_tail(
     map: &mut BTreeMap<String, (u64, String, String)>,
     name: &str,
@@ -1529,11 +1614,12 @@ struct DecodedCache {
     entries: Vec<Entry>,
     pending: Result<Vec<String>>,
 }
-fn decode_cache(
+fn decode_cache<S: RecordSource>(
     bytes: &[u8],
     options: &EngineOptions,
     identity: &PublicIdentity,
     listing: &[String],
+    source: &S,
 ) -> Result<DecodedCache> {
     ensure(bytes.len() >= 40, "Truncated checkpoint")?;
     let (body, tag) = bytes.split_at(bytes.len() - 32);
@@ -1550,6 +1636,8 @@ fn decode_cache(
         meta.version == CACHE_VERSION
             && meta.storage_version == STORAGE_VERSION
             && meta.layout == meta.authority.layout
+            && meta.layout <= crate::protocol::LAYOUT
+            && meta.namespaces == options.namespaces
             && meta.reducer_schema == domain::REDUCER_SCHEMA
             && meta.identity == *identity
             && meta.authority.id == options.library_id,
@@ -1586,6 +1674,18 @@ fn decode_cache(
             flags,
             author_key,
             epoch: u64::from_le_bytes(epoch),
+            version: {
+                let length = reader.length()?;
+                if length == 0 {
+                    None
+                } else {
+                    Some(
+                        std::str::from_utf8(reader.take(length - 1)?)
+                            .map_err(|_| Error("Invalid provider version".into()))?
+                            .to_owned(),
+                    )
+                }
+            },
         });
     }
     ensure(reader.0.is_empty(), "Trailing checkpoint bytes")?;
@@ -1593,7 +1693,16 @@ fn decode_cache(
         entries.windows(2).all(|p| p[0].path < p[1].path),
         "Unsorted checkpoint index",
     )?;
-    let pending = compare_listing(&entries, listing);
+    let pending = compare_listing(&entries, listing).and_then(|pending| {
+        for entry in &entries {
+            if !crate::protocol::is_replaceable(&entry.path)
+                && source.content_version(&entry.path)? != entry.version
+            {
+                return Err(Error("Provider content version changed".into()));
+            }
+        }
+        Ok(pending)
+    });
     Ok(DecodedCache {
         meta,
         entries,

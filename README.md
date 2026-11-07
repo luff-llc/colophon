@@ -17,6 +17,10 @@ Swift reference implementation in `reference/swift/`. The root Swift package is 
 with the Rust-backed 0.3 products under `swift/`. In LUFF's Marginalia repository,
 "Colophon 0.2" names the Swift layout-2 step whose design 0.3 absorbs.
 
+0.3 separates immutable intent from replaceable playback state, scopes operation listings by
+namespace, and adds an authenticated layout barrier and explicit session readiness. See the
+[0.3 handoff](docs/handoff-v03.md) and [performance results](docs/performance.md).
+
 ## Try it
 
 The fastest way to see Colophon: the playground runs the real 0.3 Rust core as
@@ -180,7 +184,7 @@ Colophon 0.1 is the protocol baseline, and this is its reference implementation,
 LUFF's apps. It is a preview, not yet a stable SDK:
 
 - **Apple platforms only** for now (macOS 14, iOS 17, visionOS 26). The kernel uses only
-  primitives other platforms provide. The 0.2 Rust/wasm implementation above is separate.
+  primitives other platforms provide. The 0.3 Rust/wasm implementation above is separate.
 - **`ColophonSaved` is a subset of `reading.saved`.** It folds capture, state and metadata.
   Deletion and the reading extensions (content, feeds, annotations, browser checkpoints) are
   kept in history but not folded yet, so a shelf here can still list a deleted item.

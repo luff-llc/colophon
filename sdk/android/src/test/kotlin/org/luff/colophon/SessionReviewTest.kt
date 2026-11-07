@@ -202,7 +202,7 @@ class SessionReviewTest {
             session.restore()
             assertTrue(
                 "unreadable library must not look empty: ${session.phase.value}",
-                session.phase.value is SessionPhase.Unavailable,
+                session.phase.value == SessionPhase.Retry,
             )
             assertFalse(session.phase.value is SessionPhase.NoLibrary)
         } finally {
@@ -240,7 +240,7 @@ class SessionReviewTest {
         owner.refresh()
         owner.approve(owner.requests.value.first(), GrantOptions(null, null, null, 0uL))
         budget.refresh()
-        assertEquals(SessionPhase.Ready, budget.phase.value)
+        assertReadyContent(budget)
         try {
             budget.perform(link(), budget.observedRevision)
             fail("spent budget must not write")
@@ -263,13 +263,13 @@ class SessionReviewTest {
         )
         owner.approve(owner.requests.value.first(), GrantOptions(null, null, expires, null))
         member.refresh()
-        assertEquals(SessionPhase.Ready, member.phase.value)
+        assertReadyContent(member)
         val reading = NamespaceStore.savedLinks(member)
         val query = SavedLinksQuery()
         try {
             assertEquals(1, reading.load(query).size)
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8)
-            while (member.phase.value == SessionPhase.Ready && System.nanoTime() < deadline) {
+            while (member.phase.value in listOf(SessionPhase.Ready, SessionPhase.Refreshing) && System.nanoTime() < deadline) {
                 delay(100)
             }
             assertEquals(SessionPhase.Denied, member.phase.value)
@@ -289,10 +289,10 @@ class SessionReviewTest {
         store.failAppend = true
         val receipt = session.perform(link(), session.observedRevision)
         assertTrue(receipt is WriteReceipt.Queued)
-        assertTrue(session.phase.value is SessionPhase.Unavailable)
+        assertTrue(session.phase.value == SessionPhase.Retry)
         store.failAppend = false
         session.refresh()
-        assertEquals(SessionPhase.Ready, session.phase.value)
+        assertReadyContent(session)
         assertEquals(1, NamespaceStore.savedLinks(session).load(SavedLinksQuery()).size)
     }
 
@@ -312,10 +312,10 @@ class SessionReviewTest {
         core.failAfterWrite = true
         val receipt = session.perform(link(), session.observedRevision)
         assertTrue(receipt is WriteReceipt.Queued)
-        assertTrue(session.phase.value is SessionPhase.Unavailable)
+        assertTrue(session.phase.value == SessionPhase.Retry)
         core.failAfterWrite = false
         session.refresh()
-        assertEquals(SessionPhase.Ready, session.phase.value)
+        assertReadyContent(session)
         assertEquals(1, NamespaceStore.savedLinks(session).load(SavedLinksQuery()).size)
     }
 
@@ -336,14 +336,14 @@ class SessionReviewTest {
         }
         assertNotNull(session.lastError.value)
         assertEquals(libraryId, session.libraryID.value)
-        assertTrue(session.phase.value is SessionPhase.Unavailable)
+        assertTrue(session.phase.value == SessionPhase.Retry)
         try {
             session.rejoin(SoftwareKeys.ephemeral())
             fail("pending publication must block rejoin")
         } catch (_: StorageException.Unavailable) {
         }
         assertEquals(libraryId, session.libraryID.value)
-        assertTrue(session.phase.value is SessionPhase.Unavailable)
+        assertTrue(session.phase.value == SessionPhase.Retry)
         assertFalse(session.phase.value is SessionPhase.NoLibrary)
     }
 
@@ -367,7 +367,7 @@ class SessionReviewTest {
         val rejoining = launch(Dispatchers.Default) { session.rejoin(SoftwareKeys.ephemeral()) }
         delay(300)
         assertEquals(libraryId, session.libraryID.value)
-        assertEquals(SessionPhase.Ready, session.phase.value)
+        assertReadyContent(session)
         gate.countDown()
         writing.join()
         rejoining.join()
@@ -397,8 +397,8 @@ class SessionReviewTest {
         val core = object : DelegatingCore() {
             var closed = false
             override fun close() {
-                closed = true
                 super.close()
+                closed = true
             }
         }
         val session = session(home(), store, core = core)
@@ -412,7 +412,7 @@ class SessionReviewTest {
         member.join()
         assertTrue(member.phase.value is SessionPhase.WaitingForApproval)
         session.join()
-        assertEquals(SessionPhase.Ready, session.phase.value)
+        assertReadyContent(session)
         session.close()
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         while (!core.closed && System.nanoTime() < deadline) delay(10)
@@ -447,7 +447,7 @@ class SessionReviewTest {
         val session = session(home(), store, core = core)
         session.create()
         session.perform(link(), session.observedRevision)
-        assertEquals(SessionPhase.Ready, session.phase.value)
+        assertTrue(session.hasUsableContent)
         val libraryId = session.libraryID.value
         val before = store.read().keys
         val broken = object : KeyProvider {
@@ -488,7 +488,7 @@ class SessionReviewTest {
         owner.refresh()
         owner.approve(owner.requests.value.first())
         member.refresh()
-        assertEquals(SessionPhase.Ready, member.phase.value)
+        assertReadyContent(member)
         val oldMember = member.memberID.value
         owner.revoke(member.memberID.value!!)
         member.refresh()
@@ -507,7 +507,7 @@ class SessionReviewTest {
                 error is StorageException.Unavailable,
             )
         }
-        assertTrue("phase ${member.phase.value}", member.phase.value is SessionPhase.Unavailable)
+        assertTrue("phase ${member.phase.value}", member.phase.value == SessionPhase.Retry)
         assertNotNull(member.lastError.value)
         val journal = SessionJournal.load(java.io.File(memberHome, "session.json"))
         assertFalse(journal.left)
@@ -561,20 +561,16 @@ class SessionReviewTest {
         } catch (error: Exception) {
             assertTrue("was ${error.javaClass.name}", error is StorageException.Unavailable)
         }
-        assertTrue("phase ${session.phase.value}", session.phase.value is SessionPhase.Unavailable)
+        assertTrue("phase ${session.phase.value}", session.phase.value == SessionPhase.Retry)
         assertNotNull(session.lastError.value)
         assertEquals(libraryId, session.libraryID.value)
-        try {
-            session.projection("reading.saved")
-            fail("failed rejoin must not keep serving the previous views")
-        } catch (error: SessionException) {
-            assertTrue(error is SessionException.NotReady)
-        }
+        assertTrue("The unchanged connection retains content during retry", session.hasUsableContent)
+        assertTrue(session.projection("reading.saved").isNotEmpty())
         val journal = SessionJournal.load(java.io.File(home, "session.json"))
         assertArrayEquals(signing, journal.signingPublicKey)
         failRead = false
         session.refresh()
-        assertEquals(SessionPhase.Ready, session.phase.value)
+        assertReadyContent(session)
         assertArrayEquals(signing, SessionJournal.load(java.io.File(home, "session.json")).signingPublicKey)
     }
 
@@ -586,7 +582,7 @@ class SessionReviewTest {
         val keys = SoftwareKeys.ephemeral()
         val session = session(home, store, keys, "Owner")
         session.create()
-        assertTrue("phase ${session.phase.value}", session.phase.value is SessionPhase.Unavailable)
+        assertTrue("phase ${session.phase.value}", session.phase.value == SessionPhase.Retry)
         val journal = SessionJournal.load(java.io.File(home, "session.json"))
         assertNotNull(journal.signingPublicKey)
         assertNotNull(journal.agreementPublicKey)
@@ -598,7 +594,7 @@ class SessionReviewTest {
 
         store.failAppend = false
         session.refresh()
-        assertEquals(SessionPhase.Ready, session.phase.value)
+        assertReadyContent(session)
 
         val replaced = session(home, store, SoftwareKeys.ephemeral(), "Stranger")
         replaced.restore()
@@ -685,7 +681,7 @@ class SessionReviewTest {
         assertEquals(SessionPhase.NoLibrary, session.phase.value)
         session.create()
         assertFalse(session.phase.value is SessionPhase.Creating)
-        assertTrue(session.phase.value is SessionPhase.Unavailable)
+        assertTrue(session.phase.value == SessionPhase.Retry)
     }
 
     @Test

@@ -3,7 +3,7 @@ import CryptoKit
 import Darwin
 import ColophonSession
 
-/// One root-owned upgrade, with a separate 0.2 session configured as migrationWriter.
+/// One root-owned upgrade, with a separate 0.3 session configured as migrationWriter.
 /// Persist the evidence key independently. Sessions gated by this scope share markerURL.
 /// Use a separate journal and marker for each independently migrated namespace scope.
 public actor LibraryMigration {

@@ -1,4 +1,4 @@
-# Android session SDK (0.2)
+# Android session SDK (0.3)
 
 `sdk/android` is the Gradle Android library `org.luff.colophon:colophon-android`
 (minSdk 33, compileSdk 35). It packages the UniFFI Kotlin bindings, `libcolophon_ffi.so`
@@ -15,7 +15,7 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
 bash scripts/build-android.sh
 ```
 
-The artifact is `sdk/android/build/colophon-android-0.2.0.aar`.
+The artifact is `sdk/android/build/colophon-android-0.3.0.aar`.
 
 ## Add the AAR to an app
 
@@ -24,7 +24,7 @@ UniFFI/JNA runtime that a local AAR does not carry:
 
 ```kotlin
 dependencies {
-    implementation(files("libs/colophon-android-0.2.0.aar"))
+    implementation(files("libs/colophon-android-0.3.0.aar"))
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.2.21")
     implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

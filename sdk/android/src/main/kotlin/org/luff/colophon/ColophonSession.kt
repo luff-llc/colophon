@@ -104,12 +104,14 @@ class ColophonSession internal constructor(
     suspend fun restore() {
         val deferred = restoreMutex.withLock {
             restoreDeferred ?: scope.async {
+                val lease = context
                 startWatching()
                 try {
-                    apply(worker.restore())
+                    val snapshot = worker.restore()
+                    if (lease == context) apply(snapshot)
                 } catch (error: Exception) {
                     if (error is CancellationException || error is SessionException.NotReady) throw error
-                    fail(error)
+                    if (lease == context) fail(error)
                 }
                 startSyncLoop()
             }.also { restoreDeferred = it }
@@ -120,8 +122,8 @@ class ColophonSession internal constructor(
     suspend fun refresh() {
         restore()
         val lease = context
-        if (_phase.value == SessionPhase.Ready) _phase.value = SessionPhase.Refreshing
         withContext(dispatcher) {
+            if (_phase.value == SessionPhase.Ready) _phase.value = SessionPhase.Refreshing
             try {
                 val snapshot = worker.refresh()
                 if (lease == context) {
@@ -134,6 +136,9 @@ class ColophonSession internal constructor(
             }
         }
     }
+
+    /** Retry the selected connection; never reset its identity or manufacture an empty library. */
+    suspend fun retry() { refresh() }
 
     suspend fun create() {
         restore()
@@ -237,10 +242,12 @@ class ColophonSession internal constructor(
     suspend fun rejoin(keys: KeyProvider) {
         restore()
         withContext(dispatcher) {
+            val generation = worker.connectionGeneration
             val snapshot = try {
                 worker.rejoin(keys)
             } catch (error: Exception) {
                 if (error is CancellationException || error is SessionException.NotReady) throw error
+                if (worker.connectionGeneration != generation) invalidateContext()
                 // PendingPublication is an internal publication signal. Callers see storage failure.
                 val publicError: Exception = if (error is PendingPublication) {
                     StorageException.Unavailable(error.reason)
@@ -310,6 +317,7 @@ class ColophonSession internal constructor(
             throw error
         } catch (error: Exception) {
             _syncState.value = SyncState.Error(error.message ?: error.toString())
+            if (error is SessionLayoutException) withContext(dispatcher) { fail(error) }
             false
         }
     }
@@ -329,7 +337,7 @@ class ColophonSession internal constructor(
 
     private suspend fun putBlob(input: BlobInput, namespace: String, mediaType: String, reference: String, required: Boolean): ColophonBlob {
         restore()
-        if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
+        if (_phase.value != SessionPhase.Ready && _phase.value != SessionPhase.Refreshing) throw SessionException.NotReady()
         val lease = context
         val staged = withContext(dispatcher) { worker.blobs.stage(namespace, mediaType, input) }
         if (lease != context) throw SessionException.DestinationChanged
@@ -365,7 +373,7 @@ class ColophonSession internal constructor(
     suspend fun blobAvailability(namespace: String, digest: String): BlobAvailability {
         restore()
         _blobDownloads.value[digest]?.let { return it }
-        if (_phase.value != SessionPhase.Ready) return BlobAvailability.Inaccessible("The library is not ready")
+        if (_phase.value != SessionPhase.Ready && _phase.value != SessionPhase.Refreshing) return BlobAvailability.Inaccessible("The library is not ready")
         return withContext(dispatcher) {
             try {
                 worker.blobs.availability(namespace, digest)
@@ -385,7 +393,7 @@ class ColophonSession internal constructor(
      */
     suspend fun readBlob(namespace: String, digest: String, maximumBytes: Long = Long.MAX_VALUE, consumer: suspend (ByteArray) -> Unit) {
         restore()
-        if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
+        if (_phase.value != SessionPhase.Ready && _phase.value != SessionPhase.Refreshing) throw SessionException.NotReady()
         val lease = context
         val manifest = withContext(dispatcher) { worker.blobs.manifest(namespace, digest) }
         if (manifest.size > maximumBytes) throw BlobException.TooLarge()
@@ -431,7 +439,7 @@ class ColophonSession internal constructor(
     /** Downloads every missing chunk (ciphertext only), publishing progress in [blobDownloads]. */
     suspend fun prefetchBlob(namespace: String, digest: String) {
         restore()
-        if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
+        if (_phase.value != SessionPhase.Ready && _phase.value != SessionPhase.Refreshing) throw SessionException.NotReady()
         download(withContext(dispatcher) { worker.blobs.manifest(namespace, digest) })
     }
 
@@ -464,7 +472,7 @@ class ColophonSession internal constructor(
      */
     suspend fun collectBlobGarbage(graceMillis: Long = 24L * 60 * 60 * 1000, evictReplicated: Boolean = false, discardSoleCopy: Boolean = false): BlobCollection {
         restore()
-        if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
+        if (_phase.value != SessionPhase.Ready && _phase.value != SessionPhase.Refreshing) throw SessionException.NotReady()
         return withContext(dispatcher) { worker.blobs.collect(graceMillis, evictReplicated, discardSoleCopy) }
     }
 
@@ -567,10 +575,12 @@ class ColophonSession internal constructor(
         }
     }
 
+    val hasUsableContent: Boolean get() = views.isNotEmpty() && _phase.value in listOf(SessionPhase.Ready, SessionPhase.Refreshing, SessionPhase.WaitingForDownload, SessionPhase.Retry)
     private fun apply(snapshot: SessionSnapshot) {
+        if (snapshot.revision < _revision.value) return
         if (relay != null && (snapshot.revision != _revision.value || snapshot.phase != _phase.value)) syncKick.trySend(Unit)
         val changed = snapshot.namespaceRevisions.keys.filter { _namespaceRevisions.value[it] != snapshot.namespaceRevisions[it] }.toSet()
-        val lost = snapshot.phase != SessionPhase.Ready && snapshot.phase != SessionPhase.Refreshing
+        val lost = snapshot.phase !in listOf(SessionPhase.Ready, SessionPhase.Refreshing, SessionPhase.WaitingForDownload, SessionPhase.Retry)
         _phase.value = snapshot.phase
         _revision.value = snapshot.revision
         _namespaceRevisions.value = snapshot.namespaceRevisions
@@ -650,11 +660,11 @@ class ColophonSession internal constructor(
             is BindingException.InvalidData ->
                 if (error.detail.startsWith("Unsupported storage layout")) SessionPhase.UpdateRequired
                 else SessionPhase.Failed(error.detail)
-            is PendingPublication -> SessionPhase.Unavailable(error.reason)
+            is PendingPublication -> SessionPhase.Retry
             is StorageException.Unavailable -> {
                 val reason = error.message ?: "unavailable"
-                if (reason.contains("Waiting for the relay")) SessionPhase.WaitingForDownload
-                else SessionPhase.Unavailable(reason)
+                if (reason.contains("Waiting for the relay") || reason.contains("download pending")) SessionPhase.WaitingForDownload
+                else SessionPhase.Retry
             }
             is AccessException -> if (error.denial.reason == DenialReason.NOT_READABLE || error.denial.reason == DenialReason.UNAVAILABLE) {
                 SessionPhase.Unavailable(error.denial.detail)
@@ -666,7 +676,7 @@ class ColophonSession internal constructor(
         }
         _lastError.value = error.message ?: error.toString()
         _phase.value = next
-        if (next == SessionPhase.UpdateRequired || next == SessionPhase.WaitingForDownload) return
+        if (next == SessionPhase.UpdateRequired || next == SessionPhase.WaitingForDownload || next == SessionPhase.Retry) return
         views = emptyMap()
         _ledger.value = emptyList()
         _members.value = emptyList()
@@ -688,7 +698,7 @@ class ColophonSession internal constructor(
 
     internal fun projection(namespace: String): ByteArray {
         val view = views[namespace]
-        if (_phase.value != SessionPhase.Ready || view == null) throw SessionException.NotReady()
+        if (!hasUsableContent || view == null) throw SessionException.NotReady()
         return view.state
     }
 

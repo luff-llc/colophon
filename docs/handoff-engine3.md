@@ -37,7 +37,7 @@ claim that all four shipping apps' codecs and production migrations are complete
 Swift and Kotlin bindings/headers were regenerated with the owning script. The XCFramework was
 rebuilt for macOS arm64, iOS arm64 and iOS simulator arm64 using `SKIP_VISIONOS=1` (about 165 MiB).
 No visionOS or Android release packaging is claimed. See the [full API/wire contract](engine.md#engine3-authenticated-import-storage-and-blobs)
-and the [spec extension](../spec/colophon-0.2.md#72-authenticated-import-and-blob-extension-engine3).
+and the [spec extension](../spec/colophon-0.3.md#72-authenticated-import-and-blob-extension-engine3).
 
 ## Checks
 

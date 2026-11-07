@@ -64,8 +64,12 @@ public actor RelaySync {
     /// relay's known paths are kept beside it in `<name>-remote.log`. Without it every launch
     /// relists the slot.
     private let namespaces: [String]
-    public init(local: any RecordStore, endpoint: RelayEndpoint, transport: any RelayTransport = URLSessionRelayTransport(), stateFile: URL? = nil, namespaces: [String] = []) {
+    private let validateAuthority: (@Sendable ([String: Data]) async throws -> Void)?
+    private let verifyLive: (@Sendable (String, Data) async throws -> UInt64)?
+    public init(local: any RecordStore, endpoint: RelayEndpoint, transport: any RelayTransport = URLSessionRelayTransport(), stateFile: URL? = nil, namespaces: [String] = [], verifyLive: (@Sendable (String, Data) async throws -> UInt64)? = nil, validateAuthority: (@Sendable ([String: Data]) async throws -> Void)? = nil) {
         self.local = local; self.endpoint = endpoint; self.stateFile = stateFile; self.namespaces = namespaces
+        self.verifyLive = verifyLive
+        self.validateAuthority = validateAuthority
         client = RelayClient(endpoint: endpoint, transport: transport)
     }
 
@@ -85,7 +89,7 @@ public actor RelaySync {
         var report = Report()
         let listed = try await list()
         report.listed = listed.count
-        let localPaths = try await local.paths()
+        let localPaths = try await local.syncPaths(namespaces: namespaces)
         let genesis = "authority/00000001.json"
         if localPaths.contains(genesis), let theirs = remote[genesis], !genesisChecked || listed[genesis] != nil {
             let mine = try await local.read(paths: [genesis])
@@ -94,22 +98,22 @@ public actor RelaySync {
             genesisChecked = true
         }
         // Pull: every listed record the local store lacks, verified against the listing.
-        let missing = remote.keys.filter { path in
-            !localPaths.contains(path) && (try? RecordPath.validate(path)) != nil
+        var missing = remote.keys.filter { path in
+            !localPaths.contains(path) && !RecordPath.isReplaceable(path) && (try? RecordPath.validate(path)) != nil
         }.sorted(by: Self.pullOrder)
         var pulledPaths = Set<String>()
+        if let validateAuthority {
+            let authorityMissing = missing.filter { $0.hasPrefix("authority/") }
+            let fetched = try await fetch(authorityMissing)
+            if !fetched.isEmpty { try await local.append(fetched); pulledPaths.formUnion(fetched.keys); report.pulled += fetched.count }
+            let paths = localPaths.filter { $0.hasPrefix("authority/") }.union(authorityMissing)
+            let authority = try await local.read(paths: Array(paths))
+            report.localRecordReads += authority.count
+            if !authority.isEmpty { try await validateAuthority(authority) }
+            missing.removeAll { $0.hasPrefix("authority/") }
+        }
         for batch in stride(from: 0, to: missing.count, by: 256).map({ Array(missing[$0..<min(missing.count, $0 + 256)]) }) {
             let fetched = try await fetch(batch)
-            if !fetched.isEmpty {
-                try await local.append(fetched)
-                pulledPaths.formUnion(fetched.keys)
-                report.pulled += fetched.count
-            }
-        }
-        // Replaceable live slots: a changed digest is a replacement, not an immutable conflict.
-        let liveChanged = listed.keys.filter { RecordPath.isReplaceable($0) && localPaths.contains($0) && !pulledPaths.contains($0) }
-        if !liveChanged.isEmpty {
-            let fetched = try await fetch(Array(liveChanged))
             if !fetched.isEmpty {
                 try await local.append(fetched)
                 pulledPaths.formUnion(fetched.keys)
@@ -152,7 +156,7 @@ public actor RelaySync {
             }
         }
         // Push: every local record the relay lacks. 200 and 201 both mean it now holds it.
-        let unpushed = localPaths.filter { remote[$0] == nil }.sorted(by: Self.pullOrder)
+        let unpushed = localPaths.filter { remote[$0] == nil && !RecordPath.isReplaceable($0) }.sorted(by: Self.pullOrder)
         for batchStart in stride(from: 0, to: unpushed.count, by: 64) {
             let batch = Array(unpushed[batchStart..<min(unpushed.count, batchStart + 64)])
             let records = try await local.read(paths: batch)
@@ -173,6 +177,27 @@ public actor RelaySync {
                         }
                     }
                 }
+            }
+        }
+        // History/intent has been persisted on both sides before a live slot is promoted.
+        // Validate the signed/decrypted generation, then CAS the exact version read before
+        // the network wait. A racing local playback write wins and is retried next pass.
+        if let verifyLive {
+            let slots = Set(localPaths.filter(RecordPath.isReplaceable)).union(remote.keys.filter(RecordPath.isReplaceable))
+            for path in slots.sorted() {
+                let mine = try await local.read(paths: [path])[path]
+                report.localRecordReads += mine == nil ? 0 : 1
+                if let mine, Self.sha256(mine) == remote[path] { continue }
+                let theirs = try await client.get(path)
+                if let theirs, Self.sha256(theirs) != remote[path] { continue } // feed raced: relist
+                let mineGeneration = if let mine { try? await verifyLive(path, mine) } else { nil as UInt64? }
+                let theirGeneration = if let theirs { try? await verifyLive(path, theirs) } else { nil as UInt64? }
+                if let theirs, let theirGeneration, mineGeneration == nil || theirGeneration > mineGeneration! {
+                    if try await local.replaceLive(path, expected: mine, bytes: theirs) { report.pulled += 1 }
+                } else if let mine, let mineGeneration, theirGeneration == nil || mineGeneration > theirGeneration! {
+                    let result = try await client.putIfAbsent(path, bytes: mine, replacing: theirs.map(Self.sha256))
+                    if result != .conflict { remember(path, Self.sha256(mine)); report.pushed += 1 }
+                } else if mineGeneration != nil, mine != theirs { conflicts.insert(path) }
             }
         }
         try saveState()
@@ -267,6 +292,7 @@ public actor RelaySync {
         guard remote[path] != nil else { return }
         remote[path] = nil; unsavedRemote.append((path, nil))
     }
+    private var stateScope: String { endpoint.url.absoluteString + "|colophon/relay/3|" + namespaces.sorted().joined(separator: ",") }
     private var remoteLog: URL? {
         stateFile.map { $0.deletingLastPathComponent().appendingPathComponent($0.deletingPathExtension().lastPathComponent + "-remote.log") }
     }
@@ -277,7 +303,7 @@ public actor RelaySync {
         guard let stateFile, FileManager.default.fileExists(atPath: stateFile.path) else { return }
         let bytes = try AtomicFile.read(stateFile, maximumBytes: 64 * 1024 * 1024)
         // A corrupt or foreign state file only costs a full relisting.
-        guard let stored = try? JSONDecoder().decode(State.self, from: bytes), stored.relay == endpoint.url.absoluteString else { return }
+        guard let stored = try? JSONDecoder().decode(State.self, from: bytes), stored.relay == stateScope else { return }
         cursor = stored.cursor
         conflicts = Set(stored.conflicts ?? [])
         if let legacy = stored.remote {
@@ -317,7 +343,7 @@ public actor RelaySync {
             try AtomicFile.append(Data(text.utf8), to: log)
             unsavedRemote = []
         }
-        let state = State(relay: endpoint.url.absoluteString, cursor: cursor, conflicts: conflicts.sorted(), remote: nil)
+        let state = State(relay: stateScope, cursor: cursor, conflicts: conflicts.sorted(), remote: nil)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let encoded = try encoder.encode(state)
         if stateDirty || (try? AtomicFile.read(stateFile, maximumBytes: 1024 * 1024)) != encoded {

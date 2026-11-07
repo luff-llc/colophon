@@ -17,6 +17,8 @@ import com.luff.colophon.requestInfo
 internal interface SessionCore {
     fun open(records: Map<String, ByteArray>, keys: KeyProvider)
     fun create(configuration: SessionConfiguration)
+    fun setReadScope(namespaces: List<String>) {}
+    fun liveGeneration(path: String, bytes: ByteArray): ULong = throw SessionException.NotReady()
     fun merge(records: Map<String, ByteArray>)
     /** Whole record map. Only rare authority operations use it; writes use [recordsAt]. */
     fun records(): Map<String, ByteArray>
@@ -72,6 +74,9 @@ internal class BindingSessionCore : SessionCore {
         library.ready()
     }
 
+    override fun setReadScope(namespaces: List<String>) { requireLibrary().native.setReadScope(namespaces) }
+    override fun liveGeneration(path: String, bytes: ByteArray): ULong =
+        requireLibrary().native.liveGeneration(path, bytes, java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS).toString())
     override fun records(): Map<String, ByteArray> = requireLibrary().records
 
     override fun importRequest(data: ByteArray): AccessRequest {

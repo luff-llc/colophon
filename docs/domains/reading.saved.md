@@ -1,6 +1,6 @@
 # reading.saved
 
-Proposed 0.2 port; [README](README.md) supplies common conventions/import provenance.
+Proposed 0.3 port; [README](README.md) supplies common conventions/import provenance.
 Source prefix `R` is `packages/Colophon/Sources/ColophonReading/`; `A` is `apps/suite/Later/`.
 This namespace has **36 advertised 0.1 kinds**, not just captured URLs. URL-free documents,
 metadata-only imports, retained originals, annotations and graph histories must survive.
@@ -221,10 +221,10 @@ must not be labelled as a verified local original.
 
 Additional ingress details and payload model fields are in the supplement.
 Heat is qualitative static analysis.
-The suite already caches some projections: 0.2 should preserve that behavior while removing
+The suite already caches some projections: 0.3 should preserve that behavior while removing
 whole-state copies across FFI. Legacy Android/Apple journal is a separate input format.
 
-## Proposed 0.2 design (24 kinds)
+## Proposed 0.3 design (24 kinds)
 
 Clean commands, v1. All payload unknown fields are retained per README; controls never become
 metadata. App/device-only gates remain for content installation, destructive actions, graph
@@ -389,7 +389,7 @@ widget files and download flags are excluded because they can be rebuilt locally
 ## Open questions
 
 - Coordinate proposed Blob, evidence sidecar and typed source descriptors with the core/FFI
-  workers; 0.2 preview only implements URL items and cannot yet promise retained-content parity.
+  workers; 0.3 preview only implements URL items and cannot yet promise retained-content parity.
 - Historical atomic restores can replace whole content snapshots; bounded decomposition needs
   an importer publication barrier and explicit old→new occurrence map. This is required work,
   not an already tested migration guarantee.

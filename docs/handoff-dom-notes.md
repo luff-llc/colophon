@@ -174,14 +174,14 @@ corresponding seams above are connected.
 
 ## Conformance and checks
 
-`tests/domain_notes.rs` generates `conformance/0.2/notes.json`: deterministic signed records
+`tests/domain_notes.rs` generates `conformance/0.3/notes.json`: deterministic signed records
 plus expected queries covering every named query and all thirteen kinds (including the current
 review role diagnostic), tombstones, late edits, output currency, conflicts, resolutions,
 archive filtering and nested extras. The existing conformance test independently replays the
 checked-in bytes and checks the query results. JS smoke verifies exact WASM parity for the same
 vector. The fixture identity seed is public synthetic test material.
 
-Only the notes portions of `conformance/0.2/expected.json` were regenerated: the old preview
+Only the notes portions of `conformance/0.3/expected.json` were regenerated: the old preview
 notes now have markdown-cell fields and notebooks expose archive/kind/touched/order metadata.
 Original library.json and signed library record bytes are unchanged. Other namespaces' expected
 results and the ledger are unchanged.

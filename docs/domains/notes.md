@@ -1,8 +1,8 @@
 # notes
 
-Proposed 0.2 port; [shared conventions](README.md) apply. Source prefix `N` is
+Proposed 0.3 port; [shared conventions](README.md) apply. Source prefix `N` is
 `packages/Colophon/Sources/ColophonNotes/`; `M` is `apps/suite/Margins/` (the Scribenda app).
-The actual domain is notebooks, cells and entries; the 0.2 preview's addNote/editNote model
+The actual domain is notebooks, cells and entries; the 0.3 preview's addNote/editNote model
 does not represent that hierarchy.
 
 ## 0.1 operations, validation and conflicts
@@ -45,7 +45,7 @@ notebook touched/updated is changed even by some ignored/unknown or malformed ce
 updated uses max claimed date. Cell text alternatives are strings; original operation history
 has full attribution. Unknown extras are retained in the log, generally not the projection.
 Unknown kinds with a valid notebook can touch it even though they mutate no content. These
-quirks are not proposed for new 0.2 operations.
+quirks are not proposed for new 0.3 operations.
 
 Derived: active notebooks by touched, notebook order→cells, entry/attachment/proposal indexes,
 proposal input currency and `outputIsCurrent = SHA256(UTF8(source)) == lastRun.sourceDigest`.
@@ -72,7 +72,7 @@ No committed Scribenda widget/share-extension writer was identified. `MarginsApp
 requests both notes and podcast namespaces for continuation. A denied source namespace must
 not hide the notebook itself or automatically widen its grant.
 
-## Proposed 0.2 design
+## Proposed 0.3 design
 
 Thirteen kinds, v=1. IDs, blobs, extensions and attribution use README. Existing preview
 `createNotebook` remains; preview `addNote`/`editNote` should become SDK conveniences for a
@@ -143,7 +143,7 @@ No old code is run during import. Preserve the original signed output as an asse
 | `entry.propose` | `proposeEntry` only for originally accepted proposals with mapped exact input set; historical invalid proposals stay evidence. Preserve original markdown/title/tags and signer claim. |
 | `proposal.review` | `reviewProposal` for original accepted result, preserving old reviewer as provenance. Importer app signs the import; no agent can self-accept. If translated inputs cannot reproduce a historical keep, preserve the kept historical contribution as evidence pending repair rather than claim a fresh acceptance. |
 
-Preview addNote/editNote records are 0.2 data, not inputs for the 0.1 translator. Old journal
+Preview addNote/editNote records are 0.3 data, not inputs for the 0.1 translator. Old journal
 notebook documents from Apple/Android need a separate source-format adapter. Cell output bytes,
 attachments, notebook content and alternatives are not disposable caches. Drop only kernels,
 editor drafts, selection, rendered HTML and derived currency/count/index caches. Unreadable
@@ -151,7 +151,7 @@ attachments remain missing; they must not be replaced with empty files.
 
 ## Open questions
 
-- Decide how already-written 0.2 preview addNote/editNote libraries coexist with cell kinds;
+- Decide how already-written 0.3 preview addNote/editNote libraries coexist with cell kinds;
   this spec does not change the wire evaluator.
 - Large cell source support beyond 256 KiB needs either a source-blob editor contract or a
   deliberate increased limit. Import must report the limit rather than truncate source.

@@ -81,7 +81,7 @@ pub struct ImportContext {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Command {
-    /// Clean 0.2 kind.
+    /// Clean 0.3 kind.
     pub kind: String,
     /// Validated payload with historical `importSource` extension.
     pub payload: Value,
@@ -784,7 +784,7 @@ fn preference_change(k: &str, v: &Value) -> Option<Value> {
 }
 
 /// Shipping 0.1 payloads write explicit `null` for absent optional fields and Unix-second
-/// `published` dates. Normalize both against the 0.2 schema here, so every host adapter need not:
+/// `published` dates. Normalize both against the 0.3 schema here, so every host adapter need not:
 /// a null is dropped only where the destination field does not accept null (heads such as
 /// `expect: null` keep their meaning), and numeric `published` becomes an RFC 3339 UTC string.
 /// The original payload stays unchanged in the import evidence.

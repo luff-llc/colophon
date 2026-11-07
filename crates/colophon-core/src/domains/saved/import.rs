@@ -109,7 +109,7 @@ pub struct ImportContext {
 pub struct ImportCommand {
     /// Stable transform child identity, distinct from the final signed destination operation ID.
     pub key: String,
-    /// Clean 0.2 kind.
+    /// Clean 0.3 kind.
     pub kind: String,
     /// Clean payload, including labelled `importSource` provenance.
     pub payload: Value,

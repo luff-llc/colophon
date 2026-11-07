@@ -157,7 +157,7 @@ require explicit reconciliation; the domain does not rewrite signed destination 
 
 ## Conformance and validation
 
-`conformance/0.2/reading.saved.json` contains deterministic synthetic signed records and expected
+`conformance/0.3/reading.saved.json` contains deterministic synthetic signed records and expected
 results for all 19 named queries. `domain_saved::deterministic_saved_vector` generates it;
 `conformance::saved_domain_conformance` reopens the checked-in bytes. JavaScript checks the same
 fixture through WASM. The old `library.json` and `library/` record bytes are unchanged. Only the

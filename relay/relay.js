@@ -86,7 +86,7 @@ class Slot {
       // instance so every old cursor answers 410 and clients relist (spec §8.2).
       for (const [p, e] of latest) {
         const d = onDisk.get(p);
-        if (!d || d.size !== e.size) { consistent = false; break; }
+        if (!d || d.size !== e.size || await this.digestOf(p) !== e.sha256) { consistent = false; break; }
       }
     }
     if (!consistent) {
@@ -251,11 +251,12 @@ class Slot {
     });
   }
 
-  async replaceRequest(p, body) {
+  async replaceRequest(p, body, expected) {
     return this.exclusive(async () => {
       const digest = sha256(body);
       const existing = this.current.get(p);
       if (existing && existing.sha256 === digest) return 200;
+      if (expected !== undefined && (!existing || `"${existing.sha256}"` !== expected)) throw new HttpError(412, 'Live slot changed');
       this.checkQuota(body.length - (existing ? existing.size : 0));
       const file = await this.target(p, true);
       const staged = await this.stage(body);
@@ -419,7 +420,12 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
       let status;
       if (conditional === '*') status = await s.putImmutable(recordPath, body);
       else if (conditional !== undefined) throw new HttpError(400, 'Only If-None-Match: * is supported');
-      else if (kind === 'request' || kind === 'state') status = await s.replaceRequest(recordPath, body);
+      else if (kind === 'state') {
+        const expected = req.headers['if-match'];
+        if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
+        status = await s.replaceRequest(recordPath, body, expected);
+      }
+      else if (kind === 'request') status = await s.replaceRequest(recordPath, body);
       else throw new HttpError(428, 'Immutable records require If-None-Match: *');
       res.writeHead(status, { etag: `"${sha256(body)}"`, 'content-length': 0 });
       return res.end();

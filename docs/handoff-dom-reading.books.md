@@ -176,7 +176,7 @@ source-prefix evaluation and reconciliation with prior effects, as described bel
 
 ## Conformance, checks, and remaining proof gaps
 
-`conformance/0.2/reading.books/{records,expected}.json` is a separate 36 KiB synthetic vector.
+`conformance/0.3/reading.books/{records,expected}.json` is a separate 36 KiB synthetic vector.
 It contains signed records and expected bounded query results, exercises all ten kinds, and
 records the current fail-closed loan outcome. `tests/support/books.rs` supplies its shared
 scenario. `domain_books.rs` generates it; the existing `conformance` target checks it; the JS

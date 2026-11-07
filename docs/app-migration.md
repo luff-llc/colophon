@@ -1,7 +1,7 @@
 # Moving LUFF's apps onto the Rust core
 
 Status: proposed, November 6, 2026. Goal: Taupe, Later, Shelf and Scribenda (Apple), and the
-Android client, run on Colophon 0.2's Rust core, with a shared app SDK that makes the next app
+Android client, run on Colophon 0.3's Rust core, with a shared app SDK that makes the next app
 mostly product work. Two things drive it: performance on long histories, and integration code
 that each app currently re-assembles.
 
@@ -79,7 +79,7 @@ Rust reducers reach parity with what the apps actually use: `reading.books` (She
 `listening.podcasts` (Taupe: follows, episodes, positions, queue, playlists, chapters,
 transcripts, notes, playback history), `reading.saved` (Later: captures, state, metadata,
 deletion, content, feeds, annotations, magazines), and `notes` (Scribenda). Each domain gets a
-spec in `docs/domains/` and vectors in `conformance/0.2/`.
+spec in `docs/domains/` and vectors in `conformance/0.3/`.
 
 ### The app SDK (Swift first, Kotlin mirrors it)
 
@@ -99,14 +99,14 @@ spec in `docs/domains/` and vectors in `conformance/0.2/`.
 A new app then declares its namespaces and commands, picks a storage configuration, and builds
 its product UI.
 
-### Moving existing libraries (0.1 to 0.2)
+### Moving existing libraries (0.1 to 0.3)
 
 People already have 0.1 libraries (Taupe testers included). On first launch of the new version:
 
 1. The app holding the root reads the 0.1 library with the existing Swift stack, verifies it,
-   and writes a new 0.2 library beside it, recording each imported operation's 0.1 ID, author
+   and writes a new 0.3 library beside it, recording each imported operation's 0.1 ID, author
    label and digest as provenance. New signatures don't claim to authenticate old authors.
-2. Sibling suite apps on the device re-enroll in the 0.2 library through the same-device path
+2. Sibling suite apps on the device re-enroll in the 0.3 library through the same-device path
    they use today; other members are listed as "needs to rejoin".
 3. The 0.1 library becomes read-only history. A catch-up pass imports any 0.1 operations
    written later by not-yet-updated devices, so nothing written during rollout is lost.
@@ -152,7 +152,7 @@ four shipping apps. Their product journeys and real provider/hardware behavior r
 
 The root **ColophonSDK** package includes `ColophonMigration`, independent of the 0.1 modules.
 Construct `LibraryMigration` with a host-owned `LegacyLibrarySource`, an explicit namespace
-scope, a dedicated 0.2 migration session, private journal directory, persistently protected AES
+scope, a dedicated 0.3 migration session, private journal directory, persistently protected AES
 key and scope-specific marker URL. Marginalia implements the protocol over its existing full
 0.1 stack; `ColophonLegacyAdapter` in `reference/swift/` is for the reference implementation.
 

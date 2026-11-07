@@ -359,6 +359,11 @@ RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_begin_call(uint64_t ptr, 
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_begin_handover(uint64_t ptr, RustBuffer new_root, RustBuffer label, RustBuffer now, RustBuffer entropy, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_BEGIN_LAYOUT
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_BEGIN_LAYOUT
+RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_begin_layout(uint64_t ptr, uint32_t layout, RustBuffer now, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_BEGIN_RECOVER
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_BEGIN_RECOVER
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_begin_recover(uint64_t ptr, RustBuffer new_root, RustBuffer label, RustBuffer now, RustBuffer entropy, RustCallStatus *_Nonnull out_status
@@ -399,6 +404,11 @@ RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_id(uint64_t ptr, RustCall
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_ledger(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_LIVE_GENERATION
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_LIVE_GENERATION
+uint64_t uniffi_colophon_ffi_fn_method_nativelibrary_live_generation(uint64_t ptr, RustBuffer path, RustBuffer bytes, RustBuffer now, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_ME
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_ME
 RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_me(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -432,6 +442,11 @@ RustBuffer uniffi_colophon_ffi_fn_method_nativelibrary_records(uint64_t ptr, Rus
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_REVISION
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_REVISION
 uint64_t uniffi_colophon_ffi_fn_method_nativelibrary_revision(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_SET_READ_SCOPE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_SET_READ_SCOPE
+void uniffi_colophon_ffi_fn_method_nativelibrary_set_read_scope(uint64_t ptr, RustBuffer namespaces, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_METHOD_NATIVELIBRARY_TOOLS
@@ -910,6 +925,12 @@ uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_begin_handover(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_BEGIN_LAYOUT
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_BEGIN_LAYOUT
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_BEGIN_RECOVER
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_BEGIN_RECOVER
 uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recover(void
@@ -958,6 +979,12 @@ uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_ledger(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_LIVE_GENERATION
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_LIVE_GENERATION
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_live_generation(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_ME
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_ME
 uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_me(void
@@ -997,6 +1024,12 @@ uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_records(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_REVISION
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_REVISION
 uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_revision(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_SET_READ_SCOPE
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_METHOD_NATIVELIBRARY_SET_READ_SCOPE
+uint16_t uniffi_colophon_ffi_checksum_method_nativelibrary_set_read_scope(void
     
 );
 #endif

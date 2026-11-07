@@ -21,7 +21,7 @@
    `KeychainKeys` defaults to Secure Enclave. The sample explicitly uses Keychain-protected
    software keys so it can run in simulators. Do not regenerate keys on restoration failure.
 4. `await session.restore()` before starting dependent work. Render its phase explicitly;
-   only `.ready` opens the product UI. Call `refresh()` on foreground entry and Retry.
+   `hasUsableContent` keeps the product UI visible during refresh/retry; `.updateRequired` shows an update gate. Call `refresh()` on foreground entry and Retry.
 5. Keep one `NamespaceStore` per feature. `await load(query)` in a task; `cached(query)` in
    `body`. Await cold completion for widgets too. Rows receive plain projection values.
 6. Capture `session.observedRevision` **before** an action starts; pass it to
@@ -103,7 +103,7 @@ An App Group shares between apps **on this device**; it is not cross-device sync
 
 `exportRecoveryKit` returns a host-defined kit after authentication; `importRecoveryKit` validates
 and applies the supplied kit, persists any replacement identity, and updates the process session.
-These callbacks must use the app’s existing, reviewed recovery mechanism. ColophonSession 0.2
+These callbacks must use the app’s existing, reviewed recovery mechanism. ColophonSession 0.3
 has no recovery-format, root-recovery or relocation API; this UI does not invent one or export
 `KeychainKeys`/Secure Enclave secrets. Without handlers the screens explain that those operations
 are unavailable. Do not treat the default integration as complete cross-device/recovery parity.
@@ -115,7 +115,7 @@ allowlist of system version, phase/failure category and counts. It excludes cont
 paths, pairing codes, kit material and arbitrary errors; no report is uploaded automatically.
 See [the SessionUI handoff](handoff-session-ui.md) for identifiers, checks and remaining gaps.
 
-## Typed 0.2 domains
+## Typed 0.3 domains
 
 Add the product for each namespace your app reads. Each depends only on `ColophonSession`;
 none imports the 0.1 domain products. The examples below assume `configuration` points at an

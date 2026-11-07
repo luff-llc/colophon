@@ -98,7 +98,7 @@ admitted content. A capped author's grant-wide budget also requires appending af
 tail across namespaces. For a middle insert, duplicate competition, authority change, or key
 unlock, the engine reevaluates admission using cached signature/decryption results, compares each
 namespace's admitted prefix, and replays the changed suffix from the nearest retained checkpoint.
-An unchanged admitted prefix does not replay reducers. Regranting remains the 0.2 protocol's
+An unchanged admitted prefix does not replay reducers. Regranting remains the 0.3 protocol's
 fresh-identity enrollment; this engine does not introduce same-identity replacement grants.
 
 ## Local checkpoints
@@ -200,12 +200,14 @@ available unlock tasks to avoid repeated rebuilds. All results authenticate befo
 The format is an authenticated binary container: `COLOENG3`, little-endian u32 JSON-metadata
 length, metadata bytes, u32 record count, sorted entries, then a 32-byte tag. Each entry contains
 u32 UTF-8 path length, path bytes, 32-byte **SHA-256 of the entire exact envelope**, u16 namespace
-index (65535 means none), and one byte of flags. This implementation supports fewer than 65,535
+index (65535 means none), one byte of flags, the 32-byte author signing-key digest,
+u64 epoch, and a length-prefixed UTF-8 provider-version token (zero means none; otherwise length is byte count plus one). This implementation supports fewer than 65,535
 namespaces. Flags distinguish signature-verified headers, header budget admission, authenticated
 IDs and projected operations. Rejected records/requests are bound as observed bytes, never
 promoted to valid operations. The metadata contains:
 
-- Container version, required `reducer_schema` generation, expected library and complete recipient public identity.
+- Container/storage/layout versions, required `reducer_schema` generation (6), selected namespaces,
+  expected library and complete recipient public identity.
 - Authenticated authority state, including historical roots, grants, epochs and revocation keeps.
 - Reducer states, namespace prefix counts and rolling digests, clocks and revisions.
 - Admission tails, capped-author spend sets, unlocked-epoch names and rejection evidence.
@@ -219,24 +221,43 @@ in one authenticated object. Index envelope digests additionally catch changed s
 outer encodings and ciphertext. These two digest purposes are intentionally different.
 
 Authentication is HKDF-SHA256 with the host's device key as salt, the exact container body as
-IKM, `colophon/verified-prefix/2` as expansion info and 32 output bytes. Comparison covers all
+IKM, `colophon/verified-prefix/3` as expansion info and 32 output bytes. Comparison covers all
 tag bytes before parsing metadata or index. Container changes must bump version and magic. Reducer schema/semantic changes increment the
 required authenticated `reducer_schema` generation in both cache APIs. Missing or mismatching
 generations fall back to replay, including caches made before all four full domains were merged.
 This preserves the `COLOENG3` layout, exact-envelope index, tag construction and prefix digests.
 The key must be random and protected separately from the shared folder. This is an additional
 host-supplied device secret, independent of namespace AES keys and the version-1 ECDH-derived
-`Library` cache key. Checkpoint state is plaintext; protect the local cache itself as well.
+`Library` cache key. Raw checkpoint state is plaintext. Use `checkpoint::PreparedCheckpointKey` to generate a random
+cache authentication key sealed to the member using the existing RFC 9180 HPKE implementation.
+Sign its exact `signing_body()` with the member key and call `finish(signature)`; the core verifies
+that signature before issuing a `CheckpointKey`. Supply `authentication_key()` to the engine.
+`CheckpointKey::protect(checkpoint, fresh_entropy)` encrypts the raw checkpoint with AES-256-GCM
+under a purpose-derived key and authenticates the exact signed ticket as additional data.
+
+To reopen, `CheckpointOpening::begin(bytes, library_id, member)` verifies the ticket signature,
+purpose, library and exact recipient before asking the host for ECDH at `agreement_peer()`.
+`finish(shared_secret)` returns the original `CheckpointKey` and authenticated plaintext for
+`Engine::open`. Wrong member/library, forged ticket, wrong ECDH and modified ciphertext fail
+explicitly. An inaccessible member key must retry; never create a replacement identity or ticket.
+The wrapper is private acceleration data, not shared authority or a portable backup, and does not
+provide rollback detection against an attacker controlling the private host container.
+
+A provider should implement `RecordSource::content_version(path)` with coherent opaque versions.
+A changed token forces signature/decryption/admission checks even for identical bytes; different
+bytes at a covered immutable path are equivocation. Without provider versions, run explicit
+`verify_batch` audits. Replaceable live slots are fetched and verified on every storage-engine
+restore/refresh, including a checkpoint restore; they never become durable reducer state.
 
 A missing, unauthenticated, wrong-library, wrong-recipient or unknown-version cache falls back
-to ordinary verification. A missing covered path or any authority-listing change invalidates
-all admission/projections. A valid cache may have a new suffix; only its new records are fetched,
+to ordinary verification. A missing covered immutable path fails explicitly; a sibling namespace excluded from the
+selected listing cannot block it. Authority additions invalidate all admission/projections. A valid cache may have a new suffix; only its new records are fetched,
 verified, decrypted and applied. An arrival before a namespace tail or a capped author's global
 tail forces full verification/replay. Full replay recomputes duplicates, budgets, held/refused
 status and revocation keeps using the same admission rule as `Library`. New key availability
 also invalidates cached payload evidence. A successfully authenticated cache retains its exact-envelope expectations even when its
 projection is invalidated: changed bytes at surviving covered paths fail with an integrity error
-during the rebuild. Missing paths in a supplied listing are an explicit invalidation, while a
+during the rebuild. Missing covered immutable paths in a supplied listing are an explicit error, while a
 missing read for a still-listed covered path is an integrity error. The conservative rebuild is explicit and may take
 full-rebuild time; the <100 ms target applies to unchanged authority with an appendable 1% suffix.
 
@@ -299,7 +320,7 @@ records, delay updates, or rewrite/delete a covered record while retaining its l
 A path-only fast open cannot detect such a rewrite until a history-cache miss or audit reads it;
 it serves the previously authenticated local state in the meantime. Cached history hits likewise
 use the earlier authenticated bytes. The attacker does not choose replacement projection data.
-A listing missing a covered path invalidates the cache; absent unseen suffixes cannot be detected.
+A listing missing a covered immutable path makes this namespace unavailable; absent unseen suffixes cannot be detected.
 Neither signatures nor checkpoints prove global freshness. A valid older local checkpoint can
 be rolled back if an attacker also controls local checkpoint storage; use host anti-rollback
 storage if that is in the app's threat model. Compromise of the device secret or trusted host

@@ -769,6 +769,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_handover(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recover(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_revoke(
@@ -785,6 +787,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_ledger(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_live_generation(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_me(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_members(
@@ -798,6 +802,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_records(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_revision(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_set_read_scope(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_tools(
     ): Int
@@ -879,6 +885,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_handover(`ptr`: Long,`newRoot`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_layout(`ptr`: Long,`layout`: Int,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_recover(`ptr`: Long,`newRoot`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_revoke(`ptr`: Long,`memberId`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -895,6 +903,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_ledger(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_live_generation(`ptr`: Long,`path`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_me(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_members(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -909,6 +919,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_revision(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_set_read_scope(`ptr`: Long,`namespaces`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_tools(`ptr`: Long,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_view(`ptr`: Long,`namespace`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1124,6 +1136,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_handover() and 0xFFFF) != 34363) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout() and 0xFFFF) != 57923) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recover() and 0xFFFF) != 26094) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1148,6 +1163,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_ledger() and 0xFFFF) != 64037) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_live_generation() and 0xFFFF) != 8161) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_me() and 0xFFFF) != 13095) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1167,6 +1185,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_revision() and 0xFFFF) != 60341) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_set_read_scope() and 0xFFFF) != 29113) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_tools() and 0xFFFF) != 56617) {
@@ -2251,6 +2272,11 @@ public interface NativeLibraryInterface {
     
     fun `beginHandover`(`newRoot`: PublicKeys, `label`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
     
+    /**
+     * Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+     */
+    fun `beginLayout`(`layout`: kotlin.UInt, `now`: kotlin.String): PreparedAction
+    
     fun `beginRecover`(`newRoot`: PublicKeys, `label`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
     
     fun `beginRevoke`(`memberId`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
@@ -2266,6 +2292,11 @@ public interface NativeLibraryInterface {
     fun `id`(): kotlin.String
     
     fun `ledger`(): List<LedgerEntry>
+    
+    /**
+     * Verify/decrypt a live slot before host-side conditional promotion.
+     */
+    fun `liveGeneration`(`path`: kotlin.String, `bytes`: kotlin.ByteArray, `now`: kotlin.String): kotlin.ULong
     
     fun `me`(): Member
     
@@ -2289,6 +2320,8 @@ public interface NativeLibraryInterface {
     fun `records`(): Map<kotlin.String, kotlin.ByteArray>
     
     fun `revision`(): kotlin.ULong
+    
+    fun `setReadScope`(`namespaces`: List<kotlin.String>)
     
     fun `tools`(`now`: kotlin.String): List<Tool>
     
@@ -2484,6 +2517,25 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
     
 
     
+    /**
+     * Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+     */
+    @Throws(BindingException::class)override fun `beginLayout`(`layout`: kotlin.UInt, `now`: kotlin.String): PreparedAction {
+            return FfiConverterTypePreparedAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_layout(
+        it,
+        
+        FfiConverterUInt.lower(`layout`),
+        FfiConverterString.lower(`now`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(BindingException::class)override fun `beginRecover`(`newRoot`: PublicKeys, `label`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction {
             return FfiConverterTypePreparedAction.lift(
     callWithHandle {
@@ -2612,6 +2664,26 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
     
 
     
+    /**
+     * Verify/decrypt a live slot before host-side conditional promotion.
+     */
+    @Throws(BindingException::class)override fun `liveGeneration`(`path`: kotlin.String, `bytes`: kotlin.ByteArray, `now`: kotlin.String): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_live_generation(
+        it,
+        
+        FfiConverterString.lower(`path`),
+        FfiConverterByteArray.lower(`bytes`),
+        FfiConverterString.lower(`now`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(BindingException::class)override fun `me`(): Member {
             return FfiConverterTypeMember.lift(
     callWithHandle {
@@ -2722,6 +2794,20 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
     }
     )
     }
+    
+
+    
+    @Throws(BindingException::class)override fun `setReadScope`(`namespaces`: List<kotlin.String>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_set_read_scope(
+        it,
+        
+        FfiConverterSequenceString.lower(`namespaces`),_status)
+}
+    }
+    
     
 
     

@@ -3,7 +3,7 @@
     "arguments": {},
     "query": "shows",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [
@@ -25,7 +25,7 @@
     },
     "query": "show",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "episodeCount": 2,
         "show": {
@@ -56,17 +56,18 @@
     },
     "query": "episodes",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
-        "next": "eyJuYW1lc3BhY2UiOiJsaXN0ZW5pbmcucG9kY2FzdHMiLCJxdWVyeSI6ImVwaXNvZGVzIiwiYXJncyI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJyZXZpc2lvbiI6IjNjZDQwNjRlNzRjNGUxZjdhZDc1NjNmZGNkNjg3MDQxOTc5NGE3YzMzYjM2MDQ1NWVlNmJmMzkzZTI2MmQ1ZjUiLCJsYXN0IjpbIjIwMjYxMTA1MDAwMDAwMDAwOm9uZSIsIm9uZSJdfQ",
+        "next": "eyJuYW1lc3BhY2UiOiJsaXN0ZW5pbmcucG9kY2FzdHMiLCJxdWVyeSI6ImVwaXNvZGVzIiwiYXJncyI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJyZXZpc2lvbiI6ImU0Y2U5MDk4MzRmOGRhYWE5NzQ3NzAyMTNkZWFkZTA4MTJiN2IxMmJjODg5ZDgyZjQ1ZDM2NDUxY2EzZjUzY2UiLCJsYXN0IjpbIjIwMjYxMTA1MDAwMDAwMDAwOm9uZSIsIm9uZSJdfQ",
         "rows": [
           {
             "consumption": "inProgress",
+            "duration": 120,
             "id": "one",
             "metadataAvailable": true,
             "noteCount": 1,
-            "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
-            "seconds": 5.0,
+            "positionRevision": "0b58dcd8c231a016e0bf22a19cf9500e",
+            "seconds": 60.0,
             "show": "show",
             "stateRevision": "0559b514f1ceb7615b0f040d9a9b010a",
             "title": "First episode",
@@ -84,15 +85,16 @@
     },
     "query": "episode",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "extensions": {},
         "heads": {
           "metadata": "5dd9c39a03fe795a48c049b282e486e9",
-          "position": "7ba51fe2e049e063aa1b1442edd51b1e",
+          "position": "0b58dcd8c231a016e0bf22a19cf9500e",
           "state": "0559b514f1ceb7615b0f040d9a9b010a"
         },
         "metadata": {
+          "duration": 120,
           "id": "one",
           "published": "2026-11-05T00:00:00Z",
           "show": "show",
@@ -100,11 +102,12 @@
         },
         "row": {
           "consumption": "inProgress",
+          "duration": 120,
           "id": "one",
           "metadataAvailable": true,
           "noteCount": 1,
-          "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
-          "seconds": 5.0,
+          "positionRevision": "0b58dcd8c231a016e0bf22a19cf9500e",
+          "seconds": 60.0,
           "show": "show",
           "stateRevision": "0559b514f1ceb7615b0f040d9a9b010a",
           "title": "First episode",
@@ -120,11 +123,11 @@
     },
     "query": "queue",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "head": "94f83b13bd99ddc29cdfd59b1090c2bf",
         "page": {
-          "next": "eyJuYW1lc3BhY2UiOiJsaXN0ZW5pbmcucG9kY2FzdHMiLCJxdWVyeSI6InF1ZXVlIiwiYXJncyI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJyZXZpc2lvbiI6IjNjZDQwNjRlNzRjNGUxZjdhZDc1NjNmZGNkNjg3MDQxOTc5NGE3YzMzYjM2MDQ1NWVlNmJmMzkzZTI2MmQ1ZjUiLCJsYXN0IjpbIjAwMDAwMDAwIiwidHdvIl19",
+          "next": "eyJuYW1lc3BhY2UiOiJsaXN0ZW5pbmcucG9kY2FzdHMiLCJxdWVyeSI6InF1ZXVlIiwiYXJncyI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJyZXZpc2lvbiI6ImU0Y2U5MDk4MzRmOGRhYWE5NzQ3NzAyMTNkZWFkZTA4MTJiN2IxMmJjODg5ZDgyZjQ1ZDM2NDUxY2EzZjUzY2UiLCJsYXN0IjpbIjAwMDAwMDAwIiwidHdvIl19",
           "rows": [
             {
               "id": "two",
@@ -148,16 +151,17 @@
     },
     "query": "playbackContext",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "chapterHead": "90031395934601aa023e4042bab45fde",
         "episode": {
           "consumption": "inProgress",
+          "duration": 120,
           "id": "one",
           "metadataAvailable": true,
           "noteCount": 1,
-          "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
-          "seconds": 5.0,
+          "positionRevision": "0b58dcd8c231a016e0bf22a19cf9500e",
+          "seconds": 60.0,
           "show": "show",
           "stateRevision": "0559b514f1ceb7615b0f040d9a9b010a",
           "title": "First episode",
@@ -181,7 +185,7 @@
     "arguments": {},
     "query": "playlists",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [
@@ -203,7 +207,7 @@
     },
     "query": "playlist",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "alternativeCount": 0,
         "extensions": null,
@@ -234,7 +238,7 @@
     },
     "query": "notes",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [
@@ -263,7 +267,7 @@
     },
     "query": "note",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "alternativeCount": 1,
         "note": {
@@ -308,7 +312,7 @@
     },
     "query": "recordingContent",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "contentOrigin": "id3",
         "head": "90031395934601aa023e4042bab45fde",
@@ -338,7 +342,7 @@
     },
     "query": "transcripts",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [
@@ -368,7 +372,7 @@
     },
     "query": "preferences",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [
@@ -393,7 +397,7 @@
     },
     "query": "recordings",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [
@@ -419,7 +423,7 @@
     },
     "query": "history",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [],
@@ -433,17 +437,18 @@
     },
     "query": "history",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [
           {
             "consumption": "inProgress",
+            "duration": 120,
             "id": "one",
             "metadataAvailable": true,
             "noteCount": 1,
-            "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
-            "seconds": 5.0,
+            "positionRevision": "0b58dcd8c231a016e0bf22a19cf9500e",
+            "seconds": 60.0,
             "show": "show",
             "stateRevision": "0559b514f1ceb7615b0f040d9a9b010a",
             "title": "First episode",
@@ -461,7 +466,7 @@
     },
     "query": "jobs",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [],
@@ -475,7 +480,7 @@
     },
     "query": "contributions",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
         "rows": [],
@@ -487,9 +492,9 @@
     "arguments": {},
     "query": "listeningCounts",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
-        "conflicts": 2,
+        "conflicts": 3,
         "episodes": 2,
         "finished": 0,
         "followed": 1,
@@ -507,11 +512,49 @@
     },
     "query": "conflicts",
     "result": {
-      "revision": "3cd4064e74c4e1f7ad7563fdcd6870419794a7c33b360455ee6bf393e262d5f5",
+      "revision": "e4ce909834f8daaa974770213deade0812b7b12bc889d82f45d36451ca3f53ce",
       "value": {
         "next": null,
-        "rows": [],
-        "total": 0
+        "rows": [
+          {
+            "author": "c43a940400a43bc7599b17f53049338f",
+            "authorLabel": "Owner",
+            "candidate": {
+              "author": "c43a940400a43bc7599b17f53049338f",
+              "authorLabel": "Owner",
+              "clock": 5,
+              "command": {
+                "id": "one",
+                "seconds": 5,
+                "show": "show"
+              },
+              "duration": 120,
+              "id": "one",
+              "metadataAvailable": true,
+              "metadataRevision": "5dd9c39a03fe795a48c049b282e486e9",
+              "origin": "person",
+              "positionBaseline": false,
+              "positionRevision": "7ba51fe2e049e063aa1b1442edd51b1e",
+              "published": "2026-11-05T00:00:00Z",
+              "revision": "7ba51fe2e049e063aa1b1442edd51b1e",
+              "seconds": 5,
+              "show": "show",
+              "title": "First episode",
+              "updated": "2026-11-04T12:00:00.000Z"
+            },
+            "clock": 5,
+            "component": "positionRevision",
+            "expected": null,
+            "found": "0b58dcd8c231a016e0bf22a19cf9500e",
+            "historical": false,
+            "object": "one",
+            "origin": "person",
+            "outcome": "passiveRegression",
+            "revision": "7ba51fe2e049e063aa1b1442edd51b1e",
+            "show": "show"
+          }
+        ],
+        "total": 1
       }
     }
   }

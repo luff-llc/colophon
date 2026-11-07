@@ -173,9 +173,9 @@ public struct RelayClient: Sendable {
         return response.body
     }
 
-    public func putIfAbsent(_ path: String, bytes: Data) async throws -> PutResult {
+    public func putIfAbsent(_ path: String, bytes: Data, replacing digest: String? = nil) async throws -> PutResult {
         var headers = ["Content-Type": "application/octet-stream"]
-        if !path.hasPrefix("state/") { headers["If-None-Match"] = "*" }
+        if let digest { headers["If-Match"] = "\"" + digest + "\"" } else { headers["If-None-Match"] = "*" }
         let response = try await transport.send(request("PUT", "/records/" + path, body: bytes,
             headers: headers, timeout: 60))
         switch response.status {

@@ -14,7 +14,7 @@ modified. Nothing was pushed or published.
   Root replacement also rotates all namespaces, excluding the former root.
 - Signed encrypted operations, admitted/held/refused evidence, authenticated AI attribution,
   all three clean domain modules, unknown-field preservation, specs, tools, and ledger.
-- Deterministic `conformance/0.2/` records and expected output; native and wasm replay parity.
+- Deterministic `conformance/0.3/` records and expected output; native and wasm replay parity.
 - `@colophon/core`, tsc-only build, non-extractable WebCrypto providers, Node 24 smoke,
   protocol spec, dependency documentation, and six portable-core lessons.
 
@@ -125,6 +125,6 @@ npm --prefix js run build
 npm --prefix js test
 ```
 
-Regenerated `conformance/0.2/`: revoke/recovery kept digests changed authority records 6–8 and
+Regenerated `conformance/0.3/`: revoke/recovery kept digests changed authority records 6–8 and
 the aggregate record map; extension projections and ledger ordering, wording and metadata
 changed expected output. Operation record bytes and all 0.1 vectors remain unchanged.

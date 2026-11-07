@@ -5,6 +5,7 @@ import Foundation
 /// Conforming sources must publish cached values on the main actor; getters perform no I/O.
 @MainActor public protocol LibrarySessionSource: AnyObject {
     var phase: SessionPhase { get }
+    var hasUsableContent: Bool { get }
     var context: UUID { get }
     var revision: UInt64 { get }
     var members: [Member] { get }
@@ -22,3 +23,5 @@ import Foundation
 }
 
 extension ColophonSession: LibrarySessionSource {}
+
+extension LibrarySessionSource { public var hasUsableContent: Bool { phase == .ready || phase == .refreshing } }

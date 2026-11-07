@@ -192,7 +192,7 @@ fn incremental_script_replays_revocation_and_held_operations() {
         "revokedBackdated"
     );
     equal_rebuild(&root);
-    // Protocol 0.2 regrant uses a fresh identity, not a replacement grant on the old identity.
+    // Protocol 0.3 regrant uses a fresh identity, not a replacement grant on the old identity.
     let replacement = keys(3);
     enroll(
         &mut root,

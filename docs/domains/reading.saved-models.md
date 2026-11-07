@@ -86,7 +86,7 @@ from `C/ContextAnswers.swift`; source is an index into selected evidence. This d
 podcast TranscriptAnswerClaim's exact Anchor objects. ReadingAnswer validation in
 `R/ReadingAnswer.swift` permits 1…8 evidence items,≤6 claims and≤8 citations per claim;
 the question scope validates a 1…500-character question and≤3,600 total excerpt characters.
-Engine/runtime/prompt labels and exact citation quotations are validated separately. The 0.2 command normalizes to
+Engine/runtime/prompt labels and exact citation quotations are validated separately. The 0.3 command normalizes to
 typed evidence references after validating the old source claim and preserving exact originals.
 `R/ReadingQuestionAdmission.swift`, `ReadingQuestionCustodyReceipt.swift`,
 `ReadingQuestionReceiptLedger.swift`, `ReadingQuestionProjection.swift`,

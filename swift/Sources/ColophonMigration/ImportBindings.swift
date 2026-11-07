@@ -2,7 +2,7 @@ import Foundation
 import ColophonSession
 
 enum ImportBindings {
-    /// Component receipts are deliberately never refreshed from native 0.2 edits.
+    /// Component receipts are deliberately never refreshed from native 0.3 edits.
     static func bind(namespace: String, source: LegacyOperation, command: LegacyImportCommand, payload: [String: Any], operationID: String, progress: inout MigrationProgress) {
         let id = payload["id"] as? String ?? "", kind = command.kind
         var components: [String] = []

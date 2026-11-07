@@ -452,3 +452,597 @@ fn checkpoint_equivocation_and_namespace_listing() {
         "notes listing must exclude the listening namespace"
     );
 }
+
+#[test]
+fn live_replacement_preserves_causal_rewind_and_deliberate_barriers() {
+    let (mut lib, owner, _) = create();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":100}),
+        91,
+    );
+    let head = success(
+        lib.query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+            .unwrap(),
+    )["positionRevision"]
+        .clone();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":20,"expect":head}),
+        92,
+    );
+    assert_eq!(episode_seconds(&lib, "e"), 20.0);
+    assert_eq!(
+        episode_seconds(&opened(lib.records().clone(), &owner), "e"),
+        20.0
+    );
+    assert_eq!(
+        lib.records()
+            .keys()
+            .filter(|p| p.starts_with("ops/"))
+            .count(),
+        0
+    );
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":3,"seek":true}),
+        93,
+    );
+    assert_eq!(
+        episode_seconds(&opened(lib.records().clone(), &owner), "e"),
+        3.0
+    );
+}
+
+#[test]
+fn forged_live_signature_and_stale_generation_never_supply_current_state() {
+    use colophon_core::records::SignedRecord;
+    let (mut lib, owner, _) = create();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":10}),
+        94,
+    );
+    let (path, old) = lib
+        .records()
+        .iter()
+        .find(|(p, _)| p.starts_with("state/"))
+        .map(|(p, b)| (p.clone(), b.clone()))
+        .unwrap();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":20}),
+        95,
+    );
+    lib.merge([(path.clone(), old)].into()).unwrap();
+    assert_eq!(episode_seconds(&lib, "e"), 20.0);
+    let mut forged: SignedRecord = serde_json::from_slice(&lib.records()[&path]).unwrap();
+    forged.signature[0] ^= 1;
+    let mut records = lib.records().clone();
+    records.insert(path, forged.encode().unwrap());
+    let reader = opened(records, &owner);
+    let episode = success(
+        reader
+            .query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+            .unwrap(),
+    );
+    assert!(episode.is_null(), "unverified live overlay: {episode}");
+}
+
+#[test]
+fn storage_engine_live_refresh_checkpoint_and_revocation_match_library() {
+    use colophon_core::engine::{Engine, EngineOptions, RecordSource};
+    use std::{cell::RefCell, rc::Rc};
+    #[derive(Clone)]
+    struct Source(Rc<RefCell<colophon_core::model::Records>>);
+    impl RecordSource for Source {
+        fn read(&self, path: &str) -> Result<Vec<u8>> {
+            self.0
+                .borrow()
+                .get(path)
+                .cloned()
+                .ok_or_else(|| colophon_core::Error("missing".into()))
+        }
+    }
+    let (mut lib, owner, _) = create();
+    let phone = keys(2);
+    enroll(
+        &mut lib,
+        &owner,
+        &phone,
+        "Phone",
+        colophon_core::model::MemberKind::Device,
+        grant(&["listening.podcasts"], None),
+        96,
+    );
+    let mut writer = opened(lib.records().clone(), &phone);
+    write(
+        &mut writer,
+        &phone,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":10}),
+        97,
+    );
+    lib.merge(writer.records().clone()).unwrap();
+    let source = Source(Rc::new(RefCell::new(lib.records().clone())));
+    let opts = EngineOptions {
+        library_id: lib.id().into(),
+        checkpoint_key: [3; 32],
+        content_cache_bytes: 1024,
+        namespaces: vec!["listening.podcasts".into()],
+    };
+    let open = |cache: Option<&[u8]>| {
+        let listing = source.0.borrow().keys().cloned().collect();
+        let mut engine =
+            Engine::open(source.clone(), listing, owner.public(), opts.clone(), cache).unwrap();
+        let shared = engine
+            .begin_unlock()
+            .into_iter()
+            .map(|s| (s.namespace, s.epoch, owner.agree(&s.peer).unwrap()))
+            .collect();
+        engine.finish_unlock_many(shared).unwrap();
+        engine
+    };
+    let mut engine = open(None);
+    let query = |e: &Engine<Source>| {
+        success(
+            e.query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+                .unwrap(),
+        )
+    };
+    assert_eq!(query(&engine)["seconds"], 10.0);
+    write(
+        &mut writer,
+        &phone,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":20}),
+        98,
+    );
+    *source.0.borrow_mut() = writer.records().clone();
+    engine
+        .refresh(source.0.borrow().keys().cloned().collect())
+        .unwrap();
+    assert_eq!(query(&engine)["seconds"], 20.0);
+    let cache = engine.checkpoint().unwrap();
+    assert_eq!(query(&open(Some(&cache)))["seconds"], 20.0);
+    lib.merge(writer.records().clone()).unwrap();
+    let action = success(
+        lib.begin_revoke(&phone.public().id(), NOW, [99; 32])
+            .unwrap(),
+    );
+    apply(&mut lib, action, &owner);
+    *source.0.borrow_mut() = lib.records().clone();
+    engine
+        .refresh(source.0.borrow().keys().cloned().collect())
+        .unwrap();
+    let shared = engine
+        .begin_unlock()
+        .into_iter()
+        .map(|s| (s.namespace, s.epoch, owner.agree(&s.peer).unwrap()))
+        .collect();
+    engine.finish_unlock_many(shared).unwrap();
+    assert!(
+        query(&engine).is_null(),
+        "revoked live position survived: {}",
+        query(&engine)
+    );
+}
+
+#[test]
+fn provider_version_change_reverifies_and_detects_immutable_equivocation() {
+    use colophon_core::engine::{Engine, EngineOptions, OpenMode, RecordSource};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+    #[derive(Clone)]
+    struct Source {
+        records: Rc<RefCell<colophon_core::model::Records>>,
+        version: Rc<Cell<u32>>,
+    }
+    impl RecordSource for Source {
+        fn read(&self, p: &str) -> Result<Vec<u8>> {
+            Ok(self.records.borrow()[p].clone())
+        }
+        fn content_version(&self, _: &str) -> Result<Option<String>> {
+            Ok(Some(self.version.get().to_string()))
+        }
+    }
+    let (mut lib, owner, _) = create();
+    write(
+        &mut lib,
+        &owner,
+        "notes",
+        "createNotebook",
+        json!({"id":"n","title":"N"}),
+        100,
+    );
+    let source = Source {
+        records: Rc::new(RefCell::new(lib.records().clone())),
+        version: Rc::new(Cell::new(1)),
+    };
+    let opts = EngineOptions {
+        library_id: lib.id().into(),
+        checkpoint_key: [7; 32],
+        content_cache_bytes: 0,
+        namespaces: vec!["notes".into()],
+    };
+    let open = |cache: Option<&[u8]>| {
+        Engine::open(
+            source.clone(),
+            source.records.borrow().keys().cloned().collect(),
+            owner.public(),
+            opts.clone(),
+            cache,
+        )
+    };
+    let mut engine = open(None).unwrap();
+    let shared = engine
+        .begin_unlock()
+        .into_iter()
+        .map(|s| (s.namespace, s.epoch, owner.agree(&s.peer).unwrap()))
+        .collect();
+    engine.finish_unlock_many(shared).unwrap();
+    let cache = engine.checkpoint().unwrap();
+    source.version.set(2);
+    assert!(matches!(
+        open(Some(&cache)).unwrap().open_mode(),
+        OpenMode::Invalidated(_)
+    ));
+    let path = source
+        .records
+        .borrow()
+        .keys()
+        .find(|p| p.starts_with("ops/"))
+        .unwrap()
+        .clone();
+    source
+        .records
+        .borrow_mut()
+        .get_mut(&path)
+        .unwrap()
+        .push(b' ');
+    let mut engine = open(Some(&cache)).unwrap();
+    let shared = engine
+        .begin_unlock()
+        .into_iter()
+        .map(|s| (s.namespace, s.epoch, owner.agree(&s.peer).unwrap()))
+        .collect();
+    assert!(protocol::is_equivocation(
+        &engine.finish_unlock_many(shared).unwrap_err()
+    ));
+}
+
+#[test]
+fn live_expiry_and_plaintext_slot_binding_are_checked_at_read_time() {
+    use colophon_core::{
+        model::{LiveStamp, OperationHeader},
+        records::{canonical, SignedRecord},
+    };
+    let (mut lib, owner, _) = create();
+    let phone = keys(2);
+    let mut access = grant(&["listening.podcasts"], None);
+    access.expires = Some("2026-11-08T00:00:00Z".into());
+    enroll(
+        &mut lib,
+        &owner,
+        &phone,
+        "Phone",
+        colophon_core::model::MemberKind::Device,
+        access,
+        110,
+    );
+    let mut writer = opened(lib.records().clone(), &phone);
+    write(
+        &mut writer,
+        &phone,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":12}),
+        111,
+    );
+    // Caveated local writes correctly use immutable intent. Construct a signed live candidate
+    // to verify the receiver's expiry check independently of that writer-side policy.
+    let raw = writer
+        .records()
+        .iter()
+        .find(|(p, _)| p.starts_with("ops/"))
+        .unwrap()
+        .1;
+    let record: SignedRecord = serde_json::from_slice(raw).unwrap();
+    let mut header: OperationHeader = serde_json::from_slice(&record.body).unwrap();
+    let slot = protocol::live_slot_name("e");
+    let path = protocol::live_state_path(&phone.public().id(), "listening.podcasts", &slot);
+    header.live = Some(LiveStamp {
+        library_id: lib.id().into(),
+        slot,
+        generation: header.meta.clock,
+        operation_id: header.meta.id.clone(),
+    });
+    let body = canonical(&header).unwrap();
+    lib.merge(
+        [(
+            path.clone(),
+            SignedRecord {
+                signature: phone.sign(&body),
+                body,
+            }
+            .encode()
+            .unwrap(),
+        )]
+        .into(),
+    )
+    .unwrap();
+    assert_eq!(episode_seconds(&lib, "e"), 12.0);
+    let expired = success(
+        lib.query(
+            "listening.podcasts",
+            "getEpisode",
+            json!({"id":"e"}),
+            "2026-11-09T00:00:00Z",
+        )
+        .unwrap(),
+    );
+    assert!(
+        expired.is_null(),
+        "expired live slot supplied current state"
+    );
+    header.live.as_mut().unwrap().slot = protocol::live_slot_name("different-episode");
+    let body = canonical(&header).unwrap();
+    let different = protocol::live_state_path(
+        &phone.public().id(),
+        "listening.podcasts",
+        &header.live.as_ref().unwrap().slot,
+    );
+    let mut records = lib.records().clone();
+    records.remove(&path);
+    records.insert(
+        different,
+        SignedRecord {
+            signature: phone.sign(&body),
+            body,
+        }
+        .encode()
+        .unwrap(),
+    );
+    let wrong = opened(records, &owner);
+    assert!(success(
+        wrong
+            .query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+            .unwrap()
+    )
+    .is_null());
+}
+
+#[test]
+fn live_overlay_rewinds_from_durable_baseline() {
+    let (mut lib, owner, _) = create();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":100,"seek":true}),
+        112,
+    );
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":200}),
+        113,
+    );
+    let head = success(
+        lib.query("listening.podcasts", "getEpisode", json!({"id":"e"}), NOW)
+            .unwrap(),
+    )["positionRevision"]
+        .clone();
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":20,"expect":head}),
+        114,
+    );
+    assert_eq!(
+        episode_seconds(&opened(lib.records().clone(), &owner), "e"),
+        20.0
+    );
+}
+
+#[test]
+fn checkpoint_key_is_member_sealed_signed_and_encrypts_private_state() {
+    use colophon_core::checkpoint::{CheckpointOpening, PreparedCheckpointKey};
+    use colophon_core::engine::{Engine, EngineOptions, OpenMode};
+    let (lib, owner, _) = create();
+    let prepared = PreparedCheckpointKey::new(lib.id(), owner.public(), [141; 32]).unwrap();
+    let signature = owner.sign(prepared.signing_body());
+    let key = prepared.finish(signature).unwrap();
+    let mut options = EngineOptions {
+        library_id: lib.id().into(),
+        checkpoint_key: key.authentication_key(),
+        namespaces: vec!["notes".into()],
+        content_cache_bytes: 0,
+    };
+    let records = lib.records().clone();
+    let listing: Vec<_> = records.keys().cloned().collect();
+    let mut engine = Engine::open(
+        records.clone(),
+        listing.clone(),
+        owner.public(),
+        options.clone(),
+        None,
+    )
+    .unwrap();
+    let shared = engine
+        .begin_unlock()
+        .iter()
+        .map(|s| (s.namespace.clone(), s.epoch, owner.agree(&s.peer).unwrap()))
+        .collect();
+    engine.finish_unlock_many(shared).unwrap();
+    let checkpoint = engine.checkpoint().unwrap();
+    let protected = key.protect(&checkpoint, [142; 32]).unwrap();
+    let opening = CheckpointOpening::begin(&protected, lib.id(), &owner.public()).unwrap();
+    let shared = owner.agree(opening.agreement_peer()).unwrap();
+    let (restored, plaintext) = opening.finish(&shared).unwrap();
+    assert_eq!(plaintext, checkpoint);
+    options.checkpoint_key = restored.authentication_key();
+    let reopened =
+        Engine::open(records, listing, owner.public(), options, Some(&plaintext)).unwrap();
+    assert_eq!(reopened.open_mode(), &OpenMode::VerifiedPrefix);
+    assert!(CheckpointOpening::begin(&protected, "different-library", &owner.public()).is_err());
+    assert!(CheckpointOpening::begin(&protected, lib.id(), &keys(143).public()).is_err());
+    let opening = CheckpointOpening::begin(&protected, lib.id(), &owner.public()).unwrap();
+    let wrong_shared = keys(143).agree(opening.agreement_peer()).unwrap();
+    assert!(opening.finish(&wrong_shared).is_err());
+    let prepared = PreparedCheckpointKey::new(lib.id(), owner.public(), [144; 32]).unwrap();
+    let forged = keys(143).sign(prepared.signing_body());
+    assert!(prepared.finish(forged).is_err());
+    let mut corrupt: serde_json::Value = serde_json::from_slice(&protected).unwrap();
+    let ciphertext = corrupt["ciphertext"].as_str().unwrap();
+    corrupt["ciphertext"] = format!(
+        "{}{}",
+        if ciphertext.starts_with('A') {
+            "B"
+        } else {
+            "A"
+        },
+        &ciphertext[1..]
+    )
+    .into();
+    let opening = CheckpointOpening::begin(
+        &serde_json::to_vec(&corrupt).unwrap(),
+        lib.id(),
+        &owner.public(),
+    )
+    .unwrap();
+    let shared = owner.agree(opening.agreement_peer()).unwrap();
+    assert!(opening.finish(&shared).is_err());
+}
+
+#[test]
+fn partial_namespace_replica_never_undercounts_a_cross_namespace_budget() {
+    use colophon_core::engine::{Engine, EngineOptions};
+    let (mut root, owner, _) = create();
+    let agent = keys(151);
+    enroll(
+        &mut root,
+        &owner,
+        &agent,
+        "Capped",
+        colophon_core::model::MemberKind::Agent,
+        grant(&["notes", "listening.podcasts"], Some(1)),
+        152,
+    );
+    let baseline = root.records().clone();
+    let mut notes = opened(baseline.clone(), &agent);
+    let mut podcasts = opened(baseline, &agent);
+    write(
+        &mut notes,
+        &agent,
+        "notes",
+        "createNotebook",
+        json!({"id":"capped","title":"Capped"}),
+        153,
+    );
+    write(
+        &mut podcasts,
+        &agent,
+        "listening.podcasts",
+        "position",
+        json!({"id":"e","seconds":1}),
+        154,
+    );
+    root.merge(notes.records().clone()).unwrap();
+    root.merge(podcasts.records().clone()).unwrap();
+    let admitted = ["notes", "listening.podcasts"]
+        .iter()
+        .map(|ns| {
+            success(root.view(ns, NOW).unwrap())
+                .admitted
+                .iter()
+                .filter(|o| o.author == agent.public().id())
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(admitted, 1);
+    write(
+        &mut root,
+        &owner,
+        "notes",
+        "createNotebook",
+        json!({"id":"root","title":"Root"}),
+        155,
+    );
+    let records: colophon_core::model::Records = root
+        .records()
+        .iter()
+        .filter(|(p, _)| protocol::listing_includes(p, &["notes".into()]))
+        .map(|(p, b)| (p.clone(), b.clone()))
+        .collect();
+    let mut scoped = opened(records.clone(), &owner);
+    scoped.set_read_scope(vec!["notes".into()]);
+    let view = success(scoped.view("notes", NOW).unwrap());
+    assert_eq!(
+        view.admitted.len(),
+        1,
+        "Unrelated owner content remains usable"
+    );
+    assert_eq!(view.admitted[0].author, owner.public().id());
+    let mut engine = Engine::open(
+        records.clone(),
+        records.keys().cloned().collect(),
+        owner.public(),
+        EngineOptions {
+            library_id: root.id().into(),
+            checkpoint_key: [156; 32],
+            content_cache_bytes: 0,
+            namespaces: vec!["notes".into()],
+        },
+        None,
+    )
+    .unwrap();
+    let shared = engine
+        .begin_unlock()
+        .iter()
+        .map(|s| (s.namespace.clone(), s.epoch, owner.agree(&s.peer).unwrap()))
+        .collect();
+    engine.finish_unlock_many(shared).unwrap();
+    assert_eq!(
+        success(engine.view("notes", NOW).unwrap()).admitted.len(),
+        1
+    );
+    let mut writer = opened(records, &agent);
+    writer.set_read_scope(vec!["notes".into()]);
+    assert!(matches!(
+        writer
+            .begin_write(
+                "notes",
+                "createNotebook",
+                json!({"id":"no","title":"No"}),
+                NOW,
+                [157; 32]
+            )
+            .unwrap(),
+        colophon_core::model::Outcome::Failure { .. }
+    ));
+}

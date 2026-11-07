@@ -103,7 +103,9 @@ private func content(_ count: Int, seed: UInt8 = 7) -> Data {
         let fresh = try await session.collectBlobGarbage(discardSoleCopy: true)
         #expect(fresh.removedChunks == 2, "The owner may discard the sole copy; the fresh orphan waits for its grace period")
         for (path, _) in try await store.blobPaths() { await store.setBlobDate(path, .distantPast) }
-        let stale = try await session.collectBlobGarbage()
+        let protected = try await session.collectBlobGarbage()
+        #expect(protected.removedChunks == 0, "Orphan chunks also need another confirmed holder")
+        let stale = try await session.collectBlobGarbage(discardSoleCopy: true)
         #expect(stale.removedChunks == 1)
         let remaining = try await store.blobPaths().keys.sorted()
         #expect(remaining.count == 3)

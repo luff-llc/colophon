@@ -93,6 +93,7 @@ pub struct CreateOptions {
 #[derive(Clone)]
 pub struct Library {
     records: Records,
+    read_scope: Vec<String>,
     authority: Authority,
     me: PublicIdentity,
     keys: BTreeMap<(String, u64), Vec<u8>>,
@@ -221,6 +222,7 @@ impl Library {
         let mut library = Self {
             verifiers,
             records,
+            read_scope: Vec::new(),
             authority,
             me,
             keys: BTreeMap::new(),
@@ -259,6 +261,71 @@ impl Library {
     pub fn identity(&self) -> &PublicIdentity {
         &self.me
     }
+    /// Declare the coherent namespace listing supplied by this host (empty means all).
+    /// Capped cross-namespace grants need their complete scope to enforce the shared budget.
+    pub fn set_read_scope(&mut self, namespaces: Vec<String>) {
+        if self.read_scope != namespaces {
+            self.read_scope = namespaces;
+            self.ingest(&[], true, &[]);
+        }
+    }
+    fn budget_scope_complete(authority: &Authority, scope: &[String], author: &str) -> bool {
+        scope.is_empty()
+            || authority
+                .members
+                .get(author)
+                .and_then(|member| member.member.grant.as_ref())
+                .is_none_or(|grant| {
+                    grant.write_budget.is_none()
+                        || grant.namespaces.iter().all(|ns| scope.contains(ns))
+                })
+    }
+    /// Authenticate a live candidate against current authority and epoch keys. Used by hosts
+    /// before conditional storage/sync promotion. Never trusts an unsigned generation.
+    pub fn live_generation(&self, path: &str, raw: &[u8], now: &str) -> Result<u64> {
+        ensure(crate::protocol::is_replaceable(path), "Not a live slot")?;
+        let input = [(path, raw)];
+        let (header, digest) = self
+            .verifiers
+            .operations(&self.authority, &input, None)?
+            .remove(0)?;
+        let member = self
+            .authority
+            .members
+            .get(&header.meta.author)
+            .ok_or_else(|| missing("author"))?;
+        ensure(member.member.revoked_at.is_none(), "Revoked live writer")?;
+        ensure(
+            member.member.grant.as_ref().is_none_or(|g| {
+                !expired(&g.expires, now).unwrap_or(true) && g.write_budget.is_none()
+            }),
+            "Expired or capped live writer",
+        )?;
+        let status = Self::judge(
+            &self.authority,
+            &header.meta,
+            &digest,
+            &mut BTreeMap::new(),
+            0,
+            true,
+        );
+        ensure(
+            status == Status::Admitted,
+            "Live writer is not currently admitted",
+        )?;
+        let generation = header.meta.clock;
+        let mut j = Judged {
+            header,
+            digest,
+            operation: None,
+            opened: false,
+            status,
+            from_live_slot: true,
+        };
+        Self::open_operation(&self.authority, &self.keys, &mut j);
+        ensure(j.operation.is_some(), "Live payload unavailable or invalid")?;
+        Ok(generation)
+    }
     /// Merge immutable records transactionally. Conflicting paths fail; identical replay is harmless.
     pub fn merge(&mut self, incoming: Records) -> Result<()> {
         self.merge_with_changes(incoming).map(|_| ())
@@ -281,7 +348,7 @@ impl Library {
                 ensure(old == raw, "Immutable record conflict")?;
             }
         }
-        let incoming: Records = incoming
+        let mut incoming: Records = incoming
             .into_iter()
             .filter(|(p, raw)| {
                 self.records.get(p) != Some(raw)
@@ -308,6 +375,35 @@ impl Library {
             self.verifiers = std::sync::Arc::new(crate::verification::Verifiers::new(&authority));
             self.authority = authority;
         }
+        // Keep an already authenticated high-water value when a provider returns an older
+        // slot. Invalid higher generations never displace it. No canonical bytes are repaired.
+        let mut ignored = Vec::new();
+        for (path, raw) in &incoming {
+            if !crate::protocol::is_replaceable(path) {
+                continue;
+            }
+            let Some(old) = self.records.get(path) else {
+                continue;
+            };
+            let Some(old_header) = decode_header(old) else {
+                continue;
+            };
+            let now = decode_header(raw)
+                .map(|h| h.meta.created)
+                .unwrap_or_else(|| old_header.meta.created.clone());
+            if self.live_generation(path, old, &now).is_ok() {
+                match self.live_generation(path, raw, &now) {
+                    Ok(generation) if generation > old_header.meta.clock => (),
+                    Ok(generation) if generation == old_header.meta.clock => {
+                        return Err(Error("Equivocation at live generation".into()))
+                    }
+                    _ => ignored.push(path.clone()),
+                }
+            }
+        }
+        for path in ignored {
+            incoming.remove(&path);
+        }
         let mut paths: Vec<_> = incoming
             .keys()
             .filter(|p| crate::protocol::is_operation_record(p))
@@ -315,12 +411,16 @@ impl Library {
             .collect();
         for path in &paths {
             if crate::protocol::is_replaceable(path) {
-                if let Some((_, slot)) = path.rsplit_once('/') {
-                    let slot = slot.trim_end_matches(".json");
-                    self.live.retain(|(author, ns, s), _| {
-                        !(s == slot && path == &crate::protocol::live_state_path(author, ns, s))
-                    });
-                }
+                self.judged.retain(|j| {
+                    !j.from_live_slot
+                        || j.header.live.as_ref().is_none_or(|stamp| {
+                            crate::protocol::live_state_path(
+                                &j.header.meta.author,
+                                &j.header.meta.namespace,
+                                &stamp.slot,
+                            ) != *path
+                        })
+                });
             }
         }
         self.records.extend(incoming);
@@ -505,7 +605,17 @@ impl Library {
             .namespaces
             .get(namespace)
             .ok_or_else(|| missing("namespace"))?;
-        Ok(Outcome::success(state.query(name, &args)?))
+        if self
+            .live
+            .values()
+            .any(|j| j.header.meta.namespace == namespace)
+        {
+            Ok(Outcome::success(
+                self.projected(namespace, now)?.query(name, &args)?,
+            ))
+        } else {
+            Ok(Outcome::success(state.query(name, &args)?))
+        }
     }
     /// Verify host signatures, then merge the complete action atomically.
     pub fn finish(&mut self, pending: PendingBatch, signatures: Vec<Vec<u8>>) -> Result<()> {
@@ -915,6 +1025,20 @@ impl Library {
     }
     fn authorize(&self, namespace: &str, access: Access, now: &str) -> Result<Option<Denial>> {
         time_key(now)?;
+        if !self.read_scope.is_empty() && !self.read_scope.iter().any(|ns| ns == namespace) {
+            return Ok(Some(Denial::new(
+                "unavailable",
+                "Namespace is outside this replica's selected scope",
+            )));
+        }
+        if access == Access::Write
+            && !Self::budget_scope_complete(&self.authority, &self.read_scope, &self.me.id())
+        {
+            return Ok(Some(Denial::new(
+                "unavailable",
+                "A grant-wide write budget requires the complete grant scope",
+            )));
+        }
         if !self.authority.namespaces.iter().any(|n| n == namespace) {
             return Ok(Some(Denial::new(
                 "notGranted",
@@ -984,7 +1108,7 @@ impl Library {
         &self,
         namespace: &str,
         kind: &str,
-        payload: Value,
+        mut payload: Value,
         now: &str,
         seed: [u8; 32],
     ) -> Result<Outcome<PendingBatch>> {
@@ -1054,32 +1178,74 @@ impl Library {
             clock <= 9_007_199_254_740_991,
             "Logical clock exceeds interoperable integer range",
         )?;
-        let live_slot = crate::protocol::live_slot(namespace, kind, &payload);
+        let mut live_slot = crate::protocol::live_slot(namespace, kind, &payload)
+            .filter(|_| self.authority.layout >= crate::protocol::LAYOUT)
+            .filter(|_| {
+                member
+                    .member
+                    .grant
+                    .as_ref()
+                    .is_none_or(|g| g.write_budget.is_none() && g.expires.is_none())
+            });
         let mut copies = Records::new();
-        if let Some(slot) = &live_slot {
-            if let Some(raw) = self.records.get(&crate::protocol::live_state_path(
-                &self.me.id(),
-                namespace,
-                slot,
-            )) {
-                if let Some(previous) = decode_header(raw) {
-                    let cited = payload
-                        .get("expect")
-                        .and_then(Value::as_str)
-                        .or_else(|| payload.get("expectedPosition").and_then(Value::as_str));
-                    if cited == Some(previous.meta.id.as_str()) {
-                        copies.insert(crate::protocol::operation_path(&previous.meta), raw.clone());
+        if live_slot.is_some() {
+            let current = self
+                .projected(namespace, now)?
+                .query("getEpisode", &json!({"id": payload["id"]}))?;
+            let informed = payload
+                .get("expect")
+                .is_some_and(|v| *v == current["positionRevision"]);
+            let forward = payload["seconds"].as_f64().unwrap_or(0.0)
+                >= current["seconds"].as_f64().unwrap_or(0.0);
+            if current["positionBaseline"] == true
+                || (!informed && (!forward || payload.get("expect").is_some()))
+            {
+                live_slot = None;
+            } else {
+                if payload.get("duration").is_none_or(Value::is_null)
+                    && current["duration"].is_number()
+                {
+                    payload["duration"] = current["duration"].clone();
+                }
+                // Collapse an own causal chain to the exact durable predecessor. Cross-author
+                // references remain exact and are retained below.
+                if informed {
+                    if let Some(previous) = self.live.values().find(|j| {
+                        j.header.meta.author == self.me.id()
+                            && current["positionRevision"] == j.header.meta.id
+                    }) {
+                        if let Some(op) = &previous.operation {
+                            if let Some(expect) = op.payload.get("expect") {
+                                payload["expect"] = expect.clone();
+                            } else {
+                                payload["expect"] = self
+                                    .namespaces
+                                    .get(namespace)
+                                    .expect("namespace")
+                                    .state
+                                    .query("getEpisode", &json!({"id":payload["id"]}))?
+                                    ["positionRevision"]
+                                    .clone();
+                            }
+                        }
                     }
                 }
             }
-        } else if matches!(kind, "position" | "setState" | "recoverPosition") {
-            if let Some(id) = payload.get("id").and_then(Value::as_str) {
-                let slot = crate::protocol::live_slot_name(id);
-                let path = crate::protocol::live_state_path(&self.me.id(), namespace, &slot);
+        }
+        // Deliberate actions preserve all currently observed playback heads. This also covers
+        // nested completion events and references to another author's replaceable revision.
+        for j in self
+            .live
+            .values()
+            .filter(|j| j.header.meta.namespace == namespace)
+        {
+            let cited = contains_revision(&payload, &j.header.meta.id);
+            if live_slot.is_none() || cited {
+                let stamp = j.header.live.as_ref().expect("live stamp");
+                let path =
+                    crate::protocol::live_state_path(&j.header.meta.author, namespace, &stamp.slot);
                 if let Some(raw) = self.records.get(&path) {
-                    if let Some(previous) = decode_header(raw) {
-                        copies.insert(crate::protocol::operation_path(&previous.meta), raw.clone());
-                    }
+                    copies.insert(crate::protocol::operation_path(&j.header.meta), raw.clone());
                 }
             }
         }
@@ -1188,10 +1354,14 @@ impl Library {
             };
             match &j.status {
                 Status::Admitted => {
-                    if j.from_live_slot {
-                        // Live slots are current overlay, not immutable admitted history.
-                    } else if let Some(operation) = &j.operation {
-                        view.admitted.push(operation.clone());
+                    if let Some(operation) = &j.operation {
+                        if !view
+                            .admitted
+                            .iter()
+                            .any(|old| old.id == operation.id && old.author == operation.author)
+                        {
+                            view.admitted.push(operation.clone());
+                        }
                     } else if self
                         .keys
                         .contains_key(&(namespace.into(), j.header.meta.epoch))
@@ -1212,7 +1382,15 @@ impl Library {
                 .map(|(_, r)| r),
         );
         if let Some(state) = self.namespaces.get(namespace) {
-            view.state = state.query("read", &json!({}))?;
+            view.state = if self
+                .live
+                .values()
+                .any(|j| j.header.meta.namespace == namespace)
+            {
+                self.projected(namespace, now)?.query("read", &json!({}))?
+            } else {
+                state.query("read", &json!({}))?
+            };
         }
         Ok(Outcome::success(view))
     }
@@ -1464,18 +1642,23 @@ impl Library {
             }
             let meta = &j.header.meta;
             let skip_clock_jump = j.from_live_slot;
-            let mut status = Self::judge(
-                &self.authority,
-                meta,
-                &j.digest,
-                &mut self.admission.spent,
-                self.admission
-                    .clocks
-                    .get(&meta.namespace)
-                    .copied()
-                    .unwrap_or(0),
-                skip_clock_jump,
-            );
+            let mut status =
+                if !Self::budget_scope_complete(&self.authority, &self.read_scope, &meta.author) {
+                    Status::Refused("budgetScopeUnavailable".into())
+                } else {
+                    Self::judge(
+                        &self.authority,
+                        meta,
+                        &j.digest,
+                        &mut self.admission.spent,
+                        self.admission
+                            .clocks
+                            .get(&meta.namespace)
+                            .copied()
+                            .unwrap_or(0),
+                        skip_clock_jump,
+                    )
+                };
             if j.from_live_slot
                 && status == Status::Admitted
                 && self
@@ -1623,31 +1806,18 @@ impl Library {
                     });
             }
         }
-        self.apply_live(&mut touched);
-        let mut live_ops: Vec<(String, OperationView, Option<domain::AuthorContext>, u64)> = self
-            .live
-            .values()
-            .filter_map(|judged| {
-                let op = judged.operation.as_ref()?.clone();
-                let ctx = self.authority.members.get(&op.author).map(|member| {
-                    domain::AuthorContext::from_member(&member.member, &self.authority.id)
-                });
-                Some((
-                    judged.header.meta.namespace.clone(),
-                    op,
-                    ctx,
-                    judged.header.meta.clock,
-                ))
-            })
-            .collect();
-        live_ops.sort_by(|a, b| a.3.cmp(&b.3).then(a.1.id.cmp(&b.1.id)));
-        for (ns, op, ctx, clock) in live_ops {
-            let state = self
-                .namespaces
-                .entry(ns.clone())
-                .or_insert_with(|| Namespace::new(&ns));
-            if clock > state.clock {
-                state.apply_overlay(&op, ctx);
+        self.live.clear();
+        for j in &self.judged {
+            if j.from_live_slot && j.status == Status::Admitted && j.operation.is_some() {
+                let stamp = j.header.live.as_ref().expect("verified live stamp");
+                self.live.insert(
+                    (
+                        j.header.meta.author.clone(),
+                        j.header.meta.namespace.clone(),
+                        stamp.slot.clone(),
+                    ),
+                    j.clone(),
+                );
             }
         }
         // Invalid records affect rejection queries even when they never enter admitted order.
@@ -1663,74 +1833,47 @@ impl Library {
             }
         }
     }
-    pub(crate) fn apply_live(&mut self, touched: &mut BTreeSet<String>) {
-        let _ = touched;
-        self.live.clear();
-        let paths: Vec<String> = self
-            .records
-            .keys()
-            .filter(|p| crate::protocol::is_replaceable(p))
-            .cloned()
+    /// Build a current projection from immutable intent plus verified live heads. Never mutate
+    /// the immutable reducer checkpoint with replaceable data; expiry is checked at query time.
+    fn projected(&self, namespace: &str, now: &str) -> Result<domain::State> {
+        let mut state = self
+            .namespaces
+            .get(namespace)
+            .ok_or_else(|| missing("namespace"))?
+            .state
+            .clone();
+        let mut heads: Vec<_> = self
+            .live
+            .values()
+            .filter(|j| j.header.meta.namespace == namespace)
             .collect();
-        for path in paths {
-            let Some(raw) = self.records.get(&path) else {
+        heads.sort_by(|a, b| order(&a.header.meta).cmp(&order(&b.header.meta)));
+        for j in heads {
+            let Some(member) = self.authority.members.get(&j.header.meta.author) else {
                 continue;
             };
-            let Ok(record) = serde_json::from_slice::<crate::records::SignedRecord>(raw) else {
-                continue;
-            };
-            let Some(header) = decode_header(raw) else {
-                continue;
-            };
-            let Some(stamp) = header.live.clone() else {
-                continue;
-            };
-            if crate::protocol::match_header_path(&path, &header.meta, header.live.as_ref())
-                .is_err()
+            if member.member.revoked_at.is_some()
+                || member
+                    .member
+                    .grant
+                    .as_ref()
+                    .is_some_and(|g| expired(&g.expires, now).unwrap_or(true))
             {
                 continue;
             }
-            if self
-                .authority
-                .members
-                .get(&header.meta.author)
-                .is_some_and(|m| m.member.revoked_at.is_some())
-            {
+            let Some(op) = &j.operation else { continue };
+            if !state.live_is_after(op) {
                 continue;
             }
-            let mut judged = Judged {
-                header,
-                digest: crate::records::digest(&record.body),
-                operation: None,
-                opened: false,
-                status: Status::Admitted,
-                from_live_slot: true,
-            };
-            Self::open_operation(&self.authority, &self.keys, &mut judged);
-            if judged.operation.is_none() {
-                continue;
-            }
-            let key = (
-                judged.header.meta.author.clone(),
-                judged.header.meta.namespace.clone(),
-                stamp.slot,
+            state.apply_with_context(
+                op,
+                Some(&domain::AuthorContext::from_member(
+                    &member.member,
+                    &self.authority.id,
+                )),
             );
-            let generation = judged
-                .header
-                .live
-                .as_ref()
-                .map(|s| s.generation)
-                .unwrap_or(0);
-            if self
-                .live
-                .get(&key)
-                .and_then(|old| old.header.live.as_ref())
-                .is_some_and(|old| old.generation > generation)
-            {
-                continue;
-            }
-            self.live.insert(key, judged);
         }
+        Ok(state)
     }
     fn open_operation(
         authority: &Authority,
@@ -1772,6 +1915,13 @@ impl Library {
                 {
                     return None;
                 }
+                if let Some(stamp) = &header.live {
+                    if crate::protocol::live_slot(&meta.namespace, &op.kind, &op.payload).as_deref()
+                        != Some(stamp.slot.as_str())
+                    {
+                        return None;
+                    }
+                }
                 Some(Self::operation_view(authority, meta, op))
             });
         // Exact encrypted records remain in `records`; do not retain a second ciphertext copy.
@@ -1804,6 +1954,15 @@ impl Library {
                 .is_some_and(|g| g.allows(&meta.namespace, Access::Write))
         {
             return refuse("notGranted");
+        }
+        if skip_clock_jump
+            && member
+                .member
+                .grant
+                .as_ref()
+                .is_some_and(|g| g.write_budget.is_some())
+        {
+            return refuse("cappedLiveWriter");
         }
         if let Some(grant) = &member.member.grant {
             if expired(&grant.expires, &meta.created).unwrap_or(true) {
@@ -2415,4 +2574,13 @@ fn operation_aad(meta: &OperationMeta) -> Result<Vec<u8>> {
         namespace: &meta.namespace,
         protocol: &meta.protocol,
     })?)
+}
+
+fn contains_revision(value: &Value, id: &str) -> bool {
+    match value {
+        Value::String(s) => s == id,
+        Value::Array(values) => values.iter().any(|v| contains_revision(v, id)),
+        Value::Object(values) => values.values().any(|v| contains_revision(v, id)),
+        _ => false,
+    }
 }

@@ -12,15 +12,32 @@ public protocol RecordStore: Sendable {
     func read() async throws -> [String: Data]
     /// Exact duplicates are idempotent. Existing different bytes must never be overwritten.
     func append(_ records: [String: Data]) async throws
+    /// Atomically replace a live slot only if its exact old bytes still match.
+    func replaceLive(_ path: String, expected: Data?, bytes: Data) async throws -> Bool
     func changes() async -> AsyncStream<Void>
     /// Every record path, without reading record bytes. Errors are never an empty set.
     func paths() async throws -> Set<String>
+    func paths(namespaces: [String]) async throws -> Set<String>
+    /// Scoped synchronization inventory, including append-only engagement evidence.
+    func syncPaths(namespaces: [String]) async throws -> Set<String>
+    /// Cheap provider versions; nil values require conservative body reads.
+    func versions(paths: Set<String>) async throws -> [String: String]
     /// Exact bytes of the requested records that exist; absent paths are omitted.
     func read(paths: [String]) async throws -> [String: Data]
 }
 
 /// Compatibility defaults for stores that only implement complete snapshots.
 extension RecordStore {
+    public func replaceLive(_ path: String, expected: Data?, bytes: Data) async throws -> Bool {
+        throw StorageError.unavailable("This provider does not support conditional live publication")
+    }
+    public func paths(namespaces: [String]) async throws -> Set<String> {
+        Set(try await paths().filter { !$0.hasPrefix("history/") && RecordPath.listingIncludes($0, namespaces: namespaces) })
+    }
+    public func syncPaths(namespaces: [String]) async throws -> Set<String> {
+        Set(try await paths().filter { RecordPath.listingIncludes($0, namespaces: namespaces) })
+    }
+    public func versions(paths: Set<String>) async throws -> [String: String] { [:] }
     public func paths() async throws -> Set<String> { Set(try await read().keys) }
     public func read(paths: [String]) async throws -> [String: Data] {
         let all = try await read()
@@ -58,13 +75,15 @@ public enum RecordPath {
     /// Missing namespaced records never block another namespace; authority, requests and unknown ops still do.
     public static func missingBlocks(_ path: String) -> Bool {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        return parts.count == 2 || (parts.count == 3 && parts[0] == "ops")
+        return parts.count == 2 || parts[0] == "ops"
     }
 }
 
 /// Each subscriber gets a bounded wake-up hint; consumers re-read the complete store.
 public actor MemoryRecordStore: RecordStore {
     private var records: [String: Data]
+    private var versionsByPath: [String: UInt64] = [:]
+    private var generation: UInt64 = 0
     private var blobs: [String: Data] = [:]
     private var blobDates: [String: Date] = [:]
     private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
@@ -84,11 +103,15 @@ public actor MemoryRecordStore: RecordStore {
         fullReads += 1
         return records
     }
-    public func paths() throws -> Set<String> {
+    public func paths() async throws -> Set<String> {
         if let unavailable { throw StorageError.unavailable(unavailable) }
         return Set(records.keys)
     }
-    public func read(paths: [String]) throws -> [String: Data] {
+    public func versions(paths: Set<String>) async throws -> [String: String] {
+        if let unavailable { throw StorageError.unavailable(unavailable) }
+        return Dictionary(uniqueKeysWithValues: paths.compactMap { path in records[path].map { _ in (path, String(versionsByPath[path] ?? 0)) } })
+    }
+    public func read(paths: [String]) async throws -> [String: Data] {
         if let unavailable { throw StorageError.unavailable(unavailable) }
         var result: [String: Data] = [:]
         for path in paths { if let bytes = records[path] { result[path] = bytes } }
@@ -104,8 +127,19 @@ public actor MemoryRecordStore: RecordStore {
             }
         }
         let changed = incoming.contains { records[$0.key] != $0.value }
-        for (path, bytes) in incoming { records[path] = bytes }
+        for (path, bytes) in incoming {
+            if records[path] != bytes { generation += 1; versionsByPath[path] = generation }
+            records[path] = bytes
+        }
         if changed { notify() }
+    }
+    public func replaceLive(_ path: String, expected: Data?, bytes: Data) async throws -> Bool {
+        try RecordPath.validate(path)
+        guard RecordPath.isReplaceable(path) else { throw StorageError.invalidPath(path) }
+        if let unavailable { throw StorageError.unavailable(unavailable) }
+        if records[path] == bytes { return true }
+        guard records[path] == expected else { return false }
+        try append([path: bytes]); return true
     }
     public func changes() -> AsyncStream<Void> {
         let id = UUID()
@@ -137,7 +171,7 @@ public protocol BlobStore: Sendable {
     /// Presence without reading bytes. Errors (for example iCloud hydration) are not absence.
     func hasBlob(_ path: String) async throws -> Bool
     /// Local cache eviction only. Never call it for a chunk that may be the last copy unless the
-    /// blob is unreferenced; the session's garbage collector decides.
+    /// owner explicitly requests discarding it; reference count alone is insufficient.
     func removeBlob(_ path: String) async throws
     /// Every local chunk path with its modification date, without reading bytes.
     func blobPaths() async throws -> [String: Date]

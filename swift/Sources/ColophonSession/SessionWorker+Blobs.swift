@@ -186,7 +186,8 @@ extension SessionWorker {
                 else if let relay, try await relay.relayHolds(path) { remove = true }
             } else if modified.addingTimeInterval(gracePeriod) < .now {
                 // A chunk no manifest names: an upload that never published.
-                remove = true
+                if discardSoleCopy { remove = true }
+                else if let relay, try await relay.relayHolds(path) { remove = true }
             }
             if remove {
                 let size = (try? await blobs.readBlob(path).count) ?? 0

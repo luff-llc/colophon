@@ -114,7 +114,7 @@ export class Library {
 The `colophon` CLI and the MCP server use the same tool list, so an agent sees identical tools in a
 browser, a terminal and an MCP client.
 
-## Implemented 0.2 additions and domain names
+## Implemented 0.3 additions and domain names
 
 The surface above is unchanged. The package additionally provides:
 
@@ -146,7 +146,7 @@ Grant-wide `writeBudget` counts distinct admitted signed author/ID reservations 
 payload can reserve a slot without entering the domain fold; this keeps accounting independent
 of which namespace keys the reader holds. Unknown restriction fields fail closed.
 
-Tools retain namespace dots and use these exact clean 0.2 operation kinds:
+Tools retain namespace dots and use these exact clean 0.3 operation kinds:
 
 | Namespace | Kinds | State collections |
 | --- | --- | --- |
@@ -155,7 +155,7 @@ Tools retain namespace dots and use these exact clean 0.2 operation kinds:
 | `notes` | `createNotebook`, `addNote`, `editNote` | `notebooks`, `notes` |
 
 Examples: `reading.saved__read`, `reading.saved__capture`, `notes__addNote`.
-Use `tools()` for descriptions and input schemas; [the spec](../spec/colophon-0.2.md#6-modules-views-and-tools)
+Use `tools()` for descriptions and input schemas; [the spec](../spec/colophon-0.3.md#6-modules-views-and-tools)
 lists payload fields. Every state also has `conflicts` and `invalid`. Projected items retain unknown
 payload fields in `extensions` while `origin`, `author`, `authorLabel`, `revision` and `clock` come from authenticated
 operations. Deleted saved items remain explicit tombstones (`deleted: true`) in `items`.

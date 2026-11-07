@@ -183,6 +183,12 @@ impl NativeLibrary {
             id: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
         }))
     }
+    pub fn set_read_scope(&self, namespaces: Vec<String>) -> Result<()> {
+        let mut session = self.lock()?;
+        session.library.set_read_scope(namespaces);
+        session.revision += 1;
+        Ok(())
+    }
     pub fn id(&self) -> Result<String> {
         Ok(self.lock()?.library.id().into())
     }
@@ -205,12 +211,15 @@ impl NativeLibrary {
     pub fn merge(&self, records: Records) -> Result<ChangeSummary> {
         let mut s = self.lock()?;
         let before = s.library.records().len();
-        s.library.merge(records.into_iter().collect())?;
+        let changes = s
+            .library
+            .merge_with_changes(records.into_iter().collect())?;
         let added = (s.library.records().len() - before) as u64;
-        if added > 0 {
+        let changed = added > 0 || !changes.namespaces.is_empty();
+        if changed {
             s.revision += 1;
         }
-        Ok(Self::summary(&s, added, added > 0))
+        Ok(Self::summary(&s, added, changed))
     }
     pub fn commit(
         &self,
@@ -332,6 +341,11 @@ impl NativeLibrary {
             s.library.begin_revoke(&member_id, &now, seed(entropy)?)?,
         )
     }
+    /// Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+    pub fn begin_layout(&self, layout: u32, now: String) -> Result<PreparedAction> {
+        let s = self.lock()?;
+        self.prepared(&s, s.library.begin_layout(layout, &now)?)
+    }
     pub fn begin_write(
         &self,
         namespace: String,
@@ -411,6 +425,10 @@ impl NativeLibrary {
                 denial: denial(reason, detail)?,
             }),
         }
+    }
+    /// Verify/decrypt a live slot before host-side conditional promotion.
+    pub fn live_generation(&self, path: String, bytes: Vec<u8>, now: String) -> Result<u64> {
+        Ok(self.lock()?.library.live_generation(&path, &bytes, &now)?)
     }
     /// Looks up the just-written operation without making the host parse protocol records.
     pub fn written_operation(

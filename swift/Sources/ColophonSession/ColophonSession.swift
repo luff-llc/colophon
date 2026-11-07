@@ -51,9 +51,13 @@ import ColophonKitStorage
         if let restoreTask { await restoreTask.value; return }
         let task = Task { [weak self] in
             guard let self else { return }
+            let lease = context
             await startWatching()
-            do { apply(try await worker.restore()) }
-            catch { fail(error) }
+            do {
+                let snapshot = try await worker.restore()
+                guard lease == context, !Task.isCancelled else { return }
+                apply(snapshot)
+            } catch { if lease == context { fail(error) } }
             startSyncLoop()
         }
         restoreTask = task
@@ -65,7 +69,7 @@ import ColophonKitStorage
         if phase == .ready { phase = .refreshing }
         do {
             let snapshot = try await worker.refresh()
-            guard lease == context else { return }
+            guard lease == context, !Task.isCancelled else { return }
             apply(snapshot)
             await startWatching()
         } catch { if lease == context { fail(error) } }
@@ -75,8 +79,9 @@ import ColophonKitStorage
         guard phase == .noLibrary else { return }
         retryCreate = true
         phase = .creating
-        do { apply(try await worker.create()); retryCreate = false; await startWatching() }
-        catch { fail(error) }
+        let lease = context
+        do { let snapshot = try await worker.create(); guard lease == context else { return }; apply(snapshot); retryCreate = false; await startWatching() }
+        catch { if lease == context { fail(error) } }
     }
     /// Retries the lifecycle action that failed, including an interrupted create.
     public func retry() async {
@@ -144,8 +149,9 @@ import ColophonKitStorage
     public func rejoin(keys: any AsyncKeyProvider) async {
         await restore()
         invalidateContext(); phase = .opening
-        do { apply(try await worker.rejoin(keys: keys)); await startWatching(); startSyncLoop() }
-        catch { fail(error) }
+        let lease = context
+        do { let snapshot = try await worker.rejoin(keys: keys); guard lease == context else { return }; apply(snapshot); await startWatching(); startSyncLoop() }
+        catch { if lease == context { fail(error) } }
     }
     public func importRequest(from url: URL) async throws {
         await restore()
@@ -161,7 +167,7 @@ import ColophonKitStorage
         let observed = namespaceRevisions[namespace, default: 0]
         do {
             let bytes = try await worker.query(namespace: namespace, name: name, arguments: arguments)
-            guard context == lease, phase == .ready,
+            guard context == lease, (phase == .ready || phase == .refreshing),
                   namespaceRevisions[namespace, default: 0] == observed else { throw SessionError.staleRevision }
             return bytes
         } catch {
@@ -204,6 +210,7 @@ import ColophonKitStorage
             return false
         } catch {
             syncState = .error(reason: error.localizedDescription)
+            if error is SessionLayoutError { fail(error) }
             return false
         }
     }
@@ -290,10 +297,12 @@ import ColophonKitStorage
         batchTask?.cancel(); batchTask = nil
         await refresh()
     }
+    public var hasUsableContent: Bool { !views.isEmpty && [.ready, .refreshing, .waitingForDownload, .retry].contains(phase) }
     private func apply(_ snapshot: SessionSnapshot) {
+        guard snapshot.revision >= revision else { return }
         if relay != nil, snapshot.revision != revision || snapshot.phase != phase { Task { [syncSignal] in await syncSignal.fire() } }
         let changed = Set(snapshot.namespaceRevisions.keys.filter { namespaceRevisions[$0] != snapshot.namespaceRevisions[$0] })
-        let lost = snapshot.phase != .ready && snapshot.phase != .refreshing
+        let lost = ![SessionPhase.ready, .refreshing, .waitingForDownload, .retry].contains(snapshot.phase)
         phase = snapshot.phase; revision = snapshot.revision; namespaceRevisions = snapshot.namespaceRevisions
         libraryID = snapshot.core?.libraryID ?? libraryID; memberID = snapshot.core?.me.id ?? memberID
         members = snapshot.core?.members ?? []; ledger = snapshot.core?.ledger ?? []; requests = snapshot.core?.requests ?? []
@@ -314,23 +323,27 @@ import ColophonKitStorage
         for invalidate in caches.values { invalidate([], true) }
     }
     private func handleCommandError(_ error: any Error) {
-        if error is AccessError || error is StorageError || error is PendingPublication || error is SessionKeyFailure { fail(error) }
+        if error is AccessError || error is StorageError || error is PendingPublication || error is SessionKeyFailure || error is SessionLayoutError { fail(error) }
         else { lastError = error.localizedDescription }
     }
     private func fail(_ error: any Error) {
+        if error is CancellationError { return }
         lastError = error.localizedDescription
         switch error {
         case SessionLayoutError.updateRequired:
             phase = .updateRequired
             return
         case let keys as SessionKeyFailure: phase = .failed(error: .keysUnavailable(detail: keys.detail))
-        case let pending as PendingPublication: phase = .unavailable(reason: pending.reason)
+        case is PendingPublication:
+            phase = .retry
+            return
         case StorageError.unavailable(let reason):
-            if reason.contains("iCloud download pending") || reason.contains("Waiting for the relay") {
+            if reason.contains("download pending") || reason.contains("Waiting for the relay") {
                 phase = .waitingForDownload
                 return
             }
-            phase = .unavailable(reason: reason)
+            phase = .retry
+            return
         case let access as AccessError:
             phase = [.notReadable, .unavailable].contains(access.denial.reason) ? .unavailable(reason: access.denial.detail) : .denied
         default: phase = .failed(error: .other(detail: error.localizedDescription))
@@ -343,7 +356,7 @@ import ColophonKitStorage
     }
     func unregisterCache(_ id: UUID) { caches[id] = nil }
     func projection(namespace: String) throws -> Data {
-        guard phase == .ready, let view = views[namespace] else { throw SessionError.notReady }
+        guard hasUsableContent, let view = views[namespace] else { throw SessionError.notReady }
         return view.state
     }
 }

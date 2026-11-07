@@ -66,7 +66,7 @@ the only storage gate, so use a long random token and keep the relay's limits.
 
 **Direct HTTPS**: set `COLOPHON_RELAY_TLS_CERT`/`COLOPHON_RELAY_TLS_KEY` and bind the public
 interface, or put Caddy/nginx in front with `reverse_proxy 127.0.0.1:8787`. Proxies must pass
-`Authorization`, `If-None-Match` and `Content-Length` through, must not buffer or transform
+`Authorization`, `If-None-Match`, `If-Match` and `Content-Length` through, must not buffer or transform
 bodies, and should allow 35-second reads for long-polled `changes?wait=30`. iOS App Transport
 Security and Android cleartext policy both require HTTPS outside local development.
 
@@ -79,10 +79,15 @@ Security and Android cleartext policy both require HTTPS outside local developme
 <dataDir>/<slot>/tmp/           staging for atomic writes
 ```
 
-- Records are staged with mode 0600, `fsync`ed, then `link(2)`ed into place, so an existing
+- Immutable records are staged with mode 0600, `fsync`ed, then `link(2)`ed into place, so an existing
   record is never replaced; the directory and log line are `fsync`ed before 201.
 - Identical re-PUTs answer 200; different bytes at an immutable path answer 412.
-- `requests/` is the only mutable area (replace without `If-None-Match`, or `DELETE`).
+- `state/` creates use `If-None-Match: *`; replacements require `If-Match: "<prior sha256>"`.
+  The comparison and replacement are serialized and durable; stale expectations return 412 and
+  unconditional replacement returns 428. Clients verify signatures and generations first.
+- `requests/` alone supports unconditional replacement and `DELETE`.
+- `changes?namespace=notes&namespace=listening.podcasts` filters namespaced ops/state/history,
+  retaining authority, requests and legacy flat paths whose namespace is not known from the path.
 - Blob chunks (`blobs/<sha256>`) must hash to their name.
 - Paths follow the SDK grammar: no traversal, no dot-files, no `%` escapes. Every directory
   component is checked with `lstat` and files are opened with `O_NOFOLLOW`; a symlink anywhere in

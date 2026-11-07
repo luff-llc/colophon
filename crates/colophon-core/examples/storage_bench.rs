@@ -273,7 +273,7 @@ fn main() {
             .begin_write(
                 "listening.podcasts",
                 "position",
-                json!({"id":"ep1","seconds":count+1}),
+                json!({"id":"ep1","seconds":count+1,"seek":true}),
                 NOW,
                 [111; 32],
             )
@@ -288,7 +288,7 @@ fn main() {
         "engine local write incl sign persist(memory) verify apply",
         started,
     );
-    // Prepare a genuine 1% new suffix; generation/signing is excluded from the next cold-open timer.
+    // Deliberate seeks remain immutable in layout 2. Prepare a genuine 1% intent suffix; generation/signing is excluded from the next cold-open timer.
     for i in 1..count / 100 {
         let mut seed = [0; 32];
         seed[..8].copy_from_slice(&(i as u64).to_le_bytes());
@@ -297,7 +297,7 @@ fn main() {
                 .begin_write(
                     "listening.podcasts",
                     "position",
-                    json!({"id":"ep1","seconds":count+i+1}),
+                    json!({"id":"ep1","seconds":count+i+1,"seek":true}),
                     NOW,
                     seed,
                 )

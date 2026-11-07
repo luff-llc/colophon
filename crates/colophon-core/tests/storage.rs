@@ -240,7 +240,7 @@ fn stale_tampered_wrong_identity_version_and_key_fall_back() {
     let end = version.len() - 32;
     let mut tag = [0; 32];
     hkdf::Hkdf::<sha2::Sha256>::new(Some(&[71; 32]), &version[..end])
-        .expand(b"colophon/verified-prefix/2", &mut tag)
+        .expand(b"colophon/verified-prefix/3", &mut tag)
         .unwrap();
     version[end..].copy_from_slice(&tag);
     for bytes in [&altered[..], &version[..], &cp[..20]] {
@@ -285,18 +285,14 @@ fn stale_tampered_wrong_identity_version_and_key_fall_back() {
         .find(|p| p.starts_with("ops/"))
         .unwrap();
     source.0.borrow_mut().remove(&removed);
-    let rebuilt = opened(source.0.borrow().clone(), &owner);
-    let mut e = Engine::open(
+    let result = Engine::open(
         source.clone(),
         source.listing(),
         owner.public(),
         options(&root),
         Some(&cp),
-    )
-    .unwrap();
-    assert!(matches!(e.open_mode(), OpenMode::Invalidated(_)));
-    unlock_engine(&mut e, &owner);
-    equal(&mut e, &rebuilt);
+    );
+    assert!(matches!(result, Err(e) if e.0.contains("Checkpoint record missing")));
 }
 #[test]
 fn background_and_history_corruption_are_sticky_integrity_errors() {
@@ -792,16 +788,20 @@ fn all_domain_vectors_restore_without_reads_and_fetch_history_lazily() {
             strip_live_revisions(&mut expected_row);
             assert_eq!(&got, &expected_row, "{ns}/{name}");
         }
-        assert!(source.1.borrow().is_empty(), "{ns} queries fetched history");
+        let live_reads = source.1.borrow().len();
+        assert!(
+            source.1.borrow().iter().all(|p| p.starts_with("state/")),
+            "{ns} queries fetched immutable history"
+        );
         assert_eq!(cold.stats().applied_operations, 0);
-        assert_eq!(cold.stats().payloads_decrypted, 0);
+        assert_eq!(cold.stats().payloads_decrypted, live_reads as u64);
         let page = success(cold.history(ns, 0, 1, NOW).unwrap());
         assert_eq!(
             json!(page.items),
             json!(success(lib.view(ns, NOW).unwrap()).admitted[..1])
         );
-        assert_eq!(source.1.borrow().len(), 1);
-        assert_eq!(cold.stats().payloads_decrypted, 1);
+        assert_eq!(source.1.borrow().len(), live_reads + 1);
+        assert_eq!(cold.stats().payloads_decrypted, live_reads as u64 + 1);
         equal(&mut cold, &lib);
     }
 }
@@ -1017,7 +1017,7 @@ fn authenticated_old_reducer_schemas_fall_back_to_full_replay() {
         old.extend_from_slice(&cp[12 + length..cp.len() - 32]);
         let mut tag = [0; 32];
         hkdf::Hkdf::<sha2::Sha256>::new(Some(&[71; 32]), &old)
-            .expand(b"colophon/verified-prefix/2", &mut tag)
+            .expand(b"colophon/verified-prefix/3", &mut tag)
             .unwrap();
         old.extend(tag);
         let source = first.source().clone();

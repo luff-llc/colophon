@@ -19,7 +19,7 @@ public struct LibraryContainerChoice: Identifiable, Sendable {
 /// A connection handler must persist bookmarks/configuration and replace the process session after
 /// successful preparation. Folder security scope is held for the duration of the callback only.
 /// Recovery handlers own the kit format, validation, protected persistence and root recovery.
-/// The 0.2 session does not itself expose relocation or recovery import/export operations.
+/// The 0.3 session does not itself expose relocation or recovery import/export operations.
 @MainActor public struct LibraryHostActions {
     public var containers: [LibraryContainerChoice]
     public var connect: ((LibraryConnectionPurpose, StorageLocation) async throws -> Void)?

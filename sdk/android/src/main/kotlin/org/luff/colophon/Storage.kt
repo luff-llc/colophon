@@ -43,7 +43,7 @@ object RecordPath {
     }
     fun missingBlocks(path: String): Boolean {
         val parts = path.split("/", limit = 0)
-        return parts.size == 2 || (parts.size == 3 && parts[0] == "ops")
+        return parts.size == 2 || parts[0] == "ops"
     }
 }
 
@@ -54,9 +54,15 @@ interface RecordStore {
     fun read(): Map<String, ByteArray>
     /** Exact duplicates are idempotent. Existing different bytes are never overwritten. */
     fun append(records: Map<String, ByteArray>)
+    fun replaceLive(path: String, expected: ByteArray?, bytes: ByteArray): Boolean =
+        throw StorageException.Unavailable("This provider does not support conditional live publication")
     fun watch(onChange: () -> Unit): AutoCloseable
     /** Every record path, without reading bytes. Errors are never an empty set. */
     fun paths(): Set<String> = read().keys
+    fun paths(namespaces: List<String>): Set<String> = paths().filter { !it.startsWith("history/") && RecordPath.listingIncludes(it, namespaces) }.toSet()
+    /** Scoped synchronization inventory, including append-only engagement evidence. */
+    fun syncPaths(namespaces: List<String>): Set<String> = paths().filter { RecordPath.listingIncludes(it, namespaces) }.toSet()
+    fun versions(paths: Set<String>): Map<String, String> = emptyMap()
     /** Exact bytes of the requested records that exist; absent paths are omitted. */
     fun read(paths: Collection<String>): Map<String, ByteArray> {
         val all = read()
@@ -90,6 +96,8 @@ internal const val MAX_BLOB_CHUNK_BYTES = 65536 + 16
 class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordStore, BlobStore {
     private val lock = Any()
     private val records = initial.mapValues { it.value.copyOf() }.toMutableMap()
+    private val versionsByPath = mutableMapOf<String, Long>()
+    private var generation = 0L
     private val blobs = mutableMapOf<String, ByteArray>()
     private val blobTimes = mutableMapOf<String, Long>()
     private val observers = CopyOnWriteArrayList<() -> Unit>()
@@ -106,6 +114,10 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
         records.keys.toSet()
     }
 
+    override fun versions(paths: Set<String>): Map<String, String> = synchronized(lock) {
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        paths.filter { it in records }.associateWith { (versionsByPath[it] ?: 0L).toString() }
+    }
     override fun read(paths: Collection<String>): Map<String, ByteArray> = synchronized(lock) {
         unavailable?.let { throw StorageException.Unavailable(it) }
         val result = paths.mapNotNull { path -> records[path]?.let { path to it.copyOf() } }.toMap()
@@ -180,6 +192,8 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
             for ((path, bytes) in incoming) {
                 val old = records[path]
                 if (old == null || RecordPath.isReplaceable(path) && !old.contentEquals(bytes)) {
+                    generation += 1
+                    versionsByPath[path] = generation
                     records[path] = bytes.copyOf()
                     added = true
                 }
@@ -189,6 +203,15 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
         if (changed) notifyObservers()
     }
 
+    override fun replaceLive(path: String, expected: ByteArray?, bytes: ByteArray): Boolean = synchronized(lock) {
+        RecordPath.validate(path)
+        if (!RecordPath.isReplaceable(path)) throw StorageException.InvalidPath(path)
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        val old = records[path]
+        if (old?.contentEquals(bytes) == true) return@synchronized true
+        if (!(old == null && expected == null || old != null && expected != null && old.contentEquals(expected))) return@synchronized false
+        append(mapOf(path to bytes)); true
+    }
     override fun watch(onChange: () -> Unit): AutoCloseable {
         observers.add(onChange)
         return AutoCloseable { observers.remove(onChange) }
@@ -212,6 +235,30 @@ class FileRecordStore(val folder: File) : RecordStore, BlobStore {
      */
     private var index: MutableSet<String>? = null
 
+    override fun versions(paths: Set<String>): Map<String, String> = synchronized(lock) {
+        paths.associateWith { path ->
+            RecordPath.validate(path); rejectSymlinkPath(path)
+            val attrs = Files.readAttributes(File(folder, path).toPath(), java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            "${attrs.fileKey()}:${attrs.size()}:${attrs.lastModifiedTime()}"
+        }
+    }
+    override fun paths(namespaces: List<String>): Set<String> = scopedPaths(namespaces, false)
+    override fun syncPaths(namespaces: List<String>): Set<String> = scopedPaths(namespaces, true)
+    private fun scopedPaths(namespaces: List<String>, includeHistory: Boolean): Set<String> = synchronized(lock) {
+        ensureFolderAccessible()
+        val found = mutableSetOf<String>()
+        for (directory in listOf("authority", "requests", "ops", "state") + if (includeHistory) listOf("history") else emptyList()) {
+            val root = folder.toPath().resolve(directory)
+            if (Files.isSymbolicLink(root)) throw StorageException.InvalidPath(root.toString())
+            if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) collect(root, null, found, namespaces)
+            else if (!Files.notExists(root, LinkOption.NOFOLLOW_LINKS)) throw StorageException.Unavailable("Cannot access $root")
+        }
+        if (!knownPaths.filter { RecordPath.missingBlocks(it) && RecordPath.listingIncludes(it, namespaces) }.all { it in found }) {
+            throw StorageException.Unavailable("Previously observed records are missing")
+        }
+        knownPaths.addAll(found)
+        found.toSet()
+    }
     override fun paths(): Set<String> = synchronized(lock) {
         index?.let { return it.toSet() }
         try {
@@ -352,6 +399,20 @@ class FileRecordStore(val folder: File) : RecordStore, BlobStore {
         notifyObservers()
     }
 
+    override fun replaceLive(path: String, expected: ByteArray?, bytes: ByteArray): Boolean = synchronized(lock) {
+        RecordPath.validate(path); rejectSymlinkPath(path)
+        if (!RecordPath.isReplaceable(path)) throw StorageException.InvalidPath(path)
+        folder.mkdirs()
+        java.io.RandomAccessFile(File(folder, ".live.lock"), "rw").use { lockFile ->
+            lockFile.channel.lock().use {
+                val file = File(folder, path)
+                val old = if (file.exists()) AtomicFile.read(file, AtomicFile.MAX_RECORD_BYTES) else null
+                if (old?.contentEquals(bytes) == true) return@synchronized true
+                if (!(old == null && expected == null || old != null && expected != null && old.contentEquals(expected))) return@synchronized false
+                append(mapOf(path to bytes)); true
+            }
+        }
+    }
     override fun watch(onChange: () -> Unit): AutoCloseable {
         observers.add(onChange)
         return AutoCloseable { observers.remove(onChange) }
@@ -374,7 +435,7 @@ class FileRecordStore(val folder: File) : RecordStore, BlobStore {
         }
     }
 
-    private fun collect(root: Path, result: MutableMap<String, ByteArray>?, found: MutableSet<String>?) {
+    private fun collect(root: Path, result: MutableMap<String, ByteArray>?, found: MutableSet<String>?, namespaces: List<String>? = null) {
         val entries = try {
             Files.newDirectoryStream(root)
         } catch (error: Exception) {
@@ -382,12 +443,14 @@ class FileRecordStore(val folder: File) : RecordStore, BlobStore {
         }
         entries.use { stream ->
             for (entry in stream) {
+                val relative = folder.toPath().relativize(entry).map { it.toString() }
+                if (namespaces != null && namespaces.isNotEmpty() && relative.size >= 3 && relative[0] in listOf("ops", "state", "history") && !relative[2].endsWith(".json") && relative[2] !in namespaces) continue
                 if (Files.isSymbolicLink(entry)) throw StorageException.InvalidPath(entry.toString())
                 val name = entry.fileName.toString()
                 if (name.startsWith(".")) continue
                 if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) {
                     if (!Files.isReadable(entry)) throw StorageException.Unavailable("Cannot read $entry")
-                    collect(entry, result, found)
+                    collect(entry, result, found, namespaces)
                 } else if (Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
                     val file = entry.toFile()
                     val prefix = folder.canonicalFile.path + File.separator

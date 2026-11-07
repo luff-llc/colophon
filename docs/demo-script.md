@@ -71,7 +71,7 @@ records computes the same page, in a browser, on an iPhone, on a server."
 
 ## 8. Close (2:20–2:35)
 
-[The repo: README, crates/, conformance/0.2, swift/.]
+[The repo: README, crates/, conformance/0.3, swift/.]
 
 "Colophon is open: a spec, conformance vectors, and one Rust core for the web, Apple, Android
 and servers. Two apps already shipped on its first version. Built in public by LUFF, with Muse
