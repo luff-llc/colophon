@@ -113,7 +113,11 @@ class RelaySyncTest {
         b.append(mapOf("ops/n/000000000001-b.json" to "b".toByteArray()))
         assertEquals(1, RelaySync(b, endpoint).sync().pushed)
         assertEquals(1, syncA.sync().pulled)
-        assertEquals(RelaySync.Report(), RelaySync(a, endpoint, stateFile = stateFile).sync())
+        // A new process resumes from the persisted cursor and remote log: nothing to pull or push,
+        // and the only local read is its one-time genesis check.
+        val resumed = RelaySync(a, endpoint, stateFile = stateFile)
+        assertEquals(RelaySync.Report(localRecordReads = 1), resumed.sync())
+        assertEquals(RelaySync.Report(), resumed.sync())
 
         val foreign = MemoryRecordStore(mapOf("authority/00000001.json" to "other".toByteArray()))
         try {

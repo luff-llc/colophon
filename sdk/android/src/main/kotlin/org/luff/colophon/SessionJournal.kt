@@ -14,7 +14,30 @@ internal data class SessionJournal(
     var agreementPublicKey: ByteArray? = null,
     var memberID: String? = null,
 ) {
+    /** Paths already appended to the known-paths log beside the journal. */
+    private var persistedKnown: MutableSet<String> = mutableSetOf()
+    private var knownLogFile: File? = null
+
+    /**
+     * Small state goes to [file]; observed paths go to an append-only `<name>-known.log`, so
+     * each save is proportional to what changed rather than to the library.
+     */
     fun save(file: File) {
+        val log = knownLog(file)
+        if (knownLogFile != log) {
+            // A new location (or a journal built in memory) starts its log from scratch.
+            AtomicFile.write(ByteArray(0), log)
+            persistedKnown = mutableSetOf()
+            knownLogFile = log
+        }
+        // Known paths only grow, and every logged path is known: equal sizes mean nothing new.
+        if (persistedKnown.size != knownPaths.size) {
+            val fresh = knownPaths.filter { it !in persistedKnown }
+            if (fresh.isNotEmpty()) {
+                AtomicFile.append(fresh.joinToString("") { it + "\n" }.toByteArray(Charsets.UTF_8), log)
+                persistedKnown.addAll(fresh)
+            }
+        }
         AtomicFile.write(encode().toByteArray(Charsets.UTF_8), file)
     }
 
@@ -24,12 +47,7 @@ internal data class SessionJournal(
         append(libraryID?.let { jsonString(it) } ?: "null")
         append(",\"left\":")
         append(left)
-        append(",\"knownPaths\":[")
-        knownPaths.sorted().forEachIndexed { index, path ->
-            if (index > 0) append(',')
-            append(jsonString(path))
-        }
-        append("],\"pending\":{")
+        append(",\"pending\":{")
         pending.keys.sorted().forEachIndexed { index, path ->
             if (index > 0) append(',')
             append(jsonString(path))
@@ -46,11 +64,25 @@ internal data class SessionJournal(
     }
 
     companion object {
+        private fun knownLog(file: File) = File(file.parentFile, file.nameWithoutExtension + "-known.log")
+
         fun load(file: File): SessionJournal {
             if (!file.exists()) return SessionJournal()
             val text = AtomicFile.read(file, AtomicFile.MAX_JOURNAL_BYTES).decodeToString()
             return try {
-                decode(text)
+                decode(text).also { journal ->
+                    val log = knownLog(file)
+                    if (log.exists()) {
+                        val lines = AtomicFile.read(log, 256 * 1024 * 1024).decodeToString()
+                        // A torn final line was never acknowledged; it is reobserved on refresh.
+                        val complete = lines.lastIndexOf('\n')
+                        val logged = if (complete < 0) emptyList() else lines.substring(0, complete).split('\n').filter { it.isNotEmpty() }
+                        journal.knownPaths.addAll(logged)
+                        journal.persistedKnown = logged.toMutableSet()
+                        journal.knownLogFile = log
+                    }
+                    // Without a log (an older journal with inline paths), the first save writes one.
+                }
             } catch (error: StorageException.Corrupt) {
                 throw error
             } catch (error: StorageException) {

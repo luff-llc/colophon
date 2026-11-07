@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # An Apple session and an Android (JVM) session share one library through one reference relay:
-# Apple creates and writes, Android joins, Apple approves, Android writes, both verify.
+# Apple creates and writes (a record and a lazy blob), Android joins, Apple approves, Android writes
+# (reading Apple's blob on demand and publishing a required blob), both verify records and blobs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
@@ -39,4 +40,4 @@ apple approve
 android write
 apple verify
 android verify
-echo "Cross-platform relay journey passed."
+echo "Cross-platform relay journey passed (records and blobs both ways)."

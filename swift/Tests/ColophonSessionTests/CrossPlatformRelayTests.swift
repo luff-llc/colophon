@@ -8,6 +8,9 @@ import Testing
 private let crossEnvironment = ProcessInfo.processInfo.environment
 private let crossStep = crossEnvironment["COLOPHON_CROSS_STEP"]
 
+/// Deterministic blob content both platforms compute: three 64 KiB chunks plus a tail.
+func crossBlob(seed: Int) -> Data { Data((0..<150_000).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ seed) }) }
+
 @MainActor struct CrossPlatformRelayTests {
     @Test(.enabled(if: crossStep != nil)) func crossPlatformStep() async throws {
         let dir = URL(fileURLWithPath: try #require(crossEnvironment["COLOPHON_CROSS_DIR"]))
@@ -33,6 +36,9 @@ private let crossStep = crossEnvironment["COLOPHON_CROSS_STEP"]
             await session.create()
             #expect(session.phase == .ready)
             try await session.perform(.saveLink(id: "from-apple", url: #require(URL(string: "https://example.com/apple")), title: "Apple"), observed: session.observedRevision)
+            // A lazily fetched blob: Android reads it on demand through the relay.
+            let blob = try await session.putBlob(crossBlob(seed: 1), namespace: "notes", mediaType: "application/octet-stream", reference: "apple-attachment")
+            try Data(blob.digest.utf8).write(to: dir.appendingPathComponent("apple-blob.txt"))
         case "approve":
             #expect(await session.syncNow())
             let request = try #require(session.requests.first, "The Android request should arrive through the relay")
@@ -43,6 +49,11 @@ private let crossStep = crossEnvironment["COLOPHON_CROSS_STEP"]
             let ids = try await store.load(.init()).map(\.id).sorted()
             store.close()
             #expect(ids == ["from-android", "from-apple"])
+            // Android marked its blob required: the pass that delivered its manifest downloaded it.
+            let digest = try String(decoding: Data(contentsOf: dir.appendingPathComponent("android-blob.txt")), as: UTF8.self)
+            #expect(await session.blobAvailability(namespace: "notes", digest: digest) == .available)
+            let bytes = try await session.blobData(namespace: "notes", digest: digest)
+            #expect(bytes == crossBlob(seed: 2), "Android's blob reached Apple intact")
         default: Issue.record("Unknown step \(crossStep ?? "")")
         }
         #expect(await session.syncNow())

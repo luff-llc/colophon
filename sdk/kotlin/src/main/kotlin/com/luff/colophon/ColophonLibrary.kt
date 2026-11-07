@@ -37,6 +37,44 @@ class ColophonLibrary private constructor(val native: NativeLibrary, private val
         ready()
         return execute(native.beginRevoke(memberID, now(), entropy()))?.let { Outcome.Failure(it) } ?: Outcome.Success(Unit)
     }
+    /** Native revision; increases whenever records are added. */
+    val revision get() = native.revision()
+    /** Exact bytes for [paths], without copying the whole record map. */
+    fun recordsAt(paths: List<String>): Map<String, ByteArray> = native.recordsAt(paths)
+    /** Read-only named query, including the common engine queries (`blob`, `blobs`, …). */
+    fun query(namespace: String, name: String, arguments: ByteArray): Outcome<ByteArray> {
+        ready()
+        return when (val result = native.query(namespace, name, arguments, now())) {
+            is JsonOutcome.Success -> Outcome.Success(result.value)
+            is JsonOutcome.Failure -> Outcome.Failure(result.denial)
+        }
+    }
+    /** A grant-checked streaming blob writer; persist each sealed chunk before publishing. */
+    fun beginBlob(namespace: String, mediaType: String): Outcome<NativeBlobWriter> {
+        ready()
+        return when (val result = native.beginBlob(namespace, mediaType, now(), entropy())) {
+            is BlobWriteOutcome.Ready -> Outcome.Success(result.writer)
+            is BlobWriteOutcome.Failure -> Outcome.Failure(result.denial)
+        }
+    }
+    /** Authenticates fetched ciphertext for chunk [index] under current grants. */
+    fun openBlobChunk(namespace: String, digest: String, index: Int, ciphertext: ByteArray): BlobReadOutcome =
+        native.openBlobChunk(namespace, digest, index.toUInt(), ciphertext, now())
+    /** As [write], also collecting the paths of the signed records into [written]. */
+    fun write(namespace: String, kind: String, payload: ByteArray, written: MutableList<String>?): Outcome<OperationView> {
+        ready()
+        return when (val result = native.beginWrite(namespace, kind, payload, now(), entropy())) {
+            is PreparedAction.Failure -> Outcome.Failure(result.denial)
+            is PreparedAction.Ready -> result.action.use { action ->
+                written?.addAll(action.signingSteps().map { it.path })
+                commit(action)
+                when (val done = native.writtenOperation(action, namespace, now())) {
+                    is OperationOutcome.Success -> Outcome.Success(done.value)
+                    is OperationOutcome.Failure -> Outcome.Failure(done.denial)
+                }
+            }
+        }
+    }
     fun write(namespace: String, kind: String, payload: ByteArray): Outcome<OperationView> {
         ready()
         return when (val result = native.beginWrite(namespace, kind, payload, now(), entropy())) {

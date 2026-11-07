@@ -93,6 +93,10 @@ class ColophonSession internal constructor(
     val syncConflicts: StateFlow<List<String>> = _syncConflicts.asStateFlow()
     private val syncKick = Channel<Unit>(Channel.CONFLATED)
     private var syncJob: Job? = null
+    private val _blobDownloads = MutableStateFlow<Map<String, BlobAvailability>>(emptyMap())
+    /** In-progress blob downloads by digest; absent when nothing is downloading. */
+    val blobDownloads: StateFlow<Map<String, BlobAvailability>> = _blobDownloads.asStateFlow()
+    @Volatile private var requiredBlobsChecked = false
 
     val observedRevision: ObservedRevision get() = ObservedRevision(context, _revision.value)
 
@@ -286,6 +290,10 @@ class ColophonSession internal constructor(
             _syncState.value = if (conflict != null) SyncState.Error("The relay holds different bytes for $conflict") else SyncState.Idle
             // Pulled records reach the core exactly like another process's folder writes.
             if ((report?.pulled ?: 0) > 0 || _phase.value != SessionPhase.Ready) refresh()
+            if ((report?.pulled ?: 0) > 0 || !requiredBlobsChecked) {
+                requiredBlobsChecked = true
+                downloadRequiredBlobs()
+            }
             true
         } catch (error: CancellationException) {
             throw error
@@ -302,6 +310,173 @@ class ColophonSession internal constructor(
         } catch (error: Exception) {
             _syncState.value = SyncState.Error(error.message ?: error.toString())
             false
+        }
+    }
+
+    /**
+     * Encrypts [data] in 64 KiB content-addressed chunks under the namespace epoch key, stores
+     * them, then publishes a signed `colophon.blobPublish` manifest with one live reference.
+     * Identical content already published only gains a reference. [required] asks every device to
+     * download it eagerly (offline reading, transcripts).
+     */
+    suspend fun putBlob(data: ByteArray, namespace: String, mediaType: String, reference: String, required: Boolean = false): ColophonBlob =
+        putBlob(BlobInput.Bytes(data), namespace, mediaType, reference, required)
+
+    /** Streams [file] without loading it into memory. It is read twice and must not change. */
+    suspend fun putBlob(file: java.io.File, namespace: String, mediaType: String, reference: String, required: Boolean = false): ColophonBlob =
+        putBlob(BlobInput.FromFile(file), namespace, mediaType, reference, required)
+
+    private suspend fun putBlob(input: BlobInput, namespace: String, mediaType: String, reference: String, required: Boolean): ColophonBlob {
+        restore()
+        if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
+        val lease = context
+        val staged = withContext(dispatcher) { worker.blobs.stage(namespace, mediaType, input) }
+        if (lease != context) throw SessionException.DestinationChanged
+        val fields = mutableListOf(
+            "reference" to jsonString(reference).toByteArray(),
+            "required" to required.toString().toByteArray(),
+        )
+        val kind = if (staged.manifest != null) {
+            fields += "manifest" to staged.manifest
+            BLOB_PUBLISH
+        } else {
+            fields += "digest" to jsonString(staged.digest).toByteArray()
+            fields += "retain" to "true".toByteArray()
+            BLOB_REFERENCE
+        }
+        val receipt = perform(DomainCommand(namespace, kind, rawJsonObject(fields)), observedRevision)
+        if (relay != null) requestSync()
+        return ColophonBlob(namespace, staged.digest, staged.size, staged.mediaType, receipt)
+    }
+
+    /** Adds or removes a live reference. Zero references lets local garbage collection reclaim it. */
+    suspend fun setBlobReference(blob: ColophonBlob, reference: String, retain: Boolean, required: Boolean? = null): WriteReceipt {
+        val fields = mutableListOf(
+            "digest" to jsonString(blob.digest).toByteArray(),
+            "reference" to jsonString(reference).toByteArray(),
+            "retain" to retain.toString().toByteArray(),
+        )
+        if (required != null) fields += "required" to required.toString().toByteArray()
+        return perform(DomainCommand(blob.namespace, BLOB_REFERENCE, rawJsonObject(fields)), observedRevision)
+    }
+
+    /** Local presence without downloading or decrypting anything. */
+    suspend fun blobAvailability(namespace: String, digest: String): BlobAvailability {
+        restore()
+        _blobDownloads.value[digest]?.let { return it }
+        if (_phase.value != SessionPhase.Ready) return BlobAvailability.Inaccessible("The library is not ready")
+        return withContext(dispatcher) {
+            try {
+                worker.blobs.availability(namespace, digest)
+            } catch (error: BlobException) {
+                BlobAvailability.Inaccessible(error.message ?: "inaccessible")
+            } catch (error: StorageException) {
+                BlobAvailability.Inaccessible(error.message ?: "inaccessible")
+            }
+        }
+    }
+
+    /**
+     * Verified plaintext, chunk by chunk, in order. Missing chunks are fetched from the relay on
+     * demand. Each chunk is authenticated before [consumer] sees it; the call throws
+     * [BlobException.DigestMismatch] at the end if the whole content does not match, so do not
+     * certify content until it returns.
+     */
+    suspend fun readBlob(namespace: String, digest: String, maximumBytes: Long = Long.MAX_VALUE, consumer: suspend (ByteArray) -> Unit) {
+        restore()
+        if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
+        val lease = context
+        val manifest = withContext(dispatcher) { worker.blobs.manifest(namespace, digest) }
+        if (manifest.size > maximumBytes) throw BlobException.TooLarge()
+        val hash = BlobHash()
+        for (index in manifest.chunks.indices) {
+            withContext(Dispatchers.IO) { worker.blobs.ensureChunk(manifest.chunks[index]) }
+            val plaintext = withContext(dispatcher) { worker.blobs.openChunk(namespace, manifest, index) }
+            if (lease != context) throw SessionException.DestinationChanged
+            hash.update(plaintext)
+            consumer(plaintext)
+        }
+        if (hash.finish() != manifest.digest || hash.size != manifest.size) throw BlobException.DigestMismatch()
+    }
+
+    /** Complete verified plaintext; use [blobFile] or [readBlob] for anything larger. */
+    suspend fun blobBytes(namespace: String, digest: String, maximumBytes: Long = 16L * 1024 * 1024): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        readBlob(namespace, digest, maximumBytes) { out.write(it) }
+        return out.toByteArray()
+    }
+
+    /**
+     * Writes verified plaintext to a new private file under [directory] (default: the session's
+     * private home). It appears only after the whole digest verified. The caller removes it.
+     */
+    suspend fun blobFile(namespace: String, digest: String, directory: java.io.File? = null): java.io.File {
+        val folder = directory ?: java.io.File(worker.configuration.privateHome, "blob-files")
+        if (!folder.exists() && !folder.mkdirs()) throw StorageException.Unavailable("Cannot create ${folder.path}")
+        val partial = java.io.File(folder, ".partial-${UUID.randomUUID()}")
+        val target = java.io.File(folder, "$digest-${UUID.randomUUID()}")
+        try {
+            java.io.FileOutputStream(partial).use { stream ->
+                readBlob(namespace, digest) { withContext(Dispatchers.IO) { stream.write(it) } }
+                stream.fd.sync()
+            }
+            if (!partial.renameTo(target)) throw StorageException.Unavailable("Cannot publish ${target.path}")
+            return target
+        } finally {
+            if (partial.exists()) partial.delete()
+        }
+    }
+
+    /** Downloads every missing chunk (ciphertext only), publishing progress in [blobDownloads]. */
+    suspend fun prefetchBlob(namespace: String, digest: String) {
+        restore()
+        if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
+        download(withContext(dispatcher) { worker.blobs.manifest(namespace, digest) })
+    }
+
+    /** Fetches every incomplete blob marked required in the configured namespaces. */
+    suspend fun downloadRequiredBlobs() {
+        restore()
+        if (_phase.value != SessionPhase.Ready || relay == null) return
+        for (namespace in worker.configuration.namespaces) {
+            val manifests = try {
+                withContext(dispatcher) { worker.blobs.incompleteRequired(namespace) }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                continue
+            }
+            for (manifest in manifests) {
+                try {
+                    download(manifest)
+                } catch (error: Exception) {
+                    if (error is CancellationException) throw error
+                }
+            }
+        }
+    }
+
+    /**
+     * Removes local chunks this session wrote or downloaded that no live reference needs: blobs
+     * with zero references, and failed uploads older than [graceMillis]. With [evictReplicated],
+     * chunks the relay already holds are evicted too unless required; they are fetched again on
+     * demand. Never touches chunks other writers stored; deletes nothing if a namespace is unreadable.
+     */
+    suspend fun collectBlobGarbage(graceMillis: Long = 24L * 60 * 60 * 1000, evictReplicated: Boolean = false): BlobCollection {
+        restore()
+        if (_phase.value != SessionPhase.Ready) throw SessionException.NotReady()
+        return withContext(dispatcher) { worker.blobs.collect(graceMillis, evictReplicated) }
+    }
+
+    private suspend fun download(manifest: BlobManifestInfo) {
+        val total = manifest.chunks.size
+        _blobDownloads.value = _blobDownloads.value + (manifest.digest to BlobAvailability.Downloading(0, total))
+        try {
+            manifest.chunks.forEachIndexed { index, path ->
+                withContext(Dispatchers.IO) { worker.blobs.ensureChunk(path) }
+                _blobDownloads.value = _blobDownloads.value + (manifest.digest to BlobAvailability.Downloading(index + 1, total))
+            }
+        } finally {
+            _blobDownloads.value = _blobDownloads.value - manifest.digest
         }
     }
 

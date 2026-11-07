@@ -71,6 +71,16 @@ data class SessionConfiguration(
     val store: RecordStore? = null,
     /** Optional relay (spec §8). The private record store stays the source of truth. */
     val relay: RelayConfiguration? = null,
+    /**
+     * Shared upgrade marker (see [MigrationMarker]). While it is active this session reports
+     * [SessionPhase.Migrating] and neither creates nor writes, unless it is the [migrationWriter].
+     */
+    val migrationMarker: File? = null,
+    /**
+     * Only the upgrade's root session sets this. It may write `colophon.importBatch` source units
+     * (up to 1 MiB), the only path that gives imported positions and states baseline semantics.
+     */
+    val migrationWriter: Boolean = false,
 ) {
     companion object {
         fun app(
@@ -80,6 +90,8 @@ data class SessionConfiguration(
             keys: KeyProvider,
             memberKind: MemberKind = MemberKind.APP,
             relay: RelayConfiguration? = null,
+            migrationMarker: File? = null,
+            migrationWriter: Boolean = false,
         ) = SessionConfiguration(
             memberLabel = memberLabel,
             memberKind = memberKind,
@@ -87,6 +99,8 @@ data class SessionConfiguration(
             privateHome = File(filesDir, "colophon"),
             keys = keys,
             relay = relay,
+            migrationMarker = migrationMarker,
+            migrationWriter = migrationWriter,
         )
     }
 }
@@ -115,7 +129,8 @@ internal data class CoreSnapshot(
     val requests: List<AccessRequest>,
     val views: Map<String, NamespaceView>,
     val denials: Map<String, Denial>,
-    val records: Map<String, ByteArray>,
+    /** Native record revision; changes whenever records are added. */
+    val revision: ULong,
 )
 
 internal data class SessionSnapshot(

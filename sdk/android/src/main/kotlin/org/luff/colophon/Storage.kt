@@ -37,13 +37,105 @@ interface RecordStore {
     /** Exact duplicates are idempotent. Existing different bytes are never overwritten. */
     fun append(records: Map<String, ByteArray>)
     fun watch(onChange: () -> Unit): AutoCloseable
+    /** Every record path, without reading bytes. Errors are never an empty set. */
+    fun paths(): Set<String> = read().keys
+    /** Exact bytes of the requested records that exist; absent paths are omitted. */
+    fun read(paths: Collection<String>): Map<String, ByteArray> {
+        val all = read()
+        return paths.mapNotNull { path -> all[path]?.let { path to it } }.toMap()
+    }
 }
 
-class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordStore {
+object BlobPath {
+    fun validate(path: String) {
+        val ok = path.length == 70 && path.startsWith("blobs/") &&
+            path.substring(6).all { it in '0'..'9' || it in 'a'..'f' }
+        if (!ok) throw StorageException.InvalidPath(path)
+    }
+}
+
+/** Immutable encrypted blob chunks (`blobs/<sha256>`), never part of record snapshots. */
+interface BlobStore {
+    /** Ciphertext; a missing chunk throws [StorageException.Unavailable]. */
+    fun readBlob(path: String): ByteArray
+    fun appendBlob(path: String, bytes: ByteArray)
+    /** Presence without reading bytes. */
+    fun hasBlob(path: String): Boolean
+    /** Local cache eviction; the session's garbage collector decides when it is safe. */
+    fun removeBlob(path: String)
+    /** Every local chunk with its modification time in epoch milliseconds. */
+    fun blobPaths(): Map<String, Long>
+}
+
+internal const val MAX_BLOB_CHUNK_BYTES = 65536 + 16
+
+class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordStore, BlobStore {
     private val lock = Any()
     private val records = initial.mapValues { it.value.copyOf() }.toMutableMap()
+    private val blobs = mutableMapOf<String, ByteArray>()
+    private val blobTimes = mutableMapOf<String, Long>()
     private val observers = CopyOnWriteArrayList<() -> Unit>()
     @Volatile private var unavailable: String? = null
+    /** Complete snapshots served, so tests can prove incremental access. */
+    @Volatile var fullReads = 0
+        private set
+    /** Record bodies served by [read] with paths. */
+    @Volatile var recordReads = 0
+        private set
+
+    override fun paths(): Set<String> = synchronized(lock) {
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        records.keys.toSet()
+    }
+
+    override fun read(paths: Collection<String>): Map<String, ByteArray> = synchronized(lock) {
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        val result = paths.mapNotNull { path -> records[path]?.let { path to it.copyOf() } }.toMap()
+        recordReads += result.size
+        result
+    }
+
+    override fun readBlob(path: String): ByteArray = synchronized(lock) {
+        BlobPath.validate(path)
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        blobs[path]?.copyOf() ?: throw StorageException.Unavailable("Blob chunk is missing: $path")
+    }
+
+    override fun appendBlob(path: String, bytes: ByteArray) = synchronized(lock) {
+        BlobPath.validate(path)
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        if (bytes.size > MAX_BLOB_CHUNK_BYTES) throw StorageException.LimitExceeded
+        val old = blobs[path]
+        if (old != null && !old.contentEquals(bytes)) throw StorageException.Conflict(path)
+        if (old == null) {
+            blobs[path] = bytes.copyOf()
+            blobTimes[path] = System.currentTimeMillis()
+        }
+    }
+
+    override fun hasBlob(path: String): Boolean = synchronized(lock) {
+        BlobPath.validate(path)
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        path in blobs
+    }
+
+    override fun removeBlob(path: String) {
+        synchronized(lock) {
+            BlobPath.validate(path)
+            blobs.remove(path)
+            blobTimes.remove(path)
+        }
+    }
+
+    override fun blobPaths(): Map<String, Long> = synchronized(lock) {
+        unavailable?.let { throw StorageException.Unavailable(it) }
+        blobTimes.toMap()
+    }
+
+    /** Test seam: age a chunk past a garbage-collection grace period. */
+    fun setBlobTime(path: String, millis: Long) = synchronized(lock) {
+        if (path in blobs) blobTimes[path] = millis
+    }
 
     fun setUnavailable(reason: String?) {
         synchronized(lock) { unavailable = reason }
@@ -52,6 +144,7 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
 
     override fun read(): Map<String, ByteArray> = synchronized(lock) {
         unavailable?.let { throw StorageException.Unavailable(it) }
+        fullReads += 1
         records.mapValues { it.value.copyOf() }
     }
 
@@ -88,10 +181,95 @@ class MemoryRecordStore(initial: Map<String, ByteArray> = emptyMap()) : RecordSt
 /**
  * Immutable library records under [folder]. Lives in the app's private files directory.
  */
-class FileRecordStore(val folder: File) : RecordStore {
+class FileRecordStore(val folder: File) : RecordStore, BlobStore {
     private val lock = Any()
     private val knownPaths = mutableSetOf<String>()
     private val observers = CopyOnWriteArrayList<() -> Unit>()
+    /**
+     * Path index: built by one directory walk, then maintained by [append]. The folder is
+     * app-private, so this store is its only writer in the process; use one instance per folder.
+     */
+    private var index: MutableSet<String>? = null
+
+    override fun paths(): Set<String> = synchronized(lock) {
+        index?.let { return it.toSet() }
+        try {
+            ensureFolderAccessible()
+            val found = mutableSetOf<String>()
+            for (directory in listOf("authority", "requests", "ops")) {
+                val root = folder.toPath().resolve(directory)
+                if (Files.isSymbolicLink(root)) throw StorageException.InvalidPath(root.toString())
+                if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+                    if (!Files.notExists(root, LinkOption.NOFOLLOW_LINKS)) throw StorageException.Unavailable("Cannot access $root")
+                    continue
+                }
+                collect(root, null, found)
+            }
+            if (!knownPaths.all { it in found }) throw StorageException.Unavailable("Previously observed records are missing")
+            knownPaths.addAll(found)
+            index = found
+            found.toSet()
+        } catch (error: StorageException) {
+            throw error
+        } catch (error: Exception) {
+            throw StorageException.Unavailable(error.message ?: error.toString())
+        }
+    }
+
+    override fun read(paths: Collection<String>): Map<String, ByteArray> = synchronized(lock) {
+        try {
+            ensureFolderAccessible()
+            val result = mutableMapOf<String, ByteArray>()
+            for (path in paths) {
+                RecordPath.validate(path)
+                rejectSymlinkPath(path)
+                val file = File(folder, path.replace('/', File.separatorChar))
+                if (!Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                    if (path in knownPaths) throw StorageException.Unavailable("Previously observed record is missing: $path")
+                    continue
+                }
+                result[path] = AtomicFile.read(file, AtomicFile.MAX_RECORD_BYTES)
+            }
+            result
+        } catch (error: StorageException) {
+            throw error
+        } catch (error: Exception) {
+            throw StorageException.Unavailable(error.message ?: error.toString())
+        }
+    }
+
+    private fun blobFile(path: String): File {
+        BlobPath.validate(path)
+        rejectSymlinkPath(path)
+        return File(File(folder, "blobs"), path.substring(6))
+    }
+
+    override fun readBlob(path: String): ByteArray {
+        val file = blobFile(path)
+        if (!file.exists()) throw StorageException.Unavailable("Blob chunk is missing: $path")
+        return AtomicFile.read(file, MAX_BLOB_CHUNK_BYTES)
+    }
+
+    override fun appendBlob(path: String, bytes: ByteArray) {
+        if (bytes.size > MAX_BLOB_CHUNK_BYTES) throw StorageException.LimitExceeded
+        val file = blobFile(path)
+        AtomicFile.write(bytes, file, immutable = true)
+    }
+
+    override fun hasBlob(path: String): Boolean = blobFile(path).exists()
+
+    override fun removeBlob(path: String) {
+        val file = blobFile(path)
+        if (file.exists() && !file.delete()) throw StorageException.Unavailable("Cannot remove $path")
+    }
+
+    override fun blobPaths(): Map<String, Long> {
+        val root = File(folder, "blobs")
+        if (Files.isSymbolicLink(root.toPath())) throw StorageException.InvalidPath(root.path)
+        val names = root.list() ?: return if (root.exists()) throw StorageException.Unavailable("Cannot list blobs") else emptyMap()
+        return names.filter { !it.startsWith(".") && it.length == 64 }
+            .associate { "blobs/$it" to File(root, it).lastModified() }
+    }
 
     override fun read(): Map<String, ByteArray> = synchronized(lock) {
         try {
@@ -110,12 +288,13 @@ class FileRecordStore(val folder: File) : RecordStore {
                     throw StorageException.Unavailable("Cannot enumerate $directory")
                 }
                 if (!Files.isReadable(root)) throw StorageException.Unavailable("Cannot read $root")
-                collect(root, result)
+                collect(root, result, null)
             }
             if (!knownPaths.all { it in result.keys }) {
                 throw StorageException.Unavailable("Previously observed records are missing")
             }
             knownPaths.addAll(result.keys)
+            index = result.keys.toMutableSet()
             result
         } catch (error: StorageException) {
             throw error
@@ -139,6 +318,7 @@ class FileRecordStore(val folder: File) : RecordStore {
                     rejectSymlinkPath(path)
                     val target = File(folder, path.replace('/', File.separatorChar))
                     AtomicFile.write(bytes, target, immutable = true)
+                    index?.add(path)
                 }
             } catch (error: StorageException) {
                 throw error
@@ -171,7 +351,7 @@ class FileRecordStore(val folder: File) : RecordStore {
         }
     }
 
-    private fun collect(root: Path, result: MutableMap<String, ByteArray>) {
+    private fun collect(root: Path, result: MutableMap<String, ByteArray>?, found: MutableSet<String>?) {
         val entries = try {
             Files.newDirectoryStream(root)
         } catch (error: Exception) {
@@ -184,7 +364,7 @@ class FileRecordStore(val folder: File) : RecordStore {
                 if (name.startsWith(".")) continue
                 if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) {
                     if (!Files.isReadable(entry)) throw StorageException.Unavailable("Cannot read $entry")
-                    collect(entry, result)
+                    collect(entry, result, found)
                 } else if (Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
                     val file = entry.toFile()
                     val prefix = folder.canonicalFile.path + File.separator
@@ -192,7 +372,8 @@ class FileRecordStore(val folder: File) : RecordStore {
                     if (!canonical.path.startsWith(prefix)) throw StorageException.InvalidPath(file.path)
                     val path = canonical.path.removePrefix(prefix).replace(File.separatorChar, '/')
                     RecordPath.validate(path)
-                    result[path] = AtomicFile.read(file, AtomicFile.MAX_RECORD_BYTES)
+                    found?.add(path)
+                    result?.put(path, AtomicFile.read(file, AtomicFile.MAX_RECORD_BYTES))
                 }
             }
         }

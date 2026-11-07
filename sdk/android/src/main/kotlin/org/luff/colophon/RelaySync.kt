@@ -23,6 +23,11 @@ sealed class SyncState {
  * Synchronizes a local record store with one relay slot (spec §8.4). The local store stays the
  * source of truth: the relay only ever adds records to it, and absence on the relay is never
  * deletion. Records are immutable, so listing both sides is enough to reconcile them.
+ *
+ * Work is proportional to the change: the feed is read from a persisted cursor, the relay's known
+ * paths live in an append-only private log, local records are enumerated by path, and only records
+ * that must be pushed or compared are read. Blob chunks are pushed before records, so a manifest
+ * never reaches a peer ahead of its ciphertext, and are pulled lazily with [fetchBlob].
  * Blocking: call it off the main thread.
  */
 class RelaySync(
@@ -32,30 +37,57 @@ class RelaySync(
     /** Private container, never the shared library. Without it each process relists the slot. */
     private val stateFile: File? = null,
 ) {
-    data class Report(val pulled: Int = 0, val pushed: Int = 0, val conflicts: List<String> = emptyList())
+    data class Report(
+        val pulled: Int = 0,
+        val pushed: Int = 0,
+        val conflicts: List<String> = emptyList(),
+        /** Encrypted blob chunks uploaded in this pass. */
+        val pushedBlobs: Int = 0,
+        /** Local record bodies read (pushes, conflict checks, the genesis check). */
+        val localRecordReads: Int = 0,
+        /** Change-feed entries that were new to this device. */
+        val listed: Int = 0,
+    )
 
     private val client = RelayClient(endpoint, transport)
     private val lock = ReentrantLock()
     private var loaded = false
     @Volatile private var cursor: String? = null
-    private var remote = mutableMapOf<String, String>()
-    private val localDigests = mutableMapOf<String, String>()
+    private var remote = HashMap<String, String>()
+    private val conflicts = sortedSetOf<String>()
+    private val unsaved = mutableListOf<Pair<String, String?>>()
+    private var genesisChecked = false
+    private var stateDirty = false
     @Volatile var hasListed = false
         private set
+
+    private val remoteLog: File? get() = stateFile?.let { File(it.parentFile, it.nameWithoutExtension + "-remote.log") }
+
+    /** True when the relay's listing, as last seen, holds [path] (a record or blob chunk). */
+    fun relayHolds(path: String): Boolean = lock.withLock {
+        loadState()
+        remote.containsKey(path)
+    }
 
     /** One complete pass: list, pull what the local store lacks, push what the relay lacks. */
     fun sync(): Report = lock.withLock {
         loadState()
-        list()
-        val localRecords = local.read().toMutableMap()
+        val listed = list()
+        var reads = 0
+        val localPaths = local.paths()
         val genesis = "authority/00000001.json"
-        val mine = localRecords[genesis]
         val theirs = remote[genesis]
-        if (mine != null && theirs != null && digest(genesis, mine) != theirs) throw RelayException.DifferentLibrary()
+        if (genesis in localPaths && theirs != null && (!genesisChecked || genesis in listed)) {
+            val mine = local.read(listOf(genesis))[genesis]
+            reads += 1
+            if (mine != null && sha256Hex(mine) != theirs) throw RelayException.DifferentLibrary()
+            genesisChecked = true
+        }
         var pulled = 0
         var pushed = 0
-        val conflicts = mutableListOf<String>()
-        val missing = remote.keys.filter { path -> localRecords[path] == null && validRecord(path) }.sortedWith(PULL_ORDER)
+        var pushedBlobs = 0
+        val pulledPaths = mutableSetOf<String>()
+        val missing = remote.keys.filter { path -> path !in localPaths && validRecord(path) }.sortedWith(PULL_ORDER)
         for (batch in missing.chunked(256)) {
             val fetched = parallel(batch) { path -> path to client.get(path) }
                 .mapNotNull { (path, bytes) ->
@@ -68,29 +100,85 @@ class RelaySync(
                 }.toMap()
             if (fetched.isNotEmpty()) {
                 local.append(fetched)
-                localRecords.putAll(fetched)
+                pulledPaths.addAll(fetched.keys)
                 pulled += fetched.size
             }
         }
-        for ((path, bytes) in localRecords) {
-            val listed = remote[path]
-            if (listed != null && digest(path, bytes) != listed) conflicts += path
+        // Conflicts: only entries new in this pass that this store already held.
+        val compare = listed.filter { it in localPaths && it !in pulledPaths && validRecord(it) }
+        if (compare.isNotEmpty()) {
+            val bytes = local.read(compare)
+            reads += bytes.size
+            for ((path, data) in bytes) {
+                if (sha256Hex(data) != remote[path]) conflicts += path else conflicts -= path
+            }
         }
-        val unpushed = localRecords.keys.filter { remote[it] == null }.sortedWith(PULL_ORDER)
-        for (batch in unpushed.chunked(PARALLELISM)) {
-            for ((path, result) in parallel(batch) { path -> path to client.putIfAbsent(path, localRecords.getValue(path)) }) {
-                when (result) {
-                    RelayClient.PutResult.CREATED -> {
-                        pushed += 1
-                        remote[path] = digest(path, localRecords.getValue(path))
+        // Blob chunks first: a peer that sees a manifest must be able to fetch its ciphertext.
+        val blobs = local as? BlobStore
+        if (blobs != null) {
+            val unpushedBlobs = blobs.blobPaths().keys.filter { it !in remote }.sorted()
+            for (batch in unpushedBlobs.chunked(PARALLELISM)) {
+                val chunks = batch.mapNotNull { path ->
+                    val bytes = blobs.readBlob(path)
+                    val sha = sha256Hex(bytes)
+                    // A local chunk that fails its content address is never uploaded.
+                    if ("blobs/$sha" == path) Triple(path, sha, bytes) else null
+                }
+                for ((triple, result) in parallel(chunks) { it to client.putIfAbsent(it.first, it.third) }) {
+                    when (result) {
+                        RelayClient.PutResult.CREATED -> {
+                            pushedBlobs += 1
+                            remember(triple.first, triple.second)
+                        }
+                        RelayClient.PutResult.PRESENT -> remember(triple.first, triple.second)
+                        RelayClient.PutResult.CONFLICT -> conflicts += triple.first
                     }
-                    RelayClient.PutResult.PRESENT -> remote[path] = digest(path, localRecords.getValue(path))
-                    RelayClient.PutResult.CONFLICT -> conflicts += path
+                }
+            }
+        }
+        val unpushed = localPaths.filter { it !in remote }.sortedWith(PULL_ORDER)
+        for (group in unpushed.chunked(64)) {
+            val records = local.read(group)
+            reads += records.size
+            for (batch in group.chunked(PARALLELISM)) {
+                val present = batch.mapNotNull { path -> records[path]?.let { Triple(path, sha256Hex(it), it) } }
+                for ((triple, result) in parallel(present) { it to client.putIfAbsent(it.first, it.third) }) {
+                    when (result) {
+                        RelayClient.PutResult.CREATED -> {
+                            pushed += 1
+                            remember(triple.first, triple.second)
+                        }
+                        RelayClient.PutResult.PRESENT -> remember(triple.first, triple.second)
+                        RelayClient.PutResult.CONFLICT -> conflicts += triple.first
+                    }
                 }
             }
         }
         saveState()
-        Report(pulled, pushed, conflicts.sorted())
+        Report(pulled, pushed, conflicts.toList(), pushedBlobs, reads, listed.size)
+    }
+
+    /**
+     * Lazily fetches one encrypted chunk the local store lacks, verifies that its bytes hash to its
+     * name and appends it to the local blob store. Returns null when the relay lacks it too.
+     * Resumable: every verified chunk is durable before the next is requested.
+     */
+    fun fetchBlob(path: String): ByteArray? {
+        BlobPath.validate(path)
+        val blobs = local as? BlobStore ?: throw StorageException.Unavailable("The local store keeps no blobs")
+        val bytes = client.get(path) ?: return null
+        if (bytes.size > MAX_BLOB_CHUNK_BYTES || "blobs/${sha256Hex(bytes)}" != path) {
+            throw RelayException.ProtocolViolation("Blob chunk does not match its content address: $path")
+        }
+        blobs.appendBlob(path, bytes)
+        lock.withLock {
+            loadState()
+            if (path !in remote) {
+                remember(path, path.substring(6))
+                saveState()
+            }
+        }
+        return bytes
     }
 
     /** Long-polls the change feed after the saved cursor, outside the pass lock. */
@@ -100,8 +188,10 @@ class RelaySync(
         return page.entries.isNotEmpty()
     }
 
-    private fun list() {
+    /** Lists from the saved cursor; returns the paths new to this device in this pass. */
+    private fun list(): Set<String> {
         var restarted = false
+        val listed = mutableSetOf<String>()
         while (true) {
             val page = try {
                 client.changes(cursor, limit = 1000)
@@ -111,6 +201,10 @@ class RelaySync(
                 restarted = true
                 cursor = null
                 remote.clear()
+                listed.clear()
+                unsaved.clear()
+                genesisChecked = false
+                resetRemoteLog()
                 continue
             }
             for (entry in page.entries) {
@@ -118,21 +212,35 @@ class RelaySync(
                     throw RelayException.ProtocolViolation("Invalid path in change feed: ${entry.path}")
                 }
                 if (entry.deleted) {
-                    remote.remove(entry.path)
+                    if (remote.remove(entry.path) != null) unsaved += entry.path to null
+                    listed -= entry.path
                     continue
                 }
                 val sha = entry.sha256
                 if (sha == null || sha.length != 64) throw RelayException.ProtocolViolation("Entry without digest: ${entry.path}")
-                remote[entry.path] = sha
+                // Entries this device already knew (its own pushes, relistings) are not changes.
+                if (remote[entry.path] != sha) {
+                    remember(entry.path, sha)
+                    listed += entry.path
+                }
             }
             if (page.cursor == cursor && page.entries.isNotEmpty()) throw RelayException.ProtocolViolation("Cursor did not advance")
-            cursor = page.cursor
+            if (page.cursor != cursor) {
+                cursor = page.cursor
+                stateDirty = true
+            }
             if (!page.more) break
         }
         hasListed = true
+        return listed
     }
 
-    private fun <T> parallel(items: List<String>, work: (String) -> T): List<T> {
+    private fun remember(path: String, sha: String) {
+        remote[path] = sha
+        unsaved += path to sha
+    }
+
+    private fun <I, T> parallel(items: List<I>, work: (I) -> T): List<T> {
         if (items.size <= 1) return items.map(work)
         val futures = items.map { item -> pool.submit(Callable { work(item) }) }
         return futures.map { future ->
@@ -145,8 +253,6 @@ class RelaySync(
         }
     }
 
-    private fun digest(path: String, bytes: ByteArray): String = localDigests.getOrPut(path) { sha256Hex(bytes) }
-
     private fun loadState() {
         if (loaded) return
         loaded = true
@@ -157,26 +263,71 @@ class RelaySync(
             val root = JsonParser(AtomicFile.read(file, AtomicFile.MAX_JOURNAL_BYTES).decodeToString()).parseValue() as Json.Obj
             if (root.string("relay") != endpoint.url) return
             cursor = root.string("cursor")
-            remote = root.stringMap("remote").toMutableMap()
+            conflicts.addAll(root.stringList("conflicts"))
+            val legacy = root.fields["remote"]
+            if (legacy is Json.Obj) {
+                // Migrate the whole-map format once into the append-only log.
+                remote = HashMap(root.stringMap("remote"))
+                resetRemoteLog()
+                unsaved.addAll(remote.entries.map { it.key to it.value })
+                saveState()
+                return
+            }
+            val log = remoteLog
+            if (log == null || !log.exists()) {
+                // A cursor without its known paths would skip records: relist instead.
+                cursor = null
+                return
+            }
+            val text = AtomicFile.read(log, 256 * 1024 * 1024).decodeToString()
+            val complete = text.lastIndexOf('\n')
+            if (complete < 0) return
+            var start = 0
+            while (start <= complete) {
+                val end = text.indexOf('\n', start)
+                // "<sha256> <path>" adds, "- <path>" removes; a torn final line is ignored.
+                if (end > start + 2) {
+                    if (text[start] == '-' && text[start + 1] == ' ') {
+                        remote.remove(text.substring(start + 2, end))
+                    } else if (end > start + 65 && text[start + 64] == ' ') {
+                        remote[text.substring(start + 65, end)] = text.substring(start, start + 64)
+                    }
+                }
+                start = end + 1
+            }
         } catch (_: Exception) {
             cursor = null
-            remote = mutableMapOf()
+            remote = HashMap()
         }
     }
 
+    private fun resetRemoteLog() {
+        val log = remoteLog ?: return
+        AtomicFile.write(ByteArray(0), log)
+        stateDirty = true
+    }
+
     private fun saveState() {
-        val file = stateFile ?: return
+        val file = stateFile
+        if (file == null) {
+            unsaved.clear()
+            return
+        }
+        val log = remoteLog
+        if (unsaved.isNotEmpty() && log != null) {
+            val text = buildString { for ((path, sha) in unsaved) append(sha ?: "-").append(' ').append(path).append('\n') }
+            AtomicFile.append(text.toByteArray(Charsets.UTF_8), log)
+            unsaved.clear()
+        }
         val text = buildString {
             append("{\"relay\":").append(jsonString(endpoint.url))
             append(",\"cursor\":").append(cursor?.let { jsonString(it) } ?: "null")
-            append(",\"remote\":{")
-            remote.keys.sorted().forEachIndexed { index, path ->
-                if (index > 0) append(',')
-                append(jsonString(path)).append(':').append(jsonString(remote.getValue(path)))
-            }
-            append("}}")
+            append(",\"conflicts\":[").append(conflicts.joinToString(",") { jsonString(it) }).append("]}")
         }
-        AtomicFile.write(text.toByteArray(Charsets.UTF_8), file)
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        val old = if (!stateDirty && file.exists()) runCatching { AtomicFile.read(file, AtomicFile.MAX_JOURNAL_BYTES) }.getOrNull() else null
+        if (stateDirty || old == null || !old.contentEquals(bytes)) AtomicFile.write(bytes, file)
+        stateDirty = false
     }
 
     private companion object {

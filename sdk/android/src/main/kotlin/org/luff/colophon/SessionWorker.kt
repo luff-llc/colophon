@@ -16,7 +16,7 @@ import java.util.concurrent.CancellationException
  */
 internal class SessionWorker(
     val configuration: SessionConfiguration,
-    private val core: SessionCore = BindingSessionCore(),
+    internal val core: SessionCore = BindingSessionCore(),
     store: RecordStore? = configuration.store,
 ) {
     @Volatile private var keys: KeyProvider = configuration.keys
@@ -27,13 +27,17 @@ internal class SessionWorker(
     private var last: CoreSnapshot? = null
     private var revision: ULong = 0u
     private var namespaceRevisions: MutableMap<String, ULong> = mutableMapOf()
-    private val mutex = Mutex()
+    internal val mutex = Mutex()
+    /** Every record path merged into the open core; storage reads skip these. */
+    private val merged = HashSet<String>()
+    private val requestPaths = sortedSetOf<String>()
+    internal val blobs = SessionBlobEngine(this)
     private val journalFile: File = File(configuration.privateHome, "session.json")
     private var acceptNewIdentity = false
     @Volatile private var closed = false
     @Volatile private var relaySync: RelaySync? = null
 
-    private fun storage(): RecordStore {
+    internal fun storage(): RecordStore {
         store?.let { return it }
         val folder = File(configuration.privateHome, "library")
         val created = FileRecordStore(folder)
@@ -43,7 +47,7 @@ internal class SessionWorker(
 
     fun watch(onChange: () -> Unit): AutoCloseable = storage().watch(onChange)
 
-    @Synchronized private fun relay(): RelaySync? {
+    @Synchronized internal fun relay(): RelaySync? {
         relaySync?.let { return it }
         val relay = configuration.relay ?: return null
         return RelaySync(storage(), relay.endpoint, relay.transport, File(configuration.privateHome, "relay.json"))
@@ -90,37 +94,48 @@ internal class SessionWorker(
         refreshLocked()
     }
 
-    private fun refreshLocked(): SessionSnapshot {
-        var records = storage().read()
-        if (records.isEmpty() && journal.pending.isEmpty() && configuration.relay != null) {
-            pullBeforeTrustingEmpty()
-            records = storage().read()
+    internal fun refreshLocked(): SessionSnapshot {
+        val marker = configuration.migrationMarker
+        if (!configuration.migrationWriter && marker != null && MigrationMarker.isActive(marker)) {
+            return empty(SessionPhase.Migrating)
         }
-        val available = records.keys + journal.pending.keys
-        if (!journal.knownPaths.all { it in available }) {
+        var stored = storage().paths()
+        if (stored.isEmpty() && journal.pending.isEmpty() && configuration.relay != null) {
+            pullBeforeTrustingEmpty()
+            stored = storage().paths()
+        }
+        if (!journal.knownPaths.all { it in stored || it in journal.pending }) {
             throw StorageException.Unavailable("Previously observed library records are unavailable")
         }
-        if (records.isEmpty() && journal.pending.isEmpty()) {
+        if (stored.isEmpty() && journal.pending.isEmpty()) {
             if (journal.libraryID != null) throw StorageException.Unavailable("Selected library is unavailable")
             return empty(SessionPhase.NoLibrary)
         }
         ensureIdentity()
-        val combined = records.toMutableMap()
+        // Only records the open core has not seen are read: proportional to the change.
+        val fresh = if (opened) stored.filter { it !in merged } else stored.toList()
+        val incoming = storage().read(fresh).toMutableMap()
         for ((path, data) in journal.pending) {
-            val old = combined[path]
+            val old = incoming[path]
             if (old != null && !old.contentEquals(data)) throw StorageException.Conflict(path)
-            combined[path] = data
+            if (!opened || path !in merged) incoming[path] = data
         }
-        if (opened) core.merge(combined) else {
-            core.open(combined, keys)
+        if (opened) {
+            if (incoming.isNotEmpty()) core.merge(incoming)
+        } else {
+            core.open(incoming, keys)
             opened = true
+            merged.clear()
+            requestPaths.clear()
         }
-        var snapshot = core.snapshot(configuration.namespaces)
+        track(incoming.keys)
+        var snapshot = snapshot()
         if (journal.libraryID != null && journal.libraryID != snapshot.libraryID) {
             throw SessionException.DestinationChanged
         }
         if (!acceptNewIdentity && journal.memberID != null && journal.memberID != snapshot.me.id) {
             opened = false
+            merged.clear()
             core.close()
             throw BindingException.KeyProvider("Key provider does not match the selected member")
         }
@@ -130,20 +145,22 @@ internal class SessionWorker(
             val existing = snapshot.requests.firstOrNull { it.id == snapshot.me.id }
             val request = existing ?: run {
                 val created = core.request(configuration, keys)
-                core.merge(mapOf("requests/${created.id}.json" to created.record))
-                snapshot = core.snapshot(configuration.namespaces)
+                val path = "requests/${created.id}.json"
+                core.merge(mapOf(path to created.record))
+                track(listOf(path))
+                snapshot = snapshot()
                 // Identity is part of the journal write that queues the request. persistDelta
                 // saves before publish; recording it afterwards leaves session.json anonymous
                 // when publication throws.
                 recordIdentity(snapshot)
-                persistDelta()
-                snapshot = core.snapshot(configuration.namespaces)
+                persistDelta(listOf(path))
+                snapshot = snapshot()
                 created
             }
-            remember(snapshot)
+            remember(snapshot, incoming.keys)
             return makeSnapshot(snapshot, SessionPhase.WaitingForApproval(request.pairingCode))
         }
-        remember(snapshot)
+        remember(snapshot, incoming.keys)
         val phase = when {
             snapshot.me.revokedAt != null -> SessionPhase.Denied
             snapshot.denials.values.any { it.reason == DenialReason.UNAVAILABLE || it.reason == DenialReason.NOT_READABLE } ->
@@ -153,6 +170,14 @@ internal class SessionWorker(
         }
         return makeSnapshot(snapshot, phase)
     }
+
+    private fun track(paths: Collection<String>) {
+        merged.addAll(paths)
+        for (path in paths) if (path.startsWith("requests/")) requestPaths.add(path)
+    }
+
+    /** Copies only `requests/` records out of the core; everything else is tracked by path. */
+    private fun snapshot(): CoreSnapshot = core.snapshot(configuration.namespaces, core.recordsAt(requestPaths))
 
     private fun ensureIdentity() {
         if (acceptNewIdentity) return
@@ -176,8 +201,8 @@ internal class SessionWorker(
         }
     }
 
-    private fun remember(snapshot: CoreSnapshot) {
-        journal.knownPaths.addAll(snapshot.records.keys)
+    private fun remember(snapshot: CoreSnapshot, observed: Collection<String>) {
+        journal.knownPaths.addAll(observed)
         recordIdentity(snapshot)
         journal.save(journalFile)
     }
@@ -185,18 +210,24 @@ internal class SessionWorker(
     suspend fun create(): SessionSnapshot = mutex.withLock {
         ensureUsable()
         loadJournal()
-        if (configuration.relay != null && !opened && journal.libraryID == null && storage().read().isEmpty()) {
+        val marker = configuration.migrationMarker
+        if (!configuration.migrationWriter && marker != null && MigrationMarker.isActive(marker)) {
+            return empty(SessionPhase.Migrating)
+        }
+        if (configuration.relay != null && !opened && journal.libraryID == null && storage().paths().isEmpty()) {
             pullBeforeTrustingEmpty()
             // The relay already holds a library for this slot: join it instead of forking it.
-            if (storage().read().isNotEmpty()) return refreshLocked()
+            if (storage().paths().isNotEmpty()) return refreshLocked()
         }
-        if (opened || journal.libraryID != null || storage().read().isNotEmpty()) {
+        if (opened || journal.libraryID != null || storage().paths().isNotEmpty()) {
             throw SessionException.DestinationChanged
         }
         core.create(configuration)
         opened = true
+        merged.clear()
+        requestPaths.clear()
         journal.left = false
-        val created = core.snapshot(configuration.namespaces)
+        val created = core.snapshot(configuration.namespaces, emptyMap())
         journal.libraryID = created.libraryID
         // persistDelta writes session.json before publication. The identity has to be in
         // that write, or a lost key file on the next open looks like a brand-new member.
@@ -213,13 +244,16 @@ internal class SessionWorker(
         if (command.namespace !in configuration.namespaces || Access.WRITE !in configuration.access) {
             throw SessionException.InvalidCommand
         }
-        if (command.payload.size > 256 * 1024) throw SessionException.InvalidCommand
+        if (command.kind == IMPORT_BATCH && !configuration.migrationWriter) throw SessionException.InvalidCommand
+        val ceiling = if (command.kind == IMPORT_BATCH || command.kind == BLOB_PUBLISH) 1024 * 1024 else 256 * 1024
+        if (command.payload.size > ceiling) throw SessionException.InvalidCommand
+        val written = mutableListOf<String>()
         val operation = try {
-            core.write(command)
+            core.write(command, written)
         } catch (error: Exception) {
             if (error is CancellationException || error is SessionException.NotReady) throw error
             val after = core.records()
-            val added = after.keys.filter { it.startsWith("ops/") && fresh.core?.records?.get(it) == null }
+            val added = after.keys.filter { it.startsWith("ops/") && it !in merged }
             if (added.isNotEmpty()) {
                 try {
                     persistDelta()
@@ -233,18 +267,24 @@ internal class SessionWorker(
             throw error
         }
         try {
-            persistDelta()
+            // Only the signed records of this write are copied and persisted.
+            persistDelta(written.ifEmpty { null })
         } catch (_: PendingPublication) {
             return WriteReceipt.Queued to empty(SessionPhase.Unavailable("Write queued for durable publication"))
         }
         WriteReceipt.Saved(operation.id) to refreshLocked()
     }
 
-    private fun persistDelta() {
-        val records = core.records()
+    /**
+     * Journals new core records, then publishes them. With [paths], only those records are copied
+     * out of the core (ordinary writes); without, the whole map is diffed (rare authority actions).
+     */
+    private fun persistDelta(paths: Collection<String>? = null) {
+        val records = if (paths != null) core.recordsAt(paths.filter { it !in journal.knownPaths }) else core.records()
         for ((path, bytes) in records) {
             if (path !in journal.knownPaths) journal.pending[path] = bytes
         }
+        track(journal.pending.keys)
         journal.save(journalFile)
         try {
             publish()
@@ -256,7 +296,7 @@ internal class SessionWorker(
     private fun publish() {
         if (journal.pending.isEmpty()) return
         storage().append(journal.pending)
-        val readback = storage().read()
+        val readback = storage().read(journal.pending.keys)
         val published = journal.pending.all { (path, bytes) -> readback[path]?.contentEquals(bytes) == true }
         if (!published) throw StorageException.Unavailable("Publication readback incomplete")
         journal.knownPaths.addAll(journal.pending.keys)
@@ -389,7 +429,7 @@ internal class SessionWorker(
     private fun makeSnapshot(snapshot: CoreSnapshot, phase: SessionPhase): SessionSnapshot {
         val previous = last
         val changed = previous == null ||
-            !mapsEqual(previous.records, snapshot.records) ||
+            previous.libraryID != snapshot.libraryID || previous.revision != snapshot.revision ||
             !denialsEqual(previous.denials, snapshot.denials) ||
             configuration.namespaces.any { !viewsEqual(previous.views[it], snapshot.views[it]) }
         if (changed) {

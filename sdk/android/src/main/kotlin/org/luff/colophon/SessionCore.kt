@@ -2,6 +2,8 @@ package org.luff.colophon
 
 import com.luff.colophon.AccessException
 import com.luff.colophon.AccessRequest
+import com.luff.colophon.BlobReadOutcome
+import com.luff.colophon.NativeBlobWriter
 import com.luff.colophon.ColophonLibrary
 import com.luff.colophon.Denial
 import com.luff.colophon.GrantOptions
@@ -16,10 +18,22 @@ internal interface SessionCore {
     fun open(records: Map<String, ByteArray>, keys: KeyProvider)
     fun create(configuration: SessionConfiguration)
     fun merge(records: Map<String, ByteArray>)
+    /** Whole record map. Only rare authority operations use it; writes use [recordsAt]. */
     fun records(): Map<String, ByteArray>
-    fun snapshot(namespaces: List<String>): CoreSnapshot
+    fun recordsAt(paths: Collection<String>): Map<String, ByteArray> {
+        val all = records()
+        return paths.mapNotNull { path -> all[path]?.let { path to it } }.toMap()
+    }
+    /** [requests] holds only `requests/` records; the worker tracks paths, so nothing is copied. */
+    fun snapshot(namespaces: List<String>, requests: Map<String, ByteArray>): CoreSnapshot
     fun request(configuration: SessionConfiguration, keys: KeyProvider): AccessRequest
     fun write(command: DomainCommand): OperationView
+    /** Writes and reports the signed record paths, so only those records are persisted. */
+    fun write(command: DomainCommand, written: MutableList<String>): OperationView = write(command)
+    fun query(namespace: String, name: String, arguments: ByteArray): ByteArray = throw SessionException.NotReady()
+    fun beginBlob(namespace: String, mediaType: String): NativeBlobWriter = throw SessionException.NotReady()
+    fun openBlobChunk(namespace: String, digest: String, index: Int, ciphertext: ByteArray): BlobReadOutcome =
+        throw SessionException.NotReady()
     fun approve(request: ByteArray, grant: GrantOptions?)
     fun revoke(id: String)
     fun importRequest(data: ByteArray): AccessRequest
@@ -69,10 +83,24 @@ internal class BindingSessionCore : SessionCore {
 
     override fun recovery(): KeyProvider? = recoveryProvider
 
-    override fun snapshot(namespaces: List<String>): CoreSnapshot {
+    override fun recordsAt(paths: Collection<String>): Map<String, ByteArray> = requireLibrary().recordsAt(paths.toList())
+
+    override fun write(command: DomainCommand, written: MutableList<String>): OperationView =
+        requireLibrary().write(command.namespace, command.kind, command.payload, written).get()
+
+    override fun query(namespace: String, name: String, arguments: ByteArray): ByteArray =
+        requireLibrary().query(namespace, name, arguments).get()
+
+    override fun beginBlob(namespace: String, mediaType: String): NativeBlobWriter =
+        requireLibrary().beginBlob(namespace, mediaType).get()
+
+    override fun openBlobChunk(namespace: String, digest: String, index: Int, ciphertext: ByteArray): BlobReadOutcome =
+        requireLibrary().openBlobChunk(namespace, digest, index, ciphertext)
+
+    override fun snapshot(namespaces: List<String>, requests: Map<String, ByteArray>): CoreSnapshot {
         val library = requireLibrary()
         val id = library.id
-        val records = library.records
+        val records = requests
         val views = mutableMapOf<String, NamespaceView>()
         val denials = mutableMapOf<String, Denial>()
         for (namespace in namespaces) {
@@ -94,7 +122,7 @@ internal class BindingSessionCore : SessionCore {
             requests = requests,
             views = views,
             denials = denials,
-            records = records,
+            revision = library.revision,
         )
     }
 

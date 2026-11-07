@@ -39,6 +39,21 @@ internal object AtomicFile {
      */
     private val renameAt2: Function? by lazy { resolveRenameAt2() }
 
+    /** Appends to a private log and syncs it. Readers tolerate a torn final line. */
+    fun append(bytes: ByteArray, to: File) {
+        val parent = to.parentFile ?: throw StorageException.Unavailable("Missing parent for ${to.path}")
+        if (!parent.exists() && !parent.mkdirs()) throw StorageException.Unavailable("Cannot create ${parent.path}")
+        try {
+            FileOutputStream(to, true).use { stream ->
+                stream.write(bytes)
+                stream.flush()
+                stream.fd.sync()
+            }
+        } catch (error: Exception) {
+            throw StorageException.Unavailable(error.message ?: "Cannot append ${to.path}")
+        }
+    }
+
     fun write(bytes: ByteArray, to: File, immutable: Boolean = false) {
         if (bytes.size > MAX_JOURNAL_BYTES) throw StorageException.LimitExceeded
         val parent = to.parentFile ?: throw StorageException.Unavailable("Missing parent for ${to.path}")

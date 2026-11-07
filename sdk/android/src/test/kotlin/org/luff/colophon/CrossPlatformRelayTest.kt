@@ -1,6 +1,7 @@
 package org.luff.colophon
 
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -37,12 +38,20 @@ class CrossPlatformRelayTest {
                 assertTrue(session.syncNow())
                 assertEquals(SessionPhase.Ready, session.phase.value)
                 session.perform(DomainCommand.saveLink("from-android", "https://example.com/android", "Android"), session.observedRevision)
+                // Apple's blob arrives lazily: the manifest synced, the chunks are fetched on read.
+                val appleDigest = File(dir, "apple-blob.txt").readText()
+                assertTrue(session.blobAvailability("notes", appleDigest) is BlobAvailability.Missing)
+                assertArrayEquals("Apple's blob reached Android intact", crossBlob(1), session.blobBytes("notes", appleDigest))
+                // Android's blob is required, so Apple downloads it eagerly.
+                val blob = session.putBlob(crossBlob(2), "notes", "application/octet-stream", "android-transcript", required = true)
+                File(dir, "android-blob.txt").writeText(blob.digest)
             }
             "verify" -> {
                 assertTrue(session.syncNow())
                 val store = NamespaceStore.savedLinks(session)
                 assertEquals(listOf("from-android", "from-apple"), store.load(SavedLinksQuery()).map { it.id }.sorted())
                 store.close()
+                assertEquals(BlobAvailability.Available, session.blobAvailability("notes", File(dir, "apple-blob.txt").readText()))
             }
             else -> error("Unknown step $step")
         }
@@ -51,3 +60,6 @@ class CrossPlatformRelayTest {
         session.close()
     }
 }
+
+/** Deterministic blob content both platforms compute: three 64 KiB chunks plus a tail. */
+internal fun crossBlob(seed: Int) = ByteArray(150_000) { (it * 31 + seed).toByte() }
