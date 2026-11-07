@@ -99,9 +99,20 @@ thread.
 - Pairing, create, approve, revoke, leave and rejoin match the Apple session.
   Device-only App Group starter enrollment and the extension ingress inbox are
   Apple-only in this release.
-- `SessionPhase.Migrating` is reserved for the 0.1→0.2 importer and is not
-  entered yet. Checkpoint bytes persist in the private container and are not
-  consumed until the verified-prefix engine is wired, matching Apple.
+- `SessionPhase.Migrating` is entered while `SessionConfiguration.migrationMarker`
+  points at an active `MigrationMarker`, exactly like Apple: such a session neither
+  creates nor writes. Only the session with `migrationWriter = true` writes during the
+  upgrade, and only it may publish `colophon.importBatch` source units (≤1 MiB), the
+  path that gives imported positions and states baseline semantics. Checkpoint bytes
+  persist in the private container and are not consumed until the verified-prefix
+  engine is wired, matching Apple.
+- Blobs: `putBlob(bytes|file)`, `readBlob`/`blobBytes`/`blobFile`, `blobAvailability`,
+  `setBlobReference`, `prefetchBlob`, `downloadRequiredBlobs`, `collectBlobGarbage` and the
+  `blobDownloads` StateFlow match the Apple session ([sync](sync.md#blobs)).
+- A write copies only its own signed records out of the core, a refresh reads only paths the
+  core has not merged, publication reads back only the pending records, and observed paths
+  are appended to `session-known.log` instead of rewriting `session.json`. Views are still
+  serialized per refresh (O(projection)); named queries are not exposed on Android yet.
 - JVM unit tests exercise the session against the host dylib; Keystore is
   proven on an emulator, not on the JVM.
 

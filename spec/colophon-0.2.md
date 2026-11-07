@@ -341,7 +341,8 @@ WASM remains single-threaded. Record storage and on-demand full-view allocations
 
 The engine3 extension uses the existing signed/encrypted operation envelope and namespace epochs;
 there is no new authority permission or public plaintext sidecar. Reducer generation 4 MUST
-invalidate older projection caches. Reducers receive kind, immutable grant and root role from
+invalidate older projection caches; generation 5 (blob eager-download hints and claimed
+creation/update dates in listening notes and notes) likewise invalidates generation 4 caches. Reducers receive kind, immutable grant and root role from
 verified authority, never from payload or historical source assertions.
 
 `colophon.importBatch` is a root-only engine operation carrying a bounded source-unit key,
@@ -372,6 +373,16 @@ ciphertext address, AEAD authentication and chunk identity before returning byte
 the complete descriptor before marking the full original verified. Missing, inaccessible and invalid
 bytes MUST remain distinct from available content. Reference counts are idempotent live-reference
 counts, not an erasure promise or permission to discard retained immutable evidence.
+
+Any namespace writer MAY publish an ordinary `colophon.blobPublish` `{manifest,reference,required?}`
+and adjust references with `colophon.blobReference` `{digest,reference,retain,required?}`.
+`required` (boolean) is a synchronized eager-download hint: clients SHOULD fetch every chunk of a
+required blob once its manifest is admitted, and MAY fetch others lazily on first read. The
+common grant-checked query `blobs({after?,limit?≤1000,required?})` pages published manifests
+in digest order as `{digest,size,mediaType,chunks,references,required}` without chunk metadata;
+`blob({digest})` additionally reports `required`. A client MAY remove its local copy of chunks
+whose blob has no live reference, or of chunks no manifest names after a grace period; local
+removal never deletes relay or peer copies.
 
 Earlier 0.2 implementations skip these unknown engine operations and cannot render their imported
 children. All participating apps MUST upgrade before enabling this extension. No 0.1 signature,
@@ -472,6 +483,16 @@ A client keeps its local store as the source of truth and repeatedly:
    a conflict; the local bytes are kept and the conflict is reported.
 4. **Pushes** each local record the remote set lacks with `PUT … If-None-Match: *`. 200 and 201
    both mean the relay now holds the record; 412 is a conflict, reported, never overwritten.
+5. **Blob chunks** (`blobs/<sha256>`) are pushed before the records of the same pass, so a peer
+   never admits a manifest whose ciphertext the relay lacks. They are never pulled as part of the
+   record set: a client fetches a chunk when a read needs it, or eagerly for blobs marked
+   `required`, and MUST check that the bytes hash to the chunk's name before storing them. Chunks
+   are verified again (AEAD, chunk digest, whole-content digest) by the core on read. A missing
+   chunk is reported as missing, never as empty content.
+
+A client SHOULD keep the work of a pass proportional to the change: persist the cursor and the
+remembered remote set (for example as an append-only log), enumerate local paths without reading
+record bodies, and read only records it must push or compare.
 
 Absence from a relay MUST NOT be read as deletion, and an unreachable, unauthorized or reset relay
 MUST NOT be read as an empty library: a client whose local store is empty MUST complete a

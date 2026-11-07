@@ -35,6 +35,32 @@ finished an earlier benchmark but then failed its sandbox-restricted `sysctl` qu
 by the documented child-resource method. These are single confirmation runs with warm filesystem
 caches, not medians or tail-latency promises. Earlier measurements below are retained for history.
 
+## Relay sync benchmark
+
+November 7, 2026 (blobs branch). A local store of 100,003 records already in sync with a relay;
+one new record is appended, then a pass runs. Release builds on the development Mac.
+
+| Pass | Swift (`MemoryRecordStore`, in-process relay) | Kotlin JVM (`MemoryRecordStore`, reference Node relay) |
+| --- | ---: | ---: |
+| New process: load cursor + remote log, list, push 1 | 577 ms | 228 ms |
+| Warm pass in the same process, push 1 | **26 ms** | **21 ms** |
+| Local record bodies read | 1 (plus a one-time genesis check) | 1 (plus a one-time genesis check) |
+| Whole-store reads (`read()`) | 0 | 0 |
+
+Before this change every pass read every local record and rewrote the whole remote map. The new
+process cost is dominated by loading 100k remembered remote paths; it is paid once per launch.
+Reproduce with `COLOPHON_SYNC_BENCH=1 bash scripts/test-swift.sh -c release --filter
+incrementalSyncPassIsProportionalToTheChange` and `COLOPHON_SYNC_BENCH=1 sdk/android/gradlew -p
+sdk/android testDebugUnitTest --tests '*SessionBlobTest.incrementalSyncPass*'` (the Kotlin run
+first pushes 100k records to the Node relay, about 30 minutes). Default runs use 5k/2k records and
+assert the same work counters.
+
+The storage-backed 100k gates were rerun after the schema-5 changes on a shared, loaded machine,
+alternating with the previous commit's binary: rebuild 1,382–1,451 ms (previous 1,417–1,480),
+local write 0.91–0.96 ms (previous 0.99–1.09), fresh-process disk checkpoint + 1% 99.5–107.2 ms
+(previous 97.7–104.7 ms in the same session; 95.3 ms on the quieter November 6 run). No regression
+was measured; the <100 ms cold gate is at the noise floor of the current machine load.
+
 ## Four-domain merge validation
 
 The final merged engine meets all three desktop timing targets with `reading.books`,

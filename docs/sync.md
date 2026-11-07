@@ -107,14 +107,42 @@ Guarantees, on both platforms:
   different bytes, nothing is pulled or pushed.
 - **Pulled bytes are checked** against the listed SHA-256 and the record path grammar, then
   appended through the store's immutable, conflict-checked write.
-- The cursor and the relay's known paths live in the private container (`relay.json`), never in
-  the shared library.
+- The cursor lives in `relay.json` and the relay's known paths in the append-only
+  `relay-remote.log`, both in the private container, never in the shared library. A pass reads
+  only the records it pushes or compares; at 100k records an incremental pass takes about 20–30 ms
+  (see [performance](performance.md#relay-sync-benchmark)).
+
+## Blobs
+
+Encrypted blob chunks (`blobs/<sha256>`) ride the same relay. Each pass pushes local chunks the
+relay lacks **before** records, so a peer never sees a manifest without its ciphertext. Chunks are
+pulled lazily: the first read of a blob fetches each missing chunk, checks that it hashes to its
+name and stores it before the next one, so an interrupted download resumes where it stopped.
+Blobs published with `required: true` are downloaded on the pass that delivers their manifest.
+
+```swift
+let blob = try await session.putBlob(contentsOf: articleFile, namespace: "reading.saved",
+                                     mediaType: "text/html", reference: itemID, required: true)
+switch await session.blobAvailability(namespace: "reading.saved", digest: blob.digest) {
+case .available: show(try await session.blobFile(namespace: "reading.saved", digest: blob.digest))
+case .missing, .downloading: showDownloading()          // never an empty article
+case .unpublished, .inaccessible: showNotYetAvailable()
+}
+```
+
+```kotlin
+val blob = session.putBlob(transcriptBytes, "listening.podcasts", "application/json", episodeID, required = true)
+when (session.blobAvailability("listening.podcasts", blob.digest)) {
+    BlobAvailability.Available -> render(session.blobBytes("listening.podcasts", blob.digest))
+    else -> showDownloading()
+}
+```
 
 ## Tests
 
 ```sh
 node --test relay/                                   # relay contract
-COLOPHON_SOFTWARE_KEYS=1 swift test --filter RelaySyncTests   # Swift, fake + real relay
+COLOPHON_SOFTWARE_KEYS=1 swift test --filter "RelaySyncTests|SessionBlobTests"   # Swift, fake + real relay
 bash scripts/test-android.sh                         # includes RelaySyncTest (real relay)
-bash scripts/test-relay-cross.sh                     # Apple and Android sessions, one relay
+bash scripts/test-relay-cross.sh                     # Apple and Android sessions, one relay, blobs both ways
 ```

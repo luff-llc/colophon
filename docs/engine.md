@@ -456,9 +456,15 @@ seeds. The signed encrypted manifest binds the chunk order, digests and complete
 
 A root can publish manifests in an import batch. Any namespace writer can publish an ordinary
 `colophon.blobPublish` operation with `{manifest,reference}`. `colophon.blobReference` with
-`{digest,reference,retain:boolean}` adds/removes an idempotent reference. `blob({digest})` returns
-the signed manifest and live reference count. Zero live references is **not** permission to delete
-retained originals or bytes needed by immutable history; no automatic garbage collection runs.
+`{digest,reference,retain:boolean}` adds/removes an idempotent reference. Either may carry
+`required: boolean`, a synchronized eager-download hint. `blob({digest})` returns the signed
+manifest, live reference count and `required`; `blobs({after?,limit?,required?})` pages manifests
+in digest order (`{digest,size,mediaType,chunks,references,required}`, `next`). Reducer schema 5.
+Native hosts authenticate fetched ciphertext with `openBlobChunk(namespace,digest,index,ciphertext)`
+(no callback) and copy only a write's own records with `recordsAt(paths)`. Zero live references is
+**not** permission to delete retained originals or bytes needed by immutable history. The core
+runs no garbage collection; the SDK sessions' explicit `collectBlobGarbage` removes only this
+device's local copies (see [handoff-blobs.md](handoff-blobs.md)).
 
 `Engine::blob_chunk` fetches one chunk through `RecordSource::read_blob`; default sources may use
 `read`, while hosts can return `Missing` or `Inaccessible`. Native `BlobSource` callbacks run outside

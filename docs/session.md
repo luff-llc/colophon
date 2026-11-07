@@ -194,3 +194,21 @@ chunks through `BlobStore`, reads them back, and returns the manifest for atomic
 before their manifest but have no projected visibility until publication. Failed uploads can
 leave unreferenced encrypted chunks; hosts retain them until an explicit archival cleanup policy
 can prove removal safe. Sibling apps read evidence through their ordinary namespace grants.
+
+## Blobs and the incremental query cache
+
+`ColophonSession.putBlob(_:|contentsOf:namespace:mediaType:reference:required:)` streams content in
+64 KiB chunks, seals them under the namespace epoch key through the native writer, persists and
+reads back each chunk, then publishes a signed `colophon.blobPublish` manifest through the ordinary
+journaled write path (`receipt` is `.saved` or `.queued`). Identical content is addressed first and
+only gains a reference. `blobAvailability` reports `unpublished`, `missing`, `downloading`,
+`available` or `inaccessible` without downloading; `blobData`, `blobFile` and `blobStream` fetch
+missing chunks from the relay on demand and verify each chunk and the whole descriptor (current
+grant, address, AEAD, digests). `collectBlobGarbage` removes only chunks this session wrote or
+downloaded (a private `blob-index.log`), never another app's chunks in a shared store. See
+[handoff-blobs.md](handoff-blobs.md).
+
+`NamespaceStore` entries are keyed by namespace revision. After a change `cached` returns nil, but
+`latest` keeps the last value (with `current: false`) so views do not blank; only queries loaded
+again are re-read, concurrent loads share one read, and the bound evicts stale entries first. The
+generated `*Store` types expose the same `latest`.
