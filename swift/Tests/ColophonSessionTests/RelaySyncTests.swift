@@ -188,7 +188,8 @@ private func link(_ id: String) throws -> DomainCommand {
         try await eventually { member.phase == .ready }
         try await member.perform(link("pushed-automatically"), observed: member.observedRevision)
         try await eventually { (try? await links(owner)) == ["pushed-automatically"] }
-        #expect(owner.syncState == .idle)
+        // The background loop may still be finishing a pass (it also checks required blobs).
+        try await eventually { owner.syncState == .idle }
         owner.stopSync(); member.stopSync()
     }
 }

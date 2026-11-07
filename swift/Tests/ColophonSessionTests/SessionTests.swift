@@ -138,7 +138,16 @@ private func link(_ id: String = UUID().uuidString) throws -> DomainCommand {
         await member.restore(); await owner.flushExternalChanges()
         try await owner.approve(#require(owner.requests.first))
         await member.flushExternalChanges(); #expect(member.phase == .ready)
-        try await member.perform(link(), observed: member.observedRevision)
+        // Two stores on one folder notify each other through NSFilePresenter, asynchronously: under
+        // a loaded parallel run a late notification can refresh between observing and writing.
+        // That is the documented stale-observation refusal, so settle and retry, never re-sign.
+        var attempts = 0
+        while true {
+            do { try await member.perform(link(), observed: member.observedRevision); break }
+            catch let error as SessionError where [.staleRevision, .notReady].contains(error) && attempts < 3 {
+                attempts += 1; await member.flushExternalChanges()
+            }
+        }
         await owner.flushExternalChanges()
         let query = NamespaceStore<SavedLinksQuery, [SavedLink]>(savedLinksIn: owner)
         #expect(try await query.load(.init()).count == 1)
