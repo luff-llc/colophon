@@ -11,7 +11,6 @@ public protocol LegacyLibrarySource: Sendable {
 public protocol LegacyLibrarySnapshot: Sendable {
     var libraryID: String { get }
     var readerID: String { get }
-    var rootID: String { get }
     var members: [LegacyMember] { get }
     var namespaces: Set<String> { get }
     /// Changes whenever relevant records, admission or evaluated source semantics change.
@@ -61,7 +60,7 @@ public struct LegacyOperation: Sendable {
     }
     // Keep the existing receipt key codec so resumed output keys remain deterministic.
     var key: String { migrationDigest(Data("\(authorID)/\(id)/\(signedBodyDigest)".utf8)) }
-    var fingerprint: String { tuple(key, admission.rawValue, admissionDetail, authorLabel, semanticFingerprint) }
+    var fingerprint: String { get throws { try tuple(key, admission.rawValue, admissionDetail, authorLabel, semanticFingerprint) } }
 }
 
 /// Imported destination heads only. Never replace these with current native destination heads.

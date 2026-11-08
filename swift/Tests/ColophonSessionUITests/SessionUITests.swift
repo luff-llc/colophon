@@ -151,21 +151,21 @@ import Testing
     }
     @Test func failedImportDoesNotClaimSuccessOrEchoSecrets() async {
         let model = RecoveryKitModel(); model.input = "TOP SECRET"
-        await model.recover(host: .init(importRecoveryKit: { secret in throw LibraryUIError.unavailable(secret) }))
+        await model.restoreDevice(host: .init(importRecoveryKit: { secret in throw LibraryUIError.unavailable(secret) }))
         #expect(!model.imported)
         #expect(model.action.error?.contains("TOP SECRET") == false)
     }
     @Test func importClearsSecretOnlyAfterSuccess() async {
         let model = RecoveryKitModel(); model.input = " private kit "
         var received = ""
-        await model.recover(host: .init(importRecoveryKit: { received = $0 }))
+        await model.restoreDevice(host: .init(importRecoveryKit: { received = $0 }))
         #expect(received == "private kit"); #expect(model.input.isEmpty); #expect(model.imported)
     }
     @Test func emptyAndOversizeSecretsNeverReachProvider() async {
         for secret in ["  ", String(repeating: "x", count: 65537)] {
             let model = RecoveryKitModel(); model.input = secret
             var called = false
-            await model.recover(host: .init(importRecoveryKit: { _ in called = true }))
+            await model.restoreDevice(host: .init(importRecoveryKit: { _ in called = true }))
             #expect(!called); #expect(!model.imported)
         }
     }
@@ -225,7 +225,7 @@ import Testing
 }
 
 @MainActor struct MemberAccessTests {
-    func member(grant: Grant? = .init(namespaces: ["notes"], access: [.read], expires: nil, writeBudget: nil)) -> Member {
+    func member(grant: Grant? = .init(import: nil, namespaces: ["notes"], access: [.read], expires: nil, writeBudget: nil)) -> Member {
         Member(id: "reader", label: "Reader", kind: .app, grant: grant, since: 1, revokedAt: nil, writes: 0)
     }
     @Test func staleRevocationDoesNotProceed() async {
@@ -235,7 +235,7 @@ import Testing
         #expect(await model.revoke(session: session) == false)
         #expect(model.action.error == SessionError.staleRevision.localizedDescription)
     }
-    @Test func ownerIsNotRevocableHere() async {
+    @Test func ungrantedMemberIsNotRevocableHere() async {
         let session = TestSession(); let member = member(grant: nil); session.members = [member]
         let model = MemberAccessModel(member: member, session: session)
         #expect(await model.revoke(session: session) == false)
@@ -249,7 +249,7 @@ import Testing
     }
     @Test func memberWordsDescribeKindAndRestrictions() {
         let member = Member(id: "agent", label: "Agent", kind: .agent,
-                            grant: .init(namespaces: ["notes"], access: [.read], expires: "2026-12-01T12:00:00Z", writeBudget: 5),
+                            grant: .init(import: nil, namespaces: ["notes"], access: [.read], expires: "2026-12-01T12:00:00Z", writeBudget: 5),
                             since: 1, revokedAt: nil, writes: 3)
         #expect(LibraryWords.kind(member.kind) == "AI agent")
         let summary = LibraryWords.grant(member)

@@ -108,7 +108,7 @@ import ColophonKitStorage
         await refresh()
         if retryCreate, phase == .noLibrary { await create() }
     }
-    /// Durable, non-expiring source-output receipt. Used only by the root migration session.
+    /// Durable, non-expiring source-output receipt. Used only by a copying member with an import grant.
     public func performMigration(_ command: DomainCommand, outputKey: String) async throws -> WriteReceipt {
         await refresh()
         let lease = context
@@ -196,6 +196,21 @@ import ColophonKitStorage
         }
     }
 
+    /// Restore this device through a recovery-kit controller, then grant its separate member.
+    /// The core enforces the recovery quorum and limits additions to approve when required.
+    public func restoreDevice(using kit: any AsyncKeyProvider) async throws {
+        await restore()
+        let lease = context
+        do {
+            let snapshot = try await worker.restoreDevice(using: kit)
+            if lease == context { apply(snapshot) }
+        } catch {
+            if lease == context { handleCommandError(error) }
+            throw error
+        }
+    }
+
+    /// The host-provided recovery-kit controller; no kit is generated or persisted by the session.
     public func recoveryKeys() async -> (any AsyncKeyProvider)? { await worker.recovery() }
 
     /// Runs one relay pass now (list, pull, push) and refreshes when records arrived. A barrier

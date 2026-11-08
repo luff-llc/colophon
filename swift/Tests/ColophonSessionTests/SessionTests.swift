@@ -7,7 +7,7 @@ private func temporary() -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent("colophon-session-" + UUID().uuidString).resolvingSymlinksInPath()
 }
 private func configuration(_ home: URL, store: MemoryRecordStore, keys: any AsyncKeyProvider = SoftwareKeys(), kind: MemberKind = .app) -> SessionConfiguration {
-    .init(memberLabel: "Test", memberKind: kind, namespaces: ["reading.saved", "notes"], location: .memory(store), privateContainer: home, keys: keys)
+    .init(memberLabel: "Test", memberKind: kind, namespaces: ["reading.saved", "notes"], location: .memory(store), privateContainer: home, keys: keys, ownerController: SoftwareKeys())
 }
 private func link(_ id: String = UUID().uuidString) throws -> DomainCommand {
     try .saveLink(id: id, url: #require(URL(string: "https://example.com/")), title: "Saved")
@@ -255,13 +255,13 @@ private actor FailingPublicationStore: RecordStore {
         #expect(try await inbox.pending().isEmpty)
     }
 
-    @Test func deviceOnlyStarterUsesSignedPairingAndExactScopes() async throws {
-        let home = temporary(), other = temporary(), store = MemoryRecordStore(), starter = SoftwareKeys()
+    @Test func deviceOnlyControllerUsesSignedPairingAndExactScopes() async throws {
+        let home = temporary(), other = temporary(), store = MemoryRecordStore(), controller = SoftwareKeys()
         defer { try? FileManager.default.removeItem(at: home); try? FileManager.default.removeItem(at: other) }
         func config(_ home: URL, kind: MemberKind) -> SessionConfiguration {
             .init(memberLabel: "Sibling", memberKind: kind, namespaces: ["notes"], libraryNamespaces: ["notes", "reading.saved"],
                   location: .appGroup(identifier: "test.synthetic", libraryName: "Library"), privateContainer: home,
-                  keys: SoftwareKeys(), enrollment: .deviceOnlyAppGroup(starterKeys: starter))
+                  keys: SoftwareKeys(), ownerController: controller, enrollment: .deviceOnlyAppGroup(controller: controller))
         }
         let app = ColophonSession(configuration: config(home, kind: .app), store: store)
         await app.create()
@@ -269,8 +269,8 @@ private actor FailingPublicationStore: RecordStore {
         let records = try await store.read()
         #expect(records.keys.contains { $0.hasPrefix("requests/") })
         let me = try #require(app.members.first { $0.id == app.memberID })
-        #expect(me.kind == .app)
-        #expect(me.grant?.namespaces == ["notes"])
+        #expect(me.kind == .device)
+        #expect(me.grant?.namespaces == ["notes", "reading.saved"])
         let agent = ColophonSession(configuration: config(other, kind: .agent), store: store)
         await agent.restore()
         guard case .waitingForApproval = agent.phase else { Issue.record("Agents never auto-enroll"); return }
@@ -318,7 +318,7 @@ private actor FailingPublicationStore: RecordStore {
         defer { try? FileManager.default.removeItem(at: home) }
         let session = ColophonSession(configuration: .init(
             memberLabel: "Test", namespaces: ["listening.podcasts", "notes"],
-            location: .memory(store), privateContainer: home, keys: SoftwareKeys()))
+            location: .memory(store), privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys()))
         await session.create()
         try await session.perform(try DomainCommand(namespace: "notes", kind: "createNotebook",
             payloadJSON: Data(#"{"id":"n","title":"N"}"#.utf8)), observed: session.observedRevision)
@@ -407,8 +407,7 @@ private actor PostCommitFailureCore: SessionCore {
     func approve(_ request: Data, grant: GrantOptions?) async throws { try await base.approve(request, grant: grant) }
     func revoke(_ id: String) async throws { try await base.revoke(id) }
     func importRequest(_ data: Data) async throws -> AccessRequest { try await base.importRequest(data) }
-    func approveWithStarter(_ request: Data, keys: any AsyncKeyProvider) async throws { try await base.approveWithStarter(request, keys: keys) }
-    func recovery() async -> (any AsyncKeyProvider)? { await base.recovery() }
+    func approveWithController(_ request: Data, keys: any AsyncKeyProvider) async throws { try await base.approveWithController(request, keys: keys) }
 }
 
 @MainActor struct PostCommitTests {

@@ -65,9 +65,8 @@ public enum WriteReceipt: Equatable, Sendable {
 
 public enum EnrollmentPolicy: Sendable {
     case pairing
-    /// Only device-local App Group app identities, while this key is still the current root.
-    /// The host must stop supplying it when protecting or moving the library.
-    case deviceOnlyAppGroup(starterKeys: any AsyncKeyProvider)
+    /// Approve device-local App Group app members through this controller's current authority.
+    case deviceOnlyAppGroup(controller: any AsyncKeyProvider)
 }
 
 public struct SessionConfiguration: Sendable {
@@ -78,20 +77,31 @@ public struct SessionConfiguration: Sendable {
     public let libraryNamespaces: [String]
     public let location: StorageLocation
     public let privateContainer: URL
+    /// Per-app content member; never reused as a controller or vault.
     public let keys: any AsyncKeyProvider
+    /// Owner controller provider, separate from the content member. Hosts own persistence and presence policy.
+    public let ownerController: any AsyncKeyProvider
     public let enrollment: EnrollmentPolicy
     /// Shared rollout marker outside the immutable library record tree. Configure every suite app.
     public let migrationMarker: URL?
-    /// Only the verified source root's migration session may bypass the rollout barrier.
+    /// Lets a dedicated copying session bypass the rollout barrier; the core still requires an import grant.
     public let migrationWriter: Bool
+    /// Short, explicit expiry for the copying member's control-rule import grant at creation.
+    public let importExpires: String?
+    /// Signed, display-only source library ID for a clean copy.
+    public let importedFrom: String?
+    /// Optional host-persisted recovery-kit controller, with its own genesis sealed slot.
     public let recoveryKeys: (any AsyncKeyProvider)?
     /// Optional relay (spec §8). The local location stays the source of truth.
     public let relay: RelayConfiguration?
+    /// Configure separate member and owner providers; hosts choose custody and authentication policy.
     public init(memberLabel: String, memberKind: MemberKind = .app, namespaces: [String], access: [Access] = [.read, .write],
                 libraryNamespaces: [String]? = nil, location: StorageLocation, privateContainer: URL,
-                keys: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil, enrollment: EnrollmentPolicy = .pairing, migrationMarker: URL? = nil, migrationWriter: Bool = false,
+                keys: any AsyncKeyProvider, ownerController: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil, enrollment: EnrollmentPolicy = .pairing, migrationMarker: URL? = nil, migrationWriter: Bool = false,
+                importExpires: String? = nil, importedFrom: String? = nil,
                 relay: RelayConfiguration? = nil) {
         self.migrationMarker = migrationMarker; self.migrationWriter = migrationWriter; self.relay = relay
+        self.ownerController = ownerController; self.importExpires = importExpires; self.importedFrom = importedFrom
         self.memberLabel = memberLabel; self.memberKind = memberKind; self.namespaces = namespaces
         self.access = access; self.libraryNamespaces = libraryNamespaces ?? namespaces
         self.enrollment = enrollment
@@ -133,7 +143,7 @@ struct SessionSnapshot: Sendable {
 }
 
 extension SessionConfiguration {
-    var starterKeys: (any AsyncKeyProvider)? {
+    var enrollmentController: (any AsyncKeyProvider)? {
         guard memberKind == .app, case .appGroup = location,
               case .deviceOnlyAppGroup(let keys) = enrollment else { return nil }
         return keys

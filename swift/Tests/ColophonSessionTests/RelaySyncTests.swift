@@ -71,7 +71,7 @@ actor FakeRelay: RelayTransport {
 
 private func configuration(_ home: URL, store: MemoryRecordStore, keys: any AsyncKeyProvider = SoftwareKeys(),
                            relay: any RelayTransport, token: String = "secret-token", url: URL = slotURL) -> SessionConfiguration {
-    .init(memberLabel: "Device", namespaces: ["reading.saved", "notes"], location: .memory(store), privateContainer: home, keys: keys,
+    .init(memberLabel: "Device", namespaces: ["reading.saved", "notes"], location: .memory(store), privateContainer: home, keys: keys, ownerController: SoftwareKeys(),
           relay: RelayConfiguration(url: url, token: token, automatic: false, transport: relay))
 }
 private func link(_ id: String) throws -> DomainCommand {
@@ -198,7 +198,7 @@ private actor AuthorityOrderTransport: RelayTransport {
         let ownerHome = temporary(), memberHome = temporary()
         defer { for dir in [ownerHome, memberHome] { try? FileManager.default.removeItem(at: dir) } }
         func automatic(_ home: URL, _ store: MemoryRecordStore) -> SessionConfiguration {
-            .init(memberLabel: "Device", namespaces: ["reading.saved", "notes"], location: .memory(store), privateContainer: home, keys: SoftwareKeys(),
+            .init(memberLabel: "Device", namespaces: ["reading.saved", "notes"], location: .memory(store), privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys(),
                   relay: RelayConfiguration(url: server.slotURL, token: server.token))
         }
         let ownerStore = MemoryRecordStore(), memberStore = MemoryRecordStore()
@@ -256,7 +256,9 @@ private actor AuthorityOrderTransport: RelayTransport {
     #expect(await owner.syncNow())
 
     #expect(await member.syncNow())
-    #expect(member.phase == .ready)
+    // A store watcher may already be refreshing the verified grant when sync returns.
+    #expect(member.phase == .ready || member.phase == .refreshing)
+    #expect(member.members.contains { $0.id == member.memberID && $0.grant != nil })
     try await member.perform(link("from-member"), observed: member.observedRevision)
     #expect(await member.syncNow())
     #expect(await owner.syncNow())

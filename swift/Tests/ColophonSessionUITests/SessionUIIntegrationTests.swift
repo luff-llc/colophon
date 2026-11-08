@@ -11,13 +11,13 @@ import Testing
         let ownerKeys = SoftwareKeys()
         let owner = ColophonSession(configuration: .init(memberLabel: "Owner", namespaces: ["notes"],
             location: .memory(storage), privateContainer: home.appendingPathComponent("owner"),
-            keys: ownerKeys, recoveryKeys: SoftwareKeys()))
+            keys: ownerKeys, ownerController: SoftwareKeys(), recoveryKeys: SoftwareKeys()))
         await owner.restore()
         #expect(owner.phase == .noLibrary)
         await owner.create()
         #expect(owner.phase == .ready)
         let guest = ColophonSession(configuration: .init(memberLabel: "Guest", memberKind: .agent, namespaces: ["notes"],
-            location: .memory(storage), privateContainer: home.appendingPathComponent("guest"), keys: SoftwareKeys()))
+            location: .memory(storage), privateContainer: home.appendingPathComponent("guest"), keys: SoftwareKeys(), ownerController: SoftwareKeys()))
         await guest.restore()
         guard case .waitingForApproval(let code) = guest.phase else {
             Issue.record("Expected a real signed pairing request"); return

@@ -21,7 +21,7 @@ func syntheticKeys(_ seed: UInt8) throws -> SoftwareKeys {
 
 @MainActor struct DomainConformanceTests {
     @Test(arguments: ["Books", "Listening", "Saved", "Notes"])
-    func namedQueriesMatchSignedConformanceRecords(_ domain: String) async throws {
+    func domainPayloadsAndQueriesAcrossAuthorityCutover(_ domain: String) async throws {
         let namespace: String
         let queries: [[String: Any]]
         let encodedRecords: [String: String]
@@ -45,22 +45,35 @@ func syntheticKeys(_ seed: UInt8) throws -> SoftwareKeys {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
         let memory = MemoryRecordStore(records: records)
-        let session = ColophonSession(configuration: .init(memberLabel: "Fixture", namespaces: [namespace], location: .memory(memory), privateContainer: home, keys: try syntheticKeys(seed)))
+        let session = ColophonSession(configuration: .init(memberLabel: "Fixture", namespaces: [namespace], location: .memory(memory), privateContainer: home, keys: try syntheticKeys(seed), ownerController: SoftwareKeys()))
         await session.restore()
-        #expect(session.phase == .ready)
-        let books = BooksStore(session: session), listening = ListeningStore(session: session)
-        let saved = SavedStore(session: session), notes = NotesStore(session: session)
+        guard case .failed = session.phase else { Issue.record("0.3 authority must be rejected"); return }
+        #expect(try await memory.read() == records, "Opening old authority must not rewrite it")
+        let current = MemoryRecordStore()
+        let active = ColophonSession(configuration: .init(memberLabel: "Fixture", namespaces: [namespace], location: .memory(current),
+            privateContainer: home.appendingPathComponent("current"), keys: SoftwareKeys(), ownerController: SoftwareKeys()))
+        await active.create()
+        try #require(active.phase == .ready)
+        let books = BooksStore(session: active), listening = ListeningStore(session: active)
+        let saved = SavedStore(session: active), notes = NotesStore(session: active)
         for query in queries {
             let name = try #require((query["name"] ?? query["query"]) as? String)
             let args = try jsonData(query["args"] ?? query["arguments"] ?? [:])
             let expected = try jsonData(try #require(query["result"] ?? query["expected"]))
             switch domain {
-            case "Books": try await BooksTestDispatch.query(name: name, arguments: args, expected: expected, store: books)
-            case "Listening": try await ListeningTestDispatch.query(name: name, arguments: args, expected: expected, store: listening)
-            case "Saved": try await SavedTestDispatch.query(name: name, arguments: args, expected: expected, store: saved)
-            default: try await NotesTestDispatch.query(name: name, arguments: args, expected: expected, store: notes)
+            case "Books": try BooksTestDispatch.decodeExpected(name: name, expected: expected)
+            case "Listening": try ListeningTestDispatch.decodeExpected(name: name, expected: expected)
+            case "Saved": try SavedTestDispatch.decodeExpected(name: name, expected: expected)
+            default: try NotesTestDispatch.decodeExpected(name: name, expected: expected)
+            }
+            let currentExpected = try await active.query(namespace: namespace, name: name, arguments: args)
+            switch domain {
+            case "Books": try await BooksTestDispatch.query(name: name, arguments: args, expected: currentExpected, store: books)
+            case "Listening": try await ListeningTestDispatch.query(name: name, arguments: args, expected: currentExpected, store: listening)
+            case "Saved": try await SavedTestDispatch.query(name: name, arguments: args, expected: currentExpected, store: saved)
+            default: try await NotesTestDispatch.query(name: name, arguments: args, expected: currentExpected, store: notes)
             }
         }
-        try await session.leave()
+        try await active.leave()
     }
 }

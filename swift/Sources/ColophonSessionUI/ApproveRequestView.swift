@@ -55,7 +55,7 @@ public struct ApproveRequestView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled((try? model.grant()) == nil)
                 .accessibilityIdentifier("library.approve")
-            } footer: { Text("Only the library owner can approve access. You can end this member’s access later.") }
+            } footer: { Text("A controller with approval authority must approve access. You can end this member’s access later.") }
         }
         .formStyle(.grouped)
         .disabled(model.action.isWorking)

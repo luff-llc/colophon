@@ -2,8 +2,8 @@ import Foundation
 import ColophonSession
 
 enum ImportBindings {
-    /// Component receipts are deliberately never refreshed from native 0.3 edits.
-    static func bind(namespace: String, source: LegacyOperation, command: LegacyImportCommand, payload: [String: Any], operationID: String, progress: inout MigrationProgress) {
+    /// Component receipts are deliberately never refreshed from native destination edits.
+    static func bind(namespace: String, source: LegacyOperation, command: LegacyImportCommand, payload: [String: Any], operationID: String, progress: inout MigrationProgress) throws {
         let id = payload["id"] as? String ?? "", kind = command.kind
         var components: [String] = []
         switch namespace {
@@ -31,11 +31,11 @@ enum ImportBindings {
         }
         if namespace == "notes", let notebook = payload["notebook"] as? String,
            kind == "moveCell" || kind == "deleteCell" || (kind == "putCell" && payload["expect"] is NSNull) {
-            progress.heads[tuple(namespace, notebook, "order")] = operationID
+            progress.heads[try tuple(namespace, notebook, "order")] = operationID
         }
         for component in components {
-            progress.revisions[tuple(namespace, component, source.id)] = operationID
-            progress.heads[tuple(namespace, component == "queue" ? "queue" : id, component)] = operationID
+            progress.revisions[try tuple(namespace, component, source.id)] = operationID
+            progress.heads[try tuple(namespace, component == "queue" ? "queue" : id, component)] = operationID
         }
     }
 }

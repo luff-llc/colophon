@@ -16,7 +16,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: home) }
         let store = MemoryRecordStore(records: records)
         func session(_ store: MemoryRecordStore, _ home: URL, taupeOnly: Bool = false) -> ColophonSession {
-            let configuration = SessionConfiguration(memberLabel: "Bench", namespaces: taupeOnly ? ["listening.podcasts"] : ["notes", "listening.podcasts", "reading.saved", "reading.books"], location: .memory(store), privateContainer: home, keys: keys)
+            let configuration = SessionConfiguration(memberLabel: "Bench", namespaces: taupeOnly ? ["listening.podcasts"] : ["notes", "listening.podcasts", "reading.saved", "reading.books"], location: .memory(store), privateContainer: home, keys: keys, ownerController: SoftwareKeys())
             return ColophonSession(configuration: configuration, store: store, core: legacy ? CompatibilitySessionCore() : BindingSessionCore())
         }
         var first: ColophonSession? = session(store, home)

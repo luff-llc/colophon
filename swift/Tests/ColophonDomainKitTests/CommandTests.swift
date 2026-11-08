@@ -12,7 +12,7 @@ import ColophonNotesKit
     let session: ColophonSession
     var exercised: Set<String> = []
     init() {
-        session = ColophonSession(configuration: .init(memberLabel: "Owner", namespaces: ["reading.books", "listening.podcasts", "reading.saved", "notes"], location: .memory(memory), privateContainer: home, keys: SoftwareKeys()))
+        session = ColophonSession(configuration: .init(memberLabel: "Owner", namespaces: ["reading.books", "listening.podcasts", "reading.saved", "notes"], location: .memory(memory), privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys()))
     }
     isolated deinit { try? FileManager.default.removeItem(at: home) }
     func start() async throws { await session.create(); try #require(session.phase == .ready) }
@@ -48,7 +48,7 @@ import ColophonNotesKit
         #expect(rows.isEmpty, "Unexpected core diagnostics: \(rows)")
     }
     func agent() async throws -> ColophonSession {
-        let agent = ColophonSession(configuration: .init(memberLabel: "Worker", memberKind: .agent, namespaces: ["listening.podcasts"], location: .memory(memory), privateContainer: home.appendingPathComponent("agent"), keys: SoftwareKeys()))
+        let agent = ColophonSession(configuration: .init(memberLabel: "Worker", memberKind: .agent, namespaces: ["listening.podcasts"], location: .memory(memory), privateContainer: home.appendingPathComponent("agent"), keys: SoftwareKeys(), ownerController: SoftwareKeys()))
         await agent.restore(); await session.refresh()
         let request = try #require(session.requests.first)
         try await session.approve(request)

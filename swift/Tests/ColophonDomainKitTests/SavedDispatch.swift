@@ -180,4 +180,34 @@ enum SavedTestDispatch {
         default: throw SessionError.invalidCommand
         }
     }
+    // Historical domain payloads remain the wire-shape reference; authority does not.
+    static func decodeExpected(name: String, expected: Data) throws {
+        func roundTrip<Value: Codable & Equatable>(_ type: Value.Type) throws {
+            let value = try JSONDecoder().decode(type, from: expected)
+            #expect(try JSONDecoder().decode(type, from: JSONEncoder().encode(value)) == value)
+        }
+        switch name {
+        case "items": try roundTrip(DomainQueryResult<ColophonSavedKit.ItemsQuery.Value>.self)
+        case "item": try roundTrip(DomainQueryResult<ColophonSavedKit.ItemQuery.Value>.self)
+        case "readingCounts": try roundTrip(DomainQueryResult<ColophonSavedKit.ReadingCountsQuery.Value>.self)
+        case "sources": try roundTrip(DomainQueryResult<ColophonSavedKit.SourcesQuery.Value>.self)
+        case "annotations": try roundTrip(DomainQueryResult<ColophonSavedKit.AnnotationsQuery.Value>.self)
+        case "annotation": try roundTrip(DomainQueryResult<ColophonSavedKit.AnnotationQuery.Value>.self)
+        case "annotationHistory": try roundTrip(DomainQueryResult<ColophonSavedKit.AnnotationHistoryQuery.Value>.self)
+        case "feeds": try roundTrip(DomainQueryResult<ColophonSavedKit.FeedsQuery.Value>.self)
+        case "feedEntries": try roundTrip(DomainQueryResult<ColophonSavedKit.FeedEntriesQuery.Value>.self)
+        case "savedViews": try roundTrip(DomainQueryResult<ColophonSavedKit.SavedViewsQuery.Value>.self)
+        case "savedView": try roundTrip(DomainQueryResult<ColophonSavedKit.SavedViewQuery.Value>.self)
+        case "reviewQueue": try roundTrip(DomainQueryResult<ColophonSavedKit.ReviewQueueQuery.Value>.self)
+        case "reviewHistory": try roundTrip(DomainQueryResult<ColophonSavedKit.ReviewHistoryQuery.Value>.self)
+        case "answers": try roundTrip(DomainQueryResult<ColophonSavedKit.AnswersQuery.Value>.self)
+        case "answer": try roundTrip(DomainQueryResult<ColophonSavedKit.AnswerQuery.Value>.self)
+        case "connections": try roundTrip(DomainQueryResult<ColophonSavedKit.ConnectionsQuery.Value>.self)
+        case "subscriptions": try roundTrip(DomainQueryResult<ColophonSavedKit.SubscriptionsQuery.Value>.self)
+        case "conflicts": try roundTrip(DomainQueryResult<ColophonSavedKit.ConflictsQuery.Value>.self)
+        case "invalid": try roundTrip(DomainQueryResult<ColophonSavedKit.InvalidQuery.Value>.self)
+        case "getPosition", "position": try roundTrip(DomainQueryResult<ColophonSavedKit.PositionQuery.Value>.self)
+        default: throw SessionError.invalidCommand
+        }
+    }
 }

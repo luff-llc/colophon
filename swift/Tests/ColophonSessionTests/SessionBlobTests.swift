@@ -10,7 +10,7 @@ private let slotURL = URL(string: "https://relay.invalid/v1/libraries/home")!
 private let syncBenchmark = ProcessInfo.processInfo.environment["COLOPHON_SYNC_BENCH"] == "1"
 
 private func configuration(_ home: URL, store: MemoryRecordStore, relay: (any RelayTransport)?, url: URL = slotURL, token: String = "secret-token") -> SessionConfiguration {
-    .init(memberLabel: "Device", namespaces: ["notes", "reading.saved"], location: .memory(store), privateContainer: home, keys: SoftwareKeys(),
+    .init(memberLabel: "Device", namespaces: ["notes", "reading.saved"], location: .memory(store), privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys(),
           relay: relay.map { RelayConfiguration(url: url, token: token, automatic: false, transport: $0) })
 }
 private func content(_ count: Int, seed: UInt8 = 7) -> Data {

@@ -8,7 +8,7 @@ import Testing
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
         let keys = SoftwareKeys(), store = MemoryRecordStore()
-        let configuration = SessionConfiguration(memberLabel: "Engine", namespaces: ["notes"], location: .memory(store), privateContainer: home, keys: keys)
+        let configuration = SessionConfiguration(memberLabel: "Engine", namespaces: ["notes"], location: .memory(store), privateContainer: home, keys: keys, ownerController: SoftwareKeys())
         let first = SessionWorker(configuration: configuration, store: store)
         var snapshot = try await first.create()
         let command = try DomainCommand(namespace: "notes", kind: "createNotebook", payloadJSON: Data(#"{"id":"n","title":"Notebook"}"#.utf8))
@@ -38,7 +38,7 @@ import Testing
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
         let store = MemoryRecordStore(), keys = SoftwareKeys()
-        let config = SessionConfiguration(memberLabel: "Owner", namespaces: ["notes"], location: .memory(store), privateContainer: home, keys: keys)
+        let config = SessionConfiguration(memberLabel: "Owner", namespaces: ["notes"], location: .memory(store), privateContainer: home, keys: keys, ownerController: SoftwareKeys())
         let worker = SessionWorker(configuration: config, store: store)
         let snapshot = try await worker.create()
         try await worker.saveCheckpoint()
@@ -57,7 +57,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: home) }
         let store = MemoryRecordStore(), keys = SoftwareKeys()
         func configuration(_ name: String, _ identity: SoftwareKeys, _ kind: MemberKind = .app) -> SessionConfiguration {
-            SessionConfiguration(memberLabel: name, memberKind: kind, namespaces: ["notes"], location: .memory(store), privateContainer: home.appendingPathComponent(name), keys: identity)
+            SessionConfiguration(memberLabel: name, memberKind: kind, namespaces: ["notes"], location: .memory(store), privateContainer: home.appendingPathComponent(name), keys: identity, ownerController: SoftwareKeys())
         }
         let owner = SessionWorker(configuration: configuration("owner", keys), store: store)
         let created = try await owner.create()
@@ -81,10 +81,10 @@ import Testing
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
         let store = MemoryRecordStore()
-        let owner = ColophonSession(configuration: SessionConfiguration(memberLabel: "Owner", namespaces: ["listening.podcasts"], location: .memory(store), privateContainer: home.appendingPathComponent("owner"), keys: SoftwareKeys()))
+        let owner = ColophonSession(configuration: SessionConfiguration(memberLabel: "Owner", namespaces: ["listening.podcasts"], location: .memory(store), privateContainer: home.appendingPathComponent("owner"), keys: SoftwareKeys(), ownerController: SoftwareKeys()))
         await owner.create()
         try await owner.perform(DomainCommand(namespace: "listening.podcasts", kind: "position", payloadJSON: Data(#"{"id":"ep","seconds":10}"#.utf8)), observed: owner.observedRevision)
-        let member = ColophonSession(configuration: SessionConfiguration(memberLabel: "Reader", memberKind: .agent, namespaces: ["listening.podcasts"], location: .memory(store), privateContainer: home.appendingPathComponent("reader"), keys: SoftwareKeys()))
+        let member = ColophonSession(configuration: SessionConfiguration(memberLabel: "Reader", memberKind: .agent, namespaces: ["listening.podcasts"], location: .memory(store), privateContainer: home.appendingPathComponent("reader"), keys: SoftwareKeys(), ownerController: SoftwareKeys()))
         await member.restore()
         guard case .waitingForApproval = member.phase else { Issue.record("Expected approval request"); return }
         #expect(member.checkpointTask == nil)
