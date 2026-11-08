@@ -7,6 +7,7 @@
 pub mod cose;
 pub mod descriptor;
 pub mod envelope;
+pub mod registration;
 pub mod strict_json;
 /// Synthetic software authenticator for conformance vectors, never platform custody.
 #[doc(hidden)]

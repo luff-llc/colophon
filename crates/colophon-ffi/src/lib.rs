@@ -6,11 +6,13 @@ mod migration;
 pub use import_storage::*;
 mod storage_engine;
 pub use storage_engine::*;
+mod keys;
 mod types;
 use colophon_core::{
     library::{Call, CreateOptions, Library, PendingBatch},
     model::{self, Outcome},
 };
+pub use keys::*;
 pub use migration::*;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -93,6 +95,13 @@ impl HostAction {
             .steps
             .iter()
             .map(|s| SigningStep {
+                descriptor: serde_json::json!(s.signer).to_string().into_bytes(),
+                form: if s.signer.is_webauthn() {
+                    KeyForm::Webauthn
+                } else {
+                    KeyForm::Raw
+                },
+                challenge: s.challenge.clone(),
                 path: s.path.clone(),
                 body: s.body.clone(),
                 signing_key: s.signing.clone(),
@@ -513,7 +522,9 @@ impl NativeLibrary {
         }
     }
 }
-/// Temporary creation shim; W5 replaces it with the full 0.4 key surface.
+/// Prepare keyring genesis, epochs and a separate member request.
+/// Sign the first round, call `advance_create`, then finish its grant/layout round.
+/// `owner` is the content member; `controller` must be a separate host-owned identity.
 #[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub fn begin_create(

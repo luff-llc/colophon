@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { Library, WebCryptoKeys } from '../dist/index.js';
+const member=await WebCryptoKeys.generate(), controller=await WebCryptoKeys.generate();
+const library=await Library.create({owner:member,controller,label:'W5',ownerLabel:'Device',namespaces:['notes']});
+assert.notDeepEqual(controller.signingPublicKey,member.signingPublicKey);
+assert.equal(library.keyring().controllers.length,1);
+assert.equal((await library.write('notes','createNotebook',{id:'n',title:'W5'})).ok,true);
+const agent=await WebCryptoKeys.generate();
+const request=await Library.requestAccess({libraryID:library.id,keys:agent,label:'Agent',kind:'agent',namespaces:['notes'],access:['read','write']});
+assert.equal((await library.approve(request.record)).ok,true);
+const opened=await Library.open(library.records,agent);
+assert.equal(opened.view('notes').ok,true);
+assert.equal((await library.revoke(request.id)).ok,true);
+opened.merge(library.records); await opened.ready();
+assert.equal((await opened.write('notes','createNotebook',{id:'x',title:'Revoked'})).reason,'revoked');
+console.log('W5 JS facade create/write/grant/revoke passed');

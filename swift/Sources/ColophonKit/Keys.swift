@@ -3,11 +3,27 @@ import Foundation
 import Security
 
 /// Async providers can suspend for authentication, a KMS, or platform key-store work.
-/// Public keys use X9.63; signatures are SHA-256 ECDSA raw r || s; ECDH returns 32 bytes.
+/// Raw signatures use r || s; WebAuthn assertions retain DER and original signed bytes.
+/// Public points use X9.63 and raw ECDH returns 32 bytes.
 public protocol AsyncKeyProvider: Sendable {
+    /// Select raw ES256 or WebAuthn get assertions.
+    var form: KeyForm { get }
+    /// Restrict get to this provider's credential and optionally evaluate the exact salt.
+    func assert(challenge: String, prfSalt: Data?) async throws -> WebauthnResult?
+    /// Evaluate an existing route; nil explicitly means unsupported or missing output.
+    func prf(salt: Data) async throws -> Data?
     func publicKeys() async throws -> PublicKeys
     func sign(body: Data) async throws -> Data
     func agree(peer: Data) async throws -> Data
+}
+
+extension AsyncKeyProvider {
+    /// Raw providers need no WebAuthn ceremony.
+    public var form: KeyForm { .raw }
+    /// Unsupported assertions are explicit; callers must not derive a fallback secret.
+    public func assert(challenge: String, prfSalt: Data?) async throws -> WebauthnResult? { nil }
+    /// Exact WebAuthn results.first for an existing slot; nil means unsupported.
+    public func prf(salt: Data) async throws -> Data? { nil }
 }
 
 extension AsyncKeyProvider where Self: KeyProvider {
@@ -144,4 +160,18 @@ private func keyOperation<T>(_ operation: () throws -> T) throws -> T {
     do { return try operation() }
     catch let error as BindingError { throw error }
     catch { throw BindingError.KeyProvider(detail: error.localizedDescription) }
+}
+
+/// Public controller JSON and provider for one ordered combined-route part.
+public struct CombinedRoutePart: Sendable {
+    /// Complete controller in protocol JSON.
+    public let controller: Data
+    /// Key descriptor in protocol JSON; required for a WebAuthn get ceremony.
+    public let descriptor: Data
+    /// Host-owned private-key and ceremony operations.
+    public let provider: any AsyncKeyProvider
+    /// Create one part without retaining platform secrets in records.
+    public init(controller: Data, descriptor: Data, provider: any AsyncKeyProvider) {
+        self.controller = controller; self.descriptor = descriptor; self.provider = provider
+    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Expected access refusals are values; malformed records and provider failures throw.
 public enum Outcome<Value: Sendable>: Sendable {
@@ -17,34 +18,37 @@ public struct AccessError: Error, Sendable {
     public let denial: Denial
 }
 
-/// In-memory Colophon 0.3 replica. Hosts own storage, sync, and key persistence.
+/// In-memory Colophon 0.4 replica. Hosts own storage, sync, and key persistence.
 /// Actor reentrancy is safe: a merge during signing makes commit throw BindingError.StaleAction.
 /// Retry such an action explicitly; no stale grant or authority change is silently committed.
 public actor Library {
     public nonisolated let native: NativeLibrary
-    public nonisolated let recoveryKeys: (any AsyncKeyProvider)?
     private let keys: any AsyncKeyProvider
+    private var controllers: [any AsyncKeyProvider] = []
     /// Paths last written by `write`, including live-state aliases and retained copies.
     public private(set) var lastWrittenPaths: [String] = []
 
-    private init(native: NativeLibrary, keys: any AsyncKeyProvider, recovery: (any AsyncKeyProvider)? = nil) {
+    private init(native: NativeLibrary, keys: any AsyncKeyProvider) {
         self.native = native
         self.keys = keys
-        self.recoveryKeys = recovery
     }
 
+    /// Create a library with separate controller and content-member identities.
     @concurrent
     public static func create(owner: any AsyncKeyProvider, label: String, ownerLabel: String,
-                              namespaces: [String], recovery: (any AsyncKeyProvider)? = nil) async throws -> Library {
-        let recovery = recovery ?? SoftwareKeys()
+                              namespaces: [String], controller: any AsyncKeyProvider) async throws -> Library {
         let publicKeys = try await owner.publicKeys()
-        let action = try beginCreate(owner: publicKeys, recovery: await recovery.publicKeys(), label: label,
-                                     ownerLabel: ownerLabel, namespaces: namespaces, now: HostInputs.now(), entropy: HostInputs.entropy())
-        let signed = try await signatures(action, keys: owner)
-        try Task.checkCancellation()
-        let records = try action.finish(signatures: signed)
-        let library = Library(native: try NativeLibrary.open(records: records, me: publicKeys), keys: owner, recovery: recovery)
+        let action = try beginCreate(owner: publicKeys, controller: await controller.publicKeys(),
+                                     vaultSeed: HostInputs.entropy(), label: label, ownerLabel: ownerLabel,
+                                     namespaces: namespaces, now: HostInputs.now(), entropy: HostInputs.entropy())
+        let first = try await signatures(action, providers: [owner, controller])
+        let final = try action.advanceCreate(signatures: first.map(\.signature))
+        let records = try final.finishAuthority(results: await signatures(final, providers: [controller]))
+        let library = Library(native: try NativeLibrary.open(records: records, me: publicKeys), keys: owner)
+        try library.native.selectController(id: controllerID(try await controller.publicKeys().signing))
+        await library.setControllers([controller])
         try await library.ready()
+        try await library.unlockVault(using: [controller])
         return library
     }
 
@@ -60,7 +64,7 @@ public actor Library {
                                      kind: MemberKind, namespaces: [String], access: [Access]) async throws -> AccessRequest {
         let action = try beginRequest(libraryId: libraryID, keys: await keys.publicKeys(), label: label, kind: kind,
                                       namespaces: namespaces, access: access, now: HostInputs.now())
-        let records = try action.finish(signatures: await signatures(action, keys: keys))
+        let records = try action.finishAuthority(results: await signatures(action, providers: [keys]))
         guard let record = records.values.first else { throw BindingError.InvalidData(detail: "Empty request") }
         return try requestInfo(record: record, libraryId: libraryID)
     }
@@ -71,6 +75,10 @@ public actor Library {
     public func me() throws -> Member { try native.me() }
     public func members() throws -> [Member] { try native.members() }
     public func ledger() throws -> [LedgerEntry] { try native.ledger() }
+    /// Current controllers, thresholds, vault identity and slots in protocol JSON.
+    public func keyring() throws -> Data { try native.keyring() }
+    /// Choose a controller for convenience grant, revoke, rekey and layout actions.
+    public func selectController(id: String) throws { try native.selectController(id: id) }
     public func tools() throws -> [Tool] { try native.tools(now: HostInputs.now()) }
 
     /// Revocations apply immediately. Await ready() to open newly received epoch shares.
@@ -162,31 +170,150 @@ public actor Library {
         }
     }
 
-    public func handover(newRoot: any AsyncKeyProvider, label: String) async throws -> Outcome<Void> {
-        try await ready()
-        return try await executeVoid(native.beginHandover(newRoot: await newRoot.publicKeys(), label: label,
-                                                         now: HostInputs.now(), entropy: HostInputs.entropy()))
-    }
+    /// Set available controller providers; content writes continue to use the member provider.
+    public func setControllers(_ providers: [any AsyncKeyProvider]) { controllers = providers }
 
-    public func recover(newRoot: any AsyncKeyProvider, label: String) async throws -> Outcome<Void> {
-        try await ready()
-        return try await executeVoid(native.beginRecover(newRoot: await newRoot.publicKeys(), label: label,
-                                                        now: HostInputs.now(), entropy: HostInputs.entropy()))
-    }
-
-    private static func signatures(_ action: HostAction, keys: any AsyncKeyProvider) async throws -> [Data] {
-        let publicKeys = try await keys.publicKeys()
-        var signatures: [Data] = []
-        for step in action.signingSteps() {
-            guard step.signingKey == publicKeys.signing else { throw BindingError.KeyProvider(detail: "Unexpected signing identity") }
-            signatures.append(try await keys.sign(body: step.body))
+    /// Open one complete vault route using ECDH or exact PRF outputs.
+    public func unlockVault(using providers: [any AsyncKeyProvider]) async throws {
+        var available: [String: any AsyncKeyProvider] = [:]
+        for provider in providers { available[Self.controllerID(try await provider.publicKeys().signing)] = provider }
+        for option in try native.beginUnlockSlots() {
+            let ids = option.inputs.map { input in
+                switch input { case .ecdh(let controller, _), .prf(let controller, _): controller }
+            }
+            guard ids.allSatisfy({ available[$0] != nil }) else { continue }
+            var secrets: [SlotSecret] = []
+            for input in option.inputs {
+                switch input {
+                case .ecdh(let controller, let enc):
+                    guard let provider = available[controller] else { throw BindingError.KeyProvider(detail: "Missing controller") }
+                    secrets.append(.ecdh(secret: try await provider.agree(peer: enc)))
+                case .prf(let controller, let salt):
+                    guard let provider = available[controller], let output = try await provider.prf(salt: salt) else {
+                        throw BindingError.KeyProvider(detail: "WebAuthn PRF unsupported or missing results.first")
+                    }
+                    secrets.append(.prf(output: output))
+                }
+            }
+            try Task.checkCancellation()
+            _ = try native.finishUnlockSlot(option: option, secrets: secrets)
+            return
         }
-        return signatures
+        throw BindingError.KeyProvider(detail: "No available vault route")
+    }
+
+    /// Prepare an authority action encoded in protocol JSON, with explicit signer IDs.
+    public func prepareAuthority(action: Data, by: String, signers: [String]) throws -> HostAction {
+        try native.prepareAuthority(action: action, by: by, signers: signers, now: HostInputs.now())
+    }
+    /// Sign a prepared action with the available controllers and atomically commit it.
+    public func finishAuthority(_ action: HostAction) async throws {
+        let results = try await Self.signatures(action, providers: controllers)
+        try Task.checkCancellation()
+        _ = try native.finishAuthority(action: action, results: results)
+    }
+    /// Verify a new-credential get assertion, build and reopen its PRF route.
+    public func buildPasskeySlot(descriptor: Data, provider: any AsyncKeyProvider, label: String,
+                                 newSeed: Data? = nil) async throws -> Data {
+        let action = try native.beginPrfSlot(descriptor: descriptor, entropy: HostInputs.entropy())
+        guard let result = try await provider.assert(challenge: action.challenge(), prfSalt: action.salt()) else {
+            throw BindingError.KeyProvider(detail: "WebAuthn assertion or PRF unsupported")
+        }
+        try Task.checkCancellation()
+        return try native.finishPrfSlot(action: action, result: result, label: label, newSeed: newSeed, entropy: HostInputs.entropy())
+    }
+    /// Verify new PRF assertions, build fresh part secrets and reopen the complete combined route.
+    public func buildCombinedSlot(parts: [CombinedRoutePart], label: String, newSeed: Data? = nil) async throws -> Data {
+        var inputs: [CombinedSlotPart] = []
+        var outputs: [Data?] = []
+        for part in parts {
+            if part.provider.form == .raw {
+                inputs.append(.sealed(controller: part.controller)); outputs.append(nil)
+            } else {
+                let action = try native.beginPrfSlot(descriptor: part.descriptor, entropy: HostInputs.entropy())
+                guard let result = try await part.provider.assert(challenge: action.challenge(), prfSalt: action.salt()), let output = result.prf else {
+                    throw BindingError.KeyProvider(detail: "WebAuthn assertion or PRF unsupported")
+                }
+                inputs.append(.prf(controller: part.controller, action: action, result: result)); outputs.append(output)
+            }
+        }
+        try Task.checkCancellation()
+        let action = try native.beginCombinedSlot(parts: inputs, label: label, newSeed: newSeed, entropy: HostInputs.entropy())
+        var secrets: [SlotSecret] = []
+        for (index, input) in action.inputs().enumerated() {
+            switch input {
+            case .ecdh(_, let enc): secrets.append(.ecdh(secret: try await parts[index].provider.agree(peer: enc)))
+            case .prf:
+                guard let output = outputs[index] else { throw BindingError.KeyProvider(detail: "Missing combined PRF output") }
+                secrets.append(.prf(output: output))
+            }
+        }
+        try Task.checkCancellation()
+        return try native.finishCombinedSlot(action: action, secrets: secrets)
+    }
+    /// Candidate controllers in protocol JSON, including each form and roles.
+    public func eligibleSigners(action: Data) throws -> [Data] { try native.eligibleSigners(action: action) }
+    /// Add a passkey with a checked slot under the prior control rule.
+    public func addPasskey(controller: Data, slot: Data, signers: [String]) async throws {
+        try await finishAuthority(native.beginAddPasskey(controller: controller, slot: slot, signers: signers, now: HostInputs.now()))
+    }
+    /// Add a controller, optionally including a checked vault route.
+    public func addController(controller: Data, slot: Data? = nil, signers: [String]) async throws {
+        try await finishAuthority(native.beginAddController(controller: controller, slot: slot, signers: signers, now: HostInputs.now()))
+    }
+    /// Recovery only-adds with prior recovery signers.
+    public func recoveryAdd(controller: Data, slot: Data? = nil, signers: [String]) async throws {
+        try await finishAuthority(native.beginRecoveryAdd(controller: controller, slot: slot, signers: signers, now: HostInputs.now()))
+    }
+    /// Remove a controller and rotate the vault with checked replacement routes.
+    public func removeController(id: String, newSeed: Data, slots: [Data], signers: [String]) async throws {
+        try await finishAuthority(native.beginRemoveController(id: id, newSeed: newSeed, slots: slots, signers: signers,
+                                                               now: HostInputs.now(), entropy: HostInputs.entropy()))
+    }
+    /// Replace the whole keyring, including threshold and vault changes.
+    public func replaceKeyring(_ keyring: Data, newSeed: Data? = nil, signers: [String]) async throws {
+        try await finishAuthority(native.beginKeyring(keyring: keyring, newSeed: newSeed, signers: signers,
+                                                      now: HostInputs.now(), entropy: HostInputs.entropy()))
+    }
+    /// Build an HPKE route for a current or rotated vault.
+    public func buildSealedSlot(controller: Data, label: String, newSeed: Data? = nil) throws -> Data {
+        try native.buildSealedSlot(controller: controller, label: label, newSeed: newSeed, entropy: HostInputs.entropy())
+    }
+    /// Grant explicit scoped, expiring import permission.
+    public func importGrant(request: Data, grant: Data, signers: [String]) async throws {
+        try await finishAuthority(native.beginImportGrant(request: request, grant: grant, signers: signers,
+                                                          now: HostInputs.now(), entropy: HostInputs.entropy()))
+    }
+    /// Introduce namespace epochs through the selected controller.
+    public func rekey(namespaces: [String]) async throws -> Outcome<Void> {
+        try await executeVoid(native.beginRekey(namespaces: namespaces, now: HostInputs.now(), entropy: HostInputs.entropy()))
+    }
+    private static func controllerID(_ signing: Data) -> String {
+        SHA256.hash(data: signing).prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+    private static func signatures(_ action: HostAction, providers: [any AsyncKeyProvider]) async throws -> [SignatureResult] {
+        var available: [Data: any AsyncKeyProvider] = [:]
+        for provider in providers { available[try await provider.publicKeys().signing] = provider }
+        var results: [SignatureResult] = []
+        for step in action.signingSteps() {
+            guard let provider = available[step.signingKey], provider.form == step.form else {
+                throw BindingError.KeyProvider(detail: "Unexpected signing identity or form")
+            }
+            if let challenge = step.challenge {
+                guard let assertion = try await provider.assert(challenge: challenge, prfSalt: nil) else {
+                    throw BindingError.KeyProvider(detail: "WebAuthn assertion unsupported")
+                }
+                results.append(SignatureResult(signature: assertion.signature, assertion: assertion))
+            } else {
+                results.append(SignatureResult(signature: try await provider.sign(body: step.body), assertion: nil))
+            }
+        }
+        return results
     }
     private func commit(_ action: HostAction) async throws {
-        let signatures = try await Self.signatures(action, keys: keys)
+        let results = try await Self.signatures(action, providers: [keys] + controllers)
         try Task.checkCancellation()
-        _ = try native.commit(action: action, signatures: signatures)
+        _ = try native.finishAuthority(action: action, results: results)
         try await ready()
     }
     private func execute(_ action: PreparedAction) async throws -> Denial? {
