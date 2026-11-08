@@ -9,18 +9,18 @@ struct LibraryTests {
     @Test func agentJourney() async throws {
         let owner = SoftwareKeys()
         let agentKeys = SoftwareKeys()
-        let root = try await Library.create(owner: owner, label: "Library", ownerLabel: "Owner",
+        let library = try await createLibrary(owner: owner, label: "Library", ownerLabel: "Owner",
                                             namespaces: ["notes", "reading.saved"])
-        let notebook = try await root.write(namespace: "notes", kind: "createNotebook",
+        let notebook = try await library.write(namespace: "notes", kind: "createNotebook",
                                              payload: json(#"{"id":"book","title":"Ideas"}"#)).get()
         #expect(notebook.origin == .person)
-        let request = try await Library.requestAccess(libraryID: root.id, keys: agentKeys, label: "Muse", kind: .agent,
+        let request = try await Library.requestAccess(libraryID: library.id, keys: agentKeys, label: "Muse", kind: .agent,
                                                       namespaces: ["notes", "reading.saved"], access: [.read, .write])
         #expect(request.pairingCode.count == 6)
-        let approved = try await root.approve(request: request.record, grant: GrantOptions.narrowing(namespaces: ["notes"], writeBudget: 3)).get()
+        let approved = try await library.approve(request: request.record, grant: GrantOptions.narrowing(namespaces: ["notes"], writeBudget: 3)).get()
         #expect(approved.kind == .agent)
         #expect(approved.grant?.namespaces == ["notes"])
-        let agent = try await Library.open(records: root.records, me: agentKeys)
+        let agent = try await Library.open(records: library.records, me: agentKeys)
         let note = try await agent.write(namespace: "notes", kind: "addNote",
                                          payload: json(#"{"id":"note","notebook":"book","text":"Keep this","origin":"person"}"#)).get()
         #expect(note.origin == .ai)
@@ -28,17 +28,17 @@ struct LibraryTests {
         if case .failure(let denial) = try await agent.view(namespace: "reading.saved") {
             #expect(denial.reason == .notGranted)
         } else { Issue.record("Narrowed namespace was readable") }
-        let changes = try await root.merge(records: agent.records)
+        let changes = try await library.merge(records: agent.records)
         #expect(changes.recordsAdded == 1)
         #expect(changes.namespaces.contains("notes"))
-        try await root.revoke(memberID: request.id).get()
-        try await agent.merge(records: root.records)
+        try await library.revoke(memberID: request.id).get()
+        try await agent.merge(records: library.records)
         if case .failure(let denial) = try await agent.write(namespace: "notes", kind: "addNote",
                                                              payload: json(#"{"id":"later","notebook":"book","text":"No"}"#)) {
             #expect(denial.reason == .revoked)
         } else { Issue.record("Revoked agent wrote") }
         let restoredKeys = try SoftwareKeys(signingPrivateKey: owner.signingPrivateKey, agreementPrivateKey: owner.agreementPrivateKey)
-        let restored = try await Library.open(records: root.records, me: restoredKeys)
+        let restored = try await Library.open(records: library.records, me: restoredKeys)
         let view = try await restored.view(namespace: "notes").get()
         #expect(view.admitted.contains { $0.id == note.id && $0.origin == .ai && $0.authorLabel == "Muse" })
         #expect(String(decoding: view.state, as: UTF8.self).contains("Keep this"))
@@ -65,9 +65,13 @@ struct LibraryTests {
         #expect(publicKey.isValidSignature(signature, for: message))
         #expect(try keys.agree(peer: peer.agreementPublicKey()) == peer.agree(peer: keys.agreementPublicKey()))
         #expect(throws: BindingError.self) { try keys.agree(peer: Data([0])) }
-        let action = try beginCreate(owner: await keys.publicKeys(), recovery: await peer.publicKeys(), label: "Callbacks",
+        let action = try beginCreate(owner: await keys.publicKeys(), controller: await peer.publicKeys(), vaultSeed: Data(repeating: 8, count: 32), label: "Callbacks",
                                      ownerLabel: "Owner", namespaces: ["notes"], now: "2026-11-06T00:00:00Z", entropy: Data(repeating: 7, count: 32))
-        let records = try action.finish(signatures: action.signWith(keys: keys))
+        let first = try action.signingSteps().map { step in
+            try (step.signingKey == keys.signingPublicKey() ? keys : peer).sign(body: step.body)
+        }
+        let final = try action.advanceCreate(signatures: first)
+        let records = try final.finish(signatures: final.signWith(keys: peer))
         let native = try NativeLibrary.open(records: records, me: await keys.publicKeys())
         let change = try native.readyWith(keys: keys)
         #expect(change.namespaces == ["notes"])
@@ -78,7 +82,7 @@ struct LibraryTests {
 
     @Test func invalidSignatureIsAtomicAndStaleActionsRefuse() async throws {
         let keys = SoftwareKeys()
-        let library = try await Library.create(owner: keys, label: "L", ownerLabel: "O", namespaces: ["notes"])
+        let library = try await createLibrary(owner: keys, label: "L", ownerLabel: "O", namespaces: ["notes"])
         let native = library.native
         let first = try native.beginWrite(namespace: "notes", kind: "createNotebook", payload: json(#"{"id":"a","title":"A"}"#),
                                           now: "2026-11-06T00:00:00Z", entropy: Data(repeating: 1, count: 32))
@@ -135,7 +139,7 @@ private actor PausingKeys: AsyncKeyProvider {
 struct AsyncProviderTests {
     @Test(.timeLimit(.minutes(1))) func mergeWhileSigningRejectsStaleAction() async throws {
         let keys = PausingKeys()
-        let library = try await Library.create(owner: keys, label: "L", ownerLabel: "O", namespaces: ["notes"])
+        let library = try await createLibrary(owner: keys, label: "L", ownerLabel: "O", namespaces: ["notes"])
         let other = try await Library.open(records: library.records, me: keys.base)
         await keys.arm()
         let task = Task {
@@ -153,7 +157,7 @@ struct AsyncProviderTests {
 
     @Test(.timeLimit(.minutes(1))) func cancellationBeforeCommitLeavesRecordsUntouched() async throws {
         let keys = PausingKeys()
-        let library = try await Library.create(owner: keys, label: "L", ownerLabel: "O", namespaces: ["notes"])
+        let library = try await createLibrary(owner: keys, label: "L", ownerLabel: "O", namespaces: ["notes"])
         let before = try await library.records
         await keys.arm()
         let task = Task {
@@ -182,13 +186,13 @@ struct RefusalTests {
     func restrictedGrant(reason: DenialReason) async throws {
         let owner = SoftwareKeys()
         let agentKeys = SoftwareKeys()
-        let root = try await Library.create(owner: owner, label: "L", ownerLabel: "O", namespaces: ["notes"])
-        let request = try await Library.requestAccess(libraryID: root.id, keys: agentKeys, label: "A", kind: .agent,
+        let library = try await createLibrary(owner: owner, label: "L", ownerLabel: "O", namespaces: ["notes"])
+        let request = try await Library.requestAccess(libraryID: library.id, keys: agentKeys, label: "A", kind: .agent,
                                                       namespaces: ["notes"], access: [.read, .write])
-        _ = try await root.approve(request: request.record, grant: GrantOptions.narrowing(
+        _ = try await library.approve(request: request.record, grant: GrantOptions.narrowing(
             expires: reason == .expired ? "2000-01-01T00:00:00Z" : nil,
             writeBudget: reason == .budgetSpent ? 0 : nil)).get()
-        let agent = try await Library.open(records: root.records, me: agentKeys)
+        let agent = try await Library.open(records: library.records, me: agentKeys)
         let outcome = try await agent.write(namespace: "notes", kind: "createNotebook", payload: json(#"{"id":"n","title":"N"}"#))
         if case .failure(let denial) = outcome { #expect(denial.reason == reason) }
         else { Issue.record("Expected typed refusal") }
@@ -196,8 +200,8 @@ struct RefusalTests {
 
     @Test func lockedKeysAndProviderFailuresAreExplicit() async throws {
         let owner = SoftwareKeys()
-        let root = try await Library.create(owner: owner, label: "L", ownerLabel: "O", namespaces: ["notes"])
-        let locked = try NativeLibrary.open(records: await root.records, me: await owner.publicKeys())
+        let library = try await createLibrary(owner: owner, label: "L", ownerLabel: "O", namespaces: ["notes"])
+        let locked = try NativeLibrary.open(records: await library.records, me: await owner.publicKeys())
         if case .failure(let denial) = try locked.view(namespace: "notes", now: "2026-11-06T00:00:00Z") {
             #expect(denial.reason == .notReadable)
         } else { Issue.record("Locked data should not appear empty") }
@@ -207,8 +211,12 @@ struct RefusalTests {
         #expect(throws: BindingError.KeyProvider(detail: "Host denied agreement")) {
             try locked.readyWith(keys: FailingKeys(owner))
         }
-        let action = try beginRequest(libraryId: await root.id, keys: await owner.publicKeys(), label: "O", kind: .app,
+        let action = try beginRequest(libraryId: await library.id, keys: await owner.publicKeys(), label: "O", kind: .app,
                                       namespaces: ["notes"], access: [.read], now: "2026-11-06T00:00:00Z")
         #expect(throws: BindingError.KeyProvider(detail: "Host denied signing")) { try action.signWith(keys: FailingKeys(owner)) }
     }
+}
+
+private func createLibrary(owner: any AsyncKeyProvider, label: String, ownerLabel: String, namespaces: [String]) async throws -> Library {
+    try await Library.create(owner: owner, label: label, ownerLabel: ownerLabel, namespaces: namespaces, controller: SoftwareKeys())
 }

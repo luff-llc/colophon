@@ -14,13 +14,13 @@ import SwiftUI
     init(phase: SessionPhase = .ready) {
         self.phase = phase
         members = [
-            Member(id: "owner", label: "My Mac", kind: .device, grant: nil, since: 1, revokedAt: nil, writes: 2),
+            Member(id: "device", label: "My Mac", kind: .device, grant: Grant(import: nil, namespaces: ["notes", "reading.books"], access: [.read, .write], expires: nil, writeBudget: nil), since: 3, revokedAt: nil, writes: 2),
             Member(id: "reader", label: "Reading Assistant", kind: .agent,
-                   grant: Grant(namespaces: ["reading.books"], access: [.read], expires: nil, writeBudget: nil),
+                   grant: Grant(import: nil, namespaces: ["reading.books"], access: [.read], expires: nil, writeBudget: nil),
                    since: 2, revokedAt: nil, writes: 0)
         ]
         requests = [Self.request]
-        ledger = [LedgerEntry(sequence: 1, at: "2026-11-06T12:00:00Z", actor: "owner", actorLabel: "My Mac",
+        ledger = [LedgerEntry(sequence: 1, at: "2026-11-06T12:00:00Z", actor: "controller", actorLabel: "My Mac",
                               event: .created, subject: nil, namespace: nil, kind: nil, origin: nil, text: "Created this library")]
     }
     static let request = AccessRequest(id: "request", label: "My iPad", kind: .device,

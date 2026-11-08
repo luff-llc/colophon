@@ -11,7 +11,7 @@ public struct RecoveryKitView: View {
             Section {
                 Label("A Way Back to Your Library", systemImage: "key.horizontal")
                     .font(.title2.bold())
-                Text("Keep your recovery kit somewhere private and safe. Anyone with the kit may be able to take control of your library.")
+                Text("Keep your recovery kit somewhere private and safe. The kit can add a device controller according to your library’s keyring rules.")
             }
             Section("Keep Your Kit") {
                 if let kit = model.exported {
@@ -36,24 +36,24 @@ public struct RecoveryKitView: View {
                 SecureField("Recovery kit", text: $model.input)
                     .autocorrectionDisabled().privacySensitive()
                     .accessibilityIdentifier("library.recoveryKitField")
-                Button("Recover Library") { confirmsRecovery = true }
+                Button("Restore Device") { confirmsRecovery = true }
                     .disabled(host.importRecoveryKit == nil || model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .accessibilityIdentifier("library.kitImport")
                 if host.importRecoveryKit == nil { Text("Recovery kit import is not available in this app yet.").foregroundStyle(.secondary) }
-                if model.imported { Label("Recovery Completed", systemImage: "checkmark.circle").accessibilityIdentifier("library.kitImported") }
-            } header: { Text("Recover a Library") }
-              footer: { Text("Recovery can change who controls the library. Use the kit for the library you selected.") }
+                if model.imported { Label("Device Restored", systemImage: "checkmark.circle").accessibilityIdentifier("library.kitImported") }
+            } header: { Text("Restore on This Device") }
+              footer: { Text("The kit adds this device’s controller and grants its member access. Use the kit for the library you selected.") }
             if model.action.isWorking { ProgressView("Accessing recovery kit") }
             LibraryErrorView(message: model.action.error)
         }
         .formStyle(.grouped)
         .disabled(model.action.isWorking)
         .navigationTitle("Recovery Kit")
-        .confirmationDialog("Recover this library?", isPresented: $confirmsRecovery, titleVisibility: .visible) {
-            Button("Recover Library") { Task { await model.recover(host: host) } }
+        .confirmationDialog("Restore this device?", isPresented: $confirmsRecovery, titleVisibility: .visible) {
+            Button("Restore Device") { Task { await model.restoreDevice(host: host) } }
                 .accessibilityIdentifier("library.kitImport.confirm")
             Button("Cancel", role: .cancel) {}.accessibilityIdentifier("library.kitImport.cancel")
-        } message: { Text("The recovery kit may replace the library’s controlling identity. Existing contributions remain attributed to their authors.") }
+        } message: { Text("The recovery kit adds a controller to the keyring. Existing controllers and contributions stay in place.") }
         .onDisappear { model.clear() }
         .interactiveDismissDisabled(model.action.isWorking || model.exported != nil)
     }

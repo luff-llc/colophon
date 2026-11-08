@@ -29,18 +29,22 @@ protocol SessionCore: Sendable {
     func approve(_ request: Data, grant: GrantOptions?) async throws
     func revoke(_ id: String) async throws
     func importRequest(_ data: Data) async throws -> AccessRequest
-    func approveWithStarter(_ request: Data, keys: any AsyncKeyProvider) async throws
-    func recovery() async -> (any AsyncKeyProvider)?
+    func approveWithController(_ request: Data, keys: any AsyncKeyProvider) async throws
+    func setOwnerController(_ provider: any AsyncKeyProvider) async
+    func restoreDevice(configuration: SessionConfiguration, keys: any AsyncKeyProvider, kit: any AsyncKeyProvider) async throws
 }
 
 actor BindingSessionCore: SessionCore {
     private var library: StorageLibrary?
     private var cache: CheckpointCache?
-    private var recoveryProvider: (any AsyncKeyProvider)?
+    private var memberProvider: (any AsyncKeyProvider)?
+    private var ownerController: (any AsyncKeyProvider)?
+    func setOwnerController(_ provider: any AsyncKeyProvider) { ownerController = provider }
     private func requireLibrary() throws -> StorageLibrary {
         guard let library else { throw SessionError.notReady }; return library
     }
     func openStorage(store: any RecordStore, paths: Set<String>, versions: [String: String], pending: [String: Data], keys: any AsyncKeyProvider, namespaces: [String], cache: CheckpointCache, libraryID: String?) async throws {
+        memberProvider = keys
         let reader = try await store.engineReader()
         let source = SessionRecordSource(reader: reader, pending: pending)
         // Verify layout/current authority before the engine can request any operation body.
@@ -57,6 +61,7 @@ actor BindingSessionCore: SessionCore {
         self.cache = cache
     }
     func open(records: [String: Data], keys: any AsyncKeyProvider) async throws {
+        memberProvider = keys
         let id = try NativeLibrary.open(records: records.filter { $0.key.hasPrefix("authority/") }, me: await SessionKeys(base: keys).publicKeys()).id()
         library = try await StorageLibrary.open(source: SessionRecordSource(reader: RecordReader { path in
             guard let bytes = records[path] else { throw StorageError.unavailable("Missing record: " + path) }; return bytes
@@ -77,21 +82,30 @@ actor BindingSessionCore: SessionCore {
     }
     func operation(path: String, namespace: String) async throws -> OperationView { try await requireLibrary().operation(path: path, namespace: namespace) }
     func create(configuration: SessionConfiguration) async throws {
-        let created = try await Library.create(owner: SessionKeys(base: configuration.starterKeys ?? configuration.keys), label: configuration.memberLabel,
-            ownerLabel: configuration.memberLabel, namespaces: configuration.libraryNamespaces, recovery: configuration.recoveryKeys.map { SessionKeys(base: $0) })
-        recoveryProvider = created.recoveryKeys
+        let created = try await SessionAuthority.create(configuration)
+        ownerController = configuration.ownerController
         let records = try await created.records
         let store = MemoryRecordStore(records: records)
         try await openStorage(store: store, paths: Set(records.keys), versions: [:], pending: [:], keys: configuration.keys,
             namespaces: configuration.namespaces, cache: CheckpointCache(privateContainer: configuration.privateContainer), libraryID: nil)
     }
-    func approveWithStarter(_ request: Data, keys: any AsyncKeyProvider) async throws {
+    private func authority(using provider: any AsyncKeyProvider) async throws -> Library {
+        guard let memberProvider else { throw SessionError.notReady }
+        return try await SessionAuthority.open(records: requireLibrary().records, member: memberProvider, controller: provider)
+    }
+    private func mergeAuthority(_ owner: Library) async throws {
         let library = try requireLibrary()
-        let owner = try await Library.open(records: library.records, me: SessionKeys(base: keys))
-        // Core authority, not location or a display label, decides whether this key may grant.
-        _ = try await owner.approve(request: request).get()
         try await library.merge(records: owner.records)
         try await library.ready()
+    }
+    func approveWithController(_ request: Data, keys: any AsyncKeyProvider) async throws {
+        let owner = try await authority(using: keys)
+        _ = try await owner.approve(request: request).get()
+        try await mergeAuthority(owner)
+    }
+    func restoreDevice(configuration: SessionConfiguration, keys: any AsyncKeyProvider, kit: any AsyncKeyProvider) async throws {
+        let restored = try await SessionAuthority.restore(records: requireLibrary().records, configuration: configuration, member: keys, kit: kit)
+        try await mergeAuthority(restored)
     }
     func mergeObserved(_ records: [String: Data], versions: [String: String]) async throws {
         let library = try requireLibrary()
@@ -118,7 +132,6 @@ actor BindingSessionCore: SessionCore {
         try await library.merge(records: ["requests/\(request.id).json": data])
         return request
     }
-    func recovery() -> (any AsyncKeyProvider)? { recoveryProvider }
     func snapshot(namespaces: [String]) async throws -> CoreSnapshot {
         let keys = Array((try await requireLibrary().records.keys).filter { $0.hasPrefix("requests/") })
         return try await snapshot(namespaces: namespaces, requestPaths: keys)
@@ -156,12 +169,24 @@ actor BindingSessionCore: SessionCore {
     func write(_ command: DomainCommand) async throws -> OperationView {
         try await requireLibrary().write(namespace: command.namespace, kind: command.kind, payload: command.payload).get()
     }
-    func approve(_ request: Data, grant: GrantOptions?) async throws { _ = try await requireLibrary().approve(request: request, grant: grant) }
-    func revoke(_ id: String) async throws { try await requireLibrary().revoke(memberID: id) }
+    func approve(_ request: Data, grant: GrantOptions?) async throws {
+        guard let ownerController else { throw SessionError.notReady }
+        let owner = try await authority(using: ownerController)
+        _ = try await owner.approve(request: request, grant: grant).get()
+        try await mergeAuthority(owner)
+    }
+    func revoke(_ id: String) async throws {
+        guard let ownerController else { throw SessionError.notReady }
+        let owner = try await authority(using: ownerController)
+        try await owner.revoke(memberID: id).get()
+        try await mergeAuthority(owner)
+    }
 }
 
 // Existing test/host adapters need not implement named queries until they support them.
 extension SessionCore {
+    func setOwnerController(_ provider: any AsyncKeyProvider) async {}
+    func restoreDevice(configuration: SessionConfiguration, keys: any AsyncKeyProvider, kit: any AsyncKeyProvider) async throws { throw SessionError.notReady }
     func refreshSource(reader: RecordReader, pending: [String: Data]) async throws {}
     func mergeObserved(_ records: [String: Data], versions: [String: String]) async throws { try await merge(records) }
     func openStorage(store: any RecordStore, paths: Set<String>, versions: [String: String], pending: [String: Data], keys: any AsyncKeyProvider, namespaces: [String], cache: CheckpointCache, libraryID: String?) async throws {

@@ -60,7 +60,7 @@ actor SessionWorker {
     private func validateSyncAuthority(_ records: [String: Data]) async throws {
         do { relayLiveVerifier = try await Library.open(records: records, me: keys) }
         catch let error as BindingError {
-            if case .InvalidData(let detail) = error, detail.hasPrefix("Unsupported storage layout") { throw SessionLayoutError.updateRequired }
+            if case .InvalidData(let detail) = error, detail.hasPrefix("newerFormat:") { throw SessionLayoutError.updateRequired }
             throw error
         }
     }
@@ -98,6 +98,7 @@ actor SessionWorker {
         return try await refreshLocked()
     }
     func refreshLocked() async throws -> SessionSnapshot {
+        await core.setOwnerController(configuration.ownerController)
         if !configuration.migrationWriter, let marker = configuration.migrationMarker,
            try MigrationMarker.isActive(at: marker) { return empty(.migrating) }
         if opened, journal.pending.isEmpty, last?.me.since != 0, let token = changeToken,
@@ -155,7 +156,7 @@ actor SessionWorker {
                 if !incoming.isEmpty { try await core.mergeObserved(incoming, versions: versions) }
             }
         } catch let error as BindingError {
-            if case .InvalidData(let detail) = error, detail.hasPrefix("Unsupported storage layout") { throw SessionLayoutError.updateRequired }
+            if case .InvalidData(let detail) = error, detail.hasPrefix("newerFormat:") { throw SessionLayoutError.updateRequired }
             throw error
         }
         liveBytes.merge(observedLive) { _, new in new }
@@ -182,9 +183,9 @@ actor SessionWorker {
                 try await publish()
                 snapshot = try await core.snapshot(namespaces: configuration.namespaces, requestPaths: Array(requestPaths))
             }
-            if let starter = configuration.starterKeys {
+            if let controller = configuration.enrollmentController {
                 do {
-                    try await core.approveWithStarter(request.record, keys: starter)
+                    try await core.approveWithController(request.record, keys: controller)
                     try await persistDelta()
                     snapshot = try await core.snapshot(namespaces: configuration.namespaces, requestPaths: Array(requestPaths))
                 } catch is AccessError {
@@ -215,7 +216,7 @@ actor SessionWorker {
             guard Set(authority.keys) == authorityPaths else { throw StorageError.unavailable("Authority download pending") }
             do { if !authority.isEmpty { try await core.mergeObserved(authority, versions: versions) } }
             catch let error as BindingError {
-                if case .InvalidData(let detail) = error, detail.hasPrefix("Unsupported storage layout") { throw SessionLayoutError.updateRequired }; throw error
+                if case .InvalidData(let detail) = error, detail.hasPrefix("newerFormat:") { throw SessionLayoutError.updateRequired }; throw error
             }
             let content = paths.subtracting(authorityPaths)
             let records = try await storage().read(paths: Array(content))
@@ -260,6 +261,14 @@ actor SessionWorker {
         try await core.create(configuration: configuration); try await core.setReadScope(configuration.namespaces); opened = true
         journal.left = false
         journal.libraryID = try await core.snapshot(namespaces: configuration.namespaces).libraryID
+        try await persistDelta()
+        return try await refreshLocked()
+    }
+    func restoreDevice(using kit: any AsyncKeyProvider) async throws -> SessionSnapshot {
+        await enter(); defer { exit() }
+        let fresh = try await refreshLocked()
+        guard opened, fresh.core != nil else { throw SessionError.notReady }
+        try await core.restoreDevice(configuration: configuration, keys: keys, kit: kit)
         try await persistDelta()
         return try await refreshLocked()
     }
@@ -463,7 +472,7 @@ actor SessionWorker {
         try Task.checkCancellation()
         return try await core.query(namespace: namespace, name: name, arguments: arguments)
     }
-    func recovery() async -> (any AsyncKeyProvider)? { await core.recovery() }
+    func recovery() -> (any AsyncKeyProvider)? { configuration.recoveryKeys }
     private func empty(_ phase: SessionPhase) -> SessionSnapshot {
         SessionSnapshot(phase: phase, core: nil, revision: revision, namespaceRevisions: namespaceRevisions)
     }

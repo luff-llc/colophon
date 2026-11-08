@@ -89,4 +89,23 @@ enum BooksTestDispatch {
         default: throw SessionError.invalidCommand
         }
     }
+    // Historical domain payloads remain the wire-shape reference; authority does not.
+    static func decodeExpected(name: String, expected: Data) throws {
+        func roundTrip<Value: Codable & Equatable>(_ type: Value.Type) throws {
+            let value = try JSONDecoder().decode(type, from: expected)
+            #expect(try JSONDecoder().decode(type, from: JSONEncoder().encode(value)) == value)
+        }
+        switch name {
+        case "books": try roundTrip(DomainQueryResult<ColophonBooksKit.BooksQuery.Value>.self)
+        case "book": try roundTrip(DomainQueryResult<ColophonBooksKit.BookQuery.Value>.self)
+        case "bookCounts": try roundTrip(DomainQueryResult<ColophonBooksKit.BookCountsQuery.Value>.self)
+        case "bookNotes": try roundTrip(DomainQueryResult<ColophonBooksKit.BookNotesQuery.Value>.self)
+        case "note": try roundTrip(DomainQueryResult<ColophonBooksKit.NoteQuery.Value>.self)
+        case "readings": try roundTrip(DomainQueryResult<ColophonBooksKit.ReadingsQuery.Value>.self)
+        case "catalogMembership": try roundTrip(DomainQueryResult<ColophonBooksKit.CatalogMembershipQuery.Value>.self)
+        case "conflicts": try roundTrip(DomainQueryResult<ColophonBooksKit.ConflictsQuery.Value>.self)
+        case "invalid": try roundTrip(DomainQueryResult<ColophonBooksKit.InvalidQuery.Value>.self)
+        default: throw SessionError.invalidCommand
+        }
+    }
 }

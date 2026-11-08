@@ -5,6 +5,17 @@ struct SessionKeyFailure: Error, Sendable { let detail: String }
 /// Classifies provider failures at their origin, preserving storage/core errors separately.
 struct SessionKeys: AsyncKeyProvider {
     let base: any AsyncKeyProvider
+    var form: KeyForm { base.form }
+    func assert(challenge: String, prfSalt: Data?) async throws -> WebauthnResult? {
+        do { return try await base.assert(challenge: challenge, prfSalt: prfSalt) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw SessionKeyFailure(detail: error.localizedDescription) }
+    }
+    func prf(salt: Data) async throws -> Data? {
+        do { return try await base.prf(salt: salt) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw SessionKeyFailure(detail: error.localizedDescription) }
+    }
     func publicKeys() async throws -> PublicKeys {
         do { return try await base.publicKeys() }
         catch is CancellationError { throw CancellationError() }

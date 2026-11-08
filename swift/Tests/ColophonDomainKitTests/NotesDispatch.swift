@@ -113,4 +113,26 @@ enum NotesTestDispatch {
         default: throw SessionError.invalidCommand
         }
     }
+    // Historical domain payloads remain the wire-shape reference; authority does not.
+    static func decodeExpected(name: String, expected: Data) throws {
+        func roundTrip<Value: Codable & Equatable>(_ type: Value.Type) throws {
+            let value = try JSONDecoder().decode(type, from: expected)
+            #expect(try JSONDecoder().decode(type, from: JSONEncoder().encode(value)) == value)
+        }
+        switch name {
+        case "notebooks": try roundTrip(DomainQueryResult<ColophonNotesKit.NotebooksQuery.Value>.self)
+        case "notebook": try roundTrip(DomainQueryResult<ColophonNotesKit.NotebookQuery.Value>.self)
+        case "entries": try roundTrip(DomainQueryResult<ColophonNotesKit.EntriesQuery.Value>.self)
+        case "entry": try roundTrip(DomainQueryResult<ColophonNotesKit.EntryQuery.Value>.self)
+        case "cells": try roundTrip(DomainQueryResult<ColophonNotesKit.CellsQuery.Value>.self)
+        case "cell": try roundTrip(DomainQueryResult<ColophonNotesKit.CellQuery.Value>.self)
+        case "attachments": try roundTrip(DomainQueryResult<ColophonNotesKit.AttachmentsQuery.Value>.self)
+        case "proposals": try roundTrip(DomainQueryResult<ColophonNotesKit.ProposalsQuery.Value>.self)
+        case "contentDetail": try roundTrip(DomainQueryResult<ColophonNotesKit.ContentDetailQuery.Value>.self)
+        case "noteCounts": try roundTrip(DomainQueryResult<ColophonNotesKit.NoteCountsQuery.Value>.self)
+        case "conflicts": try roundTrip(DomainQueryResult<ColophonNotesKit.ConflictsQuery.Value>.self)
+        case "invalid": try roundTrip(DomainQueryResult<ColophonNotesKit.InvalidQuery.Value>.self)
+        default: throw SessionError.invalidCommand
+        }
+    }
 }

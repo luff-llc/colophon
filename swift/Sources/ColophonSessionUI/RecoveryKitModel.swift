@@ -25,7 +25,8 @@ import Observation
             exported = text; kept = false
         }
     }
-    public func recover(host: LibraryHostActions) async {
+    /// Ask the host to decode its kit and restore this device through the library's keyring.
+    public func restoreDevice(host: LibraryHostActions) async {
         let secret = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let lease = generation
         await action.run {

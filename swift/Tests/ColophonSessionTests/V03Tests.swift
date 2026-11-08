@@ -5,7 +5,7 @@ import Testing
 
 @MainActor struct V03Tests {
     private func config(_ store: MemoryRecordStore, _ home: URL, _ keys: SoftwareKeys) -> SessionConfiguration {
-        .init(memberLabel: "Playback", namespaces: ["listening.podcasts"], location: .memory(store), privateContainer: home, keys: keys)
+        .init(memberLabel: "Playback", namespaces: ["listening.podcasts"], location: .memory(store), privateContainer: home, keys: keys, ownerController: SoftwareKeys())
     }
     @Test(arguments: ["2026-11-07T12:00:00Z", "2026-11-07T12:00:00.555Z"])
     func expiryRefreshWaitsForHostClock(_ expires: String) throws {
@@ -60,13 +60,17 @@ import Testing
     }
     @Test func futureLayoutStopsBeforeContentAndKeepsIdentity() async throws {
         let keys = SoftwareKeys()
-        let library = try await Library.create(owner: keys, label: "Future", ownerLabel: "Owner", namespaces: ["listening.podcasts"])
+        let controller = SoftwareKeys()
+        let library = try await Library.create(owner: keys, label: "Future", ownerLabel: "Owner", namespaces: ["listening.podcasts"], controller: controller)
         _ = try await library.write(namespace: "listening.podcasts", kind: "position", payload: Data(#"{"id":"e","seconds":10,"seek":true}"#.utf8)).get()
-        guard case .ready(let action) = try library.native.beginLayout(layout: 99, now: "2026-11-07T12:00:00Z") else { Issue.record("Root layout action refused"); return }
+        guard case .ready(let action) = try library.native.beginLayout(layout: 99, now: "2026-11-07T12:00:00Z") else { Issue.record("Controller layout action refused"); return }
         var signatures: [Data] = []
-        for step in action.signingSteps() { signatures.append(try keys.sign(body: step.body)) }
+        for step in action.signingSteps() { signatures.append(try controller.sign(body: step.body)) }
         var records = try await library.records
-        records.merge(try action.finish(signatures: signatures)) { _, new in new }
+        // A future writer can publish this signed body; the current writer refuses to finish it.
+        let step = try #require(action.signingSteps().first)
+        let path = try #require(action.recordPaths().first)
+        records[path] = try JSONSerialization.data(withJSONObject: ["body": step.body.base64EncodedString(), "signature": signatures[0].base64EncodedString()])
         let store = MemoryRecordStore(records: records)
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
@@ -82,7 +86,7 @@ import Testing
         let remote = FakeRelay()
         for (path, bytes) in records { await remote.plant(path, bytes) }
         let empty = MemoryRecordStore()
-        let remoteSession = ColophonSession(configuration: .init(memberLabel: "Reader", namespaces: ["listening.podcasts"], location: .memory(empty), privateContainer: home.appendingPathComponent("remote"), keys: keys,
+        let remoteSession = ColophonSession(configuration: .init(memberLabel: "Reader", namespaces: ["listening.podcasts"], location: .memory(empty), privateContainer: home.appendingPathComponent("remote"), keys: keys, ownerController: SoftwareKeys(),
             relay: .init(url: try #require(URL(string: "https://relay.invalid/v1/libraries/home")), token: "secret-token", automatic: false, transport: remote)))
         await remoteSession.restore()
         #expect(remoteSession.phase == .updateRequired)

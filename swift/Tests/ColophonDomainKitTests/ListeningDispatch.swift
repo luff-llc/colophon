@@ -186,4 +186,34 @@ enum ListeningTestDispatch {
         default: throw SessionError.invalidCommand
         }
     }
+    // Historical domain payloads remain the wire-shape reference; authority does not.
+    static func decodeExpected(name: String, expected: Data) throws {
+        func roundTrip<Value: Codable & Equatable>(_ type: Value.Type) throws {
+            let value = try JSONDecoder().decode(type, from: expected)
+            #expect(try JSONDecoder().decode(type, from: JSONEncoder().encode(value)) == value)
+        }
+        switch name {
+        case "shows": try roundTrip(DomainQueryResult<ColophonListeningKit.ShowsQuery.Value>.self)
+        case "show": try roundTrip(DomainQueryResult<ColophonListeningKit.ShowQuery.Value>.self)
+        case "episodes": try roundTrip(DomainQueryResult<ColophonListeningKit.EpisodesQuery.Value>.self)
+        case "getEpisode", "episode": try roundTrip(DomainQueryResult<ColophonListeningKit.EpisodeQuery.Value>.self)
+        case "getQueue", "queue": try roundTrip(DomainQueryResult<ColophonListeningKit.QueueQuery.Value>.self)
+        case "playbackContext": try roundTrip(DomainQueryResult<ColophonListeningKit.PlaybackContextQuery.Value>.self)
+        case "playlists": try roundTrip(DomainQueryResult<ColophonListeningKit.PlaylistsQuery.Value>.self)
+        case "playlist": try roundTrip(DomainQueryResult<ColophonListeningKit.PlaylistQuery.Value>.self)
+        case "notes": try roundTrip(DomainQueryResult<ColophonListeningKit.NotesQuery.Value>.self)
+        case "note": try roundTrip(DomainQueryResult<ColophonListeningKit.NoteQuery.Value>.self)
+        case "recordingContent": try roundTrip(DomainQueryResult<ColophonListeningKit.RecordingContentQuery.Value>.self)
+        case "transcripts": try roundTrip(DomainQueryResult<ColophonListeningKit.TranscriptsQuery.Value>.self)
+        case "preferences": try roundTrip(DomainQueryResult<ColophonListeningKit.PreferencesQuery.Value>.self)
+        case "recordings": try roundTrip(DomainQueryResult<ColophonListeningKit.RecordingsQuery.Value>.self)
+        case "history": try roundTrip(DomainQueryResult<ColophonListeningKit.HistoryQuery.Value>.self)
+        case "jobs": try roundTrip(DomainQueryResult<ColophonListeningKit.JobsQuery.Value>.self)
+        case "contributions": try roundTrip(DomainQueryResult<ColophonListeningKit.ContributionsQuery.Value>.self)
+        case "listeningCounts": try roundTrip(DomainQueryResult<ColophonListeningKit.ListeningCountsQuery.Value>.self)
+        case "conflicts": try roundTrip(DomainQueryResult<ColophonListeningKit.ConflictsQuery.Value>.self)
+        case "invalid": try roundTrip(DomainQueryResult<ColophonListeningKit.InvalidQuery.Value>.self)
+        default: throw SessionError.invalidCommand
+        }
+    }
 }

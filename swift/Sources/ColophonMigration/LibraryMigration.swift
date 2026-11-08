@@ -3,7 +3,7 @@ import CryptoKit
 import Darwin
 import ColophonSession
 
-/// One root-owned upgrade, with a separate 0.3 session configured as migrationWriter.
+/// Clean copy through a separate destination session with a scoped, expiring import grant.
 /// Persist the evidence key independently. Sessions gated by this scope share markerURL.
 /// Use a separate journal and marker for each independently migrated namespace scope.
 public actor LibraryMigration {
@@ -43,7 +43,7 @@ public actor LibraryMigration {
         let snapshot = try source.snapshot(namespaces: Set(namespaces))
         let operations = snapshot.operations
         guard snapshot.namespaces == Set(namespaces), Set(operations.keys) == Set(namespaces),
-              !snapshot.libraryID.isEmpty, !snapshot.readerID.isEmpty, !snapshot.rootID.isEmpty else { throw MigrationError.invalidSource }
+              !snapshot.libraryID.isEmpty, !snapshot.readerID.isEmpty else { throw MigrationError.invalidSource }
         for entries in operations.values {
             for entry in entries where snapshot.records[entry.sourcePath] == nil {
                 throw MigrationError.sourceUnavailable(entry.sourcePath)
@@ -71,7 +71,7 @@ public actor LibraryMigration {
                 "envelopeDigest": digest, "digestAlgorithm": "SHA-256", "digestPurpose": "exact source envelope bytes (not an authenticated signed-body digest)",
                 "admission": "unresolved", "domainOutcome": "unresolved", "outputOperationIDs": [String: String](),
                 "reason": "Refused, unreadable, invalid, or unsupported namespace; exact envelope retained in encrypted source archive"]
-            let key = "unresolved-" + migrationDigest(Data(tuple(progress.sourceLibraryID, namespaces[0], path, digest).utf8))
+            let key = "unresolved-" + migrationDigest(Data(try tuple(progress.sourceLibraryID, namespaces[0], path, digest).utf8))
             unresolvedEvidence.append((key, try json(unresolved)))
             let issue = "Unresolved source envelope: " + path
             if !progress.unresolved.contains(issue) { progress.unresolved.append(issue) }
@@ -100,7 +100,7 @@ public actor LibraryMigration {
         // Re-evaluate complete admission/order, including held -> admitted transitions. Earlier
         // insertions need an engine historical overlay; do not rewrite already signed history.
         for namespace in namespaces {
-            let current = (operations[namespace] ?? []).map(\.fingerprint)
+            let current = try (operations[namespace] ?? []).map { try $0.fingerprint }
             let prior = progress.prefixes[namespace] ?? []
             let entries = operations[namespace] ?? []
             if Array(current.prefix(prior.count)) != prior {
@@ -164,7 +164,7 @@ public actor LibraryMigration {
                         try files.write(json(manifests), to: manifestURL)
                     }
                 }
-                let batchKey = tuple(progress.sourceLibraryID, namespace, entry.key, "transform-1")
+                let batchKey = try tuple(progress.sourceLibraryID, namespace, entry.key, "transform-1")
                 var childIDs: [String] = [], outputIDs: [String: String] = [:], children: [[String: Any]] = []
                 var bindings: [(LegacyImportCommand, Data, String)] = []
                 var identities: [String: [String: String]] = [:]
@@ -180,7 +180,7 @@ public actor LibraryMigration {
                     }
                     if let id = payload["id"] as? String, migrationCreatesIdentity(namespace, command.kind, payload) {
                         let category = importIdentityCategory(namespace: namespace, kind: command.kind)
-                        let key = tuple(progress.sourceLibraryID, namespace, category, id, entry.signedBodyDigest)
+                        let key = try tuple(progress.sourceLibraryID, namespace, category, id, entry.signedBodyDigest)
                         let reserved = try await destination.query(namespace: namespace, name: "importIdentity", arguments: json(["key": key, "preferred": id, "category": category]))
                         let status = try JSONSerialization.jsonObject(with: reserved) as? [String: Any] ?? [:]
                         if status["occupied"] as? Bool == true && status["reserved"] as? String != id {
@@ -216,7 +216,7 @@ public actor LibraryMigration {
                 try afterPublication?()
                 for (command, payloadBytes, id) in bindings {
                     let payload = try JSONSerialization.jsonObject(with: payloadBytes) as? [String: Any] ?? [:]
-                    ImportBindings.bind(namespace: namespace, source: entry, command: command, payload: payload, operationID: id, progress: &progress)
+                    try ImportBindings.bind(namespace: namespace, source: entry, command: command, payload: payload, operationID: id, progress: &progress)
                 }
                 if evaluated.outcome == "unresolved" || evidenceHasGap(evidence) || entry.admission != .admitted {
                     let issue = "\(namespace)/\(operation.id): retained import evidence requires review"
@@ -226,7 +226,7 @@ public actor LibraryMigration {
                 progress.sourceOutcomes?[namespace, default: [:]][entry.key] = try json(sourceOutcome(entry, index: index, evaluated: evaluated))
                 progress.outputs.merge(outputIDs) { _, new in new }
                 progress.states[namespace] = try bindLegacyImportState(namespace: namespace, stateJson: plan.stateJson, outputs: outputIDs)
-                progress.prefixes[namespace, default: []].append(entry.fingerprint)
+                progress.prefixes[namespace, default: []].append(try entry.fingerprint)
                 progress.lastImportedOperation[namespace] = operation.id
                 try files.save(progress)
                 index += 1; processed += 1

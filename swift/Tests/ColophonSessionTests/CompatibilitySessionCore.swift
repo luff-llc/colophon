@@ -5,28 +5,28 @@ import ColophonKit
 
 actor CompatibilitySessionCore: SessionCore {
     private var library: Library?
-    private var recoveryProvider: (any AsyncKeyProvider)?
+    private var member: (any AsyncKeyProvider)?
+    private var controller: (any AsyncKeyProvider)?
+    func setOwnerController(_ provider: any AsyncKeyProvider) { controller = provider }
     private func requireLibrary() throws -> Library {
         guard let library else { throw SessionError.notReady }; return library
     }
     func open(records: [String: Data], keys: any AsyncKeyProvider) async throws {
+        member = keys
         library = try await Library.open(records: records, me: SessionKeys(base: keys))
     }
     func create(configuration: SessionConfiguration) async throws {
-        library = try await Library.create(owner: SessionKeys(base: configuration.starterKeys ?? configuration.keys), label: configuration.memberLabel,
-            ownerLabel: configuration.memberLabel, namespaces: configuration.libraryNamespaces, recovery: configuration.recoveryKeys.map { SessionKeys(base: $0) })
-        recoveryProvider = library?.recoveryKeys
-        if configuration.starterKeys != nil, let created = library {
-            library = try await Library.open(records: created.records, me: SessionKeys(base: configuration.keys))
-        }
+        library = try await SessionAuthority.create(configuration)
+        member = configuration.keys; controller = configuration.ownerController
     }
-    func approveWithStarter(_ request: Data, keys: any AsyncKeyProvider) async throws {
-        let library = try requireLibrary()
-        let owner = try await Library.open(records: library.records, me: SessionKeys(base: keys))
-        // Core authority, not location or a display label, decides whether this key may grant.
+    private func authority(_ provider: any AsyncKeyProvider) async throws -> Library {
+        guard let member else { throw SessionError.notReady }
+        return try await SessionAuthority.open(records: requireLibrary().records, member: member, controller: provider)
+    }
+    func approveWithController(_ request: Data, keys: any AsyncKeyProvider) async throws {
+        let owner = try await authority(keys)
         _ = try await owner.approve(request: request).get()
-        try await library.merge(records: owner.records)
-        try await library.ready()
+        try await merge(owner.records)
     }
     func merge(_ records: [String: Data]) async throws {
         let library = try requireLibrary()
@@ -48,7 +48,6 @@ actor CompatibilitySessionCore: SessionCore {
         try await library.merge(records: ["requests/\(request.id).json": data])
         return request
     }
-    func recovery() -> (any AsyncKeyProvider)? { recoveryProvider }
     func snapshot(namespaces: [String]) async throws -> CoreSnapshot {
         let keys = Array((try await requireLibrary().records.keys).filter { $0.hasPrefix("requests/") })
         return try await snapshot(namespaces: namespaces, requestPaths: keys)
@@ -88,7 +87,17 @@ actor CompatibilitySessionCore: SessionCore {
     func write(_ command: DomainCommand) async throws -> OperationView {
         try await requireLibrary().write(namespace: command.namespace, kind: command.kind, payload: command.payload).get()
     }
-    func approve(_ request: Data, grant: GrantOptions?) async throws { _ = try await requireLibrary().approve(request: request, grant: grant).get() }
-    func revoke(_ id: String) async throws { try await requireLibrary().revoke(memberID: id).get() }
+    func approve(_ request: Data, grant: GrantOptions?) async throws {
+        guard let controller else { throw SessionError.notReady }
+        let owner = try await authority(controller)
+        _ = try await owner.approve(request: request, grant: grant).get()
+        try await merge(owner.records)
+    }
+    func revoke(_ id: String) async throws {
+        guard let controller else { throw SessionError.notReady }
+        let owner = try await authority(controller)
+        try await owner.revoke(memberID: id).get()
+        try await merge(owner.records)
+    }
 }
 

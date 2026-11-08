@@ -41,8 +41,9 @@ public enum LibraryWords {
     }
     public static func grant(_ member: Member) -> String {
         if member.revokedAt != nil { return "Access ended" }
-        guard let grant = member.grant else { return member.since > 0 ? "Library owner" : "Waiting for approval" }
+        guard let grant = member.grant else { return "Waiting for approval" }
         var lines = [access(grant.access), grant.namespaces.map(namespace).joined(separator: ", ")]
+        if grant.import == true { lines.append("Can import history") }
         if let expires = grant.expires { lines.append("Expires \(date(expires))") }
         if let budget = grant.writeBudget { lines.append("Up to \(budget) changes; \(member.writes) made") }
         return lines.joined(separator: " · ")

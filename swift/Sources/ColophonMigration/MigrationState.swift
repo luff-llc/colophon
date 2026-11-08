@@ -3,7 +3,7 @@ import CryptoKit
 import ColophonSession
 
 public enum MigrationError: Error, Equatable, Sendable {
-    case rootRequired, invalidSource, busy, destinationUnavailable, destinationChanged
+    case invalidSource, busy, destinationUnavailable, destinationChanged
     case sourceUnavailable(String)
     case reconciliationRequired(String)
 }
@@ -52,4 +52,4 @@ struct MigrationFiles {
     }
 }
 func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes]) }
-func tuple(_ parts: String...) -> String { String(data: try! json(parts), encoding: .utf8)! }
+func tuple(_ parts: String...) throws -> String { String(decoding: try json(parts), as: UTF8.self) }

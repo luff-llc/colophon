@@ -24,7 +24,7 @@ private actor FailingKeys: AsyncKeyProvider {
         defer { try? FileManager.default.removeItem(at: home) }
         let store = MemoryRecordStore(), keys = FailingKeys()
         func config(_ sub: String, _ provider: any AsyncKeyProvider) -> SessionConfiguration {
-            .init(memberLabel: "Fixture", namespaces: ["notes"], location: .memory(store), privateContainer: home.appendingPathComponent(sub), keys: provider)
+            .init(memberLabel: "Fixture", namespaces: ["notes"], location: .memory(store), privateContainer: home.appendingPathComponent(sub), keys: provider, ownerController: SoftwareKeys())
         }
         func expectKeyFailure(_ session: ColophonSession) {
             guard case .failed(.keysUnavailable(let detail)) = session.phase else { Issue.record("Expected explicit key failure, got \(session.phase)"); return }
@@ -54,7 +54,7 @@ private actor FailingKeys: AsyncKeyProvider {
         defer { try? FileManager.default.removeItem(at: home) }
         let marker = home.appendingPathComponent("rollout.json"), store = MemoryRecordStore()
         try MigrationMarker(sourceLibraryID: "old", active: true).save(at: marker)
-        let session = ColophonSession(configuration: .init(memberLabel: "Sibling", namespaces: ["notes"], location: .memory(store), privateContainer: home.appendingPathComponent("sibling"), keys: SoftwareKeys(), migrationMarker: marker))
+        let session = ColophonSession(configuration: .init(memberLabel: "Sibling", namespaces: ["notes"], location: .memory(store), privateContainer: home.appendingPathComponent("sibling"), keys: SoftwareKeys(), ownerController: SoftwareKeys(), migrationMarker: marker))
         await session.restore(); #expect(session.phase == .migrating)
         await session.create(); #expect(session.phase == .migrating)
         #expect(try await store.read().isEmpty)

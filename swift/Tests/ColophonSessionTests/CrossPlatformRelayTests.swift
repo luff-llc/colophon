@@ -24,9 +24,17 @@ func crossBlob(seed: Int) -> Data { Data((0..<150_000).map { UInt8(truncatingIfN
             keys = SoftwareKeys()
             try JSONEncoder().encode([keys.signingPrivateKey, keys.agreementPrivateKey]).write(to: keyFile)
         }
+        let controllerFile = dir.appendingPathComponent("apple-controller.json")
+        let controller: SoftwareKeys
+        if let stored = try? JSONDecoder().decode([Data].self, from: Data(contentsOf: controllerFile)), stored.count == 2 {
+            controller = try SoftwareKeys(signingPrivateKey: stored[0], agreementPrivateKey: stored[1])
+        } else {
+            controller = SoftwareKeys()
+            try JSONEncoder().encode([controller.signingPrivateKey, controller.agreementPrivateKey]).write(to: controllerFile)
+        }
         let library = dir.appendingPathComponent("apple-library")
         let session = ColophonSession(configuration: .init(memberLabel: "iPhone", namespaces: ["reading.saved", "notes", "listening.podcasts"], location: .folder(library),
-                                                           privateContainer: dir.appendingPathComponent("apple-home"), keys: keys,
+                                                           privateContainer: dir.appendingPathComponent("apple-home"), keys: keys, ownerController: controller,
                                                            relay: RelayConfiguration(url: url, token: token, automatic: false)),
                                       store: FolderRecordStore(folder: library, coordinated: false))
         await session.restore()
