@@ -3,15 +3,23 @@ import ColophonCore
 import ColophonStore
 import ColophonMigration
 
+/// Failures specific to the apps' root-holding legacy adapter.
+public enum LegacyAdapterError: Error, Equatable, Sendable {
+    /// The supplied identity does not prove possession of the verified source root.
+    case rootRequired
+}
+
 /// Adapter for this repository's 0.1 reference. Apps with their own 0.1 modules implement
 /// LegacyLibrarySource in their own package instead of depending on this target.
 public struct ColophonLegacyAdapter: LegacyLibrarySource {
     private let store: any RecordStore
     private let reader: any Identity
     private let root: any Identity
+    /// Retain the member reader and the root provider used to authorize this app migration.
     public init(store: any RecordStore, readerIdentity: any Identity, rootIdentity: any Identity) {
         self.store = store; reader = readerIdentity; root = rootIdentity
     }
+    /// Capture verified legacy history after proving possession of its current root.
     public func snapshot(namespaces: Set<String>) throws -> any LegacyLibrarySnapshot {
         guard !namespaces.isEmpty, namespaces.isSubset(of: Set(SourceReader.namespaces)) else { throw MigrationError.invalidSource }
         let snapshot = try SourceReader.read(store: store, reader: reader, root: root, namespaces: namespaces)
@@ -30,7 +38,7 @@ private struct ReferenceSnapshot: LegacyLibrarySnapshot {
     var unresolved: [String] { source.unresolved }
     var unresolvedPaths: [String] { source.unresolvedPaths }
     var changeToken: String {
-        Canonical.digest(Data(records.keys.sorted().map { $0 + ":" + Canonical.digest(records[$0]!) }.joined(separator: "\n").utf8))
+        Canonical.digest(Data(records.keys.sorted().map { $0 + ":" + (records[$0].map(Canonical.digest) ?? "missing") }.joined(separator: "\n").utf8))
     }
     var operations: [String: [LegacyOperation]] {
         Dictionary(uniqueKeysWithValues: namespaces.map { namespace in
@@ -59,4 +67,4 @@ private struct ReferenceSnapshot: LegacyLibrarySnapshot {
 }
 
 func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes]) }
-func tuple(_ parts: String...) -> String { String(data: try! json(parts), encoding: .utf8)! }
+func tuple(_ parts: String...) throws -> String { String(decoding: try json(parts), as: UTF8.self) }

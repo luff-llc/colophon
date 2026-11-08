@@ -72,11 +72,12 @@ private struct Fixture {
     let home: URL
     let store = MemoryRecordStore()
     let keys = SoftwareKeys()
+    let controller = SoftwareKeys()
     let evidenceKey = SymmetricKey(size: .bits256)
     var marker: URL { home.appendingPathComponent("migration-status.json") }
     init() { home = FileManager.default.temporaryDirectory.appendingPathComponent("migration-test-" + UUID().uuidString) }
     func session() -> ColophonSession {
-        ColophonSession(configuration: .init(memberLabel: "Migration root", namespaces: allNamespaces, location: .memory(store), privateContainer: home.appendingPathComponent("session"), keys: keys, migrationMarker: marker, migrationWriter: true))
+        ColophonSession(configuration: .init(memberLabel: "Migration root", namespaces: allNamespaces, location: .memory(store), privateContainer: home.appendingPathComponent("session"), keys: keys, ownerController: controller, migrationMarker: marker, migrationWriter: true, importExpires: Date.now.addingTimeInterval(3600).ISO8601Format()))
     }
     func migration(_ source: Fixture, _ session: ColophonSession) -> LibraryMigration {
         LibraryMigration(source: ColophonLegacyAdapter(store: source.source, readerIdentity: source.phone, rootIdentity: source.root), namespaces: Set(allNamespaces), destination: session,
@@ -243,9 +244,18 @@ private struct Fixture {
         let f = try Fixture(), d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
         let migration = LibraryMigration(source: ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.mac), namespaces: Set(allNamespaces),
             destination: d.session(), privateContainer: d.home, evidenceKey: d.evidenceKey, markerURL: d.marker)
-        await #expect(throws: MigrationError.rootRequired) { try await migration.run() }
+        await #expect(throws: LegacyAdapterError.rootRequired) { try await migration.run() }
         #expect(try await d.store.read().isEmpty)
     }
+    @Test func adapterRequiresARootSignatureNotOnlyMatchingPublicKeys() throws {
+        let fixture = try Fixture()
+        let before = fixture.source.snapshot
+        let adapter = ColophonLegacyAdapter(store: fixture.source, readerIdentity: fixture.phone,
+                                            rootIdentity: InvalidRootProof(base: fixture.root))
+        #expect(throws: LegacyAdapterError.rootRequired) { try adapter.snapshot(namespaces: Set(allNamespaces)) }
+        #expect(fixture.source.snapshot == before)
+    }
+
     @Test func lateEarlierOperationStopsForReconciliationWithoutRewriting() async throws {
         let f = try Fixture(), offline = MemoryStore()
         for (path, bytes) in f.source.snapshot { try offline.create(path, bytes) }
@@ -327,8 +337,8 @@ private struct Fixture {
         let source = ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.root)
         let booksMarker = d.home.appendingPathComponent("books-marker.json")
         let booksSession = ColophonSession(configuration: .init(memberLabel: "Books migration", namespaces: [Books.namespace],
-            location: .memory(d.store), privateContainer: d.home.appendingPathComponent("books-session"), keys: d.keys,
-            migrationMarker: booksMarker, migrationWriter: true))
+            location: .memory(d.store), privateContainer: d.home.appendingPathComponent("books-session"), keys: d.keys, ownerController: d.controller,
+            migrationMarker: booksMarker, migrationWriter: true, importExpires: Date.now.addingTimeInterval(3600).ISO8601Format()))
         func booksMigration() -> LibraryMigration {
             LibraryMigration(source: source, namespaces: [Books.namespace], destination: booksSession,
                 privateContainer: d.home.appendingPathComponent("books-migration"), evidenceKey: d.evidenceKey, markerURL: booksMarker)
@@ -356,7 +366,7 @@ private struct Fixture {
         let notesDestination = Destination(); defer { try? FileManager.default.removeItem(at: notesDestination.home) }
         let notesSession = ColophonSession(configuration: .init(memberLabel: "Notes migration", namespaces: [Notes.namespace],
             location: .memory(notesDestination.store), privateContainer: notesDestination.home.appendingPathComponent("notes-session"),
-            keys: notesDestination.keys, migrationMarker: notesDestination.marker, migrationWriter: true))
+            keys: notesDestination.keys, ownerController: notesDestination.controller, migrationMarker: notesDestination.marker, migrationWriter: true, importExpires: Date.now.addingTimeInterval(3600).ISO8601Format()))
         let notes = LibraryMigration(source: source, namespaces: [Notes.namespace], destination: notesSession,
             privateContainer: notesDestination.home.appendingPathComponent("notes-migration"), evidenceKey: notesDestination.evidenceKey,
             markerURL: notesDestination.marker)
@@ -399,8 +409,8 @@ private struct Fixture {
         f.source.tamper(path, try Canonical.encode(SignedRecord(body: record.body, signature: Data(repeating: 0, count: 64))))
         let d = Destination(); defer { try? FileManager.default.removeItem(at: d.home) }
         let session = ColophonSession(configuration: .init(memberLabel: "Books migration", namespaces: [Books.namespace],
-            location: .memory(d.store), privateContainer: d.home.appendingPathComponent("books-session"), keys: d.keys,
-            migrationMarker: d.marker, migrationWriter: true))
+            location: .memory(d.store), privateContainer: d.home.appendingPathComponent("books-session"), keys: d.keys, ownerController: d.controller,
+            migrationMarker: d.marker, migrationWriter: true, importExpires: Date.now.addingTimeInterval(3600).ISO8601Format()))
         let migration = LibraryMigration(source: ColophonLegacyAdapter(store: f.source, readerIdentity: f.phone, rootIdentity: f.root),
             namespaces: [Books.namespace], destination: session, privateContainer: d.home.appendingPathComponent("migration"),
             evidenceKey: d.evidenceKey, markerURL: d.marker)
@@ -458,7 +468,6 @@ private struct RevisedSnapshot: LegacyLibrarySnapshot {
     let revision: String
     var libraryID: String { base.libraryID }
     var readerID: String { base.readerID }
-    var rootID: String { base.rootID }
     var members: [LegacyMember] { base.members }
     var namespaces: Set<String> { base.namespaces }
     var changeToken: String { base.changeToken + revision }
@@ -476,4 +485,12 @@ private struct RevisedSnapshot: LegacyLibrarySnapshot {
     func evaluate(namespace: String, index: Int, bindings: LegacyImportBindings) throws -> LegacyEvaluation {
         try base.evaluate(namespace: namespace, index: index, bindings: bindings)
     }
+}
+
+private struct InvalidRootProof: Identity {
+    let base: SoftwareIdentity
+    var publicIdentity: PublicIdentity { base.publicIdentity }
+    var custody: KeyCustody { .software }
+    func sign(_ bytes: Data) throws -> Data { Data(repeating: 0, count: 64) }
+    func sharedSecret(with peer: P256.KeyAgreement.PublicKey) throws -> SharedSecret { try base.sharedSecret(with: peer) }
 }

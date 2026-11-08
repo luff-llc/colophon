@@ -42,9 +42,9 @@ enum SourceReader {
         let replica = Replica(store: copy, identity: reader)
         let authority = try replica.authority()
         let rootPublic = try root.availablePublicIdentity()
-        guard rootPublic == authority.root else { throw MigrationError.rootRequired }
+        guard rootPublic == authority.root else { throw LegacyAdapterError.rootRequired }
         let challenge = Data(("colophon-migration-root/1/" + authority.libraryID + "/" + UUID().uuidString).utf8)
-        guard authority.root.verify(try root.sign(challenge), over: challenge) else { throw MigrationError.rootRequired }
+        guard authority.root.verify(try root.sign(challenge), over: challenge) else { throw LegacyAdapterError.rootRequired }
         let readerID = try reader.availablePublicIdentity().id
         var entries: [String: [SourceEntry]] = [:]
         var accounted = Set<String>(), unresolved: [String] = []
