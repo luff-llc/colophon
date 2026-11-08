@@ -1,0 +1,8 @@
+{
+  "description": "cose duplicate key",
+  "expected": "malformed",
+  "probe": "cose",
+  "sections": [
+    "2.5"
+  ]
+}

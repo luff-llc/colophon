@@ -1,0 +1,53 @@
+{
+  "description": "Encrypted notes operation retains an explicit null payload member; full Library replay and domain views match.",
+  "expected": "accept",
+  "keyring": {
+    "controllers": [
+      {
+        "id": "256b1be32745d1d1c9d49121cc87bc45",
+        "roles": [
+          "approve",
+          "control"
+        ]
+      },
+      {
+        "id": "b89656e81e77b5d5e7c55b67c6e004e5",
+        "roles": [
+          "approve",
+          "control"
+        ]
+      },
+      {
+        "id": "c9e5515eaa065a25ed185ccde2b80aeb",
+        "roles": [
+          "recover"
+        ]
+      }
+    ],
+    "members": [
+      {
+        "grant": {
+          "access": [
+            "read",
+            "write"
+          ],
+          "namespaces": [
+            "listening.podcasts",
+            "notes",
+            "reading.books",
+            "reading.saved"
+          ]
+        },
+        "id": "cb5d08ab6e3f0f885f06b39be159fb30"
+      }
+    ],
+    "recoverThreshold": 1,
+    "threshold": 1,
+    "vaultID": "5166a088c3302035f92746ebc3155a13"
+  },
+  "probe": "library",
+  "sections": [
+    "2.1",
+    "7"
+  ]
+}

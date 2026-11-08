@@ -1,0 +1,8 @@
+{
+  "description": "signing equals agreement",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.3"
+  ]
+}

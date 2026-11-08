@@ -1,0 +1,24 @@
+{
+  "description": "high s webauthn",
+  "expected": "accept",
+  "keyring": {
+    "controllers": [
+      {
+        "id": "256b1be32745d1d1c9d49121cc87bc45",
+        "roles": [
+          "approve",
+          "control",
+          "recover"
+        ]
+      }
+    ],
+    "members": [],
+    "recoverThreshold": 1,
+    "threshold": 1,
+    "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+  },
+  "probe": "authority",
+  "sections": [
+    "3.3"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "description": "shared controller agreement",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.3"
+  ]
+}

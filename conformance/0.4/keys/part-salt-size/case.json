@@ -1,0 +1,9 @@
+{
+  "description": "part salt size",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.2",
+    "5.2"
+  ]
+}

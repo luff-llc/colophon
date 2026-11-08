@@ -1,0 +1,9 @@
+{
+  "description": "layout minority",
+  "expected": "badSignature",
+  "probe": "authority",
+  "sections": [
+    "6.3",
+    "7"
+  ]
+}

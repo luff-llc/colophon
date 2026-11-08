@@ -1,0 +1,42 @@
+{
+  "description": "recovery add approve only",
+  "expected": "accept",
+  "keyring": {
+    "controllers": [
+      {
+        "id": "1ea74636684021c2d78cfbd99d2f011b",
+        "roles": [
+          "control"
+        ]
+      },
+      {
+        "id": "2465e067258c84eb0609e644930adb56",
+        "roles": [
+          "approve"
+        ]
+      },
+      {
+        "id": "7a14b43d4e9010e7987d86ec054f0d79",
+        "roles": [
+          "approve"
+        ]
+      },
+      {
+        "id": "b609e0fd25ac2aefc193156581e112cb",
+        "roles": [
+          "approve",
+          "control",
+          "recover"
+        ]
+      }
+    ],
+    "members": [],
+    "recoverThreshold": 1,
+    "threshold": 2,
+    "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+  },
+  "probe": "authority",
+  "sections": [
+    "6.3"
+  ]
+}

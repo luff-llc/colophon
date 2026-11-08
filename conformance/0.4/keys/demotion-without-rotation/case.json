@@ -1,0 +1,8 @@
+{
+  "description": "demotion without rotation",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "6.2"
+  ]
+}

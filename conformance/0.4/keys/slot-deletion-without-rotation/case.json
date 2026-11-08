@@ -1,0 +1,8 @@
+{
+  "description": "slot deletion without rotation",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "6.2"
+  ]
+}

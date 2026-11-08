@@ -1,0 +1,9 @@
+{
+  "description": "imported from uppercase",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "6.2",
+    "9"
+  ]
+}

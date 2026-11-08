@@ -1,0 +1,51 @@
+{
+  "encoding": "base64",
+  "epochs": [
+    {
+      "epoch": 1,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "ELYxEcq7XisXt74HDzRaFRlZfSXuJQO9WU2ZaXQ+Jyc=",
+        "enc": "BP6MW5SmVR+CTfAm4wRvTxbO1JZ1dICP9WcMlZ6knQRfVifgGgLA9lpqoycQ/tuHGcfPDGLfbpkR6bp30ad2X18=",
+        "exporterSecret": "40y9oIhRDMrplB/QTeDZnEUOwjaCx4JOSCYRfzYzBpQ=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwpmZTNhMzE2NWFmMzE5Y2I0YzAzOWU5YWVkMjkzN2E5Ngpub3RlcwoxCjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYy",
+        "key": "LCxucCuQwwf2mmU7sZc4JD5+Hwa5S5nGLeq35wAuJg8=",
+        "nonce": "nd5/lqdn/cKyuDQD",
+        "plaintext": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "recipient": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "sharedSecret": "Cbtt8Qi6VEqMoFwayBc9fxko8H5w9JNVyUUr15Yeq6k="
+      },
+      "namespace": "notes",
+      "recipientID": "94ffbe7a6ca230304b0404b62f109062",
+      "record": "authority/00000002.json"
+    }
+  ],
+  "keyrings": [
+    {
+      "record": "authority/00000001.json",
+      "slots": [
+        {
+          "ctapInput": "LCXkktSzBde3ZwWGN5IPtsEmdRKP8wvlsGiHARtqvOQ=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnByZgoyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NQ==",
+          "key": "EzLsTWoihJDoRz1sGG64+bJrZF8ZGw66oWQsXBj35vY=",
+          "nonce": "idtD/saHYhorDZAA",
+          "prfOutput": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+          "salt": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+        },
+        {
+          "ctapInput": "LCXkktSzBde3ZwWGN5IPtsEmdRKP8wvlsGiHARtqvOQ=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnByZgpmZTAwYWIwZjM0MTkwMWY4NjNhNDkxNjBjZjU1NDU4OA==",
+          "key": "nh3kbDMnerVvay688qdLJbQ36qLHeQndLuN7KAy0TQI=",
+          "nonce": "idtD/saHYhorDZAA",
+          "prfOutput": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+          "salt": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+        }
+      ],
+      "vault": {
+        "agreement": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "signing": "BJyDs3wFZeVe4BC/TtOe97DjvyI4XakLd2TgUXnHDtDGB6s8uUKhtVjxSvzM3KVFrZ+qqlEd2z9G0aiwhBO9xNg="
+      },
+      "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+    }
+  ]
+}

@@ -1,0 +1,245 @@
+{
+  "memberID": "cb5d08ab6e3f0f885f06b39be159fb30",
+  "prfCeremony": {
+    "assertion": {
+      "authenticatorData": "mWOHb7vmw3GsWirjnnJoYzmFNi/c0Exh5Svj6jZlNBkFAAAAAA==",
+      "clientData": "eyJjaGFsbGVuZ2UiOiJGQTlDdTIwMVM1QmczLU4zZGRvSU80MTliMFNjRU5iTVA2aHYtRkxmSlo4Iiwib3JpZ2luIjoiaHR0cHM6Ly9pZC5sdWZmLndvcmtzIiwidHlwZSI6IndlYmF1dGhuLmdldCJ9"
+    },
+    "key": {
+      "credential": "AQ==",
+      "form": "webauthn",
+      "origins": [
+        "android:apk-key-hash:test"
+      ],
+      "rp": "id.luff.works",
+      "signing": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo="
+    },
+    "prfOutput": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+    "salt": "rCARbMVB4/tVfqwjwOiMZf0G7q7s/1tnyrXf0+GTuP4=",
+    "signature": "MEUCIQCsP3exITxX+qAeaPTZoZhhlmliRW/L7dneKnd+yd/8AAIgcF/U9fgf9bw1G7uoxN4Y75Ya9+miSSB5kWKQXYNfduk="
+  },
+  "views": {
+    "listening.podcasts": {
+      "admitted": [
+        {
+          "author": "cb5d08ab6e3f0f885f06b39be159fb30",
+          "authorLabel": "Device owner",
+          "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "a4aca5b4e38b5cfb35ef38f64c1ffd20",
+          "kind": "follow",
+          "origin": "person",
+          "payload": {
+            "id": "show",
+            "title": "Synthetic show",
+            "url": "https://example.test/feed"
+          }
+        }
+      ],
+      "held": [],
+      "namespace": "listening.podcasts",
+      "refused": [],
+      "state": {
+        "conflicts": [],
+        "contributions": [],
+        "episodes": [],
+        "invalid": [],
+        "jobs": [],
+        "notes": [],
+        "playlists": [],
+        "preferences": {},
+        "queue": {
+          "episodes": []
+        },
+        "receipts": {},
+        "recordings": {},
+        "shows": [
+          {
+            "author": "cb5d08ab6e3f0f885f06b39be159fb30",
+            "authorLabel": "Device owner",
+            "clock": 1,
+            "followed": true,
+            "following": true,
+            "id": "show",
+            "origin": "person",
+            "revision": "a4aca5b4e38b5cfb35ef38f64c1ffd20",
+            "title": "Synthetic show",
+            "url": "https://example.test/feed"
+          }
+        ],
+        "transcripts": []
+      }
+    },
+    "notes": {
+      "admitted": [
+        {
+          "author": "cb5d08ab6e3f0f885f06b39be159fb30",
+          "authorLabel": "Device owner",
+          "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "1d34c7cb496be8f8636c9b1915acc9e2",
+          "kind": "createNotebook",
+          "origin": "person",
+          "payload": {
+            "id": "notebook",
+            "optional": null,
+            "title": "Notebook"
+          }
+        }
+      ],
+      "held": [],
+      "namespace": "notes",
+      "refused": [],
+      "state": {
+        "attachments": [],
+        "cells": [],
+        "conflicts": [],
+        "entries": [],
+        "invalid": [],
+        "notebooks": [
+          {
+            "archived": false,
+            "author": "cb5d08ab6e3f0f885f06b39be159fb30",
+            "authorLabel": "Device owner",
+            "clock": 1,
+            "created": "2026-11-04T12:00:00.000Z",
+            "extensions": {
+              "optional": null
+            },
+            "id": "notebook",
+            "kind": "notebook",
+            "orderRevision": null,
+            "origin": "person",
+            "revision": "1d34c7cb496be8f8636c9b1915acc9e2",
+            "title": "Notebook",
+            "touched": [
+              1,
+              "cb5d08ab6e3f0f885f06b39be159fb30",
+              "1d34c7cb496be8f8636c9b1915acc9e2"
+            ],
+            "updated": "2026-11-04T12:00:00.000Z"
+          }
+        ],
+        "notes": [],
+        "proposals": [],
+        "runs": []
+      }
+    },
+    "reading.books": {
+      "admitted": [
+        {
+          "author": "cb5d08ab6e3f0f885f06b39be159fb30",
+          "authorLabel": "Device owner",
+          "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "c78e7e0dc858775c990881c4b1aa7415",
+          "kind": "addBook",
+          "origin": "person",
+          "payload": {
+            "creator": "Example writer",
+            "id": "book",
+            "title": "Synthetic book"
+          }
+        }
+      ],
+      "held": [],
+      "namespace": "reading.books",
+      "refused": [],
+      "state": {
+        "books": {
+          "book": {
+            "book": {
+              "author": "cb5d08ab6e3f0f885f06b39be159fb30",
+              "authorLabel": "Device owner",
+              "clock": 1,
+              "creator": "Example writer",
+              "extensions": {},
+              "fraction": 0,
+              "id": "book",
+              "origin": "person",
+              "page": null,
+              "revision": "c78e7e0dc858775c990881c4b1aa7415",
+              "title": "Synthetic book"
+            },
+            "deleted": false,
+            "heads": {
+              "activity": "c78e7e0dc858775c990881c4b1aa7415",
+              "loan": null,
+              "metadata": "c78e7e0dc858775c990881c4b1aa7415",
+              "plan": "c78e7e0dc858775c990881c4b1aa7415",
+              "progress": null
+            },
+            "loan": null,
+            "readings": [
+              {
+                "extensions": {},
+                "finished": null,
+                "id": "c78e7e0dc858775c990881c4b1aa7415",
+                "revision": "c78e7e0dc858775c990881c4b1aa7415",
+                "started": null,
+                "status": "unplanned"
+              }
+            ]
+          }
+        },
+        "conflicts": {},
+        "invalid": [],
+        "notes": {}
+      }
+    },
+    "reading.saved": {
+      "admitted": [
+        {
+          "author": "cb5d08ab6e3f0f885f06b39be159fb30",
+          "authorLabel": "Device owner",
+          "clock": 1,
+          "created": "2026-11-04T12:00:00.000Z",
+          "id": "8a6b9e654995150fc38869e55e991321",
+          "kind": "capture",
+          "origin": "person",
+          "payload": {
+            "id": "saved",
+            "title": "Synthetic document"
+          }
+        }
+      ],
+      "held": [],
+      "namespace": "reading.saved",
+      "refused": [],
+      "state": {
+        "annotations": {},
+        "answers": {},
+        "checkpoints": {},
+        "conflicts": [],
+        "connections": {},
+        "diagnostics": [],
+        "exportBlocked": false,
+        "feeds": {},
+        "images": {},
+        "invalid": [],
+        "items": [
+          {
+            "added": "2026-11-04T12:00:00.000Z",
+            "author": "cb5d08ab6e3f0f885f06b39be159fb30",
+            "authorLabel": "Device owner",
+            "clock": 1,
+            "id": "saved",
+            "origin": "person",
+            "retention": "saved",
+            "revision": "8a6b9e654995150fc38869e55e991321",
+            "title": "Synthetic document"
+          }
+        ],
+        "pendingCount": 0,
+        "receipts": {},
+        "reviewHistory": [],
+        "savedViews": {},
+        "sourceMetadata": {},
+        "sources": {},
+        "subscriptions": {},
+        "unsupported": [],
+        "visibility": {}
+      }
+    }
+  }
+}

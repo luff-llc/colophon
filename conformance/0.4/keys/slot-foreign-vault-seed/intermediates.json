@@ -1,0 +1,60 @@
+{
+  "encoding": "base64",
+  "epochs": [],
+  "keyrings": [
+    {
+      "record": "authority/00000001.json",
+      "slots": [
+        {
+          "ecdh": "YHiDx6uH6A5IKSyW54mUXHg1pfCT4aet4e+WIzMivUQ=",
+          "enc": "BBv8mFUhtD1g+ucV+7eSwLoSgLdWwrdwswTPMm6BDMJ/1+P36kuL4jQLAPc+8qatCJUDbtZKs2bKFTEBZEb5FNA=",
+          "exporterSecret": "+tH2X7w1cEiPZY4F4q3iuk+4ywsPFI074pW3VN3O+iE=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnNlYWxlZApiNjA5ZTBmZDI1YWMyYWVmYzE5MzE1NjU4MWUxMTJjYg==",
+          "key": "qtiAYp1CpGnjoBnOgNikGuwr+VDFaW7PsrJBHDsV6kQ=",
+          "nonce": "P5HHPcAnvIXrIkre",
+          "plaintext": "R0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0c=",
+          "recipient": "BMR8aqb74CN0TYO6NScPLwwml8GGB7haxa/uxAc8PdaIROQob+eyZkVxbiAzMXeOgw3w90xPpDDoMsM3onTXb7s=",
+          "sharedSecret": "2fXgX61/dwpL1PUrarzEHCaqGeA0kBJnjAn0cfF0OUY="
+        },
+        {
+          "ctapInput": "LCXkktSzBde3ZwWGN5IPtsEmdRKP8wvlsGiHARtqvOQ=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnByZgoyNTZiMWJlMzI3NDVkMWQxYzlkNDkxMjFjYzg3YmM0NQ==",
+          "key": "EzLsTWoihJDoRz1sGG64+bJrZF8ZGw66oWQsXBj35vY=",
+          "nonce": "idtD/saHYhorDZAA",
+          "prfOutput": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+          "salt": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+        },
+        {
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCmNvbWJpbmVkCmI2MDllMGZkMjVhYzJhZWZjMTkzMTU2NTgxZTExMmNiLDI1NmIxYmUzMjc0NWQxZDFjOWQ0OTEyMWNjODdiYzQ1",
+          "key": "H56do23sQlOM2qdrJYltwcyzjZfRA5J+u1YCu92P8KA=",
+          "nonce": "EZhX/C4U2x4/cfE0",
+          "parts": [
+            {
+              "ecdh": "R4NloJLMbQ20US1U8+HPxK7q6tim8EEJFwcCrk26L/o=",
+              "enc": "BM5ltyShrOGjVKndRJxLnGdjZBra96TU8rMDrZROcq8SmI1ZxDyHg1sluEg8+DReqLd0Bc6OrlwA3yaCty8glBg=",
+              "exporterSecret": "/GCQg2vdo2V4Uvdu2ElPTpOgfjvZ2t+8agsogLaTzBQ=",
+              "info": "Y29sb3Bob24vdmF1bHQtcGFydC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCjAKc2VhbGVkCmI2MDllMGZkMjVhYzJhZWZjMTkzMTU2NTgxZTExMmNi",
+              "key": "eBkA56IX6O8TtwekJzaEjH7r8ak9yAlWhx/KmRfAvLs=",
+              "nonce": "75kpT2ZPUqHqgkvE",
+              "plaintext": "lO8MycraVtubHAw0wGbmsFyDHIxDjT7q4/69PUeGh3I=",
+              "recipient": "BMR8aqb74CN0TYO6NScPLwwml8GGB7haxa/uxAc8PdaIROQob+eyZkVxbiAzMXeOgw3w90xPpDDoMsM3onTXb7s=",
+              "sharedSecret": "SebRRdP3oggD1y+xYwz2Y7f4LWu5BALOgYYrKX9TRR8="
+            },
+            {
+              "ctapInput": "LCXkktSzBde3ZwWGN5IPtsEmdRKP8wvlsGiHARtqvOQ=",
+              "info": "Y29sb3Bob24vdmF1bHQtcGFydC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCjEKcHJmCjI1NmIxYmUzMjc0NWQxZDFjOWQ0OTEyMWNjODdiYzQ1",
+              "plaintext": "CPWXoKtQ48iETHjwV8c82YXyeKgLrfwiF/CzSQ8W3H8=",
+              "prfOutput": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+              "salt": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+            }
+          ]
+        }
+      ],
+      "vault": {
+        "agreement": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "signing": "BJyDs3wFZeVe4BC/TtOe97DjvyI4XakLd2TgUXnHDtDGB6s8uUKhtVjxSvzM3KVFrZ+qqlEd2z9G0aiwhBO9xNg="
+      },
+      "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+    }
+  ]
+}

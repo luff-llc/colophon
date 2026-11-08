@@ -1,0 +1,9 @@
+{
+  "description": "registration prf output",
+  "expected": "malformed",
+  "probe": "registrationPrf",
+  "sections": [
+    "5.2",
+    "8"
+  ]
+}

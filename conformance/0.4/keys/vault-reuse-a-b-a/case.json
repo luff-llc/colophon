@@ -1,0 +1,9 @@
+{
+  "description": "vault reuse a b a",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.3",
+    "6.2"
+  ]
+}

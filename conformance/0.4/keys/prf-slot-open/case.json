@@ -1,0 +1,33 @@
+{
+  "description": "prf slot open",
+  "expected": "accept",
+  "keyring": {
+    "controllers": [
+      {
+        "id": "256b1be32745d1d1c9d49121cc87bc45",
+        "roles": [
+          "approve",
+          "control",
+          "recover"
+        ]
+      },
+      {
+        "id": "b609e0fd25ac2aefc193156581e112cb",
+        "roles": [
+          "approve",
+          "control",
+          "recover"
+        ]
+      }
+    ],
+    "members": [],
+    "recoverThreshold": 1,
+    "threshold": 1,
+    "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+  },
+  "probe": "slot",
+  "sections": [
+    "5.1",
+    "5.2"
+  ]
+}

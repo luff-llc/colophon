@@ -1,0 +1,8 @@
+{
+  "description": "seq two missing namespace",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "6.2"
+  ]
+}

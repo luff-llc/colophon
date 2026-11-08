@@ -1,0 +1,8 @@
+{
+  "description": "seq two incomplete rekey",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "6.2"
+  ]
+}

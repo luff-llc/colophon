@@ -1,0 +1,46 @@
+{
+  "encoding": "base64",
+  "epochs": [
+    {
+      "epoch": 1,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "ELYxEcq7XisXt74HDzRaFRlZfSXuJQO9WU2ZaXQ+Jyc=",
+        "enc": "BP6MW5SmVR+CTfAm4wRvTxbO1JZ1dICP9WcMlZ6knQRfVifgGgLA9lpqoycQ/tuHGcfPDGLfbpkR6bp30ad2X18=",
+        "exporterSecret": "HxMUdf8Necqd51NOsa8RZ4hZHZoBp+jUttThwifsfJQ=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwowNWZkYTA0MjYyOWJhNzU3YmM1Y2NjOTk4NmYzNzljYwpub3RlcwoxCjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYy",
+        "key": "5CkIlPazhgayKHLiz/iTVPISIGynj7Vxa/DXhse9Jdw=",
+        "nonce": "NxMkb0SDNKUM3MM+",
+        "plaintext": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "recipient": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "sharedSecret": "Cbtt8Qi6VEqMoFwayBc9fxko8H5w9JNVyUUr15Yeq6k="
+      },
+      "namespace": "notes",
+      "recipientID": "94ffbe7a6ca230304b0404b62f109062",
+      "record": "authority/00000002.json"
+    }
+  ],
+  "keyrings": [
+    {
+      "record": "authority/00000001.json",
+      "slots": [
+        {
+          "ecdh": "YHiDx6uH6A5IKSyW54mUXHg1pfCT4aet4e+WIzMivUQ=",
+          "enc": "BBv8mFUhtD1g+ucV+7eSwLoSgLdWwrdwswTPMm6BDMJ/1+P36kuL4jQLAPc+8qatCJUDbtZKs2bKFTEBZEb5FNA=",
+          "exporterSecret": "+tH2X7w1cEiPZY4F4q3iuk+4ywsPFI074pW3VN3O+iE=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnNlYWxlZApiNjA5ZTBmZDI1YWMyYWVmYzE5MzE1NjU4MWUxMTJjYg==",
+          "key": "qtiAYp1CpGnjoBnOgNikGuwr+VDFaW7PsrJBHDsV6kQ=",
+          "nonce": "P5HHPcAnvIXrIkre",
+          "plaintext": "RkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkY=",
+          "recipient": "BMR8aqb74CN0TYO6NScPLwwml8GGB7haxa/uxAc8PdaIROQob+eyZkVxbiAzMXeOgw3w90xPpDDoMsM3onTXb7s=",
+          "sharedSecret": "2fXgX61/dwpL1PUrarzEHCaqGeA0kBJnjAn0cfF0OUY="
+        }
+      ],
+      "vault": {
+        "agreement": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "signing": "BJyDs3wFZeVe4BC/TtOe97DjvyI4XakLd2TgUXnHDtDGB6s8uUKhtVjxSvzM3KVFrZ+qqlEd2z9G0aiwhBO9xNg="
+      },
+      "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+    }
+  ]
+}

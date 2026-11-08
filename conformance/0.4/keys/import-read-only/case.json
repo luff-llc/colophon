@@ -1,0 +1,8 @@
+{
+  "description": "import read only",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "7"
+  ]
+}

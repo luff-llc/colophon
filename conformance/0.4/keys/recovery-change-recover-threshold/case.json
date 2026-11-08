@@ -1,0 +1,8 @@
+{
+  "description": "recovery change recover threshold",
+  "expected": "badSignature",
+  "probe": "authority",
+  "sections": [
+    "6.3"
+  ]
+}

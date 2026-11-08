@@ -1,0 +1,8 @@
+{
+  "description": "shares without vault change",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "6.2"
+  ]
+}

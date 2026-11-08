@@ -1,0 +1,8 @@
+{
+  "description": "recovery add control",
+  "expected": "badSignature",
+  "probe": "authority",
+  "sections": [
+    "6.3"
+  ]
+}

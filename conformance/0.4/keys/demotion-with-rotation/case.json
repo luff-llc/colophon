@@ -1,0 +1,31 @@
+{
+  "description": "demotion with rotation",
+  "expected": "accept",
+  "keyring": {
+    "controllers": [
+      {
+        "id": "1ea74636684021c2d78cfbd99d2f011b",
+        "roles": [
+          "approve"
+        ]
+      },
+      {
+        "id": "b609e0fd25ac2aefc193156581e112cb",
+        "roles": [
+          "approve",
+          "control",
+          "recover"
+        ]
+      }
+    ],
+    "members": [],
+    "recoverThreshold": 1,
+    "threshold": 1,
+    "vaultID": "ae87de1a8e580127d33655ff46724ac3"
+  },
+  "probe": "history",
+  "sections": [
+    "5.1",
+    "6.2"
+  ]
+}

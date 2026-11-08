@@ -1,0 +1,172 @@
+{
+  "encoding": "base64",
+  "epochs": [
+    {
+      "epoch": 1,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "Pi20G7B5e1a5Oi8LRJneqkaN1b4IjYI78qqeaCUQ71c=",
+        "enc": "BBjJ0Ck5f0YJklVZUpUlfNuMnKnqRORVWMt7d4YjlFxsfUed0VHvKrQSSIlpv3QeC+XqZvMwcZ/VyebFgZx+hcM=",
+        "exporterSecret": "S3dS3g5pgrP/raWm5vL1xD6TmzCNkUpsOL47ePvr28I=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo2OWExZmYzOTljNDhmNWI4ZDM1ZGUyYzRiZTk5ODYxMQpsaXN0ZW5pbmcucG9kY2FzdHMKMQo1MTY2YTA4OGMzMzAyMDM1ZjkyNzQ2ZWJjMzE1NWExMw==",
+        "key": "a5tzuHXrc1ye2zQ6xBnMwZH3CV04zrTwr8JMVycOclE=",
+        "nonce": "/M6b1DKlvtaqu1DV",
+        "plaintext": "PUwH7eZsoQdSwJPt69vLba0WJ+1KBceHW+0lvspV3qE=",
+        "recipient": "BD5Fe/QD9f4E64LqPPlGmlKOAu7JdwYZz1hJcU5JUiyt5uYMRzbmTOoRetzXipyYZVtFuxciFmZtExW5zD3MR1o=",
+        "sharedSecret": "9oSzuN3hR1Hjvh/8Teo1PdcCfTZFTmCe/bBkMTvIrTs="
+      },
+      "namespace": "listening.podcasts",
+      "recipientID": "5166a088c3302035f92746ebc3155a13",
+      "record": "authority/00000002.json"
+    },
+    {
+      "epoch": 1,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "gK2iVXrbkHN6pzfPQ0ARfkpNMVFyqL/uU/EdVMAdAKw=",
+        "enc": "BF9AAjL43x4eysjs+zIs90YVItnrne3fKHwCVUaOG9Bcawzc0xH1ih2ABI4vv8E68bGaveQ50KHTtHf1SDFmREU=",
+        "exporterSecret": "kb/dzuFRlagnR27FcNAoQ35gwK1vJLRsF1eP6AcGdrg=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo2OWExZmYzOTljNDhmNWI4ZDM1ZGUyYzRiZTk5ODYxMQpub3RlcwoxCjUxNjZhMDg4YzMzMDIwMzVmOTI3NDZlYmMzMTU1YTEz",
+        "key": "fWhuHTK6pSMWHzJzm1xgfJ+2PW2gDiYa/9XdqqBBD2w=",
+        "nonce": "Fj9KICJWZTyvsRld",
+        "plaintext": "KIDn058mULv/WLQRn9sgz8PefUURoZPIcC1z5NfbXGI=",
+        "recipient": "BD5Fe/QD9f4E64LqPPlGmlKOAu7JdwYZz1hJcU5JUiyt5uYMRzbmTOoRetzXipyYZVtFuxciFmZtExW5zD3MR1o=",
+        "sharedSecret": "buvD8E2E5abxN2uGPSwVs1R8Q/v6cAMYNSDGlssIPK0="
+      },
+      "namespace": "notes",
+      "recipientID": "5166a088c3302035f92746ebc3155a13",
+      "record": "authority/00000002.json"
+    },
+    {
+      "epoch": 1,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "lkhJDcsoxPMKQChKkRbuBgP9S14vWJfDaUBqfPh1VEI=",
+        "enc": "BJq+bgehiGKcXJFaIjnUq98QXqZ+YzbImyMM9/SdGHppgao1S9bBux1LotjQNILsr9HoNfI7dOjCXg6tSzDxAVM=",
+        "exporterSecret": "V4PvBMWrqjAFrKjYuCyAlYDECyUREZyyRgkjMwk/eHo=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo2OWExZmYzOTljNDhmNWI4ZDM1ZGUyYzRiZTk5ODYxMQpyZWFkaW5nLmJvb2tzCjEKNTE2NmEwODhjMzMwMjAzNWY5Mjc0NmViYzMxNTVhMTM=",
+        "key": "MVbstsS8HVcAhNdLA/nI6ljdy2nodorsvW3qYo+x9mY=",
+        "nonce": "IIr6LQ6srtUCk2+L",
+        "plaintext": "ykwKYBaUfPrnlTemFM+yYR2ntii3woc6eSD3fcnF538=",
+        "recipient": "BD5Fe/QD9f4E64LqPPlGmlKOAu7JdwYZz1hJcU5JUiyt5uYMRzbmTOoRetzXipyYZVtFuxciFmZtExW5zD3MR1o=",
+        "sharedSecret": "0AOnS0D21O8L+w8m7ShPa9XpIHYJQjba1C0CPi+4jNk="
+      },
+      "namespace": "reading.books",
+      "recipientID": "5166a088c3302035f92746ebc3155a13",
+      "record": "authority/00000002.json"
+    },
+    {
+      "epoch": 1,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "qSSYKp5ei+1SA6L8iVIOKyxKZ127eXbr4nvT8jGjFWM=",
+        "enc": "BCiEZGDFL2IBT3rX5HvGbZDveo1R+h8Meq9/jarnAF0Rf+xM+wtUX2MCoKJR+QV3WTIB46jZ4xjsZD0NtHL0Tdw=",
+        "exporterSecret": "Y66S9bA0vAzjO6xJepJrvkqgJcs0rDL7eyd5Ip8QgUM=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo2OWExZmYzOTljNDhmNWI4ZDM1ZGUyYzRiZTk5ODYxMQpyZWFkaW5nLnNhdmVkCjEKNTE2NmEwODhjMzMwMjAzNWY5Mjc0NmViYzMxNTVhMTM=",
+        "key": "KJqu9/WNXe8mbmguj6D3czsosx1s0GMBqipR1JGxnts=",
+        "nonce": "ZQ8blLe9APU6I1nN",
+        "plaintext": "A1SjBp9ZGkkE6e1y+x4Aqca45yut67ANWlDK459Glwc=",
+        "recipient": "BD5Fe/QD9f4E64LqPPlGmlKOAu7JdwYZz1hJcU5JUiyt5uYMRzbmTOoRetzXipyYZVtFuxciFmZtExW5zD3MR1o=",
+        "sharedSecret": "S2wDATzTWeGTXLC3xT3rjxHcHN/uhFV680wwvogITlA="
+      },
+      "namespace": "reading.saved",
+      "recipientID": "5166a088c3302035f92746ebc3155a13",
+      "record": "authority/00000002.json"
+    },
+    {
+      "epoch": 1,
+      "field": "shares",
+      "hpke": {
+        "ecdh": "Tneeqx6qFg3Mgmj2v0dMw07i4609HKWGEVg9NF+pkJc=",
+        "enc": "BN7V0EUuk04zi9G/gHIqpeWG+yNKJY90059mF/Og4nUkAQl4BN7Tvzf4w+2ie8SfU2Th3ILzLAh7oU1gRF6HSfQ=",
+        "exporterSecret": "PXr/3ixxpyaa2EFLDyCl06+NJl61Nn0cccDETJy4TOA=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo2OWExZmYzOTljNDhmNWI4ZDM1ZGUyYzRiZTk5ODYxMQpsaXN0ZW5pbmcucG9kY2FzdHMKMQpjYjVkMDhhYjZlM2YwZjg4NWYwNmIzOWJlMTU5ZmIzMA==",
+        "key": "jnk5uYosrZ6+pu/NuU/pqpHEvXMp0BBp3pyHxmdvR2E=",
+        "nonce": "FLX0WWEZba2ZgQCa",
+        "plaintext": "PUwH7eZsoQdSwJPt69vLba0WJ+1KBceHW+0lvspV3qE=",
+        "recipient": "BB5lD8PXOR1Apo78hEh6cvCcWJ1rIO44E/13Zp+5RILNSinmZ4MbmqO3TgzP2qk8kzugHAHf9u+wgYXrlJY8j8g=",
+        "sharedSecret": "doltIyzFKSs6hucQVUtLogXfDzxD+IdT05purdd41eo="
+      },
+      "namespace": "listening.podcasts",
+      "recipientID": "cb5d08ab6e3f0f885f06b39be159fb30",
+      "record": "authority/00000003.json"
+    },
+    {
+      "epoch": 1,
+      "field": "shares",
+      "hpke": {
+        "ecdh": "HmrnmN/VdGeuUr7UKJd6mCEi+MTTPjLWQ7zJ98ZJnP4=",
+        "enc": "BEmvC5qWILEN7l0Iov1b1/4FtirmbrXiMqaLwqHIioRjvSRUj2zLZACS+8+kj8GhVU6A/C0LBt6wMu2d/xFfrkk=",
+        "exporterSecret": "EVqAw13c0sMkWJlupGww56WE4Yq7CFT2OabSGwFBt5U=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo2OWExZmYzOTljNDhmNWI4ZDM1ZGUyYzRiZTk5ODYxMQpub3RlcwoxCmNiNWQwOGFiNmUzZjBmODg1ZjA2YjM5YmUxNTlmYjMw",
+        "key": "AWMQEUG6sZui/PTjxS4giYdVJyR9c8aSM/r52WttPGg=",
+        "nonce": "opnSXpSuD96/XOQ8",
+        "plaintext": "KIDn058mULv/WLQRn9sgz8PefUURoZPIcC1z5NfbXGI=",
+        "recipient": "BB5lD8PXOR1Apo78hEh6cvCcWJ1rIO44E/13Zp+5RILNSinmZ4MbmqO3TgzP2qk8kzugHAHf9u+wgYXrlJY8j8g=",
+        "sharedSecret": "ZOLTlO/sp1wD6BBxIW1PWu4fVLOXu3NnYEZaEBGfOus="
+      },
+      "namespace": "notes",
+      "recipientID": "cb5d08ab6e3f0f885f06b39be159fb30",
+      "record": "authority/00000003.json"
+    },
+    {
+      "epoch": 1,
+      "field": "shares",
+      "hpke": {
+        "ecdh": "TQdkEGC8Bb4BXjBwpEqFE/BoAxFZfZt31g9dIauT4Ek=",
+        "enc": "BHOhzkcEXFhhsYV8qpMXXctzsQcw8XV9KrXv9tDUtpwR0pcZxxHOoUQHL+JUI1YuPdPiXLcZStjCw3JREzBXFNk=",
+        "exporterSecret": "/Rb8Nko9XxE6EtZBfOBhi6x2aUB8+sa60bPDdn866dM=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo2OWExZmYzOTljNDhmNWI4ZDM1ZGUyYzRiZTk5ODYxMQpyZWFkaW5nLmJvb2tzCjEKY2I1ZDA4YWI2ZTNmMGY4ODVmMDZiMzliZTE1OWZiMzA=",
+        "key": "txR41Xqn3Bs+GhT1sAEgQk/1yie052YR+qsDPG0L9/E=",
+        "nonce": "Kbn7cvcRqZUH9WrK",
+        "plaintext": "ykwKYBaUfPrnlTemFM+yYR2ntii3woc6eSD3fcnF538=",
+        "recipient": "BB5lD8PXOR1Apo78hEh6cvCcWJ1rIO44E/13Zp+5RILNSinmZ4MbmqO3TgzP2qk8kzugHAHf9u+wgYXrlJY8j8g=",
+        "sharedSecret": "WfbSY+cc++Yas51/EAPKCxjEFrFA53595V4mhKBh0Gk="
+      },
+      "namespace": "reading.books",
+      "recipientID": "cb5d08ab6e3f0f885f06b39be159fb30",
+      "record": "authority/00000003.json"
+    },
+    {
+      "epoch": 1,
+      "field": "shares",
+      "hpke": {
+        "ecdh": "Kivbc2joprawDzGM43yGy9xPlIh4YJRid9/zJSAVDU4=",
+        "enc": "BEPnjGESGzGRlEF/4GYAehH5b+OjJI5HN6Z1nfbtMLqMB6lhBCbaTCzXPmub5setCfHGAiY1O1GeHWtbFG8bhj8=",
+        "exporterSecret": "LaRNvO3Kt2LZYqtlxyO03if8JVYvMlSUxFKVe2KiThA=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo2OWExZmYzOTljNDhmNWI4ZDM1ZGUyYzRiZTk5ODYxMQpyZWFkaW5nLnNhdmVkCjEKY2I1ZDA4YWI2ZTNmMGY4ODVmMDZiMzliZTE1OWZiMzA=",
+        "key": "lzs8Zau0ivZ9c43D0Dk4afSA9fBi41dXNs1JM+rRwys=",
+        "nonce": "1hxdTpQ5YIJd55uL",
+        "plaintext": "A1SjBp9ZGkkE6e1y+x4Aqca45yut67ANWlDK459Glwc=",
+        "recipient": "BB5lD8PXOR1Apo78hEh6cvCcWJ1rIO44E/13Zp+5RILNSinmZ4MbmqO3TgzP2qk8kzugHAHf9u+wgYXrlJY8j8g=",
+        "sharedSecret": "Sjckm8CIb1T8tuuEevDRF/bg8TJq12zq06MWWkRfYdU="
+      },
+      "namespace": "reading.saved",
+      "recipientID": "cb5d08ab6e3f0f885f06b39be159fb30",
+      "record": "authority/00000003.json"
+    }
+  ],
+  "keyrings": [
+    {
+      "record": "authority/00000001.json",
+      "slots": [
+        {
+          "ecdh": "B+6lNwL+B+lrdVOmk4yfELReopkQNK0cIHmgGeULpQo=",
+          "enc": "BBcj37XL5TQW2cTNvmqIlUXxp4elM+L90fLo61SeqbpiApCDqz+1cTm86fNq0DMOZc+yBkxL1yvCoVtJ4qn+BNo=",
+          "exporterSecret": "73OWUJvJOOqFU97VLC6ZwyxdI4miw7La2nu1ir1aUVs=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80CjUxNjZhMDg4YzMzMDIwMzVmOTI3NDZlYmMzMTU1YTEzCnNlYWxlZApiODk2NTZlODFlNzdiNWQ1ZTdjNTViNjdjNmUwMDRlNQ==",
+          "key": "awYUj4e47w3Ll2YTWfgoaw1GNO84ofVU5VtlUkLRPV4=",
+          "nonce": "I2b4dmU2u1fY/Tv1",
+          "plaintext": "ysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyso=",
+          "recipient": "BMz6KbKuSI9obg1QIJLVDwoWMf8V07GldklOd30Z379Qnu10g3ro0mI1Jhu8RMW8cay4B6jUMRitDIHePaScnGk=",
+          "sharedSecret": "iiclzwqay93X+wn3yaF/ip7z9kacRX3h/hhtMqIvyr4="
+        }
+      ],
+      "vault": {
+        "agreement": "BD5Fe/QD9f4E64LqPPlGmlKOAu7JdwYZz1hJcU5JUiyt5uYMRzbmTOoRetzXipyYZVtFuxciFmZtExW5zD3MR1o=",
+        "signing": "BJB2fAd50QJRQTUWdW7Eoi+y2I2pu2WIUjIj53GRtCpDTySDnVRknoJEvXZ8vxDb5etJY8VD6Q3fwbZboVFSxJs="
+      },
+      "vaultID": "5166a088c3302035f92746ebc3155a13"
+    }
+  ]
+}

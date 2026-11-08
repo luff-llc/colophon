@@ -1,0 +1,3 @@
+# Deterministic Colophon 0.4 library
+
+Owner controller, synthetic PRF passkey controller, recovery-kit controller, and a separate device member. `records/` contains exact Library API output: authority, member request and one operation per listening.podcasts, notes, reading.books and reading.saved. `input.json` publishes expected complete domain views, member ID and the PRF construction assertion. `case.json` publishes the expected keyring. `intermediates.json` publishes vault and slot secrets. Keys are in ../keys/keys.json. All secrets are public and unsafe for real data. Replaces the retired 0.3 library fixture; no historical files are changed.

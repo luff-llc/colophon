@@ -1,0 +1,9 @@
+{
+  "description": "authority three",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "6.1",
+    "9"
+  ]
+}

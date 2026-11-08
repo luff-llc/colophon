@@ -1,0 +1,103 @@
+{
+  "encoding": "base64",
+  "epochs": [
+    {
+      "epoch": 1,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "ELYxEcq7XisXt74HDzRaFRlZfSXuJQO9WU2ZaXQ+Jyc=",
+        "enc": "BP6MW5SmVR+CTfAm4wRvTxbO1JZ1dICP9WcMlZ6knQRfVifgGgLA9lpqoycQ/tuHGcfPDGLfbpkR6bp30ad2X18=",
+        "exporterSecret": "CHJFR30JjOWBiDBP0j4j3wpNgV9HltBtftB4KNjFK58=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo4ZTIwZTA5YzAxZDgyMGRmZGQ3NmExNzAwZmEzZWFiMwpub3RlcwoxCjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYy",
+        "key": "TY689qZ5U1q4ZcWkY7MuzXT6r8uL+G5tuJPe9lyX/ts=",
+        "nonce": "zaZLNVLnYe0bhMck",
+        "plaintext": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "recipient": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "sharedSecret": "Cbtt8Qi6VEqMoFwayBc9fxko8H5w9JNVyUUr15Yeq6k="
+      },
+      "namespace": "notes",
+      "recipientID": "94ffbe7a6ca230304b0404b62f109062",
+      "record": "authority/00000002.json"
+    },
+    {
+      "epoch": 2,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "W0AhQNpVIfhfcfE0wXD1e0ePx7CHDJfo3ZXOKIXS9Uo=",
+        "enc": "BO++EsG9aYTmwRgkLj037ZNFY891bMvUpOS8zBCxTcmJDuW8ULzedTlt3AQ95nw4zuXG2LhjCpUWHS3Vo5XhiMc=",
+        "exporterSecret": "sRlLPzGFzAIrWCVUBmZlMWNEmpY4IZW/p5NXjFLQeP0=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo4ZTIwZTA5YzAxZDgyMGRmZGQ3NmExNzAwZmEzZWFiMwpub3RlcwoyCmFlODdkZTFhOGU1ODAxMjdkMzM2NTVmZjQ2NzI0YWMz",
+        "key": "pvQlYYiNwlKcGuXu7RYm9LC2FkjqrX5IYKlOXp88SqM=",
+        "nonce": "VxUhULgDhdSsAF/8",
+        "plaintext": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+        "recipient": "BPYrs1JaDoVow8IphZq+4aUpg5pclOc1+fUIBGfQ+7jCASwmWaEnQWcUcjcnfmZvXQ1P2hRDi0oxYK9Y5eqkexQ=",
+        "sharedSecret": "/DiTleaBD4H6ZGXLPDqTlClqSMRzoA5Evw5tGIEGa1c="
+      },
+      "namespace": "notes",
+      "recipientID": "ae87de1a8e580127d33655ff46724ac3",
+      "record": "authority/00000003.json"
+    },
+    {
+      "epoch": 1,
+      "field": "shares",
+      "hpke": {
+        "ecdh": "bXYtPUlvoQqdQO7plkNQgUu4GIT4aClODepTEkhhNB8=",
+        "enc": "BJqQGC59COraC0r3gcVv8TSi7Yw46L1CxMb2XDXXm5jvesxd6Q+4il2VlfZ1ZEeMxYf8BjIimviDzEaOn/DFK8o=",
+        "exporterSecret": "a+MnpSH7SxJPHr5ZlRDx7k4DG4lIF4YsVvpCOiR2tII=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo4ZTIwZTA5YzAxZDgyMGRmZGQ3NmExNzAwZmEzZWFiMwpub3RlcwoxCmFlODdkZTFhOGU1ODAxMjdkMzM2NTVmZjQ2NzI0YWMz",
+        "key": "ePrFohrJYtB1zhx/YfTYXO4nEBJMGvk9GUT+rz2Ij0o=",
+        "nonce": "SGp9n1Q4197a9dJS",
+        "plaintext": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "recipient": "BPYrs1JaDoVow8IphZq+4aUpg5pclOc1+fUIBGfQ+7jCASwmWaEnQWcUcjcnfmZvXQ1P2hRDi0oxYK9Y5eqkexQ=",
+        "sharedSecret": "vOPgJThkMKLbP+ktO7Zv59HWRhKgai83BgB1TxZVt3o="
+      },
+      "namespace": "notes",
+      "recipientID": "ae87de1a8e580127d33655ff46724ac3",
+      "record": "authority/00000003.json"
+    }
+  ],
+  "keyrings": [
+    {
+      "record": "authority/00000001.json",
+      "slots": [
+        {
+          "ecdh": "YHiDx6uH6A5IKSyW54mUXHg1pfCT4aet4e+WIzMivUQ=",
+          "enc": "BBv8mFUhtD1g+ucV+7eSwLoSgLdWwrdwswTPMm6BDMJ/1+P36kuL4jQLAPc+8qatCJUDbtZKs2bKFTEBZEb5FNA=",
+          "exporterSecret": "+tH2X7w1cEiPZY4F4q3iuk+4ywsPFI074pW3VN3O+iE=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnNlYWxlZApiNjA5ZTBmZDI1YWMyYWVmYzE5MzE1NjU4MWUxMTJjYg==",
+          "key": "qtiAYp1CpGnjoBnOgNikGuwr+VDFaW7PsrJBHDsV6kQ=",
+          "nonce": "P5HHPcAnvIXrIkre",
+          "plaintext": "RkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkY=",
+          "recipient": "BMR8aqb74CN0TYO6NScPLwwml8GGB7haxa/uxAc8PdaIROQob+eyZkVxbiAzMXeOgw3w90xPpDDoMsM3onTXb7s=",
+          "sharedSecret": "2fXgX61/dwpL1PUrarzEHCaqGeA0kBJnjAn0cfF0OUY="
+        }
+      ],
+      "vault": {
+        "agreement": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "signing": "BJyDs3wFZeVe4BC/TtOe97DjvyI4XakLd2TgUXnHDtDGB6s8uUKhtVjxSvzM3KVFrZ+qqlEd2z9G0aiwhBO9xNg="
+      },
+      "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+    },
+    {
+      "record": "authority/00000003.json",
+      "slots": [
+        {
+          "ecdh": "YHiDx6uH6A5IKSyW54mUXHg1pfCT4aet4e+WIzMivUQ=",
+          "enc": "BBv8mFUhtD1g+ucV+7eSwLoSgLdWwrdwswTPMm6BDMJ/1+P36kuL4jQLAPc+8qatCJUDbtZKs2bKFTEBZEb5FNA=",
+          "exporterSecret": "paJ3O5VXmTvzGL1MffFw2DWqBqlZ1/hCgHySuNb0C3U=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80CmFlODdkZTFhOGU1ODAxMjdkMzM2NTVmZjQ2NzI0YWMzCnNlYWxlZApiNjA5ZTBmZDI1YWMyYWVmYzE5MzE1NjU4MWUxMTJjYg==",
+          "key": "z5nzIQ23tlfijCbqIbWrNxfp5dYUZvjsXUgte9Itb1I=",
+          "nonce": "Ao8uKt1xCPAz0z0t",
+          "plaintext": "R0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0c=",
+          "recipient": "BMR8aqb74CN0TYO6NScPLwwml8GGB7haxa/uxAc8PdaIROQob+eyZkVxbiAzMXeOgw3w90xPpDDoMsM3onTXb7s=",
+          "sharedSecret": "2fXgX61/dwpL1PUrarzEHCaqGeA0kBJnjAn0cfF0OUY="
+        }
+      ],
+      "vault": {
+        "agreement": "BPYrs1JaDoVow8IphZq+4aUpg5pclOc1+fUIBGfQ+7jCASwmWaEnQWcUcjcnfmZvXQ1P2hRDi0oxYK9Y5eqkexQ=",
+        "signing": "BEX1BxIQHUgH9WpT6GgG7/IDB1KD+7igWqu4Hi7ejV9EXNt6ETOn/Wi8dhMkxpuII1R+zNoR7nLA61HULFUnq08="
+      },
+      "vaultID": "ae87de1a8e580127d33655ff46724ac3"
+    }
+  ]
+}

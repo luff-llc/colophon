@@ -1,0 +1,8 @@
+{
+  "description": "slot foreign vault seed",
+  "expected": "vaultLocked",
+  "probe": "slot",
+  "sections": [
+    "5.1"
+  ]
+}

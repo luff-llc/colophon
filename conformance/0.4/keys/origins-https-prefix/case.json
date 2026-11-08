@@ -1,0 +1,9 @@
+{
+  "description": "origins https prefix",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.2",
+    "5.2"
+  ]
+}

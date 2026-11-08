@@ -1,0 +1,33 @@
+{
+  "controller": {
+    "key": {
+      "credential": "AQ==",
+      "form": "webauthn",
+      "origins": [
+        "android:apk-key-hash:test"
+      ],
+      "rp": "id.luff.works",
+      "signing": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo="
+    },
+    "label": "Passkey",
+    "roles": [
+      "approve",
+      "control"
+    ]
+  },
+  "prfOutput": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+  "salt": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+  "signers": [
+    "b89656e81e77b5d5e7c55b67c6e004e5"
+  ],
+  "slot": {
+    "box": "JXd9HhFkingT9KVa9tcun8JkwkQLfGPw1IeWuy8dz1pjMBEFPeGkiBKkyjJaJdOLzyxHZndTpEQx9DMo",
+    "controllers": [
+      "256b1be32745d1d1c9d49121cc87bc45"
+    ],
+    "kind": "prf",
+    "label": "Registration output",
+    "salt": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+  },
+  "source": "registration"
+}

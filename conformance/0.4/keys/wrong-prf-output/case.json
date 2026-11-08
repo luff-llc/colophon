@@ -1,0 +1,8 @@
+{
+  "description": "wrong prf output",
+  "expected": "vaultLocked",
+  "probe": "slot",
+  "sections": [
+    "5.2"
+  ]
+}

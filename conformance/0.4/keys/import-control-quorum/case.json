@@ -1,0 +1,52 @@
+{
+  "description": "import control quorum",
+  "expected": "accept",
+  "keyring": {
+    "controllers": [
+      {
+        "id": "1ea74636684021c2d78cfbd99d2f011b",
+        "roles": [
+          "control"
+        ]
+      },
+      {
+        "id": "7a14b43d4e9010e7987d86ec054f0d79",
+        "roles": [
+          "approve"
+        ]
+      },
+      {
+        "id": "b609e0fd25ac2aefc193156581e112cb",
+        "roles": [
+          "approve",
+          "control",
+          "recover"
+        ]
+      }
+    ],
+    "members": [
+      {
+        "grant": {
+          "access": [
+            "read",
+            "write"
+          ],
+          "expires": "2027-01-01T00:00:00Z",
+          "import": true,
+          "namespaces": [
+            "notes"
+          ]
+        },
+        "id": "cb5d08ab6e3f0f885f06b39be159fb30"
+      }
+    ],
+    "recoverThreshold": 1,
+    "threshold": 2,
+    "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+  },
+  "probe": "authority",
+  "sections": [
+    "6.3",
+    "7"
+  ]
+}

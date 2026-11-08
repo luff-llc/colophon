@@ -1,0 +1,8 @@
+{
+  "description": "duplicate body name",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.1"
+  ]
+}

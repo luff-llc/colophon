@@ -1,0 +1,9 @@
+{
+  "description": "prf raw controller",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.2",
+    "5.2"
+  ]
+}

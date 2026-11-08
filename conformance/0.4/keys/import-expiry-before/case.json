@@ -1,0 +1,8 @@
+{
+  "description": "import expiry before",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "7"
+  ]
+}

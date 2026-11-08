@@ -1,0 +1,8 @@
+{
+  "description": "recovery remove",
+  "expected": "badSignature",
+  "probe": "authority",
+  "sections": [
+    "6.3"
+  ]
+}

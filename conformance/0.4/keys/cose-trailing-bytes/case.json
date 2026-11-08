@@ -1,0 +1,8 @@
+{
+  "description": "cose trailing bytes",
+  "expected": "malformed",
+  "probe": "cose",
+  "sections": [
+    "2.5"
+  ]
+}

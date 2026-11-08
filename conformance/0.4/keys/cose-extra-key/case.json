@@ -1,0 +1,8 @@
+{
+  "description": "cose extra key",
+  "expected": "malformed",
+  "probe": "cose",
+  "sections": [
+    "2.5"
+  ]
+}

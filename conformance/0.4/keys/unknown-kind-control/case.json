@@ -1,0 +1,8 @@
+{
+  "description": "unknown kind control",
+  "expected": "newerFormat",
+  "probe": "authority",
+  "sections": [
+    "6.3"
+  ]
+}

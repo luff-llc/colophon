@@ -1,0 +1,86 @@
+{
+  "encoding": "base64",
+  "epochs": [
+    {
+      "epoch": 1,
+      "field": "epochs",
+      "hpke": {
+        "ecdh": "ELYxEcq7XisXt74HDzRaFRlZfSXuJQO9WU2ZaXQ+Jyc=",
+        "enc": "BP6MW5SmVR+CTfAm4wRvTxbO1JZ1dICP9WcMlZ6knQRfVifgGgLA9lpqoycQ/tuHGcfPDGLfbpkR6bp30ad2X18=",
+        "exporterSecret": "mKAgK251gY0j/m1GIfbX11WRufIpns1bUtoVlS3wYE8=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo5NmQxMDNjMjlkNGY0MWVhYTM4ZDI2MDZiMjE4ZGNmZgpub3RlcwoxCjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYy",
+        "key": "DmhdOquHA2YEeEWyDxJ9NQ189syJJ2p6td4TnvvmTzY=",
+        "nonce": "qpoQvRNATw6w5+xV",
+        "plaintext": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "recipient": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "sharedSecret": "Cbtt8Qi6VEqMoFwayBc9fxko8H5w9JNVyUUr15Yeq6k="
+      },
+      "namespace": "notes",
+      "recipientID": "94ffbe7a6ca230304b0404b62f109062",
+      "record": "authority/00000002.json"
+    },
+    {
+      "epoch": 1,
+      "field": "shares",
+      "hpke": {
+        "ecdh": "482umoq5wWTsy+9Xy9dJpftAVx7LBpfOIQ8j9c8/FgA=",
+        "enc": "BEYcpltkmL9J3K8Fr4/HbYxUUrlDHSImv27pax/rVjxU0ZgnzY2ivmabdXh0B3asfu78oDzVyKi4lK87U59ZZnw=",
+        "exporterSecret": "Vdj0hqMAm89jwRfPMIbj8oIHOW5V0m2RyOviuE6bj0s=",
+        "info": "Y29sb3Bob24vZXBvY2gvMwo5NmQxMDNjMjlkNGY0MWVhYTM4ZDI2MDZiMjE4ZGNmZgpub3RlcwoxCmNiNWQwOGFiNmUzZjBmODg1ZjA2YjM5YmUxNTlmYjMw",
+        "key": "VCWH41EKiFxviHz25RqGs9tLx778Eox9FZicaJ/RV78=",
+        "nonce": "lgqEQYbCY/3x+Z6U",
+        "plaintext": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "recipient": "BB5lD8PXOR1Apo78hEh6cvCcWJ1rIO44E/13Zp+5RILNSinmZ4MbmqO3TgzP2qk8kzugHAHf9u+wgYXrlJY8j8g=",
+        "sharedSecret": "q5GT+79d8soxtwMGc+rZ/vYp+7cTwLLDigTr0L7bZD4="
+      },
+      "namespace": "notes",
+      "recipientID": "cb5d08ab6e3f0f885f06b39be159fb30",
+      "record": "authority/00000003.json"
+    }
+  ],
+  "keyrings": [
+    {
+      "record": "authority/00000001.json",
+      "slots": [
+        {
+          "ecdh": "IcrhMwNGAxq7lX7m7VMtZtBERBHrbM+TMx6faHfByNM=",
+          "enc": "BBv8mFUhtD1g+ucV+7eSwLoSgLdWwrdwswTPMm6BDMJ/1+P36kuL4jQLAPc+8qatCJUDbtZKs2bKFTEBZEb5FNA=",
+          "exporterSecret": "XyyUKtw/IFFtA5KrCeV4TgdlsDSi/+gyHDHuDoKbNco=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnNlYWxlZAoxZWE3NDYzNjY4NDAyMWMyZDc4Y2ZiZDk5ZDJmMDExYg==",
+          "key": "j2l87XaZOGb0MpyFMwdq6r5nJMBUXjWbNqSEh6sOaD4=",
+          "nonce": "ebl4agaEfDCkLZAn",
+          "plaintext": "RkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkY=",
+          "recipient": "BNbzkHfwopodB6xA/XTPI0nNpvTya7Shfx0kyCulcoIO1rZQyNQikZfqVgiedU9xSiy05x6DA65Zyii8XW0Uemk=",
+          "sharedSecret": "a4wqLH1Zr4XOJwF2SGP65qdljBcpe3Zjelcey5AyFrA="
+        },
+        {
+          "ecdh": "RQZMgzM/OHL22Zahu6fVkWmkedT0tOAjiTWUmgQo6oM=",
+          "enc": "BBv8mFUhtD1g+ucV+7eSwLoSgLdWwrdwswTPMm6BDMJ/1+P36kuL4jQLAPc+8qatCJUDbtZKs2bKFTEBZEb5FNA=",
+          "exporterSecret": "GzwQ3JgBN2nNiS7Sxr6UfJ4kdr34MieHFSNRyJUtNeU=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnNlYWxlZAo3YTE0YjQzZDRlOTAxMGU3OTg3ZDg2ZWMwNTRmMGQ3OQ==",
+          "key": "58lCHEzjRoAiHI/7UU/diQQ+6KktWoaW8bcrVhOTfxM=",
+          "nonce": "AzQbj+OZjxPqkU7g",
+          "plaintext": "RkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkY=",
+          "recipient": "BG6hIYzW9p+RTQy8KTaqM50aD8TO52tPcv8tiu6ycPyPUNrix8HWQ+Be3nSsFn3o2uy/MbQ/yEwVW2IhczOWvfo=",
+          "sharedSecret": "LBKqRB10gqWACtQopgGVsZTaX6hzzzgu7WfuSF8MMfc="
+        },
+        {
+          "ecdh": "YHiDx6uH6A5IKSyW54mUXHg1pfCT4aet4e+WIzMivUQ=",
+          "enc": "BBv8mFUhtD1g+ucV+7eSwLoSgLdWwrdwswTPMm6BDMJ/1+P36kuL4jQLAPc+8qatCJUDbtZKs2bKFTEBZEb5FNA=",
+          "exporterSecret": "+tH2X7w1cEiPZY4F4q3iuk+4ywsPFI074pW3VN3O+iE=",
+          "info": "Y29sb3Bob24vdmF1bHQtc2xvdC80Cjk0ZmZiZTdhNmNhMjMwMzA0YjA0MDRiNjJmMTA5MDYyCnNlYWxlZApiNjA5ZTBmZDI1YWMyYWVmYzE5MzE1NjU4MWUxMTJjYg==",
+          "key": "qtiAYp1CpGnjoBnOgNikGuwr+VDFaW7PsrJBHDsV6kQ=",
+          "nonce": "P5HHPcAnvIXrIkre",
+          "plaintext": "RkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkY=",
+          "recipient": "BMR8aqb74CN0TYO6NScPLwwml8GGB7haxa/uxAc8PdaIROQob+eyZkVxbiAzMXeOgw3w90xPpDDoMsM3onTXb7s=",
+          "sharedSecret": "2fXgX61/dwpL1PUrarzEHCaqGeA0kBJnjAn0cfF0OUY="
+        }
+      ],
+      "vault": {
+        "agreement": "BNqBy3sdXSFIz4j0CnaQtdBwpjMgfq5h0j1hCll78HjSSGt4UI7oTbfQQgdpz8ehWep7vffx9b4cHO0Z9AvscI8=",
+        "signing": "BJyDs3wFZeVe4BC/TtOe97DjvyI4XakLd2TgUXnHDtDGB6s8uUKhtVjxSvzM3KVFrZ+qqlEd2z9G0aiwhBO9xNg="
+      },
+      "vaultID": "94ffbe7a6ca230304b0404b62f109062"
+    }
+  ]
+}

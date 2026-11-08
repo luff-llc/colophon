@@ -1,0 +1,8 @@
+{
+  "description": "invalid extra cosignature",
+  "expected": "badSignature",
+  "probe": "authority",
+  "sections": [
+    "3.1"
+  ]
+}

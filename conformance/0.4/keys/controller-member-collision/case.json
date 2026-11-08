@@ -1,0 +1,8 @@
+{
+  "description": "controller member collision",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.3"
+  ]
+}

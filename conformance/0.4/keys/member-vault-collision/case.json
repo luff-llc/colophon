@@ -1,0 +1,8 @@
+{
+  "description": "member vault collision",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "2.3"
+  ]
+}

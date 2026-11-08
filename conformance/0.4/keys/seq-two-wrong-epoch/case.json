@@ -1,0 +1,8 @@
+{
+  "description": "seq two wrong epoch",
+  "expected": "malformed",
+  "probe": "authority",
+  "sections": [
+    "6.2"
+  ]
+}
