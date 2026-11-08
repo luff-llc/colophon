@@ -77,7 +77,7 @@ data class SessionConfiguration(
     val keys: KeyProvider,
     /** External controller provider, required for creation and authority actions. */
     val ownerController: ControllerProvider? = null,
-    /** Host-owned kit; genesis support is blocked by the current core creation API. */
+    /** Optional host-owned raw kit, included in genesis with its own sealed vault slot. */
     val recoveryKit: ControllerProvider? = null,
     val store: RecordStore? = null,
     /** Optional relay (spec §8). The private record store stays the source of truth. */
@@ -92,6 +92,8 @@ data class SessionConfiguration(
      * (up to 1 MiB), the only path that gives imported positions and states baseline semantics.
      */
     val migrationWriter: Boolean = false,
+    /** Display label for the optional recovery controller and its genesis slot. */
+    val recoveryLabel: String = "Recovery kit",
 ) {
     companion object {
         /** App-private session storage with independent content and external controller providers. */
@@ -106,6 +108,7 @@ data class SessionConfiguration(
             relay: RelayConfiguration? = null,
             migrationMarker: File? = null,
             migrationWriter: Boolean = false,
+            recoveryLabel: String = "Recovery kit",
         ) = SessionConfiguration(
             memberLabel = memberLabel,
             memberKind = memberKind,
@@ -117,6 +120,7 @@ data class SessionConfiguration(
             relay = relay,
             migrationMarker = migrationMarker,
             migrationWriter = migrationWriter,
+            recoveryLabel = recoveryLabel,
         )
     }
 }

@@ -16,24 +16,6 @@ internal fun encodeKeyJSON(value: KeyJson): String = when (value) {
     KeyJson.Null -> "null"
 }
 
-/** Enables a host kit through a normal control-rule change, independently of blocked genesis support. */
-internal fun enableTestKit(lib: ColophonLibrary, kit: ControllerProvider, second: ControllerProvider? = null) {
-    lib.unlockVault()
-    val ring = keyObject(lib.keyring())
-    val extra = listOfNotNull(kit to listOf("recover"), second?.let { it to listOf("approve", "control") })
-    val controllers = ring.array("controllers") + extra.map { (provider, roles) -> keyObject(controllerJSON(provider, "Kit", roles)) }
-    val slots = ring.array("slots") + extra.map { (provider, roles) ->
-        keyObject(lib.native.buildSealedSlot(controllerJSON(provider, "Kit", roles), "Kit", null, ByteArray(32).also(java.security.SecureRandom()::nextBytes)))
-    }
-    val sorted = controllers.sortedBy {
-        val key = (it as KeyJson.Obj).fields.getValue("key") as KeyJson.Obj
-        keyID(java.util.Base64.getDecoder().decode(key.string("signing")))
-    }
-    val changed = KeyJson.Obj(ring.fields + mapOf("controllers" to KeyJson.Array(sorted), "slots" to KeyJson.Array(slots),
-        "recoverThreshold" to KeyJson.Number("1"), "threshold" to KeyJson.Number(if (second == null) "1" else "2")))
-    lib.changeKeyring(encodeKeyJSON(changed).toByteArray())
-}
-
 class ControllerSessionBridgeTest {
     @Test fun engineApprovesAndRevokesWithPersistedSeparateController() = runBlocking {
         val home = Files.createTempDirectory("colophon-controller-bridge").toFile()
@@ -77,14 +59,25 @@ class ControllerSessionBridgeTest {
         try {
             val member = SoftwareKeys.ephemeral(); val owner = RawControllerProvider(SoftwareKeys.ephemeral())
             val kit = RawControllerProvider(SoftwareKeys.ephemeral())
-            val records = ColophonLibrary.create(member, "Keys", "Original", listOf("notes"), owner).use { lib ->
-                lib.write("notes", "createNotebook", """{"id":"n","title":"Kit history"}""".toByteArray()).get()
-                enableTestKit(lib, kit)
-                lib.records
-            }
-            val store = MemoryRecordStore(records)
+            val store = MemoryRecordStore()
+            val originalConfig = SessionConfiguration.app(home, "Original", listOf("notes"), member,
+                ownerController = owner, recoveryKit = kit, recoveryLabel = "Offline backup").copy(store = store)
+            val original = SessionWorker(originalConfig)
+            val created = original.create()
+            assertEquals(SessionPhase.Ready, created.phase)
+            assertEquals(4, store.paths().count { it.startsWith("authority/") })
+            val genesis = keyObject(java.util.Base64.getDecoder().decode(
+                keyObject(store.read(listOf("authority/00000001.json")).getValue("authority/00000001.json")).string("body")))
+            val ring = genesis.fields.getValue("keyring") as KeyJson.Obj
+            assertEquals("1", (ring.fields["recoverThreshold"] as KeyJson.Number).raw)
+            assertEquals(2, ring.array("controllers").size)
+            val kitSlot = ring.array("slots").map { it as KeyJson.Obj }.single { it.stringList("controllers") == listOf(kit.controllerID()) }
+            assertEquals("sealed", kitSlot.string("kind"))
+            assertEquals("Offline backup", kitSlot.string("label"))
+            original.write(DomainCommand("notes", "createNotebook", """{"id":"n","title":"Kit history"}""".toByteArray()), created.revision)
+            original.closeCoreNow()
             val replacementKeys = SoftwareKeys.ephemeral(); val replacementOwner = RawControllerProvider(SoftwareKeys.ephemeral())
-            val configuration = SessionConfiguration("Replacement", namespaces = listOf("notes"), privateHome = home,
+            val configuration = SessionConfiguration("Replacement", namespaces = listOf("notes"), privateHome = File(home, "replacement"),
                 keys = replacementKeys, ownerController = replacementOwner, store = store)
             val session = SessionWorker(configuration)
             assertTrue(session.restore().phase is SessionPhase.WaitingForApproval)

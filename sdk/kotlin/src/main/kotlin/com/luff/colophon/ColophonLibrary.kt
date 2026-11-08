@@ -154,15 +154,24 @@ class ColophonLibrary private constructor(val native: NativeLibrary, private val
         private fun now() = Instant.now().truncatedTo(ChronoUnit.MILLIS).toString()
         /**
          * Creates layout 2 with separate member and raw owner controller keys in two signing rounds.
-         * A host-supplied recovery kit at genesis is blocked until the core exposes that creation API.
+         * An optional raw recovery kit receives its own genesis slot and never signs creation.
          */
         fun create(member: KeyProvider, label: String, ownerLabel: String, namespaces: List<String>,
-                   ownerController: ControllerProvider, recoveryKit: ControllerProvider? = null): ColophonLibrary {
-            if (recoveryKit != null) throw BindingException.InvalidData("Core creation API cannot include a recovery-kit controller in genesis")
+                   ownerController: ControllerProvider, recoveryKit: ControllerProvider? = null,
+                   recoveryLabel: String = "Recovery kit"): ColophonLibrary {
             if (ownerController.form() != KeyForm.RAW) throw BindingException.InvalidData("Core creation API requires a raw owner controller")
+            val recovery = recoveryKit?.let {
+                if (it.form() != KeyForm.RAW) throw BindingException.InvalidData("Core creation API requires a raw recovery-kit controller")
+                RecoveryKitController(it.controllerPublic(), recoveryLabel)
+            }
             val seed = entropy()
             val records = try {
-                beginCreate(member.publicKeys(), ownerController.controllerPublic(), seed, label, ownerLabel, namespaces, now(), entropy()).use { first ->
+                val options = CreateLibraryOptions(
+                    member = member.publicKeys(), controller = ownerController.controllerPublic(), vaultSeed = seed,
+                    label = label, ownerLabel = ownerLabel, namespaces = namespaces, recovery = recovery,
+                    importedFrom = null, importExpires = null,
+                )
+                beginCreateWith(options, now(), entropy()).use { first ->
                     first.advanceCreate(signAction(first, member, listOf(ownerController)).map { it.signature }).use { final ->
                         final.finishAuthority(signAction(final, null, listOf(ownerController)))
                     }

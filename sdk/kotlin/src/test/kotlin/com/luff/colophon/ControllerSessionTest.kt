@@ -16,21 +16,20 @@ internal fun encodeKeyJSON(value: KeyJson): String = when (value) {
     KeyJson.Null -> "null"
 }
 
-/** Enables a host kit through a normal control-rule change, independently of blocked genesis support. */
-internal fun enableTestKit(lib: ColophonLibrary, kit: ControllerProvider, second: ControllerProvider? = null) {
+/** Raises the control threshold to exercise approve-only restoration from an existing genesis kit. */
+internal fun raiseTestThreshold(lib: ColophonLibrary, second: ControllerProvider) {
     lib.unlockVault()
     val ring = keyObject(lib.keyring())
-    val extra = listOfNotNull(kit to listOf("recover"), second?.let { it to listOf("approve", "control") })
-    val controllers = ring.array("controllers") + extra.map { (provider, roles) -> keyObject(controllerJSON(provider, "Kit", roles)) }
-    val slots = ring.array("slots") + extra.map { (provider, roles) ->
-        keyObject(lib.native.buildSealedSlot(controllerJSON(provider, "Kit", roles), "Kit", null, ByteArray(32).also(java.security.SecureRandom()::nextBytes)))
-    }
+    val controller = controllerJSON(second, "Second controller", listOf("approve", "control"))
+    val controllers = ring.array("controllers") + keyObject(controller)
+    val slots = ring.array("slots") + keyObject(lib.native.buildSealedSlot(controller, "Second controller", null,
+        ByteArray(32).also(java.security.SecureRandom()::nextBytes)))
     val sorted = controllers.sortedBy {
         val key = (it as KeyJson.Obj).fields.getValue("key") as KeyJson.Obj
         keyID(Base64.getDecoder().decode(key.string("signing")))
     }
     val changed = KeyJson.Obj(ring.fields + mapOf("controllers" to KeyJson.Array(sorted), "slots" to KeyJson.Array(slots),
-        "recoverThreshold" to KeyJson.Number("1"), "threshold" to KeyJson.Number(if (second == null) "1" else "2")))
+        "threshold" to KeyJson.Number("2")))
     lib.changeKeyring(encodeKeyJSON(changed).toByteArray())
 }
 
@@ -76,15 +75,70 @@ class ControllerSessionTest {
         }
     }
 
-    @Test fun kitGenesisFailsBeforeSigningAndReusedPrincipalFails() {
-        val member = Counted(); val controller = RawControllerProvider(Counted())
-        assertFailsWith<BindingException.InvalidData> {
-            ColophonLibrary.create(member, "Keys", "Phone", listOf("notes"), controller, RawControllerProvider(PlatformKeys.software()))
+    @Test fun kitGenesisUsesTwoRoundsWithoutKitPrivateWork() {
+        val member = Counted(); val owner = Counted(); val kitKeys = Counted()
+        val controller = RawControllerProvider(owner); val kit = RawControllerProvider(kitKeys)
+        val namespaces = listOf("notes", "reading.saved")
+        ColophonLibrary.create(member, "Keys", "Phone", namespaces, controller, kit, "Offline backup").use { lib ->
+            assertEquals(1, member.signs)
+            assertEquals(4, owner.signs)
+            assertEquals(0, kitKeys.signs)
+            assertEquals(0, owner.agreements)
+            assertEquals(0, kitKeys.agreements)
+            assertEquals(4, lib.records.keys.count { it.startsWith("authority/") })
+            fun body(seq: Int) = keyObject(Base64.getDecoder().decode(
+                keyObject(lib.records.getValue("authority/%08d.json".format(seq))).string("body")))
+            val genesis = body(1)
+            assertEquals("genesis", genesis.string("kind"))
+            val ring = genesis.fields.getValue("keyring") as KeyJson.Obj
+            assertEquals("1", (ring.fields["threshold"] as KeyJson.Number).raw)
+            assertEquals("1", (ring.fields["recoverThreshold"] as KeyJson.Number).raw)
+            val controllers = ring.array("controllers").map { it as KeyJson.Obj }
+            assertEquals(2, controllers.size)
+            val ids = controllers.map { keyID(Base64.getDecoder().decode((it.fields.getValue("key") as KeyJson.Obj).string("signing"))) }
+            assertEquals(ids.sorted(), ids)
+            assertEquals(listOf("approve", "control"), controllers[ids.indexOf(controller.controllerID())].stringList("roles"))
+            assertEquals(listOf("recover"), controllers[ids.indexOf(kit.controllerID())].stringList("roles"))
+            assertEquals("Offline backup", controllers[ids.indexOf(kit.controllerID())].string("label"))
+            val slots = ring.array("slots").map { it as KeyJson.Obj }
+            assertEquals(2, slots.size)
+            assertTrue(slots.all { it.string("kind") == "sealed" })
+            assertEquals(setOf(controller.controllerID(), kit.controllerID()), slots.flatMap { it.stringList("controllers") }.toSet())
+            assertEquals("Offline backup", slots.single { it.stringList("controllers") == listOf(kit.controllerID()) }.string("label"))
+            assertEquals("rekey", body(2).string("kind"))
+            assertEquals(namespaces.toSet(), body(2).array("epochs").map { (it as KeyJson.Obj).string("namespace") }.toSet())
+            val grant = body(3).fields.getValue("grant") as KeyJson.Obj
+            assertEquals(namespaces, grant.stringList("namespaces"))
+            assertEquals(listOf("read", "write"), grant.stringList("access"))
+            assertEquals("2", (body(4).fields["layout"] as KeyJson.Number).raw)
+            assertEquals(1, lib.members().size)
+            assertNotEquals(lib.me().id, controller.controllerID())
+            assertNotEquals(lib.me().id, kit.controllerID())
+            ColophonLibrary.open(lib.records, member).use { it.native.unlockVault(listOf(controller)) }
+            ColophonLibrary.open(lib.records, member).use { it.native.unlockVault(listOf(kit)) }
+            assertEquals(0, kitKeys.signs)
+            assertEquals(1, kitKeys.agreements)
         }
-        assertEquals(0, member.signs)
+    }
+
+    @Test fun creationRejectsReusedPrincipalsAndInvalidKits() {
+        val member = Counted(); val owner = RawControllerProvider(Counted())
         assertFailsWith<BindingException.InvalidData> {
             ColophonLibrary.create(member, "Keys", "Phone", listOf("notes"), RawControllerProvider(member))
         }
+        for (kit in listOf(owner, RawControllerProvider(member))) {
+            assertFailsWith<BindingException.InvalidData> {
+                ColophonLibrary.create(member, "Keys", "Phone", listOf("notes"), owner, kit)
+            }
+        }
+        assertFailsWith<BindingException.InvalidData> {
+            ColophonLibrary.create(member, "Keys", "Phone", listOf("notes"), owner, RawControllerProvider(PlatformKeys.software()), "")
+        }
+        val before = member.signs
+        assertFailsWith<BindingException.InvalidData> {
+            ColophonLibrary.create(member, "Keys", "Phone", listOf("notes"), owner, TestAssertionProvider())
+        }
+        assertEquals(before, member.signs)
     }
 
     @Test fun kitRestoresNewDeviceAndReadsHistory() = kitRestore(false)
@@ -93,9 +147,9 @@ class ControllerSessionTest {
     private fun kitRestore(approveOnly: Boolean) {
         val member = PlatformKeys.software(); val controller = RawControllerProvider(PlatformKeys.software())
         val kit = RawControllerProvider(PlatformKeys.software())
-        ColophonLibrary.create(member, "Keys", "Original", listOf("notes"), controller).use { lib ->
+        ColophonLibrary.create(member, "Keys", "Original", listOf("notes"), controller, kit).use { lib ->
             lib.write("notes", "createNotebook", """{"id":"n","title":"History"}""".toByteArray()).get()
-            enableTestKit(lib, kit, if (approveOnly) RawControllerProvider(PlatformKeys.software()) else null)
+            if (approveOnly) raiseTestThreshold(lib, RawControllerProvider(PlatformKeys.software()))
             val replacement = RawControllerProvider(PlatformKeys.software()); val newMember = PlatformKeys.software()
             ColophonLibrary.restoreFromKit(lib.records, newMember, replacement, "Replacement", listOf("notes"), listOf(kit)).use { restored ->
                 assertTrue(restored.view("notes").get().state.decodeToString().contains("History"))
@@ -111,9 +165,8 @@ class ControllerSessionTest {
     @Test fun removalRotatesVaultAndRetainedControllerReadsHistory() {
         val member = PlatformKeys.software(); val owner = RawControllerProvider(PlatformKeys.software())
         val retained = RawControllerProvider(PlatformKeys.software()); val kit = RawControllerProvider(PlatformKeys.software())
-        ColophonLibrary.create(member, "Keys", "Original", listOf("notes"), owner).use { lib ->
+        ColophonLibrary.create(member, "Keys", "Original", listOf("notes"), owner, kit).use { lib ->
             lib.write("notes", "createNotebook", """{"id":"n","title":"History"}""".toByteArray()).get()
-            enableTestKit(lib, kit)
             lib.unlockVault()
             val added = controllerJSON(retained, "Retained", listOf("approve", "control"))
             val slot = lib.native.buildSealedSlot(added, "Retained", null, ByteArray(32) { 61 })

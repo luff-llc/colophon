@@ -91,7 +91,8 @@ internal class BindingSessionCore : SessionCore {
     override fun saveCheckpoint() { library?.let { it.native.verifyBatch(128u); cache?.save(it.checkpoint(), it.id) } }
     override fun create(configuration: SessionConfiguration) {
         val owner = configuration.ownerController ?: throw BindingException.KeyProvider("An owner controller provider is required for creation")
-        ColophonLibrary.create(configuration.keys, configuration.memberLabel, configuration.memberLabel, configuration.libraryNamespaces, owner, configuration.recoveryKit).use { created ->
+        ColophonLibrary.create(configuration.keys, configuration.memberLabel, configuration.memberLabel, configuration.libraryNamespaces,
+            owner, configuration.recoveryKit, configuration.recoveryLabel).use { created ->
             val records = created.records
             openStorage(MemoryRecordStore(records), records.keys, emptyMap(), emptyMap(), configuration.keys, configuration.namespaces,
                 CheckpointCache(java.io.File(configuration.privateHome, "Checkpoints")), null)

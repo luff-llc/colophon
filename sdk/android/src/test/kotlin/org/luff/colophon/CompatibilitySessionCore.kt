@@ -37,6 +37,7 @@ internal class CompatibilitySessionCore : SessionCore {
             configuration.libraryNamespaces,
             configuration.ownerController ?: error("Missing test controller"),
             configuration.recoveryKit,
+            configuration.recoveryLabel,
         )
     }
 
