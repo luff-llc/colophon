@@ -21,6 +21,40 @@ The playground depends on the real core via `"@colophon/core": "file:../js"`,
 so build `js/` first (`npm --prefix js run build`, Rust on PATH). Vite emits
 the core's `.wasm` as a build asset; no extra plugins needed.
 
+## Device sessions and recovery
+
+`src/session.ts` wraps the 0.4 SDK with distinct owner controller and member
+providers. The demo generates separate non-extractable WebCrypto signing and
+agreement keys for each principal. Member keys open content epochs; grant and
+revoke open the vault through the owner provider first. `DeviceSession.open`
+accepts an external owner provider, including a provider with an existing PRF
+route. This package adds no passkey ceremonies.
+
+Creation without a kit uses the core's two signing rounds: genesis, seq-2
+rekey, member request/grant, and layout 2. **Kit creation is blocked:** the
+landed core/WASM creation API has no input for a kit controller or genesis
+slot. `DeviceSession.create` rejects a supplied kit explicitly. The default
+demo runs through End and reports this blocker at Recover.
+
+`DeviceSession.restore` accepts existing kit-enabled 0.4 records: the kit
+opens its vault slot and signs a recovery-rule keyring addition, then the new
+device controller grants the fresh member all namespaces. Existing controllers,
+slots, vault and thresholds stay. When recovery has a lower threshold, the new
+controller receives only `approve`. The demo restore uses a raw owner provider;
+opening existing sessions accepts other provider forms.
+
+The demo stores CryptoKey handles in IndexedDB separately from the records and
+never persists the vault seed. A demo kit handle, when supplied by a host, is
+stored alongside the device handles for convenience; this is not an exported
+or independently stored recovery kit. The 0.4 storage keys do not reopen older
+libraries.
+
+Focused flow tests (requires the already-built local `@colophon/core` package):
+
+```sh
+npm test
+```
+
 ## The agent
 
 Without a key, a scripted stand-in performs the same tool calls a model would,
@@ -45,5 +79,6 @@ live Muse model answers through `Library.tools()` / `Library.call()`:
 - `src/app.ts` — intro, colophon page, content tabs, agent device, five verbs,
   demo mode.
 - `src/seed.ts` — invented podcast excerpts, saved links, empty notebook.
-- `src/storage.ts` — IndexedDB snapshots of records plus owner/recovery key
-  handles for the Recover verb.
+- `src/session.ts` — controller/member separation, vault unlocks and recovery-rule restore.
+- `src/storage.ts` — IndexedDB snapshots of 0.4 records and separate controller,
+  member and optional kit key handles.
