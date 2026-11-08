@@ -665,6 +665,21 @@ internal interface UniffiCallbackInterfaceKeyProviderMethod3 : com.sun.jna.Callb
 internal interface UniffiCallbackInterfaceBlobSourceMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`path`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceControllerProviderMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceControllerProviderMethod1 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceControllerProviderMethod2 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`body`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceControllerProviderMethod3 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`peer`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceControllerProviderMethod4 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`challenge`: RustBuffer.ByValue,`prfSalt`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceEngineRecordSourceMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`path`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -712,6 +727,37 @@ internal open class UniffiVTableCallbackInterfaceBlobSource(
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `read` = other.`read`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "descriptor", "form", "sign", "agree", "assert")
+internal open class UniffiVTableCallbackInterfaceControllerProvider(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `descriptor`: UniffiCallbackInterfaceControllerProviderMethod0? = null,
+    @JvmField internal var `form`: UniffiCallbackInterfaceControllerProviderMethod1? = null,
+    @JvmField internal var `sign`: UniffiCallbackInterfaceControllerProviderMethod2? = null,
+    @JvmField internal var `agree`: UniffiCallbackInterfaceControllerProviderMethod3? = null,
+    @JvmField internal var `assert`: UniffiCallbackInterfaceControllerProviderMethod4? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `descriptor`: UniffiCallbackInterfaceControllerProviderMethod0? = null,
+        `form`: UniffiCallbackInterfaceControllerProviderMethod1? = null,
+        `sign`: UniffiCallbackInterfaceControllerProviderMethod2? = null,
+        `agree`: UniffiCallbackInterfaceControllerProviderMethod3? = null,
+        `assert`: UniffiCallbackInterfaceControllerProviderMethod4? = null,
+    ): UniffiVTableCallbackInterfaceControllerProvider(`uniffiFree`,`uniffiClone`,`descriptor`,`form`,`sign`,`agree`,`assert`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceControllerProvider) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `descriptor` = other.`descriptor`
+        `form` = other.`form`
+        `sign` = other.`sign`
+        `agree` = other.`agree`
+        `assert` = other.`assert`
     }
 
 }
@@ -773,9 +819,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_reconcile_import_prefix(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_func_parse_registration(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_vault_public(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_func_webauthn_prf_input(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_func_bind_legacy_import_state(
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_import_legacy_batch(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_hostaction_advance_create(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_hostaction_finish(
     ): Int
@@ -785,15 +839,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_hostaction_signing_steps(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_hostaction_finish_authority(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_hostaction_sign_controller_with(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_approve(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_call(
     ): Int
-    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_handover(
-    ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout(
-    ): Int
-    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recover(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_revoke(
     ): Int
@@ -845,9 +899,55 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativelibrary_records_at(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_add_controller(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_add_passkey(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_combined_slot(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import_grant(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_keyring(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_prf_slot(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recovery_add(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_rekey(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_remove_controller(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_begin_unlock_slots(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_build_sealed_slot(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_eligible_signers(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_finish_authority(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_finish_combined_slot(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_finish_prf_slot(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_finish_unlock_slot(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_keyring(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_prepare_authority(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_nativelibrary_select_controller(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativeblobwriter_push(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_combinedslotaction_inputs(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_prfaction_challenge(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_prfaction_descriptor(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_prfaction_salt(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_nativecheckpointopening_agreement_peer(
     ): Int
@@ -931,6 +1031,16 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_blobsource_read(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_controllerprovider_descriptor(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_controllerprovider_form(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_controllerprovider_sign(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_controllerprovider_agree(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_controllerprovider_assert(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_enginerecordsource_read(
     ): Int
     external fun ffi_colophon_ffi_uniffi_contract_version(
@@ -950,6 +1060,7 @@ internal object UniffiLib {
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "colophon_ffi"))
         uniffiCallbackInterfaceBlobSource.register(this)
+        uniffiCallbackInterfaceControllerProvider.register(this)
         uniffiCallbackInterfaceEngineRecordSource.register(this)
         uniffiCallbackInterfaceKeyProvider.register(this)
         
@@ -960,6 +1071,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_colophon_ffi_fn_free_hostaction(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_colophon_ffi_fn_method_hostaction_advance_create(`ptr`: Long,`signatures`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_colophon_ffi_fn_method_hostaction_finish(`ptr`: Long,`signatures`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_hostaction_record_paths(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -967,6 +1080,10 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_method_hostaction_sign_with(`ptr`: Long,`keys`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_hostaction_signing_steps(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_hostaction_finish_authority(`ptr`: Long,`results`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_hostaction_sign_controller_with(`ptr`: Long,`keys`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_clone_nativelibrary(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -978,11 +1095,7 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_call(`ptr`: Long,`tool`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_handover(`ptr`: Long,`newRoot`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_layout(`ptr`: Long,`layout`: Int,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_recover(`ptr`: Long,`newRoot`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_revoke(`ptr`: Long,`memberId`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1034,6 +1147,44 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativelibrary_records_at(`ptr`: Long,`paths`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_add_controller(`ptr`: Long,`controller`: RustBuffer.ByValue,`slot`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_add_passkey(`ptr`: Long,`controller`: RustBuffer.ByValue,`slot`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_combined_slot(`ptr`: Long,`parts`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`newSeed`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_import_grant(`ptr`: Long,`request`: RustBuffer.ByValue,`grant`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_keyring(`ptr`: Long,`keyring`: RustBuffer.ByValue,`newSeed`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_prf_slot(`ptr`: Long,`descriptor`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_recovery_add(`ptr`: Long,`controller`: RustBuffer.ByValue,`slot`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_rekey(`ptr`: Long,`namespaces`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_remove_controller(`ptr`: Long,`id`: RustBuffer.ByValue,`newSeed`: RustBuffer.ByValue,`slots`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_begin_unlock_slots(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_build_sealed_slot(`ptr`: Long,`controller`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`newSeed`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_eligible_signers(`ptr`: Long,`action`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_finish_authority(`ptr`: Long,`action`: Long,`results`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_finish_combined_slot(`ptr`: Long,`action`: Long,`secrets`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_finish_prf_slot(`ptr`: Long,`action`: Long,`result`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`newSeed`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_finish_unlock_slot(`ptr`: Long,`option`: RustBuffer.ByValue,`secrets`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_keyring(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_prepare_authority(`ptr`: Long,`action`: RustBuffer.ByValue,`by`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_nativelibrary_select_controller(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_colophon_ffi_fn_clone_nativeblobwriter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_free_nativeblobwriter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1041,6 +1192,22 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_method_nativeblobwriter_finish(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_nativeblobwriter_push(`ptr`: Long,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_clone_combinedslotaction(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_free_combinedslotaction(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_colophon_ffi_fn_method_combinedslotaction_inputs(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_clone_prfaction(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_free_prfaction(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_colophon_ffi_fn_method_prfaction_challenge(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_prfaction_descriptor(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_method_prfaction_salt(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_clone_nativecheckpointkey(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1132,9 +1299,11 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_colophon_ffi_fn_init_callback_vtable_blobsource(`vtable`: UniffiVTableCallbackInterfaceBlobSource,
     ): Unit
+    external fun uniffi_colophon_ffi_fn_init_callback_vtable_controllerprovider(`vtable`: UniffiVTableCallbackInterfaceControllerProvider,
+    ): Unit
     external fun uniffi_colophon_ffi_fn_init_callback_vtable_enginerecordsource(`vtable`: UniffiVTableCallbackInterfaceEngineRecordSource,
     ): Unit
-    external fun uniffi_colophon_ffi_fn_func_begin_create(`owner`: RustBuffer.ByValue,`recovery`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`ownerLabel`: RustBuffer.ByValue,`namespaces`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_colophon_ffi_fn_func_begin_create(`owner`: RustBuffer.ByValue,`controller`: RustBuffer.ByValue,`vaultSeed`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`ownerLabel`: RustBuffer.ByValue,`namespaces`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_func_begin_request(`libraryId`: RustBuffer.ByValue,`keys`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`namespaces`: RustBuffer.ByValue,`access`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1147,6 +1316,12 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_func_import_output_id(`library`: RustBuffer.ByValue,`namespace`: RustBuffer.ByValue,`batch`: RustBuffer.ByValue,`child`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_reconcile_import_prefix(`previous`: RustBuffer.ByValue,`current`: RustBuffer.ByValue,`importedHeads`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_parse_registration(`attestationObject`: RustBuffer.ByValue,`rp`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_vault_public(`seedBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_colophon_ffi_fn_func_webauthn_prf_input(`salt`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_func_bind_legacy_import_state(`namespace`: RustBuffer.ByValue,`stateJson`: RustBuffer.ByValue,`outputs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1271,7 +1446,7 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if ((lib.uniffi_colophon_ffi_checksum_func_begin_create() and 0xFFFF) != 28067) {
+    if ((lib.uniffi_colophon_ffi_checksum_func_begin_create() and 0xFFFF) != 14963) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_begin_request() and 0xFFFF) != 1798) {
@@ -1292,10 +1467,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_func_reconcile_import_prefix() and 0xFFFF) != 30375) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_func_parse_registration() and 0xFFFF) != 23766) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_vault_public() and 0xFFFF) != 1751) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_webauthn_prf_input() and 0xFFFF) != 46537) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_func_bind_legacy_import_state() and 0xFFFF) != 14834) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_import_legacy_batch() and 0xFFFF) != 60451) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_advance_create() and 0xFFFF) != 19521) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_finish() and 0xFFFF) != 36295) {
@@ -1310,19 +1497,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_signing_steps() and 0xFFFF) != 47812) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_finish_authority() and 0xFFFF) != 18383) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_hostaction_sign_controller_with() and 0xFFFF) != 47071) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_approve() and 0xFFFF) != 2763) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_call() and 0xFFFF) != 53600) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_handover() and 0xFFFF) != 34363) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout() and 0xFFFF) != 57923) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recover() and 0xFFFF) != 26094) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout() and 0xFFFF) != 11927) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_revoke() and 0xFFFF) != 25240) {
@@ -1358,7 +1545,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_merge() and 0xFFFF) != 51897) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_query() and 0xFFFF) != 28303) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_query() and 0xFFFF) != 21892) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_ready_with() and 0xFFFF) != 23978) {
@@ -1400,10 +1587,79 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_records_at() and 0xFFFF) != 8933) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_add_controller() and 0xFFFF) != 31436) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_add_passkey() and 0xFFFF) != 20436) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_combined_slot() and 0xFFFF) != 64515) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import_grant() and 0xFFFF) != 7592) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_keyring() and 0xFFFF) != 19783) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_prf_slot() and 0xFFFF) != 56827) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recovery_add() and 0xFFFF) != 26768) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_rekey() and 0xFFFF) != 25813) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_remove_controller() and 0xFFFF) != 63895) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_begin_unlock_slots() and 0xFFFF) != 11287) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_build_sealed_slot() and 0xFFFF) != 2596) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_eligible_signers() and 0xFFFF) != 9751) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_finish_authority() and 0xFFFF) != 12204) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_finish_combined_slot() and 0xFFFF) != 51527) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_finish_prf_slot() and 0xFFFF) != 10958) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_finish_unlock_slot() and 0xFFFF) != 37632) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_keyring() and 0xFFFF) != 51373) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_prepare_authority() and 0xFFFF) != 29896) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_nativelibrary_select_controller() and 0xFFFF) != 56359) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish() and 0xFFFF) != 7658) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativeblobwriter_push() and 0xFFFF) != 42511) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_combinedslotaction_inputs() and 0xFFFF) != 42850) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_prfaction_challenge() and 0xFFFF) != 4685) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_prfaction_descriptor() and 0xFFFF) != 11006) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_prfaction_salt() and 0xFFFF) != 43912) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_nativecheckpointopening_agreement_peer() and 0xFFFF) != 34623) {
@@ -1527,6 +1783,21 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_blobsource_read() and 0xFFFF) != 32010) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_controllerprovider_descriptor() and 0xFFFF) != 22289) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_controllerprovider_form() and 0xFFFF) != 27210) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_controllerprovider_sign() and 0xFFFF) != 30147) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_controllerprovider_agree() and 0xFFFF) != 28811) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_controllerprovider_assert() and 0xFFFF) != 37373) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_enginerecordsource_read() and 0xFFFF) != 9929) {
@@ -1961,7 +2232,279 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //
 
 
+/**
+ * A combined slot that cannot be published until all parts reopen the correct vault.
+ */
+public interface CombinedSlotActionInterface {
+    
+    /**
+     * Ordered ECDH inputs and exact PRF salts for the mandatory reopen check.
+     */
+    fun `inputs`(): List<SlotInput>
+    
+    companion object
+}
+
+/**
+ * A combined slot that cannot be published until all parts reopen the correct vault.
+ */
+open class CombinedSlotAction: Disposable, AutoCloseable, CombinedSlotActionInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_colophon_ffi_fn_free_combinedslotaction(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_colophon_ffi_fn_clone_combinedslotaction(handle, status)
+        }
+    }
+
+    
+    /**
+     * Ordered ECDH inputs and exact PRF salts for the mandatory reopen check.
+     */override fun `inputs`(): List<SlotInput> {
+            return FfiConverterSequenceTypeSlotInput.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_combinedslotaction_inputs(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCombinedSlotAction: FfiConverter<CombinedSlotAction, Long> {
+    override fun lower(value: CombinedSlotAction): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): CombinedSlotAction {
+        return CombinedSlotAction(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): CombinedSlotAction {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: CombinedSlotAction) = 8UL
+
+    override fun write(value: CombinedSlotAction, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
 public interface HostActionInterface {
+    
+    /**
+     * Complete the first creation round and return its grant/layout signing round.
+     */
+    fun `advanceCreate`(`signatures`: List<kotlin.ByteArray>): HostAction
     
     /**
      * Verify every host signature, returning an immutable batch for creation or a request.
@@ -1977,6 +2520,16 @@ public interface HostActionInterface {
     fun `signWith`(`keys`: KeyProvider): List<kotlin.ByteArray>
     
     fun `signingSteps`(): List<SigningStep>
+    
+    /**
+     * Finish exact signatures and assertions with core verification before returning records.
+     */
+    fun `finishAuthority`(`results`: List<SignatureResult>): Map<kotlin.String, kotlin.ByteArray>
+    
+    /**
+     * Drive a single local controller without holding a session lock.
+     */
+    fun `signControllerWith`(`keys`: ControllerProvider): List<SignatureResult>
     
     companion object
 }
@@ -2084,6 +2637,24 @@ open class HostAction: Disposable, AutoCloseable, HostActionInterface
 
     
     /**
+     * Complete the first creation round and return its grant/layout signing round.
+     */
+    @Throws(BindingException::class)override fun `advanceCreate`(`signatures`: List<kotlin.ByteArray>): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_hostaction_advance_create(
+        it,
+        
+        FfiConverterSequenceByteArray.lower(`signatures`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Verify every host signature, returning an immutable batch for creation or a request.
      * For a session mutation use commit, which also checks the revision.
      */
@@ -2139,6 +2710,42 @@ open class HostAction: Disposable, AutoCloseable, HostActionInterface
     UniffiLib.uniffi_colophon_ffi_fn_method_hostaction_signing_steps(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Finish exact signatures and assertions with core verification before returning records.
+     */
+    @Throws(BindingException::class)override fun `finishAuthority`(`results`: List<SignatureResult>): Map<kotlin.String, kotlin.ByteArray> {
+            return FfiConverterMapStringByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_hostaction_finish_authority(
+        it,
+        
+        FfiConverterSequenceTypeSignatureResult.lower(`results`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Drive a single local controller without holding a session lock.
+     */
+    @Throws(BindingException::class)override fun `signControllerWith`(`keys`: ControllerProvider): List<SignatureResult> {
+            return FfiConverterSequenceTypeSignatureResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_hostaction_sign_controller_with(
+        it,
+        
+        FfiConverterTypeControllerProvider.lower(`keys`),_status)
 }
     }
     )
@@ -4145,14 +4752,10 @@ public interface NativeLibraryInterface {
     
     fun `beginCall`(`tool`: kotlin.String, `input`: kotlin.ByteArray, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedCall
     
-    fun `beginHandover`(`newRoot`: PublicKeys, `label`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
-    
     /**
-     * Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+     * Prepare a controller-approved storage layout raise. Hosts present compatibility confirmation.
      */
     fun `beginLayout`(`layout`: kotlin.UInt, `now`: kotlin.String): PreparedAction
-    
-    fun `beginRecover`(`newRoot`: PublicKeys, `label`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
     
     fun `beginRevoke`(`memberId`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
     
@@ -4183,7 +4786,7 @@ public interface NativeLibraryInterface {
     fun `merge`(`records`: Map<kotlin.String, kotlin.ByteArray>): ChangeSummary
     
     /**
-     * Read a named domain query without tool-name collisions or preparing a write.
+     * Read a named domain query without preparing a write.
      */
     fun `query`(`namespace`: kotlin.String, `name`: kotlin.String, `arguments`: kotlin.ByteArray, `now`: kotlin.String): JsonOutcome
     
@@ -4229,6 +4832,102 @@ public interface NativeLibraryInterface {
      * Lets hosts persist a write's new records without copying the whole record map.
      */
     fun `recordsAt`(`paths`: List<kotlin.String>): Map<kotlin.String, kotlin.ByteArray>
+    
+    /**
+     * Add a controller with an optional checked slot under control or recovery authorization.
+     */
+    fun `beginAddController`(`controller`: kotlin.ByteArray, `slot`: kotlin.ByteArray?, `signers`: List<kotlin.String>, `now`: kotlin.String): HostAction
+    
+    /**
+     * Add a passkey using the slot checked by finish_prf_slot.
+     */
+    fun `beginAddPasskey`(`controller`: kotlin.ByteArray, `slot`: kotlin.ByteArray, `signers`: List<kotlin.String>, `now`: kotlin.String): HostAction
+    
+    /**
+     * Verify new PRF parts and construct a combined route with fresh sealed part secrets.
+     */
+    fun `beginCombinedSlot`(`parts`: List<CombinedSlotPart>, `label`: kotlin.String, `newSeed`: kotlin.ByteArray?, `entropy`: kotlin.ByteArray): CombinedSlotAction
+    
+    /**
+     * Grant explicit scoped, expiring import power under the control rule.
+     */
+    fun `beginImportGrant`(`request`: kotlin.ByteArray, `grant`: kotlin.ByteArray, `signers`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction
+    
+    /**
+     * Replace the keyring, including threshold, role, slot and vault changes.
+     */
+    fun `beginKeyring`(`keyring`: kotlin.ByteArray, `newSeed`: kotlin.ByteArray?, `signers`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction
+    
+    /**
+     * Begin a fresh get ceremony before building a PRF slot. Registration outputs cannot finish it.
+     */
+    fun `beginPrfSlot`(`descriptor`: kotlin.ByteArray, `entropy`: kotlin.ByteArray): PrfAction
+    
+    /**
+     * Recovery only-adds action; the core verifies the prior recovery quorum and role limits.
+     */
+    fun `beginRecoveryAdd`(`controller`: kotlin.ByteArray, `slot`: kotlin.ByteArray?, `signers`: List<kotlin.String>, `now`: kotlin.String): HostAction
+    
+    /**
+     * Introduce namespace epochs using the selected controller.
+     */
+    fun `beginRekey`(`namespaces`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction
+    
+    /**
+     * Remove a controller, rotate the vault and reseal history to the replacement slots.
+     */
+    fun `beginRemoveController`(`id`: kotlin.String, `newSeed`: kotlin.ByteArray, `slots`: List<kotlin.ByteArray>, `signers`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction
+    
+    /**
+     * All current vault slot options with ordered HPKE encapsulations and PRF salts.
+     */
+    fun `beginUnlockSlots`(): List<SlotOption>
+    
+    /**
+     * Build an HPKE slot for the current vault or a fresh rotation seed; returns protocol JSON.
+     */
+    fun `buildSealedSlot`(`controller`: kotlin.ByteArray, `label`: kotlin.String, `newSeed`: kotlin.ByteArray?, `entropy`: kotlin.ByteArray): kotlin.ByteArray
+    
+    /**
+     * Candidate controllers and forms for a rule, before choosing a complete signer quorum.
+     * `keyring` candidates include control and recovery; the core rejects mixed-role quorums.
+     */
+    fun `eligibleSigners`(`action`: kotlin.ByteArray): List<kotlin.ByteArray>
+    
+    /**
+     * Verify every signature and assertion before an optimistic atomic commit.
+     */
+    fun `finishAuthority`(`action`: HostAction, `results`: List<SignatureResult>): ChangeSummary
+    
+    /**
+     * Reopen every combined part and check the vault before returning publishable slot JSON.
+     */
+    fun `finishCombinedSlot`(`action`: CombinedSlotAction, `secrets`: List<SlotSecret>): kotlin.ByteArray
+    
+    /**
+     * Verify the new credential, build its slot and reopen with the same output before publication.
+     */
+    fun `finishPrfSlot`(`action`: PrfAction, `result`: WebauthnResult, `label`: kotlin.String, `newSeed`: kotlin.ByteArray?, `entropy`: kotlin.ByteArray): kotlin.ByteArray
+    
+    /**
+     * Atomically check the vault and open historical epochs; failure leaves the session untouched.
+     */
+    fun `finishUnlockSlot`(`option`: SlotOption, `secrets`: List<SlotSecret>): ChangeSummary
+    
+    /**
+     * Current keyring in exact protocol JSON schema.
+     */
+    fun `keyring`(): kotlin.ByteArray
+    
+    /**
+     * Prepare an authority/4 action (protocol JSON) with explicit primary and cosigners.
+     */
+    fun `prepareAuthority`(`action`: kotlin.ByteArray, `by`: kotlin.String, `signers`: List<kotlin.String>, `now`: kotlin.String): HostAction
+    
+    /**
+     * Select a controller for convenience grant, revoke, rekey and layout actions.
+     */
+    fun `selectController`(`id`: kotlin.String)
     
     companion object
 }
@@ -4374,26 +5073,8 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
     
 
     
-    @Throws(BindingException::class)override fun `beginHandover`(`newRoot`: PublicKeys, `label`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction {
-            return FfiConverterTypePreparedAction.lift(
-    callWithHandle {
-    uniffiRustCallWithError(BindingException) { _status ->
-    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_handover(
-        it,
-        
-        FfiConverterTypePublicKeys.lower(`newRoot`),
-        FfiConverterString.lower(`label`),
-        FfiConverterString.lower(`now`),
-        FfiConverterByteArray.lower(`entropy`),_status)
-}
-    }
-    )
-    }
-    
-
-    
     /**
-     * Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+     * Prepare a controller-approved storage layout raise. Hosts present compatibility confirmation.
      */
     @Throws(BindingException::class)override fun `beginLayout`(`layout`: kotlin.UInt, `now`: kotlin.String): PreparedAction {
             return FfiConverterTypePreparedAction.lift(
@@ -4404,24 +5085,6 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
         
         FfiConverterUInt.lower(`layout`),
         FfiConverterString.lower(`now`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    @Throws(BindingException::class)override fun `beginRecover`(`newRoot`: PublicKeys, `label`: kotlin.String, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction {
-            return FfiConverterTypePreparedAction.lift(
-    callWithHandle {
-    uniffiRustCallWithError(BindingException) { _status ->
-    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_recover(
-        it,
-        
-        FfiConverterTypePublicKeys.lower(`newRoot`),
-        FfiConverterString.lower(`label`),
-        FfiConverterString.lower(`now`),
-        FfiConverterByteArray.lower(`entropy`),_status)
 }
     }
     )
@@ -4606,7 +5269,7 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
 
     
     /**
-     * Read a named domain query without tool-name collisions or preparing a write.
+     * Read a named domain query without preparing a write.
      */
     @Throws(BindingException::class)override fun `query`(`namespace`: kotlin.String, `name`: kotlin.String, `arguments`: kotlin.ByteArray, `now`: kotlin.String): JsonOutcome {
             return FfiConverterTypeJsonOutcome.lift(
@@ -4854,6 +5517,387 @@ open class NativeLibrary: Disposable, AutoCloseable, NativeLibraryInterface
     
 
     
+    /**
+     * Add a controller with an optional checked slot under control or recovery authorization.
+     */
+    @Throws(BindingException::class)override fun `beginAddController`(`controller`: kotlin.ByteArray, `slot`: kotlin.ByteArray?, `signers`: List<kotlin.String>, `now`: kotlin.String): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_add_controller(
+        it,
+        
+        FfiConverterByteArray.lower(`controller`),
+        FfiConverterOptionalByteArray.lower(`slot`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterString.lower(`now`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Add a passkey using the slot checked by finish_prf_slot.
+     */
+    @Throws(BindingException::class)override fun `beginAddPasskey`(`controller`: kotlin.ByteArray, `slot`: kotlin.ByteArray, `signers`: List<kotlin.String>, `now`: kotlin.String): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_add_passkey(
+        it,
+        
+        FfiConverterByteArray.lower(`controller`),
+        FfiConverterByteArray.lower(`slot`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterString.lower(`now`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Verify new PRF parts and construct a combined route with fresh sealed part secrets.
+     */
+    @Throws(BindingException::class)override fun `beginCombinedSlot`(`parts`: List<CombinedSlotPart>, `label`: kotlin.String, `newSeed`: kotlin.ByteArray?, `entropy`: kotlin.ByteArray): CombinedSlotAction {
+            return FfiConverterTypeCombinedSlotAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_combined_slot(
+        it,
+        
+        FfiConverterSequenceTypeCombinedSlotPart.lower(`parts`),
+        FfiConverterString.lower(`label`),
+        FfiConverterOptionalByteArray.lower(`newSeed`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Grant explicit scoped, expiring import power under the control rule.
+     */
+    @Throws(BindingException::class)override fun `beginImportGrant`(`request`: kotlin.ByteArray, `grant`: kotlin.ByteArray, `signers`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_import_grant(
+        it,
+        
+        FfiConverterByteArray.lower(`request`),
+        FfiConverterByteArray.lower(`grant`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterString.lower(`now`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Replace the keyring, including threshold, role, slot and vault changes.
+     */
+    @Throws(BindingException::class)override fun `beginKeyring`(`keyring`: kotlin.ByteArray, `newSeed`: kotlin.ByteArray?, `signers`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_keyring(
+        it,
+        
+        FfiConverterByteArray.lower(`keyring`),
+        FfiConverterOptionalByteArray.lower(`newSeed`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterString.lower(`now`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Begin a fresh get ceremony before building a PRF slot. Registration outputs cannot finish it.
+     */
+    @Throws(BindingException::class)override fun `beginPrfSlot`(`descriptor`: kotlin.ByteArray, `entropy`: kotlin.ByteArray): PrfAction {
+            return FfiConverterTypePrfAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_prf_slot(
+        it,
+        
+        FfiConverterByteArray.lower(`descriptor`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Recovery only-adds action; the core verifies the prior recovery quorum and role limits.
+     */
+    @Throws(BindingException::class)override fun `beginRecoveryAdd`(`controller`: kotlin.ByteArray, `slot`: kotlin.ByteArray?, `signers`: List<kotlin.String>, `now`: kotlin.String): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_recovery_add(
+        it,
+        
+        FfiConverterByteArray.lower(`controller`),
+        FfiConverterOptionalByteArray.lower(`slot`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterString.lower(`now`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Introduce namespace epochs using the selected controller.
+     */
+    @Throws(BindingException::class)override fun `beginRekey`(`namespaces`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): PreparedAction {
+            return FfiConverterTypePreparedAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_rekey(
+        it,
+        
+        FfiConverterSequenceString.lower(`namespaces`),
+        FfiConverterString.lower(`now`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Remove a controller, rotate the vault and reseal history to the replacement slots.
+     */
+    @Throws(BindingException::class)override fun `beginRemoveController`(`id`: kotlin.String, `newSeed`: kotlin.ByteArray, `slots`: List<kotlin.ByteArray>, `signers`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_remove_controller(
+        it,
+        
+        FfiConverterString.lower(`id`),
+        FfiConverterByteArray.lower(`newSeed`),
+        FfiConverterSequenceByteArray.lower(`slots`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterString.lower(`now`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * All current vault slot options with ordered HPKE encapsulations and PRF salts.
+     */
+    @Throws(BindingException::class)override fun `beginUnlockSlots`(): List<SlotOption> {
+            return FfiConverterSequenceTypeSlotOption.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_begin_unlock_slots(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Build an HPKE slot for the current vault or a fresh rotation seed; returns protocol JSON.
+     */
+    @Throws(BindingException::class)override fun `buildSealedSlot`(`controller`: kotlin.ByteArray, `label`: kotlin.String, `newSeed`: kotlin.ByteArray?, `entropy`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_build_sealed_slot(
+        it,
+        
+        FfiConverterByteArray.lower(`controller`),
+        FfiConverterString.lower(`label`),
+        FfiConverterOptionalByteArray.lower(`newSeed`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Candidate controllers and forms for a rule, before choosing a complete signer quorum.
+     * `keyring` candidates include control and recovery; the core rejects mixed-role quorums.
+     */
+    @Throws(BindingException::class)override fun `eligibleSigners`(`action`: kotlin.ByteArray): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_eligible_signers(
+        it,
+        
+        FfiConverterByteArray.lower(`action`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Verify every signature and assertion before an optimistic atomic commit.
+     */
+    @Throws(BindingException::class)override fun `finishAuthority`(`action`: HostAction, `results`: List<SignatureResult>): ChangeSummary {
+            return FfiConverterTypeChangeSummary.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_finish_authority(
+        it,
+        
+        FfiConverterTypeHostAction.lower(`action`),
+        FfiConverterSequenceTypeSignatureResult.lower(`results`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Reopen every combined part and check the vault before returning publishable slot JSON.
+     */
+    @Throws(BindingException::class)override fun `finishCombinedSlot`(`action`: CombinedSlotAction, `secrets`: List<SlotSecret>): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_finish_combined_slot(
+        it,
+        
+        FfiConverterTypeCombinedSlotAction.lower(`action`),
+        FfiConverterSequenceTypeSlotSecret.lower(`secrets`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Verify the new credential, build its slot and reopen with the same output before publication.
+     */
+    @Throws(BindingException::class)override fun `finishPrfSlot`(`action`: PrfAction, `result`: WebauthnResult, `label`: kotlin.String, `newSeed`: kotlin.ByteArray?, `entropy`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_finish_prf_slot(
+        it,
+        
+        FfiConverterTypePrfAction.lower(`action`),
+        FfiConverterTypeWebauthnResult.lower(`result`),
+        FfiConverterString.lower(`label`),
+        FfiConverterOptionalByteArray.lower(`newSeed`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Atomically check the vault and open historical epochs; failure leaves the session untouched.
+     */
+    @Throws(BindingException::class)override fun `finishUnlockSlot`(`option`: SlotOption, `secrets`: List<SlotSecret>): ChangeSummary {
+            return FfiConverterTypeChangeSummary.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_finish_unlock_slot(
+        it,
+        
+        FfiConverterTypeSlotOption.lower(`option`),
+        FfiConverterSequenceTypeSlotSecret.lower(`secrets`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Current keyring in exact protocol JSON schema.
+     */
+    @Throws(BindingException::class)override fun `keyring`(): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_keyring(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Prepare an authority/4 action (protocol JSON) with explicit primary and cosigners.
+     */
+    @Throws(BindingException::class)override fun `prepareAuthority`(`action`: kotlin.ByteArray, `by`: kotlin.String, `signers`: List<kotlin.String>, `now`: kotlin.String): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_prepare_authority(
+        it,
+        
+        FfiConverterByteArray.lower(`action`),
+        FfiConverterString.lower(`by`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterString.lower(`now`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Select a controller for convenience grant, revoke, rekey and layout actions.
+     */
+    @Throws(BindingException::class)override fun `selectController`(`id`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_nativelibrary_select_controller(
+        it,
+        
+        FfiConverterString.lower(`id`),_status)
+}
+    }
+    
+    
+
+    
 
     
 
@@ -4899,6 +5943,315 @@ public object FfiConverterTypeNativeLibrary: FfiConverter<NativeLibrary, Long> {
     override fun allocationSize(value: NativeLibrary) = 8UL
 
     override fun write(value: NativeLibrary, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * Single-use fresh get ceremony, bound to a session revision and a new credential.
+ */
+public interface PrfActionInterface {
+    
+    /**
+     * Fresh unpadded base64url get challenge.
+     */
+    fun `challenge`(): kotlin.String
+    
+    /**
+     * Complete new credential descriptor; restrict get to exactly this credential.
+     */
+    fun `descriptor`(): kotlin.ByteArray
+    
+    /**
+     * Exact prf.eval.first input.
+     */
+    fun `salt`(): kotlin.ByteArray
+    
+    companion object
+}
+
+/**
+ * Single-use fresh get ceremony, bound to a session revision and a new credential.
+ */
+open class PrfAction: Disposable, AutoCloseable, PrfActionInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_colophon_ffi_fn_free_prfaction(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_colophon_ffi_fn_clone_prfaction(handle, status)
+        }
+    }
+
+    
+    /**
+     * Fresh unpadded base64url get challenge.
+     */override fun `challenge`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_prfaction_challenge(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Complete new credential descriptor; restrict get to exactly this credential.
+     */override fun `descriptor`(): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_prfaction_descriptor(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Exact prf.eval.first input.
+     */override fun `salt`(): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_prfaction_salt(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePrfAction: FfiConverter<PrfAction, Long> {
+    override fun lower(value: PrfAction): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): PrfAction {
+        return PrfAction(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): PrfAction {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: PrfAction) = 8UL
+
+    override fun write(value: PrfAction, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
@@ -5188,6 +6541,11 @@ public object FfiConverterTypeEngineWork: FfiConverterRustBuffer<EngineWork> {
 
 
 data class Grant (
+    /**
+     * Explicit import permission, present only as true in protocol JSON.
+     */
+    val `import`: kotlin.Boolean?
+    , 
     val `namespaces`: List<kotlin.String>
     , 
     val `access`: List<Access>
@@ -5211,6 +6569,7 @@ data class Grant (
 public object FfiConverterTypeGrant: FfiConverterRustBuffer<Grant> {
     override fun read(buf: ByteBuffer): Grant {
         return Grant(
+            FfiConverterOptionalBoolean.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterSequenceTypeAccess.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -5219,6 +6578,7 @@ public object FfiConverterTypeGrant: FfiConverterRustBuffer<Grant> {
     }
 
     override fun allocationSize(value: Grant) = (
+            FfiConverterOptionalBoolean.allocationSize(value.`import`) +
             FfiConverterSequenceString.allocationSize(value.`namespaces`) +
             FfiConverterSequenceTypeAccess.allocationSize(value.`access`) +
             FfiConverterOptionalString.allocationSize(value.`expires`) +
@@ -5226,6 +6586,7 @@ public object FfiConverterTypeGrant: FfiConverterRustBuffer<Grant> {
     )
 
     override fun write(value: Grant, buf: ByteBuffer) {
+            FfiConverterOptionalBoolean.write(value.`import`, buf)
             FfiConverterSequenceString.write(value.`namespaces`, buf)
             FfiConverterSequenceTypeAccess.write(value.`access`, buf)
             FfiConverterOptionalString.write(value.`expires`, buf)
@@ -5848,11 +7209,85 @@ public object FfiConverterTypeRejection: FfiConverterRustBuffer<Rejection> {
 
 
 
+/**
+ * Signature and optional assertion for one prepared signer.
+ */
+data class SignatureResult (
+    /**
+     * Raw r||s or DER according to the prepared descriptor.
+     */
+    val `signature`: kotlin.ByteArray
+    , 
+    /**
+     * Present only for WebAuthn; its signature must equal `signature`.
+     */
+    val `assertion`: WebauthnResult?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSignatureResult: FfiConverterRustBuffer<SignatureResult> {
+    override fun read(buf: ByteBuffer): SignatureResult {
+        return SignatureResult(
+            FfiConverterByteArray.read(buf),
+            FfiConverterOptionalTypeWebauthnResult.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SignatureResult) = (
+            FfiConverterByteArray.allocationSize(value.`signature`) +
+            FfiConverterOptionalTypeWebauthnResult.allocationSize(value.`assertion`)
+    )
+
+    override fun write(value: SignatureResult, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`signature`, buf)
+            FfiConverterOptionalTypeWebauthnResult.write(value.`assertion`, buf)
+    }
+}
+
+
+
+/**
+ * Exact body and form-specific host work for one signer.
+ */
 data class SigningStep (
+    /**
+     * Complete descriptor as protocol JSON, including credential metadata.
+     */
+    val `descriptor`: kotlin.ByteArray
+    , 
+    /**
+     * Signature form.
+     */
+    val `form`: KeyForm
+    , 
+    /**
+     * Unpadded base64url WebAuthn challenge when applicable.
+     */
+    val `challenge`: kotlin.String?
+    , 
+    /**
+     * Immutable destination path; cosigners share a path and body.
+     */
     val `path`: kotlin.String
     , 
+    /**
+     * Exact bytes to sign.
+     */
     val `body`: kotlin.ByteArray
     , 
+    /**
+     * Uncompressed P-256 signing point.
+     */
     val `signingKey`: kotlin.ByteArray
     
 ){
@@ -5870,6 +7305,9 @@ data class SigningStep (
 public object FfiConverterTypeSigningStep: FfiConverterRustBuffer<SigningStep> {
     override fun read(buf: ByteBuffer): SigningStep {
         return SigningStep(
+            FfiConverterByteArray.read(buf),
+            FfiConverterTypeKeyForm.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
@@ -5877,15 +7315,92 @@ public object FfiConverterTypeSigningStep: FfiConverterRustBuffer<SigningStep> {
     }
 
     override fun allocationSize(value: SigningStep) = (
+            FfiConverterByteArray.allocationSize(value.`descriptor`) +
+            FfiConverterTypeKeyForm.allocationSize(value.`form`) +
+            FfiConverterOptionalString.allocationSize(value.`challenge`) +
             FfiConverterString.allocationSize(value.`path`) +
             FfiConverterByteArray.allocationSize(value.`body`) +
             FfiConverterByteArray.allocationSize(value.`signingKey`)
     )
 
     override fun write(value: SigningStep, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`descriptor`, buf)
+            FfiConverterTypeKeyForm.write(value.`form`, buf)
+            FfiConverterOptionalString.write(value.`challenge`, buf)
             FfiConverterString.write(value.`path`, buf)
             FfiConverterByteArray.write(value.`body`, buf)
             FfiConverterByteArray.write(value.`signingKey`, buf)
+    }
+}
+
+
+
+/**
+ * A current slot, captured with the session revision for atomic opening.
+ */
+data class SlotOption (
+    /**
+     * Index in the current keyring.
+     */
+    val `index`: kotlin.ULong
+    , 
+    /**
+     * Display label.
+     */
+    val `label`: kotlin.String
+    , 
+    /**
+     * Session that issued this option.
+     */
+    val `session`: kotlin.ULong
+    , 
+    /**
+     * Session revision when prepared.
+     */
+    val `revision`: kotlin.ULong
+    , 
+    /**
+     * Ordered ECDH inputs and PRF salts.
+     */
+    val `inputs`: List<SlotInput>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSlotOption: FfiConverterRustBuffer<SlotOption> {
+    override fun read(buf: ByteBuffer): SlotOption {
+        return SlotOption(
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterSequenceTypeSlotInput.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SlotOption) = (
+            FfiConverterULong.allocationSize(value.`index`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterULong.allocationSize(value.`session`) +
+            FfiConverterULong.allocationSize(value.`revision`) +
+            FfiConverterSequenceTypeSlotInput.allocationSize(value.`inputs`)
+    )
+
+    override fun write(value: SlotOption, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`index`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterULong.write(value.`session`, buf)
+            FfiConverterULong.write(value.`revision`, buf)
+            FfiConverterSequenceTypeSlotInput.write(value.`inputs`, buf)
     }
 }
 
@@ -5967,6 +7482,69 @@ public object FfiConverterTypeUnlockResult: FfiConverterRustBuffer<UnlockResult>
     override fun write(value: UnlockResult, buf: ByteBuffer) {
             FfiConverterTypeAgreementStep.write(value.`step`, buf)
             FfiConverterByteArray.write(value.`shared`, buf)
+    }
+}
+
+
+
+/**
+ * Exact signed WebAuthn bytes and optional extension result.
+ */
+data class WebauthnResult (
+    /**
+     * DER ES256 signature.
+     */
+    val `signature`: kotlin.ByteArray
+    , 
+    /**
+     * Original authenticatorData bytes.
+     */
+    val `authenticatorData`: kotlin.ByteArray
+    , 
+    /**
+     * Original clientDataJSON bytes.
+     */
+    val `clientData`: kotlin.ByteArray
+    , 
+    /**
+     * Exact 32-byte results.first; absence fails PRF construction explicitly.
+     */
+    val `prf`: kotlin.ByteArray?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWebauthnResult: FfiConverterRustBuffer<WebauthnResult> {
+    override fun read(buf: ByteBuffer): WebauthnResult {
+        return WebauthnResult(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterOptionalByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WebauthnResult) = (
+            FfiConverterByteArray.allocationSize(value.`signature`) +
+            FfiConverterByteArray.allocationSize(value.`authenticatorData`) +
+            FfiConverterByteArray.allocationSize(value.`clientData`) +
+            FfiConverterOptionalByteArray.allocationSize(value.`prf`)
+    )
+
+    override fun write(value: WebauthnResult, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`signature`, buf)
+            FfiConverterByteArray.write(value.`authenticatorData`, buf)
+            FfiConverterByteArray.write(value.`clientData`, buf)
+            FfiConverterOptionalByteArray.write(value.`prf`, buf)
     }
 }
 
@@ -6362,6 +7940,140 @@ public object FfiConverterTypeBlobWriteOutcome : FfiConverterRustBuffer<BlobWrit
 
 
 
+/**
+ * One new combined-slot part; PRF parts require a fresh get ceremony and its result.
+ */
+sealed class CombinedSlotPart: Disposable  {
+    
+    /**
+     * Raw controller encoded as protocol JSON.
+     */
+    data class Sealed(
+        /**
+         * Complete raw controller in protocol JSON.
+         */
+        val `controller`: kotlin.ByteArray) : CombinedSlotPart()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * WebAuthn controller, fresh core ceremony and exact platform result.
+     */
+    data class Prf(
+        /**
+         * Complete WebAuthn controller in protocol JSON.
+         */
+        val `controller`: kotlin.ByteArray, 
+        /**
+         * Fresh core get ceremony restricted to this credential.
+         */
+        val `action`: com.luff.colophon.PrfAction, 
+        /**
+         * Exact platform assertion and PRF output.
+         */
+        val `result`: com.luff.colophon.WebauthnResult) : CombinedSlotPart()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+    @Suppress("UNNECESSARY_SAFE_CALL") // codegen is much simpler if we unconditionally emit safe calls here
+    override fun destroy() {
+        when(this) {
+            is CombinedSlotPart.Sealed -> {
+                
+    Disposable.destroy(
+        this.`controller`
+    )
+                
+            }
+            is CombinedSlotPart.Prf -> {
+                
+    Disposable.destroy(
+        this.`controller`,
+        this.`action`,
+        this.`result`
+    )
+                
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCombinedSlotPart : FfiConverterRustBuffer<CombinedSlotPart>{
+    override fun read(buf: ByteBuffer): CombinedSlotPart {
+        return when(buf.getInt()) {
+            1 -> CombinedSlotPart.Sealed(
+                FfiConverterByteArray.read(buf),
+                )
+            2 -> CombinedSlotPart.Prf(
+                FfiConverterByteArray.read(buf),
+                FfiConverterTypePrfAction.read(buf),
+                FfiConverterTypeWebauthnResult.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: CombinedSlotPart): ULong = when(value) {
+        is CombinedSlotPart.Sealed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterByteArray.allocationSize(value.`controller`)
+            )
+        }
+        is CombinedSlotPart.Prf -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterByteArray.allocationSize(value.`controller`)
+                + FfiConverterTypePrfAction.allocationSize(value.`action`)
+                + FfiConverterTypeWebauthnResult.allocationSize(value.`result`)
+            )
+        }
+    }
+
+    override fun write(value: CombinedSlotPart, buf: ByteBuffer) {
+        when(value) {
+            is CombinedSlotPart.Sealed -> {
+                buf.putInt(1)
+                FfiConverterByteArray.write(value.`controller`, buf)
+                Unit
+            }
+            is CombinedSlotPart.Prf -> {
+                buf.putInt(2)
+                FfiConverterByteArray.write(value.`controller`, buf)
+                FfiConverterTypePrfAction.write(value.`action`, buf)
+                FfiConverterTypeWebauthnResult.write(value.`result`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 
 enum class DenialReason {
     
@@ -6479,6 +8191,49 @@ public object FfiConverterTypeJsonOutcome : FfiConverterRustBuffer<JsonOutcome>{
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * Controller signature form.
+ */
+
+enum class KeyForm {
+    
+    /**
+     * Raw ES256 over the body.
+     */
+    RAW,
+    /**
+     * WebAuthn get assertion with a DER signature.
+     */
+    WEBAUTHN;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeKeyForm: FfiConverterRustBuffer<KeyForm> {
+    override fun read(buf: ByteBuffer) = try {
+        KeyForm.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: KeyForm) = 4UL
+
+    override fun write(value: KeyForm, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -6916,6 +8671,216 @@ public object FfiConverterTypePreparedCall : FfiConverterRustBuffer<PreparedCall
 
 
 
+/**
+ * One slot part's host work; order is significant for combined slots.
+ */
+sealed class SlotInput {
+    
+    /**
+     * Host ECDH against the HPKE encapsulation.
+     */
+    data class Ecdh(
+        /**
+         * Controller whose agreement key is needed.
+         */
+        val `controller`: kotlin.String, 
+        /**
+         * Uncompressed HPKE encapsulation.
+         */
+        val `enc`: kotlin.ByteArray) : SlotInput()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * Host WebAuthn PRF evaluation using this exact salt.
+     */
+    data class Prf(
+        /**
+         * Controller whose credential must evaluate the extension.
+         */
+        val `controller`: kotlin.String, 
+        /**
+         * Exact prf.eval.first input.
+         */
+        val `salt`: kotlin.ByteArray) : SlotInput()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSlotInput : FfiConverterRustBuffer<SlotInput>{
+    override fun read(buf: ByteBuffer): SlotInput {
+        return when(buf.getInt()) {
+            1 -> SlotInput.Ecdh(
+                FfiConverterString.read(buf),
+                FfiConverterByteArray.read(buf),
+                )
+            2 -> SlotInput.Prf(
+                FfiConverterString.read(buf),
+                FfiConverterByteArray.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: SlotInput): ULong = when(value) {
+        is SlotInput.Ecdh -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`controller`)
+                + FfiConverterByteArray.allocationSize(value.`enc`)
+            )
+        }
+        is SlotInput.Prf -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`controller`)
+                + FfiConverterByteArray.allocationSize(value.`salt`)
+            )
+        }
+    }
+
+    override fun write(value: SlotInput, buf: ByteBuffer) {
+        when(value) {
+            is SlotInput.Ecdh -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`controller`, buf)
+                FfiConverterByteArray.write(value.`enc`, buf)
+                Unit
+            }
+            is SlotInput.Prf -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`controller`, buf)
+                FfiConverterByteArray.write(value.`salt`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * One returned host secret in slot-part order.
+ */
+sealed class SlotSecret {
+    
+    /**
+     * Raw 32-byte ECDH result.
+     */
+    data class Ecdh(
+        /**
+         * Raw x-coordinate from host ECDH.
+         */
+        val `secret`: kotlin.ByteArray) : SlotSecret()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * Exact 32-byte WebAuthn PRF results.first.
+     */
+    data class Prf(
+        /**
+         * Exact platform results.first.
+         */
+        val `output`: kotlin.ByteArray) : SlotSecret()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSlotSecret : FfiConverterRustBuffer<SlotSecret>{
+    override fun read(buf: ByteBuffer): SlotSecret {
+        return when(buf.getInt()) {
+            1 -> SlotSecret.Ecdh(
+                FfiConverterByteArray.read(buf),
+                )
+            2 -> SlotSecret.Prf(
+                FfiConverterByteArray.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: SlotSecret): ULong = when(value) {
+        is SlotSecret.Ecdh -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterByteArray.allocationSize(value.`secret`)
+            )
+        }
+        is SlotSecret.Prf -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterByteArray.allocationSize(value.`output`)
+            )
+        }
+    }
+
+    override fun write(value: SlotSecret, buf: ByteBuffer) {
+        when(value) {
+            is SlotSecret.Ecdh -> {
+                buf.putInt(1)
+                FfiConverterByteArray.write(value.`secret`, buf)
+                Unit
+            }
+            is SlotSecret.Prf -> {
+                buf.putInt(2)
+                FfiConverterByteArray.write(value.`output`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 sealed class ViewOutcome {
     
     data class Success(
@@ -7064,6 +9029,169 @@ internal object uniffiCallbackInterfaceBlobSource {
  * @suppress
  */
 public object FfiConverterTypeBlobSource: FfiConverterCallbackInterface<BlobSource>()
+
+
+
+
+
+/**
+ * Synchronous controller provider; async hosts use the explicit begin/finish APIs.
+ * No callback is invoked while a session mutex is held.
+ */
+public interface ControllerProvider {
+    
+    /**
+     * Complete validated key descriptor in protocol JSON.
+     */
+    fun `descriptor`(): kotlin.ByteArray
+    
+    /**
+     * Report the signing form.
+     */
+    fun `form`(): KeyForm
+    
+    /**
+     * Sign exact raw body bytes.
+     */
+    fun `sign`(`body`: kotlin.ByteArray): kotlin.ByteArray
+    
+    /**
+     * Return a raw ECDH secret.
+     */
+    fun `agree`(`peer`: kotlin.ByteArray): kotlin.ByteArray
+    
+    /**
+     * Perform get restricted to this descriptor's credential; evaluate salt when supplied.
+     */
+    fun `assert`(`challenge`: kotlin.String, `prfSalt`: kotlin.ByteArray?): WebauthnResult
+    
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceControllerProvider {
+    internal object `descriptor`: UniffiCallbackInterfaceControllerProviderMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeControllerProvider.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`descriptor`(
+                )
+            }
+            val writeReturn = { value: kotlin.ByteArray -> uniffiOutReturn.setValue(FfiConverterByteArray.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: BindingException -> FfiConverterTypeBindingError.lower(e) }
+            )
+        }
+    }
+    internal object `form`: UniffiCallbackInterfaceControllerProviderMethod1 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeControllerProvider.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`form`(
+                )
+            }
+            val writeReturn = { value: KeyForm -> uniffiOutReturn.setValue(FfiConverterTypeKeyForm.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: BindingException -> FfiConverterTypeBindingError.lower(e) }
+            )
+        }
+    }
+    internal object `sign`: UniffiCallbackInterfaceControllerProviderMethod2 {
+        override fun callback(`uniffiHandle`: Long,`body`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeControllerProvider.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`sign`(
+                    FfiConverterByteArray.lift(`body`),
+                )
+            }
+            val writeReturn = { value: kotlin.ByteArray -> uniffiOutReturn.setValue(FfiConverterByteArray.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: BindingException -> FfiConverterTypeBindingError.lower(e) }
+            )
+        }
+    }
+    internal object `agree`: UniffiCallbackInterfaceControllerProviderMethod3 {
+        override fun callback(`uniffiHandle`: Long,`peer`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeControllerProvider.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`agree`(
+                    FfiConverterByteArray.lift(`peer`),
+                )
+            }
+            val writeReturn = { value: kotlin.ByteArray -> uniffiOutReturn.setValue(FfiConverterByteArray.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: BindingException -> FfiConverterTypeBindingError.lower(e) }
+            )
+        }
+    }
+    internal object `assert`: UniffiCallbackInterfaceControllerProviderMethod4 {
+        override fun callback(`uniffiHandle`: Long,`challenge`: RustBuffer.ByValue,`prfSalt`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeControllerProvider.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`assert`(
+                    FfiConverterString.lift(`challenge`),
+                    FfiConverterOptionalByteArray.lift(`prfSalt`),
+                )
+            }
+            val writeReturn = { value: WebauthnResult -> uniffiOutReturn.setValue(FfiConverterTypeWebauthnResult.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: BindingException -> FfiConverterTypeBindingError.lower(e) }
+            )
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeControllerProvider.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeControllerProvider.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceControllerProvider.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `descriptor`,
+        `form`,
+        `sign`,
+        `agree`,
+        `assert`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_colophon_ffi_fn_init_callback_vtable_controllerprovider(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeControllerProvider: FfiConverterCallbackInterface<ControllerProvider>()
 
 
 
@@ -7295,6 +9423,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
+    override fun read(buf: ByteBuffer): kotlin.Boolean? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterBoolean.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Boolean?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterBoolean.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Boolean?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterBoolean.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -7317,6 +9477,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
+    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterByteArray.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterByteArray.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterByteArray.write(value, buf)
         }
     }
 }
@@ -7413,6 +9605,38 @@ public object FfiConverterOptionalTypeGrantOptions: FfiConverterRustBuffer<Grant
         } else {
             buf.put(1)
             FfiConverterTypeGrantOptions.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWebauthnResult: FfiConverterRustBuffer<WebauthnResult?> {
+    override fun read(buf: ByteBuffer): WebauthnResult? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWebauthnResult.read(buf)
+    }
+
+    override fun allocationSize(value: WebauthnResult?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWebauthnResult.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WebauthnResult?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWebauthnResult.write(value, buf)
         }
     }
 }
@@ -7771,6 +9995,34 @@ public object FfiConverterSequenceTypeRejection: FfiConverterRustBuffer<List<Rej
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeSignatureResult: FfiConverterRustBuffer<List<SignatureResult>> {
+    override fun read(buf: ByteBuffer): List<SignatureResult> {
+        val len = buf.getInt()
+        return List<SignatureResult>(len) {
+            FfiConverterTypeSignatureResult.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<SignatureResult>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeSignatureResult.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<SignatureResult>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeSignatureResult.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeSigningStep: FfiConverterRustBuffer<List<SigningStep>> {
     override fun read(buf: ByteBuffer): List<SigningStep> {
         val len = buf.getInt()
@@ -7789,6 +10041,34 @@ public object FfiConverterSequenceTypeSigningStep: FfiConverterRustBuffer<List<S
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeSigningStep.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeSlotOption: FfiConverterRustBuffer<List<SlotOption>> {
+    override fun read(buf: ByteBuffer): List<SlotOption> {
+        val len = buf.getInt()
+        return List<SlotOption>(len) {
+            FfiConverterTypeSlotOption.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<SlotOption>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeSlotOption.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<SlotOption>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeSlotOption.write(it, buf)
         }
     }
 }
@@ -7873,6 +10153,90 @@ public object FfiConverterSequenceTypeAccess: FfiConverterRustBuffer<List<Access
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeAccess.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeCombinedSlotPart: FfiConverterRustBuffer<List<CombinedSlotPart>> {
+    override fun read(buf: ByteBuffer): List<CombinedSlotPart> {
+        val len = buf.getInt()
+        return List<CombinedSlotPart>(len) {
+            FfiConverterTypeCombinedSlotPart.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<CombinedSlotPart>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeCombinedSlotPart.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<CombinedSlotPart>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeCombinedSlotPart.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeSlotInput: FfiConverterRustBuffer<List<SlotInput>> {
+    override fun read(buf: ByteBuffer): List<SlotInput> {
+        val len = buf.getInt()
+        return List<SlotInput>(len) {
+            FfiConverterTypeSlotInput.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<SlotInput>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeSlotInput.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<SlotInput>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeSlotInput.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeSlotSecret: FfiConverterRustBuffer<List<SlotSecret>> {
+    override fun read(buf: ByteBuffer): List<SlotSecret> {
+        val len = buf.getInt()
+        return List<SlotSecret>(len) {
+            FfiConverterTypeSlotSecret.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<SlotSecret>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeSlotSecret.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<SlotSecret>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeSlotSecret.write(it, buf)
         }
     }
 }
@@ -7993,14 +10357,20 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         }
     }
 }
-    @Throws(BindingException::class) fun `beginCreate`(`owner`: PublicKeys, `recovery`: PublicKeys, `label`: kotlin.String, `ownerLabel`: kotlin.String, `namespaces`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction {
+        /**
+         * Prepare keyring genesis, epochs and a separate member request.
+         * Sign the first round, call `advance_create`, then finish its grant/layout round.
+         * `owner` is the content member; `controller` must be a separate host-owned identity.
+         */
+    @Throws(BindingException::class) fun `beginCreate`(`owner`: PublicKeys, `controller`: PublicKeys, `vaultSeed`: kotlin.ByteArray, `label`: kotlin.String, `ownerLabel`: kotlin.String, `namespaces`: List<kotlin.String>, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction {
             return FfiConverterTypeHostAction.lift(
     uniffiRustCallWithError(BindingException) { _status ->
     UniffiLib.uniffi_colophon_ffi_fn_func_begin_create(
     
         
         FfiConverterTypePublicKeys.lower(`owner`),
-        FfiConverterTypePublicKeys.lower(`recovery`),
+        FfiConverterTypePublicKeys.lower(`controller`),
+        FfiConverterByteArray.lower(`vaultSeed`),
         FfiConverterString.lower(`label`),
         FfiConverterString.lower(`ownerLabel`),
         FfiConverterSequenceString.lower(`namespaces`),
@@ -8092,6 +10462,52 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         FfiConverterByteArray.lower(`previous`),
         FfiConverterByteArray.lower(`current`),
         FfiConverterByteArray.lower(`importedHeads`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Parse registration without trusting or requiring attestation verification; returns descriptor JSON.
+         */
+    @Throws(BindingException::class) fun `parseRegistration`(`attestationObject`: kotlin.ByteArray, `rp`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_parse_registration(
+    
+        
+        FfiConverterByteArray.lower(`attestationObject`),
+        FfiConverterString.lower(`rp`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Derive only the vault public identity for a host-supplied fresh seed.
+         */
+    @Throws(BindingException::class) fun `vaultPublic`(`seedBytes`: kotlin.ByteArray): PublicKeys {
+            return FfiConverterTypePublicKeys.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_vault_public(
+    
+        
+        FfiConverterByteArray.lower(`seedBytes`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Transform a salt for hosts calling CTAP hmac-secret directly; use the UV-associated secret.
+         */
+    @Throws(BindingException::class) fun `webauthnPrfInput`(`salt`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_webauthn_prf_input(
+    
+        
+        FfiConverterByteArray.lower(`salt`),_status)
 }
     )
     }

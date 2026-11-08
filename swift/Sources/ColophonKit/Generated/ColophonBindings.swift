@@ -591,7 +591,141 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 
+/**
+ * A combined slot that cannot be published until all parts reopen the correct vault.
+ */
+public protocol CombinedSlotActionProtocol: AnyObject, Sendable {
+    
+    /**
+     * Ordered ECDH inputs and exact PRF salts for the mandatory reopen check.
+     */
+    func inputs()  -> [SlotInput]
+    
+}
+/**
+ * A combined slot that cannot be published until all parts reopen the correct vault.
+ */
+open class CombinedSlotAction: CombinedSlotActionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_combinedslotaction(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_combinedslotaction(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Ordered ECDH inputs and exact PRF salts for the mandatory reopen check.
+     */
+open func inputs() -> [SlotInput]  {
+    return try!  FfiConverterSequenceTypeSlotInput.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_combinedslotaction_inputs(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCombinedSlotAction: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = CombinedSlotAction
+
+    public static func lift(_ handle: UInt64) throws -> CombinedSlotAction {
+        return CombinedSlotAction(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: CombinedSlotAction) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CombinedSlotAction {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: CombinedSlotAction, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCombinedSlotAction_lift(_ handle: UInt64) throws -> CombinedSlotAction {
+    return try FfiConverterTypeCombinedSlotAction.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCombinedSlotAction_lower(_ value: CombinedSlotAction) -> UInt64 {
+    return FfiConverterTypeCombinedSlotAction.lower(value)
+}
+
+
+
+
+
+
 public protocol HostActionProtocol: AnyObject, Sendable {
+    
+    /**
+     * Complete the first creation round and return its grant/layout signing round.
+     */
+    func advanceCreate(signatures: [Data]) throws  -> HostAction
     
     /**
      * Verify every host signature, returning an immutable batch for creation or a request.
@@ -607,6 +741,16 @@ public protocol HostActionProtocol: AnyObject, Sendable {
     func signWith(keys: KeyProvider) throws  -> [Data]
     
     func signingSteps()  -> [SigningStep]
+    
+    /**
+     * Finish exact signatures and assertions with core verification before returning records.
+     */
+    func finishAuthority(results: [SignatureResult]) throws  -> [String: Data]
+    
+    /**
+     * Drive a single local controller without holding a session lock.
+     */
+    func signControllerWith(keys: ControllerProvider) throws  -> [SignatureResult]
     
 }
 open class HostAction: HostActionProtocol, @unchecked Sendable {
@@ -663,6 +807,19 @@ open class HostAction: HostActionProtocol, @unchecked Sendable {
 
     
     /**
+     * Complete the first creation round and return its grant/layout signing round.
+     */
+open func advanceCreate(signatures: [Data])throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_hostaction_advance_create(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceData.lower(signatures),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Verify every host signature, returning an immutable batch for creation or a request.
      * For a session mutation use commit, which also checks the revision.
      */
@@ -703,6 +860,32 @@ open func signingSteps() -> [SigningStep]  {
         uniffiCallStatus in
     uniffi_colophon_ffi_fn_method_hostaction_signing_steps(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Finish exact signatures and assertions with core verification before returning records.
+     */
+open func finishAuthority(results: [SignatureResult])throws  -> [String: Data]  {
+    return try  FfiConverterDictionaryStringData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_hostaction_finish_authority(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeSignatureResult.lower(results),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Drive a single local controller without holding a session lock.
+     */
+open func signControllerWith(keys: ControllerProvider)throws  -> [SignatureResult]  {
+    return try  FfiConverterSequenceTypeSignatureResult.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_hostaction_sign_controller_with(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceControllerProvider_lower(keys),uniffiCallStatus
     )
 })
 }
@@ -1782,14 +1965,10 @@ public protocol NativeLibraryProtocol: AnyObject, Sendable {
     
     func beginCall(tool: String, input: Data, now: String, entropy: Data) throws  -> PreparedCall
     
-    func beginHandover(newRoot: PublicKeys, label: String, now: String, entropy: Data) throws  -> PreparedAction
-    
     /**
-     * Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+     * Prepare a controller-approved storage layout raise. Hosts present compatibility confirmation.
      */
     func beginLayout(layout: UInt32, now: String) throws  -> PreparedAction
-    
-    func beginRecover(newRoot: PublicKeys, label: String, now: String, entropy: Data) throws  -> PreparedAction
     
     func beginRevoke(memberId: String, now: String, entropy: Data) throws  -> PreparedAction
     
@@ -1820,7 +1999,7 @@ public protocol NativeLibraryProtocol: AnyObject, Sendable {
     func merge(records: [String: Data]) throws  -> ChangeSummary
     
     /**
-     * Read a named domain query without tool-name collisions or preparing a write.
+     * Read a named domain query without preparing a write.
      */
     func query(namespace: String, name: String, arguments: Data, now: String) throws  -> JsonOutcome
     
@@ -1866,6 +2045,102 @@ public protocol NativeLibraryProtocol: AnyObject, Sendable {
      * Lets hosts persist a write's new records without copying the whole record map.
      */
     func recordsAt(paths: [String]) throws  -> [String: Data]
+    
+    /**
+     * Add a controller with an optional checked slot under control or recovery authorization.
+     */
+    func beginAddController(controller: Data, slot: Data?, signers: [String], now: String) throws  -> HostAction
+    
+    /**
+     * Add a passkey using the slot checked by finish_prf_slot.
+     */
+    func beginAddPasskey(controller: Data, slot: Data, signers: [String], now: String) throws  -> HostAction
+    
+    /**
+     * Verify new PRF parts and construct a combined route with fresh sealed part secrets.
+     */
+    func beginCombinedSlot(parts: [CombinedSlotPart], label: String, newSeed: Data?, entropy: Data) throws  -> CombinedSlotAction
+    
+    /**
+     * Grant explicit scoped, expiring import power under the control rule.
+     */
+    func beginImportGrant(request: Data, grant: Data, signers: [String], now: String, entropy: Data) throws  -> HostAction
+    
+    /**
+     * Replace the keyring, including threshold, role, slot and vault changes.
+     */
+    func beginKeyring(keyring: Data, newSeed: Data?, signers: [String], now: String, entropy: Data) throws  -> HostAction
+    
+    /**
+     * Begin a fresh get ceremony before building a PRF slot. Registration outputs cannot finish it.
+     */
+    func beginPrfSlot(descriptor: Data, entropy: Data) throws  -> PrfAction
+    
+    /**
+     * Recovery only-adds action; the core verifies the prior recovery quorum and role limits.
+     */
+    func beginRecoveryAdd(controller: Data, slot: Data?, signers: [String], now: String) throws  -> HostAction
+    
+    /**
+     * Introduce namespace epochs using the selected controller.
+     */
+    func beginRekey(namespaces: [String], now: String, entropy: Data) throws  -> PreparedAction
+    
+    /**
+     * Remove a controller, rotate the vault and reseal history to the replacement slots.
+     */
+    func beginRemoveController(id: String, newSeed: Data, slots: [Data], signers: [String], now: String, entropy: Data) throws  -> HostAction
+    
+    /**
+     * All current vault slot options with ordered HPKE encapsulations and PRF salts.
+     */
+    func beginUnlockSlots() throws  -> [SlotOption]
+    
+    /**
+     * Build an HPKE slot for the current vault or a fresh rotation seed; returns protocol JSON.
+     */
+    func buildSealedSlot(controller: Data, label: String, newSeed: Data?, entropy: Data) throws  -> Data
+    
+    /**
+     * Candidate controllers and forms for a rule, before choosing a complete signer quorum.
+     * `keyring` candidates include control and recovery; the core rejects mixed-role quorums.
+     */
+    func eligibleSigners(action: Data) throws  -> [Data]
+    
+    /**
+     * Verify every signature and assertion before an optimistic atomic commit.
+     */
+    func finishAuthority(action: HostAction, results: [SignatureResult]) throws  -> ChangeSummary
+    
+    /**
+     * Reopen every combined part and check the vault before returning publishable slot JSON.
+     */
+    func finishCombinedSlot(action: CombinedSlotAction, secrets: [SlotSecret]) throws  -> Data
+    
+    /**
+     * Verify the new credential, build its slot and reopen with the same output before publication.
+     */
+    func finishPrfSlot(action: PrfAction, result: WebauthnResult, label: String, newSeed: Data?, entropy: Data) throws  -> Data
+    
+    /**
+     * Atomically check the vault and open historical epochs; failure leaves the session untouched.
+     */
+    func finishUnlockSlot(option: SlotOption, secrets: [SlotSecret]) throws  -> ChangeSummary
+    
+    /**
+     * Current keyring in exact protocol JSON schema.
+     */
+    func keyring() throws  -> Data
+    
+    /**
+     * Prepare an authority/4 action (protocol JSON) with explicit primary and cosigners.
+     */
+    func prepareAuthority(action: Data, by: String, signers: [String], now: String) throws  -> HostAction
+    
+    /**
+     * Select a controller for convenience grant, revoke, rekey and layout actions.
+     */
+    func selectController(id: String) throws 
     
 }
 /**
@@ -1960,21 +2235,8 @@ open func beginCall(tool: String, input: Data, now: String, entropy: Data)throws
 })
 }
     
-open func beginHandover(newRoot: PublicKeys, label: String, now: String, entropy: Data)throws  -> PreparedAction  {
-    return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
-        uniffiCallStatus in
-    uniffi_colophon_ffi_fn_method_nativelibrary_begin_handover(
-            self.uniffiCloneHandle(),
-        FfiConverterTypePublicKeys_lower(newRoot),
-        FfiConverterString.lower(label),
-        FfiConverterString.lower(now),
-        FfiConverterData.lower(entropy),uniffiCallStatus
-    )
-})
-}
-    
     /**
-     * Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+     * Prepare a controller-approved storage layout raise. Hosts present compatibility confirmation.
      */
 open func beginLayout(layout: UInt32, now: String)throws  -> PreparedAction  {
     return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
@@ -1983,19 +2245,6 @@ open func beginLayout(layout: UInt32, now: String)throws  -> PreparedAction  {
             self.uniffiCloneHandle(),
         FfiConverterUInt32.lower(layout),
         FfiConverterString.lower(now),uniffiCallStatus
-    )
-})
-}
-    
-open func beginRecover(newRoot: PublicKeys, label: String, now: String, entropy: Data)throws  -> PreparedAction  {
-    return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
-        uniffiCallStatus in
-    uniffi_colophon_ffi_fn_method_nativelibrary_begin_recover(
-            self.uniffiCloneHandle(),
-        FfiConverterTypePublicKeys_lower(newRoot),
-        FfiConverterString.lower(label),
-        FfiConverterString.lower(now),
-        FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
 }
@@ -2122,7 +2371,7 @@ open func merge(records: [String: Data])throws  -> ChangeSummary  {
 }
     
     /**
-     * Read a named domain query without tool-name collisions or preparing a write.
+     * Read a named domain query without preparing a write.
      */
 open func query(namespace: String, name: String, arguments: Data, now: String)throws  -> JsonOutcome  {
     return try  FfiConverterTypeJsonOutcome_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
@@ -2300,6 +2549,292 @@ open func recordsAt(paths: [String])throws  -> [String: Data]  {
 })
 }
     
+    /**
+     * Add a controller with an optional checked slot under control or recovery authorization.
+     */
+open func beginAddController(controller: Data, slot: Data?, signers: [String], now: String)throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_add_controller(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(controller),
+        FfiConverterOptionData.lower(slot),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Add a passkey using the slot checked by finish_prf_slot.
+     */
+open func beginAddPasskey(controller: Data, slot: Data, signers: [String], now: String)throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_add_passkey(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(controller),
+        FfiConverterData.lower(slot),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Verify new PRF parts and construct a combined route with fresh sealed part secrets.
+     */
+open func beginCombinedSlot(parts: [CombinedSlotPart], label: String, newSeed: Data?, entropy: Data)throws  -> CombinedSlotAction  {
+    return try  FfiConverterTypeCombinedSlotAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_combined_slot(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeCombinedSlotPart.lower(parts),
+        FfiConverterString.lower(label),
+        FfiConverterOptionData.lower(newSeed),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Grant explicit scoped, expiring import power under the control rule.
+     */
+open func beginImportGrant(request: Data, grant: Data, signers: [String], now: String, entropy: Data)throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_import_grant(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(request),
+        FfiConverterData.lower(grant),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Replace the keyring, including threshold, role, slot and vault changes.
+     */
+open func beginKeyring(keyring: Data, newSeed: Data?, signers: [String], now: String, entropy: Data)throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_keyring(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(keyring),
+        FfiConverterOptionData.lower(newSeed),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Begin a fresh get ceremony before building a PRF slot. Registration outputs cannot finish it.
+     */
+open func beginPrfSlot(descriptor: Data, entropy: Data)throws  -> PrfAction  {
+    return try  FfiConverterTypePrfAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_prf_slot(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(descriptor),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Recovery only-adds action; the core verifies the prior recovery quorum and role limits.
+     */
+open func beginRecoveryAdd(controller: Data, slot: Data?, signers: [String], now: String)throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_recovery_add(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(controller),
+        FfiConverterOptionData.lower(slot),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Introduce namespace epochs using the selected controller.
+     */
+open func beginRekey(namespaces: [String], now: String, entropy: Data)throws  -> PreparedAction  {
+    return try  FfiConverterTypePreparedAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_rekey(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(namespaces),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Remove a controller, rotate the vault and reseal history to the replacement slots.
+     */
+open func beginRemoveController(id: String, newSeed: Data, slots: [Data], signers: [String], now: String, entropy: Data)throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_remove_controller(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),
+        FfiConverterData.lower(newSeed),
+        FfiConverterSequenceData.lower(slots),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * All current vault slot options with ordered HPKE encapsulations and PRF salts.
+     */
+open func beginUnlockSlots()throws  -> [SlotOption]  {
+    return try  FfiConverterSequenceTypeSlotOption.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_begin_unlock_slots(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Build an HPKE slot for the current vault or a fresh rotation seed; returns protocol JSON.
+     */
+open func buildSealedSlot(controller: Data, label: String, newSeed: Data?, entropy: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_build_sealed_slot(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(controller),
+        FfiConverterString.lower(label),
+        FfiConverterOptionData.lower(newSeed),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Candidate controllers and forms for a rule, before choosing a complete signer quorum.
+     * `keyring` candidates include control and recovery; the core rejects mixed-role quorums.
+     */
+open func eligibleSigners(action: Data)throws  -> [Data]  {
+    return try  FfiConverterSequenceData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_eligible_signers(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(action),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Verify every signature and assertion before an optimistic atomic commit.
+     */
+open func finishAuthority(action: HostAction, results: [SignatureResult])throws  -> ChangeSummary  {
+    return try  FfiConverterTypeChangeSummary_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_finish_authority(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeHostAction_lower(action),
+        FfiConverterSequenceTypeSignatureResult.lower(results),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Reopen every combined part and check the vault before returning publishable slot JSON.
+     */
+open func finishCombinedSlot(action: CombinedSlotAction, secrets: [SlotSecret])throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_finish_combined_slot(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCombinedSlotAction_lower(action),
+        FfiConverterSequenceTypeSlotSecret.lower(secrets),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Verify the new credential, build its slot and reopen with the same output before publication.
+     */
+open func finishPrfSlot(action: PrfAction, result: WebauthnResult, label: String, newSeed: Data?, entropy: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_finish_prf_slot(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePrfAction_lower(action),
+        FfiConverterTypeWebauthnResult_lower(result),
+        FfiConverterString.lower(label),
+        FfiConverterOptionData.lower(newSeed),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Atomically check the vault and open historical epochs; failure leaves the session untouched.
+     */
+open func finishUnlockSlot(option: SlotOption, secrets: [SlotSecret])throws  -> ChangeSummary  {
+    return try  FfiConverterTypeChangeSummary_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_finish_unlock_slot(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSlotOption_lower(option),
+        FfiConverterSequenceTypeSlotSecret.lower(secrets),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Current keyring in exact protocol JSON schema.
+     */
+open func keyring()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_keyring(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Prepare an authority/4 action (protocol JSON) with explicit primary and cosigners.
+     */
+open func prepareAuthority(action: Data, by: String, signers: [String], now: String)throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_prepare_authority(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(action),
+        FfiConverterString.lower(by),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterString.lower(now),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Select a controller for convenience grant, revoke, rekey and layout actions.
+     */
+open func selectController(id: String)throws   {try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_nativelibrary_select_controller(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+}
+}
+    
 
     
 }
@@ -2343,6 +2878,169 @@ public func FfiConverterTypeNativeLibrary_lift(_ handle: UInt64) throws -> Nativ
 #endif
 public func FfiConverterTypeNativeLibrary_lower(_ value: NativeLibrary) -> UInt64 {
     return FfiConverterTypeNativeLibrary.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Single-use fresh get ceremony, bound to a session revision and a new credential.
+ */
+public protocol PrfActionProtocol: AnyObject, Sendable {
+    
+    /**
+     * Fresh unpadded base64url get challenge.
+     */
+    func challenge()  -> String
+    
+    /**
+     * Complete new credential descriptor; restrict get to exactly this credential.
+     */
+    func descriptor()  -> Data
+    
+    /**
+     * Exact prf.eval.first input.
+     */
+    func salt()  -> Data
+    
+}
+/**
+ * Single-use fresh get ceremony, bound to a session revision and a new credential.
+ */
+open class PrfAction: PrfActionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_colophon_ffi_fn_clone_prfaction(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_colophon_ffi_fn_free_prfaction(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Fresh unpadded base64url get challenge.
+     */
+open func challenge() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_prfaction_challenge(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Complete new credential descriptor; restrict get to exactly this credential.
+     */
+open func descriptor() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_prfaction_descriptor(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Exact prf.eval.first input.
+     */
+open func salt() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_prfaction_salt(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrfAction: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = PrfAction
+
+    public static func lift(_ handle: UInt64) throws -> PrfAction {
+        return PrfAction(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: PrfAction) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrfAction {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: PrfAction, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrfAction_lift(_ handle: UInt64) throws -> PrfAction {
+    return try FfiConverterTypePrfAction.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrfAction_lower(_ value: PrfAction) -> UInt64 {
+    return FfiConverterTypePrfAction.lower(value)
 }
 
 
@@ -2717,6 +3415,10 @@ public func FfiConverterTypeEngineWork_lower(_ value: EngineWork) -> RustBuffer 
 
 
 public struct Grant: Equatable, Hashable {
+    /**
+     * Explicit import permission, present only as true in protocol JSON.
+     */
+    public let `import`: Bool?
     public let namespaces: [String]
     public let access: [Access]
     public let expires: String?
@@ -2724,7 +3426,11 @@ public struct Grant: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(namespaces: [String], access: [Access], expires: String?, writeBudget: UInt64?) {
+    public init(
+        /**
+         * Explicit import permission, present only as true in protocol JSON.
+         */`import`: Bool?, namespaces: [String], access: [Access], expires: String?, writeBudget: UInt64?) {
+        self.`import` = `import`
         self.namespaces = namespaces
         self.access = access
         self.expires = expires
@@ -2747,6 +3453,7 @@ public struct FfiConverterTypeGrant: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Grant {
         return
             try Grant(
+                import: FfiConverterOptionBool.read(from: &buf), 
                 namespaces: FfiConverterSequenceString.read(from: &buf), 
                 access: FfiConverterSequenceTypeAccess.read(from: &buf), 
                 expires: FfiConverterOptionString.read(from: &buf), 
@@ -2755,6 +3462,7 @@ public struct FfiConverterTypeGrant: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: Grant, into buf: inout [UInt8]) {
+        FfiConverterOptionBool.write(value.`import`, into: &buf)
         FfiConverterSequenceString.write(value.namespaces, into: &buf)
         FfiConverterSequenceTypeAccess.write(value.access, into: &buf)
         FfiConverterOptionString.write(value.expires, into: &buf)
@@ -3523,14 +4231,128 @@ public func FfiConverterTypeRejection_lower(_ value: Rejection) -> RustBuffer {
 }
 
 
+/**
+ * Signature and optional assertion for one prepared signer.
+ */
+public struct SignatureResult: Equatable, Hashable {
+    /**
+     * Raw r||s or DER according to the prepared descriptor.
+     */
+    public let signature: Data
+    /**
+     * Present only for WebAuthn; its signature must equal `signature`.
+     */
+    public let assertion: WebauthnResult?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Raw r||s or DER according to the prepared descriptor.
+         */signature: Data, 
+        /**
+         * Present only for WebAuthn; its signature must equal `signature`.
+         */assertion: WebauthnResult?) {
+        self.signature = signature
+        self.assertion = assertion
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SignatureResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSignatureResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SignatureResult {
+        return
+            try SignatureResult(
+                signature: FfiConverterData.read(from: &buf), 
+                assertion: FfiConverterOptionTypeWebauthnResult.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SignatureResult, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.signature, into: &buf)
+        FfiConverterOptionTypeWebauthnResult.write(value.assertion, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSignatureResult_lift(_ buf: RustBuffer) throws -> SignatureResult {
+    return try FfiConverterTypeSignatureResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSignatureResult_lower(_ value: SignatureResult) -> RustBuffer {
+    return FfiConverterTypeSignatureResult.lower(value)
+}
+
+
+/**
+ * Exact body and form-specific host work for one signer.
+ */
 public struct SigningStep: Equatable, Hashable {
+    /**
+     * Complete descriptor as protocol JSON, including credential metadata.
+     */
+    public let descriptor: Data
+    /**
+     * Signature form.
+     */
+    public let form: KeyForm
+    /**
+     * Unpadded base64url WebAuthn challenge when applicable.
+     */
+    public let challenge: String?
+    /**
+     * Immutable destination path; cosigners share a path and body.
+     */
     public let path: String
+    /**
+     * Exact bytes to sign.
+     */
     public let body: Data
+    /**
+     * Uncompressed P-256 signing point.
+     */
     public let signingKey: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(path: String, body: Data, signingKey: Data) {
+    public init(
+        /**
+         * Complete descriptor as protocol JSON, including credential metadata.
+         */descriptor: Data, 
+        /**
+         * Signature form.
+         */form: KeyForm, 
+        /**
+         * Unpadded base64url WebAuthn challenge when applicable.
+         */challenge: String?, 
+        /**
+         * Immutable destination path; cosigners share a path and body.
+         */path: String, 
+        /**
+         * Exact bytes to sign.
+         */body: Data, 
+        /**
+         * Uncompressed P-256 signing point.
+         */signingKey: Data) {
+        self.descriptor = descriptor
+        self.form = form
+        self.challenge = challenge
         self.path = path
         self.body = body
         self.signingKey = signingKey
@@ -3552,6 +4374,9 @@ public struct FfiConverterTypeSigningStep: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SigningStep {
         return
             try SigningStep(
+                descriptor: FfiConverterData.read(from: &buf), 
+                form: FfiConverterTypeKeyForm.read(from: &buf), 
+                challenge: FfiConverterOptionString.read(from: &buf), 
                 path: FfiConverterString.read(from: &buf), 
                 body: FfiConverterData.read(from: &buf), 
                 signingKey: FfiConverterData.read(from: &buf)
@@ -3559,6 +4384,9 @@ public struct FfiConverterTypeSigningStep: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: SigningStep, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.descriptor, into: &buf)
+        FfiConverterTypeKeyForm.write(value.form, into: &buf)
+        FfiConverterOptionString.write(value.challenge, into: &buf)
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterData.write(value.body, into: &buf)
         FfiConverterData.write(value.signingKey, into: &buf)
@@ -3578,6 +4406,105 @@ public func FfiConverterTypeSigningStep_lift(_ buf: RustBuffer) throws -> Signin
 #endif
 public func FfiConverterTypeSigningStep_lower(_ value: SigningStep) -> RustBuffer {
     return FfiConverterTypeSigningStep.lower(value)
+}
+
+
+/**
+ * A current slot, captured with the session revision for atomic opening.
+ */
+public struct SlotOption: Equatable, Hashable {
+    /**
+     * Index in the current keyring.
+     */
+    public let index: UInt64
+    /**
+     * Display label.
+     */
+    public let label: String
+    /**
+     * Session that issued this option.
+     */
+    public let session: UInt64
+    /**
+     * Session revision when prepared.
+     */
+    public let revision: UInt64
+    /**
+     * Ordered ECDH inputs and PRF salts.
+     */
+    public let inputs: [SlotInput]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Index in the current keyring.
+         */index: UInt64, 
+        /**
+         * Display label.
+         */label: String, 
+        /**
+         * Session that issued this option.
+         */session: UInt64, 
+        /**
+         * Session revision when prepared.
+         */revision: UInt64, 
+        /**
+         * Ordered ECDH inputs and PRF salts.
+         */inputs: [SlotInput]) {
+        self.index = index
+        self.label = label
+        self.session = session
+        self.revision = revision
+        self.inputs = inputs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SlotOption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSlotOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SlotOption {
+        return
+            try SlotOption(
+                index: FfiConverterUInt64.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                session: FfiConverterUInt64.read(from: &buf), 
+                revision: FfiConverterUInt64.read(from: &buf), 
+                inputs: FfiConverterSequenceTypeSlotInput.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SlotOption, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.index, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterUInt64.write(value.session, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterSequenceTypeSlotInput.write(value.inputs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSlotOption_lift(_ buf: RustBuffer) throws -> SlotOption {
+    return try FfiConverterTypeSlotOption.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSlotOption_lower(_ value: SlotOption) -> RustBuffer {
+    return FfiConverterTypeSlotOption.lower(value)
 }
 
 
@@ -3690,6 +4617,95 @@ public func FfiConverterTypeUnlockResult_lift(_ buf: RustBuffer) throws -> Unloc
 #endif
 public func FfiConverterTypeUnlockResult_lower(_ value: UnlockResult) -> RustBuffer {
     return FfiConverterTypeUnlockResult.lower(value)
+}
+
+
+/**
+ * Exact signed WebAuthn bytes and optional extension result.
+ */
+public struct WebauthnResult: Equatable, Hashable {
+    /**
+     * DER ES256 signature.
+     */
+    public let signature: Data
+    /**
+     * Original authenticatorData bytes.
+     */
+    public let authenticatorData: Data
+    /**
+     * Original clientDataJSON bytes.
+     */
+    public let clientData: Data
+    /**
+     * Exact 32-byte results.first; absence fails PRF construction explicitly.
+     */
+    public let prf: Data?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * DER ES256 signature.
+         */signature: Data, 
+        /**
+         * Original authenticatorData bytes.
+         */authenticatorData: Data, 
+        /**
+         * Original clientDataJSON bytes.
+         */clientData: Data, 
+        /**
+         * Exact 32-byte results.first; absence fails PRF construction explicitly.
+         */prf: Data?) {
+        self.signature = signature
+        self.authenticatorData = authenticatorData
+        self.clientData = clientData
+        self.prf = prf
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WebauthnResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWebauthnResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WebauthnResult {
+        return
+            try WebauthnResult(
+                signature: FfiConverterData.read(from: &buf), 
+                authenticatorData: FfiConverterData.read(from: &buf), 
+                clientData: FfiConverterData.read(from: &buf), 
+                prf: FfiConverterOptionData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WebauthnResult, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.signature, into: &buf)
+        FfiConverterData.write(value.authenticatorData, into: &buf)
+        FfiConverterData.write(value.clientData, into: &buf)
+        FfiConverterOptionData.write(value.prf, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebauthnResult_lift(_ buf: RustBuffer) throws -> WebauthnResult {
+    return try FfiConverterTypeWebauthnResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebauthnResult_lower(_ value: WebauthnResult) -> RustBuffer {
+    return FfiConverterTypeWebauthnResult.lower(value)
 }
 
 
@@ -4027,6 +5043,101 @@ public func FfiConverterTypeBlobWriteOutcome_lower(_ value: BlobWriteOutcome) ->
 
 
 
+/**
+ * One new combined-slot part; PRF parts require a fresh get ceremony and its result.
+ */
+
+public enum CombinedSlotPart {
+    
+    /**
+     * Raw controller encoded as protocol JSON.
+     */
+    case sealed(
+        /**
+         * Complete raw controller in protocol JSON.
+         */controller: Data
+    )
+    /**
+     * WebAuthn controller, fresh core ceremony and exact platform result.
+     */
+    case prf(
+        /**
+         * Complete WebAuthn controller in protocol JSON.
+         */controller: Data, 
+        /**
+         * Fresh core get ceremony restricted to this credential.
+         */action: PrfAction, 
+        /**
+         * Exact platform assertion and PRF output.
+         */result: WebauthnResult
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CombinedSlotPart: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCombinedSlotPart: FfiConverterRustBuffer {
+    typealias SwiftType = CombinedSlotPart
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CombinedSlotPart {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sealed(controller: try FfiConverterData.read(from: &buf)
+        )
+        
+        case 2: return .prf(controller: try FfiConverterData.read(from: &buf), action: try FfiConverterTypePrfAction.read(from: &buf), result: try FfiConverterTypeWebauthnResult.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CombinedSlotPart, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .sealed(controller):
+            writeInt(&buf, Int32(1))
+            FfiConverterData.write(controller, into: &buf)
+            
+        
+        case let .prf(controller,action,result):
+            writeInt(&buf, Int32(2))
+            FfiConverterData.write(controller, into: &buf)
+            FfiConverterTypePrfAction.write(action, into: &buf)
+            FfiConverterTypeWebauthnResult.write(result, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCombinedSlotPart_lift(_ buf: RustBuffer) throws -> CombinedSlotPart {
+    return try FfiConverterTypeCombinedSlotPart.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCombinedSlotPart_lower(_ value: CombinedSlotPart) -> RustBuffer {
+    return FfiConverterTypeCombinedSlotPart.lower(value)
+}
+
+
+
 
 public enum DenialReason: Equatable, Hashable {
     
@@ -4192,6 +5303,81 @@ public func FfiConverterTypeJsonOutcome_lift(_ buf: RustBuffer) throws -> JsonOu
 #endif
 public func FfiConverterTypeJsonOutcome_lower(_ value: JsonOutcome) -> RustBuffer {
     return FfiConverterTypeJsonOutcome.lower(value)
+}
+
+
+
+/**
+ * Controller signature form.
+ */
+
+public enum KeyForm: Equatable, Hashable {
+    
+    /**
+     * Raw ES256 over the body.
+     */
+    case raw
+    /**
+     * WebAuthn get assertion with a DER signature.
+     */
+    case webauthn
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension KeyForm: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeKeyForm: FfiConverterRustBuffer {
+    typealias SwiftType = KeyForm
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> KeyForm {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .raw
+        
+        case 2: return .webauthn
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: KeyForm, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .raw:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .webauthn:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeKeyForm_lift(_ buf: RustBuffer) throws -> KeyForm {
+    return try FfiConverterTypeKeyForm.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeKeyForm_lower(_ value: KeyForm) -> RustBuffer {
+    return FfiConverterTypeKeyForm.lower(value)
 }
 
 
@@ -4676,6 +5862,188 @@ public func FfiConverterTypePreparedCall_lower(_ value: PreparedCall) -> RustBuf
 
 
 
+/**
+ * One slot part's host work; order is significant for combined slots.
+ */
+
+public enum SlotInput: Equatable, Hashable {
+    
+    /**
+     * Host ECDH against the HPKE encapsulation.
+     */
+    case ecdh(
+        /**
+         * Controller whose agreement key is needed.
+         */controller: String, 
+        /**
+         * Uncompressed HPKE encapsulation.
+         */enc: Data
+    )
+    /**
+     * Host WebAuthn PRF evaluation using this exact salt.
+     */
+    case prf(
+        /**
+         * Controller whose credential must evaluate the extension.
+         */controller: String, 
+        /**
+         * Exact prf.eval.first input.
+         */salt: Data
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SlotInput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSlotInput: FfiConverterRustBuffer {
+    typealias SwiftType = SlotInput
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SlotInput {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .ecdh(controller: try FfiConverterString.read(from: &buf), enc: try FfiConverterData.read(from: &buf)
+        )
+        
+        case 2: return .prf(controller: try FfiConverterString.read(from: &buf), salt: try FfiConverterData.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SlotInput, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .ecdh(controller,enc):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(controller, into: &buf)
+            FfiConverterData.write(enc, into: &buf)
+            
+        
+        case let .prf(controller,salt):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(controller, into: &buf)
+            FfiConverterData.write(salt, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSlotInput_lift(_ buf: RustBuffer) throws -> SlotInput {
+    return try FfiConverterTypeSlotInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSlotInput_lower(_ value: SlotInput) -> RustBuffer {
+    return FfiConverterTypeSlotInput.lower(value)
+}
+
+
+
+/**
+ * One returned host secret in slot-part order.
+ */
+
+public enum SlotSecret: Equatable, Hashable {
+    
+    /**
+     * Raw 32-byte ECDH result.
+     */
+    case ecdh(
+        /**
+         * Raw x-coordinate from host ECDH.
+         */secret: Data
+    )
+    /**
+     * Exact 32-byte WebAuthn PRF results.first.
+     */
+    case prf(
+        /**
+         * Exact platform results.first.
+         */output: Data
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SlotSecret: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSlotSecret: FfiConverterRustBuffer {
+    typealias SwiftType = SlotSecret
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SlotSecret {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .ecdh(secret: try FfiConverterData.read(from: &buf)
+        )
+        
+        case 2: return .prf(output: try FfiConverterData.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SlotSecret, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .ecdh(secret):
+            writeInt(&buf, Int32(1))
+            FfiConverterData.write(secret, into: &buf)
+            
+        
+        case let .prf(output):
+            writeInt(&buf, Int32(2))
+            FfiConverterData.write(output, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSlotSecret_lift(_ buf: RustBuffer) throws -> SlotSecret {
+    return try FfiConverterTypeSlotSecret.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSlotSecret_lower(_ value: SlotSecret) -> RustBuffer {
+    return FfiConverterTypeSlotSecret.lower(value)
+}
+
+
+
 
 public enum ViewOutcome: Equatable, Hashable {
     
@@ -4884,6 +6252,267 @@ public func FfiConverterCallbackInterfaceBlobSource_lift(_ handle: UInt64) throw
 #endif
 public func FfiConverterCallbackInterfaceBlobSource_lower(_ v: BlobSource) -> UInt64 {
     return FfiConverterCallbackInterfaceBlobSource.lower(v)
+}
+
+
+
+
+/**
+ * Synchronous controller provider; async hosts use the explicit begin/finish APIs.
+ * No callback is invoked while a session mutex is held.
+ */
+public protocol ControllerProvider: AnyObject, Sendable {
+    
+    /**
+     * Complete validated key descriptor in protocol JSON.
+     */
+    func descriptor() throws  -> Data
+    
+    /**
+     * Report the signing form.
+     */
+    func form() throws  -> KeyForm
+    
+    /**
+     * Sign exact raw body bytes.
+     */
+    func sign(body: Data) throws  -> Data
+    
+    /**
+     * Return a raw ECDH secret.
+     */
+    func agree(peer: Data) throws  -> Data
+    
+    /**
+     * Perform get restricted to this descriptor's credential; evaluate salt when supplied.
+     */
+    func assert(challenge: String, prfSalt: Data?) throws  -> WebauthnResult
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceControllerProvider {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceControllerProvider = UniffiVTableCallbackInterfaceControllerProvider(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceControllerProvider.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface ControllerProvider: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceControllerProvider.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface ControllerProvider: handle missing in uniffiClone")
+            }
+        },
+        descriptor: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceControllerProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.descriptor(
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeBindingError_lower
+            )
+        },
+        form: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> KeyForm in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceControllerProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.form(
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeKeyForm_lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeBindingError_lower
+            )
+        },
+        sign: { (
+            uniffiHandle: UInt64,
+            body: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceControllerProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.sign(
+                     body: try FfiConverterData.lift(body)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeBindingError_lower
+            )
+        },
+        agree: { (
+            uniffiHandle: UInt64,
+            peer: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceControllerProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.agree(
+                     peer: try FfiConverterData.lift(peer)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeBindingError_lower
+            )
+        },
+        assert: { (
+            uniffiHandle: UInt64,
+            challenge: RustBuffer,
+            prfSalt: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> WebauthnResult in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceControllerProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.assert(
+                     challenge: try FfiConverterString.lift(challenge),
+                     prfSalt: try FfiConverterOptionData.lift(prfSalt)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeWebauthnResult_lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeBindingError_lower
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceControllerProvider> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceControllerProvider>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitControllerProvider() {
+    uniffi_colophon_ffi_fn_init_callback_vtable_controllerprovider(UniffiCallbackInterfaceControllerProvider.vtablePtr)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceControllerProvider {
+    fileprivate static let handleMap = UniffiHandleMap<ControllerProvider>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceControllerProvider : FfiConverter {
+    typealias SwiftType = ControllerProvider
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceControllerProvider_lift(_ handle: UInt64) throws -> ControllerProvider {
+    return try FfiConverterCallbackInterfaceControllerProvider.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceControllerProvider_lower(_ v: ControllerProvider) -> UInt64 {
+    return FfiConverterCallbackInterfaceControllerProvider.lower(v)
 }
 
 
@@ -5266,6 +6895,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -5282,6 +6935,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -5354,6 +7031,30 @@ fileprivate struct FfiConverterOptionTypeGrantOptions: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeGrantOptions.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWebauthnResult: FfiConverterRustBuffer {
+    typealias SwiftType = WebauthnResult?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWebauthnResult.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWebauthnResult.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -5659,6 +7360,31 @@ fileprivate struct FfiConverterSequenceTypeRejection: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSignatureResult: FfiConverterRustBuffer {
+    typealias SwiftType = [SignatureResult]
+
+    public static func write(_ value: [SignatureResult], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSignatureResult.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SignatureResult] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SignatureResult]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSignatureResult.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSigningStep: FfiConverterRustBuffer {
     typealias SwiftType = [SigningStep]
 
@@ -5676,6 +7402,31 @@ fileprivate struct FfiConverterSequenceTypeSigningStep: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeSigningStep.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSlotOption: FfiConverterRustBuffer {
+    typealias SwiftType = [SlotOption]
+
+    public static func write(_ value: [SlotOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSlotOption.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SlotOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SlotOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSlotOption.read(from: &buf))
         }
         return seq
     }
@@ -5759,6 +7510,81 @@ fileprivate struct FfiConverterSequenceTypeAccess: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCombinedSlotPart: FfiConverterRustBuffer {
+    typealias SwiftType = [CombinedSlotPart]
+
+    public static func write(_ value: [CombinedSlotPart], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCombinedSlotPart.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CombinedSlotPart] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CombinedSlotPart]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCombinedSlotPart.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSlotInput: FfiConverterRustBuffer {
+    typealias SwiftType = [SlotInput]
+
+    public static func write(_ value: [SlotInput], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSlotInput.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SlotInput] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SlotInput]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSlotInput.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSlotSecret: FfiConverterRustBuffer {
+    typealias SwiftType = [SlotSecret]
+
+    public static func write(_ value: [SlotSecret], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSlotSecret.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SlotSecret] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SlotSecret]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSlotSecret.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDictionaryStringUInt64: FfiConverterRustBuffer {
     public static func write(_ value: [String: UInt64], into buf: inout [UInt8]) {
         let len = Int32(value.count)
@@ -5833,12 +7659,18 @@ fileprivate struct FfiConverterDictionaryStringData: FfiConverterRustBuffer {
         return dict
     }
 }
-public func beginCreate(owner: PublicKeys, recovery: PublicKeys, label: String, ownerLabel: String, namespaces: [String], now: String, entropy: Data)throws  -> HostAction  {
+/**
+ * Prepare keyring genesis, epochs and a separate member request.
+ * Sign the first round, call `advance_create`, then finish its grant/layout round.
+ * `owner` is the content member; `controller` must be a separate host-owned identity.
+ */
+public func beginCreate(owner: PublicKeys, controller: PublicKeys, vaultSeed: Data, label: String, ownerLabel: String, namespaces: [String], now: String, entropy: Data)throws  -> HostAction  {
     return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
         uniffiCallStatus in
     uniffi_colophon_ffi_fn_func_begin_create(
         FfiConverterTypePublicKeys_lower(owner),
-        FfiConverterTypePublicKeys_lower(recovery),
+        FfiConverterTypePublicKeys_lower(controller),
+        FfiConverterData.lower(vaultSeed),
         FfiConverterString.lower(label),
         FfiConverterString.lower(ownerLabel),
         FfiConverterSequenceString.lower(namespaces),
@@ -5911,6 +7743,40 @@ public func reconcileImportPrefix(previous: Data, current: Data, importedHeads: 
 })
 }
 /**
+ * Parse registration without trusting or requiring attestation verification; returns descriptor JSON.
+ */
+public func parseRegistration(attestationObject: Data, rp: String)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_parse_registration(
+        FfiConverterData.lower(attestationObject),
+        FfiConverterString.lower(rp),uniffiCallStatus
+    )
+})
+}
+/**
+ * Derive only the vault public identity for a host-supplied fresh seed.
+ */
+public func vaultPublic(seedBytes: Data)throws  -> PublicKeys  {
+    return try  FfiConverterTypePublicKeys_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_vault_public(
+        FfiConverterData.lower(seedBytes),uniffiCallStatus
+    )
+})
+}
+/**
+ * Transform a salt for hosts calling CTAP hmac-secret directly; use the UV-associated secret.
+ */
+public func webauthnPrfInput(salt: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_webauthn_prf_input(
+        FfiConverterData.lower(salt),uniffiCallStatus
+    )
+})
+}
+/**
  * Bind planned book component heads to actual signed destination IDs before the next batch.
  */
 public func bindLegacyImportState(namespace: String, stateJson: Data, outputs: [String: String])throws  -> Data  {
@@ -5953,7 +7819,7 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_colophon_ffi_checksum_func_begin_create() != 28067) {
+    if (uniffi_colophon_ffi_checksum_func_begin_create() != 14963) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_begin_request() != 1798) {
@@ -5974,10 +7840,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_func_reconcile_import_prefix() != 30375) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_func_parse_registration() != 23766) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_vault_public() != 1751) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_webauthn_prf_input() != 46537) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_func_bind_legacy_import_state() != 14834) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_import_legacy_batch() != 60451) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_hostaction_advance_create() != 19521) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_hostaction_finish() != 36295) {
@@ -5992,19 +7870,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_hostaction_signing_steps() != 47812) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_hostaction_finish_authority() != 18383) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_hostaction_sign_controller_with() != 47071) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_approve() != 2763) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_call() != 53600) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_handover() != 34363) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout() != 57923) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recover() != 26094) {
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_layout() != 11927) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_revoke() != 25240) {
@@ -6040,7 +7918,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_merge() != 51897) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_nativelibrary_query() != 28303) {
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_query() != 21892) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_ready_with() != 23978) {
@@ -6082,10 +7960,79 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_nativelibrary_records_at() != 8933) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_add_controller() != 31436) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_add_passkey() != 20436) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_combined_slot() != 64515) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_import_grant() != 7592) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_keyring() != 19783) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_prf_slot() != 56827) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_recovery_add() != 26768) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_rekey() != 25813) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_remove_controller() != 63895) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_begin_unlock_slots() != 11287) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_build_sealed_slot() != 2596) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_eligible_signers() != 9751) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_finish_authority() != 12204) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_finish_combined_slot() != 51527) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_finish_prf_slot() != 10958) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_finish_unlock_slot() != 37632) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_keyring() != 51373) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_prepare_authority() != 29896) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_nativelibrary_select_controller() != 56359) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_nativeblobwriter_finish() != 7658) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativeblobwriter_push() != 42511) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_combinedslotaction_inputs() != 42850) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_prfaction_challenge() != 4685) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_prfaction_descriptor() != 11006) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_prfaction_salt() != 43912) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_nativecheckpointopening_agreement_peer() != 34623) {
@@ -6211,11 +8158,27 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_blobsource_read() != 32010) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_controllerprovider_descriptor() != 22289) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_controllerprovider_form() != 27210) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_controllerprovider_sign() != 30147) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_controllerprovider_agree() != 28811) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_controllerprovider_assert() != 37373) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_enginerecordsource_read() != 9929) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitBlobSource()
+    uniffiCallbackInitControllerProvider()
     uniffiCallbackInitEngineRecordSource()
     uniffiCallbackInitKeyProvider()
     return InitializationResult.ok

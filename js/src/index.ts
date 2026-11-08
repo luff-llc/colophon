@@ -1,5 +1,5 @@
-/** Colophon 0.2: records and deterministic policy in Rust; private keys and I/O in the host. */
-import wasmInit, { HostAction, WasmLibrary } from '../dist/wasm/colophon_wasm.js';
+/** Colophon 0.4: records and deterministic policy in Rust; private keys and I/O in the host. */
+import wasmInit, { HostAction, HostCombinedParts, WasmLibrary } from '../dist/wasm/colophon_wasm.js';
 
 /** Initialize the web-target WASM once. Node reads the file URL; browsers use fetch. */
 let initialization: Promise<void> | undefined;
@@ -18,7 +18,24 @@ export function init(): Promise<void> {
   return initialization;
 }
 
+export type KeyForm = 'raw' | 'webauthn';
+/** Protocol JSON bytes use standard base64. */
+export type KeyDescriptor = { form: 'raw'; signing: string; agreement?: string } |
+  { form: 'webauthn'; signing: string; rp: string; credential: string; origins?: string[] };
+export interface Controller { key: KeyDescriptor; label: string; roles: ('approve' | 'control' | 'recover')[]; verification?: true }
+export interface Sealed { enc: string; ciphertext: string }
+export type Slot = { kind: 'sealed'; controllers: string[]; label: string; sealed: Sealed } |
+  { kind: 'prf'; controllers: string[]; label: string; salt: string; box: string } |
+  { kind: 'combined'; controllers: string[]; label: string; parts: ({ kind: 'sealed'; sealed: Sealed } | { kind: 'prf'; salt: string })[]; box: string };
+export interface Keyring { controllers: Controller[]; threshold: number; recoverThreshold: number; vault: { signing: string; agreement: string }; slots: Slot[] }
+export interface WebauthnResult { signature: Uint8Array; authenticatorData: Uint8Array; clientData: Uint8Array; prf?: Uint8Array }
+export interface SlotOption { index: number; label: string; inputs: ({ kind: 'ecdh'; controller: string; enc: number[] } | { kind: 'prf'; controller: string; salt: number[] })[] }
 export interface KeyProvider {
+  readonly form?: KeyForm;
+  /** get must be restricted to this provider's single credential. */
+  assert?(challenge: string, prfSalt?: Uint8Array): Promise<WebauthnResult>;
+  /** Existing-route PRF evaluation; missing output is an explicit failure. */
+  prf?(salt: Uint8Array): Promise<Uint8Array | undefined>;
   readonly signingPublicKey: Uint8Array;
   readonly agreementPublicKey: Uint8Array;
   sign(body: Uint8Array): Promise<Uint8Array>;
@@ -27,6 +44,7 @@ export interface KeyProvider {
 
 /** Non-extractable P-256 private keys. Persist these CryptoKeys using host structured cloning. */
 export class WebCryptoKeys implements KeyProvider {
+  readonly form = 'raw' as const;
   private constructor(
     private readonly signing: CryptoKeyPair,
     private readonly agreement: CryptoKeyPair,
@@ -93,7 +111,7 @@ function json(value: unknown): string { const result = JSON.stringify(value); if
 
 export type MemberKind = 'device' | 'app' | 'agent' | 'server';
 export type Access = 'read' | 'write';
-export interface Grant { namespaces: string[]; access: Access[]; expires?: string; writeBudget?: number }
+export interface Grant { import?: true; namespaces: string[]; access: Access[]; expires?: string; writeBudget?: number }
 export interface Member { id: string; label: string; kind: MemberKind; grant: Grant | null; since: number; revokedAt: number | null; writes: number }
 export type Records = Map<string, Uint8Array>;
 export interface AccessRequest { id: string; label: string; kind: MemberKind; namespaces: string[]; access: Access[]; pairingCode: string; record: Uint8Array }
@@ -106,19 +124,25 @@ export interface Tool { name: string; description: string; inputSchema: unknown 
 /** An in-memory library. Hosts persist and sync records; no storage backend is assumed. */
 export class Library {
   readonly records: Records = new Map();
-  /** Present on creation; persist independently from the owner's keys for recovery. */
-  readonly recoveryKeys?: KeyProvider;
+  private controllers: KeyProvider[] = [];
   private queue: Promise<unknown> = Promise.resolve();
   private unlockFailure: unknown;
-  private constructor(private readonly core: WasmLibrary, private readonly keys: KeyProvider, recovery?: KeyProvider) { this.recoveryKeys = recovery; }
+  private constructor(private readonly core: WasmLibrary, private readonly keys: KeyProvider) {}
 
-  static async create(opts: { owner: KeyProvider; label: string; ownerLabel: string; namespaces: string[]; recovery?: KeyProvider }): Promise<Library> {
+  static async create(opts: { owner: KeyProvider; controller: KeyProvider; label: string; ownerLabel: string; namespaces: string[] }): Promise<Library> {
     await init();
-    const recovery = opts.recovery ?? await WebCryptoKeys.generate();
+    const controller = opts.controller;
     const core = new WasmLibrary(opts.owner.signingPublicKey, opts.owner.agreementPublicKey);
-    const lib = new Library(core, opts.owner, recovery);
-    const action = core.begin_create(opts.label, opts.ownerLabel, json(opts.namespaces), recovery.signingPublicKey, recovery.agreementPublicKey, now(), entropy());
-    await lib.execute(action);
+    const lib = new Library(core, opts.owner);
+    lib.controllers = [controller];
+    const first = core.begin_create(opts.label, opts.ownerLabel, json(opts.namespaces), controller.signingPublicKey, controller.agreementPublicKey, entropy(), now(), entropy());
+    await lib.signAction(first, [opts.owner, controller]);
+    const final = first.advance_create();
+    await lib.signAction(final, [controller]);
+    core.commit(final); lib.refreshRecords();
+    core.select_controller(await controllerID(controller.signingPublicKey));
+    await lib.unlockVault([controller]);
+    await lib.unlock();
     return lib;
   }
   static async open(records: Records, me: KeyProvider): Promise<Library> {
@@ -188,13 +212,117 @@ export class Library {
       return this.executeWrite(action, namespace);
     });
   }
-  /** Planned handover shares all epochs before transferring authority. */
-  handover(root: KeyProvider, label: string): Promise<Outcome<void>> {
-    return this.serial(async () => { await this.unlock(); const result = await this.execute(this.core.begin_handover(root.signingPublicKey, root.agreementPublicKey, label, now(), entropy())); return result.ok ? { ok: true, value: undefined } : result; });
+  /** Make controller providers available for authority signatures. */
+  setControllers(providers: KeyProvider[]): void { this.controllers = [...providers]; }
+  selectController(id: string): void { this.core.select_controller(id); }
+  keyring(): Keyring { return JSON.parse(this.core.keyring()); }
+  static async parseRegistration(attestationObject: Uint8Array, rp: string): Promise<KeyDescriptor> {
+    await init(); return JSON.parse(WasmLibrary.parse_registration(attestationObject, rp));
   }
-  /** Open with recoveryKeys first, then transfer authority and all data epochs to a fresh root. */
-  recover(root: KeyProvider, label: string): Promise<Outcome<void>> {
-    return this.serial(async () => { await this.unlock(); const result = await this.execute(this.core.begin_recover(root.signingPublicKey, root.agreementPublicKey, label, now(), entropy())); return result.ok ? { ok: true, value: undefined } : result; });
+  /** Open one complete route; every PRF byte is the platform's results.first. */
+  async unlockVault(providers: KeyProvider[] = this.controllers): Promise<void> {
+    const available = new Map<string, KeyProvider>();
+    for (const provider of providers) available.set(await controllerID(provider.signingPublicKey), provider);
+    const options: SlotOption[] = JSON.parse(this.core.begin_unlock_slots());
+    for (const option of options) {
+      if (!option.inputs.every(input => available.has(input.controller))) continue;
+      const secrets: { kind: string; bytes: number[] }[] = [];
+      try {
+        for (const input of option.inputs) {
+          const provider = available.get(input.controller);
+          if (!provider) throw new Error('Missing controller');
+          const output = input.kind === 'ecdh' ? await provider.agree(new Uint8Array(input.enc)) : await provider.prf?.(new Uint8Array(input.salt));
+          if (!output) throw new Error('WebAuthn PRF unsupported or missing results.first');
+          secrets.push({ kind: input.kind, bytes: Array.from(output) }); output.fill(0);
+        }
+        this.core.finish_unlock_slot(option.index, json(secrets)); return;
+      } finally { for (const secret of secrets) secret.bytes.fill(0); }
+    }
+    throw new Error('No available vault route');
+  }
+  prepareAuthority(action: unknown, by: string, signers: string[]): HostAction {
+    return this.core.prepare_authority(json(action), by, json(signers), now());
+  }
+  finishAuthority(action: HostAction): Promise<Outcome<void>> { return this.serial(() => this.execute(action)); }
+  buildSealedSlot(controller: Controller, label: string, newSeed?: Uint8Array): Slot {
+    return JSON.parse(this.core.build_sealed_slot(json(controller), label, newSeed ?? new Uint8Array(), entropy()));
+  }
+  async buildPasskeySlot(key: KeyDescriptor, provider: KeyProvider, label: string, newSeed?: Uint8Array): Promise<Slot> {
+    const action = this.core.begin_prf_slot(json(key), entropy());
+    let consumed = false;
+    let result: WebauthnResult | undefined;
+    try {
+      result = await provider.assert?.(action.challenge(), action.salt());
+      if (!result?.prf) throw new Error('WebAuthn assertion or PRF unsupported');
+      consumed = true;
+      return JSON.parse(this.core.finish_prf_slot(action, result.signature, result.authenticatorData, result.clientData, result.prf, label, newSeed ?? new Uint8Array(), entropy()));
+    } finally { result?.prf?.fill(0); if (!consumed) action.free(); }
+  }
+  /** Build a combined route, verifying every get assertion and reopening every part. */
+  async buildCombinedSlot(parts: { controller: Controller; provider: KeyProvider }[], label: string, newSeed?: Uint8Array): Promise<Slot> {
+    const builder = new HostCombinedParts();
+    const outputs: (Uint8Array | undefined)[] = [];
+    let builderConsumed = false;
+    let pending: ReturnType<WasmLibrary['begin_combined_slot']> | undefined;
+    const secrets: { kind: string; bytes: number[] }[] = [];
+    try {
+      for (const part of parts) {
+        if (part.controller.key.form === 'raw') { builder.sealed(json(part.controller)); outputs.push(undefined); }
+        else {
+          const ceremony = this.core.begin_prf_slot(json(part.controller.key), entropy());
+          let consumed = false;
+          try {
+            const result = await part.provider.assert?.(ceremony.challenge(), ceremony.salt());
+            if (!result?.prf) throw new Error('WebAuthn assertion or PRF unsupported');
+            outputs.push(result.prf);
+            consumed = true;
+            builder.prf(json(part.controller), ceremony, result.signature, result.authenticatorData, result.clientData, result.prf);
+          } finally { if (!consumed) ceremony.free(); }
+        }
+      }
+      builderConsumed = true;
+      pending = this.core.begin_combined_slot(builder, label, newSeed ?? new Uint8Array(), entropy());
+      for (let i = 0; i < parts.length; i++) {
+        const input = (JSON.parse(pending.inputs()) as SlotOption['inputs'])[i];
+        const part = parts[i];
+        if (!input || !part) throw new Error('Missing combined part');
+        const output = input.kind === 'prf' ? outputs[i] : await part.provider.agree(new Uint8Array(input.enc));
+        if (!output) throw new Error('Missing combined secret');
+        secrets.push({ kind: input.kind, bytes: Array.from(output) });
+        if (input.kind === 'ecdh') output.fill(0);
+      }
+      const completed = pending; pending = undefined;
+      return JSON.parse(this.core.finish_combined_slot(completed, json(secrets)));
+    } finally {
+      for (const output of outputs) output?.fill(0);
+      for (const secret of secrets) secret.bytes.fill(0);
+      pending?.free(); if (!builderConsumed) builder.free();
+    }
+  }
+  /** Candidate controllers and forms; finishing verifies the complete quorum. */
+  eligibleSigners(action: unknown): Controller[] { return JSON.parse(this.core.eligible_signers(json(action))); }
+  static async vaultPublic(seed: Uint8Array): Promise<{ signing: string; agreement: string }> { await init(); return JSON.parse(WasmLibrary.vault_public(seed)); }
+  static async webauthnPRFInput(salt: Uint8Array): Promise<Uint8Array> { await init(); return WasmLibrary.webauthn_prf_input(salt); }
+  addController(controller: Controller, slot: Slot | undefined, signers: string[]): Promise<Outcome<void>> {
+    return this.serial(() => this.execute(this.core.begin_add_controller(json(controller), json(slot ?? null), json(signers), now())));
+  }
+  recoveryAdd(controller: Controller, slot: Slot | undefined, signers: string[]): Promise<Outcome<void>> {
+    return this.serial(() => this.execute(this.core.begin_recovery_add(json(controller), json(slot ?? null), json(signers), now())));
+  }
+  addPasskey(controller: Controller, slot: Slot, signers: string[]): Promise<Outcome<void>> {
+    return this.serial(() => this.execute(this.core.begin_add_passkey(json(controller), json(slot), json(signers), now())));
+  }
+  removeController(id: string, newSeed: Uint8Array, slots: Slot[], signers: string[]): Promise<Outcome<void>> {
+    return this.serial(() => this.execute(this.core.begin_remove_controller(id, newSeed, json(slots), json(signers), now(), entropy())));
+  }
+  replaceKeyring(keyring: Keyring, newSeed: Uint8Array | undefined, signers: string[]): Promise<Outcome<void>> {
+    return this.serial(() => this.execute(this.core.begin_keyring(json(keyring), newSeed ?? new Uint8Array(), json(signers), now(), entropy())));
+  }
+  importGrant(request: Uint8Array, grant: Grant, signers: string[]): Promise<Outcome<void>> {
+    return this.serial(() => this.execute(this.core.begin_import_grant(request, json(grant), json(signers), now(), entropy())));
+  }
+  rekey(namespaces: string[]): Promise<Outcome<void>> {
+    return this.serial(() => this.execute(this.core.begin_rekey(json(namespaces), now(), entropy())));
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.queue.then(work);
@@ -214,14 +342,24 @@ export class Library {
     if (immediate !== null) { action.free(); return immediate; }
     let consumed = false;
     try {
-      for (let i = 0; i < action.count(); i++) {
-        if (!equal(action.signing_key(i), this.keys.signingPublicKey)) throw new Error('Unexpected signing identity');
-        action.sign(i, await this.keys.sign(action.body(i)));
-      }
+      await this.signAction(action, [this.keys, ...this.controllers]);
       consumed = true;
       this.core.commit(action); this.refreshRecords(); await this.unlock();
       return { ok: true, value: undefined };
     } finally { if (!consumed) action.free(); }
+  }
+  private async signAction(action: HostAction, providers: KeyProvider[]): Promise<void> {
+    for (let i = 0; i < action.count(); i++) {
+      const descriptor: KeyDescriptor = JSON.parse(action.descriptor(i));
+      const provider = providers.find(p => equal(p.signingPublicKey, action.signing_key(i)) && (p.form ?? 'raw') === descriptor.form);
+      if (!provider) throw new Error('Unexpected signing identity or form');
+      const challenge = action.challenge(i);
+      if (challenge) {
+        const result = await provider.assert?.(challenge);
+        if (!result) throw new Error('WebAuthn assertion unsupported');
+        action.assert(i, result.signature, result.authenticatorData, result.clientData);
+      } else action.sign(i, await provider.sign(action.body(i)));
+    }
   }
   private async executeWrite(action: HostAction, namespace: string): Promise<Outcome<OperationView>> {
     const immediate: Outcome<OperationView> | null = JSON.parse(action.settled());
@@ -239,3 +377,9 @@ export class Library {
     for (let i = 0; i < this.core.record_count(); i++) this.records.set(this.core.record_path(i), this.core.record(i));
   }
 }
+
+/** Controller key ID, shared with the core's first 16 SHA-256 bytes. */
+export async function controllerID(signing: Uint8Array): Promise<string> {
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', copy(signing))).slice(0, 16), b => b.toString(16).padStart(2, '0')).join('');
+}
+export { HostAction };

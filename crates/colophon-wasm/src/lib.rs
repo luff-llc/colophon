@@ -3,11 +3,13 @@
 #![forbid(unsafe_code)]
 use colophon_core::{
     crypto::PublicIdentity,
-    library::{AgreementStep, Call, CreateOptions, Library, PendingBatch},
+    library::{AgreementStep, Call, CreateOptions, Library, PendingBatch, SignatureResult},
     model::{Grant, Outcome, Records, Request},
     Error,
 };
 use serde_json::{json, Value};
+mod keys;
+pub use keys::*;
 use wasm_bindgen::prelude::*;
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
@@ -29,7 +31,7 @@ fn seed(bytes: &[u8]) -> Result<[u8; 32], JsValue> {
 #[wasm_bindgen]
 pub struct HostAction {
     pending: Option<PendingBatch>,
-    signatures: Vec<Vec<u8>>,
+    signatures: Vec<SignatureResult>,
     settled: Option<Value>,
 }
 impl HostAction {
@@ -37,7 +39,13 @@ impl HostAction {
         let count = pending.steps.len();
         Self {
             pending: Some(pending),
-            signatures: vec![vec![]; count],
+            signatures: vec![
+                SignatureResult {
+                    signature: vec![],
+                    assertion: None
+                };
+                count
+            ],
             settled: None,
         }
     }
@@ -55,7 +63,7 @@ impl HostAction {
         self.pending
             .take()
             .ok_or_else(|| js_error("Action has no signing steps"))?
-            .finish(self.signatures)
+            .finish_with_assertions(self.signatures)
             .map_err(js_error)
     }
 }
@@ -68,7 +76,20 @@ impl HostAction {
             .take()
             .ok_or_else(|| js_error("Missing creation action"))?;
         pending
-            .advance_create(self.signatures)
+            .advance_create(
+                self.signatures
+                    .into_iter()
+                    .map(|s| {
+                        if s.assertion.is_some() {
+                            return Err(colophon_core::Error(
+                                "malformed: assertion in raw creation".into(),
+                            ));
+                        }
+                        Ok(s.signature)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(js_error)?,
+            )
             .map(Self::pending)
             .map_err(js_error)
     }
@@ -106,7 +127,10 @@ impl HostAction {
             .signatures
             .get_mut(index)
             .ok_or_else(|| js_error("Invalid signing step"))?;
-        *slot = signature.to_vec();
+        *slot = SignatureResult {
+            signature: signature.to_vec(),
+            assertion: None,
+        };
         Ok(())
     }
     /// Immediate read outcome or refusal, as JSON; null means signing is required.

@@ -54,6 +54,9 @@ pub struct Denial {
 #[derive(Clone, Debug, Serialize, Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct Grant {
+    /// Explicit import permission, present only as true in protocol JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import: Option<bool>,
     pub namespaces: Vec<String>,
     pub access: Vec<Access>,
     pub expires: Option<String>,
@@ -141,9 +144,19 @@ pub struct ChangeSummary {
     pub records_added: u64,
 }
 #[derive(Clone, Debug, uniffi::Record)]
+/// Exact body and form-specific host work for one signer.
 pub struct SigningStep {
+    /// Complete descriptor as protocol JSON, including credential metadata.
+    pub descriptor: Vec<u8>,
+    /// Signature form.
+    pub form: KeyForm,
+    /// Unpadded base64url WebAuthn challenge when applicable.
+    pub challenge: Option<String>,
+    /// Immutable destination path; cosigners share a path and body.
     pub path: String,
+    /// Exact bytes to sign.
     pub body: Vec<u8>,
+    /// Uncompressed P-256 signing point.
     pub signing_key: Vec<u8>,
 }
 #[derive(Clone, Debug, uniffi::Record)]
@@ -252,4 +265,97 @@ impl TryFrom<colophon_core::model::NamespaceView> for NamespaceView {
 pub enum JsonOutcome {
     Success { value: Vec<u8> },
     Failure { denial: Denial },
+}
+
+/// Controller signature form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum KeyForm {
+    /// Raw ES256 over the body.
+    Raw,
+    /// WebAuthn get assertion with a DER signature.
+    Webauthn,
+}
+/// Exact signed WebAuthn bytes and optional extension result.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct WebauthnResult {
+    /// DER ES256 signature.
+    pub signature: Vec<u8>,
+    /// Original authenticatorData bytes.
+    pub authenticator_data: Vec<u8>,
+    /// Original clientDataJSON bytes.
+    pub client_data: Vec<u8>,
+    /// Exact 32-byte results.first; absence fails PRF construction explicitly.
+    pub prf: Option<Vec<u8>>,
+}
+/// Signature and optional assertion for one prepared signer.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct SignatureResult {
+    /// Raw r||s or DER according to the prepared descriptor.
+    pub signature: Vec<u8>,
+    /// Present only for WebAuthn; its signature must equal `signature`.
+    pub assertion: Option<WebauthnResult>,
+}
+impl TryFrom<SignatureResult> for colophon_core::library::SignatureResult {
+    type Error = crate::BindingError;
+    fn try_from(value: SignatureResult) -> crate::Result<Self> {
+        if value
+            .assertion
+            .as_ref()
+            .is_some_and(|a| a.signature != value.signature)
+        {
+            return Err(crate::invalid("Assertion signature mismatch"));
+        }
+        Ok(Self {
+            signature: value.signature,
+            assertion: value
+                .assertion
+                .map(|a| colophon_core::keys::Assertion::new(a.authenticator_data, a.client_data)),
+        })
+    }
+}
+/// One slot part's host work; order is significant for combined slots.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SlotInput {
+    /// Host ECDH against the HPKE encapsulation.
+    Ecdh {
+        /// Controller whose agreement key is needed.
+        controller: String,
+        /// Uncompressed HPKE encapsulation.
+        enc: Vec<u8>,
+    },
+    /// Host WebAuthn PRF evaluation using this exact salt.
+    Prf {
+        /// Controller whose credential must evaluate the extension.
+        controller: String,
+        /// Exact prf.eval.first input.
+        salt: Vec<u8>,
+    },
+}
+/// A current slot, captured with the session revision for atomic opening.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct SlotOption {
+    /// Index in the current keyring.
+    pub index: u64,
+    /// Display label.
+    pub label: String,
+    /// Session that issued this option.
+    pub session: u64,
+    /// Session revision when prepared.
+    pub revision: u64,
+    /// Ordered ECDH inputs and PRF salts.
+    pub inputs: Vec<SlotInput>,
+}
+/// One returned host secret in slot-part order.
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum SlotSecret {
+    /// Raw 32-byte ECDH result.
+    Ecdh {
+        /// Raw x-coordinate from host ECDH.
+        secret: Vec<u8>,
+    },
+    /// Exact 32-byte WebAuthn PRF results.first.
+    Prf {
+        /// Exact platform results.first.
+        output: Vec<u8>,
+    },
 }
