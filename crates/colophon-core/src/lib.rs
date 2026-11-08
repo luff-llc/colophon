@@ -11,10 +11,13 @@ pub mod domains;
 pub mod engine;
 pub mod hpke;
 pub mod imports;
+pub mod keys;
 pub mod library;
 pub mod model;
 pub mod protocol;
 pub mod records;
+pub mod slots;
+pub mod vault;
 pub mod verification;
 
 /// A protocol or cryptographic validation failure. Messages contain no private key material.
