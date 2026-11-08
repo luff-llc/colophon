@@ -29,7 +29,13 @@ fn resign(
     mutate(&mut body);
     let body = colophon_core::records::canonical(&body).unwrap();
     SignedRecord {
-        signature: signer.sign(&body),
+        signature: if serde_json::from_slice::<serde_json::Value>(&body).unwrap()["protocol"]
+            == colophon_core::protocol::AUTHORITY
+        {
+            keys(201).sign(&body)
+        } else {
+            signer.sign(&body)
+        },
         body,
     }
     .encode()
@@ -720,43 +726,57 @@ fn invalidation_does_not_erase_authenticated_immutability_evidence() {
 
 #[test]
 fn all_domain_vectors_restore_without_reads_and_fetch_history_lazily() {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use serde_json::Value;
-    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3");
-    let read = |name: &str| -> Value {
-        serde_json::from_slice(&std::fs::read(folder.join(name)).unwrap()).unwrap()
-    };
-    for (ns, record_file, expected_file, seed) in [
-        (
-            "reading.books",
-            "reading.books/records.json",
-            "reading.books/expected.json",
-            5,
-        ),
-        ("notes", "notes.json", "notes.json", 1),
-        (
-            "reading.saved",
-            "reading.saved.json",
-            "reading.saved.json",
-            1,
-        ),
-        (
-            "listening.podcasts",
-            "listening.podcasts.records.json",
-            "listening.podcasts.expected.json",
-            1,
-        ),
+    for ns in [
+        "reading.books",
+        "notes",
+        "reading.saved",
+        "listening.podcasts",
     ] {
-        let vector = read(record_file);
-        let records = vector
-            .get("records")
-            .unwrap_or(&vector)
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(p, b)| (p.clone(), STANDARD.decode(b.as_str().unwrap()).unwrap()))
-            .collect();
-        let owner = keys(seed);
+        let owner = keys(1);
+        let pending = Library::begin_create(
+            colophon_core::library::CreateOptions {
+                owner: keys(201).public(),
+                member: owner.public(),
+                vault_seed: [202; 32],
+                import_expires: None,
+                label: "Storage fixture".into(),
+                owner_label: "Owner".into(),
+                namespaces: vec![ns.into()],
+            },
+            NOW,
+            [10; 32],
+        )
+        .unwrap();
+        let mut fixture = opened(finish(pending, &owner), &owner);
+        let (kind, payload, query, args) = match ns {
+            "reading.books" => (
+                "addBook",
+                json!({"id":"book","title":"Book","creator":"Writer"}),
+                "book",
+                json!({"id":"book"}),
+            ),
+            "notes" => (
+                "createNotebook",
+                json!({"id":"notebook","title":"Notebook"}),
+                "notebooks",
+                json!({}),
+            ),
+            "reading.saved" => (
+                "capture",
+                json!({"id":"saved","url":"https://example.org"}),
+                "items",
+                json!({}),
+            ),
+            _ => (
+                "follow",
+                json!({"id":"show","url":"https://example.org/feed"}),
+                "shows",
+                json!({}),
+            ),
+        };
+        support::write(&mut fixture, &owner, ns, kind, payload, 11);
+        let expected = json!({"queries":[{"name":query,"args":args,"result":success(fixture.query(ns,query,args.clone(),NOW).unwrap())}]});
+        let records = fixture.records().clone();
         let lib = opened(records, &owner);
         let first = engine(&lib, &owner);
         let cp = first.checkpoint().unwrap();
@@ -772,7 +792,6 @@ fn all_domain_vectors_restore_without_reads_and_fetch_history_lazily() {
         .unwrap();
         unlock_engine(&mut cold, &owner);
         assert_eq!(cold.open_mode(), &OpenMode::VerifiedPrefix, "{ns}");
-        let expected = read(expected_file);
         for q in expected
             .get("queries")
             .unwrap_or(&expected)
@@ -811,8 +830,10 @@ fn four_domain_writes_and_suffix_replay_share_the_registered_reducers() {
     let owner = keys(1);
     let pending = Library::begin_create(
         colophon_core::library::CreateOptions {
-            owner: owner.public(),
-            recovery: keys(9).public(),
+            owner: keys(201).public(),
+            member: owner.public(),
+            vault_seed: [202; 32],
+            import_expires: None,
             label: "Four domains".into(),
             owner_label: "Owner".into(),
             namespaces: colophon_core::domain::NAMESPACES

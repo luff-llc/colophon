@@ -30,7 +30,7 @@ fn query(lib: &colophon_core::library::Library, name: &str, args: Value) -> Valu
 }
 #[test]
 fn atomic_publication_evidence_receipts_retries_and_replay() {
-    let (mut lib, owner, _) = create();
+    let (mut lib, owner, _) = create_importing(true);
     let old = lib.records().clone();
     let mut b = batch("unit");
     b.children.push(ImportChild { key:"cell".into(),kind:"putCell".into(),payload:json!({"id":"cell","notebook":"unit","kind":"markdown","source":"Imported text","expect":null}),baseline:false });
@@ -78,8 +78,8 @@ fn atomic_publication_evidence_receipts_retries_and_replay() {
     );
 }
 #[test]
-fn grants_root_fence_paging_and_namespace_encryption() {
-    let (mut lib, owner, _) = create();
+fn grants_import_fence_paging_and_namespace_encryption() {
+    let (mut lib, owner, _) = create_importing(true);
     let member = keys(3);
     let other = keys(4);
     enroll(
@@ -170,7 +170,7 @@ fn grants_root_fence_paging_and_namespace_encryption() {
 }
 #[test]
 fn historical_reconciliation_never_makes_rejected_writes_effective() {
-    let (mut lib, owner, _) = create();
+    let (mut lib, owner, _) = create_importing(true);
     write(
         &mut lib,
         &owner,
@@ -248,7 +248,7 @@ fn historical_reconciliation_never_makes_rejected_writes_effective() {
 }
 #[test]
 fn identity_reservations_bind_retries_and_protect_native_tombstones() {
-    let (mut lib, owner, _) = create();
+    let (mut lib, owner, _) = create_importing(true);
     write(
         &mut lib,
         &owner,
@@ -297,7 +297,7 @@ fn identity_reservations_bind_retries_and_protect_native_tombstones() {
 }
 #[test]
 fn blobs_stream_encrypt_authenticate_reference_count_and_lazy_host_reads() {
-    let (mut lib, owner, _) = create();
+    let (mut lib, owner, _) = create_importing(true);
     let mut writer = match lib
         .begin_blob("notes", "text/plain".into(), NOW, [60; 32])
         .unwrap()
@@ -424,8 +424,8 @@ fn blobs_stream_encrypt_authenticate_reference_count_and_lazy_host_reads() {
 }
 
 #[test]
-fn role_fences_apply_before_signing_and_forged_import_metadata_never_grants_root() {
-    let (mut lib, owner, _) = create();
+fn role_fences_apply_before_signing_and_forged_import_metadata_never_grants_import() {
+    let (mut lib, owner, _) = create_importing(true);
     let server = keys(5);
     enroll(
         &mut lib,
@@ -486,7 +486,7 @@ fn role_fences_apply_before_signing_and_forged_import_metadata_never_grants_root
 }
 #[test]
 fn authenticated_baseline_receipts_cannot_overwrite_native_progress() {
-    let (mut lib, owner, _) = create();
+    let (mut lib, owner, _) = create_importing(true);
     write(
         &mut lib,
         &owner,
@@ -557,8 +557,10 @@ fn loan_and_review_use_authenticated_app_context_on_replay_and_checkpoint_suffix
     let server = keys(8);
     let p = colophon_core::library::Library::begin_create(
         colophon_core::library::CreateOptions {
-            owner: owner.public(),
-            recovery: keys(9).public(),
+            owner: keys(201).public(),
+            member: owner.public(),
+            vault_seed: [202; 32],
+            import_expires: None,
             label: "Roles".into(),
             owner_label: "Owner".into(),
             namespaces: vec!["reading.books".into(), "notes".into()],
@@ -682,7 +684,7 @@ fn loan_and_review_use_authenticated_app_context_on_replay_and_checkpoint_suffix
 #[test]
 fn blob_availability_and_revocation_never_expose_an_empty_success() {
     use colophon_core::blobs::BlobRead;
-    let (mut lib, owner, _) = create();
+    let (mut lib, owner, _) = create_importing(true);
     let member = keys(6);
     enroll(
         &mut lib,
@@ -790,7 +792,7 @@ fn blob_availability_and_revocation_never_expose_an_empty_success() {
 }
 #[test]
 fn invalid_children_are_atomic_and_reservations_are_category_scoped() {
-    let (mut lib, owner, _) = create();
+    let (mut lib, owner, _) = create_importing(true);
     let mut b = batch("same-id");
     b.identities.insert(
         "notebook-source".into(),
@@ -867,7 +869,7 @@ fn invalid_children_are_atomic_and_reservations_are_category_scoped() {
 }
 #[test]
 fn ordinary_blob_publication_marks_required_and_pages_manifests() {
-    let (mut lib, owner, _) = create();
+    let (mut lib, owner, _) = create_importing(true);
     let mut digests = Vec::new();
     for (i, required) in [(0u8, true), (1, false), (2, true)] {
         let mut writer = match lib

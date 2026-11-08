@@ -481,6 +481,7 @@ impl NativeEngine {
                         .unwrap_or(info.access),
                     expires: g.expires,
                     write_budget: g.write_budget,
+                    import: None,
                 })
             })
             .transpose()?;

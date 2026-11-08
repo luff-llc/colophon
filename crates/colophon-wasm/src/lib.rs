@@ -61,6 +61,17 @@ impl HostAction {
 }
 #[wasm_bindgen]
 impl HostAction {
+    /// Complete the first creation signing round and return grant/layout steps.
+    pub fn advance_create(mut self) -> Result<HostAction, JsValue> {
+        let pending = self
+            .pending
+            .take()
+            .ok_or_else(|| js_error("Missing creation action"))?;
+        pending
+            .advance_create(self.signatures)
+            .map(Self::pending)
+            .map_err(js_error)
+    }
     /// Number of exact signing bodies.
     pub fn count(&self) -> usize {
         self.signatures.len()
@@ -200,8 +211,9 @@ impl WasmLibrary {
         label: String,
         owner_label: String,
         namespaces: &str,
-        recovery_signing: &[u8],
-        recovery_agreement: &[u8],
+        controller_signing: &[u8],
+        controller_agreement: &[u8],
+        vault_seed: &[u8],
         now: &str,
         entropy: &[u8],
     ) -> Result<HostAction, JsValue> {
@@ -211,8 +223,10 @@ impl WasmLibrary {
         let namespaces = serde_json::from_str(namespaces).map_err(js_error)?;
         Library::begin_create(
             CreateOptions {
-                owner: self.me.clone(),
-                recovery: identity(recovery_signing, recovery_agreement),
+                owner: identity(controller_signing, controller_agreement),
+                member: self.me.clone(),
+                vault_seed: seed(vault_seed)?,
+                import_expires: None,
                 label,
                 owner_label,
                 namespaces,
@@ -285,34 +299,6 @@ impl WasmLibrary {
                 now,
                 seed(entropy)?,
             )
-            .map(HostAction::outcome)
-            .map_err(js_error)
-    }
-    /// Prepare planned root handover, with key reshares before the transfer.
-    pub fn begin_handover(
-        &self,
-        signing: &[u8],
-        agreement: &[u8],
-        label: String,
-        now: &str,
-        entropy: &[u8],
-    ) -> Result<HostAction, JsValue> {
-        self.library()?
-            .begin_handover(identity(signing, agreement), label, now, seed(entropy)?)
-            .map(HostAction::outcome)
-            .map_err(js_error)
-    }
-    /// Prepare recovery of both authority and every data-key epoch.
-    pub fn begin_recover(
-        &self,
-        signing: &[u8],
-        agreement: &[u8],
-        label: String,
-        now: &str,
-        entropy: &[u8],
-    ) -> Result<HostAction, JsValue> {
-        self.library()?
-            .begin_recover(identity(signing, agreement), label, now, seed(entropy)?)
             .map(HostAction::outcome)
             .map_err(js_error)
     }

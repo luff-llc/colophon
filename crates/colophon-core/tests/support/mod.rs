@@ -17,9 +17,31 @@ pub fn success<T: std::fmt::Debug>(outcome: Outcome<T>) -> T {
         other => panic!("Expected success: {other:?}"),
     }
 }
-pub fn finish(pending: PendingBatch, keys: &SoftwareKeys) -> Records {
-    let signatures = pending.steps.iter().map(|s| keys.sign(&s.body)).collect();
-    pending.finish(signatures).unwrap()
+pub fn finish(pending: PendingBatch, key: &SoftwareKeys) -> Records {
+    let sign = |p: &PendingBatch| {
+        p.steps
+            .iter()
+            .map(|s| {
+                if s.signing == keys(201).public().signing {
+                    keys(201).sign(&s.body)
+                } else {
+                    key.sign(&s.body)
+                }
+            })
+            .collect()
+    };
+    let sigs = sign(&pending);
+    if pending
+        .steps
+        .iter()
+        .any(|s| s.path == "authority/00000001.json")
+    {
+        let next = pending.advance_create(sigs).unwrap();
+        let sigs = sign(&next);
+        next.finish(sigs).unwrap()
+    } else {
+        pending.finish(sigs).unwrap()
+    }
 }
 pub fn apply(lib: &mut Library, pending: PendingBatch, keys: &SoftwareKeys) {
     lib.merge(finish(pending, keys)).unwrap();
@@ -38,15 +60,33 @@ pub fn unlock(lib: &mut Library, keys: &SoftwareKeys) {
 pub fn opened(records: Records, keys: &SoftwareKeys) -> Library {
     let mut lib = Library::open(records, keys.public()).unwrap();
     unlock(&mut lib, keys);
+    if matches!(keys.public().id().as_str(),id if id==self::keys(1).public().id() || id==self::keys(5).public().id())
+    {
+        lib.select_controller(&self::keys(201).public().id())
+            .unwrap();
+        let secret = match &lib.begin_unlock_slot(0).unwrap()[0] {
+            colophon_core::slots::OpeningInput::Ecdh { enc, .. } => {
+                self::keys(201).agree(enc).unwrap()
+            }
+            _ => panic!("expected sealed owner slot"),
+        };
+        lib.finish_unlock_slot(0, &[colophon_core::slots::OpeningSecret::Ecdh(&secret)])
+            .unwrap();
+    }
     lib
 }
 pub fn create() -> (Library, SoftwareKeys, SoftwareKeys) {
+    create_importing(false)
+}
+pub fn create_importing(importing: bool) -> (Library, SoftwareKeys, SoftwareKeys) {
     let owner = keys(1);
-    let recovery = SoftwareKeys::recovery([9; 32]).unwrap();
+    let controller = keys(201);
     let pending = Library::begin_create(
         CreateOptions {
-            owner: owner.public(),
-            recovery: recovery.public(),
+            owner: keys(201).public(),
+            member: owner.public(),
+            vault_seed: [202; 32],
+            import_expires: importing.then(|| "2027-01-01T00:00:00Z".into()),
             label: "Conformance Library".into(),
             owner_label: "Owner".into(),
             namespaces: vec![
@@ -59,7 +99,7 @@ pub fn create() -> (Library, SoftwareKeys, SoftwareKeys) {
         [10; 32],
     )
     .unwrap();
-    (opened(finish(pending, &owner), &owner), owner, recovery)
+    (opened(finish(pending, &owner), &owner), owner, controller)
 }
 pub fn request(
     lib: &Library,
@@ -108,6 +148,7 @@ pub fn grant(namespaces: &[&str], budget: Option<u64>) -> Grant {
         access: vec![Access::Read, Access::Write],
         expires: None,
         write_budget: budget,
+        import: None,
     }
 }
 pub fn write(

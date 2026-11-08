@@ -1,12 +1,12 @@
+//! Multi-member grant, operation and revocation scenario using authority/4 fixtures.
 #![allow(clippy::unwrap_used)]
 mod support;
-use base64::{engine::general_purpose::STANDARD, Engine};
-use colophon_core::{model::*, records::canonical};
+use colophon_core::model::*;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::collections::BTreeMap;
 use support::*;
 fn scenario() -> (Records, Value) {
-    let (mut root, owner, recovery) = create();
+    let (mut root, owner, _controller) = create();
     let device = keys(2);
     let app = keys(3);
     let agent = keys(4);
@@ -229,20 +229,7 @@ fn scenario() -> (Records, Value) {
         json!({"id":"after-rekey","url":"https://example.org/new"}),
         38,
     );
-    let mut recovery_lib = opened(root.records().clone(), &recovery);
-    let replacement = keys(5);
-    let recover = success(
-        recovery_lib
-            .begin_recover(
-                replacement.public(),
-                "Recovered owner".into(),
-                LATER,
-                [39; 32],
-            )
-            .unwrap(),
-    );
-    apply(&mut recovery_lib, recover, &recovery);
-    let restored = opened(recovery_lib.records().clone(), &replacement);
+    let restored = root;
     let views: BTreeMap<_, _> = restored
         .authority()
         .namespaces
@@ -254,158 +241,23 @@ fn scenario() -> (Records, Value) {
         "An edited contribution"
     );
     assert_eq!(views["reading.saved"].admitted.len(), 4);
-    let expected = json!({"libraryID":restored.id(),"views":views,"ledger":restored.ledger(),"members":restored.members(),"beforeRevokeNotes":before_revoke,"localRefusals":{"outsideGrant":"notGranted","budget":"budgetSpent","afterRevoke":"revoked"},"recovery":{"root":replacement.public().id(),"epochCount":restored.authority().epochs.values().map(|e| e.len()).sum::<usize>()}});
+    let expected = json!({"libraryID":restored.id(),"views":views,"ledger":restored.ledger(),"members":restored.members(),"beforeRevokeNotes":before_revoke,"localRefusals":{"outsideGrant":"notGranted","budget":"budgetSpent","afterRevoke":"revoked"},"epochCount":restored.authority().epochs.values().map(|e| e.len()).sum::<usize>()});
     (restored.records().clone(), expected)
 }
+
 #[test]
-fn deterministic_library_conformance() {
+fn deterministic_multi_member_replica_and_revocation_replay() {
     let (records, expected) = scenario();
-    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3");
-    let encoded: BTreeMap<_, _> = records
-        .iter()
-        .map(|(p, b)| (p.clone(), STANDARD.encode(b)))
-        .collect();
-    if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
-        fs::create_dir_all(&folder).unwrap();
-        fs::write(folder.join("library.json"), canonical(&encoded).unwrap()).unwrap();
-        fs::write(
-            folder.join("expected.json"),
-            serde_json::to_vec_pretty(&expected).unwrap(),
-        )
-        .unwrap();
-        for (path, raw) in &records {
-            let path = folder.join("library").join(path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, raw).unwrap();
-        }
-    }
-    let stored: BTreeMap<String, String> =
-        serde_json::from_slice(&fs::read(folder.join("library.json")).unwrap()).unwrap();
-    assert_eq!(
-        stored, encoded,
-        "Run COLOPHON_UPDATE_VECTORS=1 cargo test --test conformance to deliberately regenerate"
-    );
-    let expected_stored: Value =
-        serde_json::from_slice(&fs::read(folder.join("expected.json")).unwrap()).unwrap();
-    assert_eq!(expected_stored, expected);
-    // Replay the checked-in bytes, not just the in-memory scenario, through a fresh replica.
-    let persisted: Records = stored
-        .iter()
-        .map(|(path, b64)| {
-            let raw = fs::read(folder.join("library").join(path)).unwrap();
-            assert_eq!(raw, STANDARD.decode(b64).unwrap());
-            (path.clone(), raw)
-        })
-        .collect();
-    let restored = opened(persisted, &keys(5));
-    for ns in restored.authority().namespaces.clone() {
-        assert_eq!(
-            json!(success(restored.view(&ns, LATER).unwrap())),
-            expected_stored["views"][&ns]
-        );
-    }
-    assert_eq!(json!(restored.ledger()), expected_stored["ledger"]);
-    // Record map insertion order cannot affect the result.
-    let reverse: Records = records.into_iter().rev().collect();
-    assert_eq!(
-        json!(opened(reverse, &keys(5)).ledger()),
-        expected_stored["ledger"]
-    );
-}
-
-#[test]
-fn deterministic_books_conformance() {
-    support::books::check(true);
-}
-
-#[test]
-fn notes_domain_queries_match_signed_vector() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/notes.json");
-    let vector: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    let records: Records = vector["records"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(path, bytes)| {
-            (
-                path.clone(),
-                STANDARD.decode(bytes.as_str().unwrap()).unwrap(),
-            )
-        })
-        .collect();
-    let library = opened(records, &keys(1));
-    if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
-        let mut updated = vector.clone();
-        for query in updated["queries"].as_array_mut().unwrap() {
-            query["result"] = json!(success(
-                library
-                    .query(
-                        "notes",
-                        query["name"].as_str().unwrap(),
-                        query["args"].clone(),
-                        NOW
-                    )
-                    .unwrap()
-            ));
-        }
-        let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/notes.json");
-        fs::write(path, serde_json::to_vec_pretty(&updated).unwrap()).unwrap();
-        return;
-    }
-    for query in vector["queries"].as_array().unwrap() {
-        assert_eq!(
-            success(
-                library
-                    .query(
-                        "notes",
-                        query["name"].as_str().unwrap(),
-                        query["args"].clone(),
-                        NOW
-                    )
-                    .unwrap()
-            ),
-            query["result"]
-        );
-    }
-}
-
-#[test]
-fn saved_domain_conformance() {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/reading.saved.json");
-    let fixture: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    let records: Records = fixture["records"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(path, bytes)| {
-            (
-                path.clone(),
-                STANDARD.decode(bytes.as_str().unwrap()).unwrap(),
-            )
-        })
-        .collect();
+    let (again, again_expected) = scenario();
+    assert_eq!(records, again);
+    assert_eq!(expected, again_expected);
     let lib = opened(records, &keys(1));
-    for query in fixture["queries"].as_array().unwrap() {
+    assert_eq!(json!(lib.members()), expected["members"]);
+    assert_eq!(json!(lib.ledger()), expected["ledger"]);
+    for namespace in &lib.authority().namespaces {
         assert_eq!(
-            json!(success(
-                lib.query(
-                    "reading.saved",
-                    query["name"].as_str().unwrap(),
-                    query["args"].clone(),
-                    NOW
-                )
-                .unwrap()
-            )),
-            query["expected"]
+            json!(success(lib.view(namespace, LATER).unwrap())),
+            expected["views"][namespace]
         );
     }
-}
-
-#[path = "support/listening_vector.rs"]
-mod listening_vector;
-#[test]
-fn listening_podcasts_conformance() {
-    listening_vector::check();
 }

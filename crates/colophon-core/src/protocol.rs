@@ -3,7 +3,7 @@ use crate::{ensure, model::OperationMeta, Error, Result};
 use sha2::{Digest, Sha256};
 
 /// Authority record protocol marker.
-pub const AUTHORITY: &str = "colophon/authority/3";
+pub const AUTHORITY: &str = "colophon/authority/4";
 /// Signed operation header protocol marker.
 pub const OPERATION: &str = "colophon/operation/3";
 /// Access-request protocol marker.
@@ -32,7 +32,7 @@ pub const EQUIVOCATION: &str = "Equivocation";
 
 /// True when `error` is an authenticated layout/authority the client cannot evaluate.
 pub fn is_unsupported_layout(error: &Error) -> bool {
-    error.0.starts_with(UNSUPPORTED_LAYOUT)
+    error.0.starts_with(UNSUPPORTED_LAYOUT) || error.0.starts_with("newerFormat")
 }
 
 /// True when `error` reports changed bytes at an immutable path.

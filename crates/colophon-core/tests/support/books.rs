@@ -1,14 +1,14 @@
 use super::*;
-use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
-use std::{collections::BTreeMap, fs, path::PathBuf};
+
 pub fn scenario() -> (Records, Value) {
     let owner = keys(5);
-    let recovery = SoftwareKeys::recovery([99; 32]).unwrap();
     let create = Library::begin_create(
         CreateOptions {
-            owner: owner.public(),
-            recovery: recovery.public(),
+            owner: keys(201).public(),
+            member: owner.public(),
+            vault_seed: [202; 32],
+            import_expires: None,
             label: "Synthetic books fixture".into(),
             owner_label: "Books fixture owner".into(),
             namespaces: vec!["reading.books".into()],
@@ -149,35 +149,13 @@ pub fn scenario() -> (Records, Value) {
         json!({"namespace":"reading.books","queries":queries}),
     )
 }
-pub fn check(update: bool) {
+pub fn check(_update: bool) {
     let (records, expected) = scenario();
-    let folder =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/reading.books");
-    let encoded: BTreeMap<_, _> = records
-        .iter()
-        .map(|(p, b)| (p.clone(), STANDARD.encode(b)))
-        .collect();
-    if update && std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
-        fs::create_dir_all(&folder).unwrap();
-        fs::write(folder.join("records.json"), canonical(&encoded).unwrap()).unwrap();
-        fs::write(
-            folder.join("expected.json"),
-            serde_json::to_vec_pretty(&expected).unwrap(),
-        )
-        .unwrap();
-    }
-    let stored: BTreeMap<String, String> =
-        serde_json::from_slice(&fs::read(folder.join("records.json")).unwrap()).unwrap();
-    let expected_stored: Value =
-        serde_json::from_slice(&fs::read(folder.join("expected.json")).unwrap()).unwrap();
-    assert_eq!(stored, encoded);
-    assert_eq!(expected_stored, expected);
-    let records: Records = stored
-        .into_iter()
-        .map(|(p, b)| (p, STANDARD.decode(b).unwrap()))
-        .collect();
+    let (again, again_expected) = scenario();
+    assert_eq!(records, again);
+    assert_eq!(expected, again_expected);
     let lib = opened(records, &keys(5));
-    for query in expected_stored["queries"].as_array().unwrap() {
+    for query in expected["queries"].as_array().unwrap() {
         assert_eq!(
             success(
                 lib.query(

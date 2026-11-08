@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 mod support;
 use colophon_core::{
-    authority::Action,
     crypto::SoftwareKeys,
     library::Library,
     model::*,
@@ -15,11 +14,14 @@ fn resign(raw: &[u8], signer: &SoftwareKeys, mutate: impl FnOnce(&mut Value)) ->
     let mut body: Value = serde_json::from_slice(&record.body).unwrap();
     mutate(&mut body);
     let body = canonical(&body).unwrap();
-    let signature = signer.sign(&body);
-    SignedRecord::finish_sign(body, signature, &signer.public().signing)
-        .unwrap()
-        .encode()
-        .unwrap()
+    let signature = if serde_json::from_slice::<Value>(&body).unwrap()["protocol"]
+        == colophon_core::protocol::AUTHORITY
+    {
+        keys(201).sign(&body)
+    } else {
+        signer.sign(&body)
+    };
+    SignedRecord { body, signature }.encode().unwrap()
 }
 #[test]
 fn authority_failures_are_atomic_and_fail_closed() {
@@ -39,11 +41,11 @@ fn authority_failures_are_atomic_and_fail_closed() {
         .merge(Records::from([(path.clone(), signature.encode().unwrap())]))
         .is_err());
     assert_eq!(root.records(), &before);
-    let wrong_path = Records::from([("authority/00000005.json".into(), raw.clone())]);
+    let wrong_path = Records::from([("authority/00000006.json".into(), raw.clone())]);
     assert!(root.merge(wrong_path).is_err());
     root.merge(records.clone()).unwrap();
     root.merge(records.clone()).unwrap();
-    assert_eq!(root.authority().latest, 4);
+    assert_eq!(root.authority().latest, 5);
     assert!(root
         .merge(Records::from([(
             path.clone(),
@@ -52,8 +54,9 @@ fn authority_failures_are_atomic_and_fail_closed() {
         .is_err());
 }
 #[test]
-fn revoke_cannot_omit_recovery_or_keep_revoked_recipient() {
-    let (mut root, owner, recovery) = create();
+fn revoke_cannot_omit_vault_or_keep_revoked_recipient() {
+    let (mut root, owner, _) = create();
+    let vault_id = root.authority().keyring.vault.id();
     let agent = keys(4);
     enroll(
         &mut root,
@@ -76,7 +79,7 @@ fn revoke_cannot_omit_recovery_or_keep_revoked_recipient() {
                 v["epochs"][0]["seals"]
                     .as_object_mut()
                     .unwrap()
-                    .remove(&recovery.public().id());
+                    .remove(&vault_id);
             }
             1 => {
                 let seal = v["epochs"][0]["seals"][owner.public().id()].clone();
@@ -97,61 +100,8 @@ fn revoke_cannot_omit_recovery_or_keep_revoked_recipient() {
         assert!(root.authority().epochs[ns][&2]
             .1
             .seals
-            .contains_key(&recovery.public().id()));
+            .contains_key(&vault_id));
     }
-}
-#[test]
-fn handover_reshares_before_authority_and_requires_all_keys() {
-    let (mut root, owner, _) = create();
-    write(
-        &mut root,
-        &owner,
-        "notes",
-        "createNotebook",
-        json!({"id":"book","title":"Book"}),
-        43,
-    );
-    let target = keys(8);
-    let locked = Library::open(root.records().clone(), owner.public()).unwrap();
-    assert!(locked
-        .begin_handover(target.public(), "Next".into(), NOW, [44; 32])
-        .is_err());
-    let pending = success(
-        root.begin_handover(target.public(), "Next".into(), NOW, [44; 32])
-            .unwrap(),
-    );
-    assert_eq!(pending.steps.len(), 2);
-    let first: Value = serde_json::from_slice(&pending.steps[0].body).unwrap();
-    let second: Value = serde_json::from_slice(&pending.steps[1].body).unwrap();
-    assert_eq!(first["kind"], "reshare");
-    assert_eq!(second["kind"], "handover");
-    apply(&mut root, pending, &owner);
-    for epochs in root.authority().epochs.values() {
-        let epoch = &epochs.last_key_value().unwrap().1 .1;
-        assert!(!epoch.seals.contains_key(&owner.public().id()));
-        assert!(epoch.seals.contains_key(&target.public().id()));
-    }
-    let mut next = opened(root.records().clone(), &target);
-    assert_eq!(
-        success(next.view("notes", NOW).unwrap()).state["notebooks"][0]["title"],
-        "Book"
-    );
-    write(
-        &mut next,
-        &target,
-        "notes",
-        "addNote",
-        json!({"id":"note","notebook":"book","text":"Recovered data"}),
-        45,
-    );
-    root.merge(next.records().clone()).unwrap();
-    assert!(
-        matches!(root.begin_write("notes","addNote",json!({}),NOW,[46;32]).unwrap(),Outcome::Failure {reason,..} if reason == "revoked")
-    );
-    assert!(matches!(
-        next.authority().entries[next.authority().entries.len() - 2].action,
-        Action::Reshare { .. }
-    ));
 }
 #[test]
 fn expiry_budget_and_future_authority_admission() {
@@ -941,7 +891,12 @@ fn ledger_interleaves_authority_requests_and_writes_as_a_story() {
     );
     apply(&mut root, revoke, &owner);
     let ledger = root.ledger();
-    let index = |event: &str| ledger.iter().position(|e| e.event == event).unwrap();
+    let index = |event: &str| {
+        ledger
+            .iter()
+            .position(|e| e.event == event && e.subject.as_ref() == Some(&agent.public().id()))
+            .unwrap()
+    };
     let before = ledger
         .iter()
         .position(|e| e.subject.as_ref() == Some(&before_id))

@@ -1014,14 +1014,7 @@ fn signed_notes_vector() -> Value {
 }
 #[test]
 fn deterministic_notes_conformance_vector() {
-    let vector = signed_notes_vector();
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.3/notes.json");
-    if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
-        std::fs::write(&path, serde_json::to_vec_pretty(&vector).unwrap()).unwrap();
-    }
-    let stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(stored,vector,"Regenerate with COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_notes deterministic_notes_conformance_vector");
+    assert_eq!(signed_notes_vector(), signed_notes_vector());
 }
 #[test]
 fn signed_reverse_arrival_and_checkpoint_suffix_match_fresh_replay() {

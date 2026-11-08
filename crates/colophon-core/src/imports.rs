@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Reserved engine operation. Only an authenticated root may publish it.
+/// Reserved engine operation. Only a member with an import grant may publish it.
 pub const BATCH_KIND: &str = "colophon.importBatch";
 /// Maximum encoded publication size; large originals belong in blobs.
 pub const MAX_BATCH_BYTES: usize = 1024 * 1024;
@@ -258,7 +258,11 @@ impl ImportState {
         let previous_revision = self.revision.clone();
         self.revision = digest(format!("{}{}", self.revision, op.id).as_bytes());
         if op.kind == BATCH_KIND {
-            if !context.root {
+            if context
+                .grant
+                .as_ref()
+                .is_none_or(|g| g.import != Some(true))
+            {
                 self.invalid.insert(op.id.clone());
                 return;
             }
@@ -272,10 +276,27 @@ impl ImportState {
             // All structural and reservation checks precede every mutation. Domain CAS failures
             // are retained normal alternatives, not a partially published transaction.
             let library = &context.library;
+            let prepared = (|| -> Result<_> {
+                let payload_digest = digest(&canonical(&op.payload)?);
+                let ids = batch
+                    .children
+                    .iter()
+                    .map(|child| output_id(library, &self.namespace, &batch.key, &child.key))
+                    .collect::<Result<Vec<_>>>()?;
+                let alternatives = batch
+                    .alternatives
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| canonical(&json!([batch.key, i, c])).map(|b| digest(&b)))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((payload_digest, ids, alternatives))
+            })();
+            let Ok((payload_digest, ids, alternative_ids)) = prepared else {
+                self.invalid.insert(op.id.clone());
+                return;
+            };
             let mut outputs = BTreeMap::new();
-            for child in &batch.children {
-                let id = output_id(library, &self.namespace, &batch.key, &child.key)
-                    .expect("serializable keys");
+            for (child, id) in batch.children.iter().zip(ids) {
                 let mut child_op = op.clone();
                 child_op.id = id.clone();
                 child_op.kind = child.kind.clone();
@@ -289,11 +310,7 @@ impl ImportState {
                 projection.apply_with_context(&child_op, context, child.baseline);
                 outputs.insert(child.key.clone(), id);
             }
-            for (index, candidate) in batch.alternatives.iter().enumerate() {
-                let id = digest(
-                    &canonical(&json!([batch.key, index, candidate]))
-                        .expect("serializable candidate"),
-                );
+            for (candidate, id) in batch.alternatives.iter().zip(alternative_ids) {
                 self.alternatives.insert(id.clone(), json!({"id":id,"batch":batch.key,"historical":true,"candidate":candidate,"importer":op.author,"publication":op.id,"sourceLibrary":batch.evidence["sourceLibrary"],"object":candidate.get("object").unwrap_or(&batch.evidence["object"]),"component":candidate.get("component").unwrap_or(&batch.evidence["component"])}));
             }
             for blob in batch.blobs {
@@ -310,7 +327,7 @@ impl ImportState {
             self.reserved
                 .extend(batch.identities.values().map(IdentityReservation::key));
             self.identities.extend(batch.identities.clone());
-            self.batches.insert(batch.key.clone(), json!({"key":batch.key,"digest":digest(&canonical(&op.payload).expect("serializable batch")),"publication":op.id,"importer":op.author,"evidence":batch.evidence,"outputOperationIDs":outputs,"identities":batch.identities,"alternatives":batch.alternatives,"baselineOutputs":batch.children.iter().filter(|c|c.baseline).map(|c|(&c.key,&outputs[&c.key])).collect::<BTreeMap<_,_>>() }));
+            self.batches.insert(batch.key.clone(), json!({"key":batch.key,"digest":payload_digest,"publication":op.id,"importer":op.author,"evidence":batch.evidence,"outputOperationIDs":outputs,"identities":batch.identities,"alternatives":batch.alternatives,"baselineOutputs":batch.children.iter().filter(|c|c.baseline).map(|c|(&c.key,&outputs[&c.key])).collect::<BTreeMap<_,_>>() }));
         } else if op.kind == "colophon.resolveHistorical" {
             // Resolving only acknowledges reviewed evidence; a separately authored clean command
             // is required to change native state. No rejected old command is replayed implicitly.

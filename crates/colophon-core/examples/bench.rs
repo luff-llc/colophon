@@ -83,8 +83,10 @@ fn generate(count: usize) -> Records {
     let owner = keys(1);
     let pending = Library::begin_create(
         colophon_core::library::CreateOptions {
-            owner: owner.public(),
-            recovery: SoftwareKeys::recovery([9; 32]).unwrap().public(),
+            owner: keys(201).public(),
+            member: owner.public(),
+            vault_seed: [202; 32],
+            import_expires: None,
             label: "Four-domain benchmark".into(),
             owner_label: "Owner".into(),
             namespaces: colophon_core::domain::NAMESPACES

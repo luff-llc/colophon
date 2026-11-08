@@ -42,6 +42,9 @@ pub struct Grant {
     /// Maximum admitted operations across all granted namespaces, for this member's lifetime.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_budget: Option<u64>,
+    /// Explicit import capability; present only as true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import: Option<bool>,
 }
 impl Grant {
     /// Whether a namespace and capability are included.

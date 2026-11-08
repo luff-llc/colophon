@@ -1,309 +1,392 @@
-//! Verified authority history, including atomic revoke/rekey and recovery of every epoch.
+//! Colophon 0.4 authority verification and keyring transitions.
 use crate::{
     crypto::PublicIdentity,
-    ensure,
+    keys::{strict_json, AuthorityEnvelope, KeyDescriptor, VerifiedSigner},
     model::*,
     protocol,
     records::{self, bytes, SignedRecord},
+    slots::{ControllerKey, Slot},
     Error, Result,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One signed authority body. Unknown action kinds stop replay.
+fn malformed(reason: impl std::fmt::Display) -> Error {
+    Error(format!("malformed: {reason}"))
+}
+fn bad(reason: impl std::fmt::Display) -> Error {
+    Error(format!("badSignature: {reason}"))
+}
+fn newer(reason: impl std::fmt::Display) -> Error {
+    Error(format!("newerFormat: {reason}"))
+}
+fn require(ok: bool, reason: &str) -> Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(malformed(reason))
+    }
+}
+/// A controller's authority roles, in protocol order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Approve members, revoke members and rekey.
+    Approve,
+    /// Change the keyring and storage layout.
+    Control,
+    /// Add recovery controllers under the only-adds rule.
+    Recover,
+}
+/// One authority principal; controllers are never members.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Controller {
+    /// Public signing descriptor and optional slot agreement key.
+    pub key: KeyDescriptor,
+    /// Display label, 1–200 bytes.
+    pub label: String,
+    /// Strictly sorted nonempty role set.
+    pub roles: Vec<Role>,
+    /// WebAuthn-only UV requirement, present only as true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<bool>,
+}
+impl Controller {
+    /// Controller signing-key ID.
+    pub fn id(&self) -> String {
+        self.key.id()
+    }
+    /// Validate this controller independently of a keyring.
+    pub fn validate(&self) -> Result<()> {
+        self.key.validate()?;
+        require((1..=200).contains(&self.label.len()), "controller label")?;
+        require(
+            !self.roles.is_empty() && self.roles.windows(2).all(|w| w[0] < w[1]),
+            "controller roles",
+        )?;
+        require(
+            self.verification.is_none()
+                || (self.verification == Some(true) && self.key.is_webauthn()),
+            "verification",
+        )
+    }
+    /// Slot-facing descriptor used by W2's cryptography.
+    pub fn slot_key(&self) -> ControllerKey<'_> {
+        if self.key.is_webauthn() {
+            ControllerKey::Webauthn
+        } else {
+            ControllerKey::Raw {
+                agreement: self.key.agreement(),
+            }
+        }
+    }
+}
+/// Current authority controllers, signing thresholds, vault and opening routes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Keyring {
+    /// Controllers in strictly ascending ID order.
+    pub controllers: Vec<Controller>,
+    /// Required control signers.
+    pub threshold: u64,
+    /// Required recovery signers; zero exactly when no recovery role exists.
+    pub recover_threshold: u64,
+    /// Public identity derived from the vault seed.
+    pub vault: PublicIdentity,
+    /// Nonempty opening routes; duplicate routes retain multiset significance.
+    pub slots: Vec<Slot>,
+}
+impl Keyring {
+    /// Look up a current controller by signing ID.
+    pub fn controller(&self, id: &str) -> Option<&Controller> {
+        self.controllers.iter().find(|c| c.id() == id)
+    }
+    /// Validate the closed keyring's structure and slot/controller compatibility.
+    pub fn validate(&self) -> Result<()> {
+        require(
+            !self.controllers.is_empty()
+                && self.controllers.windows(2).all(|w| w[0].id() < w[1].id()),
+            "controller ordering",
+        )?;
+        for c in &self.controllers {
+            c.validate()?;
+        }
+        let controls = self
+            .controllers
+            .iter()
+            .filter(|c| c.roles.contains(&Role::Control))
+            .count() as u64;
+        let recovers = self
+            .controllers
+            .iter()
+            .filter(|c| c.roles.contains(&Role::Recover))
+            .count() as u64;
+        require(
+            self.threshold > 0 && self.threshold <= controls,
+            "threshold",
+        )?;
+        require(
+            if recovers == 0 {
+                self.recover_threshold == 0
+            } else {
+                self.recover_threshold > 0 && self.recover_threshold <= recovers
+            },
+            "recoverThreshold",
+        )?;
+        self.vault.validate().map_err(malformed)?;
+        require(
+            self.vault.signing != self.vault.agreement,
+            "vault usage collision",
+        )?;
+        require(!self.slots.is_empty(), "empty slots")?;
+        for s in &self.slots {
+            s.validate(|id| self.controller(id).map(Controller::slot_key))?;
+        }
+        Ok(())
+    }
+}
+/// Exact authority/4 body schema, applied only after authorization and unknown-content checks.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthorityEntry {
-    /// Protocol marker.
+    /// Authority protocol marker.
     pub protocol: String,
-    /// Contiguous sequence from one.
+    /// Contiguous sequence beginning at one.
     pub seq: u64,
-    /// SHA-256 of the previous exact body (null only at genesis).
+    /// Previous exact body digest; null only at genesis.
     pub previous: Option<String>,
-    /// Host-supplied date.
+    /// Host-supplied UTC date.
     pub issued: String,
-    /// `root` or, only for recovery, `recovery`.
+    /// Primary controller ID.
     pub by: String,
-    /// Authority action.
+    /// Authority transition.
     #[serde(flatten)]
     pub action: Action,
 }
-/// Closed authority vocabulary. Embedded key distributions make changes atomic.
+/// The six authority/4 transitions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Action {
-    /// Initial identities and declared namespaces.
+    /// Create a library with no implicit member or epoch.
     Genesis {
-        /// Human-readable library or replacement-member label.
+        /// Display label.
         label: String,
-        #[serde(rename = "ownerLabel")]
-        /// Human-readable owner label.
-        owner_label: String,
-        /// Initial or replacement root public identity.
-        root: PublicIdentity,
-        /// Independent recovery public identity.
-        recovery: PublicIdentity,
-        /// Namespaces declared by this library.
+        /// Declared namespaces.
         namespaces: Vec<String>,
+        /// Initial keyring.
+        keyring: Keyring,
+        /// Display-only old library ID.
+        #[serde(rename = "importedFrom", skip_serializing_if = "Option::is_none")]
+        imported_from: Option<String>,
     },
-    /// Introduce consecutive epochs with complete eligible recipient lists.
+    /// Introduce consecutive namespace epochs.
     Rekey {
-        /// Fresh consecutive epochs, each sealed to exactly the eligible recipients.
+        /// Nonempty new epochs.
         epochs: Vec<Epoch>,
     },
-    /// Admit a verified request with a possibly narrowed grant and historical key shares.
+    /// Approve a member's self-signed request.
     Grant {
+        /// Exact signed raw request envelope.
         #[serde(with = "bytes")]
-        /// Exact self-signed access-request envelope.
         request: Vec<u8>,
-        /// Approved closed-set restrictions, no broader than the request.
+        /// Approved scope and restrictions, including optional import power.
         grant: Grant,
-        /// Every existing epoch in scope, sealed to the intended recipient.
+        /// Historical epoch shares for the member.
         shares: Vec<Epoch>,
     },
-    /// End access while keeping acknowledged operations and rotating readable namespaces.
+    /// Revoke a member and rotate its readable namespaces.
     Revoke {
+        /// Revoked member ID.
         #[serde(rename = "memberID")]
-        /// Identity whose access ends.
         member_id: String,
-        /// Acknowledged authenticated signed-body digests whose admission is preserved.
+        /// Accepted operation body digests.
         kept: BTreeSet<String>,
-        /// Fresh consecutive epochs, each sealed to exactly the eligible recipients.
+        /// New epochs excluding the revoked member.
         epochs: Vec<Epoch>,
     },
-    /// Planned handover's prerequisite: seal every existing epoch to the new root.
-    Reshare {
-        /// Prospective root identity receiving historical keys.
-        recipient: PublicIdentity,
-        /// Human-readable library or replacement-member label.
-        label: String,
-        /// Every existing epoch in scope, sealed to the intended recipient.
-        shares: Vec<Epoch>,
+    /// Replace the keyring, optionally rotating the vault and every namespace.
+    Keyring {
+        /// Replacement keyring.
+        keyring: Keyring,
+        /// Every historical epoch sealed only to the fresh vault, on rotation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shares: Option<Vec<Epoch>>,
+        /// One fresh epoch per namespace, on rotation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        epochs: Option<Vec<Epoch>>,
     },
-    /// Replace the root only after a verified reshare.
-    Handover {
-        /// Initial or replacement root public identity.
-        root: PublicIdentity,
-        /// Acknowledged authenticated signed-body digests whose admission is preserved.
-        kept: BTreeSet<String>,
-        /// Fresh consecutive epochs, each sealed to exactly the eligible recipients.
-        epochs: Vec<Epoch>,
-    },
-    /// Recovery-signed atomic replacement and redistribution of every recovered epoch.
-    Recover {
-        /// Initial or replacement root public identity.
-        root: PublicIdentity,
-        /// Human-readable library or replacement-member label.
-        label: String,
-        /// Acknowledged authenticated signed-body digests whose admission is preserved.
-        kept: BTreeSet<String>,
-        /// Every existing epoch in scope, sealed to the intended recipient.
-        shares: Vec<Epoch>,
-        /// Fresh consecutive epochs, each sealed to exactly the eligible recipients.
-        epochs: Vec<Epoch>,
-    },
-    /// Raises the required storage layout. Never lowers it. Root-signed.
+    /// Raise the required storage layout under the control rule.
     Layout {
-        /// Required storage layout; this implementation writes and reads layout 2.
+        /// Required layout number.
         layout: u32,
     },
 }
-/// Internal member identity and admission history, exposed for protocol inspectors.
+/// A member and its authenticated admission history.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberState {
-    /// View metadata and grant.
+    /// Display metadata and immutable grant.
     pub member: Member,
-    /// Authenticated public keys.
+    /// Member's separate signing and agreement points.
     pub public: PublicIdentity,
-    /// Operations explicitly preserved by revocation.
+    /// Accepted signed-body digests preserved by revocation.
     pub kept: BTreeSet<String>,
 }
-/// A verified history produced by `replay`. Deserialized caches require device authentication.
+/// Authenticated contiguous authority history. Persisted caches require device authentication.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Authority {
-    /// Genesis-body ID.
+    /// Genesis exact-body ID.
     pub id: String,
-    /// Human library name.
+    /// Library display label.
     pub label: String,
-    /// Current root public identity.
-    pub root: PublicIdentity,
-    /// Recovery public identity.
-    pub recovery: PublicIdentity,
+    /// Current keyring.
+    pub keyring: Keyring,
     /// Declared namespaces.
     pub namespaces: Vec<String>,
-    /// Current sequence.
+    /// Latest verified sequence.
     pub latest: u64,
-    /// Digest of latest exact body.
+    /// Latest exact-body digest.
     pub last_digest: String,
-    /// Members indexed by signing ID.
+    /// All admitted members, including revoked members.
     pub members: BTreeMap<String, MemberState>,
-    /// Epochs, with the authority sequence at which each was introduced.
+    /// Epochs and their introducing authority sequences.
     pub epochs: BTreeMap<String, BTreeMap<u64, (u64, Epoch)>>,
-    /// Verified entries for ledger generation.
+    /// Verified typed entries.
     pub entries: Vec<AuthorityEntry>,
-    /// Required storage layout; 1 when no `layout` entry has been applied.
-    #[serde(default = "default_layout")]
+    /// Required storage layout.
     pub layout: u32,
-    roots: Vec<(u64, String)>,
-    pending_roots: BTreeMap<String, (PublicIdentity, String)>,
+    points: BTreeMap<String, (String, String)>,
+    ids: BTreeMap<String, (String, String)>,
 }
 impl Authority {
-    /// Verify the complete contiguous chain. A gap, conflict, unknown kind or bad signature fails.
+    /// Verify the chain using §6.3's authorization-before-extension order.
     pub fn replay(records: &Records) -> Result<Self> {
+        Self::replay_inner(records).map_err(|e| {
+            if ["malformed", "badSignature", "newerFormat"]
+                .iter()
+                .any(|p| e.0.starts_with(p))
+            {
+                e
+            } else {
+                malformed(e)
+            }
+        })
+    }
+    fn replay_inner(records: &Records) -> Result<Self> {
         let list: Vec<_> = records
             .iter()
             .filter(|(p, _)| p.starts_with("authority/"))
             .collect();
-        let (_, first) = list.first().ok_or_else(|| missing("genesis"))?;
-        let envelope: SignedRecord = serde_json::from_slice(first)?;
-        let entry: AuthorityEntry = serde_json::from_slice(&envelope.body)?;
-        ensure(
-            entry.seq == 1 && entry.previous.is_none() && entry.by == "root",
-            "Invalid genesis",
-        )?;
+        let (_, raw) = list.first().ok_or_else(|| malformed("missing genesis"))?;
+        let env = AuthorityEnvelope::from_json(raw)?;
+        let value = strict_json::parse(&env.body)?;
+        header(&value, 1, None)?;
+        require(value["kind"] == "genesis", "expected genesis")?;
+        // Genesis must expose its authorizing keyring before signatures can be checked.
+        // Only unknown content in that keyring is inspected at this stage.
+        scan(&serde_json::json!({"kind":"genesis","keyring":value["keyring"]}))?;
+        let first: AuthorityEntry = serde_json::from_value(value).map_err(malformed)?;
         let Action::Genesis {
             label,
-            owner_label,
-            root,
-            recovery,
             namespaces,
-        } = &entry.action
+            keyring,
+            imported_from,
+        } = &first.action
         else {
-            return Err(Error("Expected genesis".into()));
+            return Err(malformed("expected genesis"));
         };
-        root.validate()?;
-        recovery.validate()?;
-        ensure(
-            root.id() != recovery.id(),
-            "Recovery must be a separate identity",
-        )?;
-        ensure(
+        keyring.validate()?;
+        require(
             !namespaces.is_empty()
                 && namespaces.iter().collect::<BTreeSet<_>>().len() == namespaces.len(),
-            "Invalid namespaces",
+            "namespaces",
         )?;
         for ns in namespaces {
             validate_namespace(ns)?;
         }
-        let mut members = BTreeMap::new();
-        members.insert(
-            root.id(),
-            MemberState {
-                member: Member {
-                    id: root.id(),
-                    label: owner_label.clone(),
-                    kind: MemberKind::Device,
-                    grant: None,
-                    since: 1,
-                    revoked_at: None,
-                    writes: 0,
-                },
-                public: root.clone(),
-                kept: BTreeSet::new(),
-            },
-        );
+        if let Some(id) = imported_from {
+            require(valid_hex(id, 32), "importedFrom")?;
+        }
         let mut state = Self {
-            id: records::id(&envelope.body),
+            id: records::id(&env.body),
             label: label.clone(),
-            root: root.clone(),
-            recovery: recovery.clone(),
+            keyring: keyring.clone(),
             namespaces: namespaces.clone(),
             latest: 0,
             last_digest: String::new(),
-            members,
+            members: BTreeMap::new(),
             epochs: BTreeMap::new(),
             entries: Vec::new(),
             layout: protocol::DEFAULT_LAYOUT,
-            roots: vec![(1, root.id())],
-            pending_roots: BTreeMap::new(),
+            points: BTreeMap::new(),
+            ids: BTreeMap::new(),
         };
+        state.register_keyring(None, keyring, 1)?;
         for (path, raw) in list {
-            let record: SignedRecord = serde_json::from_slice(raw)?;
-            ensure(
+            require(
                 path == &format!("authority/{:08}.json", state.latest + 1),
-                "Authority gap or invalid path",
+                "authority path or gap",
             )?;
-            let entry = match serde_json::from_slice::<AuthorityEntry>(&record.body) {
-                Ok(entry) => entry,
-                Err(_) => {
-                    authenticate_authority(&record, &state)?;
-                    match parse_entry(&record.body, state.latest + 1) {
-                        Err(error) => return Err(error),
-                        Ok(_) => {
-                            return Err(Error(format!(
-                                "{} (this client supports layout {})",
-                                protocol::UNSUPPORTED_LAYOUT,
-                                protocol::LAYOUT
-                            )))
-                        }
-                    }
-                }
-            };
-            ensure(
-                entry.protocol == protocol::AUTHORITY && entry.seq == state.latest + 1,
-                "Authority version or sequence",
+            let env = AuthorityEnvelope::from_json(raw)?;
+            let value = strict_json::parse(&env.body)?;
+            header(
+                &value,
+                state.latest + 1,
+                if state.latest == 0 {
+                    None
+                } else {
+                    Some(&state.last_digest)
+                },
             )?;
-            ensure(
-                entry.previous
-                    == if state.latest == 0 {
-                        None
-                    } else {
-                        Some(state.last_digest.clone())
-                    },
-                "Authority hash chain",
-            )?;
-            time_key(&entry.issued)?;
-            match entry.by.as_str() {
-                "root" => {
-                    ensure(
-                        !matches!(entry.action, Action::Recover { .. }),
-                        "Recovery signer required",
-                    )?;
-                    record.verify(&state.root.signing)?;
+            let by = value["by"].as_str().ok_or_else(|| malformed("by"))?;
+            // Foreign attached signers, including the primary, always fail as badSignature.
+            let signers =
+                env.verify_all(|id| state.keyring.controller(id).map(|c| &c.key), false)?;
+            for signer in &signers {
+                let c = state
+                    .keyring
+                    .controller(&signer.id)
+                    .ok_or_else(|| bad("foreign controller"))?;
+                if c.verification == Some(true) && signer.uv != Some(true) {
+                    return Err(bad("controller requires UV"));
                 }
-                "recovery" => {
-                    ensure(
-                        matches!(entry.action, Action::Recover { .. }),
-                        "Recovery may only recover",
-                    )?;
-                    record.verify(&state.recovery.signing)?;
-                }
-                _ => {
-                    record
-                        .verify(&state.root.signing)
-                        .or_else(|_| record.verify(&state.recovery.signing))?;
-                    return Err(Error(format!(
-                        "{} (unknown signer; this client supports layout {})",
-                        protocol::UNSUPPORTED_LAYOUT,
-                        protocol::LAYOUT
-                    )));
-                }
+            }
+            require(!by.is_empty(), "by")?;
+            authorize(&state.keyring, &value, &signers)?;
+            env.check_known_fields()?;
+            scan(&value)?;
+            reject_nulls(&value, true)?;
+            let entry: AuthorityEntry = serde_json::from_value(value).map_err(malformed)?;
+            if entry.seq == 2 {
+                let Action::Rekey { epochs } = &entry.action else {
+                    return Err(malformed("seq 2 must rekey"));
+                };
+                state.all_namespaces(epochs)?;
+                require(epochs.iter().all(|e| e.epoch == 1), "seq 2 epoch 1")?;
             }
             state.apply(&entry)?;
             state.latest = entry.seq;
-            state.last_digest = records::digest(&record.body);
+            state.last_digest = records::digest(&env.body);
             state.entries.push(entry);
         }
-        ensure(
-            state.layout <= protocol::LAYOUT,
-            &format!(
-                "{} {} (this client supports {})",
-                protocol::UNSUPPORTED_LAYOUT,
-                state.layout,
-                protocol::LAYOUT
-            ),
-        )?;
+        if state.layout > protocol::LAYOUT {
+            return Err(newer("storage layout"));
+        }
         Ok(state)
     }
-    /// Root in force at an authority sequence.
-    pub fn root_at(&self, seq: u64) -> Option<&str> {
-        self.roots
+    /// Independently reverify an authority prefix (also used by background cache audits).
+    pub fn verify_prefix(records: &Records, seq: u64) -> Result<()> {
+        let prefix = records
             .iter()
-            .rev()
-            .find(|(s, _)| *s <= seq)
-            .map(|(_, id)| id.as_str())
+            .filter(|(p, _)| {
+                !p.starts_with("authority/") || *p <= &format!("authority/{seq:08}.json")
+            })
+            .map(|(p, r)| (p.clone(), r.clone()))
+            .collect();
+        Self::replay(&prefix).map(|_| ())
     }
-    /// Epoch current at an authority sequence.
+    /// Epoch current at a signed authority sequence.
     pub fn epoch_at(&self, namespace: &str, seq: u64) -> Option<u64> {
         self.epochs
             .get(namespace)?
@@ -312,49 +395,115 @@ impl Authority {
             .find(|(_, (s, _))| *s <= seq)
             .map(|(e, _)| *e)
     }
-    /// HPKE application context, bound to library, namespace, epoch and recipient.
+    /// Bound epoch HPKE application context.
     pub fn key_info(&self, namespace: &str, epoch: u64, recipient: &str) -> Vec<u8> {
         key_info(&self.id, namespace, epoch, recipient)
     }
+    fn register(&mut self, principal: &str, usage: &str, point: &[u8], repeat: bool) -> Result<()> {
+        let owner = (principal.to_owned(), usage.to_owned());
+        for (map, key) in [
+            (&mut self.points, records::hex(point)),
+            (&mut self.ids, records::id(point)),
+        ] {
+            if let Some(old) = map.get(&key) {
+                require(repeat && old == &owner, "one key, one principal and usage")?;
+            }
+            map.insert(key, owner.clone());
+        }
+        Ok(())
+    }
+    fn register_keyring(
+        &mut self,
+        prior: Option<&Keyring>,
+        next: &Keyring,
+        seq: u64,
+    ) -> Result<()> {
+        for c in &next.controllers {
+            let repeat = prior.is_some_and(|p| p.controller(&c.id()).is_some());
+            let principal = format!("controller:{}", c.id());
+            self.register(&principal, "signing", c.key.signing(), repeat)?;
+            if let Some(point) = c.key.agreement() {
+                self.register(&principal, "agreement", point, repeat)?;
+            }
+        }
+        if prior.is_none_or(|p| p.vault != next.vault) {
+            let principal = format!("vault:{seq}");
+            self.register(&principal, "signing", &next.vault.signing, false)?;
+            self.register(&principal, "agreement", &next.vault.agreement, false)?;
+        }
+        Ok(())
+    }
+    fn all_namespaces(&self, epochs: &[Epoch]) -> Result<()> {
+        require(
+            epochs.len() == self.namespaces.len()
+                && epochs.iter().map(|e| &e.namespace).collect::<BTreeSet<_>>()
+                    == self.namespaces.iter().collect(),
+            "must rotate every namespace",
+        )
+    }
     fn apply(&mut self, entry: &AuthorityEntry) -> Result<()> {
         match &entry.action {
-            Action::Genesis { .. } => ensure(entry.seq == 1, "Repeated genesis")?,
-            Action::Rekey { epochs } => self.add_epochs(epochs, entry.seq, &entry.issued)?,
+            Action::Genesis { .. } => require(entry.seq == 1, "repeated genesis")?,
+            Action::Rekey { epochs } => {
+                require(!epochs.is_empty(), "empty rekey")?;
+                self.add_epochs(epochs, entry.seq, &entry.issued)?;
+            }
             Action::Grant {
                 request,
                 grant,
                 shares,
             } => {
-                let request = verify_request(request, &self.id)?;
+                let r = verify_request(request, &self.id)?;
                 grant.validate()?;
-                ensure(
-                    !self.members.contains_key(&request.member.id())
-                        && request.member.id() != self.recovery.id(),
-                    "Member already known",
+                require(
+                    !self.members.contains_key(&r.member.id()),
+                    "member already known",
                 )?;
-                ensure(
+                require(
                     grant
                         .namespaces
                         .iter()
-                        .all(|n| self.namespaces.contains(n) && request.namespaces.contains(n))
-                        && grant.access.iter().all(|a| request.access.contains(a)),
-                    "Grant exceeds request",
+                        .all(|n| self.namespaces.contains(n) && r.namespaces.contains(n))
+                        && grant.access.iter().all(|a| r.access.contains(a)),
+                    "grant exceeds request",
                 )?;
-                self.add_shares(shares, &request.member.id(), &grant.namespaces)?;
-                let id = request.member.id();
+                if grant.import.is_some() {
+                    require(
+                        grant.import == Some(true)
+                            && grant.access.contains(&Access::Write)
+                            && matches!(r.kind, MemberKind::Device | MemberKind::App),
+                        "import grant",
+                    )?;
+                    require(
+                        grant
+                            .expires
+                            .as_deref()
+                            .map(time_key)
+                            .transpose()?
+                            .is_some_and(|t| {
+                                time_key(&entry.issued).is_ok_and(|issued| t > issued)
+                            }),
+                        "import expiry",
+                    )?;
+                }
+                let principal = format!("member:{}", r.member.id());
+                self.register(&principal, "signing", &r.member.signing, false)?;
+                self.register(&principal, "agreement", &r.member.agreement, false)?;
+                self.add_shares(shares, &r.member.id(), &grant.namespaces)?;
+                let id = r.member.id();
                 self.members.insert(
                     id.clone(),
                     MemberState {
                         member: Member {
                             id,
-                            label: request.label,
-                            kind: request.kind,
+                            label: r.label,
+                            kind: r.kind,
                             grant: Some(grant.clone()),
                             since: entry.seq,
                             revoked_at: None,
                             writes: 0,
                         },
-                        public: request.member,
+                        public: r.member,
                         kept: BTreeSet::new(),
                     },
                 );
@@ -364,139 +513,79 @@ impl Authority {
                 kept,
                 epochs,
             } => {
-                ensure(member_id != &self.root.id(), "Cannot revoke current root")?;
-                let member = self
+                require(kept.iter().all(|d| valid_hex(d, 64)), "kept digest")?;
+                let m = self
                     .members
                     .get_mut(member_id)
-                    .ok_or_else(|| missing("member"))?;
-                ensure(member.member.revoked_at.is_none(), "Already revoked")?;
-                let required: BTreeSet<_> = member
+                    .ok_or_else(|| malformed("unknown member"))?;
+                require(m.member.revoked_at.is_none(), "already revoked")?;
+                let required: BTreeSet<_> = m
                     .member
                     .grant
                     .as_ref()
                     .filter(|g| g.access.contains(&Access::Read))
                     .map(|g| g.namespaces.iter().cloned().collect())
                     .unwrap_or_default();
-                ensure(
+                require(
                     epochs
                         .iter()
                         .map(|e| e.namespace.clone())
                         .collect::<BTreeSet<_>>()
                         == required,
-                    "Revoke must rotate every readable namespace",
+                    "revoke namespaces",
                 )?;
-                member.member.revoked_at = Some(entry.seq);
-                member.kept = kept.clone();
+                m.member.revoked_at = Some(entry.seq);
+                m.kept = kept.clone();
                 self.add_epochs(epochs, entry.seq, &entry.issued)?;
             }
-            Action::Reshare {
-                recipient,
-                label,
-                shares,
-            } => {
-                recipient.validate()?;
-                ensure(
-                    recipient.id() != self.recovery.id() && recipient.id() != self.root.id(),
-                    "Invalid handover target",
-                )?;
-                self.add_shares(shares, &recipient.id(), &self.namespaces.clone())?;
-                self.pending_roots
-                    .insert(recipient.id(), (recipient.clone(), label.clone()));
-            }
-            Action::Handover { root, kept, epochs } => {
-                let (shared, label) = self
-                    .pending_roots
-                    .get(&root.id())
-                    .cloned()
-                    .ok_or_else(|| missing("prior handover reshare"))?;
-                ensure(&shared == root, "Handover identity mismatch")?;
-                // New epochs could have arrived since reshare; all must be available before transfer.
-                ensure(
-                    self.epochs
-                        .values()
-                        .flat_map(|e| e.values())
-                        .all(|(_, e)| e.seals.contains_key(&root.id())),
-                    "Handover missing epoch",
-                )?;
-                self.replace_root(root, &label, kept, entry.seq)?;
-                self.replace_epochs(epochs, entry)?;
-            }
-            Action::Recover {
-                root,
-                label,
-                kept,
+            Action::Keyring {
+                keyring,
                 shares,
                 epochs,
             } => {
-                root.validate()?;
-                self.add_shares(shares, &root.id(), &self.namespaces.clone())?;
-                self.replace_root(root, label, kept, entry.seq)?;
-                self.replace_epochs(epochs, entry)?;
+                keyring.validate()?;
+                let old = self.keyring.clone();
+                let rotated = old.vault != keyring.vault;
+                let preserved = preserves_slots(&old.slots, &keyring.slots, false)?;
+                let rotation_required = !preserved
+                    || old.controllers.iter().any(|c| {
+                        keyring.controller(&c.id()).is_none_or(|n| {
+                            c.roles.iter().any(|r| !n.roles.contains(r))
+                                || c.key.agreement() != n.key.agreement()
+                        })
+                    });
+                require(!rotation_required || rotated, "vault rotation required")?;
+                self.register_keyring(Some(&old), keyring, entry.seq)?;
+                if rotated {
+                    let shares = shares
+                        .as_ref()
+                        .ok_or_else(|| malformed("rotation shares missing"))?;
+                    let epochs = epochs
+                        .as_ref()
+                        .ok_or_else(|| malformed("rotation epochs missing"))?;
+                    self.all_namespaces(epochs)?;
+                    self.add_shares(shares, &keyring.vault.id(), &self.namespaces.clone())?;
+                    self.keyring = keyring.clone();
+                    self.add_epochs(epochs, entry.seq, &entry.issued)?;
+                } else {
+                    require(
+                        shares.is_none() && epochs.is_none() && preserved,
+                        "shares or epochs without rotation",
+                    )?;
+                    self.keyring = keyring.clone();
+                }
             }
             Action::Layout { layout } => {
-                ensure(*layout >= self.layout, "Layout cannot be lowered")?;
-                ensure(*layout >= 1, "Invalid layout")?;
+                require(*layout >= 1 && *layout >= self.layout, "layout lowered")?;
                 self.layout = *layout;
             }
         }
         Ok(())
     }
-    fn replace_epochs(&mut self, epochs: &[Epoch], entry: &AuthorityEntry) -> Result<()> {
-        ensure(
-            epochs.iter().map(|e| &e.namespace).collect::<BTreeSet<_>>()
-                == self.namespaces.iter().collect::<BTreeSet<_>>(),
-            "Root replacement must rotate every namespace",
-        )?;
-        self.add_epochs(epochs, entry.seq, &entry.issued)
-    }
-    fn replace_root(
-        &mut self,
-        root: &PublicIdentity,
-        label: &str,
-        kept: &BTreeSet<String>,
-        seq: u64,
-    ) -> Result<()> {
-        ensure(
-            root.id() != self.root.id() && root.id() != self.recovery.id(),
-            "Invalid replacement root",
-        )?;
-        let old = self
-            .members
-            .get_mut(&self.root.id())
-            .ok_or_else(|| missing("root member"))?;
-        old.member.revoked_at = Some(seq);
-        old.kept = kept.clone();
-        ensure(
-            !self.members.contains_key(&root.id()),
-            "Replacement root must be a fresh identity",
-        )?;
-        self.members.insert(
-            root.id(),
-            MemberState {
-                member: Member {
-                    id: root.id(),
-                    label: label.into(),
-                    kind: MemberKind::Device,
-                    grant: None,
-                    since: seq,
-                    revoked_at: None,
-                    writes: 0,
-                },
-                public: root.clone(),
-                kept: BTreeSet::new(),
-            },
-        );
-        self.root = root.clone();
-        self.roots.push((seq, root.id()));
-        self.pending_roots.clear();
-        Ok(())
-    }
-    /// Eligible recipients for a newly introduced namespace epoch.
+    /// Exactly the current vault and active, unexpired readers at introduction time.
     pub fn recipients(&self, namespace: &str, now: &str) -> Result<Vec<PublicIdentity>> {
-        let mut recipients = BTreeMap::from([
-            (self.root.id(), self.root.clone()),
-            (self.recovery.id(), self.recovery.clone()),
-        ]);
+        let mut recipients =
+            BTreeMap::from([(self.keyring.vault.id(), self.keyring.vault.clone())]);
         for m in self.members.values() {
             if m.member.revoked_at.is_none() {
                 if let Some(g) = &m.member.grant {
@@ -510,29 +599,34 @@ impl Authority {
     }
     fn add_epochs(&mut self, epochs: &[Epoch], seq: u64, now: &str) -> Result<()> {
         let mut seen = BTreeSet::new();
-        for epoch in epochs {
-            ensure(
-                self.namespaces.contains(&epoch.namespace) && seen.insert(&epoch.namespace),
-                "Duplicate or undeclared namespace epoch",
+        for e in epochs {
+            require(
+                self.namespaces.contains(&e.namespace) && seen.insert(&e.namespace),
+                "duplicate or undeclared epoch",
             )?;
-            ensure(
-                epoch.epoch == self.epoch_at(&epoch.namespace, seq).unwrap_or(0) + 1,
-                "Epoch must be consecutive",
+            require(
+                e.epoch
+                    == self
+                        .epoch_at(&e.namespace, seq)
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| malformed("epoch overflow"))?,
+                "nonconsecutive epoch",
             )?;
             let required: BTreeSet<_> = self
-                .recipients(&epoch.namespace, now)?
+                .recipients(&e.namespace, now)?
                 .iter()
                 .map(PublicIdentity::id)
                 .collect();
-            ensure(
-                epoch.seals.keys().cloned().collect::<BTreeSet<_>>() == required,
-                "Epoch recipient list is incomplete or overbroad",
+            require(
+                e.seals.keys().cloned().collect::<BTreeSet<_>>() == required,
+                "epoch recipients",
             )?;
-            validate_seals(epoch)?;
+            validate_seals(e)?;
             self.epochs
-                .entry(epoch.namespace.clone())
+                .entry(e.namespace.clone())
                 .or_default()
-                .insert(epoch.epoch, (seq, epoch.clone()));
+                .insert(e.epoch, (seq, e.clone()));
         }
         Ok(())
     }
@@ -548,85 +642,346 @@ impl Authority {
                 self.epochs
                     .get(n)
                     .into_iter()
-                    .flat_map(move |epochs| epochs.keys().map(move |e| (n.clone(), *e)))
+                    .flat_map(move |es| es.keys().map(move |e| (n.clone(), *e)))
             })
             .collect();
         let actual: BTreeSet<_> = shares
             .iter()
             .map(|e| (e.namespace.clone(), e.epoch))
             .collect();
-        ensure(
+        require(
             actual == expected && actual.len() == shares.len(),
-            "Must reshare every granted historical epoch exactly once",
+            "historical shares incomplete",
         )?;
         for share in shares {
-            ensure(
+            require(
                 share.seals.len() == 1 && share.seals.contains_key(recipient),
-                "Unexpected share recipient",
+                "share recipient",
             )?;
             validate_seals(share)?;
-            let (_, epoch) = self
+            let (_, e) = self
                 .epochs
                 .get_mut(&share.namespace)
-                .and_then(|e| e.get_mut(&share.epoch))
-                .ok_or_else(|| missing("shared epoch"))?;
-            epoch.seals.extend(share.seals.clone());
+                .and_then(|es| es.get_mut(&share.epoch))
+                .ok_or_else(|| malformed("unknown shared epoch"))?;
+            e.seals.extend(share.seals.clone());
         }
         Ok(())
     }
 }
-fn validate_seals(epoch: &Epoch) -> Result<()> {
-    for seal in epoch.seals.values() {
-        ensure(
-            seal.enc.len() == 65 && seal.enc[0] == 4 && seal.ciphertext.len() == 48,
-            "Invalid epoch seal",
+fn valid_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn header(v: &Value, seq: u64, previous: Option<&str>) -> Result<()> {
+    require(
+        v.is_object() && v["protocol"] == protocol::AUTHORITY && v["seq"].as_u64() == Some(seq),
+        "authority header",
+    )?;
+    require(
+        if seq == 1 {
+            v.get("previous") == Some(&Value::Null)
+        } else {
+            v["previous"].as_str() == previous
+        },
+        "previous digest",
+    )?;
+    time_key(v["issued"].as_str().ok_or_else(|| malformed("issued"))?).map_err(malformed)?;
+    require(v["by"].as_str().is_some_and(|s| valid_hex(s, 32)), "by")?;
+    require(v["kind"].is_string(), "kind")
+}
+fn control(k: &Keyring, s: &[VerifiedSigner]) -> bool {
+    s.len() as u64 >= k.threshold
+        && s.iter().all(|s| {
+            s.uv != Some(false)
+                && k.controller(&s.id)
+                    .is_some_and(|c| c.roles.contains(&Role::Control))
+        })
+}
+fn authorize(k: &Keyring, v: &Value, s: &[VerifiedSigner]) -> Result<()> {
+    let kind = v["kind"].as_str().ok_or_else(|| malformed("kind"))?;
+    let allowed = match kind {
+        "keyring" => control(k, s) || recovery(k, v, s)?,
+        "rekey" | "grant" | "revoke"
+            if !(kind == "grant" && v["grant"].get("import").is_some()) =>
+        {
+            s.len() == 1
+                && k.controller(&s[0].id).is_some_and(|c| {
+                    c.roles.contains(&Role::Approve)
+                        || (kind == "rekey" && c.roles.contains(&Role::Control))
+                })
+        }
+        _ => control(k, s),
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(bad("authority rule"))
+    }
+}
+fn recovery(k: &Keyring, v: &Value, s: &[VerifiedSigner]) -> Result<bool> {
+    if k.recover_threshold == 0
+        || (s.len() as u64) < k.recover_threshold
+        || !s.iter().all(|s| {
+            s.uv != Some(false)
+                && k.controller(&s.id)
+                    .is_some_and(|c| c.roles.contains(&Role::Recover))
+        })
+    {
+        return Ok(false);
+    }
+    let old = serde_json::to_value(k)?;
+    let next = &v["keyring"];
+    for f in ["threshold", "recoverThreshold", "vault"] {
+        if old[f] != next[f] {
+            return Ok(false);
+        }
+    }
+    let Some(cs) = next["controllers"].as_array() else {
+        return Ok(false);
+    };
+    let old_cs = old["controllers"]
+        .as_array()
+        .ok_or_else(|| malformed("controllers"))?;
+    if !old_cs.iter().all(|c| cs.contains(c)) {
+        return Ok(false);
+    }
+    let mut new_ids = BTreeSet::new();
+    for c in cs.iter().filter(|c| !old_cs.contains(c)) {
+        if k.recover_threshold < k.threshold && c["roles"] != serde_json::json!(["approve"]) {
+            return Ok(false);
+        }
+        let Some(signing) = c["key"]["signing"].as_str() else {
+            return Ok(false);
+        };
+        use base64::Engine;
+        let Ok(signing) = base64::engine::general_purpose::STANDARD.decode(signing) else {
+            return Ok(false);
+        };
+        let id = records::id(&signing);
+        if k.controller(&id).is_some() {
+            return Ok(false);
+        }
+        new_ids.insert(id);
+    }
+    let Some(slots) = next["slots"].as_array() else {
+        return Ok(false);
+    };
+    let Some(old_slots) = old["slots"].as_array() else {
+        return Ok(false);
+    };
+    let mut remaining = slots.clone();
+    for old in old_slots {
+        let Some(i) = remaining.iter().position(|s| s == old) else {
+            return Ok(false);
+        };
+        remaining.remove(i);
+    }
+    Ok(remaining.iter().all(|s| {
+        s["controllers"].as_array().is_some_and(|ids| {
+            ids.iter()
+                .all(|id| id.as_str().is_some_and(|id| new_ids.contains(id)))
+        })
+    }))
+}
+fn preserves_slots(old: &[Slot], new: &[Slot], labels: bool) -> Result<bool> {
+    let canonical = |s: &Slot| -> Result<Vec<u8>> {
+        let mut v = serde_json::to_value(s)?;
+        if !labels {
+            if let Some(m) = v.as_object_mut() {
+                m.remove("label");
+            }
+        }
+        records::canonical(&v)
+    };
+    let mut rest = new.iter().map(canonical).collect::<Result<Vec<_>>>()?;
+    for s in old {
+        let bytes = canonical(s)?;
+        let Some(i) = rest.iter().position(|s| s == &bytes) else {
+            return Ok(false);
+        };
+        rest.remove(i);
+    }
+    Ok(true)
+}
+fn validate_seals(e: &Epoch) -> Result<()> {
+    for s in e.seals.values() {
+        require(
+            s.enc.len() == 65 && s.enc.first() == Some(&4) && s.ciphertext.len() == 48,
+            "epoch seal",
         )?;
-        p256::PublicKey::from_sec1_bytes(&seal.enc)
-            .map_err(|_| Error("Invalid HPKE point".into()))?;
+        p256::PublicKey::from_sec1_bytes(&s.enc).map_err(malformed)?;
     }
     Ok(())
 }
-fn default_layout() -> u32 {
-    protocol::DEFAULT_LAYOUT
-}
-
-fn authenticate_authority(record: &SignedRecord, state: &Authority) -> Result<()> {
-    #[derive(Deserialize)]
-    struct Probe {
-        by: Option<String>,
+fn closed(v: &Value, fields: &[&str], extension: bool) -> Result<()> {
+    let Some(map) = v.as_object() else {
+        return if extension {
+            Ok(())
+        } else {
+            Err(malformed("expected object"))
+        };
+    };
+    if map.keys().any(|f| !fields.contains(&f.as_str())) {
+        return Err(if extension {
+            newer("unknown field")
+        } else {
+            malformed("unknown field")
+        });
     }
-    let probe: Probe = serde_json::from_slice(&record.body).unwrap_or(Probe { by: None });
-    match probe.by.as_deref() {
-        Some("recovery") => record.verify(&state.recovery.signing),
-        _ => record.verify(&state.root.signing),
-    }
+    Ok(())
 }
-
-fn parse_entry(body: &[u8], seq: u64) -> Result<AuthorityEntry> {
-    match serde_json::from_slice::<AuthorityEntry>(body) {
-        Ok(entry) => Ok(entry),
-        Err(_) => {
-            #[derive(Deserialize)]
-            struct Probe {
-                kind: Option<String>,
-                layout: Option<u32>,
+fn reject_nulls(v: &Value, top: bool) -> Result<()> {
+    match v {
+        Value::Null => return Err(malformed("null")),
+        Value::Object(m) => {
+            for (key, v) in m {
+                if top && key == "previous" && v.is_null() {
+                    continue;
+                }
+                reject_nulls(v, false)?;
             }
-            let probe: Probe = serde_json::from_slice(body).unwrap_or(Probe {
-                kind: None,
-                layout: None,
-            });
-            let layout = probe.layout.unwrap_or(0);
-            Err(Error(format!(
-                "{} {} (this client supports {}; newer authority kind {:?})",
-                protocol::UNSUPPORTED_LAYOUT,
-                layout.max(u32::try_from(seq).unwrap_or(u32::MAX)),
-                protocol::LAYOUT,
-                probe.kind.unwrap_or_else(|| "unknown".into())
-            )))
+        }
+        Value::Array(a) => {
+            for v in a {
+                reject_nulls(v, false)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+fn scan(v: &Value) -> Result<()> {
+    let kind = v["kind"].as_str().ok_or_else(|| malformed("kind"))?;
+    let fields: &[&str] = match kind {
+        "genesis" => &["label", "namespaces", "keyring", "importedFrom"],
+        "rekey" => &["epochs"],
+        "grant" => &["request", "grant", "shares"],
+        "revoke" => &["memberID", "kept", "epochs"],
+        "keyring" => &["keyring", "shares", "epochs"],
+        "layout" => &["layout"],
+        _ => return Err(newer("unknown authority kind")),
+    };
+    let mut allowed = vec!["protocol", "seq", "previous", "issued", "by", "kind"];
+    allowed.extend(fields);
+    closed(v, &allowed, true)?;
+    if let Some(k) = v.get("keyring") {
+        closed(
+            k,
+            &[
+                "controllers",
+                "threshold",
+                "recoverThreshold",
+                "vault",
+                "slots",
+            ],
+            true,
+        )?;
+        if let Some(cs) = k["controllers"].as_array() {
+            for c in cs {
+                closed(c, &["key", "label", "roles", "verification"], true)?;
+                let key = &c["key"];
+                closed(
+                    key,
+                    &[
+                        "form",
+                        "signing",
+                        "agreement",
+                        "rp",
+                        "credential",
+                        "origins",
+                    ],
+                    true,
+                )?;
+                if key["form"]
+                    .as_str()
+                    .is_some_and(|f| !["raw", "webauthn"].contains(&f))
+                {
+                    return Err(newer("key form"));
+                }
+                if let Some(rs) = c["roles"].as_array() {
+                    for r in rs {
+                        if r.as_str()
+                            .is_some_and(|r| !["approve", "control", "recover"].contains(&r))
+                        {
+                            return Err(newer("role"));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(v) = k.get("vault") {
+            closed(v, &["signing", "agreement"], true)?;
+        }
+        if let Some(ss) = k["slots"].as_array() {
+            for s in ss {
+                let fields: &[&str] = match s["kind"].as_str() {
+                    Some("sealed") => &["kind", "controllers", "label", "sealed"],
+                    Some("prf") => &["kind", "controllers", "label", "salt", "box"],
+                    Some("combined") => &["kind", "controllers", "label", "parts", "box"],
+                    Some(_) => return Err(newer("slot kind")),
+                    None => &[
+                        "kind",
+                        "controllers",
+                        "label",
+                        "sealed",
+                        "salt",
+                        "box",
+                        "parts",
+                    ],
+                };
+                closed(s, fields, true)?;
+                if let Some(sealed) = s.get("sealed") {
+                    closed(sealed, &["enc", "ciphertext"], true)?;
+                }
+                if let Some(ps) = s["parts"].as_array() {
+                    for p in ps {
+                        let fields: &[&str] = match p["kind"].as_str() {
+                            Some("sealed") => &["kind", "sealed"],
+                            Some("prf") => &["kind", "salt"],
+                            Some(_) => return Err(newer("part kind")),
+                            None => &["kind", "sealed", "salt"],
+                        };
+                        closed(p, fields, true)?;
+                        if let Some(sealed) = p.get("sealed") {
+                            closed(sealed, &["enc", "ciphertext"], true)?;
+                        }
+                    }
+                }
+            }
         }
     }
+    if let Some(g) = v.get("grant") {
+        closed(
+            g,
+            &["namespaces", "access", "expires", "writeBudget", "import"],
+            true,
+        )?;
+    }
+    for field in ["epochs", "shares"] {
+        if let Some(es) = v[field].as_array() {
+            for e in es {
+                closed(e, &["namespace", "epoch", "seals"], true)?;
+                if let Some(ss) = e["seals"].as_object() {
+                    for s in ss.values() {
+                        closed(s, &["enc", "ciphertext"], true)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
-
+/// Parse a strict single-raw envelope for a request or operation.
+/// Authority assertions and cosignatures are never accepted on member records.
+pub fn raw_record(raw: &[u8]) -> Result<SignedRecord> {
+    let v = strict_json::parse(raw)?;
+    closed(&v, &["body", "signature"], false)?;
+    let r: SignedRecord = serde_json::from_value(v).map_err(malformed)?;
+    strict_json::parse(&r.body)?;
+    Ok(r)
+}
 /// HPKE context encoding; fields cannot contain newlines under the namespace and ID rules.
 pub fn key_info(library: &str, namespace: &str, epoch: u64, recipient: &str) -> Vec<u8> {
     format!(
@@ -637,11 +992,32 @@ pub fn key_info(library: &str, namespace: &str, epoch: u64, recipient: &str) -> 
 }
 /// Verify self-signed access request and its library binding before displaying it.
 pub fn verify_request(raw: &[u8], library: &str) -> Result<Request> {
-    let record: SignedRecord = serde_json::from_slice(raw)?;
-    let request: Request = serde_json::from_slice(&record.body)?;
-    request.member.validate()?;
+    let record = raw_record(raw)?;
+    let value = strict_json::parse(&record.body)?;
+    closed(
+        &value,
+        &[
+            "protocol",
+            "libraryID",
+            "member",
+            "label",
+            "kind",
+            "namespaces",
+            "access",
+            "created",
+        ],
+        false,
+    )?;
+    closed(&value["member"], &["signing", "agreement"], false)?;
+    reject_nulls(&value, false)?;
+    let request: Request = serde_json::from_value(value).map_err(malformed)?;
+    request.member.validate().map_err(malformed)?;
+    require(
+        request.member.signing != request.member.agreement,
+        "member usage collision",
+    )?;
     record.verify(&request.member.signing)?;
-    ensure(
+    require(
         request.protocol == protocol::REQUEST && request.library_id == library,
         "Request belongs to another protocol or library",
     )?;
@@ -650,6 +1026,7 @@ pub fn verify_request(raw: &[u8], library: &str) -> Result<Request> {
         access: request.access.clone(),
         expires: None,
         write_budget: None,
+        import: None,
     }
     .validate()?;
     time_key(&request.created)?;

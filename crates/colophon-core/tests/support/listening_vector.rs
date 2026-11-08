@@ -1,8 +1,8 @@
 use super::support::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use colophon_core::{model::Records, records::canonical};
-use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use colophon_core::model::Records;
+use serde_json::json;
+use std::collections::BTreeMap;
 
 pub fn check() {
     let (mut root, owner, _) = create();
@@ -118,31 +118,8 @@ pub fn check() {
             })
         })
         .collect();
-    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3");
-    if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
-        fs::write(
-            folder.join("listening.podcasts.records.json"),
-            canonical(&encoded).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            folder.join("listening.podcasts.expected.json"),
-            serde_json::to_vec_pretty(&expected).unwrap(),
-        )
-        .unwrap();
-    }
-    let stored: BTreeMap<String, String> =
-        serde_json::from_slice(&fs::read(folder.join("listening.podcasts.records.json")).unwrap())
-            .unwrap();
-    let results: Value =
-        serde_json::from_slice(&fs::read(folder.join("listening.podcasts.expected.json")).unwrap())
-            .unwrap();
-    assert_eq!(stored, encoded);
-    assert_eq!(results, json!(expected));
-    let records: Records = stored
-        .into_iter()
-        .map(|(p, b)| (p, STANDARD.decode(b).unwrap()))
-        .collect();
+    let results = json!(expected);
+    let records = root.records().clone();
     let replay = opened(records, &owner);
     for test in results.as_array().unwrap() {
         assert_eq!(

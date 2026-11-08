@@ -472,7 +472,7 @@ impl<S: RecordSource> Engine<S> {
                         // Slot paths do not encode operation IDs; match the authenticated source digest.
                         let raw = self.source.read(path)?;
                         if <[u8; 32]>::from(Sha256::digest(&raw)) == entry.digest {
-                            let record: SignedRecord = serde_json::from_slice(&raw)?;
+                            let record = crate::authority::raw_record(&raw)?;
                             let header: OperationHeader = serde_json::from_slice(&record.body)?;
                             if header.meta.id == judged.header.meta.id {
                                 if let Some(op) = &judged.operation {
@@ -927,14 +927,18 @@ impl<S: RecordSource> Engine<S> {
                     )?;
                 }
                 if path.starts_with("ops/") || path.starts_with("state/") {
-                    match results.next().expect("one result per operation") {
+                    match results
+                        .next()
+                        .ok_or_else(|| missing("operation verification result"))?
+                    {
                         Ok((header, digest)) => {
                             self.stats.signatures_verified += 1;
                             entry.flags |= VERIFIED;
-                            entry.body_digest = std::array::from_fn(|i| {
-                                u8::from_str_radix(&digest[2 * i..2 * i + 2], 16)
-                                    .expect("verified digest")
-                            });
+                            ensure(digest.len() == 64, "Invalid verified digest length")?;
+                            for (i, byte) in entry.body_digest.iter_mut().enumerate() {
+                                *byte = u8::from_str_radix(&digest[2 * i..2 * i + 2], 16)
+                                    .map_err(|_| Error("Invalid verified digest".into()))?;
+                            }
                             entry.epoch = header.meta.epoch;
                             entry.authority = header.meta.authority;
                             if let Some(member) =
@@ -994,12 +998,9 @@ impl<S: RecordSource> Engine<S> {
                                 !self.live_witnesses.contains_key(*path),
                                 "Integrity error: unverified live replacement",
                             )?;
-                            let header =
-                                serde_json::from_slice::<SignedRecord>(raw)
-                                    .ok()
-                                    .and_then(|r| {
-                                        serde_json::from_slice::<OperationHeader>(&r.body).ok()
-                                    });
+                            let header = crate::authority::raw_record(raw).ok().and_then(|r| {
+                                serde_json::from_slice::<OperationHeader>(&r.body).ok()
+                            });
                             let (ns, id, author) = header
                                 .map(|h| (h.meta.namespace, h.meta.id, h.meta.author))
                                 .unwrap_or_else(|| (String::new(), (*path).into(), String::new()));
@@ -1167,7 +1168,11 @@ impl<S: RecordSource> Engine<S> {
                     if j.status == Status::Admitted && j.operation.is_some() {
                         self.live_witnesses
                             .insert(entry.path.clone(), (meta.clock, entry.digest));
-                        let stamp = j.header.live.as_ref().expect("verified live stamp");
+                        let stamp = j
+                            .header
+                            .live
+                            .as_ref()
+                            .ok_or_else(|| missing("verified live stamp"))?;
                         let key = (
                             meta.author.clone(),
                             meta.namespace.clone(),
@@ -1559,7 +1564,10 @@ impl<S: RecordSource> Engine<S> {
     }
     fn load_operation(&mut self, path: &str, digest: [u8; 32]) -> Result<OperationView> {
         if let Some(index) = self.cache.iter().position(|(p, _)| p == path) {
-            let entry = self.cache.remove(index).expect("cache index exists");
+            let entry = self
+                .cache
+                .remove(index)
+                .ok_or_else(|| missing("cache entry"))?;
             let result = serde_json::from_slice(&entry.1)?;
             self.cache.push_back(entry);
             return Ok(result);
@@ -1570,7 +1578,7 @@ impl<S: RecordSource> Engine<S> {
             <[u8; 32]>::from(Sha256::digest(&raw)) == digest,
             "Record digest mismatch",
         )?;
-        let record: SignedRecord = serde_json::from_slice(&raw)?;
+        let record = crate::authority::raw_record(&raw)?;
         let header: OperationHeader = serde_json::from_slice(&record.body)?;
         let at = self
             .entries
@@ -1753,7 +1761,7 @@ impl<S: RecordSource> Engine<S> {
                     )?;
                 }
                 if entry.flags & VERIFIED != 0 {
-                    let record: SignedRecord = serde_json::from_slice(&raw)?;
+                    let record = crate::authority::raw_record(&raw)?;
                     let header: OperationHeader = serde_json::from_slice(&record.body)?;
                     let member = self
                         .library
@@ -1766,19 +1774,20 @@ impl<S: RecordSource> Engine<S> {
                     record.verify(&member.public.signing)?;
                     self.stats.signatures_verified += 1;
                 } else if entry.path.starts_with("authority/") {
-                    let record: SignedRecord = serde_json::from_slice(&raw)?;
-                    let body: AuthorityEntry = serde_json::from_slice(&record.body)?;
-                    let key = if body.by == "recovery" {
-                        &self.library.authority.recovery.signing
-                    } else {
-                        let root = self
-                            .library
-                            .authority
-                            .root_at(body.seq.saturating_sub(1).max(1))
-                            .ok_or_else(|| missing("root"))?;
-                        &self.library.authority.members[root].public.signing
-                    };
-                    record.verify(key)?;
+                    let envelope = crate::keys::AuthorityEnvelope::from_json(&raw)?;
+                    let body: AuthorityEntry = serde_json::from_slice(&envelope.body)?;
+                    let records = self
+                        .library
+                        .authority
+                        .entries
+                        .iter()
+                        .take(body.seq as usize)
+                        .map(|e| {
+                            let path = format!("authority/{:08}.json", e.seq);
+                            self.source.read(&path).map(|r| (path, r))
+                        })
+                        .collect::<Result<Records>>()?;
+                    Authority::verify_prefix(&records, body.seq)?;
                 }
                 Ok(())
             })();
@@ -1812,6 +1821,9 @@ fn empty_library(authority: Authority, me: PublicIdentity) -> Library {
         read_scope: Vec::new(),
         authority,
         me,
+        vault_seed: None,
+        controller: None,
+        checked_slots: BTreeSet::new(),
         keys: BTreeMap::new(),
         checkpoint_keys: BTreeMap::new(),
         judged: Vec::new(),
@@ -1908,7 +1920,7 @@ fn compare_listing(entries: &[Entry], listing: &[String]) -> Result<Vec<String>>
     let mut authority_changed = false;
     for path in listing {
         while previous.peek().is_some_and(|entry| entry.path < *path) {
-            let entry = previous.next().expect("peeked entry");
+            let entry = previous.next().ok_or_else(|| missing("listing entry"))?;
             ensure(
                 crate::protocol::is_replaceable(&entry.path),
                 "Checkpoint record missing from listing",

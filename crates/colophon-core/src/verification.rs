@@ -120,7 +120,7 @@ impl Verifiers {
             return Ok(Vec::new());
         }
         let parse = |(_, raw): &(&str, &[u8])| -> Result<(SignedRecord, OperationHeader)> {
-            let record: SignedRecord = serde_json::from_slice(raw)?;
+            let record = crate::authority::raw_record(raw)?;
             let header: OperationHeader = serde_json::from_slice(&record.body)?;
             ensure(self.0.contains_key(&header.meta.author), "Missing author")?;
             Ok((record, header))
@@ -208,7 +208,10 @@ pub(crate) fn parallel_map<T: Sync, R: Send>(input: &[T], f: impl Fn(&T) -> R + 
                     .collect();
                 handles
                     .into_iter()
-                    .flat_map(|h| h.join().expect("verification worker panicked"))
+                    .flat_map(|h| match h.join() {
+                        Ok(rows) => rows,
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    })
                     .collect()
             });
         }

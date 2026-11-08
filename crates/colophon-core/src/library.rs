@@ -2,15 +2,17 @@
 #[path = "blob_api.rs"]
 mod blob_api;
 use crate::{
-    authority::{self, Action, Authority, AuthorityEntry},
+    authority::{self, Action, Authority, AuthorityEntry, Controller, Keyring, Role},
     crypto::{self, Entropy, PublicIdentity},
     domain::{self, Spec},
     engine::{self, ChangeSummary, CheckpointPolicy, Namespace, Snapshot},
     ensure,
     hpke::SealedKey,
+    keys::{Assertion, AuthorityEnvelope, Cosignature, KeyDescriptor},
     model::*,
     records::{self, bytes, canonical, SignedRecord},
-    Error, Result,
+    slots::{self, Slot},
+    vault, Error, Result,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,50 +21,264 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "storage.rs"]
 pub(crate) mod storage;
 
-/// One exact body to sign. Finish verifies the supplied signature against `signing`.
+/// One exact body and signer descriptor for a host signature.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SigningStep {
-    /// Immutable storage path.
+    /// Immutable destination path; cosigners share the primary path and body.
     pub path: String,
-    /// Exact body bytes for the host.
+    /// Exact signed bytes.
     #[serde(with = "bytes")]
     pub body: Vec<u8>,
-    /// Expected public signing key.
+    /// Expected signing point (also available in the descriptor).
     #[serde(with = "bytes")]
     pub signing: Vec<u8>,
+    /// Signer's form and credential metadata.
+    pub signer: KeyDescriptor,
+    /// WebAuthn base64url SHA-256 challenge, absent for raw signatures.
+    pub challenge: Option<String>,
 }
-/// An action's complete prepared record batch. Persist/merge atomically after all signatures verify.
+impl SigningStep {
+    fn new(path: String, body: Vec<u8>, signer: KeyDescriptor) -> Self {
+        let challenge = signer.is_webauthn().then(|| crate::keys::challenge(&body));
+        Self {
+            path,
+            body,
+            signing: signer.signing().to_vec(),
+            signer,
+            challenge,
+        }
+    }
+    fn raw(path: String, body: Vec<u8>, public: &PublicIdentity) -> Self {
+        Self::new(
+            path,
+            body,
+            KeyDescriptor::Raw {
+                signing: public.signing.clone(),
+                agreement: Some(public.agreement.clone()),
+            },
+        )
+    }
+}
+/// One host signature with its exact assertion bytes when using WebAuthn.
+#[derive(Clone, Debug)]
+pub struct SignatureResult {
+    /// Raw r||s or DER according to the step's descriptor.
+    pub signature: Vec<u8>,
+    /// Assertion for a WebAuthn signer, absent for raw.
+    pub assertion: Option<Assertion>,
+}
+/// A fresh assertion ceremony for building a PRF route, never a registration result.
+pub struct PrfPreparation {
+    /// Only this credential may satisfy the ceremony.
+    pub key: KeyDescriptor,
+    /// Exact WebAuthn PRF input.
+    pub salt: [u8; 32],
+    /// Fresh core challenge for a WebAuthn get assertion.
+    pub challenge: String,
+    body: Vec<u8>,
+}
+/// Verified get-assertion PRF output for one new route, held only in memory.
+pub struct VerifiedPrf {
+    key: KeyDescriptor,
+    salt: [u8; 32],
+    output: [u8; 32],
+    uv: bool,
+}
+/// One new combined-slot part with its controller and verified PRF ceremony, if needed.
+pub enum CombinedPart {
+    /// Generate a fresh independent secret and seal it to a raw controller.
+    Sealed {
+        /// Raw controller with a separate agreement key.
+        controller: Controller,
+    },
+    /// Use the output of a fresh get assertion for this WebAuthn controller.
+    Prf {
+        /// Controller whose descriptor must match the verified ceremony.
+        controller: Controller,
+        /// Core-verified ceremony result.
+        verified: VerifiedPrf,
+    },
+}
+/// A newly built combined slot waiting for a complete checked opening.
+pub struct PendingSlot {
+    slot: Slot,
+    vault: PublicIdentity,
+    controllers: Vec<Controller>,
+    outputs: Vec<Option<[u8; 32]>>,
+}
+impl PendingSlot {
+    /// Exact ECDH inputs and PRF salts; return secrets in this same order.
+    pub fn begin_open(&self) -> Result<Vec<slots::OpeningInput<'_>>> {
+        self.slot.begin_open()
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Creation {
+    grant: Grant,
+    shares: Vec<Epoch>,
+    by: Controller,
+    issued: String,
+    request_path: String,
+}
+/// An atomic record batch with exact two-phase signing steps.
+/// Creation uses `advance_create` after its first round to embed the signed request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PendingBatch {
-    /// Host signing steps in authority order.
+    /// Exact signing work; multiple steps with a common path are cosignatures.
     pub steps: Vec<SigningStep>,
-    /// Extra paths that receive a copy of the signed envelope at the first matching `steps` path.
+    /// Copies of a completed signed step to other storage paths.
     #[serde(default)]
     pub aliases: Vec<(String, String)>,
-    /// Already-signed records to store (retained live predecessors).
+    /// Already signed records included atomically.
     #[serde(default)]
     pub copies: Records,
+    #[serde(default)]
+    base: Records,
+    #[serde(default)]
+    creation: Option<Box<Creation>>,
 }
 impl PendingBatch {
-    /// Finish all signatures without changing a library. A wrong signature rejects the whole batch.
+    /// Finish raw signatures, checking authority rules before returning any records.
     pub fn finish(self, signatures: Vec<Vec<u8>>) -> Result<Records> {
+        self.finish_with_assertions(
+            signatures
+                .into_iter()
+                .map(|signature| SignatureResult {
+                    signature,
+                    assertion: None,
+                })
+                .collect(),
+        )
+    }
+    /// Finish all exact signatures and assertions; a failure returns no partial batch.
+    pub fn finish_with_assertions(self, results: Vec<SignatureResult>) -> Result<Records> {
         ensure(
-            self.steps.len() == signatures.len(),
+            self.creation.is_none(),
+            "Creation requires advance_create before its final signing round",
+        )?;
+        self.finish_round(results, true)
+    }
+    fn finish_round(self, results: Vec<SignatureResult>, validate: bool) -> Result<Records> {
+        ensure(
+            self.steps.len() == results.len(),
             "Signature count mismatch",
         )?;
         let mut records = self.copies;
-        for (step, signature) in self.steps.into_iter().zip(signatures) {
-            let record = SignedRecord::finish_sign(step.body, signature, &step.signing)?;
-            records.insert(step.path, record.encode()?);
+        let mut authority = BTreeMap::<String, (AuthorityEnvelope, Vec<Cosignature>)>::new();
+        for (step, result) in self.steps.into_iter().zip(results) {
+            if step.path.starts_with("authority/") {
+                if let Some((env, cs)) = authority.get_mut(&step.path) {
+                    ensure(env.body == step.body, "Cosignature body mismatch")?;
+                    cs.push(Cosignature::new(
+                        step.signer.id(),
+                        result.signature,
+                        result.assertion,
+                    ));
+                } else {
+                    authority.insert(
+                        step.path,
+                        (
+                            AuthorityEnvelope::new(
+                                step.body,
+                                result.signature,
+                                result.assertion,
+                                None,
+                            )?,
+                            Vec::new(),
+                        ),
+                    );
+                }
+            } else {
+                ensure(
+                    result.assertion.is_none(),
+                    "malformed: assertion on member record",
+                )?;
+                let r = SignedRecord::finish_sign(step.body, result.signature, &step.signing)?;
+                records.insert(step.path, r.encode()?);
+            }
+        }
+        for (path, (mut env, mut cs)) in authority {
+            cs.sort_by(|a, b| a.signer.cmp(&b.signer));
+            if !cs.is_empty() {
+                env.cosignatures = Some(cs);
+            }
+            records.insert(path, env.encode()?);
         }
         for (from, to) in self.aliases {
-            let bytes = records
+            let raw = records
                 .get(&from)
                 .cloned()
-                .ok_or_else(|| Error("Missing signed alias source".into()))?;
-            records.insert(to, bytes);
+                .ok_or_else(|| missing("alias source"))?;
+            records.insert(to, raw);
+        }
+        if validate && records.keys().any(|p| p.starts_with("authority/")) {
+            let mut all = self.base;
+            all.extend(records.clone());
+            Authority::replay(&all)?;
         }
         Ok(records)
+    }
+    /// Finish genesis, rekey and the member request, then prepare grant and layout.
+    /// The returned batch contains the first round as signed copies; persist only its final result.
+    pub fn advance_create(mut self, signatures: Vec<Vec<u8>>) -> Result<Self> {
+        let context = self
+            .creation
+            .take()
+            .ok_or_else(|| missing("creation continuation"))?;
+        let copies = self.finish_round(
+            signatures
+                .into_iter()
+                .map(|signature| SignatureResult {
+                    signature,
+                    assertion: None,
+                })
+                .collect(),
+            false,
+        )?;
+        let request = copies
+            .get(&context.request_path)
+            .cloned()
+            .ok_or_else(|| missing("creation request"))?;
+        let prior = Authority::replay(&copies)?;
+        let grant = AuthorityEntry {
+            protocol: crate::protocol::AUTHORITY.into(),
+            seq: 3,
+            previous: Some(prior.last_digest),
+            issued: context.issued.clone(),
+            by: context.by.id(),
+            action: Action::Grant {
+                request,
+                grant: context.grant,
+                shares: context.shares,
+            },
+        };
+        let body = canonical(&grant)?;
+        let layout = AuthorityEntry {
+            protocol: crate::protocol::AUTHORITY.into(),
+            seq: 4,
+            previous: Some(records::digest(&body)),
+            issued: context.issued,
+            by: context.by.id(),
+            action: Action::Layout {
+                layout: crate::protocol::LAYOUT,
+            },
+        };
+        Ok(Self {
+            steps: vec![
+                SigningStep::new(
+                    "authority/00000003.json".into(),
+                    body,
+                    context.by.key.clone(),
+                ),
+                SigningStep::new(
+                    "authority/00000004.json".into(),
+                    canonical(&layout)?,
+                    context.by.key,
+                ),
+            ],
+            copies,
+            ..Self::default()
+        })
     }
 }
 /// An ECDH task for the host's non-extractable agreement key.
@@ -76,17 +292,21 @@ pub struct AgreementStep {
     #[serde(with = "bytes")]
     pub peer: Vec<u8>,
 }
-/// Inputs for creating a library. The recovery secret remains with the host.
+/// Host inputs for creation; owner and member must be separate principals.
 pub struct CreateOptions {
-    /// Owner's public identity.
+    /// Raw controller identity for the owner.
     pub owner: PublicIdentity,
-    /// Independently derived recovery identity.
-    pub recovery: PublicIdentity,
-    /// Library label.
+    /// Device member identity, distinct from the controller.
+    pub member: PublicIdentity,
+    /// Fresh random vault seed, kept only in slots and session memory.
+    pub vault_seed: [u8; 32],
+    /// Optional explicit import expiry for a copying device, signed under the control rule.
+    pub import_expires: Option<String>,
+    /// Library display label.
     pub label: String,
-    /// Owner label.
+    /// Owner controller and device display label.
     pub owner_label: String,
-    /// Declared namespace names.
+    /// Declared namespaces.
     pub namespaces: Vec<String>,
 }
 /// In-memory replica: signed records and explicitly unlocked symmetric keys only.
@@ -96,6 +316,9 @@ pub struct Library {
     read_scope: Vec<String>,
     authority: Authority,
     me: PublicIdentity,
+    vault_seed: Option<[u8; 32]>,
+    controller: Option<String>,
+    checked_slots: BTreeSet<(String, Vec<u8>)>,
     keys: BTreeMap<(String, u64), Vec<u8>>,
     checkpoint_keys: BTreeMap<(String, u64), Vec<u8>>,
     judged: Vec<Judged>,
@@ -135,78 +358,119 @@ struct Judged {
     from_live_slot: bool,
 }
 impl Library {
-    /// Prepare genesis and initial epochs. Every new epoch is sealed to owner and recovery.
+    /// Prepare raw owner genesis, seq-2 rekey and a separate device request.
+    /// Call `PendingBatch::advance_create` with this round's signatures, then sign its grant and layout.
     pub fn begin_create(opts: CreateOptions, now: &str, seed: [u8; 32]) -> Result<PendingBatch> {
         opts.owner.validate()?;
-        opts.recovery.validate()?;
+        opts.member.validate()?;
         time_key(now)?;
+        let vault = vault::derive(opts.vault_seed)?.public();
+        let owner = Controller {
+            key: KeyDescriptor::Raw {
+                signing: opts.owner.signing.clone(),
+                agreement: Some(opts.owner.agreement.clone()),
+            },
+            label: opts.owner_label.clone(),
+            roles: vec![Role::Approve, Role::Control],
+            verification: None,
+        };
+        let mut entropy = Entropy::new(seed);
+        let slot = Slot::seal(
+            &opts.vault_seed,
+            &vault.id(),
+            &owner.id(),
+            &owner.label,
+            &opts.owner.agreement,
+            &mut entropy,
+        )?;
+        let keyring = Keyring {
+            controllers: vec![owner.clone()],
+            threshold: 1,
+            recover_threshold: 0,
+            vault: vault.clone(),
+            slots: vec![slot],
+        };
+        keyring.validate()?;
         let genesis = AuthorityEntry {
             protocol: crate::protocol::AUTHORITY.into(),
             seq: 1,
             previous: None,
             issued: now.into(),
-            by: "root".into(),
+            by: owner.id(),
             action: Action::Genesis {
                 label: opts.label,
-                owner_label: opts.owner_label,
-                root: opts.owner.clone(),
-                recovery: opts.recovery.clone(),
                 namespaces: opts.namespaces.clone(),
+                keyring,
+                imported_from: None,
             },
         };
         let body = canonical(&genesis)?;
         let id = records::id(&body);
-        let mut entropy = Entropy::new(seed);
-        let epochs = opts
-            .namespaces
-            .iter()
-            .map(|ns| {
-                make_epoch(
-                    &id,
-                    ns,
-                    1,
-                    &[opts.owner.clone(), opts.recovery.clone()],
-                    &mut entropy,
+        let mut epochs = Vec::new();
+        let mut shares = Vec::new();
+        for ns in &opts.namespaces {
+            let key = entropy.take::<32>()?;
+            let seal = |recipient: &PublicIdentity, entropy: &mut Entropy| {
+                SealedKey::seal(
+                    &recipient.agreement,
+                    &key,
+                    &authority::key_info(&id, ns, 1, &recipient.id()),
+                    entropy,
                 )
-            })
-            .collect::<Result<Vec<_>>>()?;
+            };
+            epochs.push(Epoch {
+                namespace: ns.clone(),
+                epoch: 1,
+                seals: BTreeMap::from([(vault.id(), seal(&vault, &mut entropy)?)]),
+            });
+            shares.push(Epoch {
+                namespace: ns.clone(),
+                epoch: 1,
+                seals: BTreeMap::from([(opts.member.id(), seal(&opts.member, &mut entropy)?)]),
+            });
+        }
         let rekey = AuthorityEntry {
             protocol: crate::protocol::AUTHORITY.into(),
             seq: 2,
             previous: Some(records::digest(&body)),
             issued: now.into(),
-            by: "root".into(),
+            by: owner.id(),
             action: Action::Rekey { epochs },
         };
-        let rekey_body = canonical(&rekey)?;
-        let layout = AuthorityEntry {
-            protocol: crate::protocol::AUTHORITY.into(),
-            seq: 3,
-            previous: Some(records::digest(&rekey_body)),
-            issued: now.into(),
-            by: "root".into(),
-            action: Action::Layout {
-                layout: crate::protocol::LAYOUT,
-            },
+        let request = Request {
+            protocol: crate::protocol::REQUEST.into(),
+            library_id: id,
+            member: opts.member.clone(),
+            label: opts.owner_label,
+            kind: MemberKind::Device,
+            namespaces: opts.namespaces.clone(),
+            access: vec![Access::Read, Access::Write],
+            created: now.into(),
         };
+        let request_path = format!("requests/{}.json", opts.member.id());
         Ok(PendingBatch {
             steps: vec![
-                SigningStep {
-                    path: "authority/00000001.json".into(),
-                    body,
-                    signing: opts.owner.signing.clone(),
-                },
-                SigningStep {
-                    path: "authority/00000002.json".into(),
-                    body: rekey_body,
-                    signing: opts.owner.signing.clone(),
-                },
-                SigningStep {
-                    path: "authority/00000003.json".into(),
-                    body: canonical(&layout)?,
-                    signing: opts.owner.signing,
-                },
+                SigningStep::new("authority/00000001.json".into(), body, owner.key.clone()),
+                SigningStep::new(
+                    "authority/00000002.json".into(),
+                    canonical(&rekey)?,
+                    owner.key.clone(),
+                ),
+                SigningStep::raw(request_path.clone(), canonical(&request)?, &opts.member),
             ],
+            creation: Some(Box::new(Creation {
+                grant: Grant {
+                    namespaces: opts.namespaces,
+                    access: vec![Access::Read, Access::Write],
+                    expires: opts.import_expires.clone(),
+                    write_budget: None,
+                    import: opts.import_expires.map(|_| true),
+                },
+                shares,
+                by: owner,
+                issued: now.into(),
+                request_path,
+            })),
             ..PendingBatch::default()
         })
     }
@@ -217,9 +481,6 @@ impl Library {
         if let Some(member) = authority.members.get(&me.id()) {
             ensure(member.public == me, "Member agreement key mismatch")?;
         }
-        if me.id() == authority.recovery.id() {
-            ensure(me == authority.recovery, "Recovery agreement key mismatch")?;
-        }
         let verifiers = std::sync::Arc::new(crate::verification::Verifiers::new(&authority));
         let mut library = Self {
             verifiers,
@@ -227,6 +488,9 @@ impl Library {
             read_scope: Vec::new(),
             authority,
             me,
+            vault_seed: None,
+            controller: None,
+            checked_slots: BTreeSet::new(),
             keys: BTreeMap::new(),
             checkpoint_keys: BTreeMap::new(),
             judged: Vec::new(),
@@ -763,6 +1027,300 @@ impl Library {
     pub fn finish(&mut self, pending: PendingBatch, signatures: Vec<Vec<u8>>) -> Result<()> {
         self.merge(pending.finish(signatures)?)
     }
+    /// Verify authority assertions and cosignatures, then merge the whole batch atomically.
+    pub fn finish_authority(
+        &mut self,
+        pending: PendingBatch,
+        results: Vec<SignatureResult>,
+    ) -> Result<()> {
+        self.merge(pending.finish_with_assertions(results)?)
+    }
+    /// Return exact HPKE encapsulations or PRF salts for a current vault slot.
+    pub fn begin_unlock_slot(&self, index: usize) -> Result<Vec<slots::OpeningInput<'_>>> {
+        self.authority
+            .keyring
+            .slots
+            .get(index)
+            .ok_or_else(|| missing("slot"))?
+            .begin_open()
+    }
+    /// Open and check a slot atomically, then unseal historical epochs with the vault.
+    /// Member checkpoint authentication remains bound to the member's own ECDH results.
+    pub fn finish_unlock_slot(
+        &mut self,
+        index: usize,
+        secrets: &[slots::OpeningSecret<'_>],
+    ) -> Result<()> {
+        let k = &self.authority.keyring;
+        let slot = k.slots.get(index).ok_or_else(|| missing("slot"))?;
+        let seed = slot.finish_open(
+            &k.vault,
+            |id| k.controller(id).map(Controller::slot_key),
+            secrets,
+            vault::derive,
+        )?;
+        let identity = vault::derive(seed)?;
+        let mut opened = Vec::new();
+        for (ns, epochs) in &self.authority.epochs {
+            for (epoch, (_, e)) in epochs {
+                let seal = e
+                    .seals
+                    .get(&k.vault.id())
+                    .ok_or_else(|| missing("vault epoch seal"))?;
+                let shared = identity.agree(&seal.enc)?;
+                let key = seal.finish_open(
+                    &k.vault.agreement,
+                    &shared,
+                    &self.authority.key_info(ns, *epoch, &k.vault.id()),
+                )?;
+                ensure(key.len() == 32, "Invalid epoch plaintext")?;
+                opened.push(((ns.clone(), *epoch), key));
+            }
+        }
+        self.vault_seed = Some(seed);
+        self.keys.extend(opened);
+        self.ingest(&[], true, &self.authority.namespaces.clone());
+        self.retry_live()?;
+        Ok(())
+    }
+    fn require_vault(&self) -> Result<[u8; 32]> {
+        let seed = self.vault_seed.ok_or_else(|| Error("vaultLocked".into()))?;
+        vault::check_seed(&seed, &self.authority.keyring.vault)
+    }
+    /// Build a sealed route using the unlocked vault or a host-supplied rotation seed.
+    pub fn build_sealed_slot(
+        &self,
+        controller: &Controller,
+        label: &str,
+        new_seed: Option<[u8; 32]>,
+        entropy: [u8; 32],
+    ) -> Result<Slot> {
+        let current = self.require_vault()?;
+        controller.validate()?;
+        let agreement = controller
+            .key
+            .agreement()
+            .ok_or_else(|| Error("malformed: sealed route requires a raw agreement key".into()))?;
+        let seed = new_seed.unwrap_or(current);
+        let v = vault::derive(seed)?.public();
+        Slot::seal(
+            &seed,
+            &v.id(),
+            &controller.id(),
+            label,
+            agreement,
+            &mut Entropy::new(entropy),
+        )
+    }
+    /// Begin an assertion restricted to a new WebAuthn credential and a fresh PRF salt.
+    pub fn begin_prf_slot(&self, key: KeyDescriptor, entropy: [u8; 32]) -> Result<PrfPreparation> {
+        self.require_vault()?;
+        key.validate()?;
+        ensure(key.is_webauthn(), "malformed: PRF requires WebAuthn")?;
+        let mut entropy = Entropy::new(entropy);
+        let salt = entropy.take::<32>()?;
+        let body = entropy.take::<32>()?.to_vec();
+        Ok(PrfPreparation {
+            challenge: crate::keys::challenge(&body),
+            key,
+            salt,
+            body,
+        })
+    }
+    /// Verify a fresh get assertion, build the PRF slot, reopen it and check the vault.
+    pub fn finish_prf_slot(
+        &mut self,
+        pending: PrfPreparation,
+        result: SignatureResult,
+        output: &[u8],
+        label: &str,
+        entropy: [u8; 32],
+    ) -> Result<Slot> {
+        let seed = self.require_vault()?;
+        let verified = self.finish_prf_part(pending, result, output)?;
+        let slot = Slot::from_prf(
+            &seed,
+            &self.authority.keyring.vault.id(),
+            &verified.key.id(),
+            label,
+            &verified.salt,
+            output,
+            &mut Entropy::new(entropy),
+        )?;
+        slot.finish_open(
+            &self.authority.keyring.vault,
+            |id| (id == verified.key.id()).then_some(slots::ControllerKey::Webauthn),
+            &[slots::OpeningSecret::Prf(output)],
+            vault::derive,
+        )?;
+        self.checked_slots
+            .insert((self.authority.keyring.vault.id(), slot_fingerprint(&slot)?));
+        Ok(slot)
+    }
+    /// Verify a fresh get assertion and its credential before accepting PRF bytes.
+    pub fn finish_prf_part(
+        &self,
+        pending: PrfPreparation,
+        result: SignatureResult,
+        output: &[u8],
+    ) -> Result<VerifiedPrf> {
+        let assertion = result
+            .assertion
+            .ok_or_else(|| Error("badSignature: missing PRF assertion".into()))?;
+        let uv = crate::keys::verify_webauthn(
+            &pending.key,
+            &pending.body,
+            &result.signature,
+            &assertion.authenticator_data,
+            &assertion.client_data,
+            false,
+        )
+        .map_err(|e| Error(format!("badSignature: {e}")))?;
+        let output = output.try_into().map_err(|_| Error("vaultLocked".into()))?;
+        Ok(VerifiedPrf {
+            key: pending.key,
+            salt: pending.salt,
+            output,
+            uv,
+        })
+    }
+    /// Build a PRF slot for a fresh vault generation during rotation, and check it before publication.
+    pub fn finish_prf_slot_for(
+        &mut self,
+        pending: PrfPreparation,
+        result: SignatureResult,
+        output: &[u8],
+        label: &str,
+        new_seed: [u8; 32],
+        entropy: [u8; 32],
+    ) -> Result<Slot> {
+        self.require_vault()?;
+        let v = vault::derive(new_seed)?.public();
+        let verified = self.finish_prf_part(pending, result, output)?;
+        let slot = Slot::from_prf(
+            &new_seed,
+            &v.id(),
+            &verified.key.id(),
+            label,
+            &verified.salt,
+            &verified.output,
+            &mut Entropy::new(entropy),
+        )?;
+        slot.finish_open(
+            &v,
+            |id| (id == verified.key.id()).then_some(slots::ControllerKey::Webauthn),
+            &[slots::OpeningSecret::Prf(&verified.output)],
+            vault::derive,
+        )?;
+        self.checked_slots
+            .insert((v.id(), slot_fingerprint(&slot)?));
+        Ok(slot)
+    }
+    /// Build a combined slot for the current vault or a host-supplied fresh rotation seed.
+    /// Complete its opening with `finish_combined_slot` before adding it to a keyring.
+    pub fn begin_combined_slot(
+        &self,
+        parts: Vec<CombinedPart>,
+        label: &str,
+        new_seed: Option<[u8; 32]>,
+        entropy: [u8; 32],
+    ) -> Result<PendingSlot> {
+        let current = self.require_vault()?;
+        let seed = new_seed.unwrap_or(current);
+        let vault = vault::derive(seed)?.public();
+        let mut controllers = Vec::new();
+        let mut outputs = Vec::new();
+        for part in &parts {
+            match part {
+                CombinedPart::Sealed { controller } => {
+                    controller.validate()?;
+                    ensure(
+                        !controller.key.is_webauthn() && controller.key.agreement().is_some(),
+                        "malformed: sealed part controller",
+                    )?;
+                    controllers.push(controller.clone());
+                    outputs.push(None);
+                }
+                CombinedPart::Prf {
+                    controller,
+                    verified,
+                } => {
+                    controller.validate()?;
+                    ensure(
+                        controller.key == verified.key
+                            && (controller.verification != Some(true) || verified.uv),
+                        "badSignature: PRF credential or UV mismatch",
+                    )?;
+                    controllers.push(controller.clone());
+                    outputs.push(Some(verified.output));
+                }
+            }
+        }
+        let inputs = parts
+            .iter()
+            .map(|part| match part {
+                CombinedPart::Sealed { controller } => slots::NewPart::Sealed {
+                    agreement: controller.key.agreement().unwrap_or_default(),
+                },
+                CombinedPart::Prf { verified, .. } => slots::NewPart::Prf {
+                    salt: &verified.salt,
+                    output: &verified.output,
+                },
+            })
+            .collect::<Vec<_>>();
+        let ids = controllers.iter().map(Controller::id).collect::<Vec<_>>();
+        let slot = Slot::combined(
+            &seed,
+            &vault.id(),
+            &ids,
+            label,
+            &inputs,
+            &mut Entropy::new(entropy),
+        )?;
+        slot.validate(|id| {
+            controllers
+                .iter()
+                .find(|c| c.id() == id)
+                .map(Controller::slot_key)
+        })?;
+        Ok(PendingSlot {
+            slot,
+            vault,
+            controllers,
+            outputs,
+        })
+    }
+    /// Open a built combined slot with the same PRF outputs and host ECDH secrets, checking the vault.
+    pub fn finish_combined_slot(
+        &mut self,
+        pending: PendingSlot,
+        secrets: &[slots::OpeningSecret<'_>],
+    ) -> Result<Slot> {
+        ensure(secrets.len() == pending.outputs.len(), "vaultLocked")?;
+        for (expected, secret) in pending.outputs.iter().zip(secrets) {
+            if let Some(expected) = expected {
+                ensure(
+                    matches!(secret,slots::OpeningSecret::Prf(actual) if *actual==expected),
+                    "vaultLocked",
+                )?;
+            }
+        }
+        pending.slot.finish_open(
+            &pending.vault,
+            |id| {
+                pending
+                    .controllers
+                    .iter()
+                    .find(|c| c.id() == id)
+                    .map(Controller::slot_key)
+            },
+            secrets,
+            vault::derive,
+        )?;
+        self.checked_slots
+            .insert((pending.vault.id(), slot_fingerprint(&pending.slot)?));
+        Ok(pending.slot)
+    }
     /// Return ECDH steps for all sealed epochs this identity has not unlocked.
     pub fn begin_unlock(&self) -> Vec<AgreementStep> {
         let id = self.me.id();
@@ -846,6 +1404,10 @@ impl Library {
     /// Prepare a self-signed request, before the prospective member has access.
     pub fn begin_request(request: Request) -> Result<PendingBatch> {
         request.member.validate()?;
+        ensure(
+            request.member.signing != request.member.agreement,
+            "malformed: member usage collision",
+        )?;
         time_key(&request.created)?;
         ensure(
             request.protocol == crate::protocol::REQUEST,
@@ -856,14 +1418,15 @@ impl Library {
             access: request.access.clone(),
             expires: None,
             write_budget: None,
+            import: None,
         }
         .validate()?;
         Ok(PendingBatch {
-            steps: vec![SigningStep {
-                path: format!("requests/{}.json", request.member.id()),
-                body: canonical(&request)?,
-                signing: request.member.signing,
-            }],
+            steps: vec![SigningStep::raw(
+                format!("requests/{}.json", request.member.id()),
+                canonical(&request)?,
+                &request.member,
+            )],
             ..PendingBatch::default()
         })
     }
@@ -880,7 +1443,7 @@ impl Library {
             record: raw,
         })
     }
-    /// Prepare approval and historical key shares. Only the current root may approve.
+    /// Prepare approval and historical key shares. An approve controller signs the grant.
     pub fn begin_approve(
         &self,
         request: Vec<u8>,
@@ -888,7 +1451,7 @@ impl Library {
         now: &str,
         seed: [u8; 32],
     ) -> Result<Outcome<PendingBatch>> {
-        if let Some(d) = self.root_denial() {
+        if let Some(d) = self.controller_denial(Role::Approve) {
             return Ok(Outcome::failure(d));
         }
         let parsed = authority::verify_request(&request, self.id())?;
@@ -897,6 +1460,7 @@ impl Library {
             access: parsed.access.clone(),
             expires: None,
             write_budget: None,
+            import: None,
         });
         grant.validate()?;
         ensure(
@@ -915,7 +1479,6 @@ impl Library {
                 shares,
             },
             now,
-            "root",
         )
         .map(Outcome::success)
     }
@@ -926,7 +1489,7 @@ impl Library {
         now: &str,
         seed: [u8; 32],
     ) -> Result<Outcome<PendingBatch>> {
-        if let Some(d) = self.root_denial() {
+        if let Some(d) = self.controller_denial(Role::Approve) {
             return Ok(Outcome::failure(d));
         }
         let target = self
@@ -935,7 +1498,7 @@ impl Library {
             .get(member_id)
             .ok_or_else(|| missing("member"))?;
         ensure(
-            member_id != self.authority.root.id() && target.member.revoked_at.is_none(),
+            target.member.revoked_at.is_none(),
             "Cannot revoke this member",
         )?;
         let kept = self.kept_for(member_id);
@@ -966,7 +1529,6 @@ impl Library {
                 epochs,
             },
             now,
-            "root",
         )
         .map(Outcome::success)
     }
@@ -977,7 +1539,10 @@ impl Library {
         now: &str,
         seed: [u8; 32],
     ) -> Result<Outcome<PendingBatch>> {
-        if let Some(d) = self.root_denial() {
+        if let (Some(d), Some(_)) = (
+            self.controller_denial(Role::Approve),
+            self.controller_denial(Role::Control),
+        ) {
             return Ok(Outcome::failure(d));
         }
         let mut entropy = Entropy::new(seed);
@@ -996,111 +1561,171 @@ impl Library {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        self.action(Action::Rekey { epochs }, now, "root")
+        self.action(Action::Rekey { epochs }, now)
             .map(Outcome::success)
     }
-    /// Prepare planned handover: all historical key reshares precede the handover record.
-    pub fn begin_handover(
+    /// Prepare a whole keyring replacement with optional fresh vault rotation.
+    /// On rotation, historical shares and one new epoch per namespace are constructed together.
+    pub fn begin_keyring(
         &self,
-        root: PublicIdentity,
-        label: String,
+        keyring: Keyring,
+        new_seed: Option<[u8; 32]>,
+        signers: &[String],
         now: &str,
         seed: [u8; 32],
-    ) -> Result<Outcome<PendingBatch>> {
-        if let Some(d) = self.root_denial() {
-            return Ok(Outcome::failure(d));
-        }
+    ) -> Result<PendingBatch> {
+        keyring.validate()?;
+        let rotated = keyring.vault != self.authority.keyring.vault;
         let mut entropy = Entropy::new(seed);
-        let shares = self.shares(&root, &self.authority.namespaces, &mut entropy)?;
-        let epochs = self.replacement_epochs(&root, now, &mut entropy)?;
-        let mut batch = self.action(
-            Action::Reshare {
-                recipient: root.clone(),
-                label,
-                shares,
-            },
-            now,
-            "root",
-        )?;
-        let first = batch.steps.first().ok_or_else(|| missing("reshare"))?;
-        let entry = AuthorityEntry {
-            protocol: crate::protocol::AUTHORITY.into(),
-            seq: self.authority.latest + 2,
-            previous: Some(records::digest(&first.body)),
-            issued: now.into(),
-            by: "root".into(),
-            action: Action::Handover {
-                root,
-                kept: self.kept_for(&self.me.id()),
-                epochs,
-            },
+        let (shares, epochs) = if rotated {
+            self.require_vault()?;
+            vault::check_seed(
+                &new_seed.ok_or_else(|| Error("vaultLocked".into()))?,
+                &keyring.vault,
+            )?;
+            let shares = self.shares(&keyring.vault, &self.authority.namespaces, &mut entropy)?;
+            let epochs = self
+                .authority
+                .namespaces
+                .iter()
+                .map(|ns| {
+                    let mut recipients = self.authority.recipients(ns, now)?;
+                    recipients.retain(|p| p != &self.authority.keyring.vault);
+                    recipients.push(keyring.vault.clone());
+                    make_epoch(
+                        self.id(),
+                        ns,
+                        self.authority
+                            .epoch_at(ns, self.authority.latest)
+                            .unwrap_or(0)
+                            + 1,
+                        &recipients,
+                        &mut entropy,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (Some(shares), Some(epochs))
+        } else {
+            ensure(new_seed.is_none(), "malformed: seed without rotation")?;
+            (None, None)
         };
-        batch.steps.push(SigningStep {
-            path: format!("authority/{:08}.json", entry.seq),
-            body: canonical(&entry)?,
-            signing: self.me.signing.clone(),
-        });
-        Ok(Outcome::success(batch))
-    }
-    /// Recovery identity opens every epoch, then atomically transfers authority and data access.
-    pub fn begin_recover(
-        &self,
-        root: PublicIdentity,
-        label: String,
-        now: &str,
-        seed: [u8; 32],
-    ) -> Result<Outcome<PendingBatch>> {
-        if self.me != self.authority.recovery {
-            return Ok(Outcome::failure(Denial::new(
-                "notGranted",
-                "The recovery identity is required",
-            )));
-        }
-        let mut entropy = Entropy::new(seed);
-        let shares = self.shares(&root, &self.authority.namespaces, &mut entropy)?;
-        let epochs = self.replacement_epochs(&root, now, &mut entropy)?;
-        self.action(
-            Action::Recover {
-                root,
-                label,
-                kept: self.kept_for(&self.authority.root.id()),
+        let by = signers.first().ok_or_else(|| missing("signer"))?;
+        self.prepare_authority(
+            Action::Keyring {
+                keyring,
                 shares,
                 epochs,
             },
+            by,
+            signers,
             now,
-            "recovery",
         )
-        .map(Outcome::success)
     }
-    fn replacement_epochs(
+    /// Add a controller and optional prebuilt slot under the control or recovery rule.
+    pub fn begin_add_controller(
         &self,
-        root: &PublicIdentity,
+        controller: Controller,
+        slot: Option<Slot>,
+        signers: &[String],
         now: &str,
-        entropy: &mut Entropy,
-    ) -> Result<Vec<Epoch>> {
-        self.authority
-            .namespaces
-            .iter()
-            .map(|ns| {
-                let mut recipients: Vec<_> = self
-                    .authority
-                    .recipients(ns, now)?
-                    .into_iter()
-                    .filter(|p| p.id() != self.authority.root.id())
-                    .collect();
-                recipients.push(root.clone());
-                make_epoch(
-                    self.id(),
-                    ns,
-                    self.authority
-                        .epoch_at(ns, self.authority.latest)
-                        .unwrap_or(0)
-                        + 1,
-                    &recipients,
-                    entropy,
-                )
-            })
-            .collect()
+    ) -> Result<PendingBatch> {
+        let mut keyring = self.authority.keyring.clone();
+        keyring.controllers.push(controller);
+        keyring.controllers.sort_by_key(Controller::id);
+        if let Some(slot) = slot {
+            keyring.slots.push(slot);
+        }
+        self.begin_keyring(keyring, None, signers, now, [0; 32])
+    }
+    /// Add a controller under the recovery only-adds rule. Finish enforces the prior quorum and limits.
+    pub fn begin_recovery_add(
+        &self,
+        controller: Controller,
+        slot: Option<Slot>,
+        signers: &[String],
+        now: &str,
+    ) -> Result<PendingBatch> {
+        self.begin_add_controller(controller, slot, signers, now)
+    }
+    /// Add a passkey with the checked slot produced by `finish_prf_slot`.
+    pub fn begin_add_passkey(
+        &self,
+        controller: Controller,
+        slot: Slot,
+        signers: &[String],
+        now: &str,
+    ) -> Result<PendingBatch> {
+        ensure(
+            controller.key.is_webauthn()
+                && matches!(slot, Slot::Prf { .. })
+                && slot.controllers() == [controller.id()],
+            "malformed: passkey PRF slot",
+        )?;
+        self.begin_add_controller(controller, Some(slot), signers, now)
+    }
+    /// Remove a controller while replacing slots, rotating the vault and sealing history.
+    pub fn begin_remove_controller(
+        &self,
+        id: &str,
+        new_seed: [u8; 32],
+        slots: Vec<Slot>,
+        signers: &[String],
+        now: &str,
+        entropy: [u8; 32],
+    ) -> Result<PendingBatch> {
+        ensure(
+            self.authority.keyring.controller(id).is_some(),
+            "Unknown controller",
+        )?;
+        let mut keyring = self.authority.keyring.clone();
+        keyring.controllers.retain(|c| c.id() != id);
+        keyring.vault = vault::derive(new_seed)?.public();
+        keyring.slots = slots;
+        self.begin_keyring(keyring, Some(new_seed), signers, now, entropy)
+    }
+    /// Change signing thresholds under the prior control rule.
+    pub fn begin_thresholds(
+        &self,
+        threshold: u64,
+        recover_threshold: u64,
+        signers: &[String],
+        now: &str,
+    ) -> Result<PendingBatch> {
+        let mut keyring = self.authority.keyring.clone();
+        keyring.threshold = threshold;
+        keyring.recover_threshold = recover_threshold;
+        self.begin_keyring(keyring, None, signers, now, [0; 32])
+    }
+    /// Prepare an import grant with explicit control signers and historical member shares.
+    pub fn begin_import_grant(
+        &self,
+        request: Vec<u8>,
+        grant: Grant,
+        signers: &[String],
+        now: &str,
+        entropy: [u8; 32],
+    ) -> Result<PendingBatch> {
+        self.require_vault()?;
+        ensure(
+            grant.import == Some(true),
+            "malformed: import grant required",
+        )?;
+        let parsed = authority::verify_request(&request, self.id())?;
+        let shares = self.shares(
+            &parsed.member,
+            &grant.namespaces,
+            &mut Entropy::new(entropy),
+        )?;
+        self.prepare_authority(
+            Action::Grant {
+                request,
+                grant,
+                shares,
+            },
+            signers.first().ok_or_else(|| missing("signer"))?,
+            signers,
+            now,
+        )
     }
     fn shares(
         &self,
@@ -1108,14 +1733,16 @@ impl Library {
         namespaces: &[String],
         entropy: &mut Entropy,
     ) -> Result<Vec<Epoch>> {
+        self.require_vault()?;
         recipient.validate()?;
         let mut shares = Vec::new();
         for ns in namespaces {
             if let Some(epochs) = self.authority.epochs.get(ns) {
                 for epoch in epochs.keys() {
-                    let key = self.keys.get(&(ns.clone(), *epoch)).ok_or_else(|| {
-                        missing("unlocked historical epoch; recovery must recover data keys")
-                    })?;
+                    let key = self
+                        .keys
+                        .get(&(ns.clone(), *epoch))
+                        .ok_or_else(|| missing("unlocked historical epoch"))?;
                     let seal = SealedKey::seal(
                         &recipient.agreement,
                         key,
@@ -1132,8 +1759,78 @@ impl Library {
         }
         Ok(shares)
     }
-    fn action(&self, action: Action, now: &str, by: &str) -> Result<PendingBatch> {
+    fn action(&self, action: Action, now: &str) -> Result<PendingBatch> {
+        let id = self
+            .controller
+            .as_deref()
+            .ok_or_else(|| missing("selected controller"))?;
+        self.prepare_authority(action, id, &[id.to_owned()], now)
+    }
+    fn controller_denial(&self, role: Role) -> Option<Denial> {
+        self.controller
+            .as_deref()
+            .and_then(|id| self.authority.keyring.controller(id))
+            .filter(|c| c.roles.contains(&role))
+            .is_none()
+            .then(|| {
+                Denial::new(
+                    "notGranted",
+                    "A controller with the required role must be selected",
+                )
+            })
+    }
+    /// Select a controller for convenience actions; content still uses this session's member.
+    pub fn select_controller(&mut self, id: &str) -> Result<()> {
+        ensure(
+            self.authority.keyring.controller(id).is_some(),
+            "Unknown controller",
+        )?;
+        self.controller = Some(id.into());
+        Ok(())
+    }
+    /// Prepare exact authority bodies for explicit primary and cosigners from the prior keyring.
+    /// Finish verifies every signature, the rule and the transition before returning records.
+    pub fn prepare_authority(
+        &self,
+        action: Action,
+        by: &str,
+        signers: &[String],
+        now: &str,
+    ) -> Result<PendingBatch> {
         time_key(now)?;
+        if matches!(
+            &action,
+            Action::Rekey { .. } | Action::Grant { .. } | Action::Revoke { .. }
+        ) || matches!(&action,Action::Keyring{keyring,..} if keyring.vault!=self.authority.keyring.vault)
+        {
+            self.require_vault()?;
+        }
+        if let Action::Keyring { keyring, .. } = &action {
+            let old = self
+                .authority
+                .keyring
+                .slots
+                .iter()
+                .map(slot_fingerprint)
+                .collect::<Result<BTreeSet<_>>>()?;
+            for slot in &keyring.slots {
+                let prf = matches!(slot, Slot::Prf { .. })
+                    || matches!(slot,Slot::Combined{parts,..} if parts.iter().any(|p|matches!(p,slots::Part::Prf{..})));
+                let fingerprint = slot_fingerprint(slot)?;
+                ensure(
+                    !prf || (keyring.vault == self.authority.keyring.vault
+                        && old.contains(&fingerprint))
+                        || self
+                            .checked_slots
+                            .contains(&(keyring.vault.id(), fingerprint)),
+                    "malformed: new PRF route requires a verified get assertion",
+                )?;
+            }
+        }
+        ensure(
+            signers.first().is_some_and(|id| id == by),
+            "Primary signer must be first",
+        )?;
         let entry = AuthorityEntry {
             protocol: crate::protocol::AUTHORITY.into(),
             seq: self.authority.latest + 1,
@@ -1142,18 +1839,32 @@ impl Library {
             by: by.into(),
             action,
         };
+        let body = canonical(&entry)?;
+        let steps = signers
+            .iter()
+            .map(|id| {
+                let c = self
+                    .authority
+                    .keyring
+                    .controller(id)
+                    .ok_or_else(|| missing("controller"))?;
+                Ok(SigningStep::new(
+                    format!("authority/{:08}.json", entry.seq),
+                    body.clone(),
+                    c.key.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(PendingBatch {
-            steps: vec![SigningStep {
-                path: format!("authority/{:08}.json", entry.seq),
-                body: canonical(&entry)?,
-                signing: self.me.signing.clone(),
-            }],
+            steps,
+            base: self
+                .records
+                .iter()
+                .filter(|(p, _)| p.starts_with("authority/"))
+                .map(|(p, r)| (p.clone(), r.clone()))
+                .collect(),
             ..PendingBatch::default()
         })
-    }
-    fn root_denial(&self) -> Option<Denial> {
-        (self.me != self.authority.root)
-            .then(|| Denial::new("notGranted", "Only the current root may change access"))
     }
     fn kept_for(&self, author: &str) -> BTreeSet<String> {
         self.evaluate()
@@ -1189,9 +1900,6 @@ impl Library {
                 "Namespace is not in this library",
             )));
         }
-        if self.me == self.authority.root {
-            return Ok(None);
-        }
         let Some(member) = self.authority.members.get(&self.me.id()) else {
             return Ok(Some(Denial::new(
                 "notGranted",
@@ -1218,7 +1926,7 @@ impl Library {
         let Some(grant) = &member.member.grant else {
             return Ok(Some(Denial::new(
                 "notGranted",
-                "This identity is no longer the root",
+                "This identity has no grant",
             )));
         };
         if !grant.allows(namespace, access) {
@@ -1282,8 +1990,16 @@ impl Library {
             .get(&self.me.id())
             .ok_or_else(|| missing("member"))?;
         if kind == crate::imports::BATCH_KIND {
-            if let Some(denial) = self.root_denial() {
-                return Ok(Outcome::failure(denial));
+            if member
+                .member
+                .grant
+                .as_ref()
+                .is_none_or(|g| g.import != Some(true))
+            {
+                return Ok(Outcome::failure(Denial::new(
+                    "notGranted",
+                    "An import grant is required",
+                )));
             }
             if let Some(state) = self.namespaces.get(namespace) {
                 state.state.validate_import(&payload)?;
@@ -1396,7 +2112,7 @@ impl Library {
                                 payload["expect"] = self
                                     .namespaces
                                     .get(namespace)
-                                    .expect("namespace")
+                                    .ok_or_else(|| missing("namespace"))?
                                     .state
                                     .query("getEpisode", &json!({"id":payload["id"]}))?
                                     ["positionRevision"]
@@ -1423,7 +2139,11 @@ impl Library {
                             .is_some_and(|id| targets_episode(kind, &payload, id))
                     }))
             {
-                let stamp = j.header.live.as_ref().expect("live stamp");
+                let stamp = j
+                    .header
+                    .live
+                    .as_ref()
+                    .ok_or_else(|| missing("live stamp"))?;
                 let path =
                     crate::protocol::live_state_path(&j.header.meta.author, namespace, &stamp.slot);
                 copies.insert(
@@ -1484,23 +2204,20 @@ impl Library {
             _ => Vec::new(),
         };
         Ok(Outcome::success(PendingBatch {
-            steps: vec![SigningStep {
-                path,
-                body,
-                signing: self.me.signing.clone(),
-            }],
+            steps: vec![SigningStep::raw(path, body, &self.me)],
             aliases,
             copies,
+            ..PendingBatch::default()
         }))
     }
-    /// Root-signed layout raise. New libraries already write layout 2 at creation.
+    /// Control-rule layout raise. New libraries already write layout 2 at creation.
     pub fn begin_layout(&self, layout: u32, now: &str) -> Result<Outcome<PendingBatch>> {
-        if let Some(d) = self.root_denial() {
+        if let Some(d) = self.controller_denial(Role::Control) {
             return Ok(Outcome::failure(d));
         }
         ensure(layout >= self.authority.layout, "Layout cannot be lowered")?;
         ensure(layout >= 1, "Invalid layout")?;
-        self.action(Action::Layout { layout }, now, "root")
+        self.action(Action::Layout { layout }, now)
             .map(Outcome::success)
     }
     /// Read a namespace after grant and expiry checks. Cached keys never override ended access.
@@ -1670,6 +2387,7 @@ impl Library {
                     access: vec![],
                     expires: None,
                     write_budget: None,
+                    import: None,
                 }),
                 since: 0,
                 revoked_at: None,
@@ -1767,7 +2485,7 @@ impl Library {
         let results = self
             .verifiers
             .operations(&self.authority, &input, None)
-            .expect("portable verifier has no host failure");
+            .unwrap_or_else(|error| input.iter().map(|_| Err(error.clone())).collect());
         for ((path, raw), parsed) in input.into_iter().zip(results) {
             match parsed {
                 Ok((header, digest)) => {
@@ -1784,7 +2502,7 @@ impl Library {
                 }
                 Err(error) => {
                     // Best-effort location for UI only; these untrusted fields grant no capability.
-                    let header = serde_json::from_slice::<SignedRecord>(raw)
+                    let header = authority::raw_record(raw)
                         .ok()
                         .and_then(|r| serde_json::from_slice::<OperationHeader>(&r.body).ok());
                     if let Some(header) = &header {
@@ -2061,7 +2779,9 @@ impl Library {
         self.live.clear();
         for j in &self.judged {
             if j.from_live_slot && j.status == Status::Admitted && j.operation.is_some() {
-                let stamp = j.header.live.as_ref().expect("verified live stamp");
+                let Some(stamp) = j.header.live.as_ref() else {
+                    continue;
+                };
                 self.live.insert(
                     (
                         j.header.meta.author.clone(),
@@ -2170,7 +2890,8 @@ impl Library {
                     &operation_aad(meta).ok()?,
                 )
                 .ok()?;
-                let op: Operation = serde_json::from_slice(&plain).ok()?;
+                let value = crate::keys::strict_json::parse(&plain).ok()?;
+                let op: Operation = serde_json::from_value(value).ok()?;
                 if op.id != meta.id
                     || op.clock != meta.clock
                     || op.authority != meta.authority
@@ -2219,16 +2940,14 @@ impl Library {
         if meta.authority < member.member.since {
             return refuse("notGranted");
         }
-        let is_root = authority.root_at(meta.authority.min(authority.latest)) == Some(&meta.author);
         if !authority.namespaces.contains(&meta.namespace) {
             return refuse("notGranted");
         }
-        if !is_root
-            && !member
-                .member
-                .grant
-                .as_ref()
-                .is_some_and(|g| g.allows(&meta.namespace, Access::Write))
+        if !member
+            .member
+            .grant
+            .as_ref()
+            .is_some_and(|g| g.allows(&meta.namespace, Access::Write))
         {
             return refuse("notGranted");
         }
@@ -2267,13 +2986,12 @@ impl Library {
             return refuse("clockJump");
         }
         let count = spent.entry(meta.author.clone()).or_default();
-        if !is_root
-            && member
-                .member
-                .grant
-                .as_ref()
-                .and_then(|g| g.write_budget)
-                .is_some_and(|budget| !count.contains(&meta.id) && count.len() as u64 >= budget)
+        if member
+            .member
+            .grant
+            .as_ref()
+            .and_then(|g| g.write_budget)
+            .is_some_and(|budget| !count.contains(&meta.id) && count.len() as u64 >= budget)
         {
             return refuse("budgetSpent");
         }
@@ -2320,19 +3038,20 @@ impl Library {
     pub fn ledger(&self) -> Vec<LedgerEntry> {
         let mut ledger = Vec::new();
         let mut order = Vec::new();
-        let mut previous_root = self.authority.root_at(1).unwrap_or("").to_owned();
         for entry in &self.authority.entries {
-            let actor = if entry.by == "recovery" {
-                self.authority.recovery.id()
-            } else {
-                previous_root.clone()
-            };
+            let actor = entry.by.clone();
             let label = self
                 .authority
-                .members
-                .get(&actor)
-                .map(|m| m.member.label.clone())
-                .unwrap_or_else(|| "Recovery identity".into());
+                .entries
+                .iter()
+                .filter_map(|e| match &e.action {
+                    Action::Genesis { keyring, .. } | Action::Keyring { keyring, .. } => {
+                        keyring.controller(&actor).map(|c| c.label.clone())
+                    }
+                    _ => None,
+                })
+                .next_back()
+                .unwrap_or_else(|| actor.clone());
             let mut add = |event: &str, subject: Option<String>, text: String| {
                 order.push((
                     entry.seq,
@@ -2412,37 +3131,11 @@ impl Library {
                         add("rekeyed", None, rekey_description(epochs, None));
                     }
                 }
-                Action::Reshare { recipient, .. } => add(
-                    "rekeyed",
-                    Some(recipient.id()),
-                    format!("{label} shared the library’s past with its next owner."),
+                Action::Keyring { .. } => add(
+                    "keyring",
+                    None,
+                    format!("{label} changed the library keyring."),
                 ),
-                Action::Handover { root, epochs, .. } => {
-                    add(
-                        "granted",
-                        Some(root.id()),
-                        format!("{label} handed over this library."),
-                    );
-                    add(
-                        "rekeyed",
-                        None,
-                        rekey_description(epochs, Some("the former owner")),
-                    );
-                    previous_root = root.id();
-                }
-                Action::Recover { root, epochs, .. } => {
-                    add(
-                        "granted",
-                        Some(root.id()),
-                        "Recovery restored control of this library and access to its past.".into(),
-                    );
-                    add(
-                        "rekeyed",
-                        None,
-                        rekey_description(epochs, Some("the former owner")),
-                    );
-                    previous_root = root.id();
-                }
                 Action::Layout { layout } => {
                     add(
                         "rekeyed",
@@ -2746,7 +3439,7 @@ fn make_epoch(
 pub use crate::protocol::operation_path;
 
 fn decode_header(raw: &[u8]) -> Option<OperationHeader> {
-    let record: SignedRecord = serde_json::from_slice(raw).ok()?;
+    let record = authority::raw_record(raw).ok()?;
     serde_json::from_slice(&record.body).ok()
 }
 fn operation_id(
@@ -2870,4 +3563,12 @@ fn contains_revision(value: &Value, id: &str) -> bool {
         Value::Object(values) => values.values().any(|v| contains_revision(v, id)),
         _ => false,
     }
+}
+
+fn slot_fingerprint(slot: &Slot) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(slot)?;
+    if let Some(map) = value.as_object_mut() {
+        map.remove("label");
+    }
+    canonical(&value)
 }

@@ -241,10 +241,8 @@ pub struct AuthorContext {
     pub kind: crate::model::MemberKind,
     /// Destination library authenticated by the operation header.
     pub library: String,
-    /// Immutable approved grant; absent only for an admitted root identity.
+    /// Immutable approved grant; present for every admitted member.
     pub grant: Option<crate::model::Grant>,
-    /// Whether this identity was enrolled as a root (admission separately checks its tenure).
-    pub root: bool,
 }
 impl AuthorContext {
     pub(crate) fn from_member(member: &crate::model::Member, library: &str) -> Self {
@@ -252,7 +250,6 @@ impl AuthorContext {
             library: library.into(),
             kind: member.kind,
             grant: member.grant.clone(),
-            root: member.grant.is_none(),
         }
     }
 }
@@ -342,9 +339,9 @@ impl State {
         if let ProjectionState::Podcasts(state) = &mut self.projection {
             self.sidecar
                 .bind_admitted_prefix(crate::records::hex(&digest));
-            crate::domains::listening::ListeningPodcasts
-                .bind_admitted_prefix(state, &crate::records::hex(&digest))
-                .expect("SHA-256 prefix");
+            // A SHA-256 hex digest always satisfies this module's prefix schema.
+            let _ = crate::domains::listening::ListeningPodcasts
+                .bind_admitted_prefix(state, &crate::records::hex(&digest));
         }
     }
     pub(crate) fn can_insert_retained(&self, op: &AdmittedOperation) -> bool {

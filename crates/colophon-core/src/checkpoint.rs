@@ -157,7 +157,7 @@ impl CheckpointOpening {
             envelope.ticket.len() <= 16 * 1024,
             "Checkpoint ticket too large",
         )?;
-        let signed: SignedRecord = serde_json::from_slice(&envelope.ticket)?;
+        let signed = crate::authority::raw_record(&envelope.ticket)?;
         signed.verify(&member.signing)?;
         let ticket: Ticket = serde_json::from_slice(&signed.body)?;
         ensure(

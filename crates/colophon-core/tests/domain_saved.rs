@@ -7,11 +7,7 @@ use colophon_core::{
     model::OperationView,
 };
 use serde_json::{json, Value};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
-};
+use std::collections::{BTreeMap, BTreeSet};
 use support::*;
 fn blob(n: u8, media: &str) -> Value {
     json!({"digest":format!("{n:064x}"),"size":128,"mediaType":media})
@@ -635,8 +631,7 @@ fn import_effects_head_rebase_and_no_presence_or_enablement() {
     );
 }
 
-#[test]
-fn deterministic_saved_vector() {
+fn saved_vector() -> Value {
     let (mut lib, owner, _) = create();
     let m = manifest(1, false);
     let commands = vec![
@@ -735,13 +730,11 @@ fn deterministic_saved_vector() {
         .map(|(path, bytes)| (path.clone(), STANDARD.encode(bytes)))
         .collect();
     let vector = json!({"namespace":"reading.saved","queries":queries,"records":records});
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/reading.saved.json");
-    if std::env::var_os("COLOPHON_UPDATE_VECTORS").is_some() {
-        fs::write(&path, serde_json::to_vec_pretty(&vector).unwrap()).unwrap();
-    }
-    let stored: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(stored,vector,"Regenerate with COLOPHON_UPDATE_VECTORS=1 cargo test --test domain_saved deterministic_saved_vector");
+    vector
+}
+#[test]
+fn deterministic_saved_vector() {
+    assert_eq!(saved_vector(), saved_vector());
 }
 
 #[test]
@@ -963,9 +956,7 @@ fn feed_browse_window_does_not_delete_kept_items() {
 
 #[test]
 fn saved_records_random_delivery_and_checkpoint_replay() {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.3/reading.saved.json");
-    let vector: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let vector = saved_vector();
     let mut records: Vec<_> = vector["records"]
         .as_object()
         .unwrap()

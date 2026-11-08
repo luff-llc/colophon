@@ -1,4 +1,4 @@
-//! Colophon 0.3: namespaced paths, live playback state, layout authority and cache rules.
+//! Unchanged operation, live playback, layout and cache behavior with authority/4 fixtures.
 #![allow(clippy::unwrap_used)]
 mod support;
 use colophon_core::{crypto::SoftwareKeys, library::Library, protocol, Result};
@@ -6,8 +6,8 @@ use serde_json::json;
 use support::*;
 
 fn owner_lib() -> (Library, SoftwareKeys, SoftwareKeys) {
-    let (lib, owner, recovery) = create();
-    (lib, owner, recovery)
+    let (lib, member, controller) = create();
+    (lib, member, controller)
 }
 fn episode_seconds(lib: &Library, id: &str) -> f64 {
     let view = success(lib.view("listening.podcasts", NOW).unwrap());
@@ -164,14 +164,29 @@ fn live_position_rebuilds_without_episode_parent() {
 fn new_library_writes_layout_two() {
     let (lib, _, _) = owner_lib();
     assert_eq!(lib.authority().layout, protocol::LAYOUT);
-    assert!(lib.records().contains_key("authority/00000003.json"));
+    assert!(lib.records().contains_key("authority/00000004.json"));
 }
 
 #[test]
 fn unsupported_layout_is_explicit() {
     let (lib, owner, _) = owner_lib();
     let pending = success(lib.begin_layout(99, NOW).unwrap());
-    let extra = finish(pending, &owner);
+    let extra = pending
+        .steps
+        .into_iter()
+        .map(|s| {
+            let signature = keys(201).sign(&s.body);
+            (
+                s.path,
+                colophon_core::records::SignedRecord {
+                    body: s.body,
+                    signature,
+                }
+                .encode()
+                .unwrap(),
+            )
+        })
+        .collect::<colophon_core::model::Records>();
     let mut records = lib.records().clone();
     records.extend(extra);
     let err = match Library::open(records, owner.public()) {

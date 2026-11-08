@@ -109,6 +109,13 @@ impl HostAction {
             .into_iter()
             .collect())
     }
+    /// Complete the first creation round and return its grant/layout signing round.
+    pub fn advance_create(&self, signatures: Vec<Vec<u8>>) -> Result<Arc<HostAction>> {
+        Ok(Arc::new(HostAction {
+            pending: self.pending.clone().advance_create(signatures)?,
+            session: None,
+        }))
+    }
     pub fn sign_with(&self, keys: Box<dyn KeyProvider>) -> Result<Vec<Vec<u8>>> {
         let public = keys.signing_public_key()?;
         self.pending
@@ -321,6 +328,7 @@ impl NativeLibrary {
                     .unwrap_or(info.access),
                 expires: g.expires,
                 write_budget: g.write_budget,
+                import: None,
             })
         } else {
             None
@@ -343,7 +351,7 @@ impl NativeLibrary {
             s.library.begin_revoke(&member_id, &now, seed(entropy)?)?,
         )
     }
-    /// Prepare a root-approved storage layout raise. Hosts present compatibility confirmation.
+    /// Prepare a controller-approved storage layout raise. Hosts present compatibility confirmation.
     pub fn begin_layout(&self, layout: u32, now: String) -> Result<PreparedAction> {
         let s = self.lock()?;
         self.prepared(&s, s.library.begin_layout(layout, &now)?)
@@ -368,35 +376,7 @@ impl NativeLibrary {
             )?,
         )
     }
-    pub fn begin_handover(
-        &self,
-        new_root: PublicKeys,
-        label: String,
-        now: String,
-        entropy: Vec<u8>,
-    ) -> Result<PreparedAction> {
-        let s = self.lock()?;
-        self.prepared(
-            &s,
-            s.library
-                .begin_handover(new_root.into(), label, &now, seed(entropy)?)?,
-        )
-    }
-    pub fn begin_recover(
-        &self,
-        new_root: PublicKeys,
-        label: String,
-        now: String,
-        entropy: Vec<u8>,
-    ) -> Result<PreparedAction> {
-        let s = self.lock()?;
-        self.prepared(
-            &s,
-            s.library
-                .begin_recover(new_root.into(), label, &now, seed(entropy)?)?,
-        )
-    }
-    /// Read a named domain query without tool-name collisions or preparing a write.
+    /// Read a named domain query without preparing a write.
     pub fn query(
         &self,
         namespace: String,
@@ -533,10 +513,13 @@ impl NativeLibrary {
         }
     }
 }
+/// Temporary creation shim; W5 replaces it with the full 0.4 key surface.
+#[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub fn begin_create(
     owner: PublicKeys,
-    recovery: PublicKeys,
+    controller: PublicKeys,
+    vault_seed: Vec<u8>,
     label: String,
     owner_label: String,
     namespaces: Vec<String>,
@@ -546,8 +529,10 @@ pub fn begin_create(
     Ok(Arc::new(HostAction {
         pending: Library::begin_create(
             CreateOptions {
-                owner: owner.into(),
-                recovery: recovery.into(),
+                owner: controller.into(),
+                member: owner.into(),
+                vault_seed: seed(vault_seed)?,
+                import_expires: None,
                 label,
                 owner_label,
                 namespaces,
