@@ -130,20 +130,39 @@ export class Library {
   private constructor(private readonly core: WasmLibrary, private readonly keys: KeyProvider) {}
 
   static async create(opts: { owner: KeyProvider; controller: KeyProvider; label: string; ownerLabel: string; namespaces: string[] }): Promise<Library> {
+    return Library.createWith(opts);
+  }
+  /** Create with an optional raw recovery kit and signed clean-copy provenance. */
+  static async createWith(opts: { owner: KeyProvider; controller: KeyProvider; label: string; ownerLabel: string; namespaces: string[];
+    kit?: KeyProvider; recoveryLabel?: string; importedFrom?: string; importExpires?: string }): Promise<Library> {
     await init();
     const controller = opts.controller;
+    if ((controller.form ?? 'raw') !== 'raw' || (opts.kit?.form ?? 'raw') !== 'raw') throw new Error('Creation requires raw owner and kit controllers');
     const core = new WasmLibrary(opts.owner.signingPublicKey, opts.owner.agreementPublicKey);
     const lib = new Library(core, opts.owner);
     lib.controllers = [controller];
-    const first = core.begin_create(opts.label, opts.ownerLabel, json(opts.namespaces), controller.signingPublicKey, controller.agreementPublicKey, entropy(), now(), entropy());
-    await lib.signAction(first, [opts.owner, controller]);
-    const final = first.advance_create();
-    await lib.signAction(final, [controller]);
-    core.commit(final); lib.refreshRecords();
-    core.select_controller(await controllerID(controller.signingPublicKey));
-    await lib.unlockVault([controller]);
-    await lib.unlock();
-    return lib;
+    try {
+      const seed = entropy();
+      try {
+        const first = core.begin_create_with(json({ label: opts.label, ownerLabel: opts.ownerLabel, namespaces: opts.namespaces,
+          recoveryLabel: opts.recoveryLabel, importedFrom: opts.importedFrom, importExpires: opts.importExpires }),
+        controller.signingPublicKey, controller.agreementPublicKey, seed, opts.kit?.signingPublicKey, opts.kit?.agreementPublicKey, now(), entropy());
+        let firstConsumed = false;
+        try {
+          await lib.signAction(first, [opts.owner, controller]);
+          firstConsumed = true;
+          const final = first.advance_create();
+          let finalConsumed = false;
+          try { await lib.signAction(final, [controller]); finalConsumed = true; core.commit(final); }
+          finally { if (!finalConsumed) final.free(); }
+        } finally { if (!firstConsumed) first.free(); }
+      } finally { seed.fill(0); }
+      lib.refreshRecords();
+      core.select_controller(await controllerID(controller.signingPublicKey));
+      await lib.unlockVault([controller]);
+      await lib.unlock();
+      return lib;
+    } catch (error) { core.free(); throw error; }
   }
   static async open(records: Records, me: KeyProvider): Promise<Library> {
     await init();
@@ -383,3 +402,6 @@ export async function controllerID(signing: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', copy(signing))).slice(0, 16), b => b.toString(16).padStart(2, '0')).join('');
 }
 export { HostAction };
+export { PasskeyProvider, type CredentialClient } from './keys/passkey.js';
+export { WebCryptoOwnerKey, IndexedDBOwnerKeyStorage, type OwnerKeyPairs, type OwnerKeyStorage } from './keys/owner.js';
+export { KeyProviderError, keyProviderError, type KeyOutcome } from './keys/errors.js';
