@@ -3624,23 +3624,12 @@ fn contains_revision(value: &Value, id: &str) -> bool {
     }
 }
 
-/// Canonical descriptors of a slot's PRF controllers, in slot order, from `lookup`.
+/// Canonical descriptors of every controller a checked route names (PRF and sealed
+/// participants alike), in slot order, from `lookup`. Publication must present the same ones.
 fn prf_binding(slot: &Slot, lookup: impl Fn(&str) -> Option<KeyDescriptor>) -> Result<Vec<u8>> {
-    let ids: Vec<&String> = match slot {
-        Slot::Prf { controllers, .. } => controllers.iter().collect(),
-        Slot::Combined {
-            controllers, parts, ..
-        } => controllers
-            .iter()
-            .zip(parts)
-            .filter(|(_, part)| matches!(part, slots::Part::Prf { .. }))
-            .map(|(id, _)| id)
-            .collect(),
-        Slot::Sealed { .. } => Vec::new(),
-    };
     let mut bound = Vec::new();
-    for id in ids {
-        let key = lookup(id).ok_or_else(|| missing("PRF controller"))?;
+    for id in slot.controllers() {
+        let key = lookup(id).ok_or_else(|| missing("route controller"))?;
         bound.push(serde_json::json!([id, serde_json::from_slice::<Value>(&key.canonical()?)?]));
     }
     canonical(&Value::Array(bound))
