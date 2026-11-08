@@ -90,6 +90,8 @@ extension SessionWorker {
     }
 
     func blobManifest(namespace: String, digest: String) async throws -> BlobManifestInfo {
+        await enter(); defer { exit() }
+        try Task.checkCancellation()
         guard configuration.namespaces.contains(namespace) else { throw SessionError.invalidCommand }
         guard let manifest = try await blobQuery(namespace: namespace, digest: digest).manifest else { throw BlobError.unpublished }
         return manifest
@@ -121,6 +123,10 @@ extension SessionWorker {
         let path = manifest.chunks[index].path
         try await ensureChunk(path)
         let ciphertext = try await blobStore().readBlob(path)
+        // Network/storage work does not touch the core. Decryption must wait for any
+        // source refresh and epoch unlock to finish, then recheck current authority.
+        await enter(); defer { exit() }
+        try Task.checkCancellation()
         switch try await core.openBlobChunk(namespace: namespace, digest: manifest.descriptor.digest, index: index, ciphertext: ciphertext) {
         case .available(let bytes): return bytes
         case .missing: throw BlobError.unpublished
@@ -147,6 +153,10 @@ extension SessionWorker {
 
     /// Required blobs not yet complete here. Completed digests are remembered for this process.
     func incompleteRequiredBlobs(namespace: String) async throws -> [BlobManifestInfo] {
+        // A post-sync scan races store-watcher refreshes even when there are no blobs.
+        // Actor isolation alone does not serialize core work across its awaits.
+        await enter(); defer { exit() }
+        try Task.checkCancellation()
         let blobs = try blobStore()
         var result: [BlobManifestInfo] = []
         for row in try await pageBlobs(namespace: namespace, requiredOnly: true) where !completeRequired.contains(row.digest) {

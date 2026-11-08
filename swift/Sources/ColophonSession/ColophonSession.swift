@@ -45,6 +45,7 @@ import ColophonKitStorage
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var requiredBlobsChecked = false
     @ObservationIgnored private let syncSignal = SyncSignal()
+    @ObservationIgnored private var commandFailureRevision: UInt64 = 0
 
     public init(configuration: SessionConfiguration) {
         worker = SessionWorker(configuration: configuration); relay = configuration.relay
@@ -84,15 +85,28 @@ import ColophonKitStorage
         await task.value
     }
     public func refresh() async {
+        await refresh(preservingCommandFailure: false)
+    }
+    private func refresh(preservingCommandFailure: Bool) async {
         await restore()
         let lease = context
+        let failureRevision = commandFailureRevision
         if phase == .ready { phase = .refreshing }
         do {
             let snapshot = try await worker.refresh()
+            // A refresh queued before a failed action cannot clear its newer error state.
+            // It may not have exercised the controller/provider that refused the action.
             guard lease == context, !Task.isCancelled else { return }
+            if snapshot.phase == .ready {
+                if failureRevision != commandFailureRevision { return }
+                // A later watcher notification also cannot prove that the action's key
+                // provider recovered. An explicit refresh/retry can clear this failure.
+                if preservingCommandFailure, commandFailureRevision != 0,
+                   case .failed(.keysUnavailable) = phase { return }
+            }
             apply(snapshot)
             await startWatching()
-        } catch { if lease == context { fail(error) } }
+        } catch { if lease == context, failureRevision == commandFailureRevision { fail(error) } }
     }
     public func create() async {
         await restore()
@@ -227,7 +241,7 @@ import ColophonKitStorage
                 syncState = .error(reason: "The relay holds different bytes for \(first)")
             } else { syncState = .idle }
             // Pulled records reach the core exactly like another process's folder writes.
-            if (report?.pulled ?? 0) > 0 || phase != .ready { await refresh() }
+            if (report?.pulled ?? 0) > 0 || phase != .ready { await refresh(preservingCommandFailure: true) }
             if (report?.pulled ?? 0) > 0 || !requiredBlobsChecked {
                 requiredBlobsChecked = true
                 await downloadRequiredBlobs()
@@ -324,13 +338,13 @@ import ColophonKitStorage
             do { try await Task.sleep(for: .milliseconds(75)) } catch { return }
             guard let self else { return }
             batchTask = nil
-            await refresh()
+            await refresh(preservingCommandFailure: true)
         }
     }
     /// Deterministic batch barrier for hosts/tests; no timing-based polling is required.
     public func flushExternalChanges() async {
         batchTask?.cancel(); batchTask = nil
-        await refresh()
+        await refresh(preservingCommandFailure: true)
     }
     public var hasUsableContent: Bool { !views.isEmpty && [.ready, .refreshing, .waitingForDownload, .retry].contains(phase) }
     private func apply(_ snapshot: SessionSnapshot) {
@@ -349,7 +363,7 @@ import ColophonKitStorage
            let date = Self.grantExpiryRefreshDate(expires) {
             expiryTask = Task { [weak self] in
                 do { try await Task.sleep(for: .seconds(max(0, date.timeIntervalSinceNow))) } catch { return }
-                await self?.refresh()
+                await self?.refresh(preservingCommandFailure: true)
             }
         }
         lastError = nil
@@ -366,7 +380,10 @@ import ColophonKitStorage
         for invalidate in caches.values { invalidate([], true) }
     }
     private func handleCommandError(_ error: any Error) {
-        if error is AccessError || error is StorageError || error is PendingPublication || error is SessionKeyFailure || error is SessionLayoutError { fail(error) }
+        if error is AccessError || error is StorageError || error is PendingPublication || error is SessionKeyFailure || error is SessionLayoutError {
+            commandFailureRevision &+= 1
+            fail(error)
+        }
         else { lastError = error.localizedDescription }
     }
     private func fail(_ error: any Error) {
