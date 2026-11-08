@@ -960,6 +960,31 @@ fn authority_library_creation_unlock_prf_get_and_failure_atomicity() {
             [94; 32],
         )
         .unwrap();
+    // Publishing the checked route under a descriptor with the same signing point but another
+    // credential (or relying party) is refused: the check binds the whole descriptor.
+    let substituted = match key.clone() {
+        KeyDescriptor::WebAuthn {
+            signing, rp, origins, ..
+        } => KeyDescriptor::WebAuthn {
+            signing,
+            rp,
+            credential: vec![0xEE; 16],
+            origins,
+        },
+        other => panic!("expected a WebAuthn descriptor, got {other:?}"),
+    };
+    let swapped = Controller {
+        key: substituted,
+        label: "New".into(),
+        roles: vec![Role::Approve],
+        verification: None,
+    };
+    let refused = lib
+        .begin_add_passkey(swapped, slot.clone(), &[keys(201).public().id()], NOW)
+        .err()
+        .map(|e| e.0)
+        .unwrap_or_default();
+    assert!(refused.starts_with("malformed"), "{refused}");
     let c = Controller {
         key,
         label: "New".into(),

@@ -330,7 +330,8 @@ pub struct Library {
     me: PublicIdentity,
     vault_seed: Option<[u8; 32]>,
     controller: Option<String>,
-    checked_slots: BTreeSet<(String, Vec<u8>)>,
+    /// Checked new PRF routes: (vault ID, slot fingerprint, verified PRF controller descriptors).
+    checked_slots: BTreeSet<(String, Vec<u8>, Vec<u8>)>,
     keys: BTreeMap<(String, u64), Vec<u8>>,
     checkpoint_keys: BTreeMap<(String, u64), Vec<u8>>,
     judged: Vec<Judged>,
@@ -1191,8 +1192,12 @@ impl Library {
             &[slots::OpeningSecret::Prf(output)],
             vault::derive,
         )?;
-        self.checked_slots
-            .insert((self.authority.keyring.vault.id(), slot_fingerprint(&slot)?));
+        let binding = prf_binding(&slot, |id| (id == verified.key.id()).then(|| verified.key.clone()))?;
+        self.checked_slots.insert((
+            self.authority.keyring.vault.id(),
+            slot_fingerprint(&slot)?,
+            binding,
+        ));
         Ok(slot)
     }
     /// Verify a fresh get assertion and its credential before accepting PRF bytes.
@@ -1250,8 +1255,9 @@ impl Library {
             &[slots::OpeningSecret::Prf(&verified.output)],
             vault::derive,
         )?;
+        let binding = prf_binding(&slot, |id| (id == verified.key.id()).then(|| verified.key.clone()))?;
         self.checked_slots
-            .insert((v.id(), slot_fingerprint(&slot)?));
+            .insert((v.id(), slot_fingerprint(&slot)?, binding));
         Ok(slot)
     }
     /// Build a combined slot for the current vault or a host-supplied fresh rotation seed.
@@ -1355,8 +1361,18 @@ impl Library {
             secrets,
             vault::derive,
         )?;
-        self.checked_slots
-            .insert((pending.vault.id(), slot_fingerprint(&pending.slot)?));
+        let binding = prf_binding(&pending.slot, |id| {
+            pending
+                .controllers
+                .iter()
+                .find(|c| c.id() == id)
+                .map(|c| c.key.clone())
+        })?;
+        self.checked_slots.insert((
+            pending.vault.id(),
+            slot_fingerprint(&pending.slot)?,
+            binding,
+        ));
         Ok(pending.slot)
     }
     /// Return ECDH steps for all sealed epochs this identity has not unlocked.
@@ -1855,12 +1871,17 @@ impl Library {
                 let prf = matches!(slot, Slot::Prf { .. })
                     || matches!(slot,Slot::Combined{parts,..} if parts.iter().any(|p|matches!(p,slots::Part::Prf{..})));
                 let fingerprint = slot_fingerprint(slot)?;
+                let preserved =
+                    keyring.vault == self.authority.keyring.vault && old.contains(&fingerprint);
+                // A new route must match a checked construction for the exact descriptors the
+                // keyring publishes (rp, credential, origins), not only the controller IDs.
+                let checked = !preserved && {
+                    let binding = prf_binding(slot, |id| keyring.controller(id).map(|c| c.key.clone()))?;
+                    self.checked_slots
+                        .contains(&(keyring.vault.id(), fingerprint, binding))
+                };
                 ensure(
-                    !prf || (keyring.vault == self.authority.keyring.vault
-                        && old.contains(&fingerprint))
-                        || self
-                            .checked_slots
-                            .contains(&(keyring.vault.id(), fingerprint)),
+                    !prf || preserved || checked,
                     "malformed: new PRF route requires a verified get assertion",
                 )?;
             }
@@ -3603,6 +3624,27 @@ fn contains_revision(value: &Value, id: &str) -> bool {
     }
 }
 
+/// Canonical descriptors of a slot's PRF controllers, in slot order, from `lookup`.
+fn prf_binding(slot: &Slot, lookup: impl Fn(&str) -> Option<KeyDescriptor>) -> Result<Vec<u8>> {
+    let ids: Vec<&String> = match slot {
+        Slot::Prf { controllers, .. } => controllers.iter().collect(),
+        Slot::Combined {
+            controllers, parts, ..
+        } => controllers
+            .iter()
+            .zip(parts)
+            .filter(|(_, part)| matches!(part, slots::Part::Prf { .. }))
+            .map(|(id, _)| id)
+            .collect(),
+        Slot::Sealed { .. } => Vec::new(),
+    };
+    let mut bound = Vec::new();
+    for id in ids {
+        let key = lookup(id).ok_or_else(|| missing("PRF controller"))?;
+        bound.push(serde_json::json!([id, serde_json::from_slice::<Value>(&key.canonical()?)?]));
+    }
+    canonical(&Value::Array(bound))
+}
 fn slot_fingerprint(slot: &Slot) -> Result<Vec<u8>> {
     let mut value = serde_json::to_value(slot)?;
     if let Some(map) = value.as_object_mut() {
