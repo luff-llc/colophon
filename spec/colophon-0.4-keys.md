@@ -1,32 +1,45 @@
 # Colophon 0.4 (draft): keys and the keyring
 
-**Status: S2 specification draft for review, 2026-11-08.** Not implemented. When it's accepted,
-this text is folded into `colophon-0.4.md`. It replaces Colophon 0.3 §2 (private-key steps),
-§3 (who epochs are sealed to) and §4 (authority), and leaves operations, modules and HTTP
-exchange (§5–§8) as they are. Requirements and rationale:
-[Galley F2](https://github.com/luff-llc/galley/blob/main/docs/foundations/f2-keys.md) (private).
+**Status: S2 specification, draft 2, 2026-11-08.** Revised after independent reviews by Codex
+and agy ([review log](#12-review-log)). Not implemented. When accepted, this text is folded into
+`colophon-0.4.md`.
 
-MUST, SHOULD and MAY express protocol requirements. Every MUST has a conformance vector in
-`conformance/0.4/keys/` (§10).
+This document replaces Colophon 0.3 §2 (private-key steps), §3 (who epochs are sealed to), §4
+(authority) and the root-only rule in §7.2. Operations, modules, live state, blobs and HTTP
+exchange (§5–§8) are otherwise unchanged. Requirements and rationale: Galley F2
+(`luff-llc/galley`, `docs/foundations/f2-keys.md`, private).
 
-## 1. What changes from 0.3, and why
+MUST, SHOULD and MAY express protocol requirements. Every MUST has a conformance vector (§10).
+Backward compatibility with 0.1 or 0.3 records is **not** a goal. Older libraries become 0.4
+libraries by clean copy (§9).
+
+## 1. What changes from 0.3
 
 | Change | Reason |
 | --- | --- |
-| A **keyring of controllers** replaces the single root and the recovery identity. Controllers are passkeys, security keys, device owner keys or recovery kits, with roles and thresholds. | No single device or key is the library. Losing any one key doesn't lose the library. |
-| Signatures come in two **forms**: `raw` P-256 and `webauthn` assertions. Records can carry **cosignatures**. | Passkeys can't sign arbitrary bytes. Thresholds need several signatures over one body. |
-| A **vault** identity receives every epoch, in place of root and recovery. Its seed is opened through **slots**: sealed, PRF or combined. | Controllers can change without resharing every epoch to each of them. A passkey can unlock data through PRF. |
-| `reshare`, `handover` and `recover` are removed. One `keyring` entry covers every authority change. | One verified rule for every change, instead of three special cases. |
-| Agents and servers can **never** be controllers. | Agents work inside grants; they never hold authority. |
-| No 0.1 or 0.3 authority record is interpreted. Older libraries become 0.4 libraries by **clean copy** (§9). | No migration code paths in the verifier. |
+| A **keyring of controllers** replaces the root and the recovery identity. Controllers are passkeys, security keys, device owner keys and recovery kits, with roles and thresholds. | No single key is the library. |
+| Authority signatures come in two **forms**, `raw` P-256 and `webauthn` assertions, and authority records can carry **cosignatures**. | Passkeys can't sign arbitrary bytes. Thresholds need several signatures over one body. |
+| A **vault** identity receives every new epoch, in place of root and recovery. Its seed is opened through **slots**. | Controllers change without resharing epochs to each one. Passkeys unlock data through PRF. |
+| `reshare`, `handover` and `recover` are removed. One `keyring` entry makes every authority change. | One verified rule instead of three special cases. |
+| **Controllers aren't members**, and **no key serves two principals.** Agents and servers can never be controllers. | Authority and content authorship are separate. Agents never hold authority. |
+| The 0.3 root-only import permission becomes an explicit **`import` grant**. | There is no root. Import power is granted, scoped and expiring. |
 
-These are unchanged: member identities, requests, grants, member kinds, epochs and HPKE,
-operations, live state, layout, and canonical bytes. The protocol marker for authority bodies
-becomes `colophon/authority/4`. The marker for operations stays `/3`.
+These are unchanged: member identities and kinds, requests, the pairing code, grant fields
+other than `import`, HPKE epochs, operations (`/3` markers), live state, layout values,
+canonical JSON (0.3 §2), and the HTTP exchange. Authority bodies use
+`protocol: "colophon/authority/4"`.
 
-## 2. Keys
+## 2. Parsing and keys
 
-### 2.1 Key descriptor
+### 2.1 Strict parsing
+
+All protocol JSON, including `clientData`, MUST be rejected with `malformed` if any object, at
+any depth, has a duplicate member name. Fields of the wrong type, and fields this document
+forbids, MUST be rejected before any authorization decision. Optional fields MUST be omitted
+when absent. `null` is not allowed except for `previous` at genesis. Empty arrays are not
+allowed where this document says "non-empty".
+
+### 2.2 Key descriptor
 
 ```json
 {"form":"raw","signing":"<base64>","agreement":"<base64>"}
@@ -35,36 +48,54 @@ becomes `colophon/authority/4`. The marker for operations stays `/3`.
 
 | Field | Rule |
 | --- | --- |
-| `form` | `raw` or `webauthn`. An unknown value MUST fail with `newerFormat`. |
-| `signing` | An uncompressed 65-byte P-256 point. For `webauthn`, it's converted from the credential's COSE_Key at registration (§2.3). |
-| `agreement` | `raw` only, and optional. An uncompressed P-256 point, required when a `sealed` slot is sealed to this key. `webauthn` keys MUST NOT have one. |
-| `rp` | `webauthn` only, and required. The relying party ID. |
-| `credential` | `webauthn` only, and required. The credential ID, used as a lookup hint. It MUST NOT affect verification. |
+| `form` | `raw` or `webauthn` |
+| `signing` | A valid, uncompressed 65-byte P-256 point |
+| `agreement` | `raw` only, and optional. A valid 65-byte P-256 point. Required when the key opens a `sealed` slot or part. MUST be absent for `webauthn`. |
+| `rp` | `webauthn` only, and required. It's 1–253 bytes of lowercase ASCII letters, digits, `-` and `.`, with no empty label and no leading or trailing `.`. |
+| `credential` | `webauthn` only, and required. 1–1023 bytes. It's a lookup hint and MUST NOT affect verification. |
+| `origins` | `webauthn` only, and optional. A non-empty, sorted, duplicate-free list of exact additional origins, for example `android:apk-key-hash:<base64url>` (§3.3). |
 
-The **key ID** is the first 32 lowercase hex characters of SHA-256 of the `signing` bytes,
-the same scheme as member IDs.
+The key ID is the first 32 lowercase hex characters of SHA-256 of the `signing` bytes.
 
-### 2.2 Private-key work stays in the host
+### 2.3 One key, one principal
 
-The core holds no platform private key. Every signature and ECDH is two-phase (0.3 §2):
-`begin_*` returns the exact bytes or challenge, and `finish_*` verifies the result before
-accepting it. The **vault seed** is a library secret, not a platform key. The core MAY hold it
-in memory for the length of a session. The core MUST NOT persist it. The host persists it only
-inside a slot.
+A key (by signing key or agreement key) MUST NOT appear as more than one of these across the
+library's whole history:
 
-### 2.3 COSE parsing (registration)
+- a controller key;
+- a member identity;
+- a current or past vault identity.
 
-A WebAuthn registration's COSE_Key MUST be a definite-length CBOR map with:
+An authority entry that would introduce such a collision is `malformed`. Devices therefore use
+**separate** owner (controller) keys and member keys. The Swift apps already do this with
+`root.json` and `identity.json`.
 
-- `kty` (1) = 2 (EC2);
-- `alg` (3) = −7 (ES256);
-- `crv` (−1) = 1 (P-256);
-- `x` (−2) and `y` (−3) as 32-byte strings.
+### 2.4 Private-key work stays in the host
 
-The key is `0x04 ‖ x ‖ y`. Any other shape, or an invalid point, MUST be rejected with
-`malformed`. Attestation MAY be recorded and MUST NOT be required.
+The core holds no platform private key. Every signature, ECDH and PRF evaluation is
+two-phase: `begin_*` returns the exact input, and `finish_*` verifies the result before using
+it. The **vault seed** is a library secret, not a platform key. The core MAY hold it in memory
+for a session, and MUST NOT persist it. The host persists the seed only inside slots.
 
-## 3. Signatures
+### 2.5 COSE_Key at registration
+
+The credential public key MUST be a definite-length CBOR map with exactly five entries and no
+duplicate keys:
+
+- 1 (kty) = 2;
+- 3 (alg) = −7;
+- −1 (crv) = 1;
+- −2 (x) and −3 (y), each a 32-byte byte string.
+
+Integers and lengths MUST use minimal encoding, and nothing may follow the map. The key is
+`0x04 ‖ x ‖ y`, and it MUST be a valid point. Anything else is `malformed`. Attestation MAY be
+recorded and MUST NOT be required.
+
+## 3. Authority signatures
+
+This section applies **only** to `colophon/authority/4` envelopes. Requests and operations keep
+the 0.3 single raw member signature. They MUST NOT carry `assertion` or `cosignatures`, and
+those fields on them are `malformed`.
 
 ### 3.1 Envelope
 
@@ -74,54 +105,65 @@ The key is `0x04 ‖ x ‖ y`. Any other shape, or an invalid point, MUST be rej
  "cosignatures":[{"signer":"<keyID>","signature":"<base64>","assertion":{...}}]}
 ```
 
-`assertion` and `cosignatures` are present only when used, so records that don't use them
-keep 0.3's shape. The primary signer is the body's `by`. Every cosignature signs the **same
-body bytes**. A primary signer and its cosigners MUST be distinct key IDs, and each MUST be a
-controller in the keyring that authorizes the entry (§6.3).
+- `assertion` is present if and only if the primary signer's form is `webauthn`. The same
+  holds for each cosignature.
+- `cosignatures` is either absent or non-empty, sorted by `signer`.
+- The primary signer is the body's `by`. Cosigners MUST be distinct from each other and from
+  `by`.
+- Every attached signature MUST verify, and MUST be by a controller of the keyring that
+  authorizes the entry (§6.3). One failing or foreign signature makes the whole entry
+  `badSignature`.
 
-### 3.2 Verifying a `raw` signature
+### 3.2 `raw`
 
-`signature` is 64 bytes, `r ‖ s`. It's ECDSA P-256 with SHA-256 over the exact `body` bytes.
-`assertion` MUST be absent.
+`signature` is 64 bytes, `r ‖ s`. It's ES256: ECDSA P-256 over SHA-256 of the exact `body`.
 
-### 3.3 Verifying a `webauthn` signature
+### 3.3 `webauthn`
 
-`assertion` MUST be present. A verifier MUST check all of the following, in order:
+A verifier MUST check, in order:
 
-1. `clientData` parses as a JSON object with:
+1. `clientData` parses under §2.1 and contains:
    - `type` equal to `"webauthn.get"`;
    - `challenge` equal to the unpadded base64url of SHA-256(`body`);
-   - `origin` equal to `https://<rp>` or `https://<label>.<rp>`;
+   - an allowed `origin` (below);
    - `crossOrigin` absent or `false`.
 
    Other members are ignored.
 2. `authenticatorData` is at least 37 bytes, and bytes 0–31 equal SHA-256 of the UTF-8 `rp`.
-3. The flags byte (32) has UP (`0x01`) set. UV (`0x04`) MUST be set when the controller's
-   `verification` is `true`, and for every signature on a `keyring` or `genesis` entry.
-4. The sign counter (bytes 33–36) is ignored, because synced passkeys report zero.
-5. `signature` is ASN.1 DER ECDSA P-256 over `authenticatorData ‖ SHA-256(clientData)`. A
-   verifier MUST accept only DER that is minimally encoded, with r and s in [1, n−1]. High-S
-   values are accepted, because authenticators produce them.
+3. The flags byte (32) has UP (`0x01`) set. UV (`0x04`) MUST be set when the controller has
+   `verification: true`, and for every signature on `genesis`, `keyring`, `layout`, and on a
+   `grant` with `import` (§7).
+4. The sign counter is ignored.
+5. Let `M = authenticatorData ‖ SHA-256(clientData bytes)`. `signature` MUST be strictly
+   minimal ASN.1 DER, with `r` and `s` in [1, n−1]. It's verified as ES256 over SHA-256(M).
+   A message API receives `M`; a prehashed API receives SHA-256(M). High-S values are
+   valid. A library that enforces low-S (for example Rust `p256`) MUST normalize `s` to
+   `min(s, n−s)` after the DER checks and before verifying. The stored bytes are never changed.
 
-The DER bytes are kept exactly as received. Raw `r ‖ s` applies only to `raw` signatures.
+**Allowed origins:** either
+- `https://` followed by a host, with no port, path, query, fragment or user information
+  (none of `/ : ? # @ \`), where the host equals `rp` or ends with `.` ‖ `rp` with a
+  non-empty prefix that doesn't start or end with `.` and doesn't contain `..`; or
+- an exact member of the controller's `origins`.
+
+Verifiers MUST NOT rewrite `clientData`.
 
 ## 4. Controllers and the keyring
 
 ### 4.1 Controller
 
 ```json
-{"key":{...descriptor...},"label":"Passkey","roles":["approve","recover"],"verification":true}
+{"key":{...},"label":"Passkey","roles":["approve","recover"],"verification":true}
 ```
 
 | Field | Rule |
 | --- | --- |
-| `roles` | A non-empty subset of `control`, `approve` and `recover`. An unknown role MUST fail with `newerFormat`. |
-| `verification` | Optional, `webauthn` only. Require UV on every signature by this controller. |
-| `label` | Display only. |
+| `roles` | A non-empty, sorted, duplicate-free subset of `approve`, `control` and `recover` |
+| `verification` | `webauthn` only. Present only as `true`. |
+| `label` | 1–200 bytes. Display only. |
 
-The controller ID is the key ID. A controller key MUST NOT be the signing key of a member whose
-authenticated kind is `agent` or `server`. An entry that would make one a controller is invalid,
-and so is a grant that admits a controller's key as an agent or server.
+The controller ID is the key ID. Because of §2.3, no controller key can be a member, so agents
+and servers can never be controllers.
 
 ### 4.2 Keyring
 
@@ -129,40 +171,58 @@ and so is a grant that admits a controller's key as an agent or server.
 {"controllers":[...],"threshold":1,"recoverThreshold":1,"vault":{"signing":"…","agreement":"…"},"slots":[...]}
 ```
 
-- `controllers` is sorted by ID, with no duplicate IDs.
-- `threshold` is between 1 and the number of `control` controllers.
-- `recoverThreshold` is between 1 and the number of `recover` controllers, or 0 when there
-  are none.
-- At least one `control` controller MUST exist.
-- `vault` is the vault's public identity (§5.1).
-- Every slot names existing controllers.
+- `controllers`: non-empty, sorted by ID, with no duplicates. At least one has `control`.
+- `threshold`: an integer, at least 1, at most the number of `control` controllers.
+- `recoverThreshold`: an integer, always present. It's 0 if no controller has `recover`, and
+  otherwise between 1 and the number of `recover` controllers.
+- `vault`: a public identity (§5.1).
+- `slots`: non-empty, each valid under §5.2.
 
-A keyring with fewer than two controllers holding `recover` or `control` is valid, but hosts
-SHOULD warn that losing one key loses the library.
+Hosts SHOULD warn when losing any single key would leave either no signing quorum or no
+openable slot.
 
 ## 5. Vault and slots
 
 ### 5.1 Vault
 
-The vault seed is 32 random bytes. Its identity is derived with the 0.3 §2 software-identity
-procedure, using HKDF salt `colophon/vault/4`. **Every epoch MUST be sealed to exactly the vault
-and the active, unexpired members with read access to that namespace.** That replaces 0.3's
-"root, recovery and members". The vault's recipient ID in HPKE `info` is its key ID.
+The vault seed is 32 random bytes from the host. Its identity is derived with the 0.3 §2
+software-identity procedure, using HKDF salt `colophon/vault/4`.
+
+**Each newly introduced epoch MUST be sealed to exactly the current vault and the active,
+unexpired members with read access to its namespace, at the introducing entry.** Historical
+seals stay valid authenticated history. Later `shares` add only the recipients this document
+authorizes.
+
+After opening any slot, the core MUST check the plaintext is 32 bytes, derive the identity,
+and compare both public keys with the keyring's `vault`. A mismatch is `vaultLocked`, and the
+session's unlocked seed is left unchanged.
 
 ### 5.2 Slots
 
-Every slot has `kind`, `controllers` (the IDs whose keys open it, in order), and `label`.
-The common info string is
-`I = "colophon/vault-slot/4\n" ‖ libraryID ‖ "\n" ‖ vaultID ‖ "\n" ‖ kind ‖ "\n" ‖ join(controllers, ",")`.
+Every slot has `kind`, `controllers` and `label`. Slot info strings bind the vault and the
+controllers, but not the library ID, so genesis can carry slots without circularity. The vault
+is fresh per library (§6.2), which makes the binding library-specific.
 
-| Kind | Fields | Opening |
+```text
+I  = "colophon/vault-slot/4\n" ‖ vaultID ‖ "\n" ‖ kind ‖ "\n" ‖ join(controllers, ",")
+Ii = "colophon/vault-part/4\n" ‖ vaultID ‖ "\n" ‖ decimal(i) ‖ "\n" ‖ part.kind ‖ "\n" ‖ controllers[i]
+```
+
+| Kind | Shape | Opening |
 | --- | --- | --- |
-| `sealed` | `sealed` (an HPKE sealed key, as 0.3 §3) | The single controller's `raw` key with `agreement` opens it. HPKE `info` and AAD are `I`. The plaintext is the 32-byte seed. |
-| `prf` | `salt` (32 bytes), `box` | The single controller is `webauthn`. The host evaluates PRF with `salt` during an assertion. The key is HKDF-SHA256(IKM = PRF output, salt = `salt`, info = `I`, 32 bytes). `box` is AES-256-GCM `nonce(12) ‖ ciphertext ‖ tag`, with AAD `I`, and its plaintext is the seed. |
-| `combined` | `parts`, `box` | Each part is `{"kind":"sealed","sealed":…}` or `{"kind":"prf","salt":…}`, in `controllers` order. Each part yields a 32-byte secret: the HPKE plaintext, or the HKDF output as above. The key is HKDF-SHA256(IKM = the secrets concatenated in order, salt = empty, info = `I`, 32 bytes). `box` is as for `prf`. |
+| `sealed` | One controller, `raw` with `agreement`. `sealed` is `{enc (65-byte point), ciphertext (48 bytes)}`. | HPKE (0.3 §3 suite) to that agreement key, with `info` and AAD `I`. The plaintext is the seed. |
+| `prf` | One controller, `webauthn`. `salt` (32 bytes), `box` (60 bytes). | PRF output `P` (below). Key = HKDF-SHA256(IKM `P`, salt `salt`, info `I`, 32 bytes). `box` = nonce(12) ‖ AES-256-GCM(seed, AAD `I`) ‖ tag. |
+| `combined` | At least 2 distinct controllers. `parts` has the same length and order. `box` is 60 bytes. Part `i` is `{"kind":"sealed","sealed":…}` for a `raw` controller with `agreement`, or `{"kind":"prf","salt":…}` for a `webauthn` controller. | Part secret `Si`: a sealed part is HPKE with `info` and AAD `Ii`; a prf part is HKDF(IKM `P`, salt, info `Ii`). Key = HKDF-SHA256(IKM `S0 ‖ … ‖ Sn`, salt empty, info `I`, 32 bytes), then the `box` as for `prf`. |
 
-A wrong secret MUST fail with `vaultLocked`. A slot whose `controllers` aren't current
-controllers is invalid.
+Each sealed part MUST encrypt a fresh, independent random 32-byte secret, never the seed and
+never reused. A wrong secret is `vaultLocked`. Structural violations are `malformed` at replay,
+not when the slot is first opened.
+
+**PRF bytes.** `salt` is the exact WebAuthn PRF extension input (`prf.eval.first`). `P` is the
+32-byte `results.first`. A host that talks CTAP `hmac-secret` directly MUST apply the WebAuthn
+transformation, SHA-256(`"WebAuthn PRF"` ‖ 0x00 ‖ salt), and select the UV-associated
+secret. If PRF is unsupported or returns no result, that MUST fail explicitly. There's no
+fallback derivation. Before a slot is published, the host MUST confirm it opens.
 
 ## 6. Authority
 
@@ -172,8 +232,8 @@ Each authority body contains:
 
 - `protocol: "colophon/authority/4"`;
 - contiguous `seq` from 1;
-- `previous`: SHA-256 of the exact preceding body, null only at genesis;
-- `issued`;
+- `previous`: SHA-256 hex of the exact preceding body, `null` only at genesis;
+- `issued` (0.3 date format);
 - `by`: the primary signer's controller ID;
 - `kind`, and that kind's fields.
 
@@ -183,114 +243,185 @@ The library ID is the first 32 hex characters of SHA-256 of the exact genesis bo
 
 | Kind | Fields | Effect |
 | --- | --- | --- |
-| `genesis` | `label`, `namespaces`, `keyring` | Creates the library and its first keyring. The initial epochs follow in a `rekey`. |
-| `rekey` | `epochs` | Introduces consecutive epochs, sealed per §5.1 |
-| `grant` | `request`, `grant`, `shares` | As 0.3 |
-| `revoke` | `memberID`, `kept`, `epochs` | As 0.3, with epochs sealed per §5.1 |
-| `keyring` | `keyring`, and also `shares` and `epochs` when the vault changes | Replaces the keyring wholesale. If `keyring.vault` differs from the current vault, `shares` MUST seal every existing epoch to the new vault, and `epochs` MUST start a new epoch in every namespace sealed per §5.1. The old vault receives nothing new. |
-| `layout` | `layout` | As 0.3. Never lowers the layout. |
+| `genesis` | `label`, `namespaces`, `keyring` | Creates the library and its first keyring. The vault MUST be fresh. |
+| `rekey` | `epochs` (non-empty) | Introduces consecutive epochs (§5.1). **Seq 2 MUST be a `rekey` introducing epoch 1 for every declared namespace.** |
+| `grant` | `request`, `grant`, `shares` | As 0.3, plus optional `import` (§7) |
+| `revoke` | `memberID`, `kept`, `epochs` | As 0.3. New epochs are sealed per §5.1. |
+| `keyring` | `keyring`, and `shares` plus `epochs` only if the vault changes | Replaces the keyring wholesale. If `keyring.vault` is unchanged, `shares` and `epochs` MUST be absent. If it changes: the new vault MUST be fresh (§2.3); `shares` MUST seal every existing epoch to the new vault; and `epochs` MUST introduce a new epoch in every namespace. |
+| `layout` | `layout` | As 0.3. It never lowers the layout. |
+
+**Rotation is required** when a controller present before the entry is absent after it, or
+loses any role. A controller that stays with fewer roles MAY have slots for the new vault. A
+removed controller can't be named by a slot (§4.2). Lowering `verification` doesn't by itself
+require rotation, but it is a control-rule change.
 
 ### 6.3 Who may sign what
 
-All signers are evaluated against the keyring **before** the entry, except for `genesis`,
-which is evaluated against its own new keyring.
+Signers of every entry except `genesis` are evaluated against the keyring **before** the entry.
+Genesis signers are evaluated against the genesis keyring.
 
-| Kind | Required signatures |
+| Kind | Rule |
 | --- | --- |
-| `genesis` | Distinct `control` controllers of the new keyring, at least its `threshold`. UV is required on WebAuthn signatures. |
-| `rekey`, `grant`, `revoke` | One controller with `approve`. A controller with `control` but not `approve` may sign `rekey`. |
-| `layout` | One controller with `control` |
-| `keyring`, by control | Distinct current `control` controllers, at least the current `threshold`. UV is required. |
-| `keyring`, by recovery | Distinct current `recover` controllers, at least the current `recoverThreshold`, with UV required. Valid **only if the change only adds**: every current controller is unchanged, with the same key, roles and verification; `threshold`, `recoverThreshold`, `vault` and every current slot are unchanged; and only new controllers and new slots for them are added. |
+| `genesis` | **Control rule** over the new keyring |
+| `keyring` | **Control rule.** If that fails, the **recovery rule** applies. If both fail, `badSignature`. |
+| `layout` | **Control rule** |
+| `grant` with `import` | **Control rule** |
+| `rekey`, `grant`, `revoke` | **Single rule:** exactly one signer, no cosignatures, holding `approve`. For `rekey`, holding `control` is also enough. |
 
-The verifier tries the control rule first. If that fails, it tries the recovery rule, and if
-both fail the entry is refused with `badSignature`. An unknown kind or field MUST stop replay
-with `newerFormat`, before any content is read.
+- **Control rule:** every signer holds `control`, the number of distinct signers is at least
+  `threshold`, and every WebAuthn signature has UV.
+- **Recovery rule:** `recoverThreshold > 0`; every signer holds `recover`; the number of distinct
+  signers is at least `recoverThreshold`; every WebAuthn signature has UV; and the change **only
+  adds**:
+  - every existing controller is byte-identical;
+  - `threshold`, `recoverThreshold`, `vault` and every existing slot are unchanged;
+  - only new controllers, and slots naming only new controllers, are added.
 
-### 6.4 Removing a controller
+  **If `recoverThreshold < threshold`, every added controller MUST have roles exactly
+  `["approve"]`.**
 
-Removing a controller, or taking a role away from one, MUST rotate the vault (§6.2). It's
-authorized only by the control rule. The removed controller's slots MUST be absent from the
-new keyring.
+**Verification order.** For seq > 1, the verifier MUST:
+
+1. check structure, size and §2.1;
+2. authenticate every signature against the prior keyring;
+3. then reject an unknown `kind`, `form`, role or slot kind with `newerFormat`.
+
+An unauthenticated entry is always `badSignature` or `malformed`, never `newerFormat`, so a
+relay can't force an update prompt. For genesis, unknown values in its own keyring are
+`newerFormat`. A forged genesis can't enter an existing library, because the library ID
+is the genesis digest.
 
 ## 7. Members
 
-Requests, grants, member kinds, the pairing code, expiry and write budgets work as in 0.3 §4.
-Grants are signed by an `approve` controller rather than the root. Later foundation work
-(Galley F3) extends grant restrictions. That extension is out of scope here.
+Requests, member kinds, the pairing code, expiry and write budgets work as in 0.3 §4. Grants
+are signed per §6.3. **Controllers aren't members.** Genesis creates no member. A device that
+writes content needs a member identity and a grant, normally approved in the same session it
+creates the library.
 
-## 8. Host interface (normative behavior, informative names)
+`grant.import` (boolean, present only as `true`) lets that member publish
+`colophon.importBatch` (0.3 §7.2) in the granted namespaces. In 0.4, every 0.3 rule that names
+the root's import role names this grant instead. An import grant MUST have `expires`, MUST be
+signed under the control rule, and MUST NOT be given to `agent` or `server` members. Revocation
+or expiry ends future imports. Already admitted imports keep their evidence attribution, which
+never becomes destination authorship or authority.
 
-- **Prepare an authority change:** the core returns the exact body and the signers that
-  satisfy §6.3 among the keys the host says it has. For WebAuthn signers it also returns the
-  challenge, SHA-256(body).
-- **Finish the change:** the host supplies signatures and assertions. The core verifies each
-  one against §3, then checks §6.3, then returns the record. Nothing is written if any check
-  fails.
-- **Open the vault:** the core lists the slots the host's available keys can open, with each
-  one's PRF salts and HPKE `enc` values. The host returns PRF outputs and raw ECDH secrets. The
-  core opens the slot and keeps the seed for the session.
-- **One prompt per action:** the core returns every body that one action needs before asking
-  for any signature, so the host can collect all of them in one ceremony per key.
+## 8. Host interface
+
+Names are informative; the behavior is normative.
+
+1. **Unlock first.** An action that reads or seals epochs (`grant`, `revoke`, vault-rotating
+   `keyring`, `rekey`) needs the vault seed in the session first. The core reports which slots
+   the available keys can open, with their PRF salts and HPKE `enc` values. The host returns
+   PRF outputs and ECDH secrets, and the core opens and checks the slot (§5.1).
+2. **New PRF slots need PRF before the body.** To create a `prf` slot or part, the host
+   evaluates PRF for the new salt, by registering with the PRF extension or by asserting,
+   before the core builds the entry.
+3. **Prepare.** The core returns the exact body, which signers can satisfy §6.3 among the
+   host's available keys, and the WebAuthn challenge (SHA-256(body)) for each.
+4. **Finish.** The host returns the signatures and assertions. The core verifies §3 and §6.3
+   before returning the record, and nothing is written on any failure.
+5. **Prompts.** Each distinct body needs its own WebAuthn assertion. A `raw` hardware key that
+   supports an authenticated context (Secure Enclave with LAContext, Android Keystore auth
+   validity) SHOULD sign every body of one action under one presence check. Hosts SHOULD
+   design actions to need one authority body where possible. For example, creating a library
+   with a device owner key needs presence once; adding a passkey later is one more ceremony.
 
 ## 9. Clean copy from older libraries
 
-A 0.4 verifier never reads 0.1 or 0.3 authority. Instead, a **copy tool**:
+A 0.4 verifier never reads 0.1 or 0.3 authority. A copy tool:
 
-1. Reads the old library **read-only**, with that version's own verifier, as an existing
-   member with read access. The old root isn't required, because the copy doesn't claim to
-   be the same library.
-2. Creates a **new** 0.4 library: a new library ID, a keyring the person sets up (at least a
-   device owner key, normally also a passkey and a recovery kit), and the same namespaces.
-3. Imports operations through the existing import contract (`imports.rs`). Each copied
-   operation is re-signed by the copying member and carries `imported:
-   {"library": <old ID>, "signedBodyDigest": <exact old body digest>}`.
-4. Reports counts per namespace, plus every record it couldn't copy and why. The old library
-   is never written. The person decides when to stop using it.
+1. Reads a private snapshot of the old library, never the original. It reads with that
+   version's own verifier, as a member with read access. Proving the old root isn't needed.
+2. Creates a **new** 0.4 library: a new library ID, a keyring the person sets up, and the same
+   namespaces.
+3. Grants its copying member read and write access plus `import`, with a short expiry, and
+   publishes `colophon.importBatch` units under the 0.3 §7.2 contract. Source operation IDs and
+   exact signed-body digests are encrypted evidence inside the batch, never authorship.
+4. Reports counts per namespace, view digests, and every record it couldn't copy, with the
+   reason.
 
-Grants, members and agents are **not** copied. They're approved again in the new library.
+Grants, members and agents aren't copied. The genesis MAY carry `importedFrom: "<old library
+ID>"` as a signed, display-only claim. It confers nothing.
 
 ## 10. Conformance
 
-Every case below is generated from published software keys and a synthetic WebAuthn
-authenticator (fixed P-256 key; `authenticatorData = SHA-256(rp) ‖ flags ‖ 00000000`).
+Vectors in `conformance/0.4/keys/` use published software keys and a synthetic WebAuthn
+authenticator: a fixed P-256 key, `authenticatorData = SHA-256(rp) ‖ flags ‖ 00000000`,
+`clientData` built from the challenge, and both high-S and low-S signatures. Each refuse case
+names its outcome.
 
 **Accept cases:**
 
 - Genesis with one raw controller.
-- Genesis with threshold 2.
-- A passkey grant.
-- Rekey by a control-only controller.
-- A recovery that only adds.
-- A controller removal with vault rotation and history readable by the new vault.
-- A combined slot opened with both parts.
-- A PRF slot opened.
+- Genesis with threshold 2 (raw plus WebAuthn).
+- Seq-2 rekey.
+- A passkey-signed grant.
+- An import grant under the control rule.
+- Rekey signed by a control-only controller.
+- Recovery that only adds, with an approve-only addition when `recoverThreshold < threshold`.
+- Removal with rotation; the new vault reads history.
+- Demotion with rotation; the demoted controller keeps a new slot.
+- `prf`, `sealed` and two-part `combined` slots opened.
+- A multi-label subdomain origin.
+- An allowlisted Android origin.
+- A high-S WebAuthn signature.
 
-**Refuse cases, each with its expected outcome:**
+**Refuse cases:**
 
-- WebAuthn: wrong challenge; wrong RP hash; foreign origin; `crossOrigin: true`;
-  `webauthn.create`; UP missing; UV missing where required; non-minimal DER; another
-  controller's key.
-- Threshold not met.
-- Recovery that removes, demotes, changes a threshold or changes the vault.
-- Removal without rotation.
-- An agent key as a controller.
-- A duplicate cosigner.
-- A slot naming a non-controller.
-- A wrong PRF output.
-- Unknown form, role or slot kind, each with `newerFormat`.
-- A 0.3 authority body, with `newerFormat` or `malformed`, never interpreted.
+- WebAuthn: wrong challenge; wrong RP hash; foreign origin; origin with user information or a
+  port; `crossOrigin: true`; `webauthn.create`; UP missing; UV missing where required;
+  non-minimal DER; another controller's key.
+- Rules:
+  - threshold unmet;
+  - mixed-role signers;
+  - an invalid extra cosignature;
+  - cosignatures on a single-rule kind;
+  - `recoverThreshold` 0 used for recovery;
+  - recovery adding `control` while `recoverThreshold < threshold`;
+  - recovery that removes, demotes, changes a threshold or changes the vault;
+  - removal or demotion without rotation;
+  - vault reuse (A→B→A);
+  - `shares` present without a vault change;
+  - layout with one of two required signatures;
+  - import grant under the single rule, or to an agent.
+- Keys and slots:
+  - a key in two principals (controller and member, member and vault);
+  - an empty or one-part combined slot;
+  - duplicate controllers in a combined slot;
+  - a `prf` slot naming a raw controller;
+  - wrong sizes;
+  - a slot that opens to a seed for another vault;
+  - a wrong PRF output.
+- Parsing and order:
+  - duplicate JSON names (body and `clientData`);
+  - COSE with extra or duplicate keys, or trailing bytes;
+  - an empty `cosignatures` array;
+  - an unauthenticated unknown kind (`badSignature`, not `newerFormat`);
+  - an authenticated unknown kind (`newerFormat`);
+  - seq 2 not a full rekey;
+  - a 0.3 authority body.
 
-The Swift implementation (Marginalia `packages/Colophon`, `KeyringTests.swift`) is the behavioral
-reference for §3.3 and §6.3. Its bytes differ (0.1 markers), so it's not a byte oracle.
+The Swift implementation (Marginalia `packages/Colophon`, `KeyringTests.swift`) is the
+behavioral reference for WebAuthn checks and recovery rules. Its bytes differ, so it's not a
+byte oracle.
 
-## 11. Open questions for review
+## 11. Decisions on the draft-1 open questions
 
-1. Should `custody` and `presence` be signed controller fields, or kept host-side display only?
-   (Galley F2 question 2.) This draft leaves them out.
-2. Should `layout` require the control threshold rather than one signature?
-3. Should a keyring with only one `recover`-or-`control` key be refused, rather than warned
-   about?
-4. Is high-S tolerance for WebAuthn DER acceptable? (Some verifiers require low-S.)
-5. Should the copy tool keep the old library ID as `importedFrom` on the genesis, for display
-   only?
+| Question | Decision |
+| --- | --- |
+| Custody and presence as signed fields | Left out of 0.4. They're host-side display until attestation exists, and can be added later as a new optional field. |
+| Layout threshold | Control rule (§6.3), with UV |
+| Refuse single-key keyrings | No. Hosts warn based on actual surviving quorums and openable slots (§4.2). |
+| High-S | Accepted, with normalization only inside verification (§3.3) |
+| Old library ID on the copy | Optional `importedFrom` on genesis, display only (§9) |
+
+## 12. Review log
+
+| Date | Reviewer | Findings | Resolution |
+| --- | --- | --- | --- |
+| 2026-11-08 | Codex (read-only) | 17: 8 high, 9 medium | All adopted. Genesis circularity was solved by dropping the library ID from slot info, rather than deferring slots. |
+| 2026-11-08 | agy (read-only) | 17 or more: 3 critical, 6 high, the rest medium and low | All adopted, including verification order, canonical omission, strict slot shapes, the `p256` low-S note and the import grant. |
+
+The reviews are kept beside this file as `colophon-0.4-keys-review-codex.md` and
+`colophon-0.4-keys-review-agy.md`. The next step is a second review round on this draft, then
+freeze at `v1`.
