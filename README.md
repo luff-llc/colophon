@@ -11,14 +11,21 @@ signed, encrypted operations, and every client folds the admitted operations int
 state. Storage and transport never grant access: a folder, iCloud Drive or a relay only
 moves bytes it can't read. There is no vendor account.
 
-This repository holds the Colophon 0.3 Rust core and JavaScript package, the
+This repository holds the Colophon 0.4 Rust core and JavaScript package, the
 playground demo, plus the 0.1 specification, conformance vectors and shipped
 Swift reference implementation in `reference/swift/`. The root Swift package is **ColophonSDK**,
-with the Rust-backed 0.3 products under `swift/`. In LUFF's Marginalia repository,
+with the Rust-backed products under `swift/`. In LUFF's Marginalia repository,
 "Colophon 0.2" names the Swift layout-2 step whose design 0.3 absorbs.
 
-0.3 separates immutable intent from replaceable playback state, scopes operation listings by
-namespace, and adds an authenticated layout barrier and explicit session readiness. See the
+**0.4 replaces the single root key with a keyring.** Authority belongs to a keyring of
+controllers: passkeys, security keys, device owner keys and recovery kits, with roles and
+thresholds. Passkeys sign authority as WebAuthn assertions and can unlock data through PRF.
+Device and member keys do the everyday work without prompts. Every epoch is sealed to a vault
+that opens through slots. See the [0.4 spec](spec/colophon-0.4.md), the
+[keys and keyring spec](spec/colophon-0.4-keys.md), and the [changelog](CHANGELOG.md).
+
+0.3 separated immutable intent from replaceable playback state, scoped operation listings by
+namespace, and added an authenticated layout barrier and explicit session readiness. See the
 [0.3 handoff](docs/handoff-v03.md) and [performance results](docs/performance.md).
 
 ## Try it
@@ -55,10 +62,10 @@ makes access explicit instead:
 - **Honest.** Missing history, keys or files remain visible, retryable states. Nothing
   is reported as an empty library because a member lacks permission.
 
-## Rust core and JavaScript package (0.3)
+## Rust core and JavaScript package (0.4)
 
-The pure Rust core implements records, P-256 host key steps, HPKE, grants, admission, epoch
-rotation, recovery, four domain folds, the ledger and generated agent tools. It performs no
+The pure Rust core implements records, raw and WebAuthn key steps, the controller keyring and
+vault slots, HPKE, grants, admission, epoch rotation, recovery, four domain folds, the ledger and generated agent tools. It performs no
 I/O and takes time and entropy explicitly. `colophon-wasm` and `@colophon/core` run the same
 implementation with non-extractable WebCrypto keys.
 
@@ -95,14 +102,16 @@ npm --prefix js test            # WebCrypto smoke and Rust/WASM fixture parity
 ES modules. Build artifacts and local dependency caches are not committed. No package has been
 published by this worktree.
 
-See the [0.3 spec](spec/colophon-0.3.md), [JavaScript contract](docs/js-api.md),
-[architecture and dependency pins](docs/architecture.md), and [0.3 conformance library](conformance/0.3/).
-Regenerate the deterministic fixture with
-`COLOPHON_UPDATE_VECTORS=1 cargo test -p colophon-core --test conformance`.
+See the [0.4 spec](spec/colophon-0.4.md), [JavaScript contract](docs/js-api.md),
+[architecture and dependency pins](docs/architecture.md), and the [0.4 conformance vectors](conformance/0.4/).
+`conformance/0.3/` is kept as history; 0.4 deliberately refuses its authority records.
+Regenerate the 0.4 vectors with
+`COLOPHON_WRITE_VECTORS=1 cargo test -p colophon-core --test keys_conformance`.
 
 The root Apple package exports `ColophonFFI`, `ColophonKit`, `ColophonKitStorage`,
 `ColophonSession`, `ColophonSessionUI`, `ColophonBooksKit`, `ColophonListeningKit`,
-`ColophonSavedKit`, `ColophonNotesKit`, and `ColophonMigration`. Start with
+`ColophonSavedKit`, `ColophonNotesKit`, `ColophonMigration`, and `ColophonKeys` (passkeys,
+security keys and Secure Enclave owner keys). Start with
 [new app](docs/new-app.md), [native bindings and package identity](docs/native-bindings.md),
 and [scoped migration](docs/migration.md). Build the local XCFramework before resolving SwiftPM.
 Apps retaining a local `Colophon` package should check out this SDK as `packages/ColophonSDK`.
@@ -164,8 +173,8 @@ they don't interpret. Conflicts are recorded, never silently resolved (spec §9)
 ## Tests and conformance
 
 ```sh
-COLOPHON_SOFTWARE_KEYS=1 swift test        # root 0.3 SDK
-COLOPHON_SOFTWARE_KEYS=1 swift test --package-path reference/swift  # 0.1 + real migration adapter
+COLOPHON_SOFTWARE_KEYS=1 swift test        # root 0.4 SDK
+COLOPHON_SOFTWARE_KEYS=1 swift test --package-path reference/swift  # 0.1, migration adapter, clean copy
 COLOPHON_SOFTWARE_KEYS=1 COLOPHON_WRITE_VECTORS=1 swift test --package-path reference/swift --filter writeVectors
 ```
 
