@@ -3294,6 +3294,145 @@ public func FfiConverterTypeChangeSummary_lower(_ value: ChangeSummary) -> RustB
 }
 
 
+/**
+ * Every option for creating a keyring library (spec §6.2, §9).
+ */
+public struct CreateLibraryOptions: Equatable, Hashable {
+    /**
+     * The device's content member keys.
+     */
+    public let member: PublicKeys
+    /**
+     * The device's owner controller keys, separate from the member.
+     */
+    public let controller: PublicKeys
+    /**
+     * Fresh random 32-byte vault seed from the host.
+     */
+    public let vaultSeed: Data
+    /**
+     * Library display label.
+     */
+    public let label: String
+    /**
+     * Owner controller display label.
+     */
+    public let ownerLabel: String
+    /**
+     * Declared namespaces.
+     */
+    public let namespaces: [String]
+    /**
+     * Optional recovery-kit controller.
+     */
+    public let recovery: RecoveryKitController?
+    /**
+     * Optional display-only old library ID for a clean copy.
+     */
+    public let importedFrom: String?
+    /**
+     * Optional import-grant expiry for a copying device.
+     */
+    public let importExpires: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The device's content member keys.
+         */member: PublicKeys, 
+        /**
+         * The device's owner controller keys, separate from the member.
+         */controller: PublicKeys, 
+        /**
+         * Fresh random 32-byte vault seed from the host.
+         */vaultSeed: Data, 
+        /**
+         * Library display label.
+         */label: String, 
+        /**
+         * Owner controller display label.
+         */ownerLabel: String, 
+        /**
+         * Declared namespaces.
+         */namespaces: [String], 
+        /**
+         * Optional recovery-kit controller.
+         */recovery: RecoveryKitController?, 
+        /**
+         * Optional display-only old library ID for a clean copy.
+         */importedFrom: String?, 
+        /**
+         * Optional import-grant expiry for a copying device.
+         */importExpires: String?) {
+        self.member = member
+        self.controller = controller
+        self.vaultSeed = vaultSeed
+        self.label = label
+        self.ownerLabel = ownerLabel
+        self.namespaces = namespaces
+        self.recovery = recovery
+        self.importedFrom = importedFrom
+        self.importExpires = importExpires
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CreateLibraryOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCreateLibraryOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CreateLibraryOptions {
+        return
+            try CreateLibraryOptions(
+                member: FfiConverterTypePublicKeys.read(from: &buf), 
+                controller: FfiConverterTypePublicKeys.read(from: &buf), 
+                vaultSeed: FfiConverterData.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                ownerLabel: FfiConverterString.read(from: &buf), 
+                namespaces: FfiConverterSequenceString.read(from: &buf), 
+                recovery: FfiConverterOptionTypeRecoveryKitController.read(from: &buf), 
+                importedFrom: FfiConverterOptionString.read(from: &buf), 
+                importExpires: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CreateLibraryOptions, into buf: inout [UInt8]) {
+        FfiConverterTypePublicKeys.write(value.member, into: &buf)
+        FfiConverterTypePublicKeys.write(value.controller, into: &buf)
+        FfiConverterData.write(value.vaultSeed, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.ownerLabel, into: &buf)
+        FfiConverterSequenceString.write(value.namespaces, into: &buf)
+        FfiConverterOptionTypeRecoveryKitController.write(value.recovery, into: &buf)
+        FfiConverterOptionString.write(value.importedFrom, into: &buf)
+        FfiConverterOptionString.write(value.importExpires, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreateLibraryOptions_lift(_ buf: RustBuffer) throws -> CreateLibraryOptions {
+    return try FfiConverterTypeCreateLibraryOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreateLibraryOptions_lower(_ value: CreateLibraryOptions) -> RustBuffer {
+    return FfiConverterTypeCreateLibraryOptions.lower(value)
+}
+
+
 public struct Denial: Equatable, Hashable {
     public let reason: DenialReason
     public let detail: String
@@ -4170,6 +4309,75 @@ public func FfiConverterTypePublicKeys_lift(_ buf: RustBuffer) throws -> PublicK
 #endif
 public func FfiConverterTypePublicKeys_lower(_ value: PublicKeys) -> RustBuffer {
     return FfiConverterTypePublicKeys.lower(value)
+}
+
+
+/**
+ * A recovery-kit controller to place in genesis (role `recover`, with its own sealed slot).
+ */
+public struct RecoveryKitController: Equatable, Hashable {
+    /**
+     * The kit's public keys; signing and agreement must differ.
+     */
+    public let keys: PublicKeys
+    /**
+     * Display label, for example "Recovery Kit".
+     */
+    public let label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The kit's public keys; signing and agreement must differ.
+         */keys: PublicKeys, 
+        /**
+         * Display label, for example "Recovery Kit".
+         */label: String) {
+        self.keys = keys
+        self.label = label
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RecoveryKitController: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRecoveryKitController: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RecoveryKitController {
+        return
+            try RecoveryKitController(
+                keys: FfiConverterTypePublicKeys.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RecoveryKitController, into buf: inout [UInt8]) {
+        FfiConverterTypePublicKeys.write(value.keys, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRecoveryKitController_lift(_ buf: RustBuffer) throws -> RecoveryKitController {
+    return try FfiConverterTypeRecoveryKitController.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRecoveryKitController_lower(_ value: RecoveryKitController) -> RustBuffer {
+    return FfiConverterTypeRecoveryKitController.lower(value)
 }
 
 
@@ -7039,6 +7247,30 @@ fileprivate struct FfiConverterOptionTypeGrantOptions: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeRecoveryKitController: FfiConverterRustBuffer {
+    typealias SwiftType = RecoveryKitController?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRecoveryKitController.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRecoveryKitController.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWebauthnResult: FfiConverterRustBuffer {
     typealias SwiftType = WebauthnResult?
 
@@ -7679,6 +7911,19 @@ public func beginCreate(owner: PublicKeys, controller: PublicKeys, vaultSeed: Da
     )
 })
 }
+/**
+ * Prepare keyring genesis with every option. Same two signing rounds as `begin_create`.
+ */
+public func beginCreateWith(options: CreateLibraryOptions, now: String, entropy: Data)throws  -> HostAction  {
+    return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_func_begin_create_with(
+        FfiConverterTypeCreateLibraryOptions_lower(options),
+        FfiConverterString.lower(now),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
 public func beginRequest(libraryId: String, keys: PublicKeys, label: String, kind: MemberKind, namespaces: [String], access: [Access], now: String)throws  -> HostAction  {
     return try  FfiConverterTypeHostAction_lift(try rustCallWithError(FfiConverterTypeBindingError_lift) {
         uniffiCallStatus in
@@ -7820,6 +8065,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.contractVersionMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_begin_create() != 14963) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_func_begin_create_with() != 59155) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_func_begin_request() != 1798) {

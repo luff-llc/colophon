@@ -1273,6 +1273,8 @@ fn base_library() -> Library {
             member: keys(14).public(),
             vault_seed: [202; 32],
             import_expires: None,
+            recovery: None,
+            imported_from: None,
             label: "Colophon 0.4 deterministic library".into(),
             owner_label: "Device owner".into(),
             namespaces: vec![

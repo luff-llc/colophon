@@ -18,6 +18,24 @@ fn success<T>(value: Outcome<T>) -> T {
 fn signatures(action: &PendingBatch, keys: &SoftwareKeys) -> Vec<Vec<u8>> {
     action.steps.iter().map(|s| keys.sign(&s.body)).collect()
 }
+/// Sign each creation step with whichever of the two keys it names.
+fn creation_signatures(
+    action: &PendingBatch,
+    member: &SoftwareKeys,
+    controller: &SoftwareKeys,
+) -> Vec<Vec<u8>> {
+    action
+        .steps
+        .iter()
+        .map(|s| {
+            if s.signing == controller.public().signing {
+                controller.sign(&s.body)
+            } else {
+                member.sign(&s.body)
+            }
+        })
+        .collect()
+}
 fn unlock(library: &mut Library, keys: &SoftwareKeys) {
     for step in library.begin_unlock() {
         library
@@ -62,11 +80,15 @@ fn sample(mut operation: impl FnMut(), count: usize) -> f64 {
 }
 fn main() {
     let keys = SoftwareKeys::from_scalars(&[1; 32], &[2; 32]).expect("owner");
-    let recovery = SoftwareKeys::from_scalars(&[3; 32], &[4; 32]).expect("recovery");
+    let controller = SoftwareKeys::from_scalars(&[3; 32], &[4; 32]).expect("controller");
     let create = Library::begin_create(
         CreateOptions {
-            owner: keys.public(),
-            recovery: recovery.public(),
+            owner: controller.public(),
+            member: keys.public(),
+            vault_seed: [6; 32],
+            import_expires: None,
+            recovery: None,
+            imported_from: None,
             label: "Benchmark".into(),
             owner_label: "Owner".into(),
             namespaces: vec!["notes".into()],
@@ -75,9 +97,11 @@ fn main() {
         [5; 32],
     )
     .expect("create");
-    let sigs = signatures(&create, &keys);
+    let first = creation_signatures(&create, &keys, &controller);
+    let second = create.advance_create(first).expect("advance");
+    let sigs = creation_signatures(&second, &keys, &controller);
     let mut base =
-        Library::open(create.finish(sigs).expect("finish"), keys.public()).expect("open");
+        Library::open(second.finish(sigs).expect("finish"), keys.public()).expect("open");
     unlock(&mut base, &keys);
     for i in 0..21 {
         let (kind, payload) = if i == 0 {

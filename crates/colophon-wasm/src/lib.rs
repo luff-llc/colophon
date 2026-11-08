@@ -251,6 +251,79 @@ impl WasmLibrary {
                 member: self.me.clone(),
                 vault_seed: seed(vault_seed)?,
                 import_expires: None,
+                recovery: None,
+                imported_from: None,
+                label,
+                owner_label,
+                namespaces,
+            },
+            now,
+            seed(entropy)?,
+        )
+        .map(HostAction::pending)
+        .map_err(js_error)
+    }
+    /// Prepare keyring genesis with an optional recovery-kit controller and display-only
+    /// `importedFrom`. `options` is JSON `{label, ownerLabel, namespaces, recoveryLabel?,
+    /// importedFrom?, importExpires?}`; keys stay binary. Same two signing rounds as `begin_create`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_create_with(
+        &self,
+        options: &str,
+        controller_signing: &[u8],
+        controller_agreement: &[u8],
+        vault_seed: &[u8],
+        recovery_signing: Option<Vec<u8>>,
+        recovery_agreement: Option<Vec<u8>>,
+        now: &str,
+        entropy: &[u8],
+    ) -> Result<HostAction, JsValue> {
+        if self.inner.is_some() {
+            return Err(js_error("Library already exists"));
+        }
+        let o: serde_json::Map<String, Value> = serde_json::from_str(options).map_err(js_error)?;
+        const KNOWN: [&str; 6] = [
+            "label",
+            "ownerLabel",
+            "namespaces",
+            "recoveryLabel",
+            "importedFrom",
+            "importExpires",
+        ];
+        if let Some(unknown) = o.keys().find(|k| !KNOWN.contains(&k.as_str())) {
+            return Err(js_error(format!("Unknown creation option {unknown}")));
+        }
+        let text = |key: &str| -> Result<Option<String>, JsValue> {
+            match o.get(key) {
+                None => Ok(None),
+                Some(Value::String(v)) => Ok(Some(v.clone())),
+                Some(_) => Err(js_error(format!("{key} must be a string"))),
+            }
+        };
+        let label = text("label")?.ok_or_else(|| js_error("label is required"))?;
+        let owner_label = text("ownerLabel")?.ok_or_else(|| js_error("ownerLabel is required"))?;
+        let namespaces: Vec<String> =
+            serde_json::from_value(o.get("namespaces").cloned().unwrap_or(Value::Null))
+                .map_err(js_error)?;
+        let recovery_label = text("recoveryLabel")?;
+        let imported_from = text("importedFrom")?;
+        let import_expires = text("importExpires")?;
+        let recovery = match (recovery_signing, recovery_agreement) {
+            (Some(s), Some(a)) => Some(colophon_core::library::RecoveryController {
+                identity: identity(&s, &a),
+                label: recovery_label.unwrap_or_else(|| "Recovery Kit".into()),
+            }),
+            (None, None) => None,
+            _ => return Err(js_error("Recovery kit needs both signing and agreement keys")),
+        };
+        Library::begin_create(
+            CreateOptions {
+                owner: identity(controller_signing, controller_agreement),
+                member: self.me.clone(),
+                vault_seed: seed(vault_seed)?,
+                import_expires,
+                recovery,
+                imported_from,
                 label,
                 owner_label,
                 namespaces,

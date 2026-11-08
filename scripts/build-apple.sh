@@ -13,9 +13,13 @@ cp swift/Sources/ColophonKit/Generated/ColophonFFI.modulemap "$staging/module.mo
 args=()
 for target in aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim; do
   if ! rustup target list --installed | grep -qx "$target"; then rustup target add "$target"; fi
-  MACOSX_DEPLOYMENT_TARGET=14.0 IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+  # One target directory per slice, and no MACOSX_/IPHONEOS_DEPLOYMENT_TARGET: on macOS 27
+  # those variables also reach the host proc-macro link and produce dylibs dyld refuses to
+  # load ("mis-aligned LINKEDIT string pool"). The toolchain's default minimums (macOS 11,
+  # iOS 14 or lower) are below the SDK's floors, so the static slices link cleanly into apps.
+  CARGO_TARGET_DIR="$PWD/target/apple/$target" \
     cargo build --locked -p colophon-ffi --release --target "$target"
-  args+=(-library "$PWD/target/$target/release/libcolophon_ffi.a" -headers "$staging")
+  args+=(-library "$PWD/target/apple/$target/$target/release/libcolophon_ffi.a" -headers "$staging")
 done
 if [[ "${SKIP_VISIONOS:-0}" != 1 ]]; then
   nightly="${VISIONOS_TOOLCHAIN:-nightly}"
@@ -26,9 +30,9 @@ if [[ "${SKIP_VISIONOS:-0}" != 1 ]]; then
   for target in aarch64-apple-visionos aarch64-apple-visionos-sim; do
     if [[ "$target" == *-sim ]]; then sdk=xrsimulator; else sdk=xros; fi
     SDKROOT="$(xcrun --sdk "$sdk" --show-sdk-path)" XROS_DEPLOYMENT_TARGET=26.0 \
-      cargo +"$nightly" build --locked -Zbuild-std=std,panic_abort \
+      CARGO_TARGET_DIR="$PWD/target/apple/$target" cargo +"$nightly" build --locked -Zbuild-std=std,panic_abort \
         -p colophon-ffi --release --target "$target"
-    args+=(-library "$PWD/target/$target/release/libcolophon_ffi.a" -headers "$staging")
+    args+=(-library "$PWD/target/apple/$target/$target/release/libcolophon_ffi.a" -headers "$staging")
   done
 fi
 # Only replace a previous artifact after all slices built successfully.

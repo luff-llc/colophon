@@ -569,6 +569,7 @@ fn open_sealed(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde_json::{json, Value};

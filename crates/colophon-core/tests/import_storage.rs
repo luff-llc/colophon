@@ -561,6 +561,8 @@ fn loan_and_review_use_authenticated_app_context_on_replay_and_checkpoint_suffix
             member: owner.public(),
             vault_seed: [202; 32],
             import_expires: None,
+            recovery: None,
+            imported_from: None,
             label: "Roles".into(),
             owner_label: "Owner".into(),
             namespaces: vec!["reading.books".into(), "notes".into()],

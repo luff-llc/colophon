@@ -807,6 +807,8 @@ internal object IntegrityCheckingUniffiLib {
     internal fun ensureInitialized() = Unit
     external fun uniffi_colophon_ffi_checksum_func_begin_create(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_func_begin_create_with(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_func_begin_request(
     ): Int
     external fun uniffi_colophon_ffi_checksum_func_request_info(
@@ -1305,6 +1307,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_colophon_ffi_fn_func_begin_create(`owner`: RustBuffer.ByValue,`controller`: RustBuffer.ByValue,`vaultSeed`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`ownerLabel`: RustBuffer.ByValue,`namespaces`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_colophon_ffi_fn_func_begin_create_with(`options`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_colophon_ffi_fn_func_begin_request(`libraryId`: RustBuffer.ByValue,`keys`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`namespaces`: RustBuffer.ByValue,`access`: RustBuffer.ByValue,`now`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_func_request_info(`record`: RustBuffer.ByValue,`libraryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1447,6 +1451,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_func_begin_create() and 0xFFFF) != 14963) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_func_begin_create_with() and 0xFFFF) != 59155) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_func_begin_request() and 0xFFFF) != 1798) {
@@ -6449,6 +6456,109 @@ public object FfiConverterTypeChangeSummary: FfiConverterRustBuffer<ChangeSummar
 
 
 
+/**
+ * Every option for creating a keyring library (spec §6.2, §9).
+ */
+data class CreateLibraryOptions (
+    /**
+     * The device's content member keys.
+     */
+    val `member`: PublicKeys
+    , 
+    /**
+     * The device's owner controller keys, separate from the member.
+     */
+    val `controller`: PublicKeys
+    , 
+    /**
+     * Fresh random 32-byte vault seed from the host.
+     */
+    val `vaultSeed`: kotlin.ByteArray
+    , 
+    /**
+     * Library display label.
+     */
+    val `label`: kotlin.String
+    , 
+    /**
+     * Owner controller display label.
+     */
+    val `ownerLabel`: kotlin.String
+    , 
+    /**
+     * Declared namespaces.
+     */
+    val `namespaces`: List<kotlin.String>
+    , 
+    /**
+     * Optional recovery-kit controller.
+     */
+    val `recovery`: RecoveryKitController?
+    , 
+    /**
+     * Optional display-only old library ID for a clean copy.
+     */
+    val `importedFrom`: kotlin.String?
+    , 
+    /**
+     * Optional import-grant expiry for a copying device.
+     */
+    val `importExpires`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCreateLibraryOptions: FfiConverterRustBuffer<CreateLibraryOptions> {
+    override fun read(buf: ByteBuffer): CreateLibraryOptions {
+        return CreateLibraryOptions(
+            FfiConverterTypePublicKeys.read(buf),
+            FfiConverterTypePublicKeys.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterOptionalTypeRecoveryKitController.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CreateLibraryOptions) = (
+            FfiConverterTypePublicKeys.allocationSize(value.`member`) +
+            FfiConverterTypePublicKeys.allocationSize(value.`controller`) +
+            FfiConverterByteArray.allocationSize(value.`vaultSeed`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterString.allocationSize(value.`ownerLabel`) +
+            FfiConverterSequenceString.allocationSize(value.`namespaces`) +
+            FfiConverterOptionalTypeRecoveryKitController.allocationSize(value.`recovery`) +
+            FfiConverterOptionalString.allocationSize(value.`importedFrom`) +
+            FfiConverterOptionalString.allocationSize(value.`importExpires`)
+    )
+
+    override fun write(value: CreateLibraryOptions, buf: ByteBuffer) {
+            FfiConverterTypePublicKeys.write(value.`member`, buf)
+            FfiConverterTypePublicKeys.write(value.`controller`, buf)
+            FfiConverterByteArray.write(value.`vaultSeed`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterString.write(value.`ownerLabel`, buf)
+            FfiConverterSequenceString.write(value.`namespaces`, buf)
+            FfiConverterOptionalTypeRecoveryKitController.write(value.`recovery`, buf)
+            FfiConverterOptionalString.write(value.`importedFrom`, buf)
+            FfiConverterOptionalString.write(value.`importExpires`, buf)
+    }
+}
+
+
+
 data class Denial (
     val `reason`: DenialReason
     , 
@@ -7161,6 +7271,53 @@ public object FfiConverterTypePublicKeys: FfiConverterRustBuffer<PublicKeys> {
     override fun write(value: PublicKeys, buf: ByteBuffer) {
             FfiConverterByteArray.write(value.`signing`, buf)
             FfiConverterByteArray.write(value.`agreement`, buf)
+    }
+}
+
+
+
+/**
+ * A recovery-kit controller to place in genesis (role `recover`, with its own sealed slot).
+ */
+data class RecoveryKitController (
+    /**
+     * The kit's public keys; signing and agreement must differ.
+     */
+    val `keys`: PublicKeys
+    , 
+    /**
+     * Display label, for example "Recovery Kit".
+     */
+    val `label`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRecoveryKitController: FfiConverterRustBuffer<RecoveryKitController> {
+    override fun read(buf: ByteBuffer): RecoveryKitController {
+        return RecoveryKitController(
+            FfiConverterTypePublicKeys.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RecoveryKitController) = (
+            FfiConverterTypePublicKeys.allocationSize(value.`keys`) +
+            FfiConverterString.allocationSize(value.`label`)
+    )
+
+    override fun write(value: RecoveryKitController, buf: ByteBuffer) {
+            FfiConverterTypePublicKeys.write(value.`keys`, buf)
+            FfiConverterString.write(value.`label`, buf)
     }
 }
 
@@ -9615,6 +9772,38 @@ public object FfiConverterOptionalTypeGrantOptions: FfiConverterRustBuffer<Grant
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeRecoveryKitController: FfiConverterRustBuffer<RecoveryKitController?> {
+    override fun read(buf: ByteBuffer): RecoveryKitController? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeRecoveryKitController.read(buf)
+    }
+
+    override fun allocationSize(value: RecoveryKitController?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeRecoveryKitController.allocationSize(value)
+        }
+    }
+
+    override fun write(value: RecoveryKitController?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeRecoveryKitController.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWebauthnResult: FfiConverterRustBuffer<WebauthnResult?> {
     override fun read(buf: ByteBuffer): WebauthnResult? {
         if (buf.get().toInt() == 0) {
@@ -10374,6 +10563,23 @@ public object FfiConverterMapStringByteArray: FfiConverterRustBuffer<Map<kotlin.
         FfiConverterString.lower(`label`),
         FfiConverterString.lower(`ownerLabel`),
         FfiConverterSequenceString.lower(`namespaces`),
+        FfiConverterString.lower(`now`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Prepare keyring genesis with every option. Same two signing rounds as `begin_create`.
+         */
+    @Throws(BindingException::class) fun `beginCreateWith`(`options`: CreateLibraryOptions, `now`: kotlin.String, `entropy`: kotlin.ByteArray): HostAction {
+            return FfiConverterTypeHostAction.lift(
+    uniffiRustCallWithError(BindingException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_func_begin_create_with(
+    
+        
+        FfiConverterTypeCreateLibraryOptions.lower(`options`),
         FfiConverterString.lower(`now`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }

@@ -87,6 +87,8 @@ pub fn create_importing(importing: bool) -> (Library, SoftwareKeys, SoftwareKeys
             member: owner.public(),
             vault_seed: [202; 32],
             import_expires: importing.then(|| "2027-01-01T00:00:00Z".into()),
+            recovery: None,
+            imported_from: None,
             label: "Conformance Library".into(),
             owner_label: "Owner".into(),
             namespaces: vec![

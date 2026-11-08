@@ -544,9 +544,70 @@ pub fn begin_create(
                 member: owner.into(),
                 vault_seed: seed(vault_seed)?,
                 import_expires: None,
+                recovery: None,
+                imported_from: None,
                 label,
                 owner_label,
                 namespaces,
+            },
+            &now,
+            seed(entropy)?,
+        )?,
+        session: None,
+    }))
+}
+/// A recovery-kit controller to place in genesis (role `recover`, with its own sealed slot).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RecoveryKitController {
+    /// The kit's public keys; signing and agreement must differ.
+    pub keys: PublicKeys,
+    /// Display label, for example "Recovery Kit".
+    pub label: String,
+}
+/// Every option for creating a keyring library (spec §6.2, §9).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CreateLibraryOptions {
+    /// The device's content member keys.
+    pub member: PublicKeys,
+    /// The device's owner controller keys, separate from the member.
+    pub controller: PublicKeys,
+    /// Fresh random 32-byte vault seed from the host.
+    pub vault_seed: Vec<u8>,
+    /// Library display label.
+    pub label: String,
+    /// Owner controller display label.
+    pub owner_label: String,
+    /// Declared namespaces.
+    pub namespaces: Vec<String>,
+    /// Optional recovery-kit controller.
+    pub recovery: Option<RecoveryKitController>,
+    /// Optional display-only old library ID for a clean copy.
+    pub imported_from: Option<String>,
+    /// Optional import-grant expiry for a copying device.
+    pub import_expires: Option<String>,
+}
+/// Prepare keyring genesis with every option. Same two signing rounds as `begin_create`.
+#[uniffi::export]
+pub fn begin_create_with(
+    options: CreateLibraryOptions,
+    now: String,
+    entropy: Vec<u8>,
+) -> Result<Arc<HostAction>> {
+    Ok(Arc::new(HostAction {
+        pending: Library::begin_create(
+            CreateOptions {
+                owner: options.controller.into(),
+                member: options.member.into(),
+                vault_seed: seed(options.vault_seed)?,
+                import_expires: options.import_expires,
+                recovery: options.recovery.map(|kit| colophon_core::library::RecoveryController {
+                    identity: kit.keys.into(),
+                    label: kit.label,
+                }),
+                imported_from: options.imported_from,
+                label: options.label,
+                owner_label: options.owner_label,
+                namespaces: options.namespaces,
             },
             &now,
             seed(entropy)?,

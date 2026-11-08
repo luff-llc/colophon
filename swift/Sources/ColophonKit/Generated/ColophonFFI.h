@@ -958,6 +958,11 @@ void uniffi_colophon_ffi_fn_init_callback_vtable_enginerecordsource(const Uniffi
 uint64_t uniffi_colophon_ffi_fn_func_begin_create(RustBuffer owner, RustBuffer controller, RustBuffer vault_seed, RustBuffer label, RustBuffer owner_label, RustBuffer namespaces, RustBuffer now, RustBuffer entropy, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_BEGIN_CREATE_WITH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_BEGIN_CREATE_WITH
+uint64_t uniffi_colophon_ffi_fn_func_begin_create_with(RustBuffer options, RustBuffer now, RustBuffer entropy, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_BEGIN_REQUEST
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_FN_FUNC_BEGIN_REQUEST
 uint64_t uniffi_colophon_ffi_fn_func_begin_request(RustBuffer library_id, RustBuffer keys, RustBuffer label, RustBuffer kind, RustBuffer namespaces, RustBuffer access, RustBuffer now, RustCallStatus *_Nonnull out_status
@@ -1276,6 +1281,12 @@ void ffi_colophon_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus 
 #ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_BEGIN_CREATE
 #define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_BEGIN_CREATE
 uint16_t uniffi_colophon_ffi_checksum_func_begin_create(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_BEGIN_CREATE_WITH
+#define UNIFFI_FFIDEF_UNIFFI_COLOPHON_FFI_CHECKSUM_FUNC_BEGIN_CREATE_WITH
+uint16_t uniffi_colophon_ffi_checksum_func_begin_create_with(void
     
 );
 #endif

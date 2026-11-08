@@ -308,6 +308,18 @@ pub struct CreateOptions {
     pub owner_label: String,
     /// Declared namespaces.
     pub namespaces: Vec<String>,
+    /// Optional recovery-kit controller (role `recover`, with its own sealed slot).
+    pub recovery: Option<RecoveryController>,
+    /// Optional display-only old library ID for a clean copy (spec §9).
+    pub imported_from: Option<String>,
+}
+/// A recovery-kit controller placed in genesis: a raw key with a separate agreement key.
+#[derive(Clone, Debug)]
+pub struct RecoveryController {
+    /// The kit's public identity (signing and agreement points).
+    pub identity: PublicIdentity,
+    /// Display label, for example "Recovery Kit".
+    pub label: String,
 }
 /// In-memory replica: signed records and explicitly unlocked symmetric keys only.
 #[derive(Clone)]
@@ -383,12 +395,38 @@ impl Library {
             &opts.owner.agreement,
             &mut entropy,
         )?;
+        let mut controllers = vec![owner.clone()];
+        let mut slots = vec![slot];
+        let mut recover_threshold = 0;
+        if let Some(kit) = &opts.recovery {
+            kit.identity.validate()?;
+            let controller = Controller {
+                key: KeyDescriptor::Raw {
+                    signing: kit.identity.signing.clone(),
+                    agreement: Some(kit.identity.agreement.clone()),
+                },
+                label: kit.label.clone(),
+                roles: vec![Role::Recover],
+                verification: None,
+            };
+            slots.push(Slot::seal(
+                &opts.vault_seed,
+                &vault.id(),
+                &controller.id(),
+                &controller.label,
+                &kit.identity.agreement,
+                &mut entropy,
+            )?);
+            controllers.push(controller);
+            recover_threshold = 1;
+        }
+        controllers.sort_by_key(|c| c.id());
         let keyring = Keyring {
-            controllers: vec![owner.clone()],
+            controllers,
             threshold: 1,
-            recover_threshold: 0,
+            recover_threshold,
             vault: vault.clone(),
-            slots: vec![slot],
+            slots,
         };
         keyring.validate()?;
         let genesis = AuthorityEntry {
@@ -401,7 +439,7 @@ impl Library {
                 label: opts.label,
                 namespaces: opts.namespaces.clone(),
                 keyring,
-                imported_from: None,
+                imported_from: opts.imported_from.clone(),
             },
         };
         let body = canonical(&genesis)?;

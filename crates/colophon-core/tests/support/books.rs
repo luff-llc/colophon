@@ -9,6 +9,8 @@ pub fn scenario() -> (Records, Value) {
             member: owner.public(),
             vault_seed: [202; 32],
             import_expires: None,
+            recovery: None,
+            imported_from: None,
             label: "Synthetic books fixture".into(),
             owner_label: "Books fixture owner".into(),
             namespaces: vec!["reading.books".into()],

@@ -739,6 +739,8 @@ fn all_domain_vectors_restore_without_reads_and_fetch_history_lazily() {
                 member: owner.public(),
                 vault_seed: [202; 32],
                 import_expires: None,
+                recovery: None,
+                imported_from: None,
                 label: "Storage fixture".into(),
                 owner_label: "Owner".into(),
                 namespaces: vec![ns.into()],
@@ -834,6 +836,8 @@ fn four_domain_writes_and_suffix_replay_share_the_registered_reducers() {
             member: owner.public(),
             vault_seed: [202; 32],
             import_expires: None,
+            recovery: None,
+            imported_from: None,
             label: "Four domains".into(),
             owner_label: "Owner".into(),
             namespaces: colophon_core::domain::NAMESPACES

@@ -180,6 +180,7 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::keys::testing::SyntheticAuthenticator;
     fn registration() -> Vec<u8> {

@@ -87,6 +87,8 @@ fn generate(count: usize) -> Records {
             member: owner.public(),
             vault_seed: [202; 32],
             import_expires: None,
+            recovery: None,
+            imported_from: None,
             label: "Four-domain benchmark".into(),
             owner_label: "Owner".into(),
             namespaces: colophon_core::domain::NAMESPACES
