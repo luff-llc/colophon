@@ -259,3 +259,64 @@ keys because nested SwiftPM sandboxing is unavailable here. Android used JDK 17,
 SDK/NDK paths and the writable shared Gradle home. Existing SDK XML/FSEvents/Gradle, SwiftPM cache
 and unavailable CoreSimulator warnings did not fail checks. No visionOS or device/simulator
 execution is claimed.
+
+## Third review fixes
+
+Addressed the partly fixed findings 3 and 6 and all four new problems in
+[review-v03-agy-3.md](review-v03-agy-3.md), covering the native sessions' storage engine and
+the compatibility `Library`. Changes remain uncommitted; no Git write commands were used.
+This section supersedes the earlier retained-prefix, candidate retry and cache-format descriptions.
+
+| Problem | Fix and regression coverage |
+| --- | --- |
+| Locked candidates loop for unapproved, revoked or partially granted members | Engine retries an unavailable live payload only when this member has a seal to unlock. Otherwise it records held `unavailable` evidence without replacing the verified index or witness, and permits a checkpoint. Swift schedules its restore checkpoint only for `.ready`. `third_review_unavailable_live_does_not_block_checkpoint` covers all three membership cases with all-namespace listing; Swift and Android waiting-member tests exercise native checkpoint saves with existing live state. |
+| First-seen locked candidates pin an empty slot | Compatibility merge validates and quarantines the first candidate as well as replacements. A locked header loaded directly by `Library::open` cannot suppress a lower candidate before payload authentication. Future-authority candidates retain their held diagnostic and retry when authority arrives. `third_review_first_locked_invalid_head_cannot_pin_slot` covers both open and merge with a correctly signed but corrupted ciphertext, followed by a valid lower generation. `third_review_first_invalid_engine_candidate_cannot_pin_slot` locks in the engine's existing protection for this case. Existing verified-fallback, rekey and deferred-invalid-candidate regressions remain green. |
+| Retained predecessors leave arrival-order hashes or introduce conflicts | Both paths bind podcast cursors and import-sidecar revisions to the canonical admitted signed-body prefix. Engine retains verified body digests in its index and rehashes an inserted predecessor before delivering subsequent operations, without fetching or reapplying unrelated payloads. The insertion probe checks the predecessor's own reducer outcome; existing import evidence or invalid outcomes conservatively require ordered replay. The strengthened `second_review_retained_head_behind_immutable_tail_keeps_cache` compares full checkpoint projections, digests and pagination results with cold replay on both paths, while retaining the two-application and zero-application restore assertions. `third_review_conflicting_retained_head_requires_ordered_replay` covers a newly conflicting passive predecessor on both paths. |
+| Observed native records remain staged and mask provider changes | `merge_observed` releases observed staging bytes after admission, including on error. Unpublished local writes retain their staging until publication acknowledgement. Both workers refresh their coherent source, including the current pending journal, before observation; this also refreshes Swift's snapshot fallback for custom stores. FFI regressions verify a newer provider live head after authority reset and require an immutable audit to notice missing provider bytes instead of serving staged copies. |
+| Authority changes verify history twice | Engine authenticates changed authority, defers content replay until host epoch unlock, and preserves namespace revision progression across that boundary. `third_review_authority_unlock_replays_once` checks that no content verification occurs before ECDH and that history is applied once afterwards. Swift and Android `authorityRefreshVerifiesHistoryOnce` tests exercise the actual worker refresh path and require exactly one signature verification and one reducer application for their historical operation. |
+
+The full native validation also exposed an intermittent automatic-sync authority gap: sorting
+parallel authority PUTs did not prevent a successor from becoming visible first. Both relay clients
+now await each authority upload's acknowledgement before sending its successor; independent content
+uploads remain parallel. The new `authorityUploadsWaitForPredecessorAcknowledgement` regressions
+fail against the old Swift and Kotlin upload loops and pass with the fix. The automatic-sync tests
+and final full native suites pass; no assertions or timeout limits were weakened.
+
+Before-fix experiments reproduced the unavailable-candidate checkpoint failure, pre-unlock replay,
+noncanonical retained state, newly conflicting predecessor shortcut, first-seen locked-slot poisoning,
+stale native provider bytes, Swift checkpoint scheduling, and concurrent authority uploads. Logs are
+under `target/third-review/before-*.log`. The engine's first-invalid-candidate test was already safe
+before this round and is additional parity coverage, not a claimed new engine defect.
+
+Seeks, completion and queue edits remain immutable. No live-state cap or eviction policy was added.
+The existing long-playback, boundary-anchor, cross-author retention and cold-reopen tests pass on
+both paths, including more than 1,024 further ticks followed by deliberate actions. Unverified
+candidates cannot replace authenticated heads or their high-water witnesses.
+
+Updated specification §5.1, the private-cache rules and §8 describe these behaviors. The private
+engine container is now **`COLOENG5`, metadata version 5**, with a verified 32-byte signed-body
+digest added to each index entry. **Reducer schema 8** invalidates older projections on both paths;
+older caches fall back to verification. The listening conformance expected results were regenerated
+for canonical cursor revisions; signed fixture records are unchanged. Retained insertion rehashes
+index digests, so it is not a claim of constant-time CPU work. No public FFI API changed. Bindings
+were regenerated without generated-source changes, and the XCFramework was rebuilt.
+
+Final validation logs and preserved full Android XML results are under `target/third-review/`:
+
+| Check | Result |
+| --- | --- |
+| `cargo test` | 182 passed, 0 failed; one existing opt-in benchmark ignored. Strengthened membership/corrupt-ciphertext cases also passed their focused rerun. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| `cargo fmt --all --check`, `git diff --check` | Passed |
+| `COLOPHON_SOFTWARE_KEYS=1 bash scripts/test-swift.sh` | All five products passed: 29 + 42 + 1 + 9 + 12 reported tests; existing opt-in cases skipped |
+| `node --test relay/` | 12 passed |
+| `npm --prefix js ci`, `npm --prefix js run build`, `npm --prefix js test` | Passed, including the final WASM rebuild and fixture/query parity |
+| `bash scripts/test-android.sh --rerun-tasks` | 63 passed, 0 failed; two existing opt-in cases skipped |
+| `bash scripts/test-relay-cross.sh` | All six stages passed: Apple create/approve/verify and Android join/write/verify, including live replacement, rewind and blobs |
+| `SKIP_VISIONOS=1 bash scripts/build-apple.sh` | Passed; generated bindings unchanged, 183 MiB macOS/iOS-device/iOS-simulator XCFramework rebuilt |
+
+Swift uses the existing workspace-cache wrapper for `swift test --disable-sandbox`, because nested
+SwiftPM sandboxing is unavailable in this environment. Android used JDK 17, the supplied SDK/NDK
+paths and the writable shared Gradle home. Existing SDK XML/FSEvents/Gradle and unavailable
+CoreSimulator warnings did not fail the checks. No new benchmark, device, simulator or visionOS
+runtime claim is made; the performance limitations in the native-session handoff remain applicable.

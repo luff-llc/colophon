@@ -161,8 +161,12 @@ public actor RelaySync {
             let batch = Array(unpushed[batchStart..<min(unpushed.count, batchStart + 64)])
             let records = try await local.read(paths: batch)
             report.localRecordReads += records.count
-            for start in stride(from: 0, to: batch.count, by: parallelism) {
-                let slice = batch[start..<min(batch.count, start + parallelism)]
+            var start = 0
+            while start < batch.count {
+                // Each authority sequence must be visible before its successor is sent.
+                let end = batch[start].hasPrefix("authority/") ? start + 1 : min(batch.count, start + parallelism)
+                let slice = batch[start..<end]
+                start = end
                 try await withThrowingTaskGroup(of: (String, String, RelayClient.PutResult).self) { group in
                     for path in slice {
                         guard let bytes = records[path] else { continue }

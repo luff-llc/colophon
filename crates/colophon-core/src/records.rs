@@ -31,7 +31,7 @@ pub fn canonical<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 pub fn digest(value: &[u8]) -> String {
     hex(&Sha256::digest(value))
 }
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

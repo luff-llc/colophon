@@ -163,3 +163,117 @@ fn protected_prefix_suffix_versions_and_stale_actions() {
         )
         .is_ok());
 }
+
+#[test]
+fn third_review_observed_bytes_do_not_mask_provider_or_replay_twice() {
+    let (library, owner, _) = create();
+    let source = Source(Arc::new(Mutex::new(
+        library.records().clone().into_iter().collect(),
+    )));
+    let key = NativeCheckpointPreparation::new(library.id().into(), public(&owner), vec![81; 32])
+        .unwrap();
+    let key = key
+        .finish(owner.sign(&key.signing_body().unwrap()))
+        .unwrap();
+    let listing = source.0.lock().unwrap().keys().cloned().collect();
+    let engine = NativeEngine::open(
+        Box::new(source.clone()),
+        listing,
+        HashMap::new(),
+        public(&owner),
+        library.id().into(),
+        vec![],
+        key,
+    )
+    .unwrap();
+    ready(&engine, &owner);
+    let old = live_at(&library, &owner, 1, 10, 84);
+    source.0.lock().unwrap().extend(old.clone());
+    engine
+        .merge_observed(old.into_iter().collect(), HashMap::new())
+        .unwrap();
+    ready(&engine, &owner);
+    let fresh = live_at(&library, &owner, 2, 20, 85);
+    source.0.lock().unwrap().extend(fresh);
+    let batch = success(
+        library
+            .begin_rekey(&["notes".into()], NOW, [86; 32])
+            .unwrap(),
+    );
+    let authority = finish(batch, &owner);
+    source.0.lock().unwrap().extend(authority.clone());
+    let before = engine.work().unwrap();
+    engine
+        .merge_observed(authority.into_iter().collect(), HashMap::new())
+        .unwrap();
+    ready(&engine, &owner);
+    let episode = engine
+        .query(
+            "listening.podcasts".into(),
+            "getEpisode".into(),
+            br#"{"id":"ep"}"#.to_vec(),
+            NOW.into(),
+        )
+        .unwrap();
+    let text = format!("{episode:?}");
+    // JSON is returned as bytes by the FFI outcome.
+    match episode {
+        JsonOutcome::Success { value: json, .. } => {
+            let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+            assert_eq!(value["seconds"], 20.0);
+        }
+        _ => panic!("{text}"),
+    }
+    assert_eq!(
+        engine.work().unwrap().signatures_verified - before.signatures_verified,
+        1
+    );
+    engine.checkpoint(vec![87; 32]).unwrap();
+}
+
+#[test]
+fn third_review_observed_immutable_bytes_are_released_for_audit() {
+    let (mut library, owner, _) = create();
+    let source = Source(Arc::new(Mutex::new(
+        library.records().clone().into_iter().collect(),
+    )));
+    let listing = source.0.lock().unwrap().keys().cloned().collect();
+    let key = NativeCheckpointPreparation::new(library.id().into(), public(&owner), vec![91; 32])
+        .unwrap();
+    let key = key
+        .finish(owner.sign(&key.signing_body().unwrap()))
+        .unwrap();
+    let engine = NativeEngine::open(
+        Box::new(source.clone()),
+        listing,
+        HashMap::new(),
+        public(&owner),
+        library.id().into(),
+        vec![],
+        key,
+    )
+    .unwrap();
+    ready(&engine, &owner);
+    write(
+        &mut library,
+        &owner,
+        "notes",
+        "createNotebook",
+        serde_json::json!({"id":"n","title":"N"}),
+        92,
+    );
+    let records: Records = library
+        .records()
+        .iter()
+        .filter(|(path, _)| path.starts_with("ops/"))
+        .map(|(path, raw)| (path.clone(), raw.clone()))
+        .collect();
+    let path = records.keys().next().unwrap().clone();
+    source.0.lock().unwrap().extend(records.clone());
+    engine.merge_observed(records, HashMap::new()).unwrap();
+    source.0.lock().unwrap().remove(&path);
+    assert!(
+        engine.verify_batch(128).is_err(),
+        "an audit must fetch the provider, not retained observed bytes"
+    );
+}

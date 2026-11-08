@@ -135,6 +135,7 @@ actor SessionWorker {
                 opened = true
                 track(stored.union(journal.pending.keys))
             } else {
+                try await core.refreshSource(reader: storage().engineReader(), pending: journal.pending)
                 let fresh = stored.filter { !merged.contains($0) || versions[$0] == nil || versions[$0] != recordVersions[$0] }
                 let authorityPaths = fresh.filter { $0.hasPrefix("authority/") }
                 var authority = try await storage().read(paths: Array(authorityPaths))
@@ -207,6 +208,7 @@ actor SessionWorker {
     private func refreshDelta(_ delta: RecordDelta) async throws -> SessionSnapshot {
         let paths = delta.paths.filter { !$0.hasPrefix("history/") && RecordPath.listingIncludes($0, namespaces: configuration.namespaces) }
         if !paths.isEmpty {
+            try await core.refreshSource(reader: storage().engineReader(), pending: journal.pending)
             let versions = try await storage().versions(paths: paths)
             let authorityPaths = paths.filter { $0.hasPrefix("authority/") }
             let authority = try await storage().read(paths: Array(authorityPaths))

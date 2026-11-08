@@ -109,8 +109,8 @@ const SPENT: u8 = 2;
 const AUTHENTICATED: u8 = 4;
 const PROJECTED: u8 = 8;
 const NO_NAMESPACE: u16 = u16::MAX;
-const MAGIC: &[u8; 8] = b"COLOENG4";
-const CACHE_VERSION: u32 = 4;
+const MAGIC: &[u8; 8] = b"COLOENG5";
+const CACHE_VERSION: u32 = 5;
 const STORAGE_VERSION: u32 = 3;
 const BATCH: usize = 8192;
 
@@ -118,6 +118,8 @@ const BATCH: usize = 8192;
 struct Entry {
     path: String,
     digest: [u8; 32],
+    /// Verified signed-body digest for canonical prefix reconstruction.
+    body_digest: [u8; 32],
     namespace: u16,
     flags: u8,
     /// SHA-256 of the author's uncompressed signing key; zero until the header verifies.
@@ -180,6 +182,7 @@ pub struct Engine<S: RecordSource> {
     stats: EngineStats,
     mode: OpenMode,
     ready: bool,
+    deferred_revisions: Option<BTreeMap<String, u64>>,
     failure: Option<Error>,
     verify_cursor: usize,
     generation: u64,
@@ -331,6 +334,7 @@ impl<S: RecordSource> Engine<S> {
             },
             mode,
             ready: false,
+            deferred_revisions: None,
             failure: None,
             verify_cursor: 0,
             generation: 0,
@@ -556,6 +560,11 @@ impl<S: RecordSource> Engine<S> {
                 state.revision = old.get(ns).copied().unwrap_or(0) + 1;
             }
         }
+        if let Some(previous) = self.deferred_revisions.take() {
+            for (ns, state) in &mut self.library.namespaces {
+                state.revision = previous.get(ns).copied().unwrap_or(0) + 1;
+            }
+        }
         self.cached_unlocked = self.library.keys.keys().cloned().collect();
         self.ready = true;
         Ok(())
@@ -601,6 +610,7 @@ impl<S: RecordSource> Engine<S> {
             })
     }
     /// Refresh after the host persists immutable records. Authority/removal/order changes rebuild.
+    /// When new epoch seals arrive, call begin_unlock/finish_unlock_many before querying.
     /// An I/O/backend/integrity error poisons this instance; reopen after the host resolves it.
     pub fn refresh(&mut self, mut listing: Vec<String>) -> Result<ChangeSummary> {
         self.check_ready()?;
@@ -617,6 +627,7 @@ impl<S: RecordSource> Engine<S> {
     }
     /// Apply an explicit host delta of persisted immutable paths without rescanning the listing.
     /// Use refresh for removals/full listings. Replayed paths are checked for byte equality.
+    /// New epoch seals defer content replay until begin_unlock/finish_unlock_many completes.
     pub fn apply_paths(&mut self, mut paths: Vec<String>) -> Result<ChangeSummary> {
         paths.retain(|p| {
             crate::protocol::listing_includes(p, &self.options.namespaces)
@@ -673,7 +684,9 @@ impl<S: RecordSource> Engine<S> {
         if authority_changed {
             self.reset("Authority listing changed")?;
         }
-        self.process_pending()?;
+        if self.ready || self.begin_unlock().is_empty() {
+            self.process_pending()?;
+        }
         self.cached_unlocked = self.library.keys.keys().cloned().collect();
         let mut changes = ChangeSummary::default();
         for (ns, state) in &mut self.library.namespaces {
@@ -713,7 +726,9 @@ impl<S: RecordSource> Engine<S> {
             Ok(pending) => self.pending = pending,
             Err(reason) => self.reset(&reason.0)?,
         }
-        self.process_pending()?;
+        if self.ready || self.begin_unlock().is_empty() {
+            self.process_pending()?;
+        }
         self.cached_unlocked = self.library.keys.keys().cloned().collect();
         // Rebuilds get fresh local revisions even if reducer counts happen to match the old state.
         let rebuilt = generation != self.generation;
@@ -772,6 +787,15 @@ impl<S: RecordSource> Engine<S> {
                 }
             }
         }
+        if !library.begin_unlock().is_empty() && self.deferred_revisions.is_none() {
+            self.deferred_revisions = Some(
+                self.library
+                    .namespaces
+                    .iter()
+                    .map(|(ns, state)| (ns.clone(), state.revision))
+                    .collect(),
+            );
+        }
         self.library = library;
         self.library.read_scope = self.options.namespaces.clone();
         self.generation += 1;
@@ -790,6 +814,10 @@ impl<S: RecordSource> Engine<S> {
         self.stats.cached_content_bytes = 0;
         self.pending = self.listing.clone();
         self.verify_cursor = 0;
+        // Rebuild authority now, then let the host unlock before verifying content once.
+        if !self.begin_unlock().is_empty() {
+            self.ready = false;
+        }
         Ok(())
     }
     fn process_pending(&mut self) -> Result<()> {
@@ -863,6 +891,7 @@ impl<S: RecordSource> Engine<S> {
                 let mut entry = Entry {
                     path: (*path).into(),
                     digest: Sha256::digest(raw).into(),
+                    body_digest: [0; 32],
                     namespace: NO_NAMESPACE,
                     flags: 0,
                     author_key: [0; 32],
@@ -898,6 +927,10 @@ impl<S: RecordSource> Engine<S> {
                         Ok((header, digest)) => {
                             self.stats.signatures_verified += 1;
                             entry.flags |= VERIFIED;
+                            entry.body_digest = std::array::from_fn(|i| {
+                                u8::from_str_radix(&digest[2 * i..2 * i + 2], 16)
+                                    .expect("verified digest")
+                            });
                             entry.epoch = header.meta.epoch;
                             entry.authority = header.meta.authority;
                             if let Some(member) =
@@ -1003,7 +1036,7 @@ impl<S: RecordSource> Engine<S> {
                     Library::open_operation(&self.library.authority, &self.library.keys, j);
                 }
             });
-            type Reduction<'a> = (OperationView, Option<&'a domain::AuthorContext>);
+            type Reduction<'a> = (OperationView, Option<&'a domain::AuthorContext>, [u8; 32]);
             let mut reductions: BTreeMap<String, Vec<Reduction>> = BTreeMap::new();
             candidates.sort_by(|(_, a), (_, b)| order(&a.header.meta).cmp(&order(&b.header.meta)));
             for (mut entry, mut j) in candidates {
@@ -1041,7 +1074,29 @@ impl<S: RecordSource> Engine<S> {
                 {
                     // Authority arrives before host ECDH. Retry from the source after unlock;
                     // do not overwrite the verified index, envelope, or high-water witness.
-                    self.pending.push(entry.path);
+                    let can_unlock = self
+                        .library
+                        .authority
+                        .epochs
+                        .get(&meta.namespace)
+                        .and_then(|epochs| epochs.get(&meta.epoch))
+                        .is_some_and(|(_, epoch)| epoch.seals.contains_key(&self.library.me.id()));
+                    if can_unlock {
+                        self.pending.push(entry.path);
+                    } else {
+                        self.rejections.insert(
+                            entry.path,
+                            (
+                                meta.namespace.clone(),
+                                Rejection {
+                                    id: meta.id.clone(),
+                                    author: meta.author.clone(),
+                                    reason: "unavailable".into(),
+                                },
+                                true,
+                            ),
+                        );
+                    }
                     continue;
                 }
                 if j.from_live_slot
@@ -1167,13 +1222,40 @@ impl<S: RecordSource> Engine<S> {
                     if let Some(op) = j.operation.take() {
                         state.clock = state.clock.max(op.clock);
                         let kind = contexts.get(&op.author);
-                        reductions
-                            .entry(meta.namespace.clone())
-                            .or_default()
-                            .push((op, kind));
-                        state.hashes[0] = engine::roll(state.hashes[0], &j.digest);
-                        *self.counts.entry(meta.namespace.clone()).or_default() += 1;
                         entry.flags |= PROJECTED;
+                        if self
+                            .library
+                            .admission
+                            .namespace_tails
+                            .get(&meta.namespace)
+                            .is_some_and(|tail| {
+                                order(meta) < (tail.0, tail.1.as_str(), tail.2.as_str())
+                            })
+                        {
+                            // Rehash verified body digests before delivering subsequent
+                            // operations, which may depend on the canonical prefix revision.
+                            let mut prefix: Vec<_> = self
+                                .entries
+                                .iter()
+                                .chain(&new_entries)
+                                .chain(std::iter::once(&entry))
+                                .filter(|e| {
+                                    e.namespace == entry.namespace && e.flags & PROJECTED != 0
+                                })
+                                .collect();
+                            prefix.sort_unstable_by_key(|e| path_order(&e.path));
+                            state.hashes[0] = prefix.into_iter().fold([0; 32], |previous, e| {
+                                engine::roll(previous, &crate::records::hex(&e.body_digest))
+                            });
+                        } else {
+                            state.hashes[0] = engine::roll(state.hashes[0], &j.digest);
+                        }
+                        reductions.entry(meta.namespace.clone()).or_default().push((
+                            op,
+                            kind,
+                            state.hashes[0],
+                        ));
+                        *self.counts.entry(meta.namespace.clone()).or_default() += 1;
                         self.stats.applied_operations += 1;
                     } else {
                         let reason = if j.opened {
@@ -1226,8 +1308,9 @@ impl<S: RecordSource> Engine<S> {
                 .filter_map(|(ns, state)| reductions.remove(ns).map(|ops| (&mut state.state, ops)))
                 .collect();
             let apply = |(state, ops): &mut (&mut domain::State, Vec<Reduction>)| {
-                for (op, kind) in ops {
+                for (op, kind, prefix) in ops {
                     state.apply_with_context(op, *kind);
+                    state.bind_admitted_prefix(*prefix);
                 }
             };
             if chunk.len() >= 512 {
@@ -1381,6 +1464,7 @@ impl<S: RecordSource> Engine<S> {
             output.extend(entry.author_key);
             output.extend(entry.epoch.to_le_bytes());
             output.extend(entry.authority.to_le_bytes());
+            output.extend(entry.body_digest);
             if let Some(version) = &entry.version {
                 put_length(&mut output, version.len() + 1)?;
                 output.extend_from_slice(version.as_bytes());
@@ -1978,9 +2062,12 @@ fn decode_cache<S: RecordSource>(
         epoch.copy_from_slice(reader.take(8)?);
         let mut authority = [0; 8];
         authority.copy_from_slice(reader.take(8)?);
+        let mut body_digest = [0; 32];
+        body_digest.copy_from_slice(reader.take(32)?);
         entries.push(Entry {
             path,
             digest,
+            body_digest,
             namespace: u16::from_le_bytes(ns),
             flags,
             author_key,

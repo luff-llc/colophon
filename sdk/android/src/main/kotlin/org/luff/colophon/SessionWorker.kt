@@ -150,6 +150,7 @@ internal class SessionWorker(
                 opened = true
                 track(stored + journal.pending.keys)
             } else {
+                core.refreshSource(storage(), journal.pending)
                 val fresh = stored.filter { it !in merged || versions[it] == null || versions[it] != recordVersions[it] }
                 val authorityPaths = fresh.filter { it.startsWith("authority/") }
                 val authority = storage().read(authorityPaths).toMutableMap()
@@ -225,6 +226,7 @@ internal class SessionWorker(
     private fun refreshDelta(delta: RecordDelta): SessionSnapshot {
         val paths = delta.paths.filter { !it.startsWith("history/") && RecordPath.listingIncludes(it, configuration.namespaces) }.toSet()
         if (paths.isNotEmpty()) {
+            core.refreshSource(storage(), journal.pending)
             val versions = storage().versions(paths)
             val authorityPaths = paths.filter { it.startsWith("authority/") }
             val authority = storage().read(authorityPaths)

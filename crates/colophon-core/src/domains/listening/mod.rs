@@ -78,6 +78,18 @@ impl PodcastsState {
                         text(row, "revision"),
                     ) < (op.clock, op.author.as_str(), op.id.as_str())
                 })
+            && {
+                let mut probe = self.playback_slice(text(&op.payload, "id"));
+                ListeningPodcasts.apply_with_context(
+                    &mut probe,
+                    op,
+                    ApplyContext {
+                        member_kind: Some(MemberKind::Device),
+                        imported_baseline: false,
+                    },
+                );
+                probe.conflicts.is_empty() && probe.invalid.is_empty()
+            }
     }
 
     pub(crate) fn playback_revision_is(&self, episode: &str, revision: &str) -> bool {
@@ -412,7 +424,7 @@ impl PodcastsState {
 impl ListeningPodcasts {
     /// Engine integration hook: bind cursors to the verified admitted-prefix digest after an
     /// admission pass, including prefixes containing versions not delivered to this reducer.
-    /// Until wired, the reducer uses a deterministic hash of every delivered OperationView.
+    /// Standalone reducer callers use a deterministic hash of delivered OperationViews.
     pub fn bind_admitted_prefix(
         &self,
         state: &mut PodcastsState,

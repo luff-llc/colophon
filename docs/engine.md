@@ -197,16 +197,16 @@ available unlock tasks to avoid repeated rebuilds. All results authenticate befo
 
 ### Cache identity and invalidation
 
-The format is an authenticated binary container: `COLOENG4`, little-endian u32 JSON-metadata
+The format is an authenticated binary container: `COLOENG5`, little-endian u32 JSON-metadata
 length, metadata bytes, u32 record count, sorted entries, then a 32-byte tag. Each entry contains
 u32 UTF-8 path length, path bytes, 32-byte **SHA-256 of the entire exact envelope**, u16 namespace
 index (65535 means none), one byte of flags, the 32-byte author signing-key digest,
-u64 epoch, u64 referenced authority sequence, and a length-prefixed UTF-8 provider-version token (zero means none; otherwise length is byte count plus one). This implementation supports fewer than 65,535
+u64 epoch, u64 referenced authority sequence, the 32-byte verified signed-body digest, and a length-prefixed UTF-8 provider-version token (zero means none; otherwise length is byte count plus one). This implementation supports fewer than 65,535
 namespaces. Flags distinguish signature-verified headers, header budget admission, authenticated
 IDs and projected operations. Rejected records/requests are bound as observed bytes, never
 promoted to valid operations. The metadata contains:
 
-- Container/storage/layout versions, required `reducer_schema` generation (7), selected namespaces,
+- Container/storage/layout versions, required `reducer_schema` generation (8), selected namespaces,
   expected library and complete recipient public identity.
 - Authenticated authority state, including historical roots, grants, epochs and revocation keeps.
 - Reducer states, namespace prefix counts and rolling digests, clocks and revisions.
@@ -226,7 +226,7 @@ IKM, `colophon/verified-prefix/3` as expansion info and 32 output bytes. Compari
 tag bytes before parsing metadata or index. Container changes must bump version and magic. Reducer schema/semantic changes increment the
 required authenticated `reducer_schema` generation in both cache APIs. Missing or mismatching
 generations fall back to replay, including caches made before all four full domains were merged.
-Version 4 replaces `COLOENG3`: restoration validates the author-key and authority/epoch bindings,
+Version 5 adds verified body digests for canonical retained insertion. Version 4 replaced `COLOENG3`: restoration validates the author-key and authority/epoch bindings,
 and authenticates live high-water witnesses. Older containers fall back to verification. Exact-envelope
 digests, tag construction and immutable prefix digests retain their existing meanings.
 The key must be random and protected separately from the shared folder. This is an additional
@@ -368,7 +368,7 @@ profile are unchanged. See [performance.md](performance.md) for measured targets
 
 ## Engine3: authenticated import storage and blobs
 
-Reducer schema **7** includes `AuthorContext { kind, grant, root, library }` and the namespace
+Reducer schema **8** includes `AuthorContext { kind, grant, root, library }` and the namespace
 import projection. Kind, the immutable grant and root enrollment come from verified authority,
 after ordinary admission. Library append, reconciliation, checkpoint suffixes and storage-backed
 parallel reduction use the same context. Books loans and notes reviews accept app/device members;
@@ -484,7 +484,7 @@ A root can publish manifests in an import batch. Any namespace writer can publis
 `{digest,reference,retain:boolean}` adds/removes an idempotent reference. Either may carry
 `required: boolean`, a synchronized eager-download hint. `blob({digest})` returns the signed
 manifest, live reference count and `required`; `blobs({after?,limit?,required?})` pages manifests
-in digest order (`{digest,size,mediaType,chunks,references,required}`, `next`). Reducer schema 7 (blob query additions originated in schema 5).
+in digest order (`{digest,size,mediaType,chunks,references,required}`, `next`). Reducer schema 8 (canonical podcast cursor/sidecar prefixes; blob query additions originated in schema 5).
 Native hosts authenticate fetched ciphertext with `openBlobChunk(namespace,digest,index,ciphertext)`
 (no callback) and copy only a write's own records with `recordsAt(paths)`. Zero live references is
 **not** permission to delete retained originals or bytes needed by immutable history. The core

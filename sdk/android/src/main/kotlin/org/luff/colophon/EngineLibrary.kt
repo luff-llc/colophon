@@ -15,11 +15,15 @@ internal class EngineLibrary(val native: NativeEngine, private val keys: KeyProv
     fun members() = native.members()
     fun ready() = native.finishUnlockMany(native.beginUnlock().map { UnlockResult(it, keys.agree(it.peer)) })
     fun merge(records: Map<String, ByteArray>) { native.merge(records); ready() }
-    fun acknowledge(versions: Map<String, String>, store: RecordStore) {
+    fun refreshSource(store: RecordStore, pending: Map<String, ByteArray>) {
+        val snapshot = pending.toMap()
         native.setSource(object : EngineRecordSource {
-            override fun read(path: String): ByteArray = store.read(listOf(path))[path]
+            override fun read(path: String): ByteArray = snapshot[path] ?: store.read(listOf(path))[path]
                 ?: throw BindingException.InvalidData("Missing record: $path")
         })
+    }
+    fun acknowledge(versions: Map<String, String>, store: RecordStore) {
+        refreshSource(store, emptyMap())
         native.updateVersions(versions)
     }
     fun checkpoint() = native.checkpoint(entropy())

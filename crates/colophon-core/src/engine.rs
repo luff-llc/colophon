@@ -70,6 +70,8 @@ impl Namespace {
         self.order.push(digest.into());
         self.hashes
             .push(roll(self.hashes.last().copied().unwrap_or([0; 32]), digest));
+        self.state
+            .bind_admitted_prefix(*self.hashes.last().expect("prefix"));
         if policy.every > 0 && policy.retain > 0 && self.order.len() % policy.every == 0 {
             self.checkpoints.push(self.snapshot());
             if self.checkpoints.len() > policy.retain {
@@ -91,6 +93,8 @@ impl Namespace {
         self.clock = self.clock.max(op.clock);
         self.order.insert(position, digest.into());
         self.hashes = prefix_hashes(&self.order);
+        self.state
+            .bind_admitted_prefix(*self.hashes.last().expect("prefix"));
         self.checkpoints
             .retain(|snapshot| snapshot.position <= position);
     }

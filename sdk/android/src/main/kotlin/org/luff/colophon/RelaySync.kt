@@ -157,7 +157,10 @@ class RelaySync(
         for (group in unpushed.chunked(64)) {
             val records = local.read(group)
             reads += records.size
-            for (batch in group.chunked(PARALLELISM)) {
+            // A reader must never observe a successor before its authority predecessor.
+            val batches = group.filter { it.startsWith("authority/") }.map { listOf(it) } +
+                group.filterNot { it.startsWith("authority/") }.chunked(PARALLELISM)
+            for (batch in batches) {
                 val present = batch.mapNotNull { path -> records[path]?.let { Triple(path, sha256Hex(it), it) } }
                 for ((triple, result) in parallel(present) { it to client.putIfAbsent(it.first, it.third) }) {
                     when (result) {

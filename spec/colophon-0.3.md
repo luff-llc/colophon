@@ -232,8 +232,13 @@ replacement arrive in one batch. It MUST NOT evict the verified envelope or its 
 Malformed payloads discovered after unlock leave the verified fallback intact. Retained fallbacks
 MUST be readmitted against current authority and the rebuilt durable clock; a revoked anchor cannot
 continue to support a formerly admissible live generation. A storage engine MUST NOT persist a
-verified checkpoint over an unresolved replacement.
-Lower generations cannot replace an observed head; different exact envelope
+verified checkpoint over a replacement awaiting an epoch key that this member can unlock.
+This quarantine rule also applies to the first candidate for an empty slot. A candidate for an
+epoch without a seal for this member is held as `unavailable`, not left in an unlock retry loop;
+it MUST NOT replace the verified index or witness, and MUST NOT prevent a private checkpoint.
+Future-authority candidates remain quarantined and are retried when that authority arrives.
+A locked header loaded at open is not a verified high-water mark: lower candidates MUST remain
+eligible until its payload is authenticated. Lower generations cannot replace an authenticated head; different exact envelope
 bytes at the same slot/generation are explicit equivocation. An exact retained/live duplicate is folded once.
 
 **Fold order is `(clock, author, id)`, never `created`.** A writer increments the highest
@@ -388,11 +393,16 @@ bind the format/reducer version, library, recipient, authority state, exact reco
 digests, namespace admitted prefixes, and the corresponding reducer states. Namespace keys
 shared with other members MUST NOT alone authorize a device-local verification cache.
 
-The Rust `Engine` cache (`COLOENG4`, version 4; supersedes `COLOENG3`) uses a sorted path/digest index and per-namespace
+The Rust `Engine` cache (`COLOENG5`, version 5; supersedes `COLOENG4`, reducer schema 8) uses a sorted path/digest index and per-namespace
 rolling prefix hashes, authenticated together with a host-provided device-local 32-byte secret
 (member-sealed). Index digests cover exact **outer envelope bytes** (including signatures) and
 are independent of the provider content version; namespace prefix hashes cover admitted exact
-**signed body** digests, as used by `kept`. Each index entry also binds the author's signing-key
+**signed body** digests, as used by `kept`. The index retains these verified body digests so an
+out-of-order retained predecessor can rebuild canonical prefix hashes without fetching historical
+payloads. Podcast pagination and import-sidecar revisions bind to that canonical admitted prefix;
+arrival-order rolling hashes MUST NOT leak into saved projections or cursors. A retained insertion
+is permitted only when applying the predecessor itself produces no conflict or invalid outcome;
+otherwise the implementation MUST replay in canonical order. Each index entry also binds the author's signing-key
 digest, namespace epoch and referenced authority sequence. Restoration MUST compare the key
 digest to verified authority and the authenticated epoch to the epoch at that sequence; lazy fetches
 and audits also compare these bindings to the fetched header. `RecordSource.content_version` supplies a coherent opaque
@@ -414,9 +424,14 @@ valid state. Hosts protect the local cache
 because reducer state can include plaintext. The Rust `checkpoint` module supplies a
 member-signed HPKE key ticket and an AES-256-GCM encrypted checkpoint envelope, bound to the
 exact library and member. Hosts use it (or equivalent protection) for persisted caches. Ticket
-authentication precedes host ECDH; the member-sealed random key is separate from namespace keys. Key inaccessibility must fail/retry, never generate a new identity. The current
-native session adapters do not persist verified-prefix caches; they verify source records on
-cold open, so no unprotected disk cache or cached authorization is introduced there. See [the engine format/API](../docs/engine.md#storage-backed-engine-stage-2).
+authentication precedes host ECDH; the member-sealed random key is separate from namespace keys.
+Key inaccessibility must fail/retry, never generate a new identity. Native sessions persist these
+protected caches. Authority changes MUST be authenticated and new available epoch keys unlocked
+before the content replay pass; sessions MUST NOT replay history once before unlock and again after
+unlock. Observed provider bytes are temporary staging, released after admission; later resets and
+audits read the current coherent provider source. Pending unpublished journal bytes remain available
+until persistence is acknowledged. Waiting-for-approval and denied sessions do not schedule an idle
+checkpoint; an explicit checkpoint may record their held state without granting access. See [the engine format/API](../docs/engine.md#storage-backed-engine-stage-2).
 
 SDK sessions distinguish first opening, waiting for download, ready, refreshing (usable
 verified content from the same connection is retained) and retry. Results MUST be bound to the
@@ -517,6 +532,10 @@ children. All participating apps MUST upgrade before enabling this extension. No
 codec, grant or historical agent authority is imported into the 0.3 trust chain.
 
 ## 8. HTTP exchange
+
+Clients publishing authority history MUST await acknowledgement of each authority sequence before
+uploading its successor. Sorting a concurrent upload batch is insufficient: observers may otherwise
+see an authority gap and fail closed. Independent immutable content uploads may remain parallel.
 
 This section defines how hosts move records between devices through an untrusted relay. It
 revises the 0.1 HTTP profile (§5.3 of 0.1) with an incremental change feed. The relay is a

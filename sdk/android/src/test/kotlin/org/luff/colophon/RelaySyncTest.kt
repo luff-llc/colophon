@@ -101,6 +101,25 @@ class RelaySyncTest {
     }
 
     @Test
+    fun authorityUploadsWaitForPredecessorAcknowledgement() {
+        val active = java.util.concurrent.atomic.AtomicInteger()
+        val overlapped = java.util.concurrent.atomic.AtomicBoolean()
+        val base = HttpUrlConnectionTransport()
+        val transport = RelayTransport { request ->
+            val authority = request.method == "PUT" && request.url.contains("authority")
+            if (authority) {
+                if (active.incrementAndGet() > 1) overlapped.set(true)
+                // Model an upload still awaiting acknowledgement.
+                Thread.sleep(10)
+            }
+            try { base.send(request) } finally { if (authority) active.decrementAndGet() }
+        }
+        val records = (1..3).associate { "authority/%08d.json".format(it) to "record$it".toByteArray() }
+        assertEquals(3, RelaySync(MemoryRecordStore(records), RelayEndpoint(relay.slotURL, relay.token), transport=transport).sync().pushed)
+        assertFalse(overlapped.get())
+    }
+
+    @Test
     fun reconcilesBothWaysAndKeepsLocalRecords() {
         val endpoint = RelayEndpoint(relay.slotURL, relay.token)
         val a = MemoryRecordStore(mapOf("authority/00000001.json" to "g".toByteArray(), "ops/m/000000000001-a.json" to "a".toByteArray()))
@@ -225,7 +244,8 @@ class RelaySyncTest {
         member.restore()
         eventually { owner.requests.value.isNotEmpty() }
         owner.approve(owner.requests.value.first())
-        eventually { member.phase.value == SessionPhase.Ready }
+        try { eventually { member.phase.value == SessionPhase.Ready } }
+        catch (error: Throwable) { throw AssertionError("Member phase=${member.phase.value} sync=${member.syncState.value}; owner phase=${owner.phase.value} sync=${owner.syncState.value}", error) }
         member.perform(link("pushed-automatically"), member.observedRevision)
         eventually { links(owner) == listOf("pushed-automatically") }
         owner.close()

@@ -54,7 +54,7 @@ import ColophonKitStorage
         worker = SessionWorker(configuration: configuration, core: core, store: store); relay = configuration.relay
         if relay != nil { syncState = .idle }
     }
-    @ObservationIgnored private var checkpointTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var checkpointTask: Task<Void, Never>?
     private func scheduleCheckpoint() {
         checkpointTask?.cancel()
         checkpointTask = Task { [weak self] in
@@ -76,7 +76,7 @@ import ColophonKitStorage
                 let snapshot = try await worker.restore()
                 guard lease == context, !Task.isCancelled else { return }
                 apply(snapshot)
-                scheduleCheckpoint()
+                if snapshot.phase == .ready { scheduleCheckpoint() }
             } catch { if lease == context { fail(error) } }
             startSyncLoop()
         }

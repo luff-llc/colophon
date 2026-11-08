@@ -777,24 +777,18 @@ fn live_expiry_and_plaintext_slot_binding_are_checked_at_read_time() {
         operation_id: header.meta.id.clone(),
     });
     let body = canonical(&header).unwrap();
-    lib.merge(
-        [(
-            path.clone(),
-            SignedRecord {
-                signature: phone.sign(&body),
-                body,
-            }
-            .encode()
-            .unwrap(),
-        )]
-        .into(),
-    )
+    let raw = SignedRecord {
+        signature: phone.sign(&body),
+        body,
+    }
+    .encode()
     .unwrap();
+    lib.merge([(path.clone(), raw.clone())].into()).unwrap();
+    assert!(!lib.records().contains_key(&path));
     assert!(success(lib.view("listening.podcasts", NOW).unwrap())
         .admitted
         .is_empty());
     // A retained copy cannot turn a caveated live stamp into durable intent either.
-    let raw = lib.records()[&path].clone();
     lib.merge([(protocol::operation_path(&header.meta), raw)].into())
         .unwrap();
     assert!(success(lib.view("listening.podcasts", NOW).unwrap())
@@ -1550,4 +1544,44 @@ fn second_review_cross_author_and_other_episode_boundary() {
             .refused
             .is_empty());
     }
+}
+
+#[test]
+fn third_review_first_locked_invalid_head_cannot_pin_slot() {
+    use colophon_core::{
+        model::OperationHeader,
+        records::{canonical, SignedRecord},
+    };
+    let (writer, owner, _) = create();
+    let mut reader = Library::open(writer.records().clone(), owner.public()).unwrap();
+    let valid = live_at(&writer, &owner, 1, 1, 245);
+    let (path, raw) = live_at(&writer, &owner, 2, 2, 246)
+        .into_iter()
+        .next()
+        .unwrap();
+    let signed: SignedRecord = serde_json::from_slice(&raw).unwrap();
+    let mut header: OperationHeader = serde_json::from_slice(&signed.body).unwrap();
+    header.ciphertext[0] ^= 1;
+    let body = canonical(&header).unwrap();
+    let corrupt = SignedRecord {
+        signature: owner.sign(&body),
+        body,
+    }
+    .encode()
+    .unwrap();
+    let mut initial = writer.records().clone();
+    initial.insert(path.clone(), corrupt.clone());
+    let mut opened_locked = Library::open(initial, owner.public()).unwrap();
+    opened_locked.merge(valid.clone()).unwrap();
+    unlock(&mut opened_locked, &owner);
+    assert_eq!(opened_locked.records()[&path], valid[&path]);
+    reader.merge([(path.clone(), corrupt)].into()).unwrap();
+    assert!(
+        !reader.records().contains_key(&path),
+        "locked candidate must be quarantined"
+    );
+    reader.merge(valid.clone()).unwrap();
+    unlock(&mut reader, &owner);
+    assert_eq!(reader.records()[&path], valid[&path]);
+    assert_eq!(episode_seconds(&reader, "ep"), 1.0);
 }

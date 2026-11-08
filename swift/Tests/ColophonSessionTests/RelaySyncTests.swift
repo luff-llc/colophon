@@ -83,7 +83,31 @@ private func link(_ id: String) throws -> DomainCommand {
     return try await query.load(.init()).map(\.id).sorted()
 }
 
+private actor AuthorityOrderTransport: RelayTransport {
+    private let base = FakeRelay()
+    private var active = 0
+    private(set) var overlapped = false
+    func send(_ request: RelayHTTPRequest) async throws -> RelayHTTPResponse {
+        let authority = request.method == "PUT" && request.url.absoluteString.contains("authority")
+        if authority {
+            active += 1
+            overlapped = overlapped || active > 1
+            // Simulate an in-flight upload; sync must await its acknowledgement.
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        defer { if authority { active -= 1 } }
+        return try await base.send(request)
+    }
+}
+
 @MainActor struct RelaySyncTests {
+    @Test func authorityUploadsWaitForPredecessorAcknowledgement() async throws {
+        let records = Dictionary(uniqueKeysWithValues: (1...3).map { (String(format: "authority/%08d.json", $0), Data("record\($0)".utf8)) })
+        let transport = AuthorityOrderTransport()
+        let report = try await RelaySync(local: MemoryRecordStore(records: records), endpoint: RelayEndpoint(url: slotURL, token: "secret-token"), transport: transport).sync()
+        #expect(report.pushed == 3)
+        #expect(await !transport.overlapped)
+    }
     @Test func reconcilesBothWaysKeepsLocalTruthAndRelistsAfterReset() async throws {
         let relay = FakeRelay(), home = temporary()
         defer { try? FileManager.default.removeItem(at: home) }

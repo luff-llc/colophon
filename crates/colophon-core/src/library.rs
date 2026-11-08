@@ -469,29 +469,49 @@ impl Library {
             if !crate::protocol::is_replaceable(path) {
                 continue;
             }
-            let Some(old) = self.records.get(path) else {
-                continue;
-            };
+            let old = self.records.get(path);
             let Ok((header, _)) = validator.live_header(path, raw) else {
+                // A future authority reference may become admissible after the missing
+                // authority arrives. Quarantine it; it cannot pin or replace this slot.
+                if validator
+                    .verifiers
+                    .operations(&validator.authority, &[(path, raw)], None)?
+                    .into_iter()
+                    .next()
+                    .is_some_and(|result| {
+                        result.is_ok_and(|(h, _)| h.meta.authority > validator.authority.latest)
+                    })
+                {
+                    deferred.push((path.clone(), raw.clone()));
+                }
                 ignored.push(path.clone());
                 continue;
             };
-            let old_generation = validator.live_header(path, old).ok().and_then(|(h, _)| {
-                // If keys are available, even a signed old envelope must pass payload binding.
-                (!validator
-                    .keys
-                    .contains_key(&(h.meta.namespace.clone(), h.meta.epoch))
-                    || validator
-                        .live_generation(path, old, &h.meta.created)
-                        .is_ok())
-                .then_some(h.meta.clock)
+            let old_generation = old.and_then(|old| {
+                validator.live_header(path, old).ok().and_then(|(h, _)| {
+                    // If keys are available, even a signed old envelope must pass payload binding.
+                    (!validator
+                        .keys
+                        .contains_key(&(h.meta.namespace.clone(), h.meta.epoch))
+                        || validator
+                            .live_generation(path, old, &h.meta.created)
+                            .is_ok())
+                    .then_some((
+                        h.meta.clock,
+                        validator
+                            .keys
+                            .contains_key(&(h.meta.namespace, h.meta.epoch)),
+                    ))
+                })
             });
-            if let Some(old_generation) = old_generation {
+            if let Some((old_generation, payload_verified)) = old_generation {
                 ensure(
                     header.meta.clock != old_generation,
                     "Equivocation at live generation",
                 )?;
-                if header.meta.clock < old_generation {
+                // A header loaded by open() while locked is not a trusted high-water mark.
+                // Keep lower candidates until the old payload can also be authenticated.
+                if payload_verified && header.meta.clock < old_generation {
                     ignored.push(path.clone());
                     continue;
                 }
@@ -547,6 +567,9 @@ impl Library {
             Vec::new()
         };
         self.ingest(&paths, authority_changed, &invalidated);
+        if authority_changed {
+            self.retry_live()?;
+        }
         Ok(self.changes.clone())
     }
     /// Complete a two-phase write/action and return its namespace changes.
@@ -1533,6 +1556,45 @@ impl Library {
                 }
                 Status::Held(reason) => view.held.push(rejection(reason)),
                 Status::Refused(reason) => view.refused.push(rejection(reason)),
+            }
+        }
+        for (path, candidates) in &self.pending_live {
+            for raw in candidates {
+                let Some(Ok((header, digest))) = self
+                    .verifiers
+                    .operations(&self.authority, &[(path, raw)], None)?
+                    .into_iter()
+                    .next()
+                else {
+                    continue;
+                };
+                if header.meta.namespace != namespace {
+                    continue;
+                }
+                let status = Self::judge(
+                    &self.authority,
+                    &header.meta,
+                    &digest,
+                    &mut BTreeMap::new(),
+                    self.admission.clocks.get(namespace).copied().unwrap_or(0),
+                    true,
+                );
+                let reason = match status {
+                    Status::Held(reason) => reason,
+                    Status::Admitted
+                        if !self
+                            .keys
+                            .contains_key(&(namespace.into(), header.meta.epoch)) =>
+                    {
+                        "unavailable".into()
+                    }
+                    _ => continue,
+                };
+                view.held.push(Rejection {
+                    id: header.meta.id,
+                    author: header.meta.author,
+                    reason,
+                });
             }
         }
         view.refused.extend(

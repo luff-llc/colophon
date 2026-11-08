@@ -20,6 +20,7 @@ internal interface SessionCore {
     }
     fun saveCheckpoint() {}
     fun updateVersions(versions: Map<String, String>, store: RecordStore) {}
+    fun refreshSource(store: RecordStore, pending: Map<String, ByteArray>) {}
     fun open(records: Map<String, ByteArray>, keys: KeyProvider)
     fun create(configuration: SessionConfiguration)
     fun setReadScope(namespaces: List<String>) {}
@@ -78,6 +79,7 @@ internal class BindingSessionCore : SessionCore {
         val opened = EngineLibrary.open(store, records.keys, emptyMap(), emptyMap(), keys, emptyList(), null, null)
         library = opened; ledger = null; ledgerRevision = null
     }
+    override fun refreshSource(store: RecordStore, pending: Map<String, ByteArray>) { requireLibrary().refreshSource(store, pending) }
     override fun updateVersions(versions: Map<String, String>, store: RecordStore) { requireLibrary().acknowledge(versions, store) }
     override fun saveCheckpoint() { library?.let { it.native.verifyBatch(128u); cache?.save(it.checkpoint(), it.id) } }
     override fun create(configuration: SessionConfiguration) {

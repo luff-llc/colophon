@@ -120,6 +120,12 @@ pub(crate) struct ImportState {
     invalid: BTreeSet<String>,
 }
 impl ImportState {
+    pub(crate) fn can_insert_retained(&self) -> bool {
+        self.batches.is_empty() && self.alternatives.is_empty() && self.invalid.is_empty()
+    }
+    pub(crate) fn bind_admitted_prefix(&mut self, prefix: String) {
+        self.revision = prefix;
+    }
     pub fn new(namespace: &str) -> Self {
         Self {
             namespace: namespace.into(),

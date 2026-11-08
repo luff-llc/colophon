@@ -171,7 +171,7 @@ pub const NAMESPACES: [&str; 4] = [
 
 // Authenticated local-cache generation for the complete built-in reducer registry.
 // Increment on any projection schema or reducer semantic change, even if serde can decode it.
-pub(crate) const REDUCER_SCHEMA: u32 = 7;
+pub(crate) const REDUCER_SCHEMA: u32 = 8;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum ProjectionState {
@@ -338,8 +338,18 @@ impl State {
             }
         }
     }
+    pub(crate) fn bind_admitted_prefix(&mut self, digest: [u8; 32]) {
+        if let ProjectionState::Podcasts(state) = &mut self.projection {
+            self.sidecar
+                .bind_admitted_prefix(crate::records::hex(&digest));
+            crate::domains::listening::ListeningPodcasts
+                .bind_admitted_prefix(state, &crate::records::hex(&digest))
+                .expect("SHA-256 prefix");
+        }
+    }
     pub(crate) fn can_insert_retained(&self, op: &AdmittedOperation) -> bool {
-        matches!(&self.projection, ProjectionState::Podcasts(state) if state.can_insert_retained(op))
+        self.sidecar.can_insert_retained()
+            && matches!(&self.projection, ProjectionState::Podcasts(state) if state.can_insert_retained(op))
     }
     pub(crate) fn live_is_after(&self, op: &AdmittedOperation) -> bool {
         self.playback_order

@@ -8,6 +8,7 @@ protocol SessionCore: Sendable {
     func openStorage(store: any RecordStore, paths: Set<String>, versions: [String: String], pending: [String: Data], keys: any AsyncKeyProvider, namespaces: [String], cache: CheckpointCache, libraryID: String?) async throws
     func saveCheckpoint() async throws
     func updateVersions(_ versions: [String: String], reader: RecordReader) async throws
+    func refreshSource(reader: RecordReader, pending: [String: Data]) async throws
     func operation(path: String, namespace: String) async throws -> OperationView
     func open(records: [String: Data], keys: any AsyncKeyProvider) async throws
     func create(configuration: SessionConfiguration) async throws
@@ -60,6 +61,9 @@ actor BindingSessionCore: SessionCore {
         library = try await StorageLibrary.open(source: SessionRecordSource(reader: RecordReader { path in
             guard let bytes = records[path] else { throw StorageError.unavailable("Missing record: " + path) }; return bytes
         }, pending: [:]), listing: Array(records.keys), versions: [:], libraryID: id, namespaces: [], checkpoint: nil, keys: SessionKeys(base: keys))
+    }
+    func refreshSource(reader: RecordReader, pending: [String: Data]) async throws {
+        try requireLibrary().native.setSource(source: SessionRecordSource(reader: reader, pending: pending))
     }
     func updateVersions(_ versions: [String: String], reader: RecordReader) async throws {
         let native = try requireLibrary().native
@@ -158,6 +162,7 @@ actor BindingSessionCore: SessionCore {
 
 // Existing test/host adapters need not implement named queries until they support them.
 extension SessionCore {
+    func refreshSource(reader: RecordReader, pending: [String: Data]) async throws {}
     func mergeObserved(_ records: [String: Data], versions: [String: String]) async throws { try await merge(records) }
     func openStorage(store: any RecordStore, paths: Set<String>, versions: [String: String], pending: [String: Data], keys: any AsyncKeyProvider, namespaces: [String], cache: CheckpointCache, libraryID: String?) async throws {
         var records = try await store.read(paths: Array(paths)); records.merge(pending) { _, new in new }

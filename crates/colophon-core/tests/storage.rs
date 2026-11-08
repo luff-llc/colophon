@@ -1000,7 +1000,13 @@ fn authenticated_old_reducer_schemas_fall_back_to_full_replay() {
     let cp = first.checkpoint().unwrap();
     let length = u32::from_le_bytes(cp[8..12].try_into().unwrap()) as usize;
     let original: serde_json::Value = serde_json::from_slice(&cp[12..12 + length]).unwrap();
-    for schema in [None, Some(json!(1)), Some(json!(2)), Some(json!(999))] {
+    for schema in [
+        None,
+        Some(json!(1)),
+        Some(json!(2)),
+        Some(json!(7)),
+        Some(json!(999)),
+    ] {
         let mut meta = original.clone();
         match schema {
             Some(value) => {
@@ -1242,7 +1248,7 @@ fn review_checkpoint_checks_author_and_epoch_bindings() {
             target = pos;
             break;
         }
-        pos += 32 + 2 + 1 + 32 + 8 + authority_bytes;
+        pos += 32 + 2 + 1 + 32 + 8 + authority_bytes + 32;
         let version = u32::from_le_bytes(cp[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4 + version.saturating_sub(1);
     }
@@ -1545,6 +1551,32 @@ fn second_review_retained_head_behind_immutable_tail_keeps_cache() {
     unlock(&mut restored_lib, &owner);
     assert_eq!(restored_lib.applied_operations("listening.podcasts"), 0);
     let cold = opened(source.0.borrow().clone(), &owner);
+    // Cursors and serialized reducer state must match canonical cold replay, too.
+    let cold_engine = engine(&cold, &owner);
+    let projection = |bytes: Vec<u8>| {
+        let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let meta: serde_json::Value = serde_json::from_slice(&bytes[12..12 + len]).unwrap();
+        let mut projection = meta["projections"]["listening.podcasts"].clone();
+        projection.as_object_mut().unwrap().remove("revision");
+        projection
+    };
+    assert_eq!(
+        projection(e.checkpoint().unwrap()),
+        projection(cold_engine.checkpoint().unwrap())
+    );
+    for replica in [&lib, &cold] {
+        assert_eq!(
+            success(
+                replica
+                    .query("listening.podcasts", "shows", json!({"limit": 1}), NOW)
+                    .unwrap()
+            ),
+            success(
+                cold.query("listening.podcasts", "shows", json!({"limit": 1}), NOW)
+                    .unwrap()
+            )
+        );
+    }
     assert_eq!(
         success(
             e.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
@@ -1766,4 +1798,177 @@ fn second_review_carried_head_loses_revoked_clock_anchor() {
         ),
         expected
     );
+}
+
+#[test]
+fn third_review_unavailable_live_does_not_block_checkpoint() {
+    for membership in ["unapproved", "partial", "revoked"] {
+        let (mut lib, owner, _) = create();
+        let reader = keys(241);
+        if membership != "unapproved" {
+            enroll(
+                &mut lib,
+                &owner,
+                &reader,
+                "Reader",
+                MemberKind::Device,
+                grant(
+                    if membership == "revoked" {
+                        &["listening.podcasts"]
+                    } else {
+                        &["notes"]
+                    },
+                    None,
+                ),
+                242,
+            );
+        }
+        if membership == "revoked" {
+            let batch = success(
+                lib.begin_revoke(&reader.public().id(), NOW, [243; 32])
+                    .unwrap(),
+            );
+            apply(&mut lib, batch, &owner);
+        }
+        lib.merge(live_at(&lib, &owner, 1, 10, 244)).unwrap();
+        let mut e = engine(&lib, &reader);
+        let checkpoint = e.checkpoint().expect(membership);
+        let len = u32::from_le_bytes(checkpoint[8..12].try_into().unwrap()) as usize;
+        let meta: serde_json::Value = serde_json::from_slice(&checkpoint[12..12 + len]).unwrap();
+        assert!(
+            meta["rejections"].to_string().contains("unavailable"),
+            "{membership}: {meta}"
+        );
+        unlock_engine(&mut e, &reader);
+        assert!(e.checkpoint().is_ok());
+        let compat = opened(lib.records().clone(), &reader);
+        assert_eq!(e.begin_unlock().len(), compat.begin_unlock().len());
+    }
+}
+
+#[test]
+fn third_review_authority_unlock_replays_once() {
+    let (mut lib, owner, _) = create();
+    for seed in 80..90 {
+        write(&mut lib, &owner, seed);
+    }
+    lib.merge(live_at(&lib, &owner, 1, 10, 91)).unwrap();
+    let mut e = engine(&lib, &owner);
+    let before = e.stats();
+    let batch = success(
+        lib.begin_rekey(&["listening.podcasts".into()], NOW, [92; 32])
+            .unwrap(),
+    );
+    let authority = finish(batch, &owner);
+    lib.merge(authority.clone()).unwrap();
+    unlock(&mut lib, &owner);
+    e.apply_paths(e.source().add(authority)).unwrap();
+    assert_eq!(
+        e.stats().signatures_verified,
+        before.signatures_verified,
+        "content must wait for host ECDH"
+    );
+    unlock_engine(&mut e, &owner);
+    assert_eq!(e.stats().applied_operations - before.applied_operations, 10);
+    assert_eq!(
+        e.stats().signatures_verified - before.signatures_verified,
+        11
+    );
+    assert!(e.checkpoint().is_ok());
+}
+
+#[test]
+fn third_review_conflicting_retained_head_requires_ordered_replay() {
+    let (mut lib, owner, _) = create();
+    support::write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"ep", "seconds":100,"seek":true}),
+        200,
+    );
+    lib.merge(live_at(&lib, &owner, 2, 10, 201)).unwrap();
+    for n in 0..4 {
+        support::write(
+            &mut lib,
+            &owner,
+            "listening.podcasts",
+            "follow",
+            json!({"id":format!("show{n}"),"url":"https://example.org/feed"}),
+            202 + n,
+        );
+    }
+    let mut e = engine(&lib, &owner);
+    let before = lib.applied_operations("listening.podcasts");
+    let batch = success(
+        e.begin_write(
+            "listening.podcasts",
+            "position",
+            json!({"id":"ep","seconds":50,"seek":true}),
+            NOW,
+            [208; 32],
+        )
+        .unwrap(),
+    );
+    let records = finish(batch, &owner);
+    lib.merge(records.clone()).unwrap();
+    assert!(
+        lib.applied_operations("listening.podcasts") - before > 2,
+        "a newly conflicting predecessor must replay"
+    );
+    e.apply_paths(e.source().add(records)).unwrap();
+    assert!(matches!(e.open_mode(), OpenMode::Invalidated(_)));
+    let cold = opened(lib.records().clone(), &owner);
+    for replica in [&lib, &cold] {
+        assert_eq!(
+            success(
+                replica
+                    .query("listening.podcasts", "read", json!({}), NOW)
+                    .unwrap()
+            ),
+            success(
+                e.query("listening.podcasts", "read", json!({}), NOW)
+                    .unwrap()
+            )
+        );
+    }
+}
+
+#[test]
+fn third_review_first_invalid_engine_candidate_cannot_pin_slot() {
+    let (lib, owner, _) = create();
+    let (path, raw) = live_at(&lib, &owner, 2, 20, 249)
+        .into_iter()
+        .next()
+        .unwrap();
+    let raw = resign(&raw, &owner, |header| {
+        use base64::Engine as _;
+        let mut bytes = base64::engine::general_purpose::STANDARD
+            .decode(header["ciphertext"].as_str().unwrap())
+            .unwrap();
+        bytes[0] ^= 1;
+        header["ciphertext"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+    });
+    let source = Source::new(lib.records().clone());
+    source.add([(path.clone(), raw)].into());
+    let mut e = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        None,
+    )
+    .unwrap();
+    unlock_engine(&mut e, &owner);
+    e.apply_paths(e.source().add(live_at(&lib, &owner, 1, 10, 250)))
+        .unwrap();
+    assert_eq!(
+        success(
+            e.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )["seconds"],
+        10.0
+    );
+    assert!(e.checkpoint().is_ok());
 }

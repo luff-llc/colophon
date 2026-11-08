@@ -328,7 +328,13 @@ impl NativeEngine {
                 s.engine.source().versions.borrow_mut().remove(path);
             }
         }
-        let mut summary = Self::merge_locked(&mut s, records)?;
+        let observed: Vec<_> = records.keys().cloned().collect();
+        let result = Self::merge_locked(&mut s, records);
+        // Observed bytes are already durable. Only unpublished local/journal writes need staging.
+        for path in observed {
+            s.engine.source().records.borrow_mut().remove(&path);
+        }
+        let mut summary = result?;
         if changed_version {
             let listing = s.listing.clone();
             let changes = s.engine.refresh(listing)?;
