@@ -1972,3 +1972,97 @@ fn third_review_first_invalid_engine_candidate_cannot_pin_slot() {
     );
     assert!(e.checkpoint().is_ok());
 }
+
+#[test]
+fn fourth_review_valid_live_replacement_clears_rejection() {
+    let (lib, owner, _) = create();
+    let mut e = engine(&lib, &owner);
+    let (path, raw) = live_at(&lib, &owner, 1, 10, 251)
+        .into_iter()
+        .next()
+        .unwrap();
+    let mut invalid: SignedRecord = serde_json::from_slice(&raw).unwrap();
+    invalid.signature[0] ^= 1;
+    e.apply_paths(
+        e.source()
+            .add([(path.clone(), invalid.encode().unwrap())].into()),
+    )
+    .unwrap();
+    let rejected = success(e.view("listening.podcasts", NOW).unwrap());
+    assert_eq!(rejected.refused.len(), 1);
+    assert!(rejected.refused[0].reason.starts_with("invalidRecord: "));
+
+    e.apply_paths(e.source().add([(path, raw)].into())).unwrap();
+    let view = success(e.view("listening.podcasts", NOW).unwrap());
+    assert_eq!(view.admitted.len(), 1);
+    assert!(
+        view.refused.is_empty(),
+        "stale rejection: {:?}",
+        view.refused
+    );
+    assert!(view.held.is_empty());
+    let checkpoint = e.checkpoint().unwrap();
+    let mut restored = Engine::open(
+        e.source().clone(),
+        e.source().listing(),
+        owner.public(),
+        options(&lib),
+        Some(&checkpoint),
+    )
+    .unwrap();
+    unlock_engine(&mut restored, &owner);
+    let view = success(restored.view("listening.podcasts", NOW).unwrap());
+    assert_eq!(view.admitted.len(), 1);
+    assert!(view.refused.is_empty());
+    assert!(view.held.is_empty());
+}
+
+#[test]
+fn fourth_review_unusable_live_candidate_does_not_count_as_member_write() {
+    let (lib, owner, _) = create();
+    let mut e = engine(&lib, &owner);
+    let (path, raw) = live_at(&lib, &owner, 2, 20, 252)
+        .into_iter()
+        .next()
+        .unwrap();
+    let raw = resign(&raw, &owner, |header| {
+        use base64::Engine as _;
+        let mut bytes = base64::engine::general_purpose::STANDARD
+            .decode(header["ciphertext"].as_str().unwrap())
+            .unwrap();
+        bytes[0] ^= 1;
+        header["ciphertext"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+    });
+    e.apply_paths(e.source().add([(path, raw)].into())).unwrap();
+    let writes_after_invalid = e.me().writes;
+    assert!(success(e.view("listening.podcasts", NOW).unwrap())
+        .admitted
+        .is_empty());
+    // An unusable high generation must neither count nor pin this replaceable slot.
+    e.apply_paths(e.source().add(live_at(&lib, &owner, 1, 10, 253)))
+        .unwrap();
+    assert_eq!(
+        e.me().writes,
+        1,
+        "invalid live candidate remained in member accounting"
+    );
+    assert_eq!(writes_after_invalid, 0);
+    assert_eq!(
+        success(
+            e.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )["seconds"],
+        10.0
+    );
+    let checkpoint = e.checkpoint().unwrap();
+    let mut restored = Engine::open(
+        e.source().clone(),
+        e.source().listing(),
+        owner.public(),
+        options(&lib),
+        Some(&checkpoint),
+    )
+    .unwrap();
+    unlock_engine(&mut restored, &owner);
+    assert_eq!(restored.me().writes, 1);
+}

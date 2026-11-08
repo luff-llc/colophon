@@ -335,7 +335,8 @@ impl NativeEngine {
             s.engine.source().records.borrow_mut().remove(&path);
         }
         let mut summary = result?;
-        if changed_version {
+        // An authority reset already queued the updated listing for replay after host unlock.
+        if changed_version && s.engine.begin_unlock().is_empty() {
             let listing = s.listing.clone();
             let changes = s.engine.refresh(listing)?;
             s.revision += 1;

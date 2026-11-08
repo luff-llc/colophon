@@ -277,3 +277,73 @@ fn third_review_observed_immutable_bytes_are_released_for_audit() {
         "an audit must fetch the provider, not retained observed bytes"
     );
 }
+
+#[test]
+fn fourth_review_observed_version_change_waits_for_authority_unlock() {
+    let (mut library, owner, _) = create();
+    write(
+        &mut library,
+        &owner,
+        "notes",
+        "createNotebook",
+        serde_json::json!({"id":"n","title":"N"}),
+        93,
+    );
+    let source = Source(Arc::new(Mutex::new(
+        library.records().clone().into_iter().collect(),
+    )));
+    let listing: Vec<_> = source.0.lock().unwrap().keys().cloned().collect();
+    let versions = listing.iter().map(|p| (p.clone(), "1".into())).collect();
+    let key = NativeCheckpointPreparation::new(library.id().into(), public(&owner), vec![94; 32])
+        .unwrap();
+    let key = key
+        .finish(owner.sign(&key.signing_body().unwrap()))
+        .unwrap();
+    let engine = NativeEngine::open(
+        Box::new(source.clone()),
+        listing,
+        versions,
+        public(&owner),
+        library.id().into(),
+        vec![],
+        key,
+    )
+    .unwrap();
+    ready(&engine, &owner);
+    let before = engine.work().unwrap();
+    let batch = success(
+        library
+            .begin_rekey(&["notes".into()], NOW, [95; 32])
+            .unwrap(),
+    );
+    let mut observed: Records = finish(batch, &owner).into_iter().collect();
+    let (path, raw) = library
+        .records()
+        .iter()
+        .find(|(p, _)| p.starts_with("ops/"))
+        .unwrap();
+    observed.insert(path.clone(), raw.clone());
+    source.0.lock().unwrap().extend(observed.clone());
+
+    let summary = engine
+        .merge_observed(observed, HashMap::from([(path.clone(), "2".into())]))
+        .unwrap();
+    assert_eq!(summary.records_added, 1);
+    assert!(!engine.begin_unlock().unwrap().is_empty());
+    assert_eq!(
+        engine.work().unwrap().signatures_verified,
+        before.signatures_verified
+    );
+    ready(&engine, &owner);
+    let after = engine.work().unwrap();
+    assert_eq!(after.signatures_verified - before.signatures_verified, 1);
+    assert_eq!(after.applied_operations - before.applied_operations, 1);
+    assert!(matches!(
+        engine
+            .query("notes".into(), "read".into(), b"{}".to_vec(), NOW.into())
+            .unwrap(),
+        JsonOutcome::Success { .. }
+    ));
+    engine.checkpoint(vec![96; 32]).unwrap();
+    engine.verify_batch(128).unwrap();
+}

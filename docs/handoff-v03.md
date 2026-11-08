@@ -320,3 +320,15 @@ SwiftPM sandboxing is unavailable in this environment. Android used JDK 17, the 
 paths and the writable shared Gradle home. Existing SDK XML/FSEvents/Gradle and unavailable
 CoreSimulator warnings did not fail the checks. No new benchmark, device, simulator or visionOS
 runtime claim is made; the performance limitations in the native-session handoff remain applicable.
+
+## Fourth review fixes
+
+Addressed both low-severity findings in [review-v03-agy-4.md](review-v03-agy-4.md).
+
+| Finding | Fix and regression coverage |
+| --- | --- |
+| Observed version change refreshes before authority unlock | `NativeEngine::merge_observed` skips the extra refresh when an authority reset awaits host unlock; the reset already queued the updated listing. `fourth_review_observed_version_change_waits_for_authority_unlock` combines a rekey with an existing immutable record's changed provider version, then verifies deferred, single-pass replay, query, checkpoint and audit. |
+| Replaceable live candidates leave stale diagnostics and write counts | Engine clears the path's rejection when re-evaluating a replaceable record and counts a live candidate only when it carries a usable operation. `fourth_review_valid_live_replacement_clears_rejection` replaces a bad signature with valid bytes and checks diagnostics through checkpoint restore. `fourth_review_unusable_live_candidate_does_not_count_as_member_write` replaces signed corrupt ciphertext with a valid lower generation and checks member counts through restore. |
+
+All three regressions failed before their fixes. Validation passed: `cargo test --workspace`,
+`cargo clippy --workspace -- -D warnings`, and `cargo fmt --check`. Changes remain uncommitted.

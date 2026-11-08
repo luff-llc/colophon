@@ -888,6 +888,10 @@ impl<S: RecordSource> Engine<S> {
             let mut results = parsed.into_iter();
             let mut candidates = Vec::new();
             for (path, raw) in &records {
+                if crate::protocol::is_replaceable(path) {
+                    // Diagnostics describe the current candidate, not prior bytes at this slot.
+                    self.rejections.remove(*path);
+                }
                 let mut entry = Entry {
                     path: (*path).into(),
                     digest: Sha256::digest(raw).into(),
@@ -1152,7 +1156,7 @@ impl<S: RecordSource> Engine<S> {
                         &tail,
                     );
                 }
-                if j.status == Status::Admitted {
+                if j.status == Status::Admitted && (!j.from_live_slot || j.operation.is_some()) {
                     self.member_writes
                         .entry(entry.author_key)
                         .or_default()
