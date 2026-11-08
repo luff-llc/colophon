@@ -51,6 +51,32 @@ Every file was downloaded; there were no iCloud placeholders.
 Members, grants and agents aren't copied (§9). Each app and agent is approved again in the new
 library with exactly the access it needs, which is also a chance to drop stale grants.
 
+## What "views are equal" means
+
+0.1 and 0.4 views can't be compared field by field: field names differ (books `author` versus
+`creator`), revisions come from different operations, and destination authorship belongs to the
+importer by design. A copy is verified by two checks.
+
+1. **Accounting.** For every namespace, every source operation in replica order is either an
+   admitted import child in the destination or listed as unresolved with its reason. Counts
+   match per namespace and per source author. Nothing is silently dropped.
+2. **Reference equality.** The tool runs the **same verified source snapshot** through the **same
+   import transforms** into a fresh **in-memory** 0.4 library, with no folder storage, file
+   publication, retries or blob re-encryption. It then compares that library's complete domain
+   views with the persisted destination's, as canonical JSON per namespace (`viewDigest`).
+
+   Before comparing, it removes **only** fields whose values come from destination operation
+   identity, entropy or signer: revisions, operation and batch IDs, authorship and attribution
+   of import children, and admission timestamps. That list is fixed in code per domain and
+   printed in the report. Every other field must be byte-equal.
+
+   This proves the persisted copy is exactly what the import transforms produce from the
+   verified source. The transforms' own fidelity, 0.1 meaning to 0.4 meaning, is covered by the
+   domain import tests in `crates/colophon-core`.
+
+The report lists both checks per namespace, the normalized-field list, and every unresolved
+record. `verified` is true only if both checks pass in every namespace.
+
 ## Where the code lives
 
 - **Read side (0.1):** a small macOS command in the Colophon Swift reference package, beside
