@@ -30,11 +30,14 @@ revoke open the vault through the owner provider first. `DeviceSession.open`
 accepts an external owner provider, including a provider with an existing PRF
 route. This package adds no passkey ceremonies.
 
-Creation without a kit uses the core's two signing rounds: genesis, seq-2
-rekey, member request/grant, and layout 2. **Kit creation is blocked:** the
-landed core/WASM creation API has no input for a kit controller or genesis
-slot. `DeviceSession.create` rejects a supplied kit explicitly. The default
-demo runs through End and reports this blocker at Recover.
+Creation uses the generated WASM `begin_create_with` transport through the
+playground adapter in `src/core.ts`, because the SDK facade's `Library.create`
+still exposes only owner-only creation. Both signing rounds stay in the core:
+genesis, seq-2 rekey, member request/grant, and layout 2. The demo supplies an
+independent recovery-kit controller in genesis, with its own sealed vault slot,
+`threshold: 1` and `recoverThreshold: 1`. The kit supplies only public keys during
+creation; it never signs creation. Hosts may omit the kit for an owner-only
+keyring with `recoverThreshold: 0`.
 
 `DeviceSession.restore` accepts existing kit-enabled 0.4 records: the kit
 opens its vault slot and signs a recovery-rule keyring addition, then the new
@@ -44,7 +47,7 @@ controller receives only `approve`. The demo restore uses a raw owner provider;
 opening existing sessions accepts other provider forms.
 
 The demo stores CryptoKey handles in IndexedDB separately from the records and
-never persists the vault seed. A demo kit handle, when supplied by a host, is
+never persists the vault seed. The demo kit handle is
 stored alongside the device handles for convenience; this is not an exported
 or independently stored recovery kit. The 0.4 storage keys do not reopen older
 libraries.
