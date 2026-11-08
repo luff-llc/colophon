@@ -66,7 +66,7 @@ impl Namespace {
     ) {
         self.state.apply_with_context(op, kind.as_ref());
         self.applied += 1;
-        self.clock = op.clock;
+        self.clock = self.clock.max(op.clock);
         self.order.push(digest.into());
         self.hashes
             .push(roll(self.hashes.last().copied().unwrap_or([0; 32]), digest));
@@ -76,6 +76,23 @@ impl Namespace {
                 self.checkpoints.remove(0);
             }
         }
+    }
+    /// Insert an already verified live predecessor after unrelated durable work. The
+    /// caller proves episode ordering is unchanged; keep canonical prefix hashes for caches.
+    pub fn insert_retained(
+        &mut self,
+        digest: &str,
+        op: &OperationView,
+        kind: Option<crate::domain::AuthorContext>,
+        position: usize,
+    ) {
+        self.state.apply_with_context(op, kind.as_ref());
+        self.applied += 1;
+        self.clock = self.clock.max(op.clock);
+        self.order.insert(position, digest.into());
+        self.hashes = prefix_hashes(&self.order);
+        self.checkpoints
+            .retain(|snapshot| snapshot.position <= position);
     }
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {

@@ -1453,3 +1453,317 @@ fn merged_engine_playback_receipts_anchors_and_retention() {
         3.0
     );
 }
+
+#[test]
+fn second_review_engine_rekeyed_live_replacement_waits_for_unlock() {
+    let (mut lib, owner, _) = create();
+    lib.merge(live_at(&lib, &owner, 1, 1, 211)).unwrap();
+    let mut e = engine(&lib, &owner);
+    let source = e.source().clone();
+    let batch = success(
+        lib.begin_rekey(&["listening.podcasts".into()], NOW, [212; 32])
+            .unwrap(),
+    );
+    apply(&mut lib, batch, &owner);
+    lib.merge(live_at(&lib, &owner, 2, 2, 213)).unwrap();
+    source.add(lib.records().clone());
+    e.refresh(source.listing()).unwrap();
+    unlock_engine(&mut e, &owner);
+    assert_eq!(
+        success(
+            e.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )["seconds"],
+        2.0
+    );
+}
+
+#[test]
+fn second_review_retained_head_behind_immutable_tail_keeps_cache() {
+    let (mut lib, owner, _) = create();
+    lib.merge(live_at(&lib, &owner, 1, 10, 220)).unwrap();
+    for n in 0..20 {
+        support::write(
+            &mut lib,
+            &owner,
+            "listening.podcasts",
+            "follow",
+            json!({"id":format!("show{n}"),"url":"https://example.org/feed"}),
+            221 + n,
+        );
+    }
+    let mut e = engine(&lib, &owner);
+    let source = e.source().clone();
+    let checkpoint = e.checkpoint().unwrap();
+    e = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        Some(&checkpoint),
+    )
+    .unwrap();
+    unlock_engine(&mut e, &owner);
+    let batch = success(
+        e.begin_write(
+            "listening.podcasts",
+            "position",
+            json!({"id":"ep","seconds":3,"seek":true}),
+            NOW,
+            [245; 32],
+        )
+        .unwrap(),
+    );
+    let records = finish(batch, &owner);
+    let applications = lib.applied_operations("listening.podcasts");
+    lib.merge(records.clone()).unwrap();
+    assert_eq!(
+        lib.applied_operations("listening.podcasts") - applications,
+        2
+    );
+    e.apply_paths(source.add(records)).unwrap();
+    assert_eq!(e.open_mode(), &OpenMode::VerifiedPrefix);
+    assert_eq!(e.stats().applied_operations, 2);
+    let cached = e.checkpoint().unwrap();
+    let mut restored = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        Some(&cached),
+    )
+    .unwrap();
+    unlock_engine(&mut restored, &owner);
+    assert_eq!(restored.stats().applied_operations, 0);
+    let cached = lib.checkpoint("listening.podcasts").unwrap();
+    let mut restored_lib = Library::open_with_checkpoints(
+        lib.records().clone(),
+        owner.public(),
+        [("listening.podcasts".into(), cached)].into(),
+    )
+    .unwrap();
+    unlock(&mut restored_lib, &owner);
+    assert_eq!(restored_lib.applied_operations("listening.podcasts"), 0);
+    let cold = opened(source.0.borrow().clone(), &owner);
+    assert_eq!(
+        success(
+            e.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        ),
+        success(
+            cold.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        success(
+            lib.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        ),
+        success(
+            cold.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn second_review_engine_boundary_and_durable_actions_survive_cold_open() {
+    let (mut lib, owner, _) = create();
+    lib.merge(live_at(&lib, &owner, 1023, 10, 214)).unwrap();
+    let mut e = engine(&lib, &owner);
+    let source = e.source().clone();
+    let ns = "listening.podcasts";
+    for n in 0u64..1030 {
+        let mut seed = [0; 32];
+        seed[..8].copy_from_slice(&n.to_le_bytes());
+        let batch = success(
+            e.begin_write(ns, "position", json!({"id":"ep","seconds":11+n}), NOW, seed)
+                .unwrap(),
+        );
+        if n == 0 {
+            assert!(batch.steps.iter().any(|s| s.path.starts_with("ops/")));
+        }
+        e.apply_paths(source.add(finish(batch, &owner))).unwrap();
+    }
+    let batch = success(
+        e.begin_write(
+            ns,
+            "position",
+            json!({"id":"ep","seconds":2,"seek":true}),
+            NOW,
+            [216; 32],
+        )
+        .unwrap(),
+    );
+    e.apply_paths(source.add(finish(batch, &owner))).unwrap();
+    assert_eq!(
+        success(
+            opened(source.0.borrow().clone(), &owner)
+                .query(ns, "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )["seconds"],
+        2.0
+    );
+    let batch = success(
+        e.begin_write(
+            ns,
+            "queue",
+            json!({"episodes":["ep","next"]}),
+            NOW,
+            [217; 32],
+        )
+        .unwrap(),
+    );
+    e.apply_paths(source.add(finish(batch, &owner))).unwrap();
+    let episode = success(e.query(ns, "getEpisode", json!({"id":"ep"}), NOW).unwrap());
+    let queue = success(e.query(ns, "getQueue", json!({}), NOW).unwrap());
+    let batch = success(e.begin_write(ns, "completePlayback", json!({
+        "id":"end","events":[{"eventID":"event","episode":"ep","show":"show","audio":"audio",
+        "endSeconds":2000,"actualDuration":2000,"expectedPosition":episode["positionRevision"],"expectedState":episode["stateRevision"]}],
+        "baseQueue":["ep","next"],"expect":queue["value"]["head"]}), NOW, [218;32]).unwrap());
+    e.apply_paths(source.add(finish(batch, &owner))).unwrap();
+    let mut cold = Engine::open(
+        source.clone(),
+        source.listing(),
+        owner.public(),
+        options(&lib),
+        None,
+    )
+    .unwrap();
+    unlock_engine(&mut cold, &owner);
+    assert_eq!(
+        success(
+            cold.query(ns, "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        )["seconds"],
+        2000.0
+    );
+    assert_eq!(
+        success(cold.query(ns, "getQueue", json!({}), NOW).unwrap())["value"]["page"]["rows"][0]
+            ["id"],
+        "next"
+    );
+    assert!(success(cold.view(ns, NOW).unwrap()).refused.is_empty());
+}
+
+#[test]
+fn second_review_retention_replays_past_conditional_failures() {
+    let (mut lib, owner, _) = create();
+    lib.merge(live_at(&lib, &owner, 1, 10, 230)).unwrap();
+    let revision = success(
+        lib.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+            .unwrap(),
+    )["positionRevision"]
+        .clone();
+    // A remote writer omitted the required dependency copy. This conditional operation is
+    // initially stale, but inserting its exact predecessor changes its historical result.
+    let mut batch = success(
+        lib.begin_write(
+            "listening.podcasts",
+            "position",
+            json!({"id":"ep","seconds":2,"seek":true,"expect":revision}),
+            NOW,
+            [231; 32],
+        )
+        .unwrap(),
+    );
+    batch.copies.clear();
+    lib.merge(finish(batch, &owner)).unwrap();
+    let mut e = engine(&lib, &owner);
+    let source = e.source().clone();
+    let batch = success(
+        e.begin_write(
+            "listening.podcasts",
+            "position",
+            json!({"id":"ep","seconds":3,"seek":true}),
+            NOW,
+            [232; 32],
+        )
+        .unwrap(),
+    );
+    let records = finish(batch, &owner);
+    lib.merge(records.clone()).unwrap();
+    e.apply_paths(source.add(records)).unwrap();
+    let cold = opened(source.0.borrow().clone(), &owner);
+    let expected = success(
+        cold.query("listening.podcasts", "read", json!({}), NOW)
+            .unwrap(),
+    );
+    assert_eq!(
+        success(
+            e.query("listening.podcasts", "read", json!({}), NOW)
+                .unwrap()
+        ),
+        expected
+    );
+    assert_eq!(
+        success(
+            lib.query("listening.podcasts", "read", json!({}), NOW)
+                .unwrap()
+        ),
+        expected
+    );
+}
+
+#[test]
+fn second_review_carried_head_loses_revoked_clock_anchor() {
+    let (mut lib, owner, _) = create();
+    let device = keys(235);
+    enroll(
+        &mut lib,
+        &owner,
+        &device,
+        "Device",
+        MemberKind::Device,
+        grant(&["listening.podcasts"], None),
+        236,
+    );
+    let mut revoker = lib.clone(); // This device has not observed the contribution it revokes.
+    let anchor = adversarial(
+        &lib,
+        &owner,
+        &device,
+        "listening.podcasts",
+        colophon_core::model::Operation {
+            id: String::new(),
+            kind: "queue".into(),
+            v: 1,
+            clock: 1024,
+            authority: lib.authority().latest,
+            created: NOW.into(),
+            payload: json!({"episodes":[]}),
+        },
+        lib.authority()
+            .epoch_at("listening.podcasts", lib.authority().latest)
+            .unwrap(),
+        237,
+    );
+    lib.merge(anchor).unwrap();
+    lib.merge(live_at(&lib, &owner, 1500, 10, 238)).unwrap();
+    let mut e = engine(&lib, &owner);
+    let source = e.source().clone();
+    let batch = success(
+        revoker
+            .begin_revoke(&device.public().id(), NOW, [239; 32])
+            .unwrap(),
+    );
+    apply(&mut revoker, batch, &owner);
+    lib.merge(revoker.records().clone()).unwrap();
+    unlock(&mut lib, &owner);
+    source.add(revoker.records().clone());
+    e.refresh(source.listing()).unwrap();
+    unlock_engine(&mut e, &owner);
+    let expected = success(
+        lib.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+            .unwrap(),
+    );
+    assert!(expected.is_null());
+    assert_eq!(
+        success(
+            e.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+                .unwrap()
+        ),
+        expected
+    );
+}

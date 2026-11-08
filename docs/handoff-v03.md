@@ -206,3 +206,56 @@ service and the existing Gradle/SDK/FSEvents warnings did not fail the checks. N
 or simulator execution is claimed. Per-slot witnesses protect an existing Engine/cache; a fresh
 replica without witnesses still cannot prove global freshness or detect rollback of an entire
 otherwise valid private cache.
+
+## Second review fixes
+
+Addressed the remaining findings 1, 3 and 6 and the four new problems in
+[review-v03-agy-2.md](review-v03-agy-2.md) on `engine-sessions`. These changes cover the
+storage engine used by native sessions and the compatibility `Library`. This section supersedes
+the first review's live-verification, anchoring and predecessor-cache claims. Changes remain
+uncommitted; no Git write commands were used.
+
+| Problem | Final behavior | Regression coverage |
+| --- | --- | --- |
+| Authority-only relay verification rejects generations above 1,024 | `live_generation` authenticates signature, authority, epoch, stamp, payload and the absolute interoperable clock limit without assuming a local durable prefix. Compatibility merge and both ingestion paths retain the relative 1,024 bound. Incoming immutable anchors and changed authority are evaluated before replacing a head. | `second_review_authority_only_relay_verifier` authenticates generation 2,049 using only authority and keys, then checks normal admission with anchors. Existing forward-exhaustion and forged/stale-head tests remain green. |
+| Locked/new-epoch replacements are silently lost | Compatibility merge quarantines signed, admissible candidates separately from the old envelope and retries them after unlock. Malformed candidates cannot evict the old head or another queued valid candidate. Engine refresh defers unavailable payloads until host ECDH, preserves authenticated fallbacks and witnesses, and refuses a checkpoint over unresolved candidates. Carried fallbacks are readmitted against current authority and the rebuilt durable clock. | `second_review_locked_and_rekeyed_replacements_are_retried`, `second_review_deferred_invalid_payload_never_evicts_valid_candidate`, `second_review_engine_rekeyed_live_replacement_waits_for_unlock`, and `second_review_carried_head_loses_revoked_clock_anchor`. |
+| Passive boundary transitions can strand subsequent durable actions | Shared preparation publishes an immutable anchor when the next passive clock reaches the durable clock plus 1,024. It retains target/cited predecessors, including other authors' heads and older peers' live samples already at the limit. Admission and local write clocks never decrease when older predecessors become durable. Seeks, completion and queue edits stay immutable. | `second_review_passive_anchor_boundary_and_durable_actions` and `second_review_engine_boundary_and_durable_actions_survive_cold_open` each exercise more than 1,024 further ticks, a seek, a queue edit, completion and cold reopen. `second_review_cross_author_and_other_episode_boundary` checks device/episode changes and older boundary samples. |
+| Retaining a live head behind unrelated durable work invalidates the prefix | Only exact authenticated envelope/order matches can bypass earlier-arrival replay. The engine preserves the verified prefix; compatibility inserts the predecessor in canonical durable order and rebuilds its prefix hashes. Neither path reapplies unrelated durable operations. Intervening episode changes, admission rejections and reducer conflicts/invalid outcomes retain conservative ordered replay. | `second_review_retained_head_behind_immutable_tail_keeps_cache` checks two reducer applications on both paths after twenty unrelated writes, engine `VerifiedPrefix`, matching cold state and zero-application checkpoint restoration. `second_review_retention_replays_past_conditional_failures` ensures insertion still reevaluates a conditional operation whose historical outcome changes. |
+
+Seven new regressions failed against the pre-task implementation and passed after the fixes.
+The exact older-peer cross-author boundary case already passed in this merged worktree: its
+shared preparer already retained passive-anchor dependencies. The new boundary-policy tests fail
+before the earlier anchoring change. The initial engine-only cache experiment also independently
+failed with `Earlier arrival or duplicate changes admission order`; the combined regression exposes
+compatibility's twenty unnecessary prefix applications first. Logs are in
+`target/second-review/{before.log,before-all.log}`. A further failing experiment caught a carried
+head surviving revocation of its supporting anchor; `carried-before.log` / `carried-after.log`
+record that correction. The ten new tests are in `tests/v03.rs` and `tests/storage.rs`.
+
+Updated specification §5.1 covers standalone authentication versus admission, deferred replacement,
+current-authority fallback checks, boundary anchors, exact predecessor insertion and monotonic
+clocks. No public FFI API, generated binding source, reducer schema or checkpoint format changed.
+Bindings were regenerated and the XCFramework rebuilt so native tests exercise the new Rust core.
+Compatibility insertion still rebuilds prefix hashes; this is not a claim that all compatibility
+CPU work is O(delta). Existing private-cache/global-freshness and mobile-performance limitations
+remain as documented in [handoff-engine-sessions.md](handoff-engine-sessions.md).
+
+Final validation logs and preserved Android XML results are under `target/second-review/`:
+
+| Check | Result |
+| --- | --- |
+| `cargo test` | 175 passed, 0 failed; one existing opt-in benchmark ignored |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| `cargo fmt --all --check`, `git diff --check` | Passed |
+| `COLOPHON_SOFTWARE_KEYS=1 bash scripts/test-swift.sh` | All five runs passed: 29 + 39 + 1 + 9 + 12 reported tests; three existing opt-in cases skipped |
+| `node --test relay/` | 12 passed |
+| `npm --prefix js ci`, `npm --prefix js run build`, `npm --prefix js test` | Passed; final WASM rebuild, key-security checks, Node smoke and Rust/WASM fixture/query parity passed |
+| `bash scripts/test-android.sh` | 60 passed, 0 failed; two existing opt-in cases skipped |
+| `bash scripts/test-relay-cross.sh` | All six Apple/Android stages passed on the final build, including live replacement, deliberate rewind and blobs |
+| `SKIP_VISIONOS=1 bash scripts/build-apple.sh` | Passed; generated sources unchanged, 182 MiB macOS/iOS-device/iOS-simulator XCFramework rebuilt |
+
+Swift uses the existing workspace-cache wrapper for `swift test --disable-sandbox` with software
+keys because nested SwiftPM sandboxing is unavailable here. Android used JDK 17, the supplied
+SDK/NDK paths and the writable shared Gradle home. Existing SDK XML/FSEvents/Gradle, SwiftPM cache
+and unavailable CoreSimulator warnings did not fail checks. No visionOS or device/simulator
+execution is claimed.

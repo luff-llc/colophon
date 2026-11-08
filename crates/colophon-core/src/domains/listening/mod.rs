@@ -64,6 +64,22 @@ impl PodcastsState {
         state
     }
 
+    /// Inserting an older live sample must not change a prior conditional outcome.
+    pub(crate) fn can_insert_retained(&self, op: &AdmittedOperation) -> bool {
+        self.conflicts.is_empty()
+            && self.invalid.is_empty()
+            && self
+                .episodes
+                .get(text(&op.payload, "id"))
+                .is_none_or(|row| {
+                    (
+                        row["clock"].as_u64().unwrap_or(0),
+                        text(row, "author"),
+                        text(row, "revision"),
+                    ) < (op.clock, op.author.as_str(), op.id.as_str())
+                })
+    }
+
     pub(crate) fn playback_revision_is(&self, episode: &str, revision: &str) -> bool {
         self.episodes.get(episode).is_some_and(|row| {
             row["positionRevision"] == revision || row["stateRevision"] == revision

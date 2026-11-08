@@ -758,6 +758,20 @@ impl<S: RecordSource> Engine<S> {
                 }
             }
         }
+        // Keep authenticated fallbacks across an authority/key refresh. Recheck current
+        // authority before carrying them; candidates in storage are still untrusted.
+        for (key, judged) in &self.library.live {
+            let path = crate::protocol::live_state_path(&key.0, &key.1, &key.2);
+            if let Some(raw) = self.library.records.get(&path) {
+                if library
+                    .live_generation(&path, raw, &judged.header.meta.created)
+                    .is_ok()
+                {
+                    library.live.insert(key.clone(), judged.clone());
+                    library.records.insert(path, raw.clone());
+                }
+            }
+        }
         self.library = library;
         self.library.read_scope = self.options.namespaces.clone();
         self.generation += 1;
@@ -902,6 +916,11 @@ impl<S: RecordSource> Engine<S> {
                             if !self.entries.is_empty()
                                 && !path.starts_with("state/")
                                 && self.needs_replay(&header.meta)
+                                && (!self.library.retains_live(&header, raw)
+                                    || self
+                                        .rejections
+                                        .values()
+                                        .any(|(ns, _, _)| *ns == header.meta.namespace))
                             {
                                 invalidates = true;
                             }
@@ -1015,6 +1034,18 @@ impl<S: RecordSource> Engine<S> {
                 };
                 if j.from_live_slot
                     && status == Status::Admitted
+                    && !self
+                        .library
+                        .keys
+                        .contains_key(&(meta.namespace.clone(), meta.epoch))
+                {
+                    // Authority arrives before host ECDH. Retry from the source after unlock;
+                    // do not overwrite the verified index, envelope, or high-water witness.
+                    self.pending.push(entry.path);
+                    continue;
+                }
+                if j.from_live_slot
+                    && status == Status::Admitted
                     && self
                         .library
                         .authority
@@ -1029,7 +1060,9 @@ impl<S: RecordSource> Engine<S> {
                     self.library
                         .admission
                         .clocks
-                        .insert(meta.namespace.clone(), meta.clock);
+                        .entry(meta.namespace.clone())
+                        .and_modify(|clock| *clock = (*clock).max(meta.clock))
+                        .or_insert(meta.clock);
                 }
                 j.status = status;
                 if j.status == Status::Admitted && j.operation.is_some() {
@@ -1132,7 +1165,7 @@ impl<S: RecordSource> Engine<S> {
                 state.revision += 1;
                 if j.status == Status::Admitted {
                     if let Some(op) = j.operation.take() {
-                        state.clock = op.clock;
+                        state.clock = state.clock.max(op.clock);
                         let kind = contexts.get(&op.author);
                         reductions
                             .entry(meta.namespace.clone())
@@ -1207,6 +1240,30 @@ impl<S: RecordSource> Engine<S> {
             self.reset("Earlier arrival or duplicate changes admission order")?;
             return self.process_pending();
         }
+        // Carried fallbacks were authenticated before this authority refresh. A revoked
+        // immutable anchor can lower the admitted clock, so recheck their relative bounds
+        // against the rebuilt prefix before allowing any fallback to remain visible.
+        self.library.live.retain(|_, j| {
+            let meta = &j.header.meta;
+            self.library
+                .authority
+                .members
+                .get(&meta.author)
+                .is_some_and(|m| m.member.revoked_at.is_none())
+                && Library::judge(
+                    &self.library.authority,
+                    meta,
+                    &j.digest,
+                    &mut BTreeMap::new(),
+                    self.library
+                        .admission
+                        .clocks
+                        .get(&meta.namespace)
+                        .copied()
+                        .unwrap_or(0),
+                    true,
+                ) == Status::Admitted
+        });
         for ns in &self.library.authority.namespaces {
             self.library
                 .namespaces
@@ -1271,6 +1328,10 @@ impl<S: RecordSource> Engine<S> {
     /// except values retained by reducers. Protect this local cache; never sync it as protocol authority.
     pub fn checkpoint(&self) -> Result<Vec<u8>> {
         self.check_ready()?;
+        ensure(
+            self.pending.is_empty(),
+            "Live candidates require epoch unlock before checkpoint",
+        )?;
         let projections = self
             .library
             .namespaces
@@ -1677,6 +1738,7 @@ fn empty_library(authority: Authority, me: PublicIdentity) -> Library {
         pending_checkpoints: BTreeMap::new(),
         verifiers,
         live: BTreeMap::new(),
+        pending_live: BTreeMap::new(),
     }
 }
 fn read_authority(

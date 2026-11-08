@@ -108,6 +108,8 @@ pub struct Library {
     verifiers: std::sync::Arc<crate::verification::Verifiers>,
     /// Current live slots keyed by (author, namespace, slot).
     live: BTreeMap<(String, String, String), Judged>,
+    /// Signed candidates awaiting epoch keys; never replace the verified envelope early.
+    pending_live: BTreeMap<String, Vec<Vec<u8>>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Status {
@@ -235,6 +237,7 @@ impl Library {
             changes: ChangeSummary::default(),
             pending_checkpoints: BTreeMap::new(),
             live: BTreeMap::new(),
+            pending_live: BTreeMap::new(),
         };
         let paths = library
             .records
@@ -308,9 +311,9 @@ impl Library {
             &header.meta,
             &digest,
             &mut BTreeMap::new(),
-            self.namespaces
-                .get(&header.meta.namespace)
-                .map_or(0, |n| n.clock),
+            // Standalone relay verifiers have authority and keys, but no durable prefix.
+            // Relative bounds belong to admission/merge, never this authentication API.
+            header.meta.clock,
             true,
         );
         ensure(
@@ -329,6 +332,70 @@ impl Library {
         Self::open_operation(&self.authority, &self.keys, &mut j);
         ensure(j.operation.is_some(), "Live payload unavailable or invalid")?;
         Ok(generation)
+    }
+    /// Header-only admission is sufficient to quarantine bytes, never to promote them.
+    fn live_header(&self, path: &str, raw: &[u8]) -> Result<(OperationHeader, String)> {
+        let (header, digest) = self
+            .verifiers
+            .operations(&self.authority, &[(path, raw)], None)?
+            .remove(0)?;
+        ensure(
+            self.authority
+                .members
+                .get(&header.meta.author)
+                .is_some_and(|m| m.member.revoked_at.is_none()),
+            "Revoked live writer",
+        )?;
+        ensure(
+            Self::judge(
+                &self.authority,
+                &header.meta,
+                &digest,
+                &mut BTreeMap::new(),
+                self.admission
+                    .clocks
+                    .get(&header.meta.namespace)
+                    .copied()
+                    .unwrap_or(0),
+                true,
+            ) == Status::Admitted,
+            "Live writer is not currently admitted",
+        )?;
+        Ok((header, digest))
+    }
+    fn retry_live(&mut self) -> Result<()> {
+        let pending = std::mem::take(&mut self.pending_live);
+        let mut changes = self.changes.clone();
+        for (path, mut candidates) in pending {
+            candidates.sort_by_key(|raw| decode_header(raw).map(|h| h.meta.clock));
+            for raw in candidates {
+                self.merge([(path.clone(), raw)].into())?;
+                changes.namespaces.extend(self.changes.namespaces.clone());
+            }
+        }
+        self.changes = changes;
+        Ok(())
+    }
+    /// Only the exact previously authenticated current head can bypass earlier-arrival replay.
+    fn retains_live(&self, header: &OperationHeader, raw: &[u8]) -> bool {
+        let Some(stamp) = &header.live else {
+            return false;
+        };
+        let key = (
+            header.meta.author.clone(),
+            header.meta.namespace.clone(),
+            stamp.slot.clone(),
+        );
+        self.live.get(&key).is_some_and(|j| {
+            j.operation.as_ref().is_some_and(|op| {
+                self.namespaces
+                    .get(&key.1)
+                    .is_some_and(|n| n.state.can_insert_retained(op))
+            }) && order(&j.header.meta) == order(&header.meta)
+        }) && self
+            .records
+            .get(&crate::protocol::live_state_path(&key.0, &key.1, &key.2))
+            .is_some_and(|old| old == raw)
     }
     /// Merge immutable records transactionally. Conflicting paths fail; identical replay is harmless.
     pub fn merge(&mut self, incoming: Records) -> Result<()> {
@@ -379,10 +446,25 @@ impl Library {
             self.verifiers = std::sync::Arc::new(crate::verification::Verifiers::new(&authority));
             self.authority = authority;
         }
-        // Keep an already authenticated high-water value when a provider returns an older
-        // slot. Invalid higher generations never displace it. No canonical bytes are repaired.
-        let mut ignored = Vec::new();
+        // Authenticate candidates against the complete incoming immutable prefix. Locked
+        // candidates remain separate until payload validation can succeed after unlock.
         let mut staged = None;
+        if incoming.keys().any(|p| crate::protocol::is_replaceable(p))
+            && (authority_changed || incoming.keys().any(|p| p.starts_with("ops/")))
+        {
+            let mut candidate = self.clone();
+            candidate.merge(
+                incoming
+                    .iter()
+                    .filter(|(p, _)| !crate::protocol::is_replaceable(p))
+                    .map(|(p, b)| (p.clone(), b.clone()))
+                    .collect(),
+            )?;
+            staged = Some(candidate);
+        }
+        let validator = staged.as_ref().unwrap_or(self);
+        let mut ignored = Vec::new();
+        let mut deferred = Vec::new();
         for (path, raw) in &incoming {
             if !crate::protocol::is_replaceable(path) {
                 continue;
@@ -390,67 +472,47 @@ impl Library {
             let Some(old) = self.records.get(path) else {
                 continue;
             };
-            // A replacement must be completely authenticated before it can evict bytes,
-            // including while locked. Never use an incoming claimed date to validate old state.
-            let Some(new_header) = decode_header(raw) else {
+            let Ok((header, _)) = validator.live_header(path, raw) else {
                 ignored.push(path.clone());
                 continue;
             };
-            // A synchronized batch can bring a durable anchor and a newer live head together.
-            // Validate against the authenticated incoming immutable prefix in that case.
-            let validator = if new_header.meta.clock
-                > self
-                    .namespaces
-                    .get(&new_header.meta.namespace)
-                    .map_or(0, |n| n.clock)
-                    .saturating_add(1024)
-                && incoming.keys().any(|p| p.starts_with("ops/"))
+            let old_generation = validator.live_header(path, old).ok().and_then(|(h, _)| {
+                // If keys are available, even a signed old envelope must pass payload binding.
+                (!validator
+                    .keys
+                    .contains_key(&(h.meta.namespace.clone(), h.meta.epoch))
+                    || validator
+                        .live_generation(path, old, &h.meta.created)
+                        .is_ok())
+                .then_some(h.meta.clock)
+            });
+            if let Some(old_generation) = old_generation {
+                ensure(
+                    header.meta.clock != old_generation,
+                    "Equivocation at live generation",
+                )?;
+                if header.meta.clock < old_generation {
+                    ignored.push(path.clone());
+                    continue;
+                }
+            }
+            if !validator
+                .keys
+                .contains_key(&(header.meta.namespace.clone(), header.meta.epoch))
             {
-                if staged.is_none() {
-                    let mut candidate = self.clone();
-                    candidate.merge(
-                        incoming
-                            .iter()
-                            .filter(|(p, _)| !crate::protocol::is_replaceable(p))
-                            .map(|(p, b)| (p.clone(), b.clone()))
-                            .collect(),
-                    )?;
-                    staged = Some(candidate);
-                }
-                staged.as_ref().expect("staged immutable prefix")
-            } else {
-                &*self
-            };
-            let Ok(generation) = validator.live_generation(path, raw, &new_header.meta.created)
-            else {
-                // Even while locked, two authenticated envelopes for one generation are
-                // a writer conflict. Never silently choose between them.
-                if decode_header(old).is_some_and(|h| h.meta.clock == new_header.meta.clock) {
-                    let verified = self.verifiers.operations(
-                        &self.authority,
-                        &[(path, old), (path, raw)],
-                        None,
-                    )?;
-                    ensure(
-                        !verified.iter().all(Result::is_ok),
-                        "Equivocation at live generation",
-                    )?;
-                }
+                deferred.push((path.clone(), raw.clone()));
                 ignored.push(path.clone());
-                continue;
-            };
-            if let Some(old_header) = decode_header(old) {
-                if validator
-                    .live_generation(path, old, &old_header.meta.created)
-                    .is_ok()
-                {
-                    if generation == old_header.meta.clock {
-                        return Err(Error("Equivocation at live generation".into()));
-                    }
-                    if generation < old_header.meta.clock {
-                        ignored.push(path.clone());
-                    }
-                }
+            } else if validator
+                .live_generation(path, raw, &header.meta.created)
+                .is_err()
+            {
+                ignored.push(path.clone());
+            }
+        }
+        for (path, raw) in deferred {
+            let candidates = self.pending_live.entry(path).or_default();
+            if !candidates.contains(&raw) {
+                candidates.push(raw);
             }
         }
         for path in ignored {
@@ -705,6 +767,7 @@ impl Library {
         self.checkpoint_keys
             .insert((namespace.into(), epoch), checkpoint_key);
         self.ingest(&[], true, &[namespace.into()]);
+        self.retry_live()?;
         Ok(())
     }
     /// Complete all host ECDH results atomically, then refresh admission/projections once.
@@ -727,6 +790,7 @@ impl Library {
                 self.checkpoint_keys.insert(location, checkpoint_key);
             }
             self.ingest(&[], true, &invalidated);
+            self.retry_live()?;
         }
         Ok(())
     }
@@ -1267,7 +1331,7 @@ impl Library {
         // Periodically anchor playback in durable history. Overwritten ticks never advance
         // admission's durable clock; every cold reader can validate the same bounded gap.
         if clock
-            > self
+            >= self
                 .namespaces
                 .get(namespace)
                 .map_or(0, |n| n.clock)
@@ -1685,11 +1749,29 @@ impl Library {
             }
         }
         candidates.sort_by(|a, b| order(&a.header.meta).cmp(&order(&b.header.meta)));
+        let retained: BTreeSet<_> = candidates
+            .iter()
+            .filter(|c| {
+                !c.from_live_slot
+                    && self
+                        .records
+                        .get(&crate::protocol::operation_path(&c.header.meta))
+                        .is_some_and(|raw| self.retains_live(&c.header, raw))
+                    && !self.judged.iter().any(|j| {
+                        j.header.meta.namespace == c.header.meta.namespace
+                            && j.status != Status::Admitted
+                    })
+            })
+            .map(|c| c.digest.clone())
+            .collect();
         replay |= candidates.iter().any(|c| c.from_live_slot);
         // Namespace clock checks are independent. Only a capped author's grant-wide budget
         // adds an ordering dependency across namespaces. This permits cheap local appends to
         // a quieter namespace even when another namespace has a much higher clock.
         for candidate in &candidates {
+            if retained.contains(&candidate.digest) {
+                continue;
+            }
             let meta = &candidate.header.meta;
             let before = |tail: &(u64, String, String)| {
                 order(meta) <= (tail.0, tail.1.as_str(), tail.2.as_str())
@@ -1768,7 +1850,9 @@ impl Library {
             if status == Status::Admitted && !j.from_live_slot {
                 self.admission
                     .clocks
-                    .insert(meta.namespace.clone(), meta.clock);
+                    .entry(meta.namespace.clone())
+                    .and_modify(|clock| *clock = (*clock).max(meta.clock))
+                    .or_insert(meta.clock);
             }
             if status == Status::Admitted
                 && j.operation.is_some()
@@ -1878,17 +1962,25 @@ impl Library {
                             .namespaces
                             .entry(ns.clone())
                             .or_insert_with(|| Namespace::new(ns));
-                        state.append(
-                            &j.digest,
-                            view,
-                            self.authority.members.get(&view.author).map(|member| {
-                                domain::AuthorContext::from_member(
-                                    &member.member,
-                                    &self.authority.id,
-                                )
-                            }),
-                            &self.checkpoint_policy,
-                        );
+                        let context = self.authority.members.get(&view.author).map(|member| {
+                            domain::AuthorContext::from_member(&member.member, &self.authority.id)
+                        });
+                        if retained.contains(&j.digest) {
+                            let position = self
+                                .judged
+                                .iter()
+                                .filter(|other| {
+                                    !other.from_live_slot
+                                        && other.status == Status::Admitted
+                                        && other.operation.is_some()
+                                        && other.header.meta.namespace == *ns
+                                        && order(&other.header.meta) < order(&j.header.meta)
+                                })
+                                .count();
+                            state.insert_retained(&j.digest, view, context, position);
+                        } else {
+                            state.append(&j.digest, view, context, &self.checkpoint_policy);
+                        }
                     }
                 }
                 let state = self
@@ -2109,7 +2201,7 @@ impl Library {
         }
         // Bound each admitted header's forward jump, including a namespace's first header.
         // Replaceable ticks must be backed by a nearby durable anchor too.
-        if meta.clock > clock.saturating_add(1024) {
+        if meta.clock > 9_007_199_254_740_991 || meta.clock > clock.saturating_add(1024) {
             return refuse("clockJump");
         }
         let count = spent.entry(meta.author.clone()).or_default();

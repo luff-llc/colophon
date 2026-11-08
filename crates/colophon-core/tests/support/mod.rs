@@ -198,3 +198,49 @@ pub fn public_identity(seed: u8) -> PublicIdentity {
 }
 
 pub mod books;
+
+/// Signed passive sample at a chosen clock, independent of the honest writer's anchor policy.
+pub fn live_at(lib: &Library, owner: &SoftwareKeys, clock: u64, seconds: u64, seed: u8) -> Records {
+    let raw = adversarial(
+        lib,
+        owner,
+        owner,
+        "listening.podcasts",
+        Operation {
+            id: String::new(),
+            kind: "position".into(),
+            v: 1,
+            clock,
+            authority: lib.authority().latest,
+            created: NOW.into(),
+            payload: serde_json::json!({"id":"ep","seconds":seconds}),
+        },
+        lib.authority()
+            .epoch_at("listening.podcasts", lib.authority().latest)
+            .unwrap(),
+        seed,
+    )
+    .into_values()
+    .next()
+    .unwrap();
+    let record: SignedRecord = serde_json::from_slice(&raw).unwrap();
+    let mut header: OperationHeader = serde_json::from_slice(&record.body).unwrap();
+    let slot = colophon_core::protocol::live_slot_name("ep");
+    header.live = Some(LiveStamp {
+        library_id: lib.id().into(),
+        slot: slot.clone(),
+        generation: clock,
+        operation_id: header.meta.id.clone(),
+    });
+    let body = canonical(&header).unwrap();
+    [(
+        colophon_core::protocol::live_state_path(&owner.public().id(), "listening.podcasts", &slot),
+        SignedRecord {
+            signature: owner.sign(&body),
+            body,
+        }
+        .encode()
+        .unwrap(),
+    )]
+    .into()
+}

@@ -226,7 +226,14 @@ A replacement that fails its expected-revision check MUST leave the previous adm
 value in place. Signature, library/path/stamp binding, grant and expiry at the referenced authority,
 and decrypted payload/slot binding MUST all verify before replacement. An unverified incoming date
 MUST NOT invalidate an existing head. A locked replica MUST retain its old bytes until it can fully
-verify the candidate. Lower generations cannot replace an observed head; different exact envelope
+verify the candidate. A candidate with an authenticated header but an unavailable epoch key MUST
+be quarantined separately and retried after host unlock, including when authority and a new-epoch
+replacement arrive in one batch. It MUST NOT evict the verified envelope or its high-water witness.
+Malformed payloads discovered after unlock leave the verified fallback intact. Retained fallbacks
+MUST be readmitted against current authority and the rebuilt durable clock; a revoked anchor cannot
+continue to support a formerly admissible live generation. A storage engine MUST NOT persist a
+verified checkpoint over an unresolved replacement.
+Lower generations cannot replace an observed head; different exact envelope
 bytes at the same slot/generation are explicit equivocation. An exact retained/live duplicate is folded once.
 
 **Fold order is `(clock, author, id)`, never `created`.** A writer increments the highest
@@ -238,12 +245,26 @@ past relevant observed live heads only when continuing that slot or retaining it
 Clocks are positive integers at most 2^53−1. In sorted header order, an otherwise admissible
 header MUST be no more than 1,024 above the highest earlier admitted header clock in its
 namespace (initially zero); larger jumps are refused as `clockJump` without reserving budget.
-This bound applies to live heads and retained live-stamped predecessors too. Before a passive
-sample would exceed the durable prefix clock by 1,024, the writer MUST retain its current head and
-publish that sample as immutable intent. Subsequent live samples use the resulting durable anchor.
+This bound applies to live heads and retained live-stamped predecessors too. When a passive
+sample reaches the durable prefix clock plus 1,024, the writer MUST publish that sample as
+immutable intent and retain its targeted or explicitly cited live predecessors, including those
+from other authors. When continuing a peer's older live head already at the 1,024 limit, its exact
+retained `ops/` copy MUST precede admission of the new anchor. Subsequent live samples use the
+resulting durable anchor.
 Readers authenticate incoming immutable anchors before evaluating a live replacement in the same
 batch. This periodic anchoring bounds live forward jumps without namespace exhaustion or losing
-later deliberate writes. Budget accounting uses the same order across namespaces.
+later deliberate writes. Standalone relay candidate authentication checks the absolute 2^53−1
+limit, signature, authority, epoch, and payload bindings without requiring a local immutable prefix.
+It does not itself admit the candidate: merge/ingestion MUST enforce the relative 1,024 bound after
+receiving immutable anchors. Budget accounting uses the same order across namespaces.
+
+An exact copy of a currently authenticated live head MAY be inserted into the durable projection
+without re-verifying or reapplying the unrelated immutable prefix. This optimization requires exact
+envelope and `(clock, author, id)` equality, unchanged episode ordering, and no outstanding admission
+rejections or reducer conflicts/invalid outcomes that the insertion could change. Other earlier
+arrivals retain normal ordered replay.
+Retention MUST NOT decrease admission or local write clocks. Compatibility projection hashes MUST
+continue to represent canonical durable order after insertion.
 Only authenticated, admissible payloads compete for a same-author operation ID; the first in
 fold order wins, and later authenticated competitors are refused as `duplicateID`. Invalid,
 held or out-of-scope competitors never disqualify a valid or kept record. Signed header budget

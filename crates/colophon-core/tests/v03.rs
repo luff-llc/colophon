@@ -1310,3 +1310,244 @@ fn review_locked_equivocation_is_explicit() {
     unlock(&mut locked, &owner);
     assert_eq!(episode_seconds(&locked, "e"), 1.0);
 }
+
+#[test]
+fn second_review_authority_only_relay_verifier() {
+    let (mut lib, owner, _) = create();
+    let authority = lib.records().clone();
+    for n in 0..2 {
+        lib.merge(adversarial(
+            &lib,
+            &owner,
+            &owner,
+            "listening.podcasts",
+            colophon_core::model::Operation {
+                id: String::new(),
+                kind: "queue".into(),
+                v: 1,
+                clock: 1024 * (n + 1),
+                authority: lib.authority().latest,
+                created: NOW.into(),
+                payload: json!({"episodes":[]}),
+            },
+            1,
+            210 + n as u8,
+        ))
+        .unwrap();
+    }
+    let records = live_at(&lib, &owner, 2049, 99, 215);
+    let verifier = opened(authority, &owner);
+    let (path, raw) = records.iter().next().unwrap();
+    assert_eq!(verifier.live_generation(path, raw, NOW).unwrap(), 2049);
+    lib.merge(records).unwrap();
+    assert_eq!(episode_seconds(&lib, "ep"), 99.0);
+}
+
+#[test]
+fn second_review_locked_and_rekeyed_replacements_are_retried() {
+    for rotate in [false, true] {
+        let (mut writer, owner, _) = create();
+        writer.merge(live_at(&writer, &owner, 1, 1, 211)).unwrap();
+        let mut reader = if rotate {
+            writer.clone()
+        } else {
+            Library::open(writer.records().clone(), owner.public()).unwrap()
+        };
+        if rotate {
+            let batch = success(
+                writer
+                    .begin_rekey(&["listening.podcasts".into()], NOW, [212; 32])
+                    .unwrap(),
+            );
+            apply(&mut writer, batch, &owner);
+        }
+        writer.merge(live_at(&writer, &owner, 2, 2, 213)).unwrap();
+        reader.merge(writer.records().clone()).unwrap();
+        unlock(&mut reader, &owner);
+        assert_eq!(episode_seconds(&reader, "ep"), 2.0, "rotation={rotate}");
+        assert_eq!(
+            episode_seconds(&opened(reader.records().clone(), &owner), "ep"),
+            2.0
+        );
+    }
+}
+
+#[test]
+fn second_review_passive_anchor_boundary_and_durable_actions() {
+    let (mut lib, owner, _) = create();
+    lib.merge(live_at(&lib, &owner, 1023, 10, 214)).unwrap();
+    let batch = success(
+        lib.begin_write(
+            "listening.podcasts",
+            "position",
+            json!({"id":"ep","seconds":11}),
+            NOW,
+            [215; 32],
+        )
+        .unwrap(),
+    );
+    assert!(
+        batch.steps.iter().any(|s| s.path.starts_with("ops/")),
+        "anchor at the boundary"
+    );
+    apply(&mut lib, batch, &owner);
+    for n in 0u64..1030 {
+        let mut seed = [0; 32];
+        seed[..8].copy_from_slice(&n.to_le_bytes());
+        let batch = success(
+            lib.begin_write(
+                "listening.podcasts",
+                "position",
+                json!({"id":"ep","seconds":12+n}),
+                NOW,
+                seed,
+            )
+            .unwrap(),
+        );
+        apply(&mut lib, batch, &owner);
+    }
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "position",
+        json!({"id":"ep","seconds":2,"seek":true}),
+        216,
+    );
+    assert_eq!(
+        episode_seconds(&opened(lib.records().clone(), &owner), "ep"),
+        2.0
+    );
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "queue",
+        json!({"episodes":["ep","next"]}),
+        217,
+    );
+    let episode = success(
+        lib.query("listening.podcasts", "getEpisode", json!({"id":"ep"}), NOW)
+            .unwrap(),
+    );
+    let queue = success(
+        lib.query("listening.podcasts", "getQueue", json!({}), NOW)
+            .unwrap(),
+    );
+    write(
+        &mut lib,
+        &owner,
+        "listening.podcasts",
+        "completePlayback",
+        json!({
+        "id":"end","events":[{"eventID":"event","episode":"ep","show":"show","audio":"audio",
+        "endSeconds":2000,"actualDuration":2000,"expectedPosition":episode["positionRevision"],"expectedState":episode["stateRevision"]}],
+        "baseQueue":["ep","next"],"expect":queue["value"]["head"]}),
+        218,
+    );
+    let cold = opened(lib.records().clone(), &owner);
+    assert!(success(cold.view("listening.podcasts", NOW).unwrap())
+        .refused
+        .is_empty());
+    assert_eq!(
+        episode_seconds(&cold, "ep"),
+        2000.0,
+        "{}",
+        success(
+            cold.query("listening.podcasts", "read", json!({}), NOW)
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        success(
+            cold.query("listening.podcasts", "getQueue", json!({}), NOW)
+                .unwrap()
+        )["value"]["page"]["rows"][0]["id"],
+        json!("next")
+    );
+}
+
+#[test]
+fn second_review_deferred_invalid_payload_never_evicts_valid_candidate() {
+    use colophon_core::{
+        model::OperationHeader,
+        records::{canonical, SignedRecord},
+    };
+    let (mut writer, owner, _) = create();
+    let old = live_at(&writer, &owner, 1, 1, 230);
+    writer.merge(old.clone()).unwrap();
+    let mut reader = writer.clone();
+    let batch = success(
+        writer
+            .begin_rekey(&["listening.podcasts".into()], NOW, [231; 32])
+            .unwrap(),
+    );
+    apply(&mut writer, batch, &owner);
+    let valid = live_at(&writer, &owner, 2, 2, 232);
+    writer.merge(valid.clone()).unwrap();
+    reader.merge(writer.records().clone()).unwrap();
+    let (path, bytes) = live_at(&writer, &owner, 3, 3, 233)
+        .into_iter()
+        .next()
+        .unwrap();
+    let record: SignedRecord = serde_json::from_slice(&bytes).unwrap();
+    let mut header: OperationHeader = serde_json::from_slice(&record.body).unwrap();
+    header.ciphertext[0] ^= 1;
+    let body = canonical(&header).unwrap();
+    let corrupt = SignedRecord {
+        signature: owner.sign(&body),
+        body,
+    }
+    .encode()
+    .unwrap();
+    reader.merge([(path.clone(), corrupt)].into()).unwrap();
+    reader
+        .merge([(path.clone(), b"bad JSON".to_vec())].into())
+        .unwrap();
+    assert_eq!(reader.records()[&path], old[&path]);
+    unlock(&mut reader, &owner);
+    assert_eq!(reader.records()[&path], valid[&path]);
+    assert_eq!(episode_seconds(&reader, "ep"), 2.0);
+}
+
+#[test]
+fn second_review_cross_author_and_other_episode_boundary() {
+    use colophon_core::model::MemberKind;
+    for other_episode in [false, true] {
+        let (mut lib, owner, _) = create();
+        let device = keys(240);
+        enroll(
+            &mut lib,
+            &owner,
+            &device,
+            "Device",
+            MemberKind::Device,
+            grant(&["listening.podcasts"], None),
+            241,
+        );
+        // Accept older peers that published a live sample exactly at the old boundary.
+        lib.merge(live_at(&lib, &owner, 1024, 10, 242)).unwrap();
+        let signer = if other_episode { &owner } else { &device };
+        let mut peer = opened(lib.records().clone(), signer);
+        let id = if other_episode { "other" } else { "ep" };
+        let batch = success(
+            peer.begin_write(
+                "listening.podcasts",
+                "position",
+                json!({"id":id,"seconds":11,"seek":false}),
+                NOW,
+                [243; 32],
+            )
+            .unwrap(),
+        );
+        if !other_episode {
+            assert_eq!(batch.copies.len(), 1);
+        }
+        apply(&mut peer, batch, signer);
+        let cold = opened(peer.records().clone(), signer);
+        assert_eq!(episode_seconds(&cold, id), 11.0);
+        assert!(success(cold.view("listening.podcasts", NOW).unwrap())
+            .refused
+            .is_empty());
+    }
+}

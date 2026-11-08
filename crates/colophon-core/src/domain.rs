@@ -338,6 +338,9 @@ impl State {
             }
         }
     }
+    pub(crate) fn can_insert_retained(&self, op: &AdmittedOperation) -> bool {
+        matches!(&self.projection, ProjectionState::Podcasts(state) if state.can_insert_retained(op))
+    }
     pub(crate) fn live_is_after(&self, op: &AdmittedOperation) -> bool {
         self.playback_order
             .get(op.payload["id"].as_str().unwrap_or(""))
