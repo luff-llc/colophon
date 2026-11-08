@@ -198,8 +198,10 @@ openable slot.
 
 ### 5.1 Vault
 
-The vault seed is 32 random bytes from the host. Its identity is derived with the 0.3 §2
-software-identity procedure, using HKDF salt `colophon/vault/4`.
+The vault seed is 32 random bytes from the host. Its identity is derived like a 0.3 recovery
+kit: first `s' = HKDF-SHA256(IKM = seed, salt = "colophon/vault/4", info = "identity", 32 bytes)`,
+then the unchanged 0.3 §2 software-identity procedure on `s'` (salt `colophon/entropy/3`,
+counters from zero).
 
 **Each newly introduced epoch MUST be sealed to exactly the current vault and the active,
 unexpired members with read access to its namespace, at the introducing entry.** Historical
@@ -498,7 +500,12 @@ names its outcome.
   - an import grant with read-only access, `expires` not after `issued`, or a `server` member;
   - `importedFrom` that isn't 32 lowercase hex.
 
-All refuse outcomes are `malformed` unless stated otherwise.
+**Outcomes.** Inside an authority envelope, any failure while verifying an attached signature
+is `badSignature`, whatever check failed (`clientData` parsing including duplicate names, type,
+challenge, origin, RP hash, flags, DER, ECDSA). Implementations MAY expose the failed check as a
+diagnostic. Structural failures of the record itself, COSE parsing at registration, and §6.2
+transition violations are `malformed`. Every other refuse case is `malformed` unless stated
+otherwise.
 
 The Swift implementation (Marginalia `packages/Colophon`, `KeyringTests.swift`) is the
 behavioral reference for WebAuthn checks and recovery rules. Its bytes differ, so it's not a
