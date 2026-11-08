@@ -5,6 +5,7 @@ import PackageDescription
 let package = Package(name: "ColophonSDK", platforms: [.macOS(.v14), .iOS(.v17), .visionOS("26.0")], products: [
   .library(name: "ColophonFFI", targets: ["ColophonFFI"]),
   .library(name: "ColophonKit", targets: ["ColophonKit"]),
+  .library(name: "ColophonKeys", targets: ["ColophonKeys"]),
   .library(name: "ColophonKitStorage", targets: ["ColophonKitStorage"]),
   .library(name: "ColophonSession", targets: ["ColophonSession"]),
   .library(name: "ColophonSessionUI", targets: ["ColophonSessionUI"]),
@@ -14,6 +15,8 @@ let package = Package(name: "ColophonSDK", platforms: [.macOS(.v14), .iOS(.v17),
   .library(name: "ColophonNotesKit", targets: ["ColophonNotesKit"]),
   .library(name: "ColophonMigration", targets: ["ColophonMigration"]),
 ], targets: [
+  .target(name: "ColophonKeys", dependencies: ["ColophonKit"], path: "swift/Sources/ColophonKeys"),
+  .testTarget(name: "ColophonKeysTests", dependencies: ["ColophonKeys"], path: "swift/Tests/ColophonKeysTests"),
   .target(name: "ColophonMigration", dependencies: ["ColophonSession"], path: "swift/Sources/ColophonMigration"),
   .testTarget(name: "ColophonMigrationTests", dependencies: ["ColophonMigration"], path: "swift/Tests/ColophonMigrationTests"),
   .target(name: "ColophonKitStorage", path: "swift/Sources/ColophonKitStorage"),
