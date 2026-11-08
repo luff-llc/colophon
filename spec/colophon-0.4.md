@@ -1,6 +1,7 @@
 # Colophon 0.4
 
-**Status: v1, frozen 2026-11-08.** The normative implementation is `crates/colophon-core`.
+**Status: interface frozen as v1 on 2026-11-08; implementation and integration complete; final
+freeze (S6) awaits Mike's sign-off and the open deviation below.** The normative implementation is `crates/colophon-core`.
 `conformance/0.4/` contains its reproducible vectors. 0.4 is a clean break from 0.3's
 authority: no 0.1 or 0.3 authority record is interpreted. Older libraries move to 0.4 by
 clean copy (`docs/clean-copy.md`).
@@ -52,4 +53,9 @@ Operation and request markers stay `/3`, and authority bodies use `colophon/auth
 - **Platforms:** the same flows pass through Rust, Swift (`ColophonKit`, sessions and
   `ColophonKeys`), Kotlin and Android, and JavaScript/WASM, with identical records.
 
-Changes after this freeze need a new spec revision, never a quiet patch.
+- **Performance:** WebAuthn verification is about 0.22 ms per signature (budget 1 ms). Cold
+  replay of a 200-entry, 20-controller keyring is about 55 ms, against a 20 ms budget. It's
+  dominated by pure-Rust P-256 verification, and is recorded as **deviation D-F2-1** in Galley's
+  register. Opens through the verified-prefix cache stay incremental.
+
+The interface is frozen: changes need a new spec revision, never a quiet patch.
