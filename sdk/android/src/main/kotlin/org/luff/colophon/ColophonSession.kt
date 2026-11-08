@@ -693,7 +693,7 @@ class ColophonSession internal constructor(
         val next = when (error) {
             is SessionLayoutException -> SessionPhase.UpdateRequired
             is BindingException.InvalidData ->
-                if (error.detail.startsWith("Unsupported storage layout")) SessionPhase.UpdateRequired
+                if (error.requiresUpdate()) SessionPhase.UpdateRequired
                 else SessionPhase.Failed(error.detail)
             is PendingPublication -> SessionPhase.Retry
             is StorageException.Unavailable -> {
@@ -711,6 +711,8 @@ class ColophonSession internal constructor(
         }
         _lastError.value = error.message ?: error.toString()
         _phase.value = next
+        checkpointJob?.cancel()
+        checkpointJob = null
         if (next == SessionPhase.UpdateRequired || next == SessionPhase.WaitingForDownload || next == SessionPhase.Retry) return
         views = emptyMap()
         activeEngine = null

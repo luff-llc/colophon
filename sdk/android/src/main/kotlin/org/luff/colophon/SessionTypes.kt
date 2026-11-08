@@ -1,6 +1,7 @@
 package org.luff.colophon
 
 import com.luff.colophon.Access
+import com.luff.colophon.BindingException
 import com.luff.colophon.AccessRequest
 import com.luff.colophon.Denial
 import com.luff.colophon.ControllerProvider
@@ -165,6 +166,10 @@ internal data class SessionSnapshot(
 internal class PendingPublication(val reason: String) : Exception(reason)
 internal class SessionRefusal(val snapshot: SessionSnapshot, val error: SessionException) : Exception(error.message)
 internal object SessionLayoutException : Exception("Unsupported storage layout")
+
+/** The core reports newerFormat only after authenticating the authority that requires an update. */
+internal fun BindingException.requiresUpdate(): Boolean = this is BindingException.InvalidData &&
+    (detail.startsWith("newerFormat:") || detail.startsWith("Unsupported storage layout"))
 
 internal fun jsonString(value: String): String {
     val escaped = buildString(value.length + 2) {

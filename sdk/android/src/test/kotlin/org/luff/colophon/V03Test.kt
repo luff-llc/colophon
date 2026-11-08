@@ -1,6 +1,9 @@
 package org.luff.colophon
 
 import com.luff.colophon.ColophonLibrary
+import com.luff.colophon.BindingException
+import com.luff.colophon.ControllerProvider
+import java.util.Base64
 import com.luff.colophon.PreparedAction
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -8,6 +11,19 @@ import org.junit.Test
 import java.nio.file.Files
 
 class V03Test {
+    // Model a newer writer. The old core must refuse finishing an unsupported layout itself;
+    // replay still needs a correctly signed future-format fixture to test UpdateRequired.
+    private fun futureLayout(lib: ColophonLibrary, controller: ControllerProvider): Map<String, ByteArray> =
+        ((lib.native.beginLayout(99u, "2026-11-07T12:00:00Z") as PreparedAction.Ready).action).use { action ->
+            val signatures = action.signControllerWith(controller)
+            val refusal = assertThrows(BindingException.InvalidData::class.java) { action.finishAuthority(signatures) }
+            assertEquals("newerFormat: storage layout", refusal.detail)
+            val step = action.signingSteps().single()
+            val body = Base64.getEncoder().encodeToString(step.body)
+            val signature = Base64.getEncoder().encodeToString(signatures.single().signature)
+            mapOf(step.path to """{"body":"$body","signature":"$signature"}""".toByteArray())
+        }
+
     private fun config(store: RecordStore, home: java.io.File, keys: SoftwareKeys) =
         SessionConfiguration("Playback", namespaces = listOf("listening.podcasts"), store = store, privateHome = home, keys = keys, ownerController = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral()))
 
@@ -33,8 +49,7 @@ class V03Test {
                 worker.refresh()
                 assertEquals(0, authorityMerges)
                 lib.unlockVault()
-                val action = (lib.native.beginLayout(99u, "2026-11-07T12:00:00Z") as PreparedAction.Ready).action
-                val future = lib.records + action.finishAuthority(action.signControllerWith(controller))
+                val future = lib.records + futureLayout(lib, controller)
                 val futureWorker = SessionWorker(config(MemoryRecordStore(future), java.io.File(home, "future"), keys))
                 try { futureWorker.refresh(); fail("Future layout opened") }
                 catch (error: Exception) { assertSame(SessionLayoutException, error) }
@@ -97,8 +112,7 @@ class V03Test {
             ColophonLibrary.create(keys, "Future", "Owner", listOf("listening.podcasts"), controller).use { lib ->
                 lib.write("listening.podcasts", "position", "{\"id\":\"e\",\"seconds\":10,\"seek\":true}".toByteArray()).get()
                 lib.unlockVault()
-                val action = (lib.native.beginLayout(99u, "2026-11-07T12:00:00Z") as PreparedAction.Ready).action
-                val records = lib.records + action.finishAuthority(action.signControllerWith(controller))
+                val records = lib.records + futureLayout(lib, controller)
                 val store = MemoryRecordStore(records)
                 val identity = keys.signingPublicKey()
                 val session = ColophonSession(config(store, home, keys))
@@ -120,6 +134,28 @@ class V03Test {
                     assertTrue("Future layouts stop before relay content downloads", empty.paths().all { it.startsWith("authority/") })
                     remote.close()
                 }
+            }
+        } finally { home.deleteRecursively() }
+    }
+
+    @Test fun forgedFutureLayoutFailsInsteadOfRequestingAnUpdate() = runBlocking {
+        val home = Files.createTempDirectory("colophon-future-forgery").toFile()
+        try {
+            val keys = SoftwareKeys.ephemeral()
+            val controller = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral())
+            ColophonLibrary.create(keys, "Future", "Owner", listOf("listening.podcasts"), controller).use { lib ->
+                lib.unlockVault()
+                val future = futureLayout(lib, controller).entries.single()
+                val envelope = JsonParser(future.value.decodeToString()).parseValue() as Json.Obj
+                val signature = Base64.getDecoder().decode(envelope.string("signature"))
+                signature[0] = (signature[0].toInt() xor 1).toByte()
+                val forged = """{"body":"${envelope.string("body")}","signature":"${Base64.getEncoder().encodeToString(signature)}"}""".toByteArray()
+                val session = ColophonSession(config(MemoryRecordStore(lib.records + (future.key to forged)), home, keys))
+                try {
+                    session.restore()
+                    val phase = session.phase.value
+                    assertTrue("Forged future authority must fail authentication: $phase", phase is SessionPhase.Failed && phase.reason.contains("badSignature"))
+                } finally { session.close() }
             }
         } finally { home.deleteRecursively() }
     }

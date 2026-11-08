@@ -17,6 +17,13 @@ import com.luff.colophon.requestInfo
 
 internal class CompatibilitySessionCore : SessionCore {
     private var library: ColophonLibrary? = null
+    private var previousLibrary: ColophonLibrary? = null
+    override fun beginIdentityChange() { previousLibrary = library; library = null }
+    override fun finishIdentityChange(keepNew: Boolean) {
+        if (keepNew) previousLibrary?.close()
+        else { library?.close(); library = previousLibrary }
+        previousLibrary = null
+    }
     private var ownerController: com.luff.colophon.ControllerProvider? = null
     override fun setOwnerController(provider: com.luff.colophon.ControllerProvider?) { ownerController = provider }
 
@@ -126,6 +133,8 @@ internal class CompatibilitySessionCore : SessionCore {
 
     override fun close() {
         library?.close()
+        previousLibrary?.close()
+        previousLibrary = null
         library = null
     }
 }
