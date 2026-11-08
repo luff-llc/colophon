@@ -19,3 +19,4 @@ dist/
 /.tools/
 
 /sdk/android/.kotlin/
+/sdk/apple/*/*.a
