@@ -20,8 +20,9 @@ access."
 
 [Keys form. The colophon page appears.]
 
-"That just happened for real. This tab made a P-256 key pair and created a library, signed and
-encrypted by the Colophon core: Rust, compiled to WebAssembly, running right here."
+"That just happened for real. This tab made separate controller and member keys. Its controller
+created the keyring and granted its member access. The Colophon core runs right here: Rust,
+compiled to WebAssembly."
 
 ## 3. Knock (0:40–1:00)
 
@@ -64,14 +65,21 @@ access doesn't rewrite the past."
 
 ## 7. Recover (2:05–2:20)
 
-[Next. Recover. The page rebuilds from stored records.]
+[Next. Recover. A new device joins through the recovery kit, with fresh controller and member keys.]
 
-"Everything you just saw is rebuilt from records and keys alone. Any client holding the same
-records computes the same page, in a browser, on an iPhone, on a server."
+"The kit opens the vault and signs a keyring entry adding the new device controller. That
+controller grants its separate member access. The content is unchanged; the history records
+the new device joining."
+
+**Recording blocker:** the landed creation API only builds a single-controller genesis with
+`recoverThreshold: 0`. It cannot include the kit controller and its sealed slot in genesis.
+The playground stops Recover explicitly for newly created libraries until that API is supplied.
+Do not record this step as working or substitute an old-key reopen. The session restore path
+accepts existing 0.4 records with a kit controller and slot.
 
 ## 8. Close (2:20–2:35)
 
-[The repo: README, crates/, conformance/0.3, swift/.]
+[The repo: README, crates/, conformance/0.4/keys, swift/.]
 
 "Colophon is open: a spec, conformance vectors, and one Rust core for the web, Apple, Android
 and servers. Two apps already shipped on its first version. Built in public by LUFF, with Muse

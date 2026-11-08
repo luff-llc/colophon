@@ -1,15 +1,13 @@
-/* IndexedDB persistence for the Recover verb. The in-memory Records map is
- * snapshotted after every mutation; Recover drops every Library object and
- * re-opens from these stored bytes with the tab's keys.
+/* Host persistence: records and non-extractable key handles, never the vault seed.
+ * The v4 storage key deliberately does not reopen older authority records.
  */
 
 import type { Records } from './core';
 
 const DB = 'colophon-playground';
 const STORE = 'kv';
-const KEY = 'records-v1';
-const OWNER_KEYS = 'owner-keys-v1';
-const RECOVERY_KEYS = 'recovery-keys-v1';
+const KEY = 'records-v4';
+const DEVICE_KEYS = 'device-keys-v4';
 
 /** Persisted host key handles. CryptoKeys structured-clone into IndexedDB with
  * private halves staying non-extractable; restore with WebCryptoKeys.fromKeyPairs. */
@@ -44,6 +42,7 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
+/** Snapshot exact signed record bytes. */
 export async function saveRecords(records: Records): Promise<number> {
   const pairs: [string, string][] = [...records.entries()].map(([p, b]) => [p, b64encode(b)]);
   const db = await openDB();
@@ -53,6 +52,7 @@ export async function saveRecords(records: Records): Promise<number> {
       tx.objectStore(STORE).put(pairs, KEY);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error('Record storage aborted'));
     });
   } finally {
     db.close();
@@ -60,39 +60,45 @@ export async function saveRecords(records: Records): Promise<number> {
   return pairs.length;
 }
 
-export async function saveKeys(owner: StoredKeyPairs, recovery: StoredKeyPairs): Promise<void> {
+/** A device has distinct controller and member handles; the demo kit is separate. */
+export interface StoredDeviceKeys {
+  owner: StoredKeyPairs;
+  member: StoredKeyPairs;
+  recoveryKit?: StoredKeyPairs;
+}
+
+/** Store host key handles together, independently of signed library records. */
+export async function saveKeys(keys: StoredDeviceKeys): Promise<void> {
   const db = await openDB();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put(owner, OWNER_KEYS);
-      tx.objectStore(STORE).put(recovery, RECOVERY_KEYS);
+      tx.objectStore(STORE).put(keys, DEVICE_KEYS);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error('Key storage aborted'));
     });
   } finally {
     db.close();
   }
 }
 
-export async function loadKeys(): Promise<{ owner: StoredKeyPairs; recovery: StoredKeyPairs } | null> {
+/** Load only 0.4 key handles; older libraries require a clean copy. */
+export async function loadKeys(): Promise<StoredDeviceKeys | null> {
   const db = await openDB();
   try {
-    const get = (key: string): Promise<StoredKeyPairs | undefined> =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE, 'readonly');
-        const rq = tx.objectStore(STORE).get(key) as IDBRequest<StoredKeyPairs | undefined>;
-        rq.onsuccess = () => resolve(rq.result);
-        rq.onerror = () => reject(rq.error);
-      });
-    const owner = await get(OWNER_KEYS);
-    const recovery = await get(RECOVERY_KEYS);
-    return owner && recovery ? { owner, recovery } : null;
+    return await new Promise<StoredDeviceKeys | null>((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const rq = tx.objectStore(STORE).get(DEVICE_KEYS) as IDBRequest<StoredDeviceKeys | undefined>;
+      rq.onsuccess = () => resolve(rq.result ?? null);
+      rq.onerror = () => reject(rq.error);
+    });
   } finally {
     db.close();
   }
 }
 
+/** Restore the last 0.4 record snapshot. */
 export async function loadRecords(): Promise<Records | null> {
   const db = await openDB();
   try {

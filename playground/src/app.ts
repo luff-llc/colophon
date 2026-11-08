@@ -12,7 +12,8 @@ import {
   type AgentSettings,
 } from './agent';
 import { DEMO_QUESTION, seedLibrary } from './seed';
-import { loadKeys, loadRecords, saveKeys, saveRecords } from './storage';
+import { loadKeys, loadRecords, saveKeys, saveRecords, type StoredDeviceKeys } from './storage';
+import { DeviceSession } from './session';
 import { groupLedger, groupSeq, summarizeWrites, type LedgerEntryLike } from './ledger';
 
 const NAMESPACES = ['listening.podcasts', 'notes', 'reading.saved'];
@@ -33,8 +34,8 @@ const REDUCED = () =>
 type Tab = 'listening' | 'notes' | 'reading';
 
 interface State {
-  ownerKeys: core.KeyProvider | null;
-  recoveryKeys: core.KeyProvider | null;
+  session: DeviceSession | null;
+  recoveryKit: core.KeyProvider | null;
   library: core.Library | null;
   agentKeys: core.KeyProvider | null;
   agentLibrary: core.Library | null;
@@ -98,8 +99,8 @@ export async function boot(root: HTMLElement | null): Promise<void> {
 
   const settings: AgentSettings = loadSettings();
   const state: State = {
-    ownerKeys: null,
-    recoveryKeys: null,
+    session: null,
+    recoveryKit: null,
     library: null,
     agentKeys: null,
     agentLibrary: null,
@@ -376,17 +377,18 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   function createLibrary(): Promise<void> {
     if (!creating) {
       creating = (async () => {
-        const ownerKeys = await core.WebCryptoKeys.generate();
-        const library = await core.Library.create({
-          owner: ownerKeys,
+        const owner = await core.WebCryptoKeys.generate();
+        const member = await core.WebCryptoKeys.generate();
+        const session = await DeviceSession.create({
+          owner,
+          member,
           label: `${OWNER_LABEL}'s library`,
-          ownerLabel: OWNER_LABEL,
+          memberLabel: OWNER_LABEL,
           namespaces: [...NAMESPACES],
         });
-        await seedLibrary(library);
-        state.ownerKeys = ownerKeys;
-        state.recoveryKeys = library.recoveryKeys ?? null;
-        state.library = library;
+        await seedLibrary(session.library);
+        state.session = session;
+        state.library = session.library;
         await persistKeys();
         await persist();
         renderAll();
@@ -440,13 +442,15 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     }
   }
 
-  /** Persist owner + recovery key handles separately from the records, so the
-   * Recover verb can drop every in-memory key and still rebuild. */
+  /** Persist software controller/member handles, plus a kit when the host has one. */
   async function persistKeys(): Promise<void> {
-    if (!state.ownerKeys || !state.recoveryKeys) return;
-    if (!(state.ownerKeys instanceof core.WebCryptoKeys) || !(state.recoveryKeys instanceof core.WebCryptoKeys)) return;
+    if (!state.session) return;
+    const { owner, member } = state.session.keys;
+    if (!(owner instanceof core.WebCryptoKeys) || !(member instanceof core.WebCryptoKeys)) return;
+    const keys: StoredDeviceKeys = { owner: owner.keyPairs(), member: member.keyPairs() };
+    if (state.recoveryKit instanceof core.WebCryptoKeys) keys.recoveryKit = state.recoveryKit.keyPairs();
     try {
-      await saveKeys(state.ownerKeys.keyPairs(), state.recoveryKeys.keyPairs());
+      await saveKeys(keys);
     } catch (err) {
       console.warn('could not persist keys', err);
     }
@@ -488,7 +492,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   }
 
   async function doGrant(): Promise<void> {
-    if (!state.library || !state.pending || state.busy || state.verbsDone.grant) return;
+    if (!state.library || !state.session || !state.pending || state.busy || state.verbsDone.grant) return;
     state.busy = 'grant';
     state.statusErr = null;
     renderAll();
@@ -502,7 +506,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       if (expirySel === 'day') partial.expires = new Date(Date.now() + 86400_000).toISOString();
       const budget = Number.parseInt(budgetRaw, 10);
       if (Number.isFinite(budget) && budget > 0) partial.writeBudget = Math.floor(budget);
-      const outcome = await state.library.approve(state.pending.record, partial);
+      const outcome = await state.session.approve(state.pending.record, partial);
       if (!outcome.ok) {
         state.statusErr = outcome.detail;
         return;
@@ -555,12 +559,12 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   }
 
   async function doEnd(): Promise<void> {
-    if (!state.library || !state.agentLibrary || !state.agentMemberID || state.busy || state.verbsDone.end) return;
+    if (!state.library || !state.session || !state.agentLibrary || !state.agentMemberID || state.busy || state.verbsDone.end) return;
     state.busy = 'end';
     state.statusErr = null;
     renderAll();
     try {
-      const outcome = await state.library.revoke(state.agentMemberID);
+      const outcome = await state.session.revoke(state.agentMemberID);
       if (!outcome.ok) {
         state.statusErr = outcome.detail;
         return;
@@ -585,63 +589,51 @@ export async function boot(root: HTMLElement | null): Promise<void> {
   }
 
   async function doRecover(): Promise<void> {
-    if (!state.library || !state.ownerKeys || state.busy || state.verbsDone.recover) return;
+    if (!state.library || state.busy || state.verbsDone.recover) return;
     state.busy = 'recover';
     state.statusErr = null;
-    state.statusMsg = 'Closing this tab’s memory…';
-    await persistKeys();
-    await persist();
-    // Drop every in-memory key and replica. The agent's keys stay: they live
-    // on its own device, which never closed.
-    const ledgerBefore = state.library.ledger().map((e) => e.text).join('\n');
-    const ownerBackup = state.ownerKeys;
-    const recoveryBackup = state.recoveryKeys;
-    state.library = null;
-    state.agentLibrary = null;
-    state.ownerKeys = null;
-    state.recoveryKeys = null;
+    state.statusMsg = 'Restoring a new device with the recovery kit…';
     renderAll();
-    announce('Closing in-memory state. Reopening from stored records.');
     try {
-      await new Promise((r) => setTimeout(r, REDUCED() ? 60 : 700));
+      await saveRecords(state.library.records);
       const stored = await loadRecords();
       if (!stored || stored.size === 0) throw new Error('No stored records found in this browser.');
-      // Keys were persisted separately from the records; restore both from
-      // storage, falling back to this tab's keys when storage is unavailable.
-      let ownerKeys: core.KeyProvider = ownerBackup;
-      let recoveryKeys: core.KeyProvider | null = recoveryBackup;
-      const keys = await loadKeys().catch(() => null);
-      if (keys) {
-        ownerKeys = await core.WebCryptoKeys.fromKeyPairs(keys.owner.signing, keys.owner.agreement);
-        recoveryKeys = await core.WebCryptoKeys.fromKeyPairs(keys.recovery.signing, keys.recovery.agreement);
+      const handles = await loadKeys();
+      const kit = handles?.recoveryKit
+        ? await core.WebCryptoKeys.fromKeyPairs(handles.recoveryKit.signing, handles.recoveryKit.agreement)
+        : state.recoveryKit;
+      if (!kit) {
+        throw new Error('This demo library has no recovery kit. Restore requires a kit controller and its vault slot.');
       }
-      const library = await core.Library.open(stored, ownerKeys);
-      state.ownerKeys = ownerKeys;
-      state.recoveryKeys = recoveryKeys;
-      state.library = library;
-      if (state.agentKeys) state.agentLibrary = await core.Library.open(stored, state.agentKeys);
+      const before = NAMESPACES.map(namespace => state.library?.view(namespace));
+      // The new device uses neither the old controller nor the old member keys.
+      const owner = await core.WebCryptoKeys.generate();
+      const member = await core.WebCryptoKeys.generate();
+      const session = await DeviceSession.restore({
+        records: stored,
+        recoveryKit: kit,
+        owner,
+        member,
+        memberLabel: OWNER_LABEL,
+      });
+      const agentLibrary = state.agentKeys ? await core.Library.open(session.library.records, state.agentKeys) : null;
+      const identical = NAMESPACES.every((namespace, index) =>
+        JSON.stringify(session.library.view(namespace)) === JSON.stringify(before[index]));
+      state.session = session;
+      state.library = session.library;
+      state.recoveryKit = kit;
+      state.agentLibrary = agentLibrary;
       state.verbsDone.recover = true;
-      const identical = library.ledger().map((e) => e.text).join('\n') === ledgerBefore;
       state.recoveredNote = identical
-        ? `✓ The same page, rebuilt from ${stored.size} stored records.`
-        : `Rebuilt from ${stored.size} stored records — the page differs.`;
-      state.statusMsg = null;
+        ? '✓ A new device joined through the recovery kit. The library content is unchanged.'
+        : 'A new device joined through the recovery kit. Its content view differs.';
+      await persistKeys();
+      await persist();
       announce(state.recoveredNote);
     } catch (err) {
-      // Restore this tab's keys so the page is not left keyless on failure.
-      state.ownerKeys = state.ownerKeys ?? ownerBackup;
-      state.recoveryKeys = state.recoveryKeys ?? recoveryBackup;
-      if (state.ownerKeys && !state.library) {
-        try {
-          const stored = await loadRecords();
-          if (stored && stored.size > 0) state.library = await core.Library.open(stored, state.ownerKeys);
-        } catch {
-          /* keep the original error */
-        }
-      }
       state.statusErr = err instanceof Error ? err.message : String(err);
-      state.statusMsg = null;
     } finally {
+      state.statusMsg = null;
       state.busy = null;
       renderAll();
     }
@@ -1027,7 +1019,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       const actor = members.get(e.actor);
       const subject = e.subject ? members.get(e.subject) : undefined;
       // Writes and requests are marked by their author; grants and revocations
-      // are the owner's lines about the member, so they follow the subject.
+      // are controller entries about the member, so they follow the subject.
       const agentLine =
         ((e.event === 'wrote' || e.event === 'requested') && actor?.kind === 'agent') ||
         ((e.event === 'granted' || e.event === 'revoked') && subject?.kind === 'agent');
@@ -1154,7 +1146,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     if (!v.grant) return state.consentOpen ? 'Check the codes match, narrow if you like, then Grant.' : 'A request is waiting — review it when ready.';
     if (!v.act) return 'Now let it work: Act. It reads, answers with a citation, and writes notes.';
     if (!v.end) return 'One tap ends its access. Its notes stay.';
-    if (!v.recover) return 'Drop this tab’s memory and rebuild from stored records.';
+    if (!v.recover) return 'Restore a new device through a recovery kit. This demo library has no kit.';
     return 'That was the whole tour: knock, grant, act, end, recover.';
   }
 
