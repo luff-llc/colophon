@@ -52,3 +52,30 @@ Marginalia, Margins and Shelf switching from `ColophonAuthority` to `ColophonKey
 Once W6 and the cutover land, Marginalia's `ColophonAuthority` keyring code and its ceremonies
 are deleted from the app path. Their tests stay in `reference/` history as the behavioral
 record.
+
+## Results (2026-11-08)
+
+All packages W1–W9 landed, plus integration fixes. Verified on tree `4c98013`, on an Apple Silicon
+Mac (macOS 27, Xcode 27.2, Rust 1.91, Node 24, JDK 17):
+
+| Check | Result |
+| --- | --- |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Pass |
+| `cargo test --workspace` | Pass (24 suites, 0 failures), including 98 key vectors and the 0.4 library fixture |
+| `wasm32-unknown-unknown` core build | Pass |
+| `scripts/generate-bindings.sh` | Pass; generated Swift and Kotlin bindings unchanged |
+| `scripts/build-apple.sh` (macOS, iOS, iOS simulator, visionOS, visionOS simulator) | Pass |
+| `scripts/test-swift.sh` (root SDK, including `ColophonKeys`) | Pass: 29, 51, 2, 10, 14 and 12 tests |
+| `ColophonKeys` device builds | iOS and visionOS pass |
+| `swift test --package-path reference/swift` (software keys) | Pass: 368 plus 14 clean-copy plus 14 migration |
+| `scripts/test-kotlin.sh`, `scripts/test-android.sh` | Pass (including the relay journeys and real `androidx.credentials` compilation) |
+| `npm --prefix js test`, `js/test/*`, playground build and test | Pass |
+| Session suite repeated 15 times after the readiness fix | 0 failures |
+| Independent security review | Two medium findings, both fixed with regression tests. Final pass: "Ready to ship: yes" |
+| Performance | WebAuthn verify about 0.23 ms (budget 1 ms). Cold 200-entry keyring replay about 56 ms against a 20 ms budget: **deviation D-F2-1** (Galley) |
+
+Not verified here:
+
+- real passkey ceremonies on physical devices;
+- the clean copy of Mike's actual library, which needs his phone to approve the reader member;
+- the Marginalia app cutover (a separate handoff, through its coordinator).
