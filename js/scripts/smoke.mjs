@@ -1,27 +1,32 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { Library, WebCryptoKeys, init } from '../dist/index.js';
+import { createHash } from 'node:crypto';
+import { readFile, readdir } from 'node:fs/promises';
+import { Library, WebCryptoKeys, controllerID, init } from '../dist/index.js';
 
 await init();
 const owner = await WebCryptoKeys.generate();
+const controller = await WebCryptoKeys.generate();
+const kit = await WebCryptoKeys.generate();
 const agent = await WebCryptoKeys.generate();
-for (const { privateKey } of Object.values(owner.keyPairs())) {
-  assert.equal(privateKey.extractable, false);
-  await assert.rejects(crypto.subtle.exportKey('jwk', privateKey));
+for (const provider of [owner, controller, kit, agent]) {
+  for (const { privateKey } of Object.values(provider.keyPairs())) {
+    assert.equal(privateKey.extractable, false);
+    await assert.rejects(crypto.subtle.exportKey('jwk', privateKey));
+  }
 }
-const root = await Library.create({ owner, label: 'Smoke library', ownerLabel: 'Owner', namespaces: ['reading.saved', 'listening.podcasts', 'notes'] });
-assert.equal((await root.write('notes', 'createNotebook', { id: 'inbox', title: 'Inbox' })).ok, true);
-const request = await Library.requestAccess({ libraryID: root.id, keys: agent, label: 'Research agent', kind: 'agent', namespaces: ['reading.saved', 'notes'], access: ['read', 'write'] });
+const library = await Library.createWith({ owner, controller, kit, label: 'Smoke library', ownerLabel: 'Owner', namespaces: ['reading.saved', 'listening.podcasts', 'notes'] });
+assert.equal((await library.write('notes', 'createNotebook', { id: 'inbox', title: 'Inbox' })).ok, true);
+const request = await Library.requestAccess({ libraryID: library.id, keys: agent, label: 'Research agent', kind: 'agent', namespaces: ['reading.saved', 'notes'], access: ['read', 'write'] });
 assert.match(request.pairingCode, /^\d{6}$/);
 // Open before approval, then test synchronous merge plus explicit asynchronous key opening.
-const agentLibrary = await Library.open(root.records, agent);
+const agentLibrary = await Library.open(library.records, agent);
 assert.equal(agentLibrary.view('notes').reason, 'notGranted');
-await assert.rejects(root.approve(request.record, { unknownRestriction: true }));
-const approval = await root.approve(request.record, { namespaces: ['notes'], writeBudget: 1 });
+await assert.rejects(library.approve(request.record, { unknownRestriction: true }));
+const approval = await library.approve(request.record, { namespaces: ['notes'], writeBudget: 1 });
 assert.equal(approval.ok, true);
 assert.equal(approval.value.kind, 'agent');
-assert(root.ledger().some(entry => entry.event === 'requested' && entry.actor === request.id));
-agentLibrary.merge(root.records);
+assert(library.ledger().some(entry => entry.event === 'requested' && entry.actor === request.id));
+agentLibrary.merge(library.records);
 await agentLibrary.ready();
 assert.equal(agentLibrary.view('reading.saved').reason, 'notGranted');
 assert(agentLibrary.tools().some(t => t.name === 'notes__addNote'));
@@ -30,33 +35,69 @@ const written = await agentLibrary.call('notes__addNote', { id: 'agent-note', no
 assert.equal(written.ok, true);
 assert.equal(written.value.origin, 'ai');
 assert.equal((await agentLibrary.write('notes', 'addNote', { id: 'over-budget', notebook: 'inbox', text: 'No' })).reason, 'budgetSpent');
-root.merge(agentLibrary.records);
-await root.ready();
-assert.equal((await root.revoke(request.id)).ok, true);
-agentLibrary.merge(root.records);
+library.merge(agentLibrary.records);
+await library.ready();
+assert.equal((await library.revoke(request.id)).ok, true);
+agentLibrary.merge(library.records);
 assert.equal((await agentLibrary.write('notes', 'addNote', { id: 'revoked', notebook: 'inbox', text: 'No' })).reason, 'revoked');
-const notes = root.view('notes');
+const notes = library.view('notes');
 assert.equal(notes.ok, true);
 assert.equal(notes.value.state.notes.length, 1);
 assert.equal(notes.value.state.notes[0].origin, 'ai');
 assert.equal(notes.value.state.notes[0].extensions.extension.retained, true);
 assert(notes.value.admitted.some(op => op.id === written.value.id));
-const cells = await root.call('notes__cells', { notebook: 'inbox', limit: 1 });
+const cells = await library.call('notes__cells', { notebook: 'inbox', limit: 1 });
 assert.equal(cells.ok, true);
 assert.equal(cells.value.value.rows[0].id, 'agent-note');
 assert.equal(cells.value.value.rows[0].kind, 'markdown');
 assert.equal(cells.value.value.total, 1);
-const cell = await root.call('notes__cell', { notebook: 'inbox', id: 'agent-note' });
+const cell = await library.call('notes__cell', { notebook: 'inbox', id: 'agent-note' });
 assert.equal(cell.value.value.source, 'An agent contribution');
 assert.equal(cell.value.value.cell.origin, 'ai');
-assert(root.ledger().some(entry => entry.event === 'revoked'));
+assert(library.ledger().some(entry => entry.event === 'revoked'));
 assert.equal((await agentLibrary.call('reading.saved__read', {})).reason, 'notGranted');
 
-// Recovery must restore data as well as signing authority through the same host steps.
-const recovery = await Library.open(root.records, root.recoveryKeys);
+// A new device has only the kit and records, plus fresh independent member/controller keys.
 const restoredKeys = await WebCryptoKeys.generate();
-assert.equal((await recovery.recover(restoredKeys, 'Recovered owner')).ok, true);
+const restoredController = await WebCryptoKeys.generate();
+const recovery = await Library.open(library.records, restoredKeys);
+assert.equal(recovery.view('notes').reason, 'notGranted');
+const beforeRecovery = recovery.keyring();
+assert.equal(beforeRecovery.threshold, 1);
+assert.equal(beforeRecovery.recoverThreshold, 1);
+const kitID = await controllerID(kit.signingPublicKey);
+recovery.setControllers([kit]);
+await recovery.unlockVault([kit]);
+const added = {
+  key: {
+    form: 'raw',
+    signing: Buffer.from(restoredController.signingPublicKey).toString('base64'),
+    agreement: Buffer.from(restoredController.agreementPublicKey).toString('base64'),
+  },
+  label: 'Recovered owner controller',
+  roles: ['approve', 'control'], // Both thresholds are 1 in this library.
+};
+const slot = recovery.buildSealedSlot(added, added.label);
+assert.equal((await recovery.recoveryAdd(added, slot, [kitID])).ok, true);
+const afterRecovery = recovery.keyring();
+assert.equal(afterRecovery.controllers.length, beforeRecovery.controllers.length + 1);
+assert.deepEqual(afterRecovery.slots, [...beforeRecovery.slots, slot]);
+assert.deepEqual(afterRecovery.controllers.filter(c => c.key.signing !== added.key.signing), beforeRecovery.controllers);
+assert.deepEqual(afterRecovery.vault, beforeRecovery.vault);
+assert.equal(afterRecovery.threshold, beforeRecovery.threshold);
+assert.equal(afterRecovery.recoverThreshold, beforeRecovery.recoverThreshold);
+assert.equal(recovery.view('notes').reason, 'notGranted'); // Controllers do not become members.
+
+// Reopen to prove the new controller's published slot opens on its own.
 const restored = await Library.open(recovery.records, restoredKeys);
+restored.setControllers([restoredController]);
+restored.selectController(await controllerID(restoredController.signingPublicKey));
+await restored.unlockVault([restoredController]);
+const restoredRequest = await Library.requestAccess({
+  libraryID: restored.id, keys: restoredKeys, label: 'Recovered owner', kind: 'device',
+  namespaces: ['reading.saved', 'listening.podcasts', 'notes'], access: ['read', 'write'],
+});
+assert.equal((await restored.approve(restoredRequest.record)).ok, true);
 assert.deepEqual(restored.view('notes').value.state, notes.value.state);
 assert.equal((await restored.write('reading.saved', 'capture', { id: 'new', url: 'https://example.org/' })).ok, true);
 assert.equal((await restored.call('reading.saved__capture', { id: 'native', title: 'Native document' })).ok, true);
@@ -70,67 +111,91 @@ assert.equal(new Set(restored.tools().map(tool => tool.name)).size, restored.too
 assert.equal((await restored.call('reading.saved__getPosition', { item: 'native' })).value.value, null);
 
 
-// Replay Rust's fixed vectors through WASM with a host WebCrypto key derived solely for fixtures.
-const encoded = JSON.parse(await readFile(new URL('../../conformance/0.3/library.json', import.meta.url), 'utf8'));
-const expected = JSON.parse(await readFile(new URL('../../conformance/0.3/expected.json', import.meta.url), 'utf8'));
-// Fixture seed 5 is deliberately public. Production callers use WebCryptoKeys.generate().
-async function deriveScalar(seed, counter) {
-  const material = await crypto.subtle.importKey('raw', seed, 'HKDF', false, ['deriveBits']);
-  const info = new Uint8Array(8); new DataView(info.buffer).setBigUint64(0, BigInt(counter));
-  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('colophon/entropy/3'), info }, material, 256));
-}
-const { createECDH } = await import('node:crypto');
-async function fixturePair(counter, algorithm, usages, seed = 5) {
-  const scalar = await deriveScalar(new Uint8Array(32).fill(seed), counter);
-  const ecdh = createECDH('prime256v1'); ecdh.setPrivateKey(scalar);
-  const point = ecdh.getPublicKey();
-  const jwk = { kty: 'EC', crv: 'P-256', x: point.subarray(1,33).toString('base64url'), y: point.subarray(33).toString('base64url'), d: Buffer.from(scalar).toString('base64url') };
+// Replay the published 0.4 records byte-for-byte with its public fixture member keys.
+const fixtureURL = new URL('../../conformance/0.4/library/', import.meta.url);
+const expected = JSON.parse(await readFile(new URL('input.json', fixtureURL), 'utf8'));
+const metadata = JSON.parse(await readFile(new URL('case.json', fixtureURL), 'utf8'));
+const published = JSON.parse(await readFile(new URL('../../conformance/0.4/keys/keys.json', import.meta.url), 'utf8'));
+const member = published.software.find(key => key.id === expected.memberID);
+assert(member, 'Fixture member must have published keys');
+async function fixturePair(scalar, encodedPoint, algorithm, usages) {
+  const point = Buffer.from(encodedPoint, 'base64');
+  const jwk = {
+    kty: 'EC', crv: 'P-256', x: point.subarray(1, 33).toString('base64url'),
+    y: point.subarray(33).toString('base64url'), d: Buffer.from(scalar, 'base64').toString('base64url'),
+  };
   const privateKey = await crypto.subtle.importKey('jwk', jwk, { name: algorithm, namedCurve: 'P-256' }, false, usages);
   const publicKey = await crypto.subtle.importKey('raw', point, { name: algorithm, namedCurve: 'P-256' }, true, algorithm === 'ECDSA' ? ['verify'] : []);
   return { privateKey, publicKey };
 }
-const fixtureKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign']), await fixturePair(1, 'ECDH', ['deriveBits']));
-const fixture = await Library.open(new Map(Object.entries(encoded).map(([path,b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), fixtureKeys);
-assert.equal(fixture.id, expected.libraryID);
-for (const [namespace, view] of Object.entries(expected.views)) assert.deepEqual(fixture.view(namespace).value, view);
-assert.deepEqual(fixture.ledger(), expected.ledger);
-const notesVector = JSON.parse(await readFile(new URL('../../conformance/0.3/notes.json', import.meta.url), 'utf8'));
-const notesKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
-const notesFixture = await Library.open(new Map(Object.entries(notesVector.records).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), notesKeys);
-for (const query of notesVector.queries) {
-  const result = await notesFixture.call(`notes__${query.name}`, query.args);
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.value, query.result);
-}
-
-const savedVector = JSON.parse(await readFile(new URL('../../conformance/0.3/reading.saved.json', import.meta.url), 'utf8'));
-const savedKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
-const savedFixture = await Library.open(new Map(Object.entries(savedVector.records).map(([path,b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), savedKeys);
-for (const query of savedVector.queries) {
-  const name = query.name === 'position' ? 'getPosition' : query.name;
-  const result = await savedFixture.call(`reading.saved__${name}`, query.args);
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.value, query.expected);
-}
-
-// Replay the podcast domain vector through generated bounded query tools.
-const podcastRecords = JSON.parse(await readFile(new URL('../../conformance/0.3/listening.podcasts.records.json', import.meta.url), 'utf8'));
-const podcastExpected = JSON.parse(await readFile(new URL('../../conformance/0.3/listening.podcasts.expected.json', import.meta.url), 'utf8'));
-const podcastKeys = await WebCryptoKeys.fromKeyPairs(await fixturePair(0, 'ECDSA', ['sign'], 1), await fixturePair(1, 'ECDH', ['deriveBits'], 1));
-const podcasts = await Library.open(new Map(Object.entries(podcastRecords).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), podcastKeys);
-for (const test of podcastExpected) {
-  const name = test.query === 'episode' ? 'episodeDetail' : test.query === 'queue' ? 'getQueue' : test.query;
-  const result = await podcasts.call(`listening.podcasts__${name}`, test.arguments);
-  assert.equal(result.ok, true);
-  if (test.query === 'queue') {
-    assert.equal(result.value.value.head, test.result.value.head);
-    assert.deepEqual(result.value.value.page.rows, test.result.value.page.rows);
-    assert.equal(result.value.value.page.total, test.result.value.page.total);
-  } else {
-    assert.deepEqual(result.value, test.result);
+const fixtureKeys = await WebCryptoKeys.fromKeyPairs(
+  await fixturePair(member.signingScalar, member.public.signing, 'ECDSA', ['sign']),
+  await fixturePair(member.agreementScalar, member.public.agreement, 'ECDH', ['deriveBits']),
+);
+assert.equal(await controllerID(fixtureKeys.signingPublicKey), expected.memberID);
+async function readRecords(directory, prefix = '') {
+  const records = new Map();
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) {
+      for (const [child, bytes] of await readRecords(new URL(`${entry.name}/`, directory), `${path}/`)) records.set(child, bytes);
+    } else records.set(path, new Uint8Array(await readFile(new URL(entry.name, directory))));
   }
+  return records;
 }
-// Exercise fractional IDs through the JSON host boundary as well as native Rust.
+const fixtureRecords = await readRecords(new URL('records/', fixtureURL));
+const fixture = await Library.open(fixtureRecords, fixtureKeys);
+const genesis = JSON.parse(new TextDecoder().decode(fixtureRecords.get('authority/00000001.json')));
+assert.equal(fixture.id, createHash('sha256').update(Buffer.from(genesis.body, 'base64')).digest('hex').slice(0, 32));
+for (const [namespace, view] of Object.entries(expected.views)) {
+  const actual = fixture.view(namespace);
+  assert.equal(actual.ok, true, namespace);
+  assert.deepEqual(actual.value, view, namespace);
+}
+assert.equal(fixture.view('notes').value.admitted[0].payload.optional, null);
+const ring = fixture.keyring();
+const summary = {
+  controllers: await Promise.all(ring.controllers.map(async c => ({
+    id: await controllerID(Uint8Array.from(Buffer.from(c.key.signing, 'base64'))), roles: c.roles,
+  }))),
+  threshold: ring.threshold,
+  recoverThreshold: ring.recoverThreshold,
+  vaultID: await controllerID(Uint8Array.from(Buffer.from(ring.vault.signing, 'base64'))),
+  members: fixture.members().map(({ id, grant }) => ({ id, grant })).sort((a, b) => a.id.localeCompare(b.id)),
+};
+assert.deepEqual(summary, metadata.keyring);
+
+// The retired authority format must fail at open, never yield a silently empty replica.
+const legacy = JSON.parse(await readFile(new URL('../../conformance/0.3/library.json', import.meta.url), 'utf8'));
+await assert.rejects(() => Library.open(new Map(Object.entries(legacy).map(([path, b64]) =>
+  [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), fixtureKeys));
+
+// Generated bounded domain queries still operate on the verified 0.4 fixture.
+const fixtureNotebook = await fixture.call('notes__notebook', { id: 'notebook' });
+assert.equal(fixtureNotebook.ok, true);
+assert.equal(fixtureNotebook.value.value.title, 'Notebook');
+const fixtureSaved = await fixture.call('reading.saved__item', { id: 'saved' });
+assert.equal(fixtureSaved.ok, true);
+assert.equal(fixtureSaved.value.value.item.title, 'Synthetic document');
+const shows = await fixture.call('listening.podcasts__shows', { limit: 1 });
+assert.equal(shows.ok, true);
+assert.equal(shows.value.value.rows[0].id, 'show');
+assert.equal(shows.value.value.total, 1);
+const show = await fixture.call('listening.podcasts__show', { id: 'show' });
+assert.equal(show.ok, true);
+assert.equal(show.value.value.show.title, 'Synthetic show');
+const queue = await fixture.call('listening.podcasts__getQueue', { limit: 1 });
+assert.equal(queue.ok, true);
+assert.equal(queue.value.value.head, null);
+assert.deepEqual(queue.value.value.page.rows, []);
+assert.equal(queue.value.value.page.total, 0);
+const book = await fixture.call('reading.books__book', { id: 'book' });
+assert.equal(book.ok, true);
+assert.equal(book.value.value.book.title, 'Synthetic book');
+assert.equal((await fixture.call('reading.books__addBook', { id: 'js-book', title: 'JS book', creator: 'Example' })).ok, true);
+assert.equal((await fixture.call('reading.books__book', { id: 'js-book' })).value.value.book.title, 'JS book');
+
+// Exercise fractional numbers through the JSON host boundary and replay.
 for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entries()) {
   const result = await restored.write('listening.podcasts', 'position', { id: `fraction-${index}`, seconds });
   assert.equal(result.ok, true);
@@ -143,17 +208,4 @@ for (const [index, seconds] of [6.713554789312184e-10, 123456789.12345679].entri
   assert.equal(entry.kind, 'position');
   assert.equal(entry.origin, 'person');
 }
-console.log('Node 24 smoke passed: non-extractable keys, narrowed grants, tools, AI attribution, budget, revoke/keep, rekey, recovery, and Rust/WASM fixture parity.');
-
-// The books fixture uses the same deliberately public seed-5 fixture identity.
-const booksRecords = JSON.parse(await readFile(new URL('../../conformance/0.3/reading.books/records.json', import.meta.url), 'utf8'));
-const booksExpected = JSON.parse(await readFile(new URL('../../conformance/0.3/reading.books/expected.json', import.meta.url), 'utf8'));
-const booksFixture = await Library.open(new Map(Object.entries(booksRecords).map(([path, b64]) => [path, Uint8Array.from(Buffer.from(b64, 'base64'))])), fixtureKeys);
-for (const { name, args, result } of booksExpected.queries) {
-  const actual = await booksFixture.call(`reading.books__${name}`, args);
-  assert.equal(actual.ok, true);
-  assert.deepEqual(actual.value, result);
-}
-assert.equal((await booksFixture.call('reading.books__addBook', { id: 'js-book', title: 'JS book', creator: 'Example' })).ok, true);
-assert.equal((await booksFixture.call('reading.books__book', { id: 'js-book' })).value.value.book.title, 'JS book');
-console.log('Books Rust/WASM query parity and generated tools passed.');
+console.log('Node 24 smoke passed: non-extractable keys, narrowed grants, tools, AI attribution, budget, revoke/keep, kit recovery, domain queries, fractional round trips, 0.4 fixture parity and 0.3 refusal.');
