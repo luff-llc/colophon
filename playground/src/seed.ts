@@ -68,14 +68,14 @@ export async function seedLibrary(library: Library): Promise<void> {
       const r = await library.write('listening.podcasts', 'follow', { id: ep.showId, url: ep.feed, title: ep.showTitle });
       if (!r.ok) throw new Error(`seed follow failed: ${r.reason}`);
     }
-    // published/durationSec are unknown fields the core carries along untouched.
+    // Use the listening schema’s date-time and duration fields.
     const a = await library.write('listening.podcasts', 'episode', {
       id: epId,
       show: ep.showId,
       title: ep.title,
       transcriptExcerpt: ep.text,
-      published: ep.published,
-      durationSec: ep.durationSec,
+      published: `${ep.published}T00:00:00Z`,
+      duration: ep.durationSec,
     });
     if (!a.ok) throw new Error(`seed episode failed: ${a.reason}`);
   }

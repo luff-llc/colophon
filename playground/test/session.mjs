@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import { createECDH } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { registerHooks } from 'node:module';
 import test from 'node:test';
 
@@ -24,16 +22,25 @@ const decode = raw => JSON.parse(Buffer.from(JSON.parse(new TextDecoder().decode
 const bodies = library => [...library.records].filter(([path]) => /^authority\/\d+\.json$/.test(path)).sort(([a], [b]) => a.localeCompare(b)).map(([, raw]) => decode(raw));
 const success = outcome => { assert.equal(outcome.ok, true, outcome.detail); return outcome.value; };
 
-test('knock → grant → act → end uses separate principals and survives reopening', async () => {
+test('knock → grant → act → end → restore uses separate principals after reopening', async () => {
   const keys = await device();
-  let session = await DeviceSession.create({ ...keys, label: 'Playground', memberLabel: 'Ada', namespaces: ['listening.podcasts', 'notes', 'reading.saved'] });
+  const kit = await WebCryptoKeys.generate();
+  let session = await DeviceSession.create({ ...keys, recoveryKit: kit, label: 'Playground', memberLabel: 'Ada', namespaces: ['listening.podcasts', 'notes', 'reading.saved'] });
   const initial = bodies(session.library);
   assert.deepEqual(initial.map(body => body.kind), ['genesis', 'rekey', 'grant', 'layout']);
   assert.equal(initial[3].layout, 2);
   const ring = session.library.keyring();
   assert.equal(ring.threshold, 1);
-  assert.equal(ring.recoverThreshold, 0);
-  assert.deepEqual(ring.controllers[0].roles, ['approve', 'control']);
+  assert.equal(ring.recoverThreshold, 1);
+  assert.equal(ring.controllers.length, 2);
+  const ownerID = await controllerID(keys.owner.signingPublicKey);
+  const kitID = await controllerID(kit.signingPublicKey);
+  assert.deepEqual(ring.controllers.find(c => c.key.signing === Buffer.from(keys.owner.signingPublicKey).toString('base64')).roles, ['approve', 'control']);
+  assert.deepEqual(ring.controllers.find(c => c.key.signing === Buffer.from(kit.signingPublicKey).toString('base64')).roles, ['recover']);
+  assert.deepEqual(ring.slots.map(slot => slot.controllers[0]).sort(), [ownerID, kitID].sort());
+  assert(ring.slots.every(slot => slot.kind === 'sealed'));
+  assert.deepEqual(initial[0].keyring, ring);
+  assert(initial.every(body => body.by === ownerID));
   assert.notEqual(await controllerID(keys.owner.signingPublicKey), session.library.me().id);
   assert.equal(new Set([keys.owner.signingPublicKey, keys.owner.agreementPublicKey, keys.member.signingPublicKey, keys.member.agreementPublicKey].map(key => Buffer.from(key).toString('hex'))).size, 4);
   await seedLibrary(session.library);
@@ -48,11 +55,12 @@ test('knock → grant → act → end uses separate principals and survives reop
   agent.merge(session.library.records);
   await agent.ready();
   assert.equal((await agent.call('reading.saved__read', {})).reason, 'notGranted');
-  await runActTurn(agent, { model: 'scripted' }, 'What did the foghorn ledger keep in its margins?', () => {});
+  const events = [];
+  await runActTurn(agent, { model: 'scripted' }, 'What did the foghorn ledger keep in its margins?', event => { events.push(event); });
   session.library.merge(agent.records);
   await session.library.ready();
   const notes = success(session.library.view('notes'));
-  assert.equal(notes.state.notes.length, 3);
+  assert.equal(notes.state.notes.length, 3, JSON.stringify(events));
   assert(notes.state.notes.every(note => note.origin === 'ai'));
 
   session = await DeviceSession.open(session.library.records, keys);
@@ -60,32 +68,20 @@ test('knock → grant → act → end uses separate principals and survives reop
   agent.merge(session.library.records);
   assert.equal((await agent.call('notes__read', {})).reason, 'revoked');
   assert.deepEqual(success(session.library.view('notes')).state, notes.state);
+  const storedKit = structuredClone(kit.keyPairs());
+  const restoredKit = await WebCryptoKeys.fromKeyPairs(storedKit.signing, storedKit.agreement);
+  const restored = await DeviceSession.restore({ ...await device(), records: session.library.records, recoveryKit: restoredKit, memberLabel: 'New device' });
+  for (const namespace of ['listening.podcasts', 'notes', 'reading.saved']) {
+    assert.deepEqual(success(restored.library.view(namespace)), success(session.library.view(namespace)));
+  }
+  agent.merge(restored.library.records);
+  assert.equal((await agent.call('notes__read', {})).reason, 'revoked');
 });
 
-// These deliberately public fixture seeds belong to the landed W5 binding flow.
-async function fixtureKeys(seedByte) {
-  async function pair(counter, algorithm, usages) {
-    const material = await crypto.subtle.importKey('raw', new Uint8Array(32).fill(seedByte), 'HKDF', false, ['deriveBits']);
-    const info = new Uint8Array(8);
-    new DataView(info.buffer).setBigUint64(0, BigInt(counter));
-    const scalar = new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('colophon/entropy/3'), info }, material, 256));
-    const ecdh = createECDH('prime256v1');
-    ecdh.setPrivateKey(scalar);
-    const point = ecdh.getPublicKey();
-    const jwk = { kty: 'EC', crv: 'P-256', x: point.subarray(1, 33).toString('base64url'), y: point.subarray(33).toString('base64url'), d: Buffer.from(scalar).toString('base64url') };
-    return {
-      privateKey: await crypto.subtle.importKey('jwk', jwk, { name: algorithm, namedCurve: 'P-256' }, false, usages),
-      publicKey: await crypto.subtle.importKey('raw', point, { name: algorithm, namedCurve: 'P-256' }, true, algorithm === 'ECDSA' ? ['verify'] : []),
-    };
-  }
-  return WebCryptoKeys.fromKeyPairs(await pair(0, 'ECDSA', ['sign']), await pair(1, 'ECDH', ['deriveBits']));
-}
-
 test('a kit alone restores a fresh controller and member without replacing the old keyring', async () => {
-  const fixture = JSON.parse(await readFile(new URL('../../crates/colophon-ffi/tests/keys-flow.json', import.meta.url)));
-  const oldMember = await fixtureKeys(12);
-  const kit = await fixtureKeys(13);
-  const existing = await Library.open(new Map(Object.entries(fixture.records).map(([path, raw]) => [path, new Uint8Array(raw)])), oldMember);
+  const kit = await WebCryptoKeys.generate();
+  const original = await DeviceSession.create({ ...await device(), recoveryKit: kit, label: 'Recovery', memberLabel: 'Ada', namespaces: ['notes'] });
+  const existing = original.library;
   success(await existing.write('notes', 'createNotebook', { id: 'inbox', title: 'Inbox' }));
   success(await existing.write('notes', 'addNote', { id: 'history', notebook: 'inbox', text: 'Before restoration' }));
   const prior = existing.keyring();
@@ -107,21 +103,19 @@ test('a kit alone restores a fresh controller and member without replacing the o
 
 test('recovery below the control threshold adds only approve authority', async () => {
   const keys = await device();
-  const session = await DeviceSession.create({ ...keys, label: 'Threshold', memberLabel: 'Ada', namespaces: ['notes'] });
+  const kit = await WebCryptoKeys.generate();
+  const session = await DeviceSession.create({ ...keys, recoveryKit: kit, label: 'Threshold', memberLabel: 'Ada', namespaces: ['notes'] });
   const ring = session.library.keyring();
   const other = await WebCryptoKeys.generate();
-  const kit = await WebCryptoKeys.generate();
-  for (const [provider, roles] of [[other, ['control']], [kit, ['recover']]]) {
-    const controller = { key: { form: 'raw', signing: Buffer.from(provider.signingPublicKey).toString('base64'), agreement: Buffer.from(provider.agreementPublicKey).toString('base64') }, label: 'Fixture controller', roles };
-    ring.controllers.push(controller);
-    ring.slots.push(session.library.buildSealedSlot(controller, controller.label));
-  }
+  const controller = { key: { form: 'raw', signing: Buffer.from(other.signingPublicKey).toString('base64'), agreement: Buffer.from(other.agreementPublicKey).toString('base64') }, label: 'Second control key', roles: ['control'] };
+  ring.controllers.push(controller);
+  ring.slots.push(session.library.buildSealedSlot(controller, controller.label));
   // Controller ordering is by key ID, not by public point.
   const ids = new Map(await Promise.all(ring.controllers.map(async c => [c.key.signing, await controllerID(Buffer.from(c.key.signing, 'base64'))])));
   ring.controllers.sort((a, b) => ids.get(a.key.signing).localeCompare(ids.get(b.key.signing)));
   ring.threshold = 2;
   ring.recoverThreshold = 1;
-  // Fixture setup uses an ordinary control-rule keyring change, never application creation.
+  // Raise the control threshold to exercise recovery’s approve-only limit.
   success(await session.library.replaceKeyring(ring, undefined, [await controllerID(keys.owner.signingPublicKey)]));
   const fresh = await device();
   const restored = await DeviceSession.restore({ ...fresh, records: session.library.records, recoveryKit: kit, memberLabel: 'Replacement' });
@@ -133,6 +127,29 @@ test('recovery below the control threshold adds only approve authority', async (
   assert.equal(restored.library.me().grant.access.includes('write'), true);
 });
 
-test('creation with a supplied kit stops explicitly at the missing genesis API', async () => {
-  await assert.rejects(DeviceSession.create({ ...await device(), recoveryKit: await WebCryptoKeys.generate(), label: 'Kit', memberLabel: 'Ada', namespaces: ['notes'] }), /cannot include a recovery-kit controller and slot in genesis/);
+test('genesis kit supplies only public keys and all creation signatures come from owner/member', async () => {
+  const keys = await device();
+  const kit = await WebCryptoKeys.generate();
+  const publicKit = {
+    form: 'raw',
+    signingPublicKey: kit.signingPublicKey,
+    agreementPublicKey: kit.agreementPublicKey,
+    sign() { throw new Error('Kit must not sign creation'); },
+    agree() { throw new Error('Kit must not open during creation'); },
+  };
+  const session = await DeviceSession.create({ ...keys, recoveryKit: publicKit, recoveryLabel: 'Offline kit', importedFrom: '0123456789abcdef0123456789abcdef', label: 'Kit', memberLabel: 'Ada', namespaces: ['notes'] });
+  const entries = bodies(session.library);
+  assert.deepEqual(entries.map(body => body.kind), ['genesis', 'rekey', 'grant', 'layout']);
+  assert.equal(entries[0].importedFrom, '0123456789abcdef0123456789abcdef');
+  const kitID = await controllerID(kit.signingPublicKey);
+  assert.equal(entries[0].keyring.slots.find(slot => slot.controllers[0] === kitID).label, 'Offline kit');
+  const opened = await Library.open(session.library.records, await WebCryptoKeys.generate());
+  await opened.unlockVault([kit]);
+});
+
+test('owner-only genesis remains available when no kit is supplied', async () => {
+  const session = await DeviceSession.create({ ...await device(), label: 'No kit', memberLabel: 'Ada', namespaces: ['notes'] });
+  assert.equal(session.library.keyring().recoverThreshold, 0);
+  assert.equal(session.library.keyring().controllers.length, 1);
+  assert.equal(session.library.keyring().slots.length, 1);
 });

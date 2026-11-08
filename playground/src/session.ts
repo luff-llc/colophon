@@ -9,12 +9,15 @@ export interface DeviceKeys {
   readonly member: core.KeyProvider;
 }
 
-/** Creation inputs. Recovery kits require a genesis-capable core creation API. */
+/** Creation inputs, including an optional independent recovery-kit controller. */
 export interface SessionOptions extends DeviceKeys {
   label: string;
   memberLabel: string;
   namespaces: string[];
   recoveryKit?: core.KeyProvider;
+  recoveryLabel?: string;
+  importedFrom?: string;
+  importExpires?: string;
 }
 
 /** A member replica with a separate owner provider for authority actions. */
@@ -31,20 +34,48 @@ export class DeviceSession {
 
   /** Create through the core's two signing rounds, including member grant and layout 2. */
   static async create(options: SessionOptions): Promise<DeviceSession> {
-    if (options.recoveryKit) {
-      throw new Error('The core creation API cannot include a recovery-kit controller and slot in genesis.');
-    }
     if ((options.owner.form ?? 'raw') !== 'raw') {
-      throw new Error('The core creation API requires a raw device controller. Open existing libraries with an external controller provider.');
+      throw new Error('Creation requires a raw device controller. Open existing libraries with an external controller provider.');
     }
-    const library = await core.Library.create({
-      owner: options.member,
-      controller: options.owner,
-      label: options.label,
-      ownerLabel: options.memberLabel,
-      namespaces: options.namespaces,
-    });
-    return new DeviceSession(library, { owner: options.owner, member: options.member });
+    if (options.recoveryKit && (options.recoveryKit.form ?? 'raw') !== 'raw') {
+      throw new Error('A recovery kit requires separate raw signing and agreement keys.');
+    }
+    await core.init();
+    const wasm = new core.WasmLibrary(options.member.signingPublicKey, options.member.agreementPublicKey);
+    const vaultSeed = crypto.getRandomValues(new Uint8Array(32));
+    const entropy = crypto.getRandomValues(new Uint8Array(32));
+    let action: core.HostAction | undefined;
+    try {
+      action = wasm.begin_create_with(JSON.stringify({
+        label: options.label,
+        ownerLabel: options.memberLabel,
+        namespaces: options.namespaces,
+        recoveryLabel: options.recoveryLabel,
+        importedFrom: options.importedFrom,
+        importExpires: options.importExpires,
+      }), options.owner.signingPublicKey, options.owner.agreementPublicKey, vaultSeed,
+      options.recoveryKit?.signingPublicKey, options.recoveryKit?.agreementPublicKey,
+      new Date().toISOString(), entropy);
+      // Only the owner and member sign creation. The kit supplies public keys only.
+      await signCreation(action, [options.owner, options.member]);
+      const first = action;
+      action = undefined; // advance_create consumes the first round, including on error.
+      action = first.advance_create();
+      await signCreation(action, [options.owner]);
+      const final = action;
+      action = undefined;
+      wasm.commit(final);
+      const records: core.Records = new Map();
+      for (let i = 0; i < wasm.record_count(); i++) records.set(wasm.record_path(i), wasm.record(i));
+      const session = await DeviceSession.open(records, { owner: options.owner, member: options.member });
+      await session.library.unlockVault([options.owner]);
+      return session;
+    } finally {
+      action?.free();
+      wasm.free();
+      vaultSeed.fill(0);
+      entropy.fill(0);
+    }
   }
 
   /** Open member epochs; authority operations unlock a controller slot when needed. */
@@ -103,6 +134,18 @@ export class DeviceSession {
     });
     requireSuccess(await library.approve(request.record));
     return new DeviceSession(library, { owner: options.owner, member: options.member });
+  }
+}
+
+async function signCreation(action: core.HostAction, providers: core.KeyProvider[]): Promise<void> {
+  for (let i = 0; i < action.count(); i++) {
+    const signing = action.signing_key(i);
+    const provider = providers.find(candidate => {
+      const publicKey = candidate.signingPublicKey;
+      return publicKey.length === signing.length && publicKey.every((byte, index) => byte === signing[index]);
+    });
+    if (!provider) throw new Error('Unexpected creation signer');
+    action.sign(i, await provider.sign(action.body(i)));
   }
 }
 

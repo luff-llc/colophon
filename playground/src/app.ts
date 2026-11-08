@@ -379,15 +379,19 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       creating = (async () => {
         const owner = await core.WebCryptoKeys.generate();
         const member = await core.WebCryptoKeys.generate();
+        const recoveryKit = await core.WebCryptoKeys.generate();
         const session = await DeviceSession.create({
           owner,
           member,
+          recoveryKit,
+          recoveryLabel: 'Recovery kit',
           label: `${OWNER_LABEL}'s library`,
           memberLabel: OWNER_LABEL,
           namespaces: [...NAMESPACES],
         });
         await seedLibrary(session.library);
         state.session = session;
+        state.recoveryKit = recoveryKit;
         state.library = session.library;
         await persistKeys();
         await persist();
@@ -808,8 +812,8 @@ export async function boot(root: HTMLElement | null): Promise<void> {
         eps.set(str(p['id']), {
           show: str(p['show']),
           title: str(p['title']) || 'Untitled episode',
-          published: str(p['published']),
-          durationSec: typeof p['durationSec'] === 'number' ? (p['durationSec'] as number) : 0,
+          published: str(p['published']).slice(0, 10),
+          durationSec: typeof p['duration'] === 'number' ? (p['duration'] as number) : 0,
           transcript: str(p['transcriptExcerpt']),
         });
       }
@@ -1146,7 +1150,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
     if (!v.grant) return state.consentOpen ? 'Check the codes match, narrow if you like, then Grant.' : 'A request is waiting — review it when ready.';
     if (!v.act) return 'Now let it work: Act. It reads, answers with a citation, and writes notes.';
     if (!v.end) return 'One tap ends its access. Its notes stay.';
-    if (!v.recover) return 'Restore a new device through a recovery kit. This demo library has no kit.';
+    if (!v.recover) return 'Restore on a new device through the recovery kit, with fresh controller and member keys.';
     return 'That was the whole tour: knock, grant, act, end, recover.';
   }
 
@@ -1467,7 +1471,7 @@ export async function boot(root: HTMLElement | null): Promise<void> {
       'Grant — you approve, narrowed if you like',
       'Act — it reads, answers, and writes notes',
       'End — access ends, its notes stay',
-      'Recover — rebuilt from stored records',
+      'Recover — a new device joins through the kit',
       'Done — the whole tour',
     ];
     const i = demoStepIndex();

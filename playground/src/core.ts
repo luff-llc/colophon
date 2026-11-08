@@ -5,3 +5,6 @@
  */
 
 export * from '@colophon/core';
+
+/** Generated creation transport; the SDK facade’s create() still exposes only owner-only genesis. */
+export { WasmLibrary } from '../../js/dist/wasm/colophon_wasm.js';

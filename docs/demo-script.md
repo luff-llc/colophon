@@ -22,7 +22,7 @@ access."
 
 "That just happened for real. This tab made separate controller and member keys. Its controller
 created the keyring and granted its member access. The Colophon core runs right here: Rust,
-compiled to WebAssembly."
+compiled to WebAssembly. A separate recovery kit already has its own slot in the keyring."
 
 ## 3. Knock (0:40–1:00)
 
@@ -70,12 +70,6 @@ access doesn't rewrite the past."
 "The kit opens the vault and signs a keyring entry adding the new device controller. That
 controller grants its separate member access. The content is unchanged; the history records
 the new device joining."
-
-**Recording blocker:** the landed creation API only builds a single-controller genesis with
-`recoverThreshold: 0`. It cannot include the kit controller and its sealed slot in genesis.
-The playground stops Recover explicitly for newly created libraries until that API is supplied.
-Do not record this step as working or substitute an old-key reopen. The session restore path
-accepts existing 0.4 records with a kit controller and slot.
 
 ## 8. Close (2:20–2:35)
 
