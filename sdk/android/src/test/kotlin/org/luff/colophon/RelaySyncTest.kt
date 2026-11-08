@@ -87,6 +87,7 @@ class RelaySyncTest {
         keys = keys,
         store = store,
         relay = RelayConfiguration(url, token, automatic = automatic),
+        ownerController = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral()),
     )
 
     private fun link(id: String) = DomainCommand.saveLink(id, "https://example.com/$id", id)

@@ -9,13 +9,14 @@ import java.nio.file.Files
 
 class V03Test {
     private fun config(store: RecordStore, home: java.io.File, keys: SoftwareKeys) =
-        SessionConfiguration("Playback", namespaces = listOf("listening.podcasts"), store = store, privateHome = home, keys = keys)
+        SessionConfiguration("Playback", namespaces = listOf("listening.podcasts"), store = store, privateHome = home, keys = keys, ownerController = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral()))
 
     @Test fun coldOpenDoesNotMergeAuthorityTwiceAndTranslatesLayoutError() = runBlocking {
         val keys = SoftwareKeys.ephemeral()
         val home = Files.createTempDirectory("colophon-review-open").toFile()
         try {
-            ColophonLibrary.create(keys, "Review", "Owner", listOf("listening.podcasts")).use { lib ->
+            val controller = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral())
+            ColophonLibrary.create(keys, "Review", "Owner", listOf("listening.podcasts"), controller).use { lib ->
                 val base = BindingSessionCore()
                 var authorityMerges = 0
                 val core = object : SessionCore by base {
@@ -31,8 +32,9 @@ class V03Test {
                 val worker = SessionWorker(config(MemoryRecordStore(lib.records), home, keys), core)
                 worker.refresh()
                 assertEquals(0, authorityMerges)
+                lib.unlockVault()
                 val action = (lib.native.beginLayout(99u, "2026-11-07T12:00:00Z") as PreparedAction.Ready).action
-                val future = lib.records + action.finish(action.signWith(keys))
+                val future = lib.records + action.finishAuthority(action.signControllerWith(controller))
                 val futureWorker = SessionWorker(config(MemoryRecordStore(future), java.io.File(home, "future"), keys))
                 try { futureWorker.refresh(); fail("Future layout opened") }
                 catch (error: Exception) { assertSame(SessionLayoutException, error) }
@@ -91,10 +93,12 @@ class V03Test {
         val keys = SoftwareKeys.ephemeral()
         val home = Files.createTempDirectory("colophon-v03-future").toFile()
         try {
-            ColophonLibrary.create(keys, "Future", "Owner", listOf("listening.podcasts")).use { lib ->
+            val controller = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral())
+            ColophonLibrary.create(keys, "Future", "Owner", listOf("listening.podcasts"), controller).use { lib ->
                 lib.write("listening.podcasts", "position", "{\"id\":\"e\",\"seconds\":10,\"seek\":true}".toByteArray()).get()
+                lib.unlockVault()
                 val action = (lib.native.beginLayout(99u, "2026-11-07T12:00:00Z") as PreparedAction.Ready).action
-                val records = lib.records + action.finish(action.signWith(keys))
+                val records = lib.records + action.finishAuthority(action.signControllerWith(controller))
                 val store = MemoryRecordStore(records)
                 val identity = keys.signingPublicKey()
                 val session = ColophonSession(config(store, home, keys))
@@ -110,7 +114,7 @@ class V03Test {
                     RelaySync(MemoryRecordStore(records), RelayEndpoint(relay.slotURL, relay.token)).sync()
                     val empty = MemoryRecordStore()
                     val remote = ColophonSession(SessionConfiguration("Reader", namespaces = listOf("listening.podcasts"), store = empty, privateHome = java.io.File(home, "remote"), keys = keys,
-                        relay = RelayConfiguration(relay.slotURL, relay.token, automatic = false)))
+                        relay = RelayConfiguration(relay.slotURL, relay.token, automatic = false), ownerController = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral())))
                     remote.restore()
                     assertEquals(SessionPhase.UpdateRequired, remote.phase.value)
                     assertTrue("Future layouts stop before relay content downloads", empty.paths().all { it.startsWith("authority/") })

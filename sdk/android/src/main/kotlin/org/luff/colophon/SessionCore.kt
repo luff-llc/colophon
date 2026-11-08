@@ -1,5 +1,6 @@
 package org.luff.colophon
 
+import com.luff.colophon.BindingException
 import com.luff.colophon.AccessException
 import com.luff.colophon.AccessRequest
 import com.luff.colophon.BlobReadOutcome
@@ -7,14 +8,18 @@ import com.luff.colophon.NativeBlobWriter
 import com.luff.colophon.ColophonLibrary
 import com.luff.colophon.Denial
 import com.luff.colophon.GrantOptions
+import com.luff.colophon.ControllerProvider
 import com.luff.colophon.KeyProvider
 import com.luff.colophon.NamespaceView
 import com.luff.colophon.OperationView
 import com.luff.colophon.Outcome
-import com.luff.colophon.PlatformKeys
 import com.luff.colophon.requestInfo
 
 internal interface SessionCore {
+    fun setOwnerController(provider: ControllerProvider?) {}
+    fun changeKeyring(keyring: ByteArray, newSeed: ByteArray?, signers: List<ControllerProvider>) { throw SessionException.NotReady() }
+    fun restoreFromKit(configuration: SessionConfiguration, kits: List<ControllerProvider>) { throw SessionException.NotReady() }
+
     fun openStorage(store: RecordStore, paths: Set<String>, versions: Map<String, String>, pending: Map<String, ByteArray>, keys: KeyProvider, namespaces: List<String>, cache: CheckpointCache, libraryID: String?) {
         open(store.read(paths) + pending, keys); setReadScope(namespaces)
     }
@@ -56,7 +61,6 @@ internal interface SessionCore {
     fun approve(request: ByteArray, grant: GrantOptions?)
     fun revoke(id: String)
     fun importRequest(data: ByteArray): AccessRequest
-    fun recovery(): KeyProvider?
     fun close()
 }
 
@@ -65,27 +69,29 @@ internal class BindingSessionCore : SessionCore {
     private var cache: CheckpointCache? = null
     private var ledger: EngineLedger? = null
     private var ledgerRevision: ULong? = null
-    private var recoveryProvider: KeyProvider? = null
+    private var ownerController: ControllerProvider? = null
+    override fun setOwnerController(provider: ControllerProvider?) { ownerController = provider }
 
     private fun requireLibrary(): EngineLibrary =
         library ?: throw SessionException.NotReady()
 
     override fun openStorage(store: RecordStore, paths: Set<String>, versions: Map<String, String>, pending: Map<String, ByteArray>, keys: KeyProvider, namespaces: List<String>, cache: CheckpointCache, libraryID: String?) {
-        val opened = EngineLibrary.open(store, paths, versions, pending, keys, namespaces, cache, libraryID)
+        val opened = EngineLibrary.open(store, paths, versions, pending, keys, namespaces, cache, libraryID, ownerController)
+        library?.close()
         library = opened; this.cache = cache; ledger = null; ledgerRevision = null
     }
     override fun open(records: Map<String, ByteArray>, keys: KeyProvider) {
         val store = MemoryRecordStore(records)
-        val opened = EngineLibrary.open(store, records.keys, emptyMap(), emptyMap(), keys, emptyList(), null, null)
+        val opened = EngineLibrary.open(store, records.keys, emptyMap(), emptyMap(), keys, emptyList(), null, null, ownerController)
+        library?.close()
         library = opened; ledger = null; ledgerRevision = null
     }
     override fun refreshSource(store: RecordStore, pending: Map<String, ByteArray>) { requireLibrary().refreshSource(store, pending) }
     override fun updateVersions(versions: Map<String, String>, store: RecordStore) { requireLibrary().acknowledge(versions, store) }
     override fun saveCheckpoint() { library?.let { it.native.verifyBatch(128u); cache?.save(it.checkpoint(), it.id) } }
     override fun create(configuration: SessionConfiguration) {
-        val recovery = configuration.recoveryKeys ?: PlatformKeys.software()
-        ColophonLibrary.create(configuration.keys, configuration.memberLabel, configuration.memberLabel, configuration.libraryNamespaces, recovery).use { created ->
-            recoveryProvider = created.recoveryKeys
+        val owner = configuration.ownerController ?: throw BindingException.KeyProvider("An owner controller provider is required for creation")
+        ColophonLibrary.create(configuration.keys, configuration.memberLabel, configuration.memberLabel, configuration.libraryNamespaces, owner, configuration.recoveryKit).use { created ->
             val records = created.records
             openStorage(MemoryRecordStore(records), records.keys, emptyMap(), emptyMap(), configuration.keys, configuration.namespaces,
                 CheckpointCache(java.io.File(configuration.privateHome, "Checkpoints")), null)
@@ -94,7 +100,7 @@ internal class BindingSessionCore : SessionCore {
     }
 
     override fun mergeObserved(records: Map<String, ByteArray>, versions: Map<String, String>) {
-        val library = requireLibrary(); library.native.mergeObserved(records, records.keys.mapNotNull { path -> versions[path]?.let { path to it } }.toMap()); library.ready()
+        val library = requireLibrary(); library.mergeObserved(records, records.keys.mapNotNull { path -> versions[path]?.let { path to it } }.toMap())
     }
     override fun merge(records: Map<String, ByteArray>) {
         val library = requireLibrary()
@@ -114,7 +120,13 @@ internal class BindingSessionCore : SessionCore {
         return request
     }
 
-    override fun recovery(): KeyProvider? = recoveryProvider
+    override fun changeKeyring(keyring: ByteArray, newSeed: ByteArray?, signers: List<ControllerProvider>) {
+        requireLibrary().changeKeyring(keyring, newSeed, signers)
+    }
+
+    override fun restoreFromKit(configuration: SessionConfiguration, kits: List<ControllerProvider>) {
+        requireLibrary().restoreFromKit(configuration, kits)
+    }
 
     override fun recordsAt(paths: Collection<String>): Map<String, ByteArray> = requireLibrary().recordsAt(paths.toList())
 
@@ -183,6 +195,7 @@ internal class BindingSessionCore : SessionCore {
     }
 
     override fun close() {
+        library?.close()
         library = null
     }
 }

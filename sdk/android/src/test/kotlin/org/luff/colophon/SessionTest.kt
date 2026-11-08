@@ -25,6 +25,7 @@ class SessionTest {
         privateHome = home,
         keys = keys,
         store = store,
+        ownerController = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral()),
     )
 
     private fun link(id: String = UUID.randomUUID().toString()) =

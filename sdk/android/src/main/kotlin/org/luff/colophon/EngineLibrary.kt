@@ -6,7 +6,8 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 
 /** Worker-confined engine facade; callbacks perform only storage reads. */
-internal class EngineLibrary(val native: NativeEngine, private val keys: KeyProvider) : AutoCloseable {
+internal class EngineLibrary(val native: NativeEngine, private val keys: KeyProvider,
+                             private val authority: ColophonLibrary) : AutoCloseable {
     val id get() = native.id()
     val records get() = native.records()
     val revision get() = native.revision()
@@ -14,7 +15,29 @@ internal class EngineLibrary(val native: NativeEngine, private val keys: KeyProv
     fun me() = native.me()
     fun members() = native.members()
     fun ready() = native.finishUnlockMany(native.beginUnlock().map { UnlockResult(it, keys.agree(it.peer)) })
-    fun merge(records: Map<String, ByteArray>) { native.merge(records); ready() }
+    fun merge(records: Map<String, ByteArray>) {
+        native.merge(records)
+        authority.merge(records.filterKeys { it.startsWith("authority/") })
+        ready()
+    }
+    fun mergeObserved(records: Map<String, ByteArray>, versions: Map<String, String>) {
+        native.mergeObserved(records, versions)
+        authority.merge(records.filterKeys { it.startsWith("authority/") })
+        ready()
+    }
+    fun changeKeyring(keyring: ByteArray, newSeed: ByteArray?, signers: List<ControllerProvider>) {
+        authority.changeKeyring(keyring, newSeed, signers)
+        native.merge(authority.records)
+        ready()
+    }
+    fun restoreFromKit(configuration: SessionConfiguration, kits: List<ControllerProvider>) {
+        val owner = configuration.ownerController ?: throw BindingException.KeyProvider("An owner controller provider is required")
+        val requestPath = "requests/${me().id}.json"
+        val records = authority.records + native.recordsAt(listOf(requestPath))
+        ColophonLibrary.restoreFromKit(records, keys, owner, configuration.memberLabel, configuration.libraryNamespaces, kits).use {
+            merge(it.records.filterKeys { path -> path.startsWith("authority/") })
+        }
+    }
     fun refreshSource(store: RecordStore, pending: Map<String, ByteArray>) {
         val snapshot = pending.toMap()
         native.setSource(object : EngineRecordSource {
@@ -44,24 +67,30 @@ internal class EngineLibrary(val native: NativeEngine, private val keys: KeyProv
                 }
             }
         }
-    fun approve(request: ByteArray, grant: GrantOptions?): Outcome<Unit> = execute(native.beginApprove(request, grant, now(), entropy()))
-    fun revoke(id: String): Outcome<Unit> = execute(native.beginRevoke(id, now(), entropy()))
-    private fun execute(prepared: PreparedAction): Outcome<Unit> = when (prepared) {
-        is PreparedAction.Failure -> Outcome.Failure(prepared.denial)
-        is PreparedAction.Ready -> prepared.action.use { native.commit(it, it.signWith(keys)); ready(); Outcome.Success(Unit) }
+    fun approve(request: ByteArray, grant: GrantOptions?): Outcome<Unit> {
+        return when (val result = authority.approve(request, grant)) {
+            is Outcome.Failure -> result
+            is Outcome.Success -> { native.merge(authority.records); ready(); Outcome.Success(Unit) }
+        }
+    }
+    fun revoke(id: String): Outcome<Unit> {
+        return when (val result = authority.revoke(id)) {
+            is Outcome.Failure -> result
+            is Outcome.Success -> { native.merge(authority.records); ready(); Outcome.Success(Unit) }
+        }
     }
     fun beginBlob(namespace: String, mediaType: String): Outcome<NativeBlobWriter> = when (val result = native.beginBlob(namespace, mediaType, now(), entropy())) {
         is BlobWriteOutcome.Ready -> Outcome.Success(result.writer)
         is BlobWriteOutcome.Failure -> Outcome.Failure(result.denial)
     }
     fun openBlobChunk(namespace: String, digest: String, index: Int, ciphertext: ByteArray) = native.openBlobChunk(namespace, digest, index.toUInt(), ciphertext, now())
-    override fun close() = native.close()
+    override fun close() { authority.close(); native.close() }
     companion object {
         private val random = SecureRandom()
         fun entropy() = ByteArray(32).also(random::nextBytes)
         fun now() = Instant.now().truncatedTo(ChronoUnit.MILLIS).toString()
         fun open(store: RecordStore, paths: Set<String>, versions: Map<String, String>, pending: Map<String, ByteArray>,
-                 keys: KeyProvider, namespaces: List<String>, cache: CheckpointCache?, expectedID: String?): EngineLibrary {
+                 keys: KeyProvider, namespaces: List<String>, cache: CheckpointCache?, expectedID: String?, ownerController: ControllerProvider? = null): EngineLibrary {
             val member = PublicKeys(keys.signingPublicKey(), keys.agreementPublicKey())
             val authority = store.read(paths.filter { it.startsWith("authority/") }) + pending.filterKeys { it.startsWith("authority/") }
             val id = NativeLibrary.open(authority, member).use { it.id() }
@@ -80,7 +109,14 @@ internal class EngineLibrary(val native: NativeEngine, private val keys: KeyProv
                 repeat(4) { inventory.write(n ushr (8 * it) and 255) }; inventory.write(bytes)
             }
             for (path in paths + pending.keys) { append(path); append(if (path in pending) "" else versions[path] ?: "") }
-            return key.use { EngineLibrary(NativeEngine.openInventory(source, inventory.toByteArray(), member, id, namespaces, key), keys).also { it.ready() } }
+            return key.use {
+                val engine = NativeEngine.openInventory(source, inventory.toByteArray(), member, id, namespaces, key)
+                var controllers: ColophonLibrary? = null
+                try {
+                    controllers = ColophonLibrary.open(authority, keys, ownerController)
+                    EngineLibrary(engine, keys, controllers).also { it.ready() }
+                } catch (error: Exception) { controllers?.close(); engine.close(); throw error }
+            }
         }
     }
 }

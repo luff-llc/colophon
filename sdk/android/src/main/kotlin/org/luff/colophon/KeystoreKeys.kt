@@ -1,6 +1,7 @@
 package org.luff.colophon
 
 import android.content.Context
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
@@ -42,16 +43,24 @@ class KeystoreKeys private constructor(
     companion object {
         private const val STORE = "AndroidKeyStore"
 
+        /**
+         * Opens a distinct alias pair. API 31+ is required for Keystore agreement keys.
+         * With [presence] the host authenticates once within its configured validity window,
+         * allowing both creation rounds to share the same presence check.
+         */
         @Suppress("UNUSED_PARAMETER")
-        fun openOrCreate(context: Context, aliasPrefix: String): KeystoreKeys {
+        fun openOrCreate(context: Context, aliasPrefix: String, presence: KeystorePresence? = null): KeystoreKeys {
             val prefix = aliasPrefix.trim()
             require(prefix.isNotEmpty() && prefix.length < 80 && prefix.all { it.isLetterOrDigit() || it == '.' || it == '-' || it == '_' }) {
                 "Invalid Keystore alias prefix"
             }
-            return KeystoreKeys { materialize(prefix) }
+            return KeystoreKeys {
+                if (Build.VERSION.SDK_INT < 31) throw BindingException.KeyProvider("Keystore agreement keys require Android API 31+")
+                materialize(prefix, presence)
+            }
         }
 
-        private fun materialize(prefix: String): Loaded {
+        private fun materialize(prefix: String, presence: KeystorePresence?): Loaded {
             return try {
                 val signingAlias = "$prefix.signing"
                 val agreementAlias = "$prefix.agreement"
@@ -62,12 +71,14 @@ class KeystoreKeys private constructor(
                     throw BindingException.KeyProvider("Incomplete Keystore identity for $prefix")
                 }
                 if (hasSigning) {
+                    checkPresence(store, signingAlias, presence)
+                    checkPresence(store, agreementAlias, presence)
                     Loaded(
                         PlatformKeys(loadPair(store, signingAlias), loadPair(store, agreementAlias)),
                         strongBoxUsed(store, signingAlias),
                     )
                 } else {
-                    create(signingAlias, agreementAlias)
+                    create(signingAlias, agreementAlias, presence)
                 }
             } catch (error: BindingException) {
                 throw error
@@ -76,12 +87,12 @@ class KeystoreKeys private constructor(
             }
         }
 
-        private fun create(signingAlias: String, agreementAlias: String): Loaded {
+        private fun create(signingAlias: String, agreementAlias: String, presence: KeystorePresence?): Loaded {
             val store = KeyStore.getInstance(STORE).apply { load(null) }
             val strongBox = generateIdentity(
                 signingAlias,
                 agreementAlias,
-                generate = { alias, purpose, strong -> generate(alias, purpose, strong) },
+                generate = { alias, purpose, strong -> generate(alias, purpose, strong, presence) },
                 deletePartial = {
                     deleteQuietly(store, signingAlias)
                     deleteQuietly(store, agreementAlias)
@@ -123,12 +134,16 @@ class KeystoreKeys private constructor(
             }
         }
 
-        private fun generate(alias: String, purpose: Int, strongBox: Boolean) {
+        private fun generate(alias: String, purpose: Int, strongBox: Boolean, presence: KeystorePresence?) {
             val builder = KeyGenParameterSpec.Builder(alias, purpose)
                 .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
                 .setInvalidatedByBiometricEnrollment(false)
             if (purpose and KeyProperties.PURPOSE_SIGN != 0) {
                 builder.setDigests(KeyProperties.DIGEST_SHA256)
+            }
+            if (presence != null) {
+                builder.setUserAuthenticationRequired(true)
+                builder.setUserAuthenticationParameters(presence.validitySeconds, presence.authenticationTypes)
             }
             if (strongBox) builder.setIsStrongBoxBacked(true)
             KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, STORE).apply {
@@ -143,6 +158,16 @@ class KeystoreKeys private constructor(
             val public = store.getCertificate(alias)?.publicKey
                 ?: throw BindingException.KeyProvider("Missing Keystore certificate $alias")
             return KeyPair(public, private)
+        }
+
+        private fun checkPresence(store: KeyStore, alias: String, presence: KeystorePresence?) {
+            val key = store.getKey(alias, null) ?: throw BindingException.KeyProvider("Missing Keystore key $alias")
+            val info = KeyFactory.getInstance(key.algorithm, STORE).getKeySpec(key, KeyInfo::class.java)
+            if (info.isUserAuthenticationRequired != (presence != null) ||
+                (presence != null && (info.userAuthenticationValidityDurationSeconds != presence.validitySeconds ||
+                    info.userAuthenticationType != presence.authenticationTypes))) {
+                throw BindingException.KeyProvider("Existing Keystore presence policy differs for $alias; use a separate alias pair")
+            }
         }
 
         private fun strongBoxUsed(store: KeyStore, alias: String): Boolean {
@@ -174,5 +199,21 @@ class KeystoreKeys private constructor(
             } catch (_: Exception) {
             }
         }
+    }
+}
+
+/**
+ * Host-selected authentication window for both controller keys; authenticate before using them.
+ * @property validitySeconds Positive authentication validity window, shared by the signing rounds.
+ * @property authenticationTypes Allowed Android strong-biometric and/or device-credential flags.
+ */
+data class KeystorePresence(
+    val validitySeconds: Int,
+    val authenticationTypes: Int = KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
+) {
+    init {
+        require(validitySeconds > 0) { "Presence window must be positive" }
+        require(authenticationTypes != 0 && authenticationTypes and
+            (KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL).inv() == 0) { "Unsupported authentication types" }
     }
 }
