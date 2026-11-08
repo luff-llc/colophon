@@ -33,7 +33,7 @@ struct SourceEvaluation {
             }
             var heads: [String: Any] = [:]
             for component in ["state", "metadata", "activity"] {
-                heads[id + "/" + component] = progress.heads[tuple(namespace, id, component)] as Any? ?? NSNull()
+                heads[id + "/" + component] = progress.heads[try tuple(namespace, id, component)] as Any? ?? NSNull()
             }
             result.context = ["heads": heads, "existingItems": Array(old.items.keys)]
         case "notes":
@@ -56,25 +56,25 @@ struct SourceEvaluation {
             }
             var identities: [String: String] = [:]
             for (category, ids) in [("notebook", Array(new.notebooks.keys)), ("cell", Array(new.cells.keys) + [cell]), ("entry", Array(new.entries.keys))] {
-                for id in ids where !id.isEmpty { identities[tuple(library, category, id)] = id }
+                for id in ids where !id.isEmpty { identities[try tuple(library, category, id)] = id }
             }
             var heads: [String: Any] = [:]
-            heads[tuple("cell", cell)] = old.cells[cell]?.revision as Any? ?? NSNull()
-            heads[tuple("entry", entryID)] = old.entries[entryID]?.revision as Any? ?? NSNull()
+            heads[try tuple("cell", cell)] = old.cells[cell]?.revision as Any? ?? NSNull()
+            heads[try tuple("entry", entryID)] = old.entries[entryID]?.revision as Any? ?? NSNull()
             // Notebook and order are independent components, reconstructed from the old prefix.
             let prior = before.admitted
-            heads[tuple("notebook", notebook)] = prior.last(where: { $0.operation.payload["notebook"]?.string == notebook && ["notebook.create", "notebook.rename", "notebook.archive"].contains($0.operation.kind) })?.id as Any? ?? NSNull()
+            heads[try tuple("notebook", notebook)] = prior.last(where: { $0.operation.payload["notebook"]?.string == notebook && ["notebook.create", "notebook.rename", "notebook.archive"].contains($0.operation.kind) })?.id as Any? ?? NSNull()
             // Imported order head is separate from cell text. Keep native destination edits
             // out of this map so catch-up remains conditional against the imported baseline.
-            let importedOrder = progress.heads[tuple(namespace, notebook, "order")]
-            heads[tuple("order", notebook)] = importedOrder as Any? ?? NSNull()
+            let importedOrder = progress.heads[try tuple(namespace, notebook, "order")]
+            heads[try tuple("order", notebook)] = importedOrder as Any? ?? NSNull()
             var revisions: [String: String] = [:]
             for prior in before.admitted {
                 for category in ["cell", "entry", "notebook", "order"] {
-                    if let mapped = progress.revisions[tuple(namespace, category, prior.id)] { revisions[tuple(category, prior.id)] = mapped }
+                    if let mapped = progress.revisions[try tuple(namespace, category, prior.id)] { revisions[try tuple(category, prior.id)] = mapped }
                 }
             }
-            if let importedOrder { revisions[tuple("order", importedOrder)] = importedOrder }
+            if let importedOrder { revisions[try tuple("order", importedOrder)] = importedOrder }
             var effective = try JSONSerialization.jsonObject(with: JSONEncoder().encode(p)) as? [String: Any] ?? [:]
             if result.outcome == "conflict" || result.outcome == "lateEdit" {
                 // The full losing candidate uses the attempted source, never the winning text.
@@ -135,8 +135,8 @@ struct SourceEvaluation {
                             case "consumption": kind = "setState"; fields["show"] = showID; fields["consumption"] = fact.body["consumption"]?.string
                             default: continue
                             }
-                            if let expected = action.expectedRevision, let imported = progress.heads[tuple(namespace, id, component)] {
-                                serviceRevisions[tuple(component, expected)] = imported
+                            if let expected = action.expectedRevision, let imported = progress.heads[try tuple(namespace, id, component)] {
+                                serviceRevisions[try tuple(component, expected)] = imported
                             }
                             actions.append(["kind": kind, "mode": action.mode.rawValue, "payload": fields])
                         }
@@ -166,14 +166,14 @@ struct SourceEvaluation {
             var heads: [String: Any] = [:]
             for prior in before.admitted {
                 for component in ["show", "position", "state", "queue", "text", "playlist"] {
-                    if let mapped = progress.revisions[tuple(namespace, component, prior.id)] { revisions[tuple(component, prior.id)] = mapped }
+                    if let mapped = progress.revisions[try tuple(namespace, component, prior.id)] { revisions[try tuple(component, prior.id)] = mapped }
                 }
             }
             for (component, id, oldHead) in [("show", show, old.showRevisions[show]), ("position", episode, old.episodes[episode]?.positionRevision), ("state", episode, old.episodes[episode]?.stateRevision), ("text", note, old.notes[note]?.revision), ("queue", "queue", old.queueRevision)] {
-                if let oldHead, let imported = progress.heads[tuple(namespace, id, component)] { revisions[tuple(component, oldHead)] = imported }
+                if let oldHead, let imported = progress.heads[try tuple(namespace, id, component)] { revisions[try tuple(component, oldHead)] = imported }
             }
             for (component, id) in [("show", show), ("position", episode), ("state", episode), ("text", note), ("queue", "queue")] {
-                heads[tuple(component, id)] = progress.heads[tuple(namespace, id, component)] as Any? ?? NSNull()
+                heads[try tuple(component, id)] = progress.heads[try tuple(namespace, id, component)] as Any? ?? NSNull()
             }
             result.context = ["effectivePayload": effective, "revisions": revisions, "catchUp": true, "destinationHeads": heads,
                               "reason": result.outcome == "unresolved" ? "Service projection/codec not connected; source retained for reconciliation" : ""]

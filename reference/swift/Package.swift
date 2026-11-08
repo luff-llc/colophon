@@ -13,6 +13,8 @@ let package = Package(name: "ColophonReference", platforms: [.macOS(.v14), .iOS(
   .library(name: "ColophonNotes", targets: ["ColophonNotes"]),
   .library(name: "ColophonMCP", targets: ["ColophonMCP"]),
   .library(name: "ColophonLegacyAdapter", targets: ["ColophonLegacyAdapter"]),
+  .library(name: "ColophonCleanCopy", targets: ["ColophonCleanCopy"]),
+  .executable(name: "colophon-clean-copy", targets: ["colophon-clean-copy"]),
   .executable(name: "colophon", targets: ["colophon"]),
 ], dependencies: [.package(name: "ColophonSDK", path: "../..")], targets: [
   .target(name: "ColophonCore", path: "Sources/ColophonCore"),
@@ -30,4 +32,11 @@ let package = Package(name: "ColophonReference", platforms: [.macOS(.v14), .iOS(
     "ColophonSaved", "ColophonBooks", "ColophonListening", "ColophonNotes", "ColophonMCP"], path: "Tests/ColophonTests"),
   .target(name: "ColophonLegacyAdapter", dependencies: ["ColophonCore", "ColophonStore", "ColophonAuthority", "ColophonReplica", "ColophonBooks", "ColophonListening", "ColophonSaved", "ColophonNotes", .product(name: "ColophonMigration", package: "ColophonSDK")]),
   .testTarget(name: "ColophonMigrationTests", dependencies: ["ColophonLegacyAdapter", .product(name: "ColophonMigration", package: "ColophonSDK")]),
+  .target(name: "ColophonCleanCopy", dependencies: ["ColophonCore", "ColophonStore", "ColophonAuthority", "ColophonReplica",
+    "ColophonBooks", "ColophonListening", "ColophonSaved", "ColophonNotes",
+    .product(name: "ColophonKit", package: "ColophonSDK"),
+    .product(name: "ColophonSession", package: "ColophonSDK"),
+    .product(name: "ColophonMigration", package: "ColophonSDK")]),
+  .executableTarget(name: "colophon-clean-copy", dependencies: ["ColophonCleanCopy"]),
+  .testTarget(name: "ColophonCleanCopyTests", dependencies: ["ColophonCleanCopy"]),
 ], swiftLanguageModes: [.v6])
