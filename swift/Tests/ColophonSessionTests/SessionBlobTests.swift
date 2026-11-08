@@ -35,10 +35,12 @@ private func content(_ count: Int, seed: UInt8 = 7) -> Data {
     await member.restore()
     #expect(await member.syncNow())
     #expect(await owner.syncNow())
+    try await settle { owner.phase == .ready && !owner.requests.isEmpty }
     try await owner.approve(#require(owner.requests.first))
     #expect(await owner.syncNow())
     #expect(await member.syncNow())
-    #expect(member.phase == .ready)
+    // A store watcher may still be applying the grant when sync returns.
+    try await settle { member.phase == .ready }
     return Pair(owner: owner, member: member, ownerStore: ownerStore, memberStore: memberStore, homes: homes)
 }
 
@@ -180,10 +182,12 @@ private func content(_ count: Int, seed: UInt8 = 7) -> Data {
 
     // Required blobs download on the pass that delivers their manifest, without a read.
     let eager = content(90_000, seed: 5)
+    try await settle { member.phase == .ready }
     let required = try await member.putBlob(eager, namespace: "notes", mediaType: "application/json", reference: "transcript", required: true)
     #expect(await member.syncNow())
     #expect(await owner.syncNow())
-    #expect(await owner.blobAvailability(namespace: "notes", digest: required.digest) == .available)
+    // The eager download runs on the pass that delivered the manifest; wait for it to land.
+    try await settle { await owner.blobAvailability(namespace: "notes", digest: required.digest) == .available }
     let ownerCopy = try await owner.blobData(namespace: "notes", digest: required.digest)
     #expect(ownerCopy == eager)
 
@@ -194,4 +198,13 @@ private func content(_ count: Int, seed: UInt8 = 7) -> Data {
     #expect(await member.syncNow())
     #expect(member.phase == .denied)
     await #expect(throws: (any Error).self) { try await member.blobData(namespace: "notes", digest: required.digest) }
+}
+
+/// Waits for background session work to settle, with a fixed deadline and no fixed sleeps in tests.
+@MainActor private func settle(_ condition: @MainActor () async -> Bool) async throws {
+    let deadline = ContinuousClock.now + .seconds(20)
+    while !(await condition()) {
+        guard ContinuousClock.now < deadline else { Issue.record("Timed out waiting for the session to settle"); return }
+        try await Task.sleep(for: .milliseconds(50))
+    }
 }

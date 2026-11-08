@@ -87,6 +87,13 @@ private actor ObservedKeys: AsyncKeyProvider {
             namespaces: ["notes"], access: [.read])
         try await store.append(["requests/\(request.id).json": request.record])
         await session.refresh()
+        // Let any store-watcher refresh triggered by the append finish before the failing action,
+        // so it can't land afterwards and replace the failure phase.
+        let deadline = ContinuousClock.now + .seconds(20)
+        while !(session.phase == .ready && session.requests.contains { $0.id == request.id }) {
+            guard ContinuousClock.now < deadline else { Issue.record("Session never settled"); return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
         let before = try await store.read()
         await owner.lockAgreement()
         await #expect(throws: (any Error).self) { try await session.approve(request) }

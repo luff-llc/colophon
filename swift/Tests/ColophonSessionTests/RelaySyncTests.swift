@@ -250,6 +250,8 @@ private actor AuthorityOrderTransport: RelayTransport {
     #expect(await member.syncNow())
 
     #expect(await owner.syncNow())
+    // A store watcher may still be applying what sync delivered; act only once settled.
+    try await eventually { owner.phase == .ready && !owner.requests.isEmpty }
     let request = try #require(owner.requests.first)
     #expect(request.pairingCode == code)
     try await owner.approve(request)
@@ -258,6 +260,7 @@ private actor AuthorityOrderTransport: RelayTransport {
     #expect(await member.syncNow())
     // A store watcher may already be refreshing the verified grant when sync returns.
     #expect(member.phase == .ready || member.phase == .refreshing)
+    try await eventually { member.phase == .ready }
     #expect(member.members.contains { $0.id == member.memberID && $0.grant != nil })
     try await member.perform(link("from-member"), observed: member.observedRevision)
     #expect(await member.syncNow())
@@ -269,6 +272,7 @@ private actor AuthorityOrderTransport: RelayTransport {
 
     // Revocation. The member has not synced yet, so its session still writes locally.
     let memberID = try #require(member.memberID)
+    try await eventually { owner.phase == .ready }
     try await owner.revoke(memberID: memberID)
     #expect(await owner.syncNow())
     try await member.perform(link("after-revocation"), observed: member.observedRevision)
