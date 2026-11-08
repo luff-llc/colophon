@@ -17,6 +17,59 @@ internal fun encodeKeyJSON(value: KeyJson): String = when (value) {
 }
 
 class ControllerSessionBridgeTest {
+    @Test fun revocationKeepsAdmittedContentAndRejectsLaterOfflineWrites() = runBlocking {
+        val home = Files.createTempDirectory("colophon-controller-kept").toFile()
+        val memberKeys = SoftwareKeys.ephemeral()
+        val ownerKeys = SoftwareKeys.ephemeral()
+        val store = MemoryRecordStore()
+        val configuration = SessionConfiguration("Owner", namespaces = listOf("reading.saved"), privateHome = home,
+            keys = ownerKeys, ownerController = RawControllerProvider(SoftwareKeys.ephemeral()), store = store)
+        val owner = SessionWorker(configuration)
+        try {
+            val created = owner.create()
+            owner.write(DomainCommand.saveLink("from-owner", "https://example.com/owner", "Owner"), created.revision)
+            val request = ColophonLibrary.requestAccess(created.core!!.libraryID, memberKeys, "Member", MemberKind.APP,
+                listOf("reading.saved"), listOf(Access.READ, Access.WRITE))
+            owner.approve(request.record, null)
+            ColophonLibrary.open(store.read(), memberKeys).use { offline ->
+                val written = mutableListOf<String>()
+                offline.write("reading.saved", "capture",
+                    """{"id":"from-member","url":"https://example.com/member","title":"Member"}""".toByteArray(), written).get()
+                val accepted = offline.recordsAt(written)
+                store.append(accepted)
+                owner.refresh()
+                val acceptedBody = java.util.Base64.getDecoder().decode(keyObject(accepted.values.single()).string("body"))
+                val acceptedDigest = java.security.MessageDigest.getInstance("SHA-256").digest(acceptedBody)
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+                owner.revoke(request.id)
+                val revocation = store.read(store.paths().filter { it.startsWith("authority/") }).values.map {
+                    keyObject(java.util.Base64.getDecoder().decode(keyObject(it).string("body")))
+                }.single { it.string("kind") == "revoke" }
+                assertEquals(setOf(acceptedDigest), revocation.stringList("kept").toSet())
+
+                written.clear()
+                offline.write("reading.saved", "capture",
+                    """{"id":"after-revocation","url":"https://example.com/late","title":"Late"}""".toByteArray(), written).get()
+                store.append(offline.recordsAt(written))
+                owner.refresh()
+                fun links(worker: SessionWorker) = decodeSavedLinks(worker.core.query("reading.saved", "read", "{}".toByteArray()), 100)
+                    .map { it.id }.sorted()
+                assertEquals(listOf("from-member", "from-owner"), links(owner))
+                ColophonLibrary.open(store.read(), ownerKeys).use { verified ->
+                    val view = verified.view("reading.saved").get()
+                    assertTrue((view.held + view.refused).any { it.author == request.id && it.reason.contains("revoked", ignoreCase = true) })
+                }
+                owner.saveCheckpoint()
+                owner.closeCoreNow()
+                val reopened = SessionWorker(configuration)
+                try {
+                    assertEquals(SessionPhase.Ready, reopened.restore().phase)
+                    assertEquals(listOf("from-member", "from-owner"), links(reopened))
+                } finally { reopened.closeCoreNow() }
+            }
+        } finally { owner.closeCoreNow(); home.deleteRecursively() }
+    }
+
     @Test fun engineApprovesAndRevokesWithPersistedSeparateController() = runBlocking {
         val home = Files.createTempDirectory("colophon-controller-bridge").toFile()
         try {

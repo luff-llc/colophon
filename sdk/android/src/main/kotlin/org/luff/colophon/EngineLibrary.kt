@@ -74,9 +74,16 @@ internal class EngineLibrary(val native: NativeEngine, private val keys: KeyProv
         }
     }
     fun revoke(id: String): Outcome<Unit> {
-        return when (val result = authority.revoke(id)) {
-            is Outcome.Failure -> result
-            is Outcome.Success -> { native.merge(authority.records); ready(); Outcome.Success(Unit) }
+        // kept must come from admitted content, which the authority-only session does not hold.
+        // Revocation is rare; materialize the current snapshot without retaining a second content replica.
+        return ColophonLibrary.open(native.records(), keys, authority.ownerController).use { snapshot ->
+            when (val result = snapshot.revoke(id)) {
+                is Outcome.Failure -> result
+                is Outcome.Success -> {
+                    merge(snapshot.records.filterKeys { it.startsWith("authority/") })
+                    Outcome.Success(Unit)
+                }
+            }
         }
     }
     fun beginBlob(namespace: String, mediaType: String): Outcome<NativeBlobWriter> = when (val result = native.beginBlob(namespace, mediaType, now(), entropy())) {

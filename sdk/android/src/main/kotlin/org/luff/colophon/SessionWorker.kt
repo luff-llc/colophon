@@ -68,7 +68,7 @@ internal class SessionWorker(
                 relayLiveVerifier = verifier
             }
             catch (error: BindingException.InvalidData) {
-                if (error.detail.startsWith("Unsupported storage layout")) throw SessionLayoutException
+                if (error.requiresUpdate()) throw SessionLayoutException
                 throw error
             }
         })
@@ -174,7 +174,7 @@ internal class SessionWorker(
                 if (incoming.isNotEmpty()) core.mergeObserved(incoming, versions)
             }
         } catch (error: BindingException) {
-            if (error is BindingException.InvalidData && error.detail.startsWith("Unsupported storage layout")) {
+            if (error.requiresUpdate()) {
                 throw SessionLayoutException
             }
             throw error
@@ -227,17 +227,22 @@ internal class SessionWorker(
     }
 
     private fun refreshDelta(delta: RecordDelta): SessionSnapshot {
-        val paths = delta.paths.filter { !it.startsWith("history/") && RecordPath.listingIncludes(it, configuration.namespaces) }.toSet()
+        val candidates = delta.paths.filter { !it.startsWith("history/") && RecordPath.listingIncludes(it, configuration.namespaces) }.toSet()
+        val versions = if (candidates.isEmpty()) emptyMap() else storage().versions(candidates)
+        // Publication already verified immutable bytes and acknowledged their provider versions.
+        // Live slots and unknown/changed versions still require a fresh read.
+        val paths = candidates.filter {
+            RecordPath.isReplaceable(it) || it !in merged || versions[it] == null || versions[it] != recordVersions[it]
+        }.toSet()
         if (paths.isNotEmpty()) {
             core.refreshSource(storage(), journal.pending)
-            val versions = storage().versions(paths)
             val authorityPaths = paths.filter { it.startsWith("authority/") }
             val authority = storage().read(authorityPaths)
             if (authority.keys != authorityPaths.toSet()) throw StorageException.Unavailable("Authority download pending")
             try {
                 if (authority.isNotEmpty()) core.mergeObserved(authority, versions)
             } catch (error: BindingException) {
-                if (error is BindingException.InvalidData && error.detail.startsWith("Unsupported storage layout")) {
+                if (error.requiresUpdate()) {
                     throw SessionLayoutException
                 }
                 throw error
@@ -472,31 +477,46 @@ internal class SessionWorker(
         val previousSigning = journal.signingPublicKey?.copyOf()
         val previousAgreement = journal.agreementPublicKey?.copyOf()
         val previousMember = journal.memberID
+        val previousOpened = opened
+        val previousLast = last
+        val previousToken = changeToken
+        val previousMerged = merged.toSet()
+        val previousRequests = requestPaths.toSet()
+        val previousVersions = recordVersions.toMap()
+        val previousLive = liveBytes.toMap()
+        core.beginIdentityChange()
         this.keys = keys
         opened = false
         last = null
         journal.left = false
         acceptNewIdentity = true
-        core.close()
         try {
             val snapshot = refreshLocked()
+            core.finishIdentityChange(true)
             connectionGeneration += 1
             snapshot
         } catch (error: Exception) {
-            // The new request is already in the journal. Reverting the provider would
-            // leave session.json between the old identity and the queued request.
+            // Keep the old native connection alive until a new request is durably queued.
+            // Restoring only the provider leaves published snapshots pointing at a disposed engine.
             if (journal.pending.isEmpty()) {
+                core.finishIdentityChange(false)
                 this.keys = previousKeys
                 journal.left = previousLeft
                 journal.signingPublicKey = previousSigning
                 journal.agreementPublicKey = previousAgreement
                 journal.memberID = previousMember
+                opened = previousOpened; last = previousLast; changeToken = previousToken
+                merged.clear(); merged.addAll(previousMerged)
+                requestPaths.clear(); requestPaths.addAll(previousRequests)
+                recordVersions.clear(); recordVersions.putAll(previousVersions)
+                liveBytes.clear(); liveBytes.putAll(previousLive)
             } else {
+                core.finishIdentityChange(true)
                 connectionGeneration += 1
+                opened = false
+                last = null
+                core.close()
             }
-            opened = false
-            last = null
-            core.close()
             throw error
         } finally {
             acceptNewIdentity = false

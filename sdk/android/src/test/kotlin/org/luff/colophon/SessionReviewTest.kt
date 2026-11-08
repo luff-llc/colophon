@@ -384,7 +384,7 @@ class SessionReviewTest {
         val member = session(home(), memberStore, SoftwareKeys.ephemeral(), "Member")
         member.restore()
         assertTrue(member.phase.value is SessionPhase.WaitingForApproval)
-        val request = memberStore.read().entries.first { it.key.startsWith("requests/") }.value
+        val request = memberStore.read().getValue("requests/${member.memberID.value}.json")
         assertTrue(owner.requests.value.isEmpty())
         owner.importRequest(request)
         assertEquals(1, owner.requests.value.size)
@@ -591,17 +591,19 @@ class SessionReviewTest {
         assertArrayEquals(keys.signingPublicKey(), journal.signingPublicKey)
         assertArrayEquals(keys.agreementPublicKey(), journal.agreementPublicKey)
         assertTrue(journal.pending.isNotEmpty())
-        assertTrue(journal.pending.keys.none { it.startsWith("requests/") })
+        val creationRequest = "requests/${journal.memberID}.json"
+        assertEquals(setOf(creationRequest), journal.pending.keys.filter { it.startsWith("requests/") }.toSet())
 
         store.failAppend = false
         session.refresh()
         assertReadyContent(session)
+        val publishedPaths = store.read().keys
 
         val replaced = session(home, store, SoftwareKeys.ephemeral(), "Stranger")
         replaced.restore()
         assertTrue("phase ${replaced.phase.value}", replaced.phase.value is SessionPhase.Failed)
         assertFalse(replaced.phase.value is SessionPhase.WaitingForApproval)
-        assertTrue(store.read().keys.none { it.startsWith("requests/") })
+        assertEquals("A replaced identity must not publish a request", publishedPaths, store.read().keys)
     }
 
     @Test
@@ -696,6 +698,8 @@ class SessionReviewTest {
 }
 
 private open class DelegatingCore(private val base: SessionCore = BindingSessionCore()) : SessionCore {
+    override fun beginIdentityChange() = base.beginIdentityChange()
+    override fun finishIdentityChange(keepNew: Boolean) = base.finishIdentityChange(keepNew)
     override fun open(records: Map<String, ByteArray>, keys: KeyProvider) = base.open(records, keys)
     override fun create(configuration: SessionConfiguration) = base.create(configuration)
     override fun merge(records: Map<String, ByteArray>) = base.merge(records)
