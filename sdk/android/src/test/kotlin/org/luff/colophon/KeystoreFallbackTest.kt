@@ -9,6 +9,16 @@ import java.security.ProviderException
 
 class KeystoreFallbackTest {
     @Test
+    fun signingAndAgreementUseDistinctAliasesAndPurposes() {
+        val calls = mutableListOf<Pair<String, Int>>()
+        assertEquals(true, KeystoreKeys.generateIdentity("owner.signing", "owner.agreement", { alias, purpose, _ ->
+            calls.add(alias to purpose)
+        }, {}))
+        assertEquals(listOf("owner.signing" to android.security.keystore.KeyProperties.PURPOSE_SIGN,
+            "owner.agreement" to android.security.keystore.KeyProperties.PURPOSE_AGREE_KEY), calls)
+    }
+
+    @Test
     fun strongBoxPurposeFailureFallsBackToTheTee() {
         val calls = mutableListOf<Boolean>()
         var deletes = 0

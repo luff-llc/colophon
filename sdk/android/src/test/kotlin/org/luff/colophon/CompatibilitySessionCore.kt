@@ -17,27 +17,27 @@ import com.luff.colophon.requestInfo
 
 internal class CompatibilitySessionCore : SessionCore {
     private var library: ColophonLibrary? = null
-    private var recoveryProvider: KeyProvider? = null
+    private var ownerController: com.luff.colophon.ControllerProvider? = null
+    override fun setOwnerController(provider: com.luff.colophon.ControllerProvider?) { ownerController = provider }
 
     private fun requireLibrary(): ColophonLibrary =
         library ?: throw SessionException.NotReady()
 
     override fun open(records: Map<String, ByteArray>, keys: KeyProvider) {
         library?.close()
-        library = ColophonLibrary.open(records, keys)
+        library = ColophonLibrary.open(records, keys, ownerController)
     }
 
     override fun create(configuration: SessionConfiguration) {
         library?.close()
-        val recovery = configuration.recoveryKeys ?: PlatformKeys.software()
         library = ColophonLibrary.create(
             configuration.keys,
             configuration.memberLabel,
             configuration.memberLabel,
             configuration.libraryNamespaces,
-            recovery,
+            configuration.ownerController ?: error("Missing test controller"),
+            configuration.recoveryKit,
         )
-        recoveryProvider = library?.recoveryKeys
     }
 
     override fun merge(records: Map<String, ByteArray>) {
@@ -58,7 +58,6 @@ internal class CompatibilitySessionCore : SessionCore {
         return request
     }
 
-    override fun recovery(): KeyProvider? = recoveryProvider
 
     override fun recordsAt(paths: Collection<String>): Map<String, ByteArray> = requireLibrary().recordsAt(paths.toList())
 

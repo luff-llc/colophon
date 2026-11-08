@@ -4,6 +4,7 @@ import com.luff.colophon.Access
 import com.luff.colophon.BindingException
 import com.luff.colophon.DenialReason
 import com.luff.colophon.GrantOptions
+import com.luff.colophon.ControllerProvider
 import com.luff.colophon.KeyProvider
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -19,6 +20,8 @@ internal class SessionWorker(
     internal val core: SessionCore = BindingSessionCore(),
     store: RecordStore? = configuration.store,
 ) {
+    init { core.setOwnerController(configuration.ownerController) }
+
     @Volatile private var keys: KeyProvider = configuration.keys
     private var store: RecordStore? = store
     private var journal = SessionJournal()
@@ -533,7 +536,22 @@ internal class SessionWorker(
         if (closed) throw SessionException.NotReady()
     }
 
-    fun recovery(): KeyProvider? = core.recovery()
+    suspend fun changeKeyring(keyring: ByteArray, newSeed: ByteArray?, signers: List<ControllerProvider>): SessionSnapshot = mutex.withLock {
+        ensureUsable()
+        refreshLocked()
+        core.changeKeyring(keyring, newSeed, signers)
+        persistDelta()
+        refreshLocked()
+    }
+
+    suspend fun restoreFromKit(kits: List<ControllerProvider>): SessionSnapshot = mutex.withLock {
+        ensureUsable()
+        loadJournal()
+        refreshLocked()
+        core.restoreFromKit(configuration, kits)
+        persistDelta()
+        refreshLocked()
+    }
 
     private fun empty(phase: SessionPhase) = SessionSnapshot(phase, null, revision, namespaceRevisions.toMap())
 

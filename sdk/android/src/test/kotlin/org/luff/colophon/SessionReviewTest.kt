@@ -43,6 +43,7 @@ class SessionReviewTest {
         privateHome = home,
         keys = keys,
         store = store,
+        ownerController = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral()),
     )
 
     private fun link(id: String = java.util.UUID.randomUUID().toString()) =
@@ -392,7 +393,7 @@ class SessionReviewTest {
     }
 
     @Test
-    fun joinRecoveryKeysAndClose() = runBlocking {
+    fun joinSeparateMemberAndClose() = runBlocking {
         val store = MemoryRecordStore()
         val core = object : DelegatingCore() {
             var closed = false
@@ -405,7 +406,7 @@ class SessionReviewTest {
         session.join()
         assertEquals(SessionPhase.NoLibrary, session.phase.value)
         session.create()
-        assertNotNull(session.recoveryKeys())
+        assertEquals(1, session.members.value.size)
         val member = session(home(), store, SoftwareKeys.ephemeral(), "Joiner")
         member.restore()
         assertTrue(member.phase.value is SessionPhase.WaitingForApproval)
@@ -706,7 +707,7 @@ private open class DelegatingCore(private val base: SessionCore = BindingSession
     override fun approve(request: ByteArray, grant: GrantOptions?) = base.approve(request, grant)
     override fun revoke(id: String) = base.revoke(id)
     override fun importRequest(data: ByteArray) = base.importRequest(data)
-    override fun recovery(): KeyProvider? = base.recovery()
+    override fun setOwnerController(provider: com.luff.colophon.ControllerProvider?) = base.setOwnerController(provider)
     override fun close() = base.close()
 }
 

@@ -5,6 +5,7 @@ import com.luff.colophon.AccessRequest
 import com.luff.colophon.BindingException
 import com.luff.colophon.DenialReason
 import com.luff.colophon.GrantOptions
+import com.luff.colophon.ControllerProvider
 import com.luff.colophon.KeyProvider
 import com.luff.colophon.LedgerEntry
 import com.luff.colophon.Member
@@ -281,7 +282,37 @@ class ColophonSession internal constructor(
         }
     }
 
-    suspend fun recoveryKeys(): KeyProvider? = withContext(dispatcher) { worker.recovery() }
+    /** Replaces the keyring under the supplied quorum; the core enforces rotation and slot rules. */
+    suspend fun changeKeyring(keyring: ByteArray, newSeed: ByteArray? = null, signers: List<ControllerProvider>) {
+        restore()
+        val lease = context
+        try {
+            withContext(dispatcher) {
+                val snapshot = worker.changeKeyring(keyring, newSeed, signers)
+                if (lease == context) apply(snapshot)
+            }
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            if (lease == context) handleCommandError(error)
+            throw error
+        }
+    }
+
+    /** Adds this device through a kit's recovery quorum, then grants its separate content member. */
+    suspend fun restoreFromKit(kits: List<ControllerProvider>) {
+        restore()
+        val lease = context
+        try {
+            withContext(dispatcher) {
+                val snapshot = worker.restoreFromKit(kits)
+                if (lease == context) apply(snapshot)
+            }
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            if (lease == context) handleCommandError(error)
+            throw error
+        }
+    }
 
     /**
      * Runs one relay pass now (list, pull, push) and refreshes when records arrived. A barrier

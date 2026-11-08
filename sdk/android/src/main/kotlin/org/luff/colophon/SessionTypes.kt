@@ -3,6 +3,7 @@ package org.luff.colophon
 import com.luff.colophon.Access
 import com.luff.colophon.AccessRequest
 import com.luff.colophon.Denial
+import com.luff.colophon.ControllerProvider
 import com.luff.colophon.KeyProvider
 import com.luff.colophon.LedgerEntry
 import com.luff.colophon.Member
@@ -72,8 +73,12 @@ data class SessionConfiguration(
     val access: List<Access> = listOf(Access.READ, Access.WRITE),
     val libraryNamespaces: List<String> = namespaces,
     val privateHome: File,
+    /** Per-app content member; never a controller. */
     val keys: KeyProvider,
-    val recoveryKeys: KeyProvider? = null,
+    /** External controller provider, required for creation and authority actions. */
+    val ownerController: ControllerProvider? = null,
+    /** Host-owned kit; genesis support is blocked by the current core creation API. */
+    val recoveryKit: ControllerProvider? = null,
     val store: RecordStore? = null,
     /** Optional relay (spec §8). The private record store stays the source of truth. */
     val relay: RelayConfiguration? = null,
@@ -83,17 +88,20 @@ data class SessionConfiguration(
      */
     val migrationMarker: File? = null,
     /**
-     * Only the upgrade's root session sets this. It may write `colophon.importBatch` source units
+     * Only a copying session with an explicit import grant sets this. It may write `colophon.importBatch` source units
      * (up to 1 MiB), the only path that gives imported positions and states baseline semantics.
      */
     val migrationWriter: Boolean = false,
 ) {
     companion object {
+        /** App-private session storage with independent content and external controller providers. */
         fun app(
             filesDir: File,
             memberLabel: String,
             namespaces: List<String>,
             keys: KeyProvider,
+            ownerController: ControllerProvider? = null,
+            recoveryKit: ControllerProvider? = null,
             memberKind: MemberKind = MemberKind.APP,
             relay: RelayConfiguration? = null,
             migrationMarker: File? = null,
@@ -104,6 +112,8 @@ data class SessionConfiguration(
             namespaces = namespaces,
             privateHome = File(filesDir, "colophon"),
             keys = keys,
+            ownerController = ownerController,
+            recoveryKit = recoveryKit,
             relay = relay,
             migrationMarker = migrationMarker,
             migrationWriter = migrationWriter,

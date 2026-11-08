@@ -41,6 +41,7 @@ class SessionBlobTest {
             relay = relay?.let { RelayConfiguration(it.slotURL, it.token, automatic = false) },
             migrationMarker = marker,
             migrationWriter = writer,
+            ownerController = com.luff.colophon.RawControllerProvider(SoftwareKeys.ephemeral()),
         ),
     ).also { sessions += it }
 

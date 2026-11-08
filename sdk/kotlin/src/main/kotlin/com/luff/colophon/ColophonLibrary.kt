@@ -14,7 +14,8 @@ class AccessException(val denial: Denial) : Exception(denial.detail)
 /** Synchronous local-keystore facade; run on the host's worker dispatcher.
  * For suspending providers use NativeLibrary's two-phase methods directly. */
 class ColophonLibrary private constructor(val native: NativeLibrary, private val keys: KeyProvider,
-                                         val recoveryKeys: KeyProvider? = null) : AutoCloseable {
+                                         /** External authority provider, separate from the content member. */
+                                         val ownerController: ControllerProvider? = null) : AutoCloseable {
     val id get() = native.id()
     val records get() = native.records()
     fun me() = native.me()
@@ -28,14 +29,14 @@ class ColophonLibrary private constructor(val native: NativeLibrary, private val
         is ViewOutcome.Failure -> Outcome.Failure(result.denial)
     }
     fun approve(request: ByteArray, grant: GrantOptions? = null): Outcome<Member> {
-        ready()
+        unlockVault()
         val info = requestInfo(request, id)
-        return execute(native.beginApprove(request, grant, now(), entropy()))?.let { Outcome.Failure(it) }
+        return executeAuthority(native.beginApprove(request, grant, now(), entropy()))?.let { Outcome.Failure(it) }
             ?: Outcome.Success(members().first { it.id == info.id })
     }
     fun revoke(memberID: String): Outcome<Unit> {
-        ready()
-        return execute(native.beginRevoke(memberID, now(), entropy()))?.let { Outcome.Failure(it) } ?: Outcome.Success(Unit)
+        unlockVault()
+        return executeAuthority(native.beginRevoke(memberID, now(), entropy()))?.let { Outcome.Failure(it) } ?: Outcome.Success(Unit)
     }
     /** Native revision; increases whenever records are added. */
     val revision get() = native.revision()
@@ -102,36 +103,105 @@ class ColophonLibrary private constructor(val native: NativeLibrary, private val
             }
         }
     }
-    fun handover(newRoot: KeyProvider, label: String): Outcome<Unit> {
-        ready()
-        return execute(native.beginHandover(newRoot.publicKeys(), label, now(), entropy()))?.let { Outcome.Failure(it) } ?: Outcome.Success(Unit)
+    /** Current authenticated controller keyring as protocol JSON. */
+    fun keyring(): ByteArray = native.keyring()
+
+    /** Opens the owner's sealed or PRF route before an authority action. */
+    fun unlockVault(providers: List<ControllerProvider> = listOf(requireController())) {
+        native.unlockVault(providers)
+        native.selectController(requireController().controllerID())
     }
-    fun recover(newRoot: KeyProvider, label: String): Outcome<Unit> {
+
+    /** Replace a keyring, providing a fresh seed and replacement slots when rotation is required. */
+    fun changeKeyring(keyring: ByteArray, newSeed: ByteArray? = null,
+                      signers: List<ControllerProvider> = listOf(requireController())) {
+        native.unlockVault(signers)
+        native.beginKeyring(keyring, newSeed, signers.map { it.controllerID() }, now(), entropy()).use {
+            native.finishAuthority(it, signAction(it, null, signers))
+        }
         ready()
-        return execute(native.beginRecover(newRoot.publicKeys(), label, now(), entropy()))?.let { Outcome.Failure(it) } ?: Outcome.Success(Unit)
+    }
+
+    /** Remove a controller with vault rotation; replacement slots are built through [native]. */
+    fun removeController(id: String, newSeed: ByteArray, slots: List<ByteArray>,
+                         signers: List<ControllerProvider> = listOf(requireController())) {
+        native.unlockVault(signers)
+        native.beginRemoveController(id, newSeed, slots, signers.map { it.controllerID() }, now(), entropy()).use {
+            native.finishAuthority(it, signAction(it, null, signers))
+        }
+        ready()
+    }
+
+    private fun requireController(): ControllerProvider = ownerController
+        ?: throw BindingException.KeyProvider("An owner controller provider is required")
+
+    private fun executeAuthority(prepared: PreparedAction): Denial? = when (prepared) {
+        is PreparedAction.Failure -> prepared.denial
+        is PreparedAction.Ready -> prepared.action.use {
+            native.finishAuthority(it, signAction(it, null, listOf(requireController())))
+            ready()
+            null
+        }
     }
     private fun commit(action: HostAction) {
         native.commit(action, action.signWith(keys))
         ready()
-    }
-    private fun execute(prepared: PreparedAction): Denial? = when (prepared) {
-        is PreparedAction.Failure -> prepared.denial
-        is PreparedAction.Ready -> prepared.action.use { commit(it); null }
     }
     override fun close() = native.close()
     companion object {
         private val random = SecureRandom()
         private fun entropy() = ByteArray(32).also(random::nextBytes)
         private fun now() = Instant.now().truncatedTo(ChronoUnit.MILLIS).toString()
-        fun create(owner: KeyProvider, label: String, ownerLabel: String, namespaces: List<String>,
-                   recovery: KeyProvider = PlatformKeys.software()): ColophonLibrary {
-            val records = beginCreate(owner.publicKeys(), recovery.publicKeys(), label, ownerLabel, namespaces, now(), entropy()).use {
-                it.finish(it.signWith(owner))
-            }
-            return ColophonLibrary(NativeLibrary.open(records, owner.publicKeys()), owner, recovery).also { it.ready() }
+        /**
+         * Creates layout 2 with separate member and raw owner controller keys in two signing rounds.
+         * A host-supplied recovery kit at genesis is blocked until the core exposes that creation API.
+         */
+        fun create(member: KeyProvider, label: String, ownerLabel: String, namespaces: List<String>,
+                   ownerController: ControllerProvider, recoveryKit: ControllerProvider? = null): ColophonLibrary {
+            if (recoveryKit != null) throw BindingException.InvalidData("Core creation API cannot include a recovery-kit controller in genesis")
+            if (ownerController.form() != KeyForm.RAW) throw BindingException.InvalidData("Core creation API requires a raw owner controller")
+            val seed = entropy()
+            val records = try {
+                beginCreate(member.publicKeys(), ownerController.controllerPublic(), seed, label, ownerLabel, namespaces, now(), entropy()).use { first ->
+                    first.advanceCreate(signAction(first, member, listOf(ownerController)).map { it.signature }).use { final ->
+                        final.finishAuthority(signAction(final, null, listOf(ownerController)))
+                    }
+                }
+            } finally { seed.fill(0) }
+            return open(records, member, ownerController)
         }
-        fun open(records: Map<String, ByteArray>, me: KeyProvider) =
-            ColophonLibrary(NativeLibrary.open(records, me.publicKeys()), me).also { it.ready() }
+
+        /** Opens member epochs; the optional external controller is used only for authority actions. */
+        fun open(records: Map<String, ByteArray>, me: KeyProvider, ownerController: ControllerProvider? = null): ColophonLibrary {
+            val library = ColophonLibrary(NativeLibrary.open(records, me.publicKeys()), me, ownerController)
+            try { library.ready(); return library }
+            catch (error: Exception) { library.close(); throw error }
+        }
+
+        /**
+         * Restores a new device through an existing kit slot and a recovery-rule keyring addition,
+         * then grants its separate member. The core enforces the recovery quorum and role limits.
+         */
+        fun restoreFromKit(records: Map<String, ByteArray>, member: KeyProvider, ownerController: ControllerProvider,
+                           ownerLabel: String, namespaces: List<String>, kits: List<ControllerProvider>): ColophonLibrary {
+            val lib = open(records, member, ownerController)
+            try {
+                lib.native.unlockVault(kits)
+                val ring = keyObject(lib.keyring())
+                fun threshold(name: String) = (ring.fields[name] as? KeyJson.Number)?.raw?.toInt()
+                    ?: throw BindingException.InvalidData("Missing keyring threshold")
+                val roles = if (threshold("recoverThreshold") < threshold("threshold")) listOf("approve") else listOf("approve", "control")
+                val controller = controllerJSON(ownerController, ownerLabel, roles)
+                val slot = lib.native.buildSealedSlot(controller, ownerLabel, null, entropy())
+                lib.native.beginRecoveryAdd(controller, slot, kits.map { it.controllerID() }, now()).use {
+                    lib.native.finishAuthority(it, signAction(it, null, kits))
+                }
+                val request = records["requests/${keyID(member.signingPublicKey())}.json"]
+                    ?: requestAccess(lib.id, member, ownerLabel, MemberKind.DEVICE, namespaces, listOf(Access.READ, Access.WRITE)).record
+                lib.approve(request).get()
+                return lib
+            } catch (error: Exception) { lib.close(); throw error }
+        }
         fun requestAccess(libraryID: String, keys: KeyProvider, label: String, kind: MemberKind,
                           namespaces: List<String>, access: List<Access>): AccessRequest =
             beginRequest(libraryID, keys.publicKeys(), label, kind, namespaces, access, now()).use {
