@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import ModuleSpikeShared
+import ModuleSpikeShared
 
 /// Run by xcodebuild on a booted iOS Simulator. Not a real iPhone measurement.
 /// Build script copies the WASM and native expected bytes into Resources.
