@@ -1,0 +1,26 @@
+[package]
+name = "colophon-module-abi-spike"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# Keep this experiment outside the production workspace and its lockfile.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "fixture"
+path = "src/bin/fixture.rs"
+
+[dependencies]
+colophon-core = { path = "../../crates/colophon-core", default-features = false }
+serde_json = "=1.0.145"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1

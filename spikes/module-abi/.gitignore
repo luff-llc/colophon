@@ -1,0 +1,6 @@
+out/
+hosts/swift/.build/
+hosts/swift/.swiftpm/
+hosts/swift/Tests/ModuleSpikeSimulatorTests/Resources/*
+!hosts/swift/Tests/ModuleSpikeSimulatorTests/Resources/.gitkeep
+Cargo.lock

@@ -1,0 +1,93 @@
+name: Colophon 0.5 module ABI spike
+
+on:
+  push:
+    branches:
+      - 'spike/module-abi-*'
+    paths:
+      - 'spikes/module-abi/**'
+      - '.github/workflows/module-abi-spike.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-bun-browser-native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust 1.91.0 + wasm32
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.91.0'
+          targets: wasm32-unknown-unknown
+      - name: Bun 1.3.2
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.2'
+      - name: Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: WABT assembler and disassembler
+        run: sudo apt-get update && sudo apt-get install -y wabt
+      - name: Build, audit, compare bytes, measure runtimes and probe internal meter
+        run: bash spikes/module-abi/run-linux.sh
+      - name: Upload all native + JS evidence, WASM binaries and exact tool versions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colophon-module-abi-linux
+          path: spikes/module-abi/out/
+          retention-days: 30
+          if-no-files-found: warn
+
+  macos-wasmkit-and-ios-simulator:
+    needs: linux-bun-browser-native
+    runs-on: xcode-27
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: colophon-module-abi-linux
+          path: spikes/module-abi/out
+      - name: Record Xcode / Swift / Simulator versions
+        run: |
+          mkdir -p spikes/module-abi/out
+          {
+            uname -a
+            xcodebuild -version
+            xcrun swift --version
+            swift --version
+            xcrun simctl list devices available
+          } | tee spikes/module-abi/out/tool-versions-apple.txt
+      - name: WasmKit 0.4.2 / macOS Swift command-line — bytes, timing, native and rewritten fuel
+        run: |
+          swift run --package-path spikes/module-abi/hosts/swift -c release module-spike-swift \
+            "$PWD/spikes/module-abi/out/notes.wasm" \
+            "$PWD/spikes/module-abi/out" \
+            "$PWD/spikes/module-abi/out/notes-metered.wasm"
+      - name: Prepare identical fixtures for iOS Simulator XCTest
+        run: bash spikes/module-abi/prepare-ios-resources.sh
+      - name: Run the SAME Swift code in the iOS Simulator
+        working-directory: spikes/module-abi/hosts/swift
+        run: |
+          set -o pipefail
+          xcodebuild -list | tee ../../out/xcode-schemes.txt
+          xcodebuild test \
+            -scheme ModuleABISpikeHost-Package \
+            -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
+            -resultBundlePath "$RUNNER_TEMP/module-abi-simulator.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee ../../out/ios-simulator.log
+      - name: Upload WasmKit CLI, iOS Simulator and tool evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colophon-module-abi-apple
+          path: spikes/module-abi/out/
+          retention-days: 30
+          if-no-files-found: warn
