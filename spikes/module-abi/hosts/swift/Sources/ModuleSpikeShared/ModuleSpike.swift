@@ -198,17 +198,19 @@ private final class Guest {
 
     init(module: Module, nativeFuel: Bool) throws {
         let engine = Engine(configuration: EngineConfiguration(fuelMetering: nativeFuel))
-        store = Store(engine: engine)
-        instance = try module.instantiate(store: store)
-        guard let memory = instance.exports[memory: "memory"] else {
+        let newStore = Store(engine: engine)
+        let newInstance = try module.instantiate(store: newStore)
+        guard let newMemory = newInstance.exports[memory: "memory"] else {
             throw SpikeError.message("WasmKit module lacks memory export")
         }
-        self.memory = memory
         for name in ["alloc", "release", "apply", "query", "initial"] {
-            guard instance.exports[function: name] != nil else {
+            guard newInstance.exports[function: name] != nil else {
                 throw SpikeError.message("WasmKit missing export \(name)")
             }
         }
+        store = newStore
+        instance = newInstance
+        memory = newMemory
     }
 
     func invoke(_ name: String, _ arguments: [Value] = []) throws -> Value {
