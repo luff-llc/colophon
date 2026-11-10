@@ -6,7 +6,7 @@ import WasmKit
 import Darwin
 #endif
 
-public struct SpikeMeasurement: Codable {
+public struct SpikeMeasurement: Encodable {
     public let host: String
     public let operations: Int
     public let parse_ms: Double
