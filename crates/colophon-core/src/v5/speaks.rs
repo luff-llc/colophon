@@ -201,7 +201,6 @@ pub struct AsOf {
 impl AsOf {
     fn from_value(v: &Value) -> CheckResult<Self> {
         let o = obj(v)?;
-        known(o, &["seq", "digest"])?;
         let seq = number(field(o, "seq")?)?;
         if seq == 0 { return Err(Verdict::Malformed); }
         Ok(Self { seq, digest: check_hex(str_field(o, "digest")?, 64)? })
@@ -222,6 +221,7 @@ pub struct Proof {
     pub links: Vec<RawEnvelope>,
     unknown: Map<String, Value>,
     protocol: String,
+    as_of_original: Value,
 }
 impl Proof {
     /// Construct a new proof using canonical link envelopes.
@@ -231,21 +231,22 @@ impl Proof {
         {
             return Err(Verdict::Malformed);
         }
-        Ok(Self { account, member, as_of, links, unknown: Map::new(), protocol: "colophon/proof/5".into() })
+        Ok(Self { account, member, as_of: as_of.clone(), links, unknown: Map::new(), protocol: "colophon/proof/5".into(), as_of_original: as_of.to_value() })
     }
     /// Strictly parse a proof and its base64-encoded envelope JSON values.
-    pub fn from_json(bytes: &[u8]) -> CheckResult<Self> {
-        let v = keys::strict_json::parse(bytes).map_err(|_| Verdict::Malformed)?;
+    pub fn from_json(json_bytes: &[u8]) -> CheckResult<Self> {
+        let v = keys::strict_json::parse(json_bytes).map_err(|_| Verdict::Malformed)?;
         let mut m = obj(&v)?.clone();
         let protocol = m.remove("protocol").and_then(|x| x.as_str().map(str::to_owned)).ok_or(Verdict::Malformed)?;
         let account = check_hex(m.remove("account").and_then(|x| x.as_str().map(str::to_owned)).as_deref().ok_or(Verdict::Malformed)?,64)?;
         let member = check_hex(m.remove("member").and_then(|x| x.as_str().map(str::to_owned)).as_deref().ok_or(Verdict::Malformed)?,32)?;
-        let as_of = AsOf::from_value(&m.remove("asOf").ok_or(Verdict::Malformed)?)?;
+        let as_of_original = m.remove("asOf").ok_or(Verdict::Malformed)?;
+        let as_of = AsOf::from_value(&as_of_original)?;
         let encoded = m.remove("links").ok_or(Verdict::Malformed)?;
         let links = encoded.as_array().ok_or(Verdict::Malformed)?;
         if links.len() > 8 { return Err(Verdict::Malformed); }
         let links = links.iter().map(|v| RawEnvelope::from_json(&bytes(v)?)).collect::<CheckResult<Vec<_>>>()?;
-        Ok(Self { account, member, as_of, links, unknown: m, protocol })
+        Ok(Self { account, member, as_of, links, unknown: m, protocol, as_of_original })
     }
     /// Return the protocol's canonical JSON, including any preserved unknown proof fields.
     pub fn canonical(&self) -> CheckResult<Vec<u8>> {
@@ -253,7 +254,7 @@ impl Proof {
         o.insert("protocol".into(), json!(self.protocol));
         o.insert("account".into(), json!(self.account));
         o.insert("member".into(), json!(self.member));
-        o.insert("asOf".into(), self.as_of.to_value());
+        o.insert("asOf".into(), self.as_of_original.clone());
         let links = self.links.iter().map(|l| l.encode().map(|b| STANDARD.encode(b)))
             .collect::<CheckResult<Vec<_>>>()?;
         o.insert("links".into(), json!(links));
@@ -413,6 +414,7 @@ fn check_inner<H: VerifiedHistory>(
     // A forged request must not coerce the verifier to announce an upgrade.
     input.request.verify(input.acting_signing)?;
     if proof.protocol != "colophon/proof/5" || !proof.unknown.is_empty()
+        || obj(&proof.as_of_original)?.keys().any(|k| k != "seq" && k != "digest")
         || proof.links.iter().any(RawEnvelope::has_unknown_fields)
         || input.request.has_unknown_fields()
     {
