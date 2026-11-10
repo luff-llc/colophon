@@ -1,0 +1,43 @@
+name: Colophon 0.5 W1 vectors and verification
+on:
+  push:
+    branches:
+      - feat/colophon-05-w1-speaks-for
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: colophon-05-w1-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Generate deterministic public vectors and run conformance
+        run: COLOPHON_WRITE_V5_VECTORS=1 cargo test -p colophon-core --test v5_conformance -- --nocapture
+      - name: Inspect changes and commit only public conformance fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short --untracked-files=all
+          git add -- conformance/0.5/speaks-for conformance/0.5/terms
+          if ! git diff --cached --quiet; then
+            if git diff --cached --name-only | grep -Ev '^conformance/0\.5/(speaks-for|terms)/'; then
+              echo 'Unexpected staged path'; exit 1
+            fi
+            git -c user.name='colophon-vector-bot' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'test(v5): publish canonical synthetic 0.5 vectors'
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+      - name: Full native workspace suite
+        run: cargo test --workspace
+      - name: Build wasm target of consuming crate
+        run: cargo check -p colophon-wasm --target wasm32-unknown-unknown
