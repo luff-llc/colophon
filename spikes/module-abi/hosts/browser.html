@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Colophon module ABI: browser host (real WebAssembly engine)</title>
+<pre id="status">Use hosts/browser-runner.mjs to execute this page in Chromium.</pre>
+<script type="module">
+  import {compiledModule, operationsFromText, runCase, probeMetering} from "./js-host.mjs";
+  const fetchBytes = async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer());
+  window.moduleSpikeRun = async ({wasmURL, opsURL, expectedURL, expectedQueryURL, count}) => {
+    const compiled = await compiledModule(await fetchBytes(wasmURL));
+    const operations = operationsFromText(await (await fetch(opsURL)).text());
+    const result = await runCase(compiled, operations, count,
+      await fetchBytes(expectedURL), await fetchBytes(expectedQueryURL));
+    result.host = "chromium-browser";
+    result.user_agent = navigator.userAgent;
+    result.js_heap_bytes = performance.memory?.usedJSHeapSize ?? null;
+    document.getElementById("status").textContent = JSON.stringify(result, null, 2);
+    return result;
+  };
+  window.moduleSpikeMeter = async ({wasmURL, opsURL}) => {
+    const compiled = await compiledModule(await fetchBytes(wasmURL));
+    const ops = operationsFromText(await (await fetch(opsURL)).text());
+    return await probeMetering(compiled, ops[0]);
+  };
+</script>
