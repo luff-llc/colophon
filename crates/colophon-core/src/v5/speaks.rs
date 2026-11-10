@@ -245,7 +245,14 @@ impl Proof {
         let encoded = m.remove("links").ok_or(Verdict::Malformed)?;
         let links = encoded.as_array().ok_or(Verdict::Malformed)?;
         if links.len() > 8 { return Err(Verdict::Malformed); }
-        let links = links.iter().map(|v| RawEnvelope::from_json(&bytes(v)?)).collect::<CheckResult<Vec<_>>>()?;
+        let links = links.iter().map(|v| {
+            let wire = bytes(v)?;
+            let envelope = RawEnvelope::from_json(&wire)?;
+            if envelope.encode()? != wire {
+                return Err(Verdict::Malformed);
+            }
+            Ok(envelope)
+        }).collect::<CheckResult<Vec<_>>>()?;
         Ok(Self { account, member, as_of, links, unknown: m, protocol, as_of_original })
     }
     /// Return the protocol's canonical JSON, including any preserved unknown proof fields.
