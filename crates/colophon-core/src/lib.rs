@@ -18,6 +18,7 @@ pub mod protocol;
 pub mod records;
 pub mod slots;
 pub mod vault;
+pub mod v5;
 pub mod verification;
 
 /// A protocol or cryptographic validation failure. Messages contain no private key material.

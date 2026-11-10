@@ -1,0 +1,1 @@
+{"expected":"ok","name":"purpose-write","probe":"purpose","spec":{"purpose":"write:notes:add","terms":{"conditions":[],"scope":[{"access":"write","namespace":"notes"}]}}}

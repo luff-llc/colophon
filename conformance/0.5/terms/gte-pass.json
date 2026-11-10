@@ -1,0 +1,1 @@
+{"expected":"ok","name":"gte-pass","probe":"condition","spec":{"args":{"amount":5},"terms":{"conditions":[{"gte":["args.amount",5]}],"scope":[{"access":"write","namespace":"notes"}]},"uv":false}}

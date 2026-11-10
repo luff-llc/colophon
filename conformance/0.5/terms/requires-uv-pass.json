@@ -1,0 +1,1 @@
+{"expected":"ok","name":"requires-uv-pass","probe":"condition","spec":{"args":{},"terms":{"requires":["uv"],"scope":[{"access":"read","namespace":"notes"}]},"uv":true}}

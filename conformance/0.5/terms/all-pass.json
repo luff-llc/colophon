@@ -1,0 +1,1 @@
+{"expected":"ok","name":"all-pass","probe":"condition","spec":{"args":{"amount":5},"terms":{"conditions":[{"all":[{"gte":["args.amount",0]},{"lte":["args.amount",5]}]}],"scope":[{"access":"write","namespace":"notes"}]},"uv":false}}

@@ -1,0 +1,1 @@
+{"expected":"refused:outOfScope","name":"prefix-fail","probe":"condition","spec":{"args":{"label":"Other"},"terms":{"conditions":[{"prefix":["args.label","Ac"]}],"scope":[{"access":"write","namespace":"notes"}]},"uv":false}}

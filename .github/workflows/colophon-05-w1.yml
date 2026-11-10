@@ -1,0 +1,35 @@
+name: Colophon 0.5 W1 conformance and verification
+
+on:
+  push:
+    branches:
+      - feat/colophon-05-w1-speaks-for
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colophon-05-w1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Validate formatting of new Rust code
+        run: |
+          rustfmt --edition 2021 --check crates/colophon-core/src/v5/mod.rs crates/colophon-core/src/v5/terms.rs crates/colophon-core/src/v5/speaks.rs crates/colophon-core/tests/v5_conformance.rs
+      - name: Replay committed synthetic vectors and check deterministic regeneration
+        run: cargo test -p colophon-core --test v5_conformance
+      - name: Full native workspace suite
+        run: cargo test --workspace
+      - name: Build wasm target of consuming crate
+        run: cargo check -p colophon-wasm --target wasm32-unknown-unknown

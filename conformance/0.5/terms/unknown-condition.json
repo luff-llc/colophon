@@ -1,0 +1,1 @@
+{"expected":"newerFormat","name":"unknown-condition","probe":"parse","spec":{"conditions":[{"newOp":["args.x",1]}],"scope":[{"access":"write","namespace":"notes"}]}}
