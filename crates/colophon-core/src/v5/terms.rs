@@ -339,17 +339,87 @@ fn evaluate(v: &Value, arguments: &Value) -> bool {
                 "eq" => actual == expected,
                 "in" => expected.as_array().is_some_and(|vs| vs.contains(actual)),
                 "prefix" => actual.as_str().zip(expected.as_str()).is_some_and(|(a,b)| a.starts_with(b)),
-                "lte" => actual.as_f64().zip(expected.as_f64()).is_some_and(|(a,b)| a <= b),
-                "gte" => actual.as_f64().zip(expected.as_f64()).is_some_and(|(a,b)| a >= b),
+                "lte" => compare_json_numbers(actual, expected)
+                    .is_some_and(|ordering| ordering != std::cmp::Ordering::Greater),
+                "gte" => compare_json_numbers(actual, expected)
+                    .is_some_and(|ordering| ordering != std::cmp::Ordering::Less),
                 _ => false,
             }
         }
     }
 }
 
+
+/// Exact ordering of integer-token JSON numbers (including values above 2^53),
+/// with IEEE-754 semantics for actual floating-point tokens. Casting large
+/// integer tokens directly to f64 would silently authorize an over-limit spend.
+fn compare_json_numbers(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    let parse = |v: &Value| {
+        let n = v.as_number()?;
+        if n.is_i64() {
+            Some((Some(i128::from(n.as_i64()?)), None))
+        } else if n.is_u64() {
+            Some((Some(i128::from(n.as_u64()?)), None))
+        } else {
+            Some((None, n.as_f64()))
+        }
+    };
+    let (li, lf) = parse(left)?;
+    let (ri, rf) = parse(right)?;
+    match (li, ri) {
+        (Some(a), Some(b)) => Some(a.cmp(&b)),
+        (Some(a), None) => compare_int_float(a, rf?),
+        (None, Some(b)) => compare_int_float(b, lf?).map(std::cmp::Ordering::reverse),
+        (None, None) => lf?.partial_cmp(&rf?),
+    }
+}
+
+/// Compare an exact signed/unsigned 64-bit JSON integer to finite binary64.
+/// All integer inputs fit into i128; float magnitudes at least 2^64 dominate.
+fn compare_int_float(integer: i128, float: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if !float.is_finite() {
+        return None;
+    }
+    const TWO_TO_64: f64 = 18_446_744_073_709_551_616.0;
+    if float >= TWO_TO_64 {
+        return Some(Ordering::Less);
+    }
+    if float <= -TWO_TO_64 {
+        return Some(Ordering::Greater);
+    }
+    let trunc = float.trunc() as i128;
+    match integer.cmp(&trunc) {
+        Ordering::Equal if float.fract() > 0.0 => Some(Ordering::Less),
+        Ordering::Equal if float.fract() < 0.0 => Some(Ordering::Greater),
+        other => Some(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_json_numeric_bounds() {
+        let terms = |condition: Value| Terms::from_value(&json!({
+            "scope":[{"namespace":"payments","access":"write"}],
+            "conditions":[condition]
+        })).unwrap();
+        let limit = 9_007_199_254_740_992u64;
+        let above = limit + 1;
+        assert!(terms(json!({"lte":["args.amount",limit]}))
+            .conditions_hold(&json!({"amount":limit}), false));
+        assert!(!terms(json!({"lte":["args.amount",limit]}))
+            .conditions_hold(&json!({"amount":above}), false));
+        assert!(terms(json!({"gte":["args.amount",above]}))
+            .conditions_hold(&json!({"amount":above}), false));
+        assert!(!terms(json!({"gte":["args.amount",above]}))
+            .conditions_hold(&json!({"amount":limit}), false));
+        assert!(!terms(json!({"lte":["args.amount",1.5]}))
+            .conditions_hold(&json!({"amount":2}), false));
+        assert!(terms(json!({"gte":["args.amount",-1.5]}))
+            .conditions_hold(&json!({"amount":-1}), false));
+    }
     #[test]
     fn narrow_each_rule() {
         let p = Terms::from_value(&json!({"scope":[{"namespace":"notes","access":"write","kinds":["add","edit"]}],"expires":"2027-01-01T00:00:00Z","depth":3,"writes":5,"requires":["uv"],"conditions":[{"lte":["args.amount",10]}],"serves":["home","authority"]})).unwrap();
