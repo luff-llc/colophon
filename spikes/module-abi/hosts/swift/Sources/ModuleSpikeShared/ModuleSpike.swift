@@ -1,6 +1,7 @@
 // The same WasmKit code is called from a macOS CLI and from iOS Simulator XCTest.
-// WasmKit 0.4.2, MIT; Swift 6.3 toolchain, Apache-2.0 with Runtime Library Exception.
+// WasmKit 0.4.2, MIT. Package requires Swift tools 6.3; CI records actual compiler.
 import Foundation
+import CryptoKit
 import WasmKit
 #if canImport(Darwin)
 import Darwin
@@ -8,6 +9,9 @@ import Darwin
 
 public struct SpikeMeasurement: Encodable {
     public let host: String
+    public let wasm_sha256: String
+    public let build_configuration: String
+    public let memory_reporting: String
     public let operations: Int
     public let parse_ms: Double
     public let instantiate_ms: Double
@@ -21,13 +25,17 @@ public struct SpikeMeasurement: Encodable {
     public var byte_equal: Bool { state_first_difference == nil && query_first_difference == nil }
 
     private enum CodingKeys: String, CodingKey {
-        case host, operations, parse_ms, instantiate_ms, apply_ms, ms_per_op,
+        case host, wasm_sha256, build_configuration, memory_reporting,
+             operations, parse_ms, instantiate_ms, apply_ms, ms_per_op,
              state_bytes, peak_linear_memory_bytes, peak_rss_bytes,
              state_first_difference, query_first_difference, byte_equal
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(host, forKey: .host)
+        try container.encode(wasm_sha256, forKey: .wasm_sha256)
+        try container.encode(build_configuration, forKey: .build_configuration)
+        try container.encode(memory_reporting, forKey: .memory_reporting)
         try container.encode(operations, forKey: .operations)
         try container.encode(parse_ms, forKey: .parse_ms)
         try container.encode(instantiate_ms, forKey: .instantiate_ms)
@@ -44,6 +52,7 @@ public struct SpikeMeasurement: Encodable {
 
 public struct SpikeProbe: Codable {
     public let passed: Bool
+    public let wasm_sha256: String
     public let min_success_budget: UInt64?
     public let failed_budget: UInt64?
     public let remaining_at_success: UInt64?
@@ -73,6 +82,16 @@ private func rssBytes() -> Int64? {
 }
 
 public enum ModuleSpike {
+    #if DEBUG
+    public static let buildConfiguration = "debug"
+    #else
+    public static let buildConfiguration = "release"
+    #endif
+
+    public static func sha256(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
     public static func firstDifference(_ expected: Data, _ got: Data) -> String? {
         let a = Array(expected), b = Array(got)
         for i in 0..<min(a.count, b.count) {
@@ -116,7 +135,10 @@ public enum ModuleSpike {
         peakLinear = max(peakLinear, guest.memory.byteCount)
         let query = try guest.query(state, name: "noteCounts", args: Data("{}".utf8))
         return SpikeMeasurement(
-            host: host, operations: count,
+            host: host, wasm_sha256: sha256(wasmBytes),
+            build_configuration: buildConfiguration,
+            memory_reporting: "guest linear memory sampled at start/128-op intervals/end; Darwin ru_maxrss is process-lifetime peak, not per-case",
+            operations: count,
             parse_ms: parseMs, instantiate_ms: instantiateMs,
             apply_ms: applyMs, ms_per_op: applyMs / Double(count),
             state_bytes: state.count, peak_linear_memory_bytes: peakLinear,
@@ -172,7 +194,7 @@ public enum ModuleSpike {
             highTrial = try trial(high)
         }
         if !highTrial.0 {
-            return SpikeProbe(passed: false, min_success_budget: nil,
+            return SpikeProbe(passed: false, wasm_sha256: sha256(wasmBytes), min_success_budget: nil,
                               failed_budget: high, remaining_at_success: nil,
                               remaining_at_failure: highTrial.1, failure: highTrial.2)
         }
@@ -184,6 +206,7 @@ public enum ModuleSpike {
         let succeeds = try trial(high), fails = try trial(high - 1)
         return SpikeProbe(
             passed: succeeds.0 && !fails.0,
+            wasm_sha256: sha256(wasmBytes),
             min_success_budget: high, failed_budget: high-1,
             remaining_at_success: succeeds.1, remaining_at_failure: fails.1,
             failure: fails.2
