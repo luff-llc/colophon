@@ -36,9 +36,18 @@ def instrument(source: str):
             # requires all such declarations before executable instructions.
             if pending_function_entry:
                 raise ValueError("unexpected nested function header")
+            functions += 1
+            # LLVM also emits genuinely empty functions on a single line:
+            # `(func $noop (type 0) (param i32))`. The header is already
+            # closed, so splice the charge *inside* its final parenthesis.
+            if line.count("(") == line.count(")"):
+                final = line.rfind(")")
+                output.append(line[:final] + "\n")
+                output.append(CHARGE)
+                output.append("  )\n")
+                continue
             output.append(line)
             pending_function_entry = True
-            functions += 1
             continue
         if pending_function_entry:
             if re.match(r"^\s*\(local(?:\s|\))", line):
