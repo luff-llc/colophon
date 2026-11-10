@@ -35,6 +35,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y wabt
       - name: Build, audit, compare bytes, measure runtimes and probe internal meter
         run: bash spikes/module-abi/run-linux.sh
+      - name: Record exact original + instrumented digests; check Linux parity and adjacent fuel
+        run: |
+          python3 spikes/module-abi/evidence.py record
+          python3 spikes/module-abi/evidence.py linux
       - name: Upload all native + JS evidence, WASM binaries and exact tool versions
         if: always()
         uses: actions/upload-artifact@v4
@@ -54,6 +58,8 @@ jobs:
         with:
           name: colophon-module-abi-linux
           path: spikes/module-abi/out
+      - name: Check Apple inputs exactly match Linux artifact SHA-256
+        run: python3 spikes/module-abi/evidence.py verify
       - name: Record Xcode / Swift / Simulator versions
         run: |
           mkdir -p spikes/module-abi/out
@@ -62,6 +68,7 @@ jobs:
             xcodebuild -version
             xcrun swift --version
             swift --version
+            xcrun simctl list runtimes
             xcrun simctl list devices available
           } | tee spikes/module-abi/out/tool-versions-apple.txt
       - name: WasmKit 0.4.2 / macOS Swift command-line — bytes, timing, native and rewritten fuel
@@ -72,17 +79,23 @@ jobs:
             "$PWD/spikes/module-abi/out/notes-metered.wasm"
       - name: Prepare identical fixtures for iOS Simulator XCTest
         run: bash spikes/module-abi/prepare-ios-resources.sh
-      - name: Run the SAME Swift code in the iOS Simulator
+      - name: Run the SAME Swift code in the iOS Simulator (optimized Release configuration)
         working-directory: spikes/module-abi/hosts/swift
         run: |
           set -o pipefail
           xcodebuild -list | tee ../../out/xcode-schemes.txt
           xcodebuild test \
             -scheme ModuleABISpikeHost-Package \
-            -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
-            -resultBundlePath "$RUNNER_TEMP/module-abi-simulator.xcresult" \
+            -configuration Release \
+            -destination 'platform=iOS Simulator,name=iPhone 18 Pro,OS=27.0' \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/module-abi-simulator-release.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee ../../out/ios-simulator.log
+            2>&1 | tee ../../out/ios-simulator-release.log
+      - name: Export typed Simulator measurements and assert all four hosts share the same binary/boundary
+        run: |
+          python3 spikes/module-abi/extract-ios-results.py spikes/module-abi/out/ios-simulator-release.log spikes/module-abi/out
+          python3 spikes/module-abi/evidence.py all
       - name: Upload WasmKit CLI, iOS Simulator and tool evidence
         if: always()
         uses: actions/upload-artifact@v4
