@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: colophon-05-w1-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   check:
