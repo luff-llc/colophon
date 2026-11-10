@@ -1,12 +1,16 @@
-name: Colophon 0.5 W1 vectors and verification
+name: Colophon 0.5 W1 conformance and verification
+
 on:
   push:
     branches:
       - feat/colophon-05-w1-speaks-for
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: colophon-05-w1-${{ github.ref }}
@@ -17,29 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Format only the new v5 Rust sources
+      - name: Validate formatting of new Rust code
         run: |
-          rustfmt --edition 2021 crates/colophon-core/src/v5/mod.rs crates/colophon-core/src/v5/terms.rs crates/colophon-core/src/v5/speaks.rs crates/colophon-core/tests/v5_conformance.rs
-      - name: Generate deterministic public vectors and run conformance
-        run: COLOPHON_WRITE_V5_VECTORS=1 cargo test -p colophon-core --test v5_conformance -- --nocapture
-      - name: Inspect changes and commit only intended sources and public fixtures
-        shell: bash
-        run: |
-          set -euo pipefail
-          git status --short --untracked-files=all
-          git add -- conformance/0.5/speaks-for conformance/0.5/terms crates/colophon-core/src/v5 crates/colophon-core/tests/v5_conformance.rs
-          if ! git diff --cached --quiet; then
-            if git diff --cached --name-only | grep -Ev '^(conformance/0\.5/(speaks-for|terms)/|crates/colophon-core/src/v5/|crates/colophon-core/tests/v5_conformance\.rs$)'; then
-              echo 'Unexpected staged path'; exit 1
-            fi
-            git -c user.name='colophon-vector-bot' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'style(v5): format new Rust modules and preserve deterministic fixtures'
-            git push origin HEAD:${{ github.ref_name }}
-          fi
+          rustfmt --edition 2021 --check crates/colophon-core/src/v5/mod.rs crates/colophon-core/src/v5/terms.rs crates/colophon-core/src/v5/speaks.rs crates/colophon-core/tests/v5_conformance.rs
+      - name: Replay committed synthetic vectors and check deterministic regeneration
+        run: cargo test -p colophon-core --test v5_conformance
       - name: Full native workspace suite
         run: cargo test --workspace
       - name: Build wasm target of consuming crate
