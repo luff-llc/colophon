@@ -68,11 +68,25 @@ The Swift code explicitly enables WasmKit's **own** fuel metering as a separate
 test, and also measures the identically rewritten module used by JS hosts.
 
 iOS Simulator (NOT a physical device): after `prepare-ios-resources.sh`,
-open `hosts/swift/Package.swift` in Xcode 27 or later with Swift 6.3, select
-the `ModuleSpikeSimulatorTests` test scheme, choose an iOS Simulator, and run
-tests. The test calls the **same** `ModuleSpike.run` and `ModuleSpike.probe`
-Swift functions as the macOS CLI; it bundles the WASM, 10,000 input operations
-and native expected bytes. The workflow also attempts this with `xcodebuild`.
+the workflow executes the **same** Swift `ModuleSpike.run` and
+`ModuleSpike.probe` functions in optimized `Release` mode (not the Xcode
+test scheme's Debug default). Reproduce on Xcode 27.1 / Swift 6.4 with:
+
+```sh
+cd spikes/module-abi/hosts/swift
+xcodebuild test -scheme ModuleABISpikeHost-Package \\
+  -configuration Release \\
+  -destination 'platform=iOS Simulator,name=iPhone 18 Pro,OS=27.0' \\
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO
+```
+
+The CI command additionally logs to `out/ios-simulator-release.log`.
+`extract-ios-results.py` turns explicit XCTest measurement markers into
+`ios-release-{1,1000,10000}.json` and `ios-release-meter.json`.
+`evidence.py` records original/instrumented SHA-256, verifies all
+downloaded inputs and asserts equality and adjacent meter budgets across
+all four WASM hosts. Unlike a Debug XCTest run, this is a release-mode
+measurement. It is **still not a physical-device benchmark**.
 
 ## Metering experiment
 
@@ -102,3 +116,9 @@ budget can be applied to arbitrary modules.
   plus the experiment's `.gitignore`).
 - An iOS **simulator** cannot provide on-device energy/thermal/real-phone
   performance results. Real iPhone measurements require a device and consent.
+
+## Constitution-first decision boundary
+
+See [W0-GUIDANCE.md](W0-GUIDANCE.md) for nonbinding, evidence-backed ABI
+recommendations. They do not modify or freeze W0, account/key proofs or the
+Galley board. See [REPORT.md](REPORT.md) for the run/commit/artifact ledger.

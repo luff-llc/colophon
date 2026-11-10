@@ -16,7 +16,8 @@ for (const n of cases) {
   const result = await runCase(compiled, operations, n, state, query);
   result.host = "bun";
   result.host_version = Bun.version;
-  result.peak_rss_bytes = process.memoryUsage().rss;
+  result.rss_snapshot_bytes = process.memoryUsage().rss; // instant reading, NOT process peak
+  delete result.peak_rss_bytes;
   await writeFile(join(out, `bun-${n}.json`), JSON.stringify(result, null, 2) + "\n");
   console.log(JSON.stringify(result));
   if (!result.byte_equal) process.exitCode = 1;

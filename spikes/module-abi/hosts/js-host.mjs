@@ -83,7 +83,7 @@ export async function runCase(compiled, operations, count, expected, expectedQue
     operations: count, compile_ms: compiled.compileMs,
     instantiate_ms: instantiateMs, apply_ms: applyMs, ms_per_op: applyMs/count,
     state_bytes: state.length, peak_linear_memory_bytes: peakLinearMemoryBytes,
-    peak_rss_bytes: null, state_first_difference: stateDiff, query_first_difference: queryDiff,
+    rss_snapshot_bytes: null, state_first_difference: stateDiff, query_first_difference: queryDiff,
     byte_equal: stateDiff === null && queryDiff === null
   };
 }
