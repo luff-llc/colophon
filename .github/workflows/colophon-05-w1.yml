@@ -34,7 +34,7 @@ jobs:
           git status --short --untracked-files=all
           git add -- conformance/0.5/speaks-for conformance/0.5/terms crates/colophon-core/src/v5 crates/colophon-core/tests/v5_conformance.rs
           if ! git diff --cached --quiet; then
-            if git diff --cached --name-only | grep -Ev '^conformance/0\.5/(speaks-for|terms)/'; then
+            if git diff --cached --name-only | grep -Ev '^(conformance/0\.5/(speaks-for|terms)/|crates/colophon-core/src/v5/|crates/colophon-core/tests/v5_conformance\.rs$)'; then
               echo 'Unexpected staged path'; exit 1
             fi
             git -c user.name='colophon-vector-bot' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'style(v5): format new Rust modules and preserve deterministic fixtures'
