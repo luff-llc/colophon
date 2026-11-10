@@ -74,9 +74,9 @@ test scheme's Debug default). Reproduce on Xcode 27.1 / Swift 6.4 with:
 
 ```sh
 cd spikes/module-abi/hosts/swift
-xcodebuild test -scheme ModuleABISpikeHost-Package \\
-  -configuration Release \\
-  -destination 'platform=iOS Simulator,name=iPhone 18 Pro,OS=27.0' \\
+xcodebuild test -scheme ModuleABISpikeHost-Package \
+  -configuration Release \
+  -destination 'platform=iOS Simulator,name=iPhone 18 Pro,OS=27.0' \
   -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO
 ```
 
