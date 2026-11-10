@@ -8,7 +8,10 @@ pub mod terms;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// The action is permitted; `unguarded` means session revocation was not checked.
-    Ok { unguarded: bool },
+    Ok {
+        /// True when the verifier did not have authenticated guarded session state.
+        unguarded: bool,
+    },
     /// Invalid syntax, structure, bounds or canonical encoding.
     Malformed,
     /// The signature/possession check failed.
