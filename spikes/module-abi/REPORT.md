@@ -7,13 +7,11 @@ an implementation from an actual measurement.
 
 ## Execution status
 
-**Verified CI evidence, 2026-11-10:**
+**Run-by-run verified CI evidence, 2026-11-10 (UTC):**
 [Linux CI #42781933617](https://github.com/luff-llc/colophon/actions/runs/42781933617)
-completed **successfully** on Ubuntu 24.04, with native Rust, Bun 1.3.2,
-real Chromium 141, import/float audit and rewritten fuel probes.
+ended **FAILURE overall** at source commit `82fe2a53fb216dfed12ae1a3b8bfd6cb97ccbf7c`: its Linux native/Bun/headless Chromium job passed, but the Apple job failed to compile Swift (`Decodable` error). Do not call this a passing workflow.
 [Follow-up CI #42782846059](https://github.com/luff-llc/colophon/actions/runs/42782846059)
-again passed Linux, and its **macOS WasmKit CLI step passed**; the
-iOS Simulator XCTest step was still running when this report revision was made.
+ended **SUCCESS overall** at source commit `a6da27407cfb300605d38d837b4b24066037252b`: Linux, macOS WasmKit 0.4.2 CLI (Release) and iPhone 18 Pro iOS Simulator XCTest (Debug) all passed.
 The artifact ZIPs contain machine-readable measurements and tool versions.
 
 | Host | Execution | Parity 1 / 1,000 / 10,000 |
@@ -22,7 +20,7 @@ The artifact ZIPs contain machine-readable measurements and tool versions.
 | Bun WASM | Passed on Linux | **All three pass**; state and query bytes identical |
 | Chromium 141 browser WASM | Passed on Linux | **All three pass**; state and query bytes identical |
 | WasmKit 0.4.2 macOS CLI | CLI step passed on Xcode 27 runner | All three checks in the CLI complete without mismatch |
-| WasmKit 0.4.2 iOS Simulator | Test active in follow-up run | **Not yet verified** |
+| WasmKit 0.4.2 iOS Simulator | Completed **Debug** XCTest successfully in run 42782846059 | All three state/query checkpoints passed |
 | Physical iPhone | Not attempted | **Not measured** |
 
 No claim is made that an iOS Simulator is a physical iPhone. No on-device
@@ -33,15 +31,14 @@ temperature, battery, thermal or energy consumption can be inferred.
 The native fixture produces the *same* `OperationView` shape as
 `crates/colophon-core/tests/domain_notes.rs` with `createNotebook`,
 `putEntry`, `putCell`, followed by valid CAS edits. All hosts use the same
-**830,884-byte** original WASM module. After 1, 1,000 and 10,000 operations,
+**830,884-byte** original WASM module (SHA-256 `933950a2579bf961de89416a9d7ac2141627ef293bd4d3cc5c44122db817791a`). After 1, 1,000 and 10,000 operations,
 they compare **raw canonical JSON bytes**, not parsed JSON values, for the
 state and the result of `query("noteCounts", {})`.
 
 **Measured:** Bun and Chromium match the native Rust reference at **every
 byte, at all three counts**, for both state and query. The
 `state_first_difference` and `query_first_difference` fields are `null`
-in all six JS results. The macOS Swift CLI step has also completed all its
-comparison checks successfully. A mismatch would fail the corresponding job.
+in all six JS results. The macOS CLI and historical **Debug iOS Simulator** from successful run 42782846059 both completed all checks successfully. A mismatch would fail the corresponding job.
 Result SHA-256s and exact first-difference diagnostics are preserved in the
 Linux artifact ZIP.
 
@@ -55,18 +52,16 @@ The WAT-rewritten module remains import-free, with the same declaration.
 
 **Portable fuel experiment:** `instrument.py` round-trips the compiled
 module with WABT 1.0.34, inserting a decrement at function/loop entry. Its
-own `fuel_reset` and `fuel_left` exports need no imports. For the first
-`apply` call, independently running on Bun and Chromium:
+own `fuel_reset` and `fuel_left` exports need no imports. For the same instrumented binary (SHA-256 `4c9ae1ba6da2a4b6cda9c03cee06ba85f4a767b7181213a89d34e2ba9cc3c429`) and first `apply` call:
 
 | Engine | Minimum successful budget | Adjacent failed budget | Failure |
 | --- | ---: | ---: | --- |
 | Bun 1.3.2 | **58,051** | **58,050** | WebAssembly unreachable trap |
 | Chromium 141 | **58,051** | **58,050** | WebAssembly unreachable trap |
+| WasmKit macOS Release | **58,051** | **58,050** | WebAssembly unreachable trap |
+| WasmKit iOS Simulator Debug | **58,051** | **58,050** | WebAssembly unreachable trap |
 
-This is evidence that both JS engines reach the **same** internal meter
-boundary for this specific binary. The macOS CLI also successfully ran both
-a native WasmKit store-fuel probe and the rewritten-fuel probe. Their
-numerical values are in the Apple run artifact once uploaded.
+All four WASM hosts reached the same adjacent internal-meter boundary for this exact binary. WasmKit's separate **native** fuel probe on the original binary found 8,719,833 failing / 8,719,834 passing; its fuel unit differs from the rewritten counter. The verifier's 57,420 failing / 57,421 passing measurement was reported for a different build without module digests, so its 630-unit discrepancy cannot be attributed or treated as contradictory evidence for these exact binaries.
 
 **Not production gas:** the rewriter charges only at function and loop
 entries. Long straight-line code, bulk memory copies and allocations are
@@ -108,20 +103,18 @@ head-to-head speedup comparison.
 | Native Rust direct | 0.1533 | 0.01041 | 0.009743 | N/A | RSS not measured |
 | Bun 1.3.2 | 7.489 | 0.1142 | 0.05366 | compile 6.59 ms; instantiate 0.15–0.28 ms | 1.31 MB guest linear; process RSS 73–127 MB at each checkpoint |
 | Chromium 141 | 3.400 | 0.0801 | 0.05312 | compile 1.3–2.9 ms; instantiate 0–0.2 ms | 1.31 MB guest linear; browser process peak RSS unavailable |
-| WasmKit macOS | See Apple artifact | See Apple artifact | See Apple artifact | See Apple artifact | See Apple artifact |
-| WasmKit iOS Simulator | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Not yet verified |
+| WasmKit macOS (Release) | 18.81175 | 0.98451 | 0.93208 | parse 0.60–4.48 ms; instantiate 0.43–2.38 ms | Darwin lifetime-process peak RSS 17.8–18.4 MB |
+| WasmKit iOS Simulator (Debug; historical) | 2,506.02 | 162.49 | 108.55 | parse 4.93–12.69 ms; instantiate 3.83–6.95 ms | Darwin lifetime-process peak RSS 211.9–256.4 MB |
+| WasmKit iOS Simulator (Release) | Pending new optimized CI | Pending | Pending | Pending | Pending |
 
 **Total apply-only time at 10,000 ops:** native Rust **97.43 ms**;
-Bun **536.60 ms**; Chromium **531.20 ms**. Bun's
-`peak_rss_bytes` field presently records a **process RSS snapshot at the
-end of each run**, *not* the maximum over the entire run; do not treat it
-as a true peak. Chromium's `js_heap_bytes` is not OS process RSS.
+Bun **536.60 ms**; Chromium **531.20 ms**. The old Bun `peak_rss_bytes` field was mislabeled: it was a **process RSS snapshot**, now renamed `rss_snapshot_bytes` in the updated harness. Chromium's `js_heap_bytes` is a JS heap snapshot, not process peak RSS. Apple `ru_maxrss` is the **process-lifetime high-water RSS in bytes** (including the test harness), not per-operation RSS. Guest linear memory is separately measured in WebAssembly pages.
 
 The baseline WASM file is **830,884 bytes**; after WABT round-trip and
 instrumentation the metered WASM is **659,831 bytes**. The size difference
 includes WABT's re-encoding and must not be interpreted as compression
 caused by metering. All exact numbers are available as `out/*.json` in
-the [passing Linux artifacts](https://github.com/luff-llc/colophon/actions/runs/42781933617).
+the [successful run 42782846059 Linux artifact](https://github.com/luff-llc/colophon/actions/runs/42782846059/artifacts/13747510602). The latest source run [42891978817](https://github.com/luff-llc/colophon/actions/runs/42891978817) additionally records SHA-256 provenance and cross-host fuel checks.
 
 ## Versions and licences
 
@@ -134,14 +127,14 @@ build identifiers for platform-installed tools are captured in
 | Colophon core | workspace `0.4.0`, main commit of PR base | Apache-2.0 |
 | Rust compiler and Cargo | requested 1.91.0 | MIT OR Apache-2.0 |
 | `serde_json` | pinned 1.0.145 | MIT OR Apache-2.0 |
-| `WasmKit` | **0.4.2**, `swiftwasm/WasmKit` tag | MIT; exact LICENSE reproduced below |
-| Swift | manifest tools 6.3; observed Xcode 27.1 / Apple Swift 6.4 | Apache-2.0 with Runtime Library Exception |
+| `WasmKit` | **0.4.2**, `swiftwasm/WasmKit` tag | MIT; full text is provided separately in [WASMKIT-LICENSE.txt](WASMKIT-LICENSE.txt), not below |
+| Swift | manifest tools 6.3; observed Xcode 27.1 (27A9275) / Apple Swift 6.4 / macOS Darwin 27 ARM64 hosted VM | Apache-2.0 with Runtime Library Exception |
 | Bun | requested 1.3.2 | MIT |
 | Node.js | requested 22.x | MIT |
 | Playwright | pinned 1.56.1 | Apache-2.0 |
 | Chromium | browser revision bundled by Playwright 1.56.1 | BSD-style Chromium licence with its own third-party notices |
 | Python | CPython 3.x, stdlib only | Python Software Foundation License v2 |
-| WABT (`wasm2wat`, `wat2wasm`) | Ubuntu package, exact version logged at run | Apache-2.0 |
+| WABT (`wasm2wat`, `wat2wasm`) | 1.0.34 (Ubuntu 24.04) | Apache-2.0 |
 | GitHub `actions/checkout`, `upload/download-artifact`, `setup-node` | v4 releases | MIT |
 | `oven-sh/setup-bun` | v2 | MIT |
 
@@ -196,5 +189,9 @@ is included verbatim in [WASMKIT-LICENSE.txt](WASMKIT-LICENSE.txt).
   that must never be copied into a hostile-module interface.
 - No release artefact is published/adopted or signed; `propose` and
   `check` are out of this spike's Brief C scope.
-- Report completion depends on CI execution and inserting observed values,
-  rather than substituting plausible numbers.
+- The historic Simulator timing is Debug; optimized Release measurements are collected by the updated workflow, not inferred from Debug.
+- No browser outside headless GitHub-hosted Chromium CI has been measured.
+
+## Constitution-first, nonbinding W0 advice
+
+[W0-GUIDANCE.md](W0-GUIDANCE.md) separates test evidence from proposed choices on buffer ownership, errors, numerics, trap atomicity, memory and metering. It changes or freezes **none** of W0, the account/key foundation, Galley board #25 or production formats.
