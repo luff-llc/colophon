@@ -1,0 +1,1 @@
+{"expected":"refused:outOfScope","name":"any-fail","probe":"condition","spec":{"args":{"amount":6},"terms":{"conditions":[{"any":[{"eq":["args.amount",1]},{"eq":["args.amount",5]}]}],"scope":[{"access":"write","namespace":"notes"}]},"uv":false}}

@@ -1,0 +1,1 @@
+{"expected":"refused:outOfScope","name":"requires-uv-fail","probe":"condition","spec":{"args":{},"terms":{"requires":["uv"],"scope":[{"access":"read","namespace":"notes"}]},"uv":false}}

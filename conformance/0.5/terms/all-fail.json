@@ -1,0 +1,1 @@
+{"expected":"refused:outOfScope","name":"all-fail","probe":"condition","spec":{"args":{"amount":6},"terms":{"conditions":[{"all":[{"gte":["args.amount",0]},{"lte":["args.amount",5]}]}],"scope":[{"access":"write","namespace":"notes"}]},"uv":false}}

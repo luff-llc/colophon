@@ -1,0 +1,1 @@
+{"expected":"refused:outOfScope","name":"purpose-unknown","probe":"purpose","spec":{"purpose":"execute:notes:add","terms":{"conditions":[],"scope":[{"access":"write","namespace":"notes"}]}}}

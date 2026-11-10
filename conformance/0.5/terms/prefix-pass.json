@@ -1,0 +1,1 @@
+{"expected":"ok","name":"prefix-pass","probe":"condition","spec":{"args":{"label":"Acme"},"terms":{"conditions":[{"prefix":["args.label","Ac"]}],"scope":[{"access":"write","namespace":"notes"}]},"uv":false}}

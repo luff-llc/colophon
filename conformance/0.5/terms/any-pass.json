@@ -1,0 +1,1 @@
+{"expected":"ok","name":"any-pass","probe":"condition","spec":{"args":{"amount":5},"terms":{"conditions":[{"any":[{"eq":["args.amount",1]},{"eq":["args.amount",5]}]}],"scope":[{"access":"write","namespace":"notes"}]},"uv":false}}
