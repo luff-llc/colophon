@@ -69,9 +69,7 @@ pub(crate) fn timestamp(s: &str) -> Option<i64> {
             return None;
         }
     }
-    if (compact && b[19] != b'Z')
-        || (!compact && (b[19] != b'.' || b[23] != b'Z'))
-    {
+    if (compact && b[19] != b'Z') || (!compact && (b[19] != b'.' || b[23] != b'Z')) {
         return None;
     }
     let number = |start: usize, end: usize| -> Option<i64> {
@@ -117,7 +115,10 @@ mod tests {
     fn utc_calendar_and_millisecond_forms() {
         assert_eq!(timestamp("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(timestamp("1970-01-01T00:00:00.001Z"), Some(1));
-        assert_eq!(timestamp("2024-02-29T23:59:59Z"), timestamp("2024-02-29T23:59:59.000Z"));
+        assert_eq!(
+            timestamp("2024-02-29T23:59:59Z"),
+            timestamp("2024-02-29T23:59:59.000Z")
+        );
         assert_eq!(timestamp("2023-02-29T00:00:00Z"), None);
         assert_eq!(timestamp("2026-11-10T23:59:60Z"), None);
     }

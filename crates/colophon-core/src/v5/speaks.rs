@@ -19,22 +19,28 @@ fn number(v: &Value) -> CheckResult<u64> {
     v.as_u64().ok_or(Verdict::Malformed)
 }
 fn hex_id(s: &str, size: usize) -> bool {
-    s.len() == size && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    s.len() == size
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 fn check_hex(s: &str, size: usize) -> CheckResult<String> {
-    if hex_id(s, size) { Ok(s.into()) } else { Err(Verdict::Malformed) }
+    if hex_id(s, size) {
+        Ok(s.into())
+    } else {
+        Err(Verdict::Malformed)
+    }
 }
 fn bytes(v: &Value) -> CheckResult<Vec<u8>> {
     let s = v.as_str().ok_or(Verdict::Malformed)?;
     let decoded = STANDARD.decode(s).map_err(|_| Verdict::Malformed)?;
-    if STANDARD.encode(&decoded) != s { return Err(Verdict::Malformed); }
+    if STANDARD.encode(&decoded) != s {
+        return Err(Verdict::Malformed);
+    }
     Ok(decoded)
 }
 fn point(v: &Value) -> CheckResult<Vec<u8>> {
     let key = bytes(v)?;
-    if key.len() != 65 || key[0] != 4
-        || p256::PublicKey::from_sec1_bytes(&key).is_err()
-    {
+    if key.len() != 65 || key[0] != 4 || p256::PublicKey::from_sec1_bytes(&key).is_err() {
         return Err(Verdict::Malformed);
     }
     Ok(key)
@@ -67,7 +73,11 @@ impl RawEnvelope {
         let mut m = obj(&v)?.clone();
         let body = bytes_field(&mut m, "body")?;
         let signature = bytes_field(&mut m, "signature")?;
-        Ok(Self { body, signature, extra: m })
+        Ok(Self {
+            body,
+            signature,
+            extra: m,
+        })
     }
     /// Begin a two-phase host signature: returns the exact bytes the host must sign.
     pub fn begin(body: &Value) -> CheckResult<Vec<u8>> {
@@ -75,14 +85,17 @@ impl RawEnvelope {
     }
     /// Finish a host signature, verifying it before returning the envelope.
     pub fn finish(body: Vec<u8>, signature: Vec<u8>, signing: &[u8]) -> CheckResult<Self> {
-        let envelope = Self { body, signature, extra: Map::new() };
+        let envelope = Self {
+            body,
+            signature,
+            extra: Map::new(),
+        };
         envelope.verify(signing)?;
         Ok(envelope)
     }
     /// Verify the raw ES256 signature using Colophon 0.4's verifier.
     pub fn verify(&self, signing: &[u8]) -> CheckResult<()> {
-        keys::verify_raw(signing, &self.body, &self.signature)
-            .map_err(|_| Verdict::BadSignature)
+        keys::verify_raw(signing, &self.body, &self.signature).map_err(|_| Verdict::BadSignature)
     }
     /// Emit the canonical envelope, with the exact original body bytes still encoded in base64.
     pub fn encode(&self) -> CheckResult<Vec<u8>> {
@@ -154,9 +167,23 @@ impl Link {
     /// Call only after its envelope has verified.
     pub fn from_value(v: &Value) -> CheckResult<Self> {
         let o = obj(v)?;
-        known(o, &["protocol", "account", "from", "to", "session", "terms",
-            "notBefore", "expires", "created"])?;
-        if str_field(o, "protocol")? != "colophon/link/5" { return Err(Verdict::NewerFormat); }
+        known(
+            o,
+            &[
+                "protocol",
+                "account",
+                "from",
+                "to",
+                "session",
+                "terms",
+                "notBefore",
+                "expires",
+                "created",
+            ],
+        )?;
+        if str_field(o, "protocol")? != "colophon/link/5" {
+            return Err(Verdict::NewerFormat);
+        }
         Ok(Self {
             account: check_hex(str_field(o, "account")?, 64)?,
             from: check_hex(str_field(o, "from")?, 32)?,
@@ -179,7 +206,9 @@ impl Link {
         o.insert("notBefore".into(), json!(self.not_before));
         o.insert("expires".into(), json!(self.expires));
         o.insert("created".into(), json!(self.created));
-        if let Some(session) = self.session { o.insert("session".into(), json!(session)); }
+        if let Some(session) = self.session {
+            o.insert("session".into(), json!(session));
+        }
         Value::Object(o)
     }
     /// The exact canonical bytes a host signs for a link; no private-key operation.
@@ -202,10 +231,17 @@ impl AsOf {
     fn from_value(v: &Value) -> CheckResult<Self> {
         let o = obj(v)?;
         let seq = number(field(o, "seq")?)?;
-        if seq == 0 { return Err(Verdict::Malformed); }
-        Ok(Self { seq, digest: check_hex(str_field(o, "digest")?, 64)? })
+        if seq == 0 {
+            return Err(Verdict::Malformed);
+        }
+        Ok(Self {
+            seq,
+            digest: check_hex(str_field(o, "digest")?, 64)?,
+        })
     }
-    fn to_value(&self) -> Value { json!({"seq":self.seq,"digest":self.digest}) }
+    fn to_value(&self) -> Value {
+        json!({"seq":self.seq,"digest":self.digest})
+    }
 }
 
 /// A proof references verified history and up to eight sequential signed links.
@@ -225,35 +261,79 @@ pub struct Proof {
 }
 impl Proof {
     /// Construct a new proof using canonical link envelopes.
-    pub fn new(account: String, member: String, as_of: AsOf, links: Vec<RawEnvelope>) -> CheckResult<Self> {
-        if !hex_id(&account, 64) || !hex_id(&member, 32) || as_of.seq == 0
-            || !hex_id(&as_of.digest, 64) || links.len() > 8
+    pub fn new(
+        account: String,
+        member: String,
+        as_of: AsOf,
+        links: Vec<RawEnvelope>,
+    ) -> CheckResult<Self> {
+        if !hex_id(&account, 64)
+            || !hex_id(&member, 32)
+            || as_of.seq == 0
+            || !hex_id(&as_of.digest, 64)
+            || links.len() > 8
         {
             return Err(Verdict::Malformed);
         }
-        Ok(Self { account, member, as_of: as_of.clone(), links, unknown: Map::new(), protocol: "colophon/proof/5".into(), as_of_original: as_of.to_value() })
+        Ok(Self {
+            account,
+            member,
+            as_of: as_of.clone(),
+            links,
+            unknown: Map::new(),
+            protocol: "colophon/proof/5".into(),
+            as_of_original: as_of.to_value(),
+        })
     }
     /// Strictly parse a proof and its base64-encoded envelope JSON values.
     pub fn from_json(json_bytes: &[u8]) -> CheckResult<Self> {
         let v = keys::strict_json::parse(json_bytes).map_err(|_| Verdict::Malformed)?;
         let mut m = obj(&v)?.clone();
-        let protocol = m.remove("protocol").and_then(|x| x.as_str().map(str::to_owned)).ok_or(Verdict::Malformed)?;
-        let account = check_hex(m.remove("account").and_then(|x| x.as_str().map(str::to_owned)).as_deref().ok_or(Verdict::Malformed)?,64)?;
-        let member = check_hex(m.remove("member").and_then(|x| x.as_str().map(str::to_owned)).as_deref().ok_or(Verdict::Malformed)?,32)?;
+        let protocol = m
+            .remove("protocol")
+            .and_then(|x| x.as_str().map(str::to_owned))
+            .ok_or(Verdict::Malformed)?;
+        let account = check_hex(
+            m.remove("account")
+                .and_then(|x| x.as_str().map(str::to_owned))
+                .as_deref()
+                .ok_or(Verdict::Malformed)?,
+            64,
+        )?;
+        let member = check_hex(
+            m.remove("member")
+                .and_then(|x| x.as_str().map(str::to_owned))
+                .as_deref()
+                .ok_or(Verdict::Malformed)?,
+            32,
+        )?;
         let as_of_original = m.remove("asOf").ok_or(Verdict::Malformed)?;
         let as_of = AsOf::from_value(&as_of_original)?;
         let encoded = m.remove("links").ok_or(Verdict::Malformed)?;
         let links = encoded.as_array().ok_or(Verdict::Malformed)?;
-        if links.len() > 8 { return Err(Verdict::Malformed); }
-        let links = links.iter().map(|v| {
-            let wire = bytes(v)?;
-            let envelope = RawEnvelope::from_json(&wire)?;
-            if envelope.encode()? != wire {
-                return Err(Verdict::Malformed);
-            }
-            Ok(envelope)
-        }).collect::<CheckResult<Vec<_>>>()?;
-        Ok(Self { account, member, as_of, links, unknown: m, protocol, as_of_original })
+        if links.len() > 8 {
+            return Err(Verdict::Malformed);
+        }
+        let links = links
+            .iter()
+            .map(|v| {
+                let wire = bytes(v)?;
+                let envelope = RawEnvelope::from_json(&wire)?;
+                if envelope.encode()? != wire {
+                    return Err(Verdict::Malformed);
+                }
+                Ok(envelope)
+            })
+            .collect::<CheckResult<Vec<_>>>()?;
+        Ok(Self {
+            account,
+            member,
+            as_of,
+            links,
+            unknown: m,
+            protocol,
+            as_of_original,
+        })
     }
     /// Return the protocol's canonical JSON, including any preserved unknown proof fields.
     pub fn canonical(&self) -> CheckResult<Vec<u8>> {
@@ -262,7 +342,10 @@ impl Proof {
         o.insert("account".into(), json!(self.account));
         o.insert("member".into(), json!(self.member));
         o.insert("asOf".into(), self.as_of_original.clone());
-        let links = self.links.iter().map(|l| l.encode().map(|b| STANDARD.encode(b)))
+        let links = self
+            .links
+            .iter()
+            .map(|l| l.encode().map(|b| STANDARD.encode(b)))
             .collect::<CheckResult<Vec<_>>>()?;
         o.insert("links".into(), json!(links));
         records::canonical(&Value::Object(o)).map_err(|_| Verdict::Malformed)
@@ -294,21 +377,33 @@ impl RequestBody {
     /// Strict parsing of the authenticated request body.
     pub fn from_value(v: &Value) -> CheckResult<Self> {
         let o = obj(v)?;
-        known(o, &["protocol", "account", "proof", "audience", "purpose", "body", "nonce", "created"])?;
-        if str_field(o, "protocol")? != "colophon/request/5" { return Err(Verdict::NewerFormat); }
+        known(
+            o,
+            &[
+                "protocol", "account", "proof", "audience", "purpose", "body", "nonce", "created",
+            ],
+        )?;
+        if str_field(o, "protocol")? != "colophon/request/5" {
+            return Err(Verdict::NewerFormat);
+        }
         let nonce = bytes(field(o, "nonce")?)?;
-        if nonce.len() != 16 { return Err(Verdict::Malformed); }
+        if nonce.len() != 16 {
+            return Err(Verdict::Malformed);
+        }
         let audience = str_field(o, "audience")?;
         let purpose = str_field(o, "purpose")?;
-        if audience.is_empty() || audience.len() > 512 || purpose.is_empty() || purpose.len() > 512 {
+        if audience.is_empty() || audience.len() > 512 || purpose.is_empty() || purpose.len() > 512
+        {
             return Err(Verdict::Malformed);
         }
         Ok(Self {
             account: check_hex(str_field(o, "account")?, 64)?,
             proof: check_hex(str_field(o, "proof")?, 64)?,
-            audience: audience.into(), purpose: purpose.into(),
+            audience: audience.into(),
+            purpose: purpose.into(),
             body: check_hex(str_field(o, "body")?, 64)?,
-            nonce, created: valid_date(str_field(o, "created")?)?,
+            nonce,
+            created: valid_date(str_field(o, "created")?)?,
         })
     }
     /// Canonical value to sign in the host.
@@ -381,7 +476,9 @@ where
     }
 }
 fn check_inner<H: VerifiedHistory>(
-    input: CheckInput<'_>, history: &H, nonce_seen: &mut impl FnMut(&[u8]) -> bool,
+    input: CheckInput<'_>,
+    history: &H,
+    nonce_seen: &mut impl FnMut(&[u8]) -> bool,
 ) -> CheckResult<bool> {
     let proof = input.proof;
     let now = timestamp(input.now).ok_or(Verdict::Malformed)?;
@@ -390,7 +487,8 @@ fn check_inner<H: VerifiedHistory>(
         return Err(Verdict::Refused(Refusal::Stale));
     }
     // 2. Member in the *latest* verified history (not historical snapshot).
-    let member = history.member(&proof.account, &proof.member)
+    let member = history
+        .member(&proof.account, &proof.member)
         .ok_or(Verdict::Refused(Refusal::Revoked))?;
     if member.revoked {
         return Err(Verdict::Refused(Refusal::Revoked));
@@ -398,10 +496,19 @@ fn check_inner<H: VerifiedHistory>(
     if records::id(&member.signing) != proof.member {
         return Err(Verdict::Malformed);
     }
-    if member.expires.as_deref().map(|s| timestamp(s).ok_or(Verdict::Malformed))
-        .transpose()?.is_some_and(|t| now > t)
-        || member.terms.expires.as_deref().map(|s| timestamp(s).ok_or(Verdict::Malformed))
-            .transpose()?.is_some_and(|t| now > t)
+    if member
+        .expires
+        .as_deref()
+        .map(|s| timestamp(s).ok_or(Verdict::Malformed))
+        .transpose()?
+        .is_some_and(|t| now > t)
+        || member
+            .terms
+            .expires
+            .as_deref()
+            .map(|s| timestamp(s).ok_or(Verdict::Malformed))
+            .transpose()?
+            .is_some_and(|t| now > t)
     {
         return Err(Verdict::Refused(Refusal::Expired));
     }
@@ -409,7 +516,9 @@ fn check_inner<H: VerifiedHistory>(
     // Carry forward signed target keys only; the typed decoder runs after all signatures.
     let mut key = member.signing.clone();
     let mut raw = Vec::with_capacity(proof.links.len());
-    if proof.links.len() > 8 { return Err(Verdict::Malformed); }
+    if proof.links.len() > 8 {
+        return Err(Verdict::Malformed);
+    }
     for envelope in &proof.links {
         envelope.verify(&key)?;
         let body = keys::strict_json::parse(&envelope.body).map_err(|_| Verdict::Malformed)?;
@@ -420,8 +529,11 @@ fn check_inner<H: VerifiedHistory>(
     // Authentication precedes forward-format errors, even for zero-link proofs.
     // A forged request must not coerce the verifier to announce an upgrade.
     input.request.verify(input.acting_signing)?;
-    if proof.protocol != "colophon/proof/5" || !proof.unknown.is_empty()
-        || obj(&proof.as_of_original)?.keys().any(|k| k != "seq" && k != "digest")
+    if proof.protocol != "colophon/proof/5"
+        || !proof.unknown.is_empty()
+        || obj(&proof.as_of_original)?
+            .keys()
+            .any(|k| k != "seq" && k != "digest")
         || proof.links.iter().any(RawEnvelope::has_unknown_fields)
         || input.request.has_unknown_fields()
     {
@@ -430,8 +542,11 @@ fn check_inner<H: VerifiedHistory>(
     // 3b. Validate chain binding, temporal bounds, scope narrowing, and depth.
     let mut prior_key = member.signing.clone();
     let mut parent_terms = member.terms.clone();
-    let mut prior_expiry = member.expires.as_deref()
-        .and_then(timestamp).unwrap_or(i64::MAX);
+    let mut prior_expiry = member
+        .expires
+        .as_deref()
+        .and_then(timestamp)
+        .unwrap_or(i64::MAX);
     if let Some(expires) = &member.terms.expires {
         prior_expiry = prior_expiry.min(timestamp(expires).ok_or(Verdict::Malformed)?);
     }
@@ -463,11 +578,16 @@ fn check_inner<H: VerifiedHistory>(
     // 4. Session numbers are guarded state; absent means unguarded, not zero.
     let current_session = history.session_number(&proof.account, &proof.member);
     if let (Some(expected), Some(actual)) = (first_session, current_session) {
-        if expected != actual { return Err(Verdict::Refused(Refusal::Ended)); }
+        if expected != actual {
+            return Err(Verdict::Refused(Refusal::Ended));
+        }
     }
     let unguarded = current_session.is_none();
     // 5. Every link and the member must allow purpose and key/argument constraints.
-    if all_terms.iter().any(|t| !t.allows(input.purpose) || !t.conditions_hold(input.arguments, input.uv)) {
+    if all_terms
+        .iter()
+        .any(|t| !t.allows(input.purpose) || !t.conditions_hold(input.arguments, input.uv))
+    {
         return Err(Verdict::Refused(Refusal::OutOfScope));
     }
     // 6. Possession and exact signed request binding.
@@ -476,8 +596,10 @@ fn check_inner<H: VerifiedHistory>(
     }
     let body = keys::strict_json::parse(&input.request.body).map_err(|_| Verdict::Malformed)?;
     let request = RequestBody::from_value(&body)?;
-    if request.account != proof.account || request.proof != proof.digest()?
-        || request.purpose != input.purpose || request.body != input.body_digest
+    if request.account != proof.account
+        || request.proof != proof.digest()?
+        || request.purpose != input.purpose
+        || request.body != input.body_digest
         || request.audience != input.audience
     {
         return Err(Verdict::Refused(Refusal::OutOfScope));

@@ -47,13 +47,16 @@ impl Scope {
         let o = object(v)?;
         known(o, &["namespace", "access", "kinds"])?;
         let namespace = word(field(o, "namespace")?)?;
-        let access = Access::parse(string(field(o, "access")?)?)
-            .ok_or(Verdict::NewerFormat)?;
+        let access = Access::parse(string(field(o, "access")?)?).ok_or(Verdict::NewerFormat)?;
         let kinds = o.get("kinds").map(names).transpose()?;
         if kinds.as_ref().is_some_and(Vec::is_empty) {
             return Err(Verdict::Malformed);
         }
-        Ok(Self { namespace, access, kinds })
+        Ok(Self {
+            namespace,
+            access,
+            kinds,
+        })
     }
     fn to_value(&self) -> Value {
         let mut o = Map::new();
@@ -103,16 +106,34 @@ impl Terms {
     /// Call this only after the enclosing link's signature has verified.
     pub fn from_value(value: &Value) -> Result<Self, Verdict> {
         let o = object(value)?;
-        known(o, &["scope", "expires", "depth", "writes", "requires", "conditions", "serves"])?;
+        known(
+            o,
+            &[
+                "scope",
+                "expires",
+                "depth",
+                "writes",
+                "requires",
+                "conditions",
+                "serves",
+            ],
+        )?;
         let scope = array(field(o, "scope")?)?;
         if scope.is_empty() || scope.len() > 64 {
             return Err(Verdict::Malformed);
         }
-        let scope = scope.iter().map(Scope::from_value).collect::<Result<Vec<_>, _>>()?;
+        let scope = scope
+            .iter()
+            .map(Scope::from_value)
+            .collect::<Result<Vec<_>, _>>()?;
         let expires = o.get("expires").map(|v| date(v)).transpose()?;
         let depth = o.get("depth").map(unsigned).transpose()?.unwrap_or(0);
         let writes = o.get("writes").map(unsigned).transpose()?;
-        let requires = o.get("requires").map(names).transpose()?.unwrap_or_default();
+        let requires = o
+            .get("requires")
+            .map(names)
+            .transpose()?
+            .unwrap_or_default();
         if requires.iter().any(|v| v != "uv") {
             return Err(Verdict::NewerFormat);
         }
@@ -120,7 +141,12 @@ impl Terms {
         if serves.iter().any(|v| v != "home" && v != "authority") {
             return Err(Verdict::NewerFormat);
         }
-        let conditions = o.get("conditions").map(array).transpose()?.cloned().unwrap_or_default();
+        let conditions = o
+            .get("conditions")
+            .map(array)
+            .transpose()?
+            .cloned()
+            .unwrap_or_default();
         let mut count = 0;
         for c in &conditions {
             validate_condition(c, 1, &mut count)?;
@@ -129,12 +155,23 @@ impl Terms {
         if bytes.len() > 4096 {
             return Err(Verdict::Malformed);
         }
-        Ok(Self { scope, expires, depth, writes, requires, conditions, serves })
+        Ok(Self {
+            scope,
+            expires,
+            depth,
+            writes,
+            requires,
+            conditions,
+            serves,
+        })
     }
     /// Reconstruct canonical value; absent optional properties remain absent.
     pub fn to_value(&self) -> Value {
         let mut o = Map::new();
-        o.insert("scope".into(), Value::Array(self.scope.iter().map(Scope::to_value).collect()));
+        o.insert(
+            "scope".into(),
+            Value::Array(self.scope.iter().map(Scope::to_value).collect()),
+        );
         if let Some(v) = &self.expires {
             o.insert("expires".into(), json!(v));
         }
@@ -161,7 +198,10 @@ impl Terms {
     }
     /// B narrows A only if all seven constraints in §6.2 hold.
     pub fn narrows(&self, child: &Self) -> bool {
-        child.scope.iter().all(|b| self.scope.iter().any(|a| a.covers(b)))
+        child
+            .scope
+            .iter()
+            .all(|b| self.scope.iter().any(|a| a.covers(b)))
             && match (&self.expires, &child.expires) {
                 (None, _) => true,
                 (Some(a), Some(b)) => match (timestamp(a), timestamp(b)) {
@@ -189,7 +229,9 @@ impl Terms {
             }
             return self.scope.iter().any(|s| {
                 s.namespace == "colophon"
-                    && s.kinds.as_ref().is_some_and(|k| k.iter().any(|v| v == name || v == purpose))
+                    && s.kinds
+                        .as_ref()
+                        .is_some_and(|k| k.iter().any(|v| v == name || v == purpose))
             });
         }
         if let Some(kind) = purpose.strip_prefix("guard:") {
@@ -199,14 +241,20 @@ impl Terms {
             return self.scope.iter().any(|s| {
                 s.namespace == "colophon"
                     && s.access == Access::Write
-                    && s.kinds.as_ref().is_some_and(|k| k.contains(&format!("guard:{kind}")))
+                    && s.kinds
+                        .as_ref()
+                        .is_some_and(|k| k.contains(&format!("guard:{kind}")))
             });
         }
         let mut p = purpose.split(':');
-        let (Some(level), Some(namespace), Some(kind), None) = (p.next(), p.next(), p.next(), p.next()) else {
+        let (Some(level), Some(namespace), Some(kind), None) =
+            (p.next(), p.next(), p.next(), p.next())
+        else {
             return false;
         };
-        let Some(access) = Access::parse(level) else { return false; };
+        let Some(access) = Access::parse(level) else {
+            return false;
+        };
         if namespace.is_empty() || kind.is_empty() {
             return false;
         }
@@ -295,10 +343,16 @@ fn validate_condition(v: &Value, depth: usize, count: &mut usize) -> Result<(), 
             }
             path(&parts[0])?;
             match op.as_str() {
-                "in" => { array(&parts[1])?; }
-                "prefix" => { string(&parts[1])?; }
+                "in" => {
+                    array(&parts[1])?;
+                }
+                "prefix" => {
+                    string(&parts[1])?;
+                }
                 "lte" | "gte" => {
-                    if !parts[1].is_number() { return Err(Verdict::Malformed); }
+                    if !parts[1].is_number() {
+                        return Err(Verdict::Malformed);
+                    }
                 }
                 _ => {}
             }
@@ -325,20 +379,37 @@ fn at_path<'a>(arguments: &'a Value, p: &str) -> Option<&'a Value> {
     Some(value)
 }
 fn evaluate(v: &Value, arguments: &Value) -> bool {
-    let Some((op, operand)) = v.as_object().and_then(|o| o.iter().next()) else { return false; };
+    let Some((op, operand)) = v.as_object().and_then(|o| o.iter().next()) else {
+        return false;
+    };
     match op.as_str() {
-        "all" => operand.as_array().is_some_and(|items| items.iter().all(|c| evaluate(c, arguments))),
-        "any" => operand.as_array().is_some_and(|items| items.iter().any(|c| evaluate(c, arguments))),
+        "all" => operand
+            .as_array()
+            .is_some_and(|items| items.iter().all(|c| evaluate(c, arguments))),
+        "any" => operand
+            .as_array()
+            .is_some_and(|items| items.iter().any(|c| evaluate(c, arguments))),
         "not" => !evaluate(operand, arguments),
         _ => {
-            let Some(parts) = operand.as_array() else { return false; };
-            let Some(p) = parts.first().and_then(Value::as_str) else { return false; };
-            let Some(actual) = at_path(arguments, p) else { return false; };
-            let Some(expected) = parts.get(1) else { return false; };
+            let Some(parts) = operand.as_array() else {
+                return false;
+            };
+            let Some(p) = parts.first().and_then(Value::as_str) else {
+                return false;
+            };
+            let Some(actual) = at_path(arguments, p) else {
+                return false;
+            };
+            let Some(expected) = parts.get(1) else {
+                return false;
+            };
             match op.as_str() {
                 "eq" => actual == expected,
                 "in" => expected.as_array().is_some_and(|vs| vs.contains(actual)),
-                "prefix" => actual.as_str().zip(expected.as_str()).is_some_and(|(a,b)| a.starts_with(b)),
+                "prefix" => actual
+                    .as_str()
+                    .zip(expected.as_str())
+                    .is_some_and(|(a, b)| a.starts_with(b)),
                 "lte" => compare_json_numbers(actual, expected)
                     .is_some_and(|ordering| ordering != std::cmp::Ordering::Greater),
                 "gte" => compare_json_numbers(actual, expected)
@@ -348,7 +419,6 @@ fn evaluate(v: &Value, arguments: &Value) -> bool {
         }
     }
 }
-
 
 /// Exact ordering of integer-token JSON numbers (including values above 2^53),
 /// with IEEE-754 semantics for actual floating-point tokens. Casting large
@@ -401,10 +471,13 @@ mod tests {
     use super::*;
     #[test]
     fn exact_json_numeric_bounds() {
-        let terms = |condition: Value| Terms::from_value(&json!({
-            "scope":[{"namespace":"payments","access":"write"}],
-            "conditions":[condition]
-        })).unwrap();
+        let terms = |condition: Value| {
+            Terms::from_value(&json!({
+                "scope":[{"namespace":"payments","access":"write"}],
+                "conditions":[condition]
+            }))
+            .unwrap()
+        };
         let limit = 9_007_199_254_740_992u64;
         let above = limit + 1;
         assert!(terms(json!({"lte":["args.amount",limit]}))
@@ -415,8 +488,9 @@ mod tests {
             .conditions_hold(&json!({"amount":above}), false));
         assert!(!terms(json!({"gte":["args.amount",above]}))
             .conditions_hold(&json!({"amount":limit}), false));
-        assert!(!terms(json!({"lte":["args.amount",1.5]}))
-            .conditions_hold(&json!({"amount":2}), false));
+        assert!(
+            !terms(json!({"lte":["args.amount",1.5]})).conditions_hold(&json!({"amount":2}), false)
+        );
         assert!(terms(json!({"gte":["args.amount",-1.5]}))
             .conditions_hold(&json!({"amount":-1}), false));
     }
@@ -425,14 +499,17 @@ mod tests {
         let p = Terms::from_value(&json!({"scope":[{"namespace":"notes","access":"write","kinds":["add","edit"]}],"expires":"2027-01-01T00:00:00Z","depth":3,"writes":5,"requires":["uv"],"conditions":[{"lte":["args.amount",10]}],"serves":["home","authority"]})).unwrap();
         let c = Terms::from_value(&json!({"scope":[{"namespace":"notes","access":"propose","kinds":["add"]}],"expires":"2026-12-01T00:00:00Z","depth":2,"writes":4,"requires":["uv"],"conditions":[{"lte":["args.amount",10]},{"gte":["args.amount",0]}],"serves":["home"]})).unwrap();
         assert!(p.narrows(&c));
-        for (field,value) in [
-            ("scope", json!([{"namespace":"notes","access":"write","kinds":["remove"]}])),
+        for (field, value) in [
+            (
+                "scope",
+                json!([{"namespace":"notes","access":"write","kinds":["remove"]}]),
+            ),
             ("expires", json!("2028-01-01T00:00:00Z")),
             ("depth", json!(3)),
             ("writes", json!(6)),
             ("requires", json!([])),
             ("conditions", json!([])),
-            ("serves", json!(["home","authority","other"])),
+            ("serves", json!(["home", "authority", "other"])),
         ] {
             let mut v = c.to_value();
             v[field] = value;
@@ -446,15 +523,30 @@ mod tests {
     #[test]
     fn predicates_bounds_and_semantics() {
         let make = |conditions: Vec<Value>| {
-            Terms::from_value(&json!({"scope":[{"namespace":"notes","access":"write"}],"conditions":conditions}))
+            Terms::from_value(
+                &json!({"scope":[{"namespace":"notes","access":"write"}],"conditions":conditions}),
+            )
         };
-        assert!(make(vec![json!({"lte":["args.amount",5]})]).unwrap().conditions_hold(&json!({"amount":5}),false));
-        assert!(!make(vec![json!({"lte":["args.amount",5]})]).unwrap().conditions_hold(&json!({"amount":6}),false));
+        assert!(make(vec![json!({"lte":["args.amount",5]})])
+            .unwrap()
+            .conditions_hold(&json!({"amount":5}), false));
+        assert!(!make(vec![json!({"lte":["args.amount",5]})])
+            .unwrap()
+            .conditions_hold(&json!({"amount":6}), false));
         assert!(make((0..32).map(|_| json!({"eq":["args.amount",5]})).collect()).is_ok());
-        assert_eq!(make((0..33).map(|_| json!({"eq":["args.amount",5]})).collect()), Err(Verdict::Malformed));
+        assert_eq!(
+            make((0..33).map(|_| json!({"eq":["args.amount",5]})).collect()),
+            Err(Verdict::Malformed)
+        );
         assert!(make(vec![json!({"not":{"not":{"not":{"eq":["x",1]}}}})]).is_ok());
-        assert_eq!(make(vec![json!({"not":{"not":{"not":{"not":{"eq":["x",1]}}}}})]), Err(Verdict::Malformed));
+        assert_eq!(
+            make(vec![json!({"not":{"not":{"not":{"not":{"eq":["x",1]}}}}})]),
+            Err(Verdict::Malformed)
+        );
         let big = "x".repeat(4096);
-        assert_eq!(make(vec![json!({"prefix":["args.x",big]})]), Err(Verdict::Malformed));
+        assert_eq!(
+            make(vec![json!({"prefix":["args.x",big]})]),
+            Err(Verdict::Malformed)
+        );
     }
 }
