@@ -29,15 +29,29 @@ def instrument(source: str):
         raise ValueError("Expected WABT's linear WAT output")
     output = []
     functions = loops = 0
+    pending_function_entry = False
     for line in lines:
-        output.append(line)
         if re.match(r"^\s*\(func\s", line):
-            # A WABT function header is its own line, including type signature.
-            output.append(CHARGE)
+            # WABT places (local ...) declarations AFTER the header. WAT
+            # requires all such declarations before executable instructions.
+            if pending_function_entry:
+                raise ValueError("unexpected nested function header")
+            output.append(line)
+            pending_function_entry = True
             functions += 1
-        elif re.match(r"^\s*loop(?:\s|$)", line):
+            continue
+        if pending_function_entry:
+            if re.match(r"^\s*\(local(?:\s|\))", line):
+                output.append(line)
+                continue
+            output.append(CHARGE)
+            pending_function_entry = False
+        output.append(line)
+        if re.match(r"^\s*loop(?:\s|$)", line):
             output.append(CHARGE)
             loops += 1
+    if pending_function_entry:
+        raise ValueError("unterminated function header")
     text = "".join(output)
     final = text.rfind(")")
     if final < 0:
