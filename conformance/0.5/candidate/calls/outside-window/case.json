@@ -1,0 +1,1 @@
+{"description":"Created 660 s before now; callWindow is 300 (step 3).","expected":"refused:window","sections":["12.3"],"verifier":{"audiences":["https://projects.example/scopes/7"],"heads":["conformance/0.5/candidate/account/head.json"],"history":"conformance/0.5/candidate/account/records","now":"2026-11-11T09:01:00Z","replay":"empty"}}
