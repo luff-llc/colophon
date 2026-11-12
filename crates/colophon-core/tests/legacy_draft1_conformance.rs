@@ -1,12 +1,14 @@
-//! Deterministic Colophon 0.5 fixtures: opt-in generation and disk-only replay.
-//! Regenerate with COLOPHON_WRITE_V5_VECTORS=1 cargo test -p colophon-core --test v5_conformance
+//! Draft-1 speaks-for fixtures (NOT Colophon 0.5): opt-in generation and disk-only replay.
+//! These vectors contradict the 0.5 candidate and are kept only as history; see
+//! `conformance/0.5/legacy-draft-1/README.md`.
+//! Regenerate with
+//! COLOPHON_WRITE_V5_VECTORS=1 cargo test -p colophon-core --test legacy_draft1_conformance
 #![allow(clippy::unwrap_used)]
 use base64::{engine::general_purpose::STANDARD, Engine};
 use colophon_core::{
     crypto::SoftwareKeys,
     keys::strict_json,
-    records,
-    v5::{
+    legacy_draft1::{
         speaks::{
             self, AsOf, CheckInput, Link, Member, Proof, RawEnvelope, RequestBody, Target,
             VerifiedHistory,
@@ -14,6 +16,7 @@ use colophon_core::{
         terms::Terms,
         Verdict,
     },
+    records,
 };
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf};
@@ -555,7 +558,7 @@ fn replay_terms(v: &Value) {
             if a.narrows(&b) {
                 Verdict::Ok { unguarded: false }
             } else {
-                Verdict::Refused(colophon_core::v5::Refusal::NotNarrower)
+                Verdict::Refused(colophon_core::legacy_draft1::Refusal::NotNarrower)
             }
         }
         "condition" => {
@@ -563,7 +566,7 @@ fn replay_terms(v: &Value) {
             if terms.conditions_hold(&spec["args"], spec["uv"].as_bool().unwrap()) {
                 Verdict::Ok { unguarded: false }
             } else {
-                Verdict::Refused(colophon_core::v5::Refusal::OutOfScope)
+                Verdict::Refused(colophon_core::legacy_draft1::Refusal::OutOfScope)
             }
         }
         "purpose" => {
@@ -571,7 +574,7 @@ fn replay_terms(v: &Value) {
             if terms.allows(spec["purpose"].as_str().unwrap()) {
                 Verdict::Ok { unguarded: false }
             } else {
-                Verdict::Refused(colophon_core::v5::Refusal::OutOfScope)
+                Verdict::Refused(colophon_core::legacy_draft1::Refusal::OutOfScope)
             }
         }
         _ => panic!("unknown probe"),
@@ -579,7 +582,7 @@ fn replay_terms(v: &Value) {
     assert_eq!(code.code(), expected, "{}", v["name"]);
 }
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5/legacy-draft-1")
 }
 fn check_group(group: &str, generated: Vec<Value>, replay: fn(&Value)) {
     let dir = root().join(group);
@@ -617,7 +620,7 @@ fn check_group(group: &str, generated: Vec<Value>, replay: fn(&Value)) {
     );
 }
 #[test]
-fn published_v5_conformance() {
+fn published_legacy_draft1_conformance() {
     check_group("speaks-for", speaks_cases(), replay_speaks);
     check_group("terms", terms_cases(), replay_terms);
 }
