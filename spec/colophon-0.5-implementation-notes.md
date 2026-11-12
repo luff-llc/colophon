@@ -71,9 +71,6 @@ Implemented, following the state table:
 **Not implemented** (reported as not implemented, never as passing):
 - `predecessor`, `successionVetoed`, `successor` and `resolve` (succession and forks' way out);
 - the 0.4 `upgrade` prefix;
-- homes' admission rules (§13.1 caps and the clock) and the exchange (§14);
-- resuming from a persisted folded state: the verifier replays from seq 1 and takes only the
-  high-water mark;
 - equivocation evidence objects;
 - seal recipients in `shares` and `epochs`;
 - slot cryptography.
@@ -171,3 +168,63 @@ Step-3 verification: 322 workspace tests pass (4 existing ignored); conformance 
 workspace/all-target clippy with `-D warnings`, WASM check and FFI build pass. Changed Rust
 files pass rustfmt; workspace rustfmt reports only the same six unchanged 0.4 files. No
 `Cargo.lock`, dependency, released engine, FFI or WASM export changes.
+
+
+## Step 4 of engine-0.5-rest: home admission and pending exchange
+
+`v05::history::home` is sans-IO. `admit` takes a persisted `HomeState`, one envelope and a
+clock date, returning the proposed next state, acceptance or one named refusal, and receipt
+bodies for the host's signer. The host must commit the returned state even on refusal: first
+observations and permanent late-activation decisions survive restart. `finish_receipt` checks
+the raw signature, exact requested body and actual signing window before accepting it.
+The engine never holds a home private key or performs storage, networking or clock reads.
+
+Implemented:
+- entry verification, inclusive 60-second/300-second clock boundaries, primary ordering,
+  primary endpoint redirects, and overlap/gap conflicts;
+- latest-state transition validation including non-void deltas; ordered proposer/account/veto
+  caps, with no eviction; veto eligibility and receipt quorum before a veto blocks activation;
+- first-seen facts, serving history and permanent late-activation refusals; late transitions
+  and their receipts remain available even when the activation is refused;
+- one receipt per home/object, persistent signing drafts, verified completion, body-based
+  idempotence and preservation of the first stored envelope;
+- authenticated receipts arriving before their objects are held separately and answered
+  `unavailable`; only after target/window validation can they affect first-seen facts or the
+  listing. The local unmatched-receipt buffer is documented at 4,096 objects; beyond that the
+  result is `unavailable`. Unknown dependencies are retried by the caller;
+- pending POST batches of 1–16 with a result for each object, including malformed objects;
+  GET pages of 1–64 with monotonic never-reused cursors, `more`, digest lookup and receipts;
+  recorded objects and their receipts stop appearing. Time-based retention may exceed seven
+  days (dropping after that is optional), including full sets whose receipt-based due time
+  has not been established yet;
+- versioned home checkpoints including all these local facts. Reading APIs assume the caller
+  has performed §13.4 authorization using the existing call verifier. Transport adapters,
+  notices, forwarding, signing and scheduling recording entries remain host responsibilities.
+
+Readings chosen, with tests (no normative text changed):
+
+| Question | Reading | Named test |
+| --- | --- | --- |
+| “not serving for any part of that window” | No serving interval overlaps the window, including its endpoints. Serving for even one instant removes this exception. | `downtime_exception_requires_no_serving_during_the_receipt_window` |
+| Who “proposed” a multi-signer transition for the local quota? | Every signing unit; each unit's quota is checked before the account quota. Vetoes consume every vetoing unit's one-per-transition allowance. | `proposer_cap_never_evicts_and_returns_per_object_batch_results`, `account_cap_follows_proposer_cap_and_retains_receipted_late_evidence`, `veto_cap_is_per_unit_and_valid_veto_blocks_activation_until_recorded` |
+| A receipt arrives before its transition | Authentication alone cannot establish its window or first-seen eligibility. Hold it, answer unavailable, and promote only after validating the target bytes. An invalid-window receipt never excuses late activation. | `forwarded_receipt_before_transition_counts_only_after_its_window_is_validated` |
+| A permanently refused activation carries a foreign-receipted transition while the home is full | Honor §13.1's explicit requirement to retain and serve that transition and its receipts; admission caps still refuse new receipt requests and never evict. Consequently §14's computed 10,368-object bound is not a guaranteed bound on this retained late evidence. This tension in the text remains recorded for review; no wire or normative text was changed silently. | `account_cap_follows_proposer_cap_and_retains_receipted_late_evidence` |
+
+The test `shuffled_pending_objects_converge_after_unavailable_dependencies_are_retried`
+checks all 24 permutations of transition, transition receipt, veto and veto receipt, with
+serialized restarts and dependency retries, then verifies the recording entry and listing.
+Local caps and cursor order remain arrival-dependent exactly as §13.1 explicitly permits.
+The hostile-input test mutates every byte of a real transition; boundary, restart, receipt
+signature, pagination, mixed-batch and non-primary-head tests cover the remaining interfaces.
+
+Generator changes (metadata only): `i-rate-dormant-burst` now states the exact admission
+object, home and `refused:late` result; the runner executes it instead of reporting it not
+implemented. `row-13-backdating-home` additionally checks the honest home's refusal of the
+hostile branch's activation, as well as its existing history verdict. The descriptive prose
+is retained, not interpreted as an expected code. No signed fixture bytes changed.
+
+Step-4 verification: 334 workspace tests pass (4 existing ignored); conformance 249 in scope,
+249 pass, 0 fail, 29 not implemented. All 1,058 generated files reproduce. Offline locked
+workspace/all-target clippy with `-D warnings`, WASM check and FFI build pass. Changed Rust
+files pass rustfmt; workspace rustfmt reports only the same six unchanged 0.4 files. No new
+dependency, lockfile, released engine or existing binding/export changes.

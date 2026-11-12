@@ -10,6 +10,7 @@
 //! `successionVetoed`, `successor`), `resolve`, the 0.4 `upgrade` prefix, homes' admission
 //! rules (§13.1 caps and clock) and the pending exchange (§14).
 pub mod envelope;
+pub mod home;
 pub mod keyring;
 mod state;
 

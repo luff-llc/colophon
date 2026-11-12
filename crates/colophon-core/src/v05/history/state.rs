@@ -225,10 +225,10 @@ impl State {
     pub fn controller_provisional(&self, id: &str) -> Option<u64> {
         self.meta.get(id).and_then(|m| m.provisional)
     }
-    fn seq(&self) -> u64 {
+    pub(super) fn seq(&self) -> u64 {
         self.digests.len() as u64
     }
-    fn last_issued(&self) -> i64 {
+    pub(super) fn last_issued(&self) -> i64 {
         self.issued.last().copied().unwrap_or(i64::MIN)
     }
     /// A controller counts: present and not added by a provisional activation.
@@ -263,13 +263,13 @@ impl State {
             })
             .collect()
     }
-    fn home_key(&self, id: &str) -> Option<Vec<u8>> {
+    pub(super) fn home_key(&self, id: &str) -> Option<Vec<u8>> {
         self.current_homes()
             .into_iter()
             .find(|m| m.request.member_id() == id)
             .map(|m| m.request.signing.clone())
     }
-    fn primary_home(&self) -> Option<String> {
+    pub(super) fn primary_home(&self) -> Option<String> {
         if let Some(p) = self.keyring.policy.primary_home() {
             return Some(p.to_string());
         }
@@ -1096,7 +1096,7 @@ pub(crate) fn check_transition(
 }
 
 /// A receipt (§13.5): returns the home and `received`.
-fn check_receipt(
+pub(super) fn check_receipt(
     s: &State,
     bytes: &[u8],
     object: &str,
@@ -1142,7 +1142,7 @@ fn embedded_list(v: &Value, field: &str, bound: usize) -> Result<Vec<Vec<u8>>> {
 // ---------------------------------------------------------------------------------------------
 // Applying deltas.
 
-fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> {
+pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> {
     let mut n = s.clone();
     let k = &s.keyring;
     let mut raw = k.raw_controllers();
@@ -2723,7 +2723,13 @@ fn final_covers(all: &[&Entry], activate_digest: &str) -> bool {
                 == Some(activate_digest)
     })
 }
-fn covered_by_home_head(s: &State, heads: &HeadSet, all: &[&Entry], y: &Entry, home: &str) -> bool {
+pub(super) fn covered_by_home_head(
+    s: &State,
+    heads: &HeadSet,
+    all: &[&Entry],
+    y: &Entry,
+    home: &str,
+) -> bool {
     let Some(key) = s.home_key(home) else {
         return false;
     };
@@ -2845,5 +2851,36 @@ pub fn check_pending_veto(
             "a signer's key form is unknown".into(),
         ));
     }
+    Ok(())
+}
+
+pub(super) fn admission_transition(s: &State, bytes: &[u8]) -> Result<TCheck> {
+    let t = check_transition(s, bytes, &[], false, false)?;
+    t.unknown.check()?;
+    if t.undecidable {
+        return Err(Failure::NewerFormat(
+            "a signer's key form is unknown".into(),
+        ));
+    }
+    if s.recorded.contains(&t.digest) {
+        return Err(malformed("transition is already recorded"));
+    }
+    apply_delta(s, &t, s.seq() + 1)?;
+    Ok(t)
+}
+
+pub(super) fn receipted_veto(
+    s: &State,
+    transition: &[u8],
+    transition_receipts: &[Vec<u8>],
+    veto: &[u8],
+    receipts: &[Vec<u8>],
+) -> Result<()> {
+    let t = check_transition(s, transition, transition_receipts, true, false)?;
+    let env = AuthEnvelope::parse(veto, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false)?;
+    check_veto(s, &t, &env, receipts, true).map_err(|o| match o {
+        Outcome::Fail(f) => f,
+        Outcome::Held(why) => malformed(why),
+    })?;
     Ok(())
 }

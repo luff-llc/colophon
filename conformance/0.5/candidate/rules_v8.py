@@ -567,7 +567,8 @@ case("t-final-survives-home-rotation", hr, ok_at(9),
      "H3 is appointed (final at 4), then H1 revoked under the control rule, so H1 stays a witness of its own revocation (final at 6 "
      "with H1's head); a verifier starting later, which can't accept heads from H1, still finds every activation final.",
      ["8.7", "13.3"], verifier=VER(D2 + 200))
-write_case("i-rate-dormant-burst", base, {"home": "refuses an immediate entry whose issued is more than 300 s behind its clock"},
+write_case("i-rate-dormant-burst", base, {"home": "refuses an immediate entry whose issued is more than 300 s behind its clock",
+           "admission": {"object": "objects/backdated.json", "result": "refused:late", "home": H1K.id}},
            "A stolen key on a quiet account tries to fill past days in one sitting.", ["13.1"],
            extra={"objects/backdated.json": (lambda c_: (grant_agent(c_, A, ts(R0), A), c_)[1])(base.copy()).envs[2]},
            verifier={"now": ts(30 * 86400), "role": "home"})
@@ -825,6 +826,7 @@ v13 = veto_of(acct, tb, [Ph, B], ts(R0 + 7200)); honest = base.copy()
 record_veto(honest, tb, [rb], v13, [receipt_of(acct, v13, H2K, ts(R0 + 7201))])
 case("row-13-backdating-home", honest, {"result": "ok", "seq": 3,
                                         "honestHome": "refuses the activate for ever, but stores and serves the transition, so the owner vetoes",
+                                        "admission": {"object": "branch-hostile/authority/00000003.json", "result": "refused:late", "home": H2K.id},
                                         "ifVetoed": "vetoed stands at every verifier holding it (the activate has no final: H2 never covers it)",
                                         "ifNotVetoed": "the thief's removal applies at every verifier that hears from H1"},
      "At quorum 1 a hostile home and one key: the owner wins only by vetoing before the deadline.", ["8.6", "13.1", "changes §H"],

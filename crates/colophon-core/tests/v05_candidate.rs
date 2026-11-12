@@ -202,6 +202,44 @@ fn now_of(case: &Value) -> i64 {
 
 fn run_history(dir: &Path, case: &Value) -> Outcome {
     let exp = &case["expected"];
+    let admission_checked = if let Some(admission) = exp.get("admission") {
+        use colophon_core::v05::history::home::{admit, HomeState, ServingInterval};
+        let prefix = Objects {
+            entries: files_in(&dir.join("records/authority"))
+                .into_iter()
+                .take(2)
+                .collect(),
+            ..Default::default()
+        };
+        let now = now_of(case);
+        let home = match HomeState::new(
+            admission["home"].as_str().unwrap().into(),
+            &prefix,
+            vec![ServingInterval {
+                from_ms: i64::MIN,
+                through_ms: None,
+            }],
+            now,
+        ) {
+            Ok(h) => h,
+            Err(f) => return Outcome::Fail(format!("home state: {f}")),
+        };
+        let bytes = fs::read(dir.join(admission["object"].as_str().unwrap())).unwrap();
+        let result = admit(&home, &bytes, case["verifier"]["now"].as_str().unwrap());
+        let got = result
+            .result
+            .err()
+            .map_or_else(|| "ok".into(), |r| r.code());
+        if got != admission["result"] {
+            return Outcome::Fail(format!(
+                "admission: expected {}, got {got}",
+                admission["result"]
+            ));
+        }
+        true
+    } else {
+        false
+    };
     if let Some(checks) = exp["checks"].as_array() {
         for check in checks {
             let after = check["after"].as_u64().unwrap() as usize;
@@ -330,7 +368,11 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
         exp.get("result").and_then(Value::as_str),
         exp.get("seq").and_then(Value::as_u64),
     ) else {
-        return Outcome::NotImplemented("expectation not machine-checkable in this step (events, home-side or builder properties)");
+        return if admission_checked {
+            Outcome::Pass("home admission matches".into())
+        } else {
+            Outcome::NotImplemented("expectation not machine-checkable in this step (events, home-side or builder properties)")
+        };
     };
     if case["verifier"].get("variants").is_some() {
         // Conflict without evidence: the same verdict for every high-water mark.
