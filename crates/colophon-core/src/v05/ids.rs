@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 pub const ACCOUNT_PREFIX: &str = "colophon:";
 
 /// An account ID: all 64 lowercase hex characters of SHA-256 of the first authority body.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct AccountId(String);
 impl AccountId {
     /// The ID of the account whose first authority body is `genesis_body` (exact bytes).

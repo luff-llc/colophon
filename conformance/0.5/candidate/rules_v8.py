@@ -694,8 +694,31 @@ for name, origin, flags, exp in [("veto-webauthn-ok", "https://keys.id.example",
 
 def scenario(name, chain, events, final, why):
     objs = {f"{i + 1:02d}-{label}": env for i, (label, env, _) in enumerate(events)}
+    checks = []
+    failures = {"thief-again-alone": "badSignature", "thief-third": "badSignature",
+                "thief-veto": "malformed", "owner-veto": "malformed"}
+    for i, (label, env, _) in enumerate(events):
+        body = json.loads(body_of(env))
+        at = secs(body["issued"] if "issued" in body else body["created"])
+        after = sum(secs(field(e, "issued")) <= at for e in chain.envs)
+        check = {"object": f"{i + 1:02d}-{label}", "after": after,
+                 "result": failures.get(label, "ok")}
+        if body["protocol"] == "colophon/authority/5":
+            check["after"] = body["seq"] - 1
+        if body["protocol"] == "colophon/call/5":
+            prefix = chain.copy(); prefix.envs = chain.envs[:after]
+            check["heads"] = [emb(head5(prefix, H1K, at - 10))]
+        checks.append(check)
+    # In row 8 the first owner veto is valid (equal units); row 17's is too small.
+    if name == "row-8-equal-units-stall":
+        checks[1]["result"] = "ok"
+        checks[3]["result"] = "ok"
+    if name == "row-4-thief-has-phone":
+        checks.append({"object": "01-thief-proposes", "after": len(chain.envs), "result": "badSignature"})
     write_case(name, chain, {"events": [{"object": f"{i + 1:02d}-{label}", "outcome": out}
-                                        for i, (label, _, out) in enumerate(events)], "final": final},
+                                        for i, (label, _, out) in enumerate(events)],
+                             "checks": checks, "final": final,
+                             "result": "ok", "seq": len(chain.envs)},
                why, ["8.7", "changes §H"], extra=files("events", objs))
 
 

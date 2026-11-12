@@ -41,7 +41,9 @@ pub fn valid_audience(s: &str) -> bool {
 }
 
 /// Record access (`write` ⊃ `propose` ⊃ `read`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Access {
     /// Read.
     Read,
@@ -51,7 +53,7 @@ pub enum Access {
     Write,
 }
 /// One `records` entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordsEntry {
     /// Namespace.
     pub namespace: String,
@@ -61,7 +63,7 @@ pub struct RecordsEntry {
     pub kinds: Option<Vec<String>>,
 }
 /// One `services` entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ServicesEntry {
     /// The audience.
     pub audience: String,
@@ -86,7 +88,7 @@ impl ServicesEntry {
 }
 
 /// A condition path: 1–8 dotted member names of 1–64 bytes, a leading `args.` dropped.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CondPath(pub Vec<String>);
 impl CondPath {
     fn parse(value: &Value) -> Result<Self> {
@@ -177,7 +179,7 @@ impl Truth {
 }
 
 /// A condition predicate (§10.4).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Predicate {
     /// Equal by canonical bytes.
     Eq(CondPath, Vec<u8>),
@@ -305,7 +307,7 @@ impl Predicate {
 }
 
 /// A `conditions` array with each top-level predicate's canonical bytes (for narrowing).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Conditions {
     /// Top-level predicates.
     pub predicates: Vec<Predicate>,
@@ -343,7 +345,7 @@ impl Conditions {
 }
 
 /// Terms (§10.1).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Terms {
     records: Option<Vec<RecordsEntry>>,
     services: Option<Vec<ServicesEntry>>,

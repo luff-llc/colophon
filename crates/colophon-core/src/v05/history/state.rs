@@ -34,7 +34,7 @@ impl From<Failure> for Outcome {
 type Step<T> = std::result::Result<T, Outcome>;
 
 /// A member (§9) and, for a home, its status.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MemberRecord {
     /// The request it was admitted with.
     pub request: Request,
@@ -56,7 +56,7 @@ pub struct MemberRecord {
     pub home: HomeStatus,
 }
 /// A home's status.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HomeStatus {
     /// Not a home.
     NotHome,
@@ -66,7 +66,7 @@ pub enum HomeStatus {
     RevocationPending(u64),
 }
 /// An activation and its finality (§8.7).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Activation {
     /// Its seq.
     pub seq: u64,
@@ -88,7 +88,7 @@ pub struct Activation {
     pub revokes: Vec<String>,
 }
 /// An outstanding suspension.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Suspension {
     /// The suspended key.
     pub key: String,
@@ -108,7 +108,7 @@ impl Suspension {
         self.due_ms.saturating_add(7 * DAY)
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct CtrlMeta {
     added_seq: u64,
     /// The charged signer of the immediate `keyring` entry that added it.
@@ -116,20 +116,20 @@ struct CtrlMeta {
     /// The activation that added it, while not final.
     provisional: Option<u64>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct RateItem {
     issued: i64,
     charged: String,
     size: usize,
     account: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Retiring {
     current_at_anchor: BTreeSet<String>,
 }
 
 /// The folded state of §17.2 at one entry.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub(crate) account: AccountId,
     pub(crate) digests: Vec<String>,
@@ -155,6 +155,36 @@ pub struct State {
 }
 
 impl State {
+    pub(super) fn check_checkpoint_shape(&self) -> Result<()> {
+        let len = self.digests.len();
+        crate::v05::require(
+            len > 0
+                && self.issued.len() == len
+                && self.keyring_at.len() == len
+                && self.delay_at.len() == len
+                && self.delay_at.iter().all(|d| *d <= 2_592_000)
+                && self
+                    .epochs
+                    .values()
+                    .chain(self.v.values())
+                    .all(|n| *n < (1u64 << 53))
+                && self.policies.iter().all(|(_, p)| {
+                    p.recovery_delay() <= 2_592_000
+                        && p.call_window() <= 3_600
+                        && p.link_max_age() <= 2_592_000
+                        && p.head_max_age() <= 86_400
+                        && p.head_quorum() <= 8
+                }),
+            "invalid folded checkpoint shape",
+        )?;
+        // This is corruption detection, not authentication of a peer's state.
+        let parsed = Keyring::parse(self.keyring.raw.clone(), 0)?;
+        crate::v05::require(
+            serde_json::to_value(parsed).ok() == serde_json::to_value(&self.keyring).ok(),
+            "checkpoint keyring differs from its validated representation",
+        )
+    }
+
     /// The account.
     pub fn account(&self) -> &AccountId {
         &self.account
@@ -178,6 +208,14 @@ impl State {
     /// Activations and their finality.
     pub fn activations(&self) -> &[Activation] {
         &self.activations
+    }
+    /// Suspensions that remain in force at the caller's clock (§8.7 Clock).
+    /// Expired records remain in the folded state for checks of historical entries.
+    pub fn active_suspensions(&self, now_ms: i64) -> Vec<&Suspension> {
+        self.suspensions
+            .iter()
+            .filter(|sp| now_ms <= sp.ends_ms())
+            .collect()
     }
     /// v(u) per unit.
     pub fn veto_counts(&self) -> &BTreeMap<String, u64> {
@@ -1637,36 +1675,14 @@ fn activate(s: &State, e: &Entry, now_ms: i64) -> Step<State> {
     Ok(n)
 }
 
-fn vetoed(s: &State, e: &Entry) -> Step<State> {
-    unsigned(e)?;
-    let v = &e.env.value;
-    let t_bytes = embedded_bytes(
-        v.get("transition").unwrap_or(&Value::Null),
-        "transition",
-        bounds::TRANSITION_ENVELOPE,
-    )?;
-    let t_receipts = embedded_list(v, "transitionReceipts", bounds::RECEIPT_ENVELOPE)?;
-    let veto_bytes = embedded_bytes(
-        v.get("veto").unwrap_or(&Value::Null),
-        "veto",
-        bounds::VETO_ENVELOPE,
-    )?;
-    let receipts = embedded_list(v, "receipts", bounds::RECEIPT_ENVELOPE)?;
-    let veto = AuthEnvelope::parse(&veto_bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)?;
-    // Table order: `by` = V's `by`; T not recorded on the branch; then T valid at E.
-    if veto.value.get("by").and_then(Value::as_str) != Some(e.by.as_str()) {
-        return Err(bad_signature("vetoed: by is not the veto's by").into());
-    }
-    let peek = AuthEnvelope::parse(
-        &t_bytes,
-        bounds::TRANSITION_ENVELOPE,
-        bounds::TRANSITION_ENVELOPE,
-        true,
-    )?;
-    if s.recorded.contains(&peek.digest) {
-        return Err(malformed("the transition is already recorded on this branch").into());
-    }
-    let t = check_transition(s, &t_bytes, &t_receipts, true, true)?;
+/// Validate a veto before or after receipts, sharing the recording-entry checks.
+fn check_veto(
+    s: &State,
+    t: &TCheck,
+    veto: &AuthEnvelope,
+    receipts: &[Vec<u8>],
+    with_receipts: bool,
+) -> Step<(i64, bool)> {
     let mut o = Obj::new(veto.value.clone(), "veto")?;
     crate::v05::require(o.string("protocol")? == "colophon/veto/5", "not a veto")
         .map_err(Outcome::from)?;
@@ -1687,7 +1703,7 @@ fn vetoed(s: &State, e: &Entry) -> Step<State> {
         .into_iter()
         .filter_map(|x| x.as_str().map(str::to_string))
         .collect();
-    if e.by != v_by {
+    if veto.primary.as_ref().is_none_or(|p| p.signer != v_by) {
         return Err(bad_signature("vetoed: by is not the veto's by").into());
     }
     let signers = veto.signer_ids();
@@ -1730,11 +1746,14 @@ fn vetoed(s: &State, e: &Entry) -> Step<State> {
     // The veto's receipts: chosen, within 300 s of its issued, before the deadline.
     let homes = s.current_homes();
     let quorum = (k.policy.head_quorum() as usize).min(homes.len());
-    crate::v05::require(receipts.len() == quorum, "veto receipts: wrong count")
-        .map_err(Outcome::from)?;
+    crate::v05::require(
+        !with_receipts || receipts.len() == quorum,
+        "veto receipts: wrong count",
+    )
+    .map_err(Outcome::from)?;
     let mut latest = i64::MIN;
     let mut last: Option<String> = None;
-    for r in &receipts {
+    for r in receipts {
         let (home, received) = check_receipt(s, r, &veto.digest, v_issued)?;
         crate::v05::require(
             last.as_ref().is_none_or(|l| l < &home),
@@ -1747,6 +1766,43 @@ fn vetoed(s: &State, e: &Entry) -> Step<State> {
         }
         latest = latest.max(received);
     }
+    let mut unknown = crate::v05::Unknown::default();
+    o.finish(&mut unknown);
+    unknown.check()?;
+    Ok((latest, undecidable))
+}
+
+fn vetoed(s: &State, e: &Entry) -> Step<State> {
+    unsigned(e)?;
+    let v = &e.env.value;
+    let t_bytes = embedded_bytes(
+        v.get("transition").unwrap_or(&Value::Null),
+        "transition",
+        bounds::TRANSITION_ENVELOPE,
+    )?;
+    let t_receipts = embedded_list(v, "transitionReceipts", bounds::RECEIPT_ENVELOPE)?;
+    let veto_bytes = embedded_bytes(
+        v.get("veto").unwrap_or(&Value::Null),
+        "veto",
+        bounds::VETO_ENVELOPE,
+    )?;
+    let receipts = embedded_list(v, "receipts", bounds::RECEIPT_ENVELOPE)?;
+    let veto = AuthEnvelope::parse(&veto_bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)?;
+    // Table order: `by` = V's `by`; T not recorded on the branch; then T valid at E.
+    if veto.value.get("by").and_then(Value::as_str) != Some(e.by.as_str()) {
+        return Err(bad_signature("vetoed: by is not the veto's by").into());
+    }
+    let peek = AuthEnvelope::parse(
+        &t_bytes,
+        bounds::TRANSITION_ENVELOPE,
+        bounds::TRANSITION_ENVELOPE,
+        true,
+    )?;
+    if s.recorded.contains(&peek.digest) {
+        return Err(malformed("the transition is already recorded on this branch").into());
+    }
+    let t = check_transition(s, &t_bytes, &t_receipts, true, true)?;
+    let (latest, undecidable) = check_veto(s, &t, &veto, &receipts, true)?;
     let want = recorded_issued(s.last_issued(), latest);
     if e.issued != want || want > latest.saturating_add(7 * DAY) {
         return Err(malformed("vetoed: issued is not determined").into());
@@ -2766,4 +2822,28 @@ fn pair(
 /// Check a held transition against a state (as a home or verifier would before receipting).
 pub fn check_pending_transition(s: &State, bytes: &[u8]) -> Result<()> {
     check_transition(s, bytes, &[], false, false).map(|_| ())
+}
+
+/// Check a pending veto against the latest verified state, before issuing its receipt.
+/// The transition receipts are required; the veto's own receipts are not yet required.
+pub fn check_pending_veto(
+    s: &State,
+    transition: &[u8],
+    transition_receipts: &[Vec<u8>],
+    bytes: &[u8],
+) -> Result<()> {
+    let t = check_transition(s, transition, transition_receipts, true, false)?;
+    let veto = AuthEnvelope::parse(bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false)?;
+    let (_, undecidable) = check_veto(s, &t, &veto, &[], false).map_err(|o| match o {
+        Outcome::Fail(f) => f,
+        Outcome::Held(why) => malformed(why),
+    })?;
+    t.unknown.check()?;
+    super::prescan("veto", &veto.value).check()?;
+    if undecidable {
+        return Err(Failure::NewerFormat(
+            "a signer's key form is unknown".into(),
+        ));
+    }
+    Ok(())
 }

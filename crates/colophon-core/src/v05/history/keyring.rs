@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A validated keyring.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Keyring {
     /// Controllers by ID.
     pub controllers: BTreeMap<String, Controller>,

@@ -66,7 +66,7 @@ impl AuthorityHeader {
 }
 
 /// A member's kind (§9.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemberKind {
     /// A device.
     Device,
@@ -80,7 +80,7 @@ pub enum MemberKind {
     Unknown(String),
 }
 /// `custody` (§9.1), display only.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Custody {
     /// Hardware.
     Hardware,
@@ -95,7 +95,7 @@ pub enum Custody {
 }
 
 /// A verified membership request (§9.1).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Request {
     /// Exact request body bytes.
     pub body: Vec<u8>,
