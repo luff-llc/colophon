@@ -1,0 +1,1 @@
+{"description":"countBy holders: K1 and K2 are one holder's, so one unit. Not a full set; the thief's one unit vetoes; v(owner) = 1 and both keys still make one unit. Stall.","expected":{"result":"badSignature","seq":4},"sections":["6.1","8.7","changes §H"],"verifier":{"now":"2026-11-14T09:21:00Z"}}

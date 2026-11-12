@@ -660,6 +660,20 @@ case("row-28-one-recovery-key-stall", oc, bad("badSignature", 4),
      "can't propose again. Stall.", ["8.7", "changes §H"], {"first-recovery": t_o1, "veto": v_o1},
      VER(R0 + 900 + W + D + 60))
 
+# Revision 11: two recovery keys of one holder are one unit, so they don't make a full set.
+kr_h = keyring([ctrl(A, ["approve", "control"], "Thief's device", holder="alex"), ctrl(K1, ["recover"], "Key 1", holder="owner"),
+                ctrl(K2, ["recover"], "Key 2", holder="owner")], threshold=1, rt=1, count="holders")
+oh = Chain(); genesis(oh, kr_h, [A], adds=[K1, K2], label="One holder, two keys"); ah = account_id(oh)
+activate(oh, transition(oh, {"homes": {"appoint": [home_appointment(ah, H1K, H1A, "Home one")]}}, [A, K1], ts(60)), [])
+t_h1 = transition(oh, {"keyring": {"keep": [], "add": [ctrl(NEW, ["approve", "control"], "New laptop", holder="owner")]}}, [K1, K2], ts(R0), adds=[NEW])
+r_h1 = receipt_of(ah, t_h1, H1K, ts(R0 + 1)); v_h1 = veto_of(ah, t_h1, [A], ts(R0 + 600))
+record_veto(oh, t_h1, [r_h1], v_h1, [receipt_of(ah, v_h1, H1K, ts(R0 + 601))])
+t_h2 = transition(oh, {"keyring": {"keep": [], "add": [ctrl(NEW, ["approve", "control"], "New laptop", holder="owner")]}}, [K1, K2], ts(R0 + 900), adds=[NEW])
+ohc = oh.copy(); activate(ohc, t_h2, [receipt_of(ah, t_h2, H1K, ts(R0 + 901))])
+case("row-28-one-holder-two-keys-stall", ohc, bad("badSignature", 4),
+     "countBy holders: K1 and K2 are one holder's, so one unit. Not a full set; the thief's one unit vetoes; v(owner) = 1 and both keys "
+     "still make one unit. Stall.", ["6.1", "8.7", "changes §H"], {"first-recovery": t_h1, "veto": v_h1}, VER(R0 + 900 + W + D + 60))
+
 # 10. Veto signatures by a WebAuthn key.
 kr_p = keyring([ctrl(A, ["approve", "control"], "Mac"), ctrl(P_pin, ["approve", "control"], "Passkey", verification=True),
                 ctrl(K1, ["recover"], "Key")], rt=1)

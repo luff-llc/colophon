@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 10, 2026-11-12. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 11, 2026-11-12. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -165,7 +165,7 @@ clocks and admission.
 | 82 | Conflicts decided from the object set only; the high-water mark detects rollback and never selects a branch; with no head evidence both entries are evidence and the verdict is `refused:fork` | Codex7 High 1 |
 | 83 | Removal-only transitions: outside the finality order, displaceable by their own valid `vetoed` until final; a transition may not revoke a home and add anything; revoking a home without it as a witness needs the stronger authority; witnesses include homes revoked by activations not yet final | Codex7 High 2, 3; the architect's 2a′, 2b, 2c |
 | 84 | Retiring vault: only a `control` or `recover` key current at the removal's anchor rotates it; keys the removed key planted after the anchor are dropped at activation | Codex7 High 4 |
-| 85 | Recovery restores control: the recovery rule may remove any controllers and install replacement control keys; all recover keys together act at once, fewer after the delay | Codex7 High 5 |
+| 85 | Recovery restores control: the recovery rule may remove any controllers and install replacement control keys; all recover keys together (two or more units) act at once, fewer by a pending transition open to veto and escalation | Codex7 High 5 |
 | 86 | A total order over recording entries (`final` inherits its activation's due time); a partitioned state table; one result per check, named home refusals; deterministic pending admission (2 per unit) | Codex7 Mediums 6–9 |
 | 87 | Row 13 and the quorum-1 statement; `final` never has empty heads | Codex7 Lows 10, 11 |
 
@@ -174,7 +174,7 @@ clocks and admission.
 | # | Change | Why |
 | --- | --- | --- |
 | 88 | A home's revocation applies only when final; a home that won't witness its own removal needs the stronger authority | Codex8 H1 |
-| 89 | Immediate full sets need two units everywhere; one recovery controller recovers after the delay | Codex8 M1 |
+| 89 | Immediate full sets need two units everywhere; one recovery unit recovers only by a pending transition, open to veto (a stall one against one) | Codex8 M1 |
 | 90 | The recording-entry order has a value at every step for every kind | Codex8 M2 |
 | 91 | Conflict and Clock are meta-events; the partition claim covers kind rows | Codex8 M3 |
 | 92 | Admission under a full cap is local by design | Codex8 M4 |
@@ -303,7 +303,7 @@ Revision 8 adds:
 
 | # | Contract | 0.5 revision 8 |
 | --- | --- | --- |
-| 34 | Recovery screens | Both security keys install a new control key at once; one does it after the delay |
+| 34 | Recovery screens | Both security keys (two units) install a new control key at once; one proposes it, completing after the delay unless vetoed |
 | 35 | Galley's home | Admission caps 2 per unit, refuse when full with the named results; refuse a transition that revokes a home and adds anything |
 | 36 | Verifier | Never choose a branch by what it saw first; `refused:fork` with no head evidence |
 | 37 | Galley's home and verifier | A revoked home stays current until its revocation is final |
@@ -766,6 +766,14 @@ the machinery it makes redundant.
 | --- | --- |
 | Codex9 H1 one recovery controller against a stolen sole control key | Not a mechanism change: one unit against one is the row-8 stall. §8.7 "Liveness of recovery"; §6.4 warning; guide §2, §5; §H row 28; `row-28-one-recovery-key-stall`. **Reference layouts checked:** the person reference (two recovery keys held by the owner) never stalls this way, because both together are an unvetoable full set; with only one of them at hand the owner adds any other key (row 25) or stalls (row 5). The company reference (`recoverThreshold` 2 of three founders) stalls only when one founder's keys are stolen and only one other founder is present (one holder against one) until the third returns; two founders always outnumber one |
 
+### G.14 Confirmation review of revision 10
+
+| Finding | Settled in |
+| --- | --- |
+| Units, not controllers | §6.4, §8.4, §8.7, guide §5, §H row 28: conditions stated in recovery units; `row-28-one-holder-two-keys-stall`. The person reference counts keys, so it has two units; the company counts holders, one unit per founder |
+| "Outnumbers" is sufficient, not necessary | §8.7 "Liveness of recovery" |
+| Stale unconditional wording | changes rows 85, 89, B.4 34; §8.4 |
+
 ## H. Theft and loss, worked through
 
 **Reference person:** a Mac device key M (with the vault slot), a phone device key Ph and a synced
@@ -806,4 +814,4 @@ thresholds 1, `recoverThreshold` 1, two homes at `headQuorum` 1, D = 72 h.
 | 25 | Owner holds one security key, the other is away; M stolen | K1 alone starts the removal of M, but M's veto (one against one) is valid. K1 with any other owner key (two units) can't be vetoed by M. | Owner wins after D + 300 s with K1 and one more key |
 | 26 | Swift root library, root stolen, library quiet for longer than D | The thief dates his kit rotations before the window. | **Thief wins** unless `handover` names more keys or the person spots the dates |
 | 27 | Hostile primary and a stolen key on a dormant account | It admits backdated entries that fit each day's rate. | History flooding up to the floor; honest homes refuse them |
-| 28 | Exactly one recovery key K, owner holds it; thief holds the sole control key | K's recovery is pending; the thief vetoes once (one against one); escalation then needs two units. | **Stall** until one side gets another key. Hence §6.4: zero or at least two recovery keys |
+| 28 | Exactly one recovery unit (one key K, or under `countBy: holders` two keys of one holder), owner holds it; thief holds the sole control unit | The recovery is pending; the thief vetoes once (one unit against one); escalation then needs two units. | **Stall** until one side gets another unit. Hence §6.4: zero or at least two recovery units. The reference person counts keys, so its two security keys are two units |

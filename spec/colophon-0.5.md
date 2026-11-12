@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 10, for review, 2026-11-12.** Not frozen, not
+**Status: final candidate, revision 11, for review, 2026-11-12.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -422,10 +422,11 @@ wording is in [colophon-0.5-guide.md](colophon-0.5-guide.md) §2):
 - the account has one home;
 - every control key is on one device (for example a phone's device key and its synced passkey);
 - all recovery keys are kept together;
-- exactly one `recover` controller exists: an account SHOULD have zero or at least two, and a host
-  MUST warn before creating or leaving one with exactly one, saying that a thief holding any one
-  control key can then block recovery for ever (a stall) and that the full, immediate recovery
-  needs two;
+- the `recover` controllers form exactly one unit (one key, or under `countBy: holders` every
+  recovery key of one holder): an account SHOULD have zero or at least two recovery units, and a
+  host MUST warn before creating or leaving one with exactly one, saying that a thief holding any
+  one control unit can then block recovery for ever (a stall) and that the full, immediate
+  recovery needs two units;
 - a company has two holders and `threshold` 2 or `threshold` 1;
 - a remaining controller has no slot after a rotation, or the vault is retiring (§8.3);
 - a home has signed no head for longer than `recoveryDelay`: until it is revoked, no addition can
@@ -644,7 +645,7 @@ doubt. Each needs the control rule unless stated:
 
 | Change | Also |
 | --- | --- |
-| Remove or demote a controller; add `control` or `recover`; `keep` | **Recovery.** The recovery rule may also remove any controllers and add replacement controllers with `approve` and `control` (never `recover`); signed by every current `recover` controller, and by at least two units, it is a full set (immediate, §8.7); otherwise it is pending with the delay and veto, so an account with one recovery controller recovers only after the delay. `keep` needs the recovery rule. The result must still have a `control` controller (§6.2). |
+| Remove or demote a controller; add `control` or `recover`; `keep` | **Recovery.** The recovery rule may also remove any controllers and add replacement controllers with `approve` and `control` (never `recover`); signed by every current `recover` controller, and by at least two units, it is a full set (immediate, §8.7); otherwise it is pending, open to veto and escalation, so an account with one recovery unit recovers only by a pending transition, which completes after the delay unless it is vetoed (one unit against one is a stall, §8.7). `keep` needs the recovery rule. The result must still have a `control` controller (§6.2). |
 | `threshold`, `addThreshold`, `recoverThreshold`, `countBy` | Count the larger of old and new `threshold` |
 | Another controller's descriptor, `verification`, `origins`, `authorityOrigins` or `holder`, in either direction | The labelled key signs a holder change |
 | Delete or change a slot; change the vault | The recovery rule may also propose a vault change with its own removals |
@@ -834,12 +835,14 @@ it.
 
 **Liveness of recovery.** While `headQuorum` honest homes are current and reachable and the owner
 holds every recovery controller, no one without the recovery rule can make those homes'
-revocation final, so they stay current and receipt the owner's transitions. Recovery then
-completes **only if the owner's units outnumber the adversary's under escalation**. Every
-recovery controller together, when there are at least two, is a full set and can't be vetoed, so
-it always completes. With **exactly one** recovery controller and an adversary holding a control
-unit, it is the equal-units stall: the adversary vetoes once, escalation then needs two units the
-owner doesn't have, and neither side completes until one obtains another unit.
+revocation final, so they stay current and receipt the owner's transitions. Then: every recovery
+controller together, when they form at least two units, is a full set and can't be vetoed, so it
+always completes, whatever the adversary holds. A vetoable recovery is sure to complete when the
+owner's units outnumber the adversary's under escalation (it also completes if nobody vetoes).
+With **exactly one** recovery unit — one key, or two keys of one holder under `countBy: holders` —
+and an adversary holding a control unit, it is the equal-units stall: the adversary vetoes once,
+escalation then needs two units the owner doesn't have, and neither side completes until one
+obtains another unit.
 
 **Finality is a recorded fact.** A verifier judges finality only from the objects it holds, never
 from heads it has seen or the order it saw things in.

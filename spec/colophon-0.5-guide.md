@@ -149,10 +149,12 @@ whether it is final and which homes it still needs; and per unit, v(u).
 > two services: if one is down, removals still work and new keys wait; if one turns dishonest
 > while someone also has one of your keys, you can lose the account.
 
-**One recovery controller.** Have none or at least two. With a single security key, recovery is
-only a pending transition, and a thief holding any one of your control keys can veto it once and
-then block it for good: one key against one is a stall. Two security keys, kept apart, recover at
-once and can't be vetoed.
+**One recovery unit.** Have none or at least two recovery units. A unit is a key when the account
+counts keys (the person reference does, so your two security keys are two units), and a holder
+when it counts holders (the company reference): then two security keys that are both yours are
+one unit. With one recovery unit, recovery is only a pending transition, and a thief holding any
+one control unit can veto it once and then block it for good: one against one is a stall. Two
+units, kept apart, recover at once and can't be vetoed.
 
 What the reference setup protects, plainly:
 - **Eventual control of the keyring.**
