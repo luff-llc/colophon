@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 9, 2026-11-12. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 10, 2026-11-12. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -11,7 +11,7 @@ fourth reviews (of 4032d44), mapped in §G.8. "Opus5" and "Codex5" are the fifth
 a1decc6) and "Builder N" the engine builder's implementation notes (`engine-0.5-foundation`,
 04c0eef), mapped in §G.9. "Opus6", "Codex6" and "Attack N" are the sixth reviews (of 281e7c4) and
 the engine attack's gaps (colophon#4), mapped in §G.10. "Codex7" is the second review of
-revision 7 (0a25988), mapped in §G.11; "Codex8" the review of revision 8 (a04d2b4), §G.12. The worked theft and loss scenarios moved from the spec
+revision 7 (0a25988), mapped in §G.11; "Codex8" the review of revision 8 (a04d2b4), §G.12; "Codex9" the review of revision 9 (04e2db1), §G.13. The worked theft and loss scenarios moved from the spec
 to §H. Revision 4 replaces the
 revision-2 and revision-3 recovery machinery (provisional keys, cancel, attempt 2,
 counter-recovery, full recovery, the primary yield, the no-home digest tie-break) with one
@@ -178,6 +178,12 @@ clocks and admission.
 | 90 | The recording-entry order has a value at every step for every kind | Codex8 M2 |
 | 91 | Conflict and Clock are meta-events; the partition claim covers kind rows | Codex8 M3 |
 | 92 | Admission under a full cap is local by design | Codex8 M4 |
+
+### A.7 Revision 10
+
+| # | Change | Why |
+| --- | --- | --- |
+| 93 | §8.7's recovery liveness claim narrowed to "the owner's units outnumber the adversary's"; one recovery controller is the equal-units stall; hosts MUST warn about exactly one | Codex9 H1; the architect's decision (recovery doesn't outrank control) |
 
 ## B. Galley's requirements
 
@@ -754,6 +760,12 @@ the machinery it makes redundant.
 | Codex8 M4 admission | §13.1 |
 | Codex8 L1 row 2 | §H row 2 |
 
+### G.13 Review of revision 9 (04e2db1)
+
+| Finding | Settled in |
+| --- | --- |
+| Codex9 H1 one recovery controller against a stolen sole control key | Not a mechanism change: one unit against one is the row-8 stall. §8.7 "Liveness of recovery"; §6.4 warning; guide §2, §5; §H row 28; `row-28-one-recovery-key-stall`. **Reference layouts checked:** the person reference (two recovery keys held by the owner) never stalls this way, because both together are an unvetoable full set; with only one of them at hand the owner adds any other key (row 25) or stalls (row 5). The company reference (`recoverThreshold` 2 of three founders) stalls only when one founder's keys are stolen and only one other founder is present (one holder against one) until the third returns; two founders always outnumber one |
+
 ## H. Theft and loss, worked through
 
 **Reference person:** a Mac device key M (with the vault slot), a phone device key Ph and a synced
@@ -794,3 +806,4 @@ thresholds 1, `recoverThreshold` 1, two homes at `headQuorum` 1, D = 72 h.
 | 25 | Owner holds one security key, the other is away; M stolen | K1 alone starts the removal of M, but M's veto (one against one) is valid. K1 with any other owner key (two units) can't be vetoed by M. | Owner wins after D + 300 s with K1 and one more key |
 | 26 | Swift root library, root stolen, library quiet for longer than D | The thief dates his kit rotations before the window. | **Thief wins** unless `handover` names more keys or the person spots the dates |
 | 27 | Hostile primary and a stolen key on a dormant account | It admits backdated entries that fit each day's rate. | History flooding up to the floor; honest homes refuse them |
+| 28 | Exactly one recovery key K, owner holds it; thief holds the sole control key | K's recovery is pending; the thief vetoes once (one against one); escalation then needs two units. | **Stall** until one side gets another key. Hence §6.4: zero or at least two recovery keys |

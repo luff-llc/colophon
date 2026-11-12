@@ -1,6 +1,6 @@
 # Colophon 0.5: implementation plan
 
-**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 9, 2026-11-12. Steps 0, 1 and 4
+**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 10, 2026-11-12. Steps 0, 1 and 4
 are merged into `spec-0.5` (luff-llc/colophon#4); revision 7's effect on them is listed under
 each step. The §8.7 state machine (step 2's transition part and step 3's conflict rules) is the
 state table of §8.7, over the persisted state of §17.2. No engine code has

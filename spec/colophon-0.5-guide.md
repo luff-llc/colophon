@@ -52,8 +52,9 @@ out the others?
   against you while someone has one of your keys, you can lose the account."
 - Every control key on one device: "A thief with this phone holds every control key. Keep one on
   another device."
-- One recovery key, or recovery keys kept together: "Someone who takes them can take your
-  account. Keep two, apart."
+- Recovery keys kept together: "Someone who takes them can take your account. Keep two, apart."
+- Exactly one recovery key: "With one security key, someone who has any one of your devices can
+  block your recovery for good. Add a second, or remove it."
 - A company with two holders: at `threshold` 2, "neither of you can be removed without the other";
   at `threshold` 1, "either can act alone".
 
@@ -148,9 +149,10 @@ whether it is final and which homes it still needs; and per unit, v(u).
 > two services: if one is down, removals still work and new keys wait; if one turns dishonest
 > while someone also has one of your keys, you can lose the account.
 
-**One recovery controller.** An immediate full recovery needs at least two signer units, so an
-account with a single recovery controller recovers only by a pending transition, after the delay
-and open to veto. Two security keys, kept apart, are the setup advice.
+**One recovery controller.** Have none or at least two. With a single security key, recovery is
+only a pending transition, and a thief holding any one of your control keys can veto it once and
+then block it for good: one key against one is a stall. Two security keys, kept apart, recover at
+once and can't be vetoed.
 
 What the reference setup protects, plainly:
 - **Eventual control of the keyring.**
@@ -200,3 +202,4 @@ without stopping either thief. What protects the owner is the veto window.
 | 2026-11-12 | Opus and Codex, sixth reviews of revision 6; engine attack (12 gaps) | H1–H6, M1–M11, lows; 3 High, 5 Medium; 12 gaps | Revision 7; changes §G.10 |
 | 2026-11-12 | Codex, second review of revision 7 | 5 High, 4 Medium, 2 Low | Revision 8; changes §G.11 |
 | 2026-11-12 | Codex, review of revision 8 | 1 High, 4 Medium, 1 Low | Revision 9; changes §G.12 |
+| 2026-11-12 | Codex, review of revision 9 | 1 High | Revision 10; changes §G.13 |

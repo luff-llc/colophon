@@ -646,6 +646,20 @@ case("t-provisional-home-revocation-keeps-home", rg9, {"result": "ok", "seq": 4,
      "A hidden control-rule revocation of the honest home doesn't take it away: it receipts the owner's three-unit removal of M and K1.",
      ["8.7", "changes §H"], {"thief-veto": v_th}, VER(DUE0 + 600 + W + D + 60))
 
+# 9e. Revision 10: one recovery controller against one stolen control key is the equal-units stall.
+kr_one = keyring([ctrl(A, ["approve", "control"], "Mac"), ctrl(K1, ["recover"], "Only security key")], threshold=1, rt=1)
+one = Chain(); genesis(one, kr_one, [A], adds=[K1], label="One recovery key"); a1 = account_id(one)
+activate(one, transition(one, {"homes": {"appoint": [home_appointment(a1, H1K, H1A, "Home one")]}}, [A, K1], ts(60)), [])
+t_o1 = transition(one, {"keyring": {"keep": [], "add": [ctrl(NEW, ["approve", "control"], "New laptop")]}}, [K1], ts(R0), adds=[NEW])
+r_o1 = receipt_of(a1, t_o1, H1K, ts(R0 + 1)); v_o1 = veto_of(a1, t_o1, [A], ts(R0 + 600))
+record_veto(one, t_o1, [r_o1], v_o1, [receipt_of(a1, v_o1, H1K, ts(R0 + 601))])
+t_o2 = transition(one, {"keyring": {"keep": [], "add": [ctrl(NEW, ["approve", "control"], "New laptop")]}}, [K1], ts(R0 + 900), adds=[NEW])
+oc = one.copy(); activate(oc, t_o2, [receipt_of(a1, t_o2, H1K, ts(R0 + 901))])
+case("row-28-one-recovery-key-stall", oc, bad("badSignature", 4),
+     "One recovery key K1 against a stolen sole control key A: A vetoes K1's recovery once (one against one); v(K1) = 1, so K1 alone "
+     "can't propose again. Stall.", ["8.7", "changes §H"], {"first-recovery": t_o1, "veto": v_o1},
+     VER(R0 + 900 + W + D + 60))
+
 # 10. Veto signatures by a WebAuthn key.
 kr_p = keyring([ctrl(A, ["approve", "control"], "Mac"), ctrl(P_pin, ["approve", "control"], "Passkey", verification=True),
                 ctrl(K1, ["recover"], "Key")], rt=1)
