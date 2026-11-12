@@ -228,3 +228,71 @@ Step-4 verification: 334 workspace tests pass (4 existing ignored); conformance 
 workspace/all-target clippy with `-D warnings`, WASM check and FFI build pass. Changed Rust
 files pass rustfmt; workspace rustfmt reports only the same six unchanged 0.4 files. No new
 dependency, lockfile, released engine or existing binding/export changes.
+
+
+## Step 5: succession and the incorporated upgrade prefix
+
+The `/4` prefix is replayed by the unchanged released `Authority::replay`; the signed
+upgrade is checked under that keyring's control rule, with UV, before its new fields.
+Only `addThreshold`, `countBy` and `policy` may differ. The folded `/5` state carries
+members as terms, epochs, historic points, sequence/digests and an explicit upgrade fence.
+Subsequent `/4` entries are malformed. No released engine code is changed.
+
+`Objects.predecessor` supplies exact predecessor envelopes, independently of the successor
+history. `history::swift::verify` verifies Swift body bytes without imposing `/5`
+canonical encoding. It handles root/recovery/steward and adopted-keyring rules, the
+strict predecessor WebAuthn check, keyring recovery's multiset-only-add rule, layout
+freezes and later attempts. The successor checks handover, carried-key possession
+exemptions, the witnessed window, historically eligible vetoers, determined
+`successionVetoed`, fresh heads, and the final binding. It persists verified succession
+and reports sequence numbers of evidence after F. A `/5` predecessor is checked by
+`verify_history`; successor activation is terminal. Migration is an owner assertion
+with a checked manifest shape, not evidence of complete copying.
+
+Readings pinned by tests:
+
+- Swift has no agreement field on a controller. Descriptor equivalence for possession
+  means the signing point, form, RP and credential; `/5` adds authority origins and may
+  carry the agreement point in its raw descriptor. Existing identities are not new keys.
+- Optional extra handover keys may be current predecessor keys absent from the new ring.
+  Their predecessor descriptor is used when no genesis descriptor exists; a present
+  genesis descriptor supplies authority origins. This follows “further keys current at
+  head”; the root-only rule means the required authority is the root, with optional extra
+  veto weight. The `swift-handover-extra-key-raises-veto` vector pins this reading.
+- A malformed `successionVetoed` candidate does not veto a succession. Its error remains
+  reported at sequence 3; valid history through sequence 2 and fresh heads can establish
+  the succession. A valid recording permanently vetoes it.
+- A Swift freeze strictly after the due instant is needed (“due before F”).
+
+Generator corrections, no normative text changes:
+
+1. Every Swift succession fixture lacked the fresh successor head required by §15.1.
+   Added a signed `successor-head.json` covering the unvetoed two-entry prefix, issued
+   after due. The verifier checks it; deleting heads or genesis receipts prevents verification.
+2. `swift-premature-freeze-then-owner` dated the owner's genesis before its named head,
+   and its appointing entry before that head too. Its genesis now uses the head's issued
+   time and its appointing transition/window is later. Recomputed affected bindings.
+3. `upgrade/then-v5-layout` used a directly signed layout, contrary to §8.4's transition
+   classification. It now embeds a signed layout transition in its determined unsigned
+   activation. The intended acceptance and all other upgrade expectations stay unchanged.
+
+Named tests in `v05_succession.rs` cover every succession/upgrade fixture in reverse
+arrival order and at every serialized restart split, including full folded-state equality;
+missing fresh heads/receipts; and malformed predecessor bytes. The runner executes all
+25 formerly excluded cases rather than matching descriptions or counting exemptions.
+
+Additional step-5 checks: `authority5-successor` is a new generated positive native
+predecessor vector. `forged_swift_candidate_cannot_create_a_fork` authenticates every
+candidate before deciding a Swift fork; one invalid competing body cannot block the
+verified chain. `malformed_evidence_after_verified_swift_final_does_not_undo_succession`
+checks that malformed bytes beyond F remain evidence and cannot undo a verified succession.
+The original whole-predecessor preflight remains available to a copy tool through
+`history::swift::verify`, while succession verification needs only the prefix through F.
+
+Step-5 verification: 339 workspace tests pass, four existing tests ignored; conformance
+275 in scope, 275 pass, zero fail, four not implemented. All 1,078 generated files reproduce.
+Offline locked workspace/all-target clippy with `-D warnings`, WASM target check and FFI
+build pass. Changed Rust files pass rustfmt; workspace rustfmt still reports only the same
+six unchanged 0.4 files. No dependency, lockfile, released engine or binding changes.
+The legacy `/3` record parser/admission path remains a limitation beyond this authority
+upgrade adapter; the stored upgrade sequence is available to callers for its format fence.

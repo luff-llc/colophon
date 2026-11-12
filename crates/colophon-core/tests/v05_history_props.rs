@@ -286,6 +286,7 @@ fn no_panics_on_hostile_objects() {
             entries: garbage(4),
             pending: garbage(3),
             heads: garbage(3),
+            predecessor: garbage(3),
         };
         assert!(catch_unwind(AssertUnwindSafe(|| verify_history(
             &o,
@@ -388,6 +389,7 @@ fn persisted_folded_state_resumes_suffix_with_replay_equivalent_verdict() {
                 entries: all.entries[split..].to_vec(),
                 pending: all.pending.clone(),
                 heads: all.heads.clone(),
+                predecessor: all.predecessor.clone(),
             };
             shuffle(&mut rng, &mut suffix.entries);
             shuffle(&mut rng, &mut suffix.pending);

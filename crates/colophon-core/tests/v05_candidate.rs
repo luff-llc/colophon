@@ -743,12 +743,7 @@ fn run_identifiers() -> Vec<(String, Outcome)> {
 }
 
 fn classify(rel: &str) -> Option<&'static str> {
-    if rel.starts_with("succession/") {
-        return Some("succession (§15, §16): out of scope");
-    }
-    if rel.starts_with("upgrade/") {
-        return Some("upgrade (§16.1, plan step 3): out of scope");
-    }
+    let _ = rel;
     None
 }
 
@@ -798,6 +793,25 @@ fn candidate_conformance() {
         let name = rel.rsplit('/').next().unwrap().to_string();
         let outcome = if let Some(why) = classify(&rel) {
             Outcome::NotImplemented(why)
+        } else if rel.starts_with("upgrade/") {
+            let v = verify_history(
+                &objects_of(&dir),
+                &Persisted::default(),
+                ms("2026-12-01T00:00:00Z"),
+            );
+            let want = case["expected"]["colophon-0.5"].as_str().unwrap();
+            if v.code() == want {
+                Outcome::Pass(format!("{} at {}", v.code(), v.seq()))
+            } else {
+                Outcome::Fail(format!(
+                    "want {want}, got {} at {}: {:?}",
+                    v.code(),
+                    v.seq(),
+                    v.stop
+                ))
+            }
+        } else if rel.starts_with("succession/") {
+            run_succession(&dir, &case)
         } else if rel == "account" {
             let v = verify_history(
                 &objects_of(&dir),
@@ -862,4 +876,60 @@ fn candidate_conformance() {
         pass + fail
     );
     assert!(unexpected.is_empty(), "unexpected failures: {unexpected:?}");
+}
+
+fn run_succession(dir: &Path, case: &Value) -> Outcome {
+    let mut objects = Objects {
+        entries: files_in(&dir.join("successor/authority")),
+        predecessor: files_in(&dir.join("predecessor/authority")),
+        ..Default::default()
+    };
+    if dir.join("genesis-receipt.json").exists() {
+        objects
+            .pending
+            .push(fs::read(dir.join("genesis-receipt.json")).unwrap());
+    }
+    if dir.join("successor-head.json").exists() {
+        objects
+            .heads
+            .push(fs::read(dir.join("successor-head.json")).unwrap());
+    }
+    let now = ms("2026-11-14T10:15:00Z");
+    let v = verify_history(&objects, &Persisted::default(), now);
+    let verified = v
+        .state
+        .as_ref()
+        .is_some_and(|s| s.verified_succession().is_some());
+    let want = case["expected"]["succession"] == "verified";
+    if verified != want {
+        return Outcome::Fail(format!(
+            "succession verified={verified}, want {want}; {} at {}: {:?}",
+            v.code(),
+            v.seq(),
+            v.stop
+        ));
+    }
+    if let Some(code) = case["expected"]["seq3"].as_str() {
+        let wanted = code.rsplit(' ').next().unwrap();
+        if v.code() != wanted {
+            return Outcome::Fail(format!(
+                "seq3 want {wanted}, got {}: {:?}",
+                v.code(),
+                v.stop
+            ));
+        }
+    }
+    if case["expected"].get("evidence").is_some()
+        && v.state
+            .as_ref()
+            .is_none_or(|s| s.predecessor_evidence() != [4])
+    {
+        return Outcome::Fail("missing after-final evidence".into());
+    }
+    Outcome::Pass(format!(
+        "succession {} (history {} at {})",
+        if verified { "verified" } else { "unverified" },
+        v.code(),
+        v.seq()
+    ))
 }

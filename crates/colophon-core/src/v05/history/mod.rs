@@ -6,13 +6,15 @@
 //! those inputs only: it doesn't depend on the order of the objects (a property test checks
 //! that), and nothing in this module reads a clock or storage.
 //!
-//! Not here (reported as not implemented by callers): succession (`predecessor`,
-//! `successionVetoed`, `successor`), `resolve`, the 0.4 `upgrade` prefix, homes' admission
-//! rules (§13.1 caps and clock) and the pending exchange (§14).
+//! Succession inputs include the predecessor history through its final entry. The caller
+//! supplies all receipts, fresh heads and clocks. No peer checkpoint is trusted.
 pub mod envelope;
 pub mod home;
 pub mod keyring;
 mod state;
+mod succession;
+pub mod swift;
+mod upgrade;
 
 pub use state::{
     check_pending_transition, check_pending_veto, Activation, HomeStatus, MemberRecord, State,
@@ -32,6 +34,9 @@ pub struct Objects {
     pub pending: Vec<Vec<u8>>,
     /// Head envelopes.
     pub heads: Vec<Vec<u8>>,
+    /// Predecessor authority envelopes through F, supplied by the caller.
+    #[serde(default)]
+    pub predecessor: Vec<Vec<u8>>,
 }
 
 /// Locally trusted verifier state (§17.2). Persist atomically; never accept a checkpoint
@@ -128,6 +133,7 @@ fn merged_objects(objects: &Objects, persisted: &Persisted) -> Objects {
         (&mut all.entries, &objects.entries),
         (&mut all.pending, &objects.pending),
         (&mut all.heads, &objects.heads),
+        (&mut all.predecessor, &objects.predecessor),
     ] {
         let mut seen: std::collections::BTreeSet<Vec<u8>> = dst.iter().cloned().collect();
         for bytes in src {
@@ -221,7 +227,7 @@ fn parse_entry(bytes: &[u8]) -> Result<Entry, Failure> {
     let (h, _) = crate::v05::members::AuthorityHeader::split(env.value.clone())?;
     if h.protocol != "colophon/authority/5" {
         return Err(if h.protocol == "colophon/authority/4" {
-            Failure::NewerFormat("0.4 upgrade prefixes are not implemented".into())
+            crate::v05::malformed("a /4 entry outside the upgrade prefix")
         } else {
             crate::v05::malformed("not a colophon/authority/5 entry")
         });
@@ -286,6 +292,19 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
     };
     let mut st: Option<State> = None;
     let mut seq = 1u64;
+    if let Some(result) = upgrade::bootstrap(objects, now_ms) {
+        match result {
+            Ok(saved) => {
+                verdict.branch = saved.history().to_vec();
+                seq = verdict.branch.len() as u64 + 1;
+                st = Some(saved);
+            }
+            Err(stop) => {
+                verdict.stop = Some(stop);
+                return verdict;
+            }
+        }
+    }
     // Fast path: append to the verified folded state. An earlier candidate, new head,
     // prior conflict, or backwards clock requires replay of the retained objects. In
     // particular a high-water marker never freezes a provisional branch.
@@ -295,6 +314,10 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
                 cp.objects.entries.iter().collect();
             let safe = !cp.conflicts
                 && now_ms >= cp.now_ms
+                && incoming
+                    .predecessor
+                    .iter()
+                    .all(|h| cp.objects.predecessor.contains(h))
                 && incoming.heads.iter().all(|h| cp.objects.heads.contains(h))
                 && incoming.entries.iter().all(|b| {
                     retained.contains(b)
@@ -332,7 +355,7 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         let mut first_failure: Option<(Stop, &Entry)> = None;
         for e in &candidates {
             let r = match &st {
-                None => state::genesis(e, now_ms),
+                None => state::genesis(e, now_ms, &objects.predecessor),
                 Some(s) => state::apply(s, e, &pending, &heads, by_seq_all(&by_seq), now_ms),
             };
             match r {
@@ -392,6 +415,11 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
             .ok()
             .and_then(|i| verdict.branch.get(i));
         verdict.rollback = on_branch != Some(hw_digest);
+    }
+    if !matches!(verdict.stop, Some(Stop::Fork { .. })) {
+        if let Some(s) = &mut st {
+            succession::finish(s, objects, now_ms);
+        }
     }
     verdict.state = st;
     verdict

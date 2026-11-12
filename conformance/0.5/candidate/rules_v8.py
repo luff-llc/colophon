@@ -848,14 +848,14 @@ SR0 = 7200
 AFTER, BEFORE = D + 600, D - 600   # F at SR0 + AFTER is after the due time (window end SR0 + 240, plus D)
 
 
-def successor_with_home(g, receipt_delay=60):
+def successor_with_home(g, receipt_delay=60, start=SR0 - 60):
     a = account_id(g)
     known = {k.id: k for k in (A, B, K1, K2, MK, NK, SP, SY, root_s, rec_s)}
     ctrls = json.loads(body_of(g.envs[0]))["keyring"]["controllers"]
     extra = [known[cid(x)] for x in ctrls if "recover" in x["roles"] and cid(x) in known][:1]
     activate(g, transition(g, {"homes": {"appoint": [home_appointment(a, SH, SHA_, "Successor home")]}},
-                           [A] + extra, ts(SR0 - 60), origin="https://id.example"), [])
-    return receipt_of(a, g.envs[0], SH, ts(SR0 - 60 + receipt_delay))
+                           [A] + extra, ts(start), origin="https://id.example"), [])
+    return receipt_of(a, g.envs[0], SH, ts(start + receipt_delay))
 
 
 def record_succession_veto(g, v_env, v_rec, g_rec):
@@ -864,13 +864,20 @@ def record_succession_veto(g, v_env, v_rec, g_rec):
                            genesisReceipts=[emb(g_rec)])
 
 
+def successor_head(g):
+    # Fresh coverage required by §15.1, covering the unvetoed prefix.
+    return envelope({"protocol": "colophon/head/5", "account": account_id(g),
+                     "authority": {"seq": 2, "digest": sha(body_of(g.envs[1]))},
+                     "issued": ts(SR0 + AFTER), "by": SH.id}, SH)
+
+
 def swift_case(name, recs, g, f_at, expected, why, signer=A, freeze=None, receipt_delay=60, vetoes=()):
     rg = successor_with_home(g, receipt_delay)
     for v_env, v_rec in vetoes:
         record_succession_veto(g, v_env, v_rec, rg)
     f = (freeze or swift_freeze_signed)(recs, account_id(g), signer, issued=ts(SR0 + f_at))
     write_swift(name, recs + [f], g, expected, why,
-                extra_recs={"genesis-receipt.json": rg, **{f"successor/authority/{i + 1:08d}.json": e for i, e in enumerate(g.envs)}})
+                extra_recs={"genesis-receipt.json": rg, "successor-head.json": successor_head(g), **{f"successor/authority/{i + 1:08d}.json": e for i, e in enumerate(g.envs)}})
 
 
 def gveto(g, key, at=SR0 + 600):
@@ -955,13 +962,13 @@ swift_case("swift-webauthn-role-swap-with-consent", wr, g, AFTER, {"succession":
 g_thief = new_genesis(recs, 2, handover=[A], label="Thief")
 f_thief = swift_freeze_signed(recs, account_id(g_thief), A, issued=ts(SR0 + 60))
 g_owner = new_genesis(recs + [f_thief], 3, handover=[A], label="Owner after premature freeze")
-rg = successor_with_home(g_owner)
+rg = successor_with_home(g_owner, start=SR0 + 120)
 f2 = dict(json.loads(unb64(f_thief["body"])), layout=4, previous=sha(unb64(f_thief["body"])), seq=4,
           issued=ts(SR0 + AFTER), successor=account_id(g_owner))
 write_swift("swift-premature-freeze-then-owner", recs + [f_thief, swift_record(f2, A)], g_owner,
             {"succession": "verified", "firstFreeze": "its succession was never due, so it doesn't end the predecessor"},
             "A thief's premature freeze at seq 3, then the owner's verified attempt with a layout-4 freeze at seq 4.",
-            extra_recs={"genesis-receipt.json": rg, **{f"successor/authority/{i + 1:08d}.json": e for i, e in enumerate(g_owner.envs)},
+            extra_recs={"genesis-receipt.json": rg, "successor-head.json": successor_head(g_owner), **{f"successor/authority/{i + 1:08d}.json": e for i, e in enumerate(g_owner.envs)},
                         "thief-genesis.json": g_thief.envs[0]})
 
 g = new_genesis(recs, 2, handover=[A], label="After final")
@@ -970,7 +977,7 @@ f_af = swift_freeze_signed(recs, account_id(g), A, issued=ts(SR0 + AFTER))
 xo = dict(json.loads(unb64(f_af["body"])), seq=4, previous=sha(unb64(f_af["body"])), issued=ts(SR0 + AFTER + 60), layout=4)
 write_swift("swift-entry-after-final", recs + [f_af, swift_record(xo, A)], g,
             {"succession": "verified", "evidence": "entry 4 is malformed evidence"}, "An entry after a verified F.",
-            extra_recs={"genesis-receipt.json": rg, **{f"successor/authority/{i + 1:08d}.json": e for i, e in enumerate(g.envs)}})
+            extra_recs={"genesis-receipt.json": rg, "successor-head.json": successor_head(g), **{f"successor/authority/{i + 1:08d}.json": e for i, e in enumerate(g.envs)}})
 
 write("rules/keys-r4.json", {"warning": "PUBLIC TEST SECRETS. Never use these keys for real data.",
                              "keys": {n: {"id": k.id, "signing": b64(k.point), "scalar": b64(k.scalar.to_bytes(32, "big"))}
@@ -1025,3 +1032,13 @@ case("t-three-candidate-winner", base, {"standsAtSeq3": sha(win_cs[2].last)},
      "Only the greatest-digest candidate has a quorum head. It beats each other candidate even though their mutual comparison is undecided.",
      ["8.6"], {"head-winner": head5(win_cs[2], H1K, R0 + 30)}, VER(R0 + 60),
      branches={str(i): [(3, wc.envs[2])] for i, wc in enumerate(win_cs)})
+
+
+# A native /5 predecessor uses its own verifier and has terminal successor activation.
+old5 = Chain()
+old5kr = keyring([ctrl(A, ["approve", "control"], "Mac"), ctrl(K1, ["recover"], "Kit")], threshold=1, rt=1)
+genesis(old5, old5kr, [A], adds=[K1], label="Native predecessor")
+next5 = Chain()
+genesis(next5, old5kr, [A], predecessor={"format":"colophon/authority/5", "account":account_id(old5), "head":anchor(old5)}, label="Native successor")
+activate(old5, transition(old5, {"successor":{"account":account_id(next5)}}, [A,K1], ts(60)), [])
+write_swift("authority5-successor", old5.envs, next5, {"succession":"verified"}, "A /5 predecessor terminates at its successor activation.", extra_recs={"successor/authority/00000001.json":next5.envs[0]})

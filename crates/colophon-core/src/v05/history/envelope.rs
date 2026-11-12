@@ -8,7 +8,7 @@ use crate::v05::{malformed, require, Result};
 use serde_json::Value;
 
 /// One signature item.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SigItem {
     /// Signer ID (for the primary signature: the body's `by`).
     pub signer: String,

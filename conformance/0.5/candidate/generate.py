@@ -253,16 +253,15 @@ upgrade_case("at-seq-two", "genesis-only", expected5="malformed",
 
 
 def then_layout(body, upgrade, signer):
-    nxt = {
-        "protocol": "colophon/authority/5",
-        "seq": body["seq"] + 1,
-        "previous": sha(body_of(upgrade)),
-        "issued": "2026-11-11T09:00:01.000Z",
-        "by": signer.id,
-        "kind": "layout",
-        "layout": 2,
-    }
-    return {f"records/authority/{body['seq'] + 1:08d}.json": env_bytes(envelope(nxt, signer))}
+    issued = "2026-11-11T09:00:01.000Z"
+    t = envelope({"protocol": "colophon/transition/5", "account": body["account"],
+                  "anchor": {"seq": body["seq"], "digest": sha(body_of(upgrade))},
+                  "issued": issued, "by": signer.id, "signers": [signer.id],
+                  "change": {"layout": 2}}, signer)
+    nxt = {"protocol": "colophon/authority/5", "seq": body["seq"] + 1,
+           "previous": sha(body_of(upgrade)), "issued": issued, "by": signer.id,
+           "kind": "activate", "transition": b64(env_bytes(t)), "receipts": []}
+    return {f"records/authority/{body['seq'] + 1:08d}.json": canonical({"body": b64(canonical(nxt))})}
 
 
 def then_v4(body, upgrade, signer):
@@ -279,7 +278,7 @@ def then_v4(body, upgrade, signer):
 
 
 upgrade_case("then-v5-layout", "seq-two-rekey", extra=then_layout,
-             why="After the upgrade, a /5 layout entry under the control rule is accepted.")
+             why="After the upgrade, a /5 layout transition under the control rule is accepted.")
 upgrade_case("then-v4-entry", "seq-two-rekey", extra=then_v4, expected5="malformed",
              why="A /4 entry after the upgrade.")
 

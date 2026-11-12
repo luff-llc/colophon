@@ -359,7 +359,7 @@ def new_genesis(pred_recs, head_seq, two_keys=False, handover=(), label="Library
             "head": {"seq": head_seq, "digest": sha(unb64(pred_recs[head_seq - 1]["body"]))}}
     g = Chain()
     adds = [] if pred_recs is not None else []
-    genesis(g, kr_new, [A], label=label, predecessor=pred, handover=handover)
+    g.add("genesis", A, max(T0, json.loads(unb64(pred_recs[head_seq - 1]["body"]))["issued"]), A, handover=handover, label=label, namespaces=[], keyring=kr_new, predecessor=pred)
     return g
 
 

@@ -152,6 +152,16 @@ pub struct State {
     retiring: Option<Retiring>,
     excused: BTreeSet<String>,
     pub(crate) points: BTreeSet<Vec<u8>>,
+    /// Upgrade sequence, fencing legacy records.
+    #[serde(default)]
+    pub upgrade_seq: Option<u64>,
+    #[serde(default)]
+    pub(super) succession: Option<super::succession::Succession>,
+    #[serde(default)]
+    pub(super) successor: Option<String>,
+    #[serde(default)]
+    /// Owner asserted migration manifest, when recorded.
+    pub migration: Option<Value>,
 }
 
 impl State {
@@ -186,6 +196,21 @@ impl State {
     }
 
     /// The account.
+    /// Verified predecessor final reference, if established.
+    pub fn verified_succession(&self) -> Option<(u64, &str)> {
+        self.succession
+            .as_ref()?
+            .verified
+            .as_ref()
+            .map(|(n, d)| (*n, d.as_str()))
+    }
+    /// Malformed evidence after the predecessor final entry.
+    pub fn predecessor_evidence(&self) -> &[u64] {
+        self.succession
+            .as_ref()
+            .map_or(&[], |p| p.evidence_after_final.as_slice())
+    }
+    /// Account identifier.
     pub fn account(&self) -> &AccountId {
         &self.account
     }
@@ -395,7 +420,7 @@ fn all_units(k: &Keyring, ids: &[String]) -> BTreeSet<String> {
 // ---------------------------------------------------------------------------------------------
 // Genesis.
 
-pub(crate) fn genesis(e: &Entry, now_ms: i64) -> Step<State> {
+pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<State> {
     if e.seq != 1 || e.kind != "genesis" {
         return Err(malformed("seq 1 must be a genesis").into());
     }
@@ -403,11 +428,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64) -> Step<State> {
         return Err(Outcome::Held("issued more than 60 s ahead".into()));
     }
     let v = &e.env.value;
-    if v.get("predecessor").is_some() {
-        return Err(
-            Failure::NewerFormat("succession (predecessor) is not implemented".into()).into(),
-        );
-    }
+    let succession = super::succession::prepare(e, predecessor, now_ms)?;
     // Step 1 reads the keyring's controllers to bind the signer.
     let keyring = Keyring::parse(v.get("keyring").cloned().unwrap_or(Value::Null), 1)?;
     let by = keyring
@@ -464,7 +485,10 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64) -> Step<State> {
         return Err(bad_signature("genesis: control rule not met").into());
     }
     for id in keyring.controllers.keys() {
-        if id != &e.by && !e.env.additions.iter().any(|a| &a.signer == id) {
+        let carried = succession
+            .as_ref()
+            .is_some_and(|p| p.carried(id, &keyring.controllers[id]));
+        if id != &e.by && !carried && !e.env.additions.iter().any(|a| &a.signer == id) {
             return Err(bad_signature("genesis: possession proof missing").into());
         }
     }
@@ -567,6 +591,10 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64) -> Step<State> {
         retiring: None,
         excused: BTreeSet::new(),
         points,
+        upgrade_seq: None,
+        succession,
+        successor: None,
+        migration: None,
     })
 }
 
@@ -1338,8 +1366,18 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
         new_members.push(member_from(s, g, act_seq, false)?);
         changed = true;
     }
-    if t.change.contains_key("migration") {
-        return Err(malformed("migration without a predecessor"));
+    if let Some(m) = t.change.get("migration") {
+        super::succession::migration(&mut n, m)?;
+        changed = true;
+    }
+    if let Some(a) = t.change.get("successor") {
+        let id = a
+            .get("account")
+            .and_then(Value::as_str)
+            .ok_or_else(|| malformed("successor account"))?;
+        AccountId::parse(id)?;
+        n.successor = Some(id.into());
+        changed = true;
     }
     if t.change.contains_key("layout") {
         changed = true;
@@ -1517,6 +1555,9 @@ pub(crate) fn apply(
     now_ms: i64,
 ) -> Step<State> {
     let _ = (pending, heads);
+    if s.successor.is_some() {
+        return Err(malformed("entry after terminal successor").into());
+    }
     // §8.5 step 1: header.
     if e.seq != s.seq() + 1 || e.previous.as_deref() != s.digests.last().map(String::as_str) {
         return Err(malformed("seq or previous doesn't follow").into());
@@ -1534,12 +1575,11 @@ pub(crate) fn apply(
         "suspend" => suspend(s, e)?,
         "vault" => vault_entry(s, e)?,
         "genesis" => return Err(malformed("a second genesis").into()),
-        "successionVetoed" => {
-            return Err(Failure::NewerFormat("succession is not implemented".into()).into())
-        }
+        "successionVetoed" => super::succession::vetoed(s, e)?,
         _ => immediate(s, e)?,
     };
     finalize_empty_witnesses(&mut n);
+    super::succession::observe_window(&mut n, e);
     // Suspensions end with an entry past their due time + 7 days, or when the entry makes
     // their transition invalid at a hypothetical activate.
     let issued = e.issued;
@@ -2674,6 +2714,20 @@ fn due_and_object(s: &State, e: &Entry) -> (i64, String) {
                 Err(_) => (i64::MAX, String::new()),
             }
         }
+        "successionVetoed" => s
+            .succession
+            .as_ref()
+            .and_then(|p| {
+                p.window.as_ref().map(|w| {
+                    (
+                        w.start
+                            .saturating_add(300_000)
+                            .saturating_add((w.delay as i64).saturating_mul(1000)),
+                        p.genesis_digest.clone(),
+                    )
+                })
+            })
+            .unwrap_or((i64::MAX, String::new())),
         "final" => {
             let seq = v
                 .get("activation")
@@ -2883,4 +2937,178 @@ pub(super) fn receipted_veto(
         Outcome::Held(why) => malformed(why),
     })?;
     Ok(())
+}
+
+/// Translate only after the complete incorporated prefix and upgrade authenticate.
+pub(super) fn from_upgrade(
+    prior: &crate::authority::Authority,
+    keyring: Keyring,
+    records: &crate::model::Records,
+    seq: u64,
+) -> Result<State> {
+    let mut digests = Vec::new();
+    let mut issued = Vec::new();
+    for raw in records.values() {
+        let env =
+            crate::keys::AuthorityEnvelope::from_json(raw).map_err(|e| malformed(e.to_string()))?;
+        let v = env.body_value().map_err(|e| malformed(e.to_string()))?;
+        digests.push(crate::v05::encoding::digest(&env.body));
+        issued.push(
+            crate::v05::encoding::parse_date(
+                v["issued"].as_str().ok_or_else(|| malformed("issued"))?,
+            )
+            .ok_or_else(|| malformed("issued"))?,
+        );
+    }
+    let first = records
+        .values()
+        .next()
+        .ok_or_else(|| malformed("missing genesis"))?;
+    let first =
+        crate::keys::AuthorityEnvelope::from_json(first).map_err(|e| malformed(e.to_string()))?;
+    let account = AccountId::of_genesis(&first.body);
+    let mut members = Vec::new();
+    for old in prior.members.values() {
+        let g = old
+            .member
+            .grant
+            .as_ref()
+            .ok_or_else(|| malformed("missing legacy grant"))?;
+        let access = if g.access.contains(&crate::model::Access::Write) {
+            "write"
+        } else {
+            "read"
+        };
+        let mut terms = serde_json::json!({"records":g.namespaces.iter().map(|n| serde_json::json!({"namespace":n,"access":access})).collect::<Vec<_>>()});
+        for (field, value) in [
+            ("expires", serde_json::to_value(&g.expires)),
+            ("writes", serde_json::to_value(g.write_budget)),
+            ("import", serde_json::to_value(g.import)),
+        ] {
+            let value = value.map_err(|e| malformed(e.to_string()))?;
+            if !value.is_null() {
+                terms[field] = value;
+            }
+        }
+        let terms = Terms::parse(terms, TermsKind::Member)?;
+        let kind = match old.member.kind {
+            crate::model::MemberKind::Device => MemberKind::Device,
+            crate::model::MemberKind::App => MemberKind::App,
+            crate::model::MemberKind::Agent => MemberKind::Agent,
+            crate::model::MemberKind::Server => MemberKind::Server,
+        };
+        members.push(MemberRecord {
+            request: Request {
+                body: Vec::new(),
+                account: account.clone(),
+                signing: old.public.signing.clone(),
+                agreement: old.public.agreement.clone(),
+                label: old.member.label.clone(),
+                kind,
+                terms: terms.clone(),
+                created_ms: issued
+                    .get(old.member.since.saturating_sub(1) as usize)
+                    .copied()
+                    .unwrap_or(0),
+                custody: None,
+                operator: None,
+                endpoints: None,
+                unknown: Default::default(),
+            },
+            expires_ms: terms.expires_ms(),
+            terms,
+            granted_seq: old.member.since,
+            revoked_seq: old.member.revoked_at,
+            renewals: Vec::new(),
+            end_sessions: Vec::new(),
+            provisional: None,
+            home: HomeStatus::NotHome,
+        });
+    }
+    let mut ever: BTreeMap<String, Vec<(u64, Option<Controller>)>> = BTreeMap::new();
+    let mut points = BTreeSet::new();
+    let mut historical_sets = Vec::new();
+    let mut present = BTreeSet::new();
+    // Retain every historical key so the one-principal rule survives the upgrade.
+    for entry in &prior.entries {
+        if let crate::authority::Action::Genesis { keyring: k, .. }
+        | crate::authority::Action::Keyring { keyring: k, .. } = &entry.action
+        {
+            let next: BTreeSet<String> = k.controllers.iter().map(|c| c.id()).collect();
+            for id in present.difference(&next) {
+                ever.entry(id.clone()).or_default().push((entry.seq, None));
+            }
+            present = next;
+            for c in &k.controllers {
+                let raw = serde_json::to_value(c).map_err(|e| malformed(e.to_string()))?;
+                let c = Controller::parse(raw, "legacy controller")?;
+                ever.entry(c.id())
+                    .or_default()
+                    .push((entry.seq, Some(c.clone())));
+                points.insert(c.key().signing().to_vec());
+                points.insert(c.id().into_bytes());
+                if let Some(a) = c.key().agreement() {
+                    points.insert(a.to_vec());
+                    points.insert(key_id(a).into_bytes());
+                }
+            }
+            for p in [&k.vault.signing, &k.vault.agreement] {
+                points.insert(p.clone());
+                points.insert(key_id(p).into_bytes());
+            }
+        }
+        historical_sets.push(present.clone());
+    }
+    historical_sets.push(present);
+    for m in &members {
+        for p in [&m.request.signing, &m.request.agreement] {
+            points.insert(p.clone());
+            points.insert(key_id(p).into_bytes());
+        }
+    }
+    let ids: BTreeSet<String> = keyring.controllers.keys().cloned().collect();
+    let meta = ids
+        .iter()
+        .map(|id| {
+            (
+                id.clone(),
+                CtrlMeta {
+                    added_seq: 1,
+                    planter: None,
+                    provisional: None,
+                },
+            )
+        })
+        .collect();
+    let len = digests.len();
+    Ok(State {
+        account,
+        digests,
+        issued,
+        keyring_at: historical_sets,
+        delay_at: vec![keyring.policy.recovery_delay(); len],
+        policies: vec![(seq, keyring.policy.clone())],
+        keyring,
+        meta,
+        ever,
+        namespaces: prior.namespaces.clone(),
+        epochs: prior
+            .epochs
+            .iter()
+            .filter_map(|(n, es)| es.keys().max().map(|e| (n.clone(), *e)))
+            .collect(),
+        members,
+        recorded: Default::default(),
+        activations: Vec::new(),
+        v: Default::default(),
+        suspensions: Vec::new(),
+        rate: Vec::new(),
+        retiring: None,
+        excused: Default::default(),
+        points,
+        upgrade_seq: Some(seq),
+        succession: None,
+        successor: None,
+        migration: None,
+    })
 }
