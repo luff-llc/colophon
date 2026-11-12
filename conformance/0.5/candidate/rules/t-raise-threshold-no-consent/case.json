@@ -1,1 +1,1 @@
-{"description":"Raising threshold needs recovery-set consent (otherwise a thief locks out recovery).","expected":{"result":"badSignature","seq":3},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"Raising threshold without a recover signer.","expected":{"result":"badSignature","seq":3},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

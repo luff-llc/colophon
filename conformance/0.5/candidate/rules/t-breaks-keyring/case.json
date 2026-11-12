@@ -1,1 +1,1 @@
-{"description":"Removing every control key: the result breaks §6.2.","expected":{"result":"malformed","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"Removing every control key breaks §6.2.","expected":{"result":"malformed","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

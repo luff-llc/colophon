@@ -1,1 +1,1 @@
-{"description":"A was vetoed once (v=1): its next transition needs two signers.","expected":{"result":"badSignature","seq":4},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"v(A)=1: A alone can't propose.","expected":{"result":"badSignature","seq":4},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

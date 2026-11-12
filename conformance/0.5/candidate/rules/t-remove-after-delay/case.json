@@ -1,1 +1,1 @@
-{"description":"Remove the lost passkey: pending, received, activated after D.","expected":{"result":"ok","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"Pending removal, received, activated at its due time (determined bytes).","expected":{"result":"ok","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:01:01Z"}}

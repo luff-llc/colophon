@@ -1,1 +1,0 @@
-{"description":"B signs a rival at seq 3 that no home covers: evidence, not a fork.","expected":{"evidence":"2ca98a02e57da2d5d70fbdf17e1eacd7b8209eba8ff517691463c816cc71fe08","result":"ok","seq":3},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

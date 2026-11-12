@@ -1,1 +1,1 @@
-{"description":"Recover set changed without the old recover key.","expected":{"succession":"unverified"},"sections":["15.1","16.3"]}
+{"description":"Recover set changed without SP.","expected":{"succession":"unverified"},"sections":["15.1","16.3"]}

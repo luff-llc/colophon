@@ -1,6 +1,6 @@
 # Colophon 0.5: implementation plan
 
-**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 4, 2026-11-12. No engine code
+**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 5, 2026-11-12. Steps 1 and 4 are stable and may start; the §8.7 state machine (step 2's transition part and step 3's conflict rules) should wait for review of revision 5. No engine code
 has been changed for it. Steps are in order. The vectors come first, because §21 says the
 spec can't freeze without them, and every verifier step is then tested against them.
 
@@ -74,9 +74,10 @@ Files: `keys/strict_json.rs`, `keys/descriptor.rs`, `keys/webauthn.rs`, `keys/en
 
 Files: `authority.rs`, `slots.rs`, `vault.rs`.
 
-- `Keyring` gains `addThreshold`, `countBy` and `policy`; controllers gain `holder`, `audiences`,
-  `until` and role `sign`; bounds of 64 controllers and 256 slots.
+- `Keyring` gains `addThreshold`, `countBy` and `policy`; controllers gain `holder`, `audiences` and
+  role `sign`; bounds of 64 controllers and 256 slots.
 - Rule evaluation (§8.4): control, recovery, single and member rules; possession; recovery-set consent; the larger-threshold count.
+- **Counting units** (§6.1) used by every count.
 - **Pending transitions (§8.7).** This is the core state machine, and it should be built and
   reviewed on its own before anything that depends on it:
   - transition, veto and receipt objects;
@@ -85,7 +86,13 @@ Files: `authority.rs`, `slots.rs`, `vault.rs`.
   - the escalation counters v(K) computed from `vetoed` entries;
   - the full-set check;
   - delta application at `activate`, with the void cases;
-  - the 7-day bound.
+  - the 7-day bound;
+  - composite changes and vault rotation with slot rebasing (§8.3);
+  - evaluation against the state before `activate`;
+  - determined `activate` and `vetoed` bodies (unsigned except vault changes);
+  - finality, and rollback on a later veto;
+  - suspension;
+  - external-object limits.
 - The §8.4 classification as data: every change kind is immediate or pending, and the default
   for unknown changes is pending.
 - Headroom: immediate entries stop at 56 controllers.

@@ -1,0 +1,1 @@
+{"description":"H1 is down: H2's receipt makes the removal due; it applies at once and is final when H1 returns.","expected":{"finality":"provisional until H1's head covers seq 3","result":"ok","seq":3},"sections":["8.7","changes §H"],"verifier":{"now":"2026-11-14T09:01:01Z"}}

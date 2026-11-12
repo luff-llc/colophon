@@ -1,0 +1,1 @@
+{"description":"A thief's premature freeze at seq 3, then the owner's verified attempt with a layout-4 freeze at seq 4.","expected":{"firstFreeze":"its succession was never due, so it doesn't end the predecessor","succession":"verified"},"sections":["15.1","16.3"]}

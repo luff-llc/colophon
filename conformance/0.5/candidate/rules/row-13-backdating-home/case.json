@@ -1,0 +1,1 @@
+{"description":"At quorum 1 a hostile home and one key are not safe.","expected":{"elsewhere":"vouched fork","honestHome":"refuses: never receipted it and first saw it now","verifiersFollowingH1":"apply the removal once due"},"sections":["13.1","changes §H"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

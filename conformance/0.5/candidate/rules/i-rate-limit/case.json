@@ -1,0 +1,1 @@
+{"description":"One signer's immediate entries over a day.","expected":{"home":"accepts seq 3-66 and refuses seq 67 (65th immediate entry by A in 24 h)"},"sections":["13.1"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

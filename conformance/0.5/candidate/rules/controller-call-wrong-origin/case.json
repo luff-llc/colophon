@@ -1,1 +1,0 @@
-{"description":"The same call from the authority origin.","expected":{"call":"refused:origin"},"sections":["12.3"],"verifier":{"audiences":["https://service.example"],"callOrigins":{"id.example":["https://sign.id.example"]},"controllerPurposes":["sign-in"],"now":"2026-11-11T09:17:00Z"}}

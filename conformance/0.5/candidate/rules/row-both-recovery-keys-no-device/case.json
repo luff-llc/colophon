@@ -1,1 +1,0 @@
-{"description":"Both security keys together: back in at once.","expected":{"events":[{"object":"01-full-recovery","outcome":"activates at once (full recovery set, two keys)"}],"final":{"controllers":["7a14b43d4e9010e7987d86ec054f0d79","b1176479fa12231725a6d79e102c00c5","cb5d08ab6e3f0f885f06b39be159fb30"]}},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

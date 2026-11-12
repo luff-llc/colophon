@@ -1,0 +1,1 @@
+{"description":"A recover-only key reads the history.","expected":{"call":"ok"},"sections":["12.3","13.4"],"verifier":{"audiences":["https://homeone.example/v1/accounts/1c0e27629ad2cad3abe71cf4b56e933ac56f874d31564b781c4058a475c8309d"],"now":"2026-11-11T09:17:00Z","role":"home"}}

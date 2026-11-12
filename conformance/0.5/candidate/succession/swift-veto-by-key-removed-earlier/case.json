@@ -1,0 +1,1 @@
+{"description":"X was removed at seq 4, before the last removal at seq 5: X's veto is invalid.","expected":{"succession":"verified"},"sections":["15.1","16.3"]}
