@@ -1,0 +1,1 @@
+{"description":"Swift keyring library frozen by its control key; the 0.5 genesis reuses its keys (no possession proofs needed).","expected":{"genesis":"ok","succession":"verified","swiftReader":"unsupportedStorageLayout(3) at seq 3; seq 1-2 accept"},"sections":["15.1","16.3"]}

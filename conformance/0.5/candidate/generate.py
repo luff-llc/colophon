@@ -173,7 +173,8 @@ write("identifiers.json", {
 
 # ---------------------------------------------------------------------------------------
 # 2. Upgrade from 0.4 in place (spec §16.1), on the published seq-two-rekey chain.
-DEFAULT_POLICY = {"callWindow": 300, "headMaxAge": 300, "headQuorum": 1, "history": "members", "linkMaxAge": 86400}
+DEFAULT_POLICY = {"callWindow": 300, "headMaxAge": 300, "headQuorum": 1, "history": "members", "linkMaxAge": 86400,
+                  "memberRule": "single", "recoveryDelay": 259200}
 
 
 def load_chain(case: str):
@@ -191,6 +192,7 @@ def upgrade_case(name, base_case, mutate=None, signer_id=None, seq_override=None
     keyring = json.loads(json.dumps(genesis["keyring"]))  # unchanged since genesis in these cases
     keyring5 = dict(keyring)
     keyring5["addThreshold"] = 1
+    keyring5["countBy"] = "keys"
     keyring5["policy"] = dict(DEFAULT_POLICY)
     controller = keyring["controllers"][0]
     cid = key_id(unb64(controller["key"]["signing"]))
@@ -289,6 +291,7 @@ g4 = json.loads(unb64(json.loads((V4 / "keys/genesis-one-raw/records/authority/0
 controller = software["b609e0fd25ac2aefc193156581e112cb"]
 keyring5 = dict(g4["keyring"])
 keyring5["addThreshold"] = 1
+keyring5["countBy"] = "keys"
 keyring5["policy"] = dict(DEFAULT_POLICY)
 
 agent_sign, agent_agree = derived("agent/signing"), derived("agent/agreement")
@@ -432,17 +435,23 @@ write("keys.json", {
 })
 
 # ---------------------------------------------------------------------------------------
+# Revision 2 cases (spec revision 2): rules, origins, pairing, Swift succession.
+exec(compile((HERE / "rules.py").read_text(), str(HERE / "rules.py"), "exec"))
+
+# ---------------------------------------------------------------------------------------
 # Self-checks: every envelope in the output whose signer is honest verifies.
 honest = 0
 for rel, data in OUT.items():
     if not rel.endswith(".json") or rel.endswith("case.json") or rel in ("keys.json", "identifiers.json"):
         continue
     env = json.loads(data)
+    if not isinstance(env, dict) or "body" not in env or "non-canonical" in rel:
+        continue
     body = unb64(env["body"])
     obj = json.loads(body)
-    assert canonical(obj) == body
+    assert canonical(obj) == body, rel
     signer_id = obj.get("by") or (obj.get("from") if obj.get("protocol") == "colophon/link/5" else None)
-    if obj.get("protocol") == "colophon/call/5":
+    if obj.get("protocol") == "colophon/call/5" and rel.startswith("calls/"):
         point = unb64(obj["key"])
         ok = verify_raw(point, body, unb64(env["signature"]))
         expected_bad = "invalid" in rel

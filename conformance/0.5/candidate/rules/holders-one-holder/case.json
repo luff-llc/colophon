@@ -1,0 +1,1 @@
+{"description":"countBy holders: two keys of one holder are one signer.","expected":{"result":"badSignature","seq":2},"sections":["6.2"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

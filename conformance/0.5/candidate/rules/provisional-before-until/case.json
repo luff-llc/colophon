@@ -1,0 +1,1 @@
+{"description":"The provisional key approves a grant before its `until`.","expected":{"result":"ok","seq":3},"sections":["6.1","8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

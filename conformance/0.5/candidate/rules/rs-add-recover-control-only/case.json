@@ -1,0 +1,1 @@
+{"description":"Adding a recover controller needs the prior recovery quorum (K1).","expected":{"result":"badSignature","seq":2},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"terms.expires on February 30.","expected":{"result":"malformed","seq":2},"sections":["2.2","10.1"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

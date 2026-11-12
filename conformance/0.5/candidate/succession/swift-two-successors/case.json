@@ -1,0 +1,1 @@
+{"description":"Two freezing entries at seq 3 naming different accounts.","expected":{"genesis":"ok","succession":"refused:fork"},"sections":["15.1","16.3"]}

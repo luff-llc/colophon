@@ -1,0 +1,1 @@
+{"description":"A fresh head over seq 2 after the verifier accepted seq 3.","expected":{"head":"refused:rollback"},"sections":["13.3"],"verifier":{"highWater":{"digest":"91972c9740bafa5da27ba576f331686abf15edee0e2fe26de950116d693ced21","seq":3},"now":"2026-11-11T09:01:00Z"}}

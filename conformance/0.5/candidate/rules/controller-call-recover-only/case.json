@@ -1,0 +1,1 @@
+{"description":"A recover-only controller calls.","expected":{"call":"refused:outOfScope"},"sections":["12.3"],"verifier":{"audiences":["https://service.example"],"callOrigins":{"id.example":["https://sign.id.example"]},"controllerPurposes":["sign-in"],"now":"2026-11-11T09:01:00Z"}}

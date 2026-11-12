@@ -1,0 +1,1 @@
+{"description":"threshold 2, addThreshold 1: one control key adds a provisional approve-only key with `until`, no slot.","expected":{"result":"ok","seq":2},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

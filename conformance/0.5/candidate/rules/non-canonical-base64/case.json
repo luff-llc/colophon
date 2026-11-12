@@ -1,0 +1,1 @@
+{"description":"A key spelled with a non-zero padding bit (decodes to the same bytes).","expected":{"result":"malformed","seq":1},"sections":["2.2"]}

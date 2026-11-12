@@ -1,0 +1,1 @@
+{"description":"The genesis names seq 1 as head; the final entry is not at head + 1 and names another account.","expected":{"genesis":"ok","succession":"unverified"},"sections":["15.1","16.3"]}

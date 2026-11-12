@@ -1,0 +1,1 @@
+{"description":"Predecessor recoverThreshold 2, new keyring 1, no recover signers in handover.","expected":{"genesis":"ok","succession":"unverified"},"sections":["15.1","16.3"]}

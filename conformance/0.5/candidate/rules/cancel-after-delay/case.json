@@ -1,0 +1,1 @@
+{"description":"After the delay the cancel rule no longer applies, and one key is below threshold 2.","expected":{"result":"badSignature","seq":4},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

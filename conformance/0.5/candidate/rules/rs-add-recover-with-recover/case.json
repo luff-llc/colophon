@@ -1,0 +1,1 @@
+{"description":"Adding a recover controller, signed by A and K1, with K2's possession proof.","expected":{"result":"ok","seq":2},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

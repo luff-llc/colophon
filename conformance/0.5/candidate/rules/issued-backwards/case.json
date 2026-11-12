@@ -1,0 +1,1 @@
+{"description":"`issued` earlier than the preceding entry's.","expected":{"result":"malformed","seq":2},"sections":["8.1"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
