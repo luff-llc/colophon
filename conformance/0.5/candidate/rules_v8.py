@@ -633,6 +633,19 @@ t_nc = prop({"keyring": {"keep": []}}, [K1, K2])
 c = base.copy(); activate(c, t_nc, [rec(t_nc)], full=True)
 case("t-recovery-leaves-no-control", c, bad("malformed", 3), "Removing every control key without a replacement breaks §6.2.", ["6.2", "8.4"])
 
+# 9d. Revision 9: a home's revocation applies only when final (Codex8 H1). The thief (M with K1) has H1
+# hide a control-rule revocation of the honest H2 and activates it; H2 stays current and receipts the
+# owner's removal of the thief's keys.
+t_rg = prop({"homes": {"revoke": [H2K.id]}}, [A, K1]); rg9 = base.copy(); activate(rg9, t_rg, [rec(t_rg)])
+t_own = prop({"keyring": {"remove": [A.id, K1.id]}}, [Ph, B, K2], at=DUE0 + 600, chain=rg9)
+activate(rg9, t_own, [receipt_of(acct, t_own, H2K, ts(DUE0 + 601))])
+v_th = veto_of(acct, t_own, [A, K1], ts(DUE0 + 900))
+case("t-provisional-home-revocation-keeps-home", rg9, {"result": "ok", "seq": 4, "controllers": sorted([Ph.id, B.id, K2.id]),
+                                                       "homes": "H1 and H2: H2's revocation at seq 3 has no final (H2 won't witness it), so H2 is still current",
+                                                       "thiefVeto": "invalid: two units against three"},
+     "A hidden control-rule revocation of the honest home doesn't take it away: it receipts the owner's three-unit removal of M and K1.",
+     ["8.7", "changes §H"], {"thief-veto": v_th}, VER(DUE0 + 600 + W + D + 60))
+
 # 10. Veto signatures by a WebAuthn key.
 kr_p = keyring([ctrl(A, ["approve", "control"], "Mac"), ctrl(P_pin, ["approve", "control"], "Passkey", verification=True),
                 ctrl(K1, ["recover"], "Key")], rt=1)

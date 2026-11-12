@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 8, for review, 2026-11-12.** Not frozen, not
+**Status: final candidate, revision 9, for review, 2026-11-12.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -10,7 +10,8 @@ first engine builder's questions, making that state model checkable by every ver
 revision 7 answers two reviews of revision 6 (281e7c4) and the engine attack, recording finality
 in the history and stating §8.7 as a state table; revision 8 answers the second review of revision 7
 (0a25988): removals, revoked homes, recovery that restores control, and verdicts that depend on
-the object set only. The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
+the object set only; revision 9 keeps a revoked home current until its revocation is final. The
+mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
 [colophon-0.5-guide.md](colophon-0.5-guide.md).
@@ -639,7 +640,7 @@ doubt. Each needs the control rule unless stated:
 
 | Change | Also |
 | --- | --- |
-| Remove or demote a controller; add `control` or `recover`; `keep` | **Recovery.** The recovery rule may also remove any controllers and add replacement controllers with `approve` and `control` (never `recover`); signed by every current `recover` controller it is a full set (immediate), and by fewer it is pending with the delay and veto. `keep` needs the recovery rule. The result must still have a `control` controller (§6.2). |
+| Remove or demote a controller; add `control` or `recover`; `keep` | **Recovery.** The recovery rule may also remove any controllers and add replacement controllers with `approve` and `control` (never `recover`); signed by every current `recover` controller, and by at least two units, it is a full set (immediate, §8.7); otherwise it is pending with the delay and veto, so an account with one recovery controller recovers only after the delay. `keep` needs the recovery rule. The result must still have a `control` controller (§6.2). |
 | `threshold`, `addThreshold`, `recoverThreshold`, `countBy` | Count the larger of old and new `threshold` |
 | Another controller's descriptor, `verification`, `origins`, `authorityOrigins` or `holder`, in either direction | The labelled key signs a holder change |
 | Delete or change a slot; change the vault | The recovery rule may also propose a vault change with its own removals |
@@ -731,9 +732,10 @@ Every recording entry has a **due time**: an `activate`'s or `vetoed`'s is its t
      dated more than 300 s before their clock (§13.1), so an honest primary covers no backdated Y.
    - Between an `activate` and a `vetoed` of one transition, the `vetoed` stands if its veto is
      valid, unless a `final` covers the `activate` (§8.7).
-   - Between other recording entries the order is total: earlier due time, then lower
-     transition-body digest, then kind (`activate` or `vetoed`, then `final`), then lower body
-     digest. Two recording entries of one kind for one transition differ only in receipts or heads:
+   - Between other recording entries the order is total, comparing in turn: the earlier due time;
+     the lower **object digest** (the transition body's for `activate`, `vetoed` and `final`, the
+     genesis body's for `successionVetoed`); the kind rank (`activate` 0, `vetoed` 1, `final` 2,
+     `successionVetoed` 3); the lower body digest. Every kind has a value at every step. Two recording entries of one kind for one transition differ only in receipts or heads:
      the one that loses is **dropped**, never rebuilt.
    A recording entry that loses to an entry of another transition is rebuilt after the head by any
    home. A signed entry that loses is not re-appended by anyone else: its signer's host is told
@@ -816,18 +818,25 @@ policy: it adds no controller, role, home, member or slot, lowers no threshold, 
 and has no `vault`, `grant`, `layout`, `migration`, `successor` or `resolve` component. A
 transition that revokes a home and also adds anything is `malformed`.
 
-**Revoking a home.** A transition that revokes homes under the control rule keeps them as
-witnesses of its activation (below), so each must sign a head covering it, having seen it. Only
-the **stronger authority** — a full set, or the recovery rule where recovery controllers exist —
-revokes a home without that: its activation's witnesses leave out the homes it revokes. An
-account with no recovery controllers and a dead home needs every control key (full set (b)) to
-drop it.
+**Revoking a home.** A home's revocation is the one removal that does **not** apply at
+activation: a revoked home stays current — for receipts, heads, witnessing and quorum — until its
+revocation is final. A transition that revokes homes under the control rule keeps them as
+witnesses of its activation (below), so each must sign a head covering it; a home that won't
+witness its own removal therefore stays. Removing such a home needs the **stronger authority** — a
+full set, or the recovery rule where recovery controllers exist — whose activation's witnesses
+leave out the homes it revokes, so finality needs only the remaining homes. An account with no
+recovery controllers and a dead or unwilling home needs every control key (full set (b)) to drop
+it.
+
+So while `headQuorum` honest homes are current and reachable and the owner holds every recovery
+controller, the owner can always get the receipts recovery needs: no one without the recovery rule
+can make those homes' revocation final, so they stay current and receipt the owner's transitions.
 
 **Finality is a recorded fact.** A verifier judges finality only from the objects it holds, never
 from heads it has seen or the order it saw things in.
-- An activation's **witnesses** are the homes current in the state before it, plus the homes
-  revoked by earlier activations that are not yet final (a home is excused only once a *final*
-  removal has revoked it), less the homes it revokes itself under the stronger authority. For a
+- An activation's **witnesses** are the homes current in the state before it (which include homes
+  whose revocation isn't final yet; a home is excused only once its revocation is final), less the
+  homes it revokes itself under the stronger authority. For a
   full set they are those of them that remain after it.
 - An activation is **final** when its witness set is empty, or a `final` entry for it is on the
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering
@@ -839,7 +848,7 @@ from heads it has seen or the order it saw things in.
   member signs no entry, transition, veto, `suspend` or call (`refused:revoked`), counts toward no
   rule, unit, quorum, full set or escalation, and its receipts and heads don't count; records by an
   added member are held (`authorityBehind`). Removals and restrictions apply at once (fail-safe),
-  final or not.
+  final or not — except a home's revocation, which applies when final.
 - **A final activation is never displaced.** A `vetoed` for its transition changes no state; it is
   equivocation evidence against every witness that receipted the veto (§13.3).
 - **A provisional activation, removal-only or not, is displaced by a valid `vetoed` of its own
@@ -865,9 +874,10 @@ no theft safety.**
 
 #### The state machine
 
-This table is normative; the prose above defines its terms. State is §17.2's. The events
-partition the entries: each entry matches exactly one row (`suspend`, `vault` and full-set
-activations only their own). "S" is the state immediately before the entry; every check fails
+This table is normative; the prose above defines its terms. State is §17.2's. The **kind rows**
+(all but the last two) partition the entries: each entry matches exactly one (`suspend`, `vault`
+and full-set activations only their own). **Conflict** and **Clock** are meta-events, applied
+after an entry has been classified by its kind row. "S" is the state immediately before the entry; every check fails
 with the result shown, and an entry that fails changes nothing. Every recording entry has
 `issued` determined as shown; another value is `malformed`.
 
@@ -1321,8 +1331,11 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   an honest primary an immediate entry's `issued` is its admission time to within 300 s.
 - **Admitting pending objects.** A home receipts a transition when, against its latest state, the
   transition meets §8.7's validity except receipts, its delta is not void, and its clock is between
-  the transition's `issued` and 300 s after it. Admission is deterministic, in this order, and a
-  full home refuses; it never evicts:
+  the transition's `issued` and 300 s after it. Admission under a full cap is local and depends on
+  arrival, by design: a full home refuses and never evicts, and two homes may admit different
+  transitions. What is deterministic is the checking order below, the named result, and that
+  validity never depends on which home admitted what, only on receipts reaching `headQuorum`.
+  Hosts refused at one home retry at the others.
   1. each `control` or `recover` unit may have at most 2 pending transitions it proposed
      (`refused:proposerFull`);
   2. the account may have at most 2 pending transitions per such unit, so no set of proposers can

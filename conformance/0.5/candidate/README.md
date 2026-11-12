@@ -1,7 +1,7 @@
 # Colophon 0.5 candidate vectors
 
 **Status: hand-built for review, not replayed by any 0.5 implementation.** These files go with
-[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 8. No 0.5 verifier exists yet,
+[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 9. No 0.5 verifier exists yet,
 so every `expected` outcome for 0.5 is the spec author's reading of the text. The bytes are
 real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256 (raw, or
 WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except
@@ -45,10 +45,10 @@ reproduces them byte for byte.
 
 ## What was run
 
-- `generate.py --check`: 1,016 generated files match. The directory holds 1,022 files: those plus
+- `generate.py --check`: 1,022 generated files match. The directory holds 1,028 files: those plus
   six sources (`README.md`, `generate.py`, `rules.py`, `rules_v8.py`, and the probe's
   `Package.swift` and `main.swift`).
-- The fifth reviewer's signature checker (`sigcheck5.py`): 2,185 signatures, including heads in
+- The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
   intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).
 - **0.4 engine** on `upgrade/*`: `newerFormat` everywhere except `foreign-signer` (`badSignature`).

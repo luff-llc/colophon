@@ -148,6 +148,10 @@ whether it is final and which homes it still needs; and per unit, v(u).
 > two services: if one is down, removals still work and new keys wait; if one turns dishonest
 > while someone also has one of your keys, you can lose the account.
 
+**One recovery controller.** An immediate full recovery needs at least two signer units, so an
+account with a single recovery controller recovers only by a pending transition, after the delay
+and open to veto. Two security keys, kept apart, are the setup advice.
+
 What the reference setup protects, plainly:
 - **Eventual control of the keyring.**
 - **Not** confidentiality of data a stolen key could already read: a recovery key with a slot,
@@ -195,3 +199,4 @@ without stopping either thief. What protects the owner is the veto window.
 | 2026-11-12 | Opus and Codex, fifth reviews of revision 5; engine builder (28 questions) | H1–H5, M1–M8, lows; 4 High, 6 Medium; 28 ambiguities, 4 vectors | Revision 6; changes §G.9 |
 | 2026-11-12 | Opus and Codex, sixth reviews of revision 6; engine attack (12 gaps) | H1–H6, M1–M11, lows; 3 High, 5 Medium; 12 gaps | Revision 7; changes §G.10 |
 | 2026-11-12 | Codex, second review of revision 7 | 5 High, 4 Medium, 2 Low | Revision 8; changes §G.11 |
+| 2026-11-12 | Codex, review of revision 8 | 1 High, 4 Medium, 1 Low | Revision 9; changes §G.12 |
