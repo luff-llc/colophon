@@ -118,6 +118,10 @@ struct Loaded {
     namespaces: Vec<String>,
     /// Embedded transition body digests and the seq of their `activate`.
     activations: Vec<(String, u64)>,
+    /// Suspended keys and the instant their suspension ends.
+    suspensions: Vec<(String, i64)>,
+    /// Activation seqs a `final` entry covers.
+    finals: Vec<u64>,
     undecidable: bool,
 }
 
@@ -142,6 +146,8 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, (u64, Failure)> {
         points: BTreeSet::new(),
         namespaces: Vec::new(),
         activations: Vec::new(),
+        suspensions: Vec::new(),
+        finals: Vec::new(),
         undecidable: false,
     };
     for (i, f) in files.iter().enumerate() {
@@ -186,7 +192,10 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, (u64, Failure)> {
             {
                 l.undecidable = true;
             }
-        } else if header.kind != "activate" && header.kind != "vetoed" {
+        } else if !matches!(
+            header.kind.as_str(),
+            "activate" | "vetoed" | "final" | "successionVetoed"
+        ) {
             return Err(fail(Failure::Malformed("missing signature".into())));
         }
         for (list, rule) in [
@@ -299,10 +308,18 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, (u64, Failure)> {
                 }
             }
             "suspend" => {
-                let key = value["key"].as_str().unwrap();
-                if let Some((_, st)) = l.controllers.get_mut(key) {
-                    *st = ControllerStatus::Suspended;
-                }
+                // Ends by the clock at the transition's due time + 7 days (§8.7 state table).
+                let key = value["key"].as_str().unwrap().to_string();
+                let t_env =
+                    strict_parse(&b64(value["transition"].as_str().unwrap())).map_err(fail)?;
+                let t: Value =
+                    serde_json::from_slice(&b64(t_env["body"].as_str().unwrap())).unwrap();
+                let delay = l.policies.last().unwrap().1.recovery_delay() as i64;
+                let due = ms(t["issued"].as_str().unwrap()) + 300_000 + delay * 1000;
+                l.suspensions.push((key, due + 7 * 86_400_000));
+            }
+            "final" => {
+                l.finals.push(value["activation"]["seq"].as_u64().unwrap());
             }
             other => {
                 return Err((
@@ -351,33 +368,20 @@ fn view_of(l: &Loaded, dir: &Path, case: &Value, now: i64) -> Result<AccountView
         .iter()
         .map(|p| fs::read(p).unwrap())
         .collect();
-    let max_age = l.policies.last().unwrap().1.head_max_age();
-    // Heads by the homes that are final so far, resolved activation by activation.
+    // Finality is a recorded fact (§8.7): an activation is final when its witness set (the homes
+    // current before it) is empty or a `final` entry covers it. Heads seen never decide.
     let mut final_member: Vec<bool> = l.members.iter().map(|m| !m.provisional).collect();
     let mut final_seq: BTreeSet<u64> = BTreeSet::new();
     for (_, aseq) in &l.activations {
-        let homes_before: Vec<(String, Vec<u8>)> = l
+        let witnesses = l
             .members
             .iter()
             .zip(&final_member)
             .filter(|(m, f)| {
                 **f && m.granted < *aseq && m.terms.serves_home() && m.revoked.is_none()
             })
-            .map(|(m, _)| (m.req.member_id(), m.req.signing.clone()))
-            .collect();
-        let covered = homes_before.iter().all(|(id, _)| {
-            heads.iter().any(|h| {
-                let ctx = HeadContext {
-                    account: &l.account,
-                    history: &l.history,
-                    homes: &homes_before,
-                    now_ms: now,
-                };
-                verify_head(h, ctx)
-                    .is_ok_and(|h| h.by() == id && h.seq() >= *aseq && h.fresh(now, max_age))
-            })
-        });
-        if covered {
+            .count();
+        if witnesses == 0 || l.finals.contains(aseq) {
             final_seq.insert(*aseq);
             for (m, f) in l.members.iter().zip(final_member.iter_mut()) {
                 if m.granted == *aseq {
@@ -392,6 +396,13 @@ fn view_of(l: &Loaded, dir: &Path, case: &Value, now: i64) -> Result<AccountView
             && vs.first().is_some_and(|(s, _)| final_seq.contains(s))
         {
             *st = ControllerStatus::Active;
+        }
+    }
+    for (key, ends) in &l.suspensions {
+        if now <= *ends {
+            if let Some((_, st)) = controllers.get_mut(key) {
+                *st = ControllerStatus::Suspended;
+            }
         }
     }
     // Pending transitions: a transition object no `activate` embeds.
@@ -445,6 +456,24 @@ fn view_of(l: &Loaded, dir: &Path, case: &Value, now: i64) -> Result<AccountView
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    // Statuses a vector states (`verifier.statuses`) must agree with what the loader derived.
+    if let Some(stated) = case["verifier"]["statuses"]["controllers"].as_object() {
+        for (id, st) in stated {
+            let want = match st.as_str().unwrap_or("") {
+                "pendingAddition" => ControllerStatus::PendingAddition,
+                "pendingRemoval" => ControllerStatus::PendingRemoval,
+                "suspended" => ControllerStatus::Suspended,
+                "addedNotFinal" => ControllerStatus::AddedNotFinal,
+                other => return Err(format!("unknown status {other}")),
+            };
+            let got = controllers.get(id).map(|(_, s)| *s);
+            if got != Some(want) {
+                return Err(format!(
+                    "status of {id}: vector says {want:?}, loader derived {got:?}"
+                ));
+            }
+        }
+    }
     let controllers = controllers
         .into_iter()
         .map(|(id, (vs, st))| ViewController::new(id, vs, st))
@@ -645,7 +674,7 @@ fn run_veto_sig(dir: &Path, case: &Value) -> Outcome {
     let cs = parse_controllers(&body_of(&g)["keyring"]).unwrap();
     let veto = json(&dir.join("veto.json"));
     let body = b64(veto["body"].as_str().unwrap());
-    let v = canonical_body(&body, bounds::RECEIPT_BODY).unwrap();
+    let v = canonical_body(&body, bounds::VETO_BODY).unwrap();
     let Some(signer) = cs.iter().find(|c| c.id() == v["by"].as_str().unwrap()) else {
         return Outcome::Fail("veto signer is not the fixture passkey".into());
     };
@@ -674,6 +703,36 @@ fn run_veto_sig(dir: &Path, case: &Value) -> Outcome {
     } else {
         Outcome::Fail(format!("expected {want}, got {}", detail(&got)))
     }
+}
+
+fn run_number_ties() -> Vec<(String, Outcome)> {
+    let d = json(&cand().join("encoding/number-ties.json"));
+    d["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let bits = u64::from_str_radix(c["bits"].as_str().unwrap(), 16).unwrap();
+            let f = f64::from_bits(bits);
+            let canon = c["canonical"].as_str().unwrap();
+            let refused = c["refused"].as_str().unwrap();
+            let wrote = String::from_utf8(
+                colophon_core::v05::encoding::canonical(&serde_json::json!(f)).unwrap(),
+            )
+            .unwrap();
+            let ok = wrote == canon
+                && canonical_body(format!("{{\"n\":{canon}}}").as_bytes(), 64).is_ok()
+                && canonical_body(format!("{{\"n\":{refused}}}").as_bytes(), 64).is_err();
+            (
+                format!("encoding/number-ties.json:{}", c["bits"].as_str().unwrap()),
+                if ok {
+                    Outcome::Pass("canonical tie spelling".into())
+                } else {
+                    Outcome::Fail(format!("wrote {wrote}"))
+                },
+            )
+        })
+        .collect()
 }
 
 fn run_identifiers() -> Vec<(String, Outcome)> {
@@ -748,6 +807,7 @@ fn classify(rel: &str) -> Option<&'static str> {
 #[test]
 fn candidate_conformance() {
     let mut results: Vec<(String, Outcome)> = run_identifiers();
+    results.extend(run_number_ties());
     let mut dirs = Vec::new();
     for top in [
         "account",

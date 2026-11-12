@@ -13,10 +13,16 @@ use sha2::{Digest, Sha256};
 pub mod bounds {
     /// Authority body (`/5`).
     pub const AUTHORITY_BODY: usize = 1_048_576;
-    /// Receipt or veto body.
-    pub const RECEIPT_BODY: usize = 1_024;
-    /// Transition body.
-    pub const TRANSITION_BODY: usize = 1_048_576;
+    /// Transition envelope (its body is bounded by the envelope).
+    pub const TRANSITION_ENVELOPE: usize = 622_592;
+    /// Veto envelope.
+    pub const VETO_ENVELOPE: usize = 131_072;
+    /// Veto body.
+    pub const VETO_BODY: usize = 4_096;
+    /// Receipt envelope.
+    pub const RECEIPT_ENVELOPE: usize = 1_024;
+    /// Receipt body.
+    pub const RECEIPT_BODY: usize = 512;
     /// Membership request body.
     pub const REQUEST_BODY: usize = 16_384;
     /// Link body.
@@ -33,6 +39,16 @@ pub mod bounds {
     pub const OPERATION_HEADER_BODY: usize = 16_777_216;
     /// WebAuthn `clientData`.
     pub const CLIENT_DATA: usize = 8_192;
+    /// The bounds compose (§2.4): the largest recording entry, a `vetoed` at `headQuorum` 8,
+    /// embeds base64 of a transition envelope, a veto envelope and 16 receipt envelopes plus at
+    /// most 2,048 bytes of header and punctuation, and still fits the authority bound.
+    pub const COMPOSED_VETOED_AT_QUORUM_8: usize =
+        b64(TRANSITION_ENVELOPE) + b64(VETO_ENVELOPE) + 16 * b64(RECEIPT_ENVELOPE) + 2_048;
+    const _: () = assert!(COMPOSED_VETOED_AT_QUORUM_8 <= AUTHORITY_BODY);
+    /// Length of the standard padded base64 of `n` bytes: 4⌈n/3⌉.
+    pub const fn b64(n: usize) -> usize {
+        n.div_ceil(3) * 4
+    }
     /// Largest integer in a field defined by the spec (§2.2): 2^53 − 1.
     pub const MAX_INTEGER: u64 = (1 << 53) - 1;
 }
@@ -86,8 +102,46 @@ fn write_canonical(value: &Value, out: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-/// Parse with the strict pass: duplicate member names at any depth are `malformed` (§2.3).
+/// Values nest at most this many containers deep (§2.3).
+pub const MAX_NESTING: usize = 64;
+
+/// True when no value in `bytes` nests deeper than [`MAX_NESTING`] containers. A linear scan
+/// that tracks strings and escapes, run before parsing so depth never costs stack.
+fn nesting_ok(bytes: &[u8]) -> bool {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for &b in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_NESTING {
+                    return false;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Parse with the strict pass: duplicate member names at any depth, lone surrogates and
+/// nesting deeper than 64 containers are `malformed` (§2.3).
 pub fn strict_parse(bytes: &[u8]) -> Result<Value> {
+    require(
+        nesting_ok(bytes),
+        "values nest more than 64 containers deep",
+    )?;
     crate::keys::strict_json::parse(bytes).map_err(|e| malformed(format!("JSON: {}", e.0)))
 }
 

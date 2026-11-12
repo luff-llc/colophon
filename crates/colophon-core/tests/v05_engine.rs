@@ -23,16 +23,18 @@ use colophon_core::v05::{
     },
     replay::{retained, MemoryReplayStore, ReplayState, ReplayStore, MAX_WINDOW_MS, RETENTION_MS},
     signature::{
-        parse_der, verify_authority_signature, verify_webauthn, AssertionBytes, AuthorityRule,
-        Checked, OriginRule, SigFailure, Strictness,
+        parse_der, verify_authority_signature, AssertionBytes, AuthorityRule, Checked, SigFailure,
     },
     terms::{Terms, TermsKind},
     Reason,
 };
+#[path = "v05_attack_support/mod.rs"]
+mod support;
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use support::webauthn::{verify_webauthn, OriginRule, Strictness};
 
 // ---------------------------------------------------------------------------------------
 // A tiny deterministic PRNG (no new dependency).
@@ -1731,7 +1733,7 @@ fn json_spec_gaps_take_the_safe_reading() {
         wa(&a, &w, b"{}", &d, client, false, OriginRule::General),
         Err(SigFailure::ClientData)
     );
-    // Nesting: 127 levels parse, 129 don't, and neither overflows the stack.
+    // Nesting: 64 levels parse, 65 do not, and neither overflows the stack.
     let deep = |n: usize| {
         format!(
             "{}{}",
@@ -1739,8 +1741,8 @@ fn json_spec_gaps_take_the_safe_reading() {
             "1".to_string() + &"}".repeat(n)
         )
     };
-    assert!(strict_parse(deep(127).as_bytes()).is_ok());
-    assert!(strict_parse(deep(129).as_bytes()).is_err());
+    assert!(strict_parse(deep(64).as_bytes()).is_ok());
+    assert!(strict_parse(deep(65).as_bytes()).is_err());
     assert!(strict_parse(deep(100_000).as_bytes()).is_err());
     // Ryū picks the shortest round-tripping decimal; spot-check values with two candidates.
     for (f, s) in [
@@ -2120,7 +2122,7 @@ fn a_malleated_signature_is_the_same_reservation() {
 }
 
 #[test]
-fn nesting_bound_is_127() {
+fn nesting_bound_is_64() {
     let obj = |n: usize| {
         format!(
             "{}{}",
@@ -2133,5 +2135,5 @@ fn nesting_bound_is_127() {
         .last()
         .unwrap();
     println!("deepest accepted nesting: {max}");
-    assert_eq!(max, 127);
+    assert_eq!(max, 64);
 }

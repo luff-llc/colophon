@@ -429,7 +429,9 @@ fn parse_link(text: &Value, first: bool, unknown: &mut Unknown) -> Result<Link> 
         "session is present exactly on the first link",
     )?;
     let terms = Terms::parse(o.value("terms")?, TermsKind::Link)?;
-    unknown.0.extend(terms.unknown().0.iter().cloned());
+    unknown
+        .0
+        .extend(terms.unknown_outside_conditions().0.iter().cloned());
     let (_, not_before_ms) = o.date("notBefore")?;
     let (_, expires_ms) = o.date("expires")?;
     let _created = o.date("created")?;
@@ -818,18 +820,25 @@ pub fn verify_call(
             member = Some(m);
         }
     }
-    // 6. Chain, link by link.
+    // 6. Chain: first every binding and the acting key (badSignature), then link by link.
     if let Some(m) = member {
         let mut prev_key: &[u8] = &m.signing;
-        let mut prev_terms: &Terms = &m.terms;
-        let mut prev_expiry: Option<i64> = m.expiry_at(s);
-        for (i, l) in call.links.iter().enumerate() {
+        for l in &call.links {
             require_sig(
                 l.env.verify(prev_key).is_ok()
                     && l.account == call.account
                     && l.from == key_id(prev_key),
                 "link does not verify under the previous key, or names another account or from",
             )?;
+            prev_key = &l.to;
+        }
+        require_sig(
+            call.key == prev_key,
+            "the acting key is not the last link's to.signing",
+        )?;
+        let mut prev_terms: &Terms = &m.terms;
+        let mut prev_expiry: Option<i64> = m.expiry_at(s);
+        for (i, l) in call.links.iter().enumerate() {
             if i == 0 {
                 require_refused(
                     l.session == Some(m.end_sessions.len() as u64),
@@ -848,14 +857,9 @@ pub fn verify_call(
                     "a link's to.signing is a principal's key (§3.3 rule 4)",
                 ));
             }
-            prev_key = &l.to;
             prev_terms = &l.terms;
             prev_expiry = Some(l.expires_ms);
         }
-        require_sig(
-            call.key == prev_key,
-            "the acting key is not the last link's to.signing",
-        )?;
     }
     // 7. Purpose. Conditions are three-valued: false refuses, unknown waits for step 8.
     let at_home = cfg.home_endpoints.iter().any(|e| e == &call.audience)
@@ -888,7 +892,7 @@ pub fn verify_call(
     // terms supplied by the view; an undecided condition; a key of unknown form.
     call.unknown.check()?;
     if let Some(m) = member {
-        m.terms.unknown().check()?;
+        m.terms.unknown_outside_conditions().check()?;
     }
     if condition_unknown {
         return Err(Failure::NewerFormat(

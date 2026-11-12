@@ -26,3 +26,63 @@ impl Rng {
         (0..n).map(|_| self.next() as u8).collect()
     }
 }
+
+/// Test-only adapter: the old raw `verify_webauthn(…, OriginRule, Strictness)` call shape,
+/// mapped onto the public, rule-bound `webauthn_check`. `General` is the call mode with the
+/// asserted origin as the only call origin, so it tests the general rule alone.
+pub mod webauthn {
+    use colophon_core::v05::descriptor::{KeyDescriptor, WebAuthnKey};
+    use colophon_core::v05::signature::{
+        webauthn_check, AssertionBytes, AuthorityRule, CheckMode, SigFailure, WebAuthnOk,
+    };
+    #[derive(Clone, Copy, Debug)]
+    pub enum OriginRule<'a> {
+        Authority,
+        General,
+        Call(&'a [String]),
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Strictness {
+        Current,
+        SwiftPredecessor,
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_webauthn(
+        signing: &[u8],
+        key: &WebAuthnKey,
+        body: &[u8],
+        sig: &[u8],
+        a: AssertionBytes<'_>,
+        uv: bool,
+        rule: OriginRule<'_>,
+        strict: Strictness,
+    ) -> Result<WebAuthnOk, SigFailure> {
+        let d = KeyDescriptor::new_webauthn(signing.to_vec(), key.clone())
+            .map_err(|_| SigFailure::Point)?;
+        let asserted: Vec<String> = serde_json::from_slice::<serde_json::Value>(a.client_data)
+            .ok()
+            .and_then(|v| {
+                v.get("origin")
+                    .and_then(|o| o.as_str())
+                    .map(|o| vec![o.to_string()])
+            })
+            .unwrap_or_default();
+        let mode = match (strict, rule) {
+            (Strictness::SwiftPredecessor, _) => CheckMode::SwiftPredecessor { uv_required: uv },
+            (_, OriginRule::Authority) => CheckMode::Authority {
+                rule: AuthorityRule::Single,
+                verification: uv,
+                sign_controller: false,
+            },
+            (_, OriginRule::General) => CheckMode::Call {
+                origins: &asserted,
+                uv_required: uv,
+            },
+            (_, OriginRule::Call(o)) => CheckMode::Call {
+                origins: o,
+                uv_required: uv,
+            },
+        };
+        webauthn_check(&d, body, sig, a, mode)
+    }
+}

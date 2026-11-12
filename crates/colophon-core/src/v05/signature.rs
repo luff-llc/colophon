@@ -133,7 +133,7 @@ fn der_integer(bytes: &[u8], at: &mut usize) -> Result<[u8; 32], SigFailure> {
 
 /// The origin rule a WebAuthn signature is checked under.
 #[derive(Clone, Copy, Debug)]
-pub enum OriginRule<'a> {
+pub(crate) enum OriginRule<'a> {
     /// Authority signatures (§4.3 "Authority origins"): authority entries, transitions,
     /// vetoes, `additions` and `handover` items. Prefer [`verify_authority_signature`], which
     /// also applies each rule's UV requirement.
@@ -151,7 +151,7 @@ pub enum OriginRule<'a> {
 /// that a Swift controller has no `origins` or `authorityOrigins`, so its origin is checked by
 /// the general rule alone, whatever rule an authority entry would otherwise use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Strictness {
+pub(crate) enum Strictness {
     /// A 0.5 object.
     Current,
     /// An entry of a `colophon/swift-keyring/2` predecessor (§16.3).
@@ -191,7 +191,7 @@ fn check_client(body: &[u8], client_data: &[u8]) -> Result<Client, SigFailure> {
     if client_data.len() > bounds::CLIENT_DATA {
         return Err(SigFailure::ClientDataBound);
     }
-    let value = crate::keys::strict_json::parse(client_data).map_err(|_| SigFailure::ClientData)?;
+    let value = super::encoding::strict_parse(client_data).map_err(|_| SigFailure::ClientData)?;
     let map = value.as_object().ok_or(SigFailure::ClientData)?;
     if map.get("type").and_then(|v| v.as_str()) != Some("webauthn.get") {
         return Err(SigFailure::Type);
@@ -228,7 +228,7 @@ fn check_der_signature(
 /// Verify a WebAuthn signature under all of §4.3, in order. `uv_required` is the controller's
 /// `verification` combined with any "with UV" rule. Returns the UV bit and the origin.
 #[allow(clippy::too_many_arguments)]
-pub fn verify_webauthn(
+pub(crate) fn verify_webauthn(
     signing: &[u8],
     key: &WebAuthnKey,
     body: &[u8],
@@ -291,28 +291,79 @@ pub fn verify_assertion_possession(
     Ok(client.origin)
 }
 
-/// The standalone WebAuthn check (§17.2): `Ok` with the UV bit, or the failed check.
+/// How the standalone WebAuthn check (§17.2) judges an assertion. Authority signatures take
+/// their origin rule and UV requirement from the [`AuthorityRule`]; there is no public way to
+/// check an authority signature under a weaker origin rule or without its UV.
+#[derive(Clone, Copy, Debug)]
+pub enum CheckMode<'a> {
+    /// An authority signature under `rule`, by a controller with `verification` or not.
+    Authority {
+        /// The rule the signature is counted under.
+        rule: AuthorityRule,
+        /// The controller's `verification`.
+        verification: bool,
+        /// True for a `sign` controller (its possession proof uses the general rule).
+        sign_controller: bool,
+    },
+    /// A call: the general rule, then exactly one of the configured call-ceremony `origins`.
+    Call {
+        /// Call-ceremony origins configured for the descriptor's `rp`.
+        origins: &'a [String],
+        /// UV required (the controller's `verification`).
+        uv_required: bool,
+    },
+    /// An entry of a Swift predecessor (§16.3): the general rule with no `origins`.
+    SwiftPredecessor {
+        /// UV required by §16.3's rule or the controller.
+        uv_required: bool,
+    },
+}
+
+/// The standalone WebAuthn check (§17.2, contract R2): `Ok` with the UV bit, or the failed check.
 pub fn webauthn_check(
     descriptor: &KeyDescriptor,
     body: &[u8],
     der_signature: &[u8],
     assertion: AssertionBytes<'_>,
-    uv_required: bool,
-    rule: OriginRule<'_>,
+    mode: CheckMode<'_>,
 ) -> Result<WebAuthnOk, SigFailure> {
     if descriptor.is_unknown_form() {
         return Err(SigFailure::UnknownForm);
     }
     let key = descriptor.webauthn().ok_or(SigFailure::Form)?;
+    let (rule, uv, strictness) = match mode {
+        CheckMode::Authority {
+            rule,
+            verification,
+            sign_controller,
+        } => (
+            if rule == AuthorityRule::Possession && sign_controller {
+                OriginRule::General
+            } else {
+                OriginRule::Authority
+            },
+            verification || rule.requires_uv(),
+            Strictness::Current,
+        ),
+        CheckMode::Call {
+            origins,
+            uv_required,
+        } => (OriginRule::Call(origins), uv_required, Strictness::Current),
+        CheckMode::SwiftPredecessor { uv_required } => (
+            OriginRule::General,
+            uv_required,
+            Strictness::SwiftPredecessor,
+        ),
+    };
     verify_webauthn(
         descriptor.signing(),
         key,
         body,
         der_signature,
         assertion,
-        uv_required,
+        uv,
         rule,
-        Strictness::Current,
+        strictness,
     )
 }
 
@@ -429,11 +480,23 @@ impl RawEnvelope {
     /// within `bound`. With `embedded`, the envelope bytes themselves must also be canonical
     /// (§2.2: embedded envelopes are base64 of canonical JSON). No signature is checked here.
     pub fn parse(bytes: &[u8], bound: usize, embedded: bool) -> super::Result<Self> {
+        Self::parse_bounded(
+            bytes,
+            bound,
+            bound.saturating_mul(2).saturating_add(4_096),
+            embedded,
+        )
+    }
+    /// As [`RawEnvelope::parse`], with an explicit bound on the envelope bytes (§2.4: receipt
+    /// envelopes 1,024 bytes).
+    pub fn parse_bounded(
+        bytes: &[u8],
+        bound: usize,
+        envelope_bound: usize,
+        embedded: bool,
+    ) -> super::Result<Self> {
         use super::encoding::{canonical_body, decode_base64, strict_parse, Obj};
-        super::require(
-            bytes.len() <= bound.saturating_mul(2).saturating_add(4_096),
-            "envelope exceeds its bound",
-        )?;
+        super::require(bytes.len() <= envelope_bound, "envelope exceeds its bound")?;
         let value = if embedded {
             canonical_body(bytes, usize::MAX)?
         } else {
