@@ -955,3 +955,48 @@ write("rules/keys-r4.json", {"warning": "PUBLIC TEST SECRETS. Never use these ke
                                       + [(f"rate/{i}", derived(f"r5/rate/{i}")) for i in range(65)]
                                       + [(f"plant/{i}", k) for i, k in enumerate(plant)]
                                       + [(f"five/{i}", k) for i, k in enumerate(five)]}})
+
+# Corrections after revision 11: builder questions 4 and 5.
+# An addition loses all of its witnesses through two later, final recovery revocations.
+exc = base.copy(); activate(exc, t_addc, [rec(t_addc)])
+exc_at1 = DUE0 + 60
+exc_t1 = prop({"homes": {"revoke": [H1K.id]}}, [K1], at=exc_at1, chain=exc)
+activate(exc, exc_t1, [receipt_of(acct, exc_t1, H2K, ts(exc_at1 + 1))])
+exc_due1 = exc_at1 + W + D
+final_of(exc, 4, [head5(exc, H2K, exc_due1 + 10, seq=4)])
+exc_at2 = exc_due1 + 60
+exc_t2 = prop({"homes": {"revoke": [H2K.id]}}, [K1], at=exc_at2, chain=exc)
+activate(exc, exc_t2, [receipt_of(acct, exc_t2, H2K, ts(exc_at2 + 1))])
+exc_due2 = exc_at2 + W + D
+# No home remains; no `final` with empty heads is constructed.
+grant_agent(exc, NEW, ts(exc_due2 + 60), NEW)
+case("t-all-witnesses-excused", exc,
+     {"result": "ok", "seq": 7, "finality": {"3": "final", "4": "final", "6": "final"}},
+     "Both original witnesses are finally revoked by recovery transitions. The earlier addition becomes final without an empty final, so NEW may sign.",
+     ["8.7"], verifier=VER(exc_due2 + 120))
+
+# Two activations of T with different receipts, with a final covering only the higher digest:
+# low beats high by digest, high beats vetoed by finality, vetoed beats low. No universal winner.
+cy_t = prop({"keyring": {"remove": [B.id]}}, [A])
+cy_r1 = rec(cy_t); cy_r2 = receipt_of(acct, cy_t, H2K, ts(R0 + 2))
+cy_a1 = base.copy(); activate(cy_a1, cy_t, [cy_r1])
+cy_a2 = base.copy(); activate(cy_a2, cy_t, [cy_r2])
+cy_lo, cy_hi = sorted([cy_a1, cy_a2], key=lambda c_: sha(c_.last))
+final_of(cy_hi, 3, [head5(cy_hi, h, DUE0 + 30, seq=3) for h in (H1K, H2K)])
+cy_v = veto_of(acct, cy_t, [Ph], ts(R0 + 600))
+cy_vc = base.copy(); record_veto(cy_vc, cy_t, [cy_r1], cy_v, [rec(cy_v, at=R0 + 601)])
+case("t-three-candidate-cycle", cy_vc, {"result": "refused:fork", "seq": 3},
+     "Three valid candidates form a comparison cycle: low-digest activate, final-covered activate, and vetoed. Keep all as an unresolved fork.",
+     ["8.6"], verifier=VER(DUE0 + 60),
+     branches={"low": [(3, cy_lo.envs[2])], "high": [(3, cy_hi.envs[2]), (4, cy_hi.envs[3])]})
+
+# A unique winner may occur after an undecidable pair in digest order.
+win_cs = []
+for i in range(3):
+    wc = base.copy(); grant_agent(wc, A, ts(R0), A, key=derived(f"post11/winner/{i}"), agree=derived(f"post11/winner/{i}/agreement"))
+    win_cs.append(wc)
+win_cs.sort(key=lambda c_: sha(c_.last))
+case("t-three-candidate-winner", base, {"standsAtSeq3": sha(win_cs[2].last)},
+     "Only the greatest-digest candidate has a quorum head. It beats each other candidate even though their mutual comparison is undecided.",
+     ["8.6"], {"head-winner": head5(win_cs[2], H1K, R0 + 30)}, VER(R0 + 60),
+     branches={str(i): [(3, wc.envs[2])] for i, wc in enumerate(win_cs)})

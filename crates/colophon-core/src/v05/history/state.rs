@@ -1420,6 +1420,25 @@ fn make_final(n: &mut State, seq: u64) {
     }
 }
 
+/// Excusals can make other activations final, including removals that excuse more homes.
+/// Reach the least fixed point after an entry; no empty `final` object is needed.
+fn finalize_empty_witnesses(n: &mut State) {
+    loop {
+        let ready: Vec<u64> = n
+            .activations
+            .iter()
+            .filter(|a| !a.final_ && a.witnesses.iter().all(|h| n.excused.contains(h)))
+            .map(|a| a.seq)
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        for seq in ready {
+            make_final(n, seq);
+        }
+    }
+}
+
 fn witnesses_of(s: &State, t: &TCheck, after: Option<&State>) -> BTreeSet<String> {
     let mut w: BTreeSet<String> = s
         .current_homes()
@@ -1482,6 +1501,7 @@ pub(crate) fn apply(
         }
         _ => immediate(s, e)?,
     };
+    finalize_empty_witnesses(&mut n);
     // Suspensions end with an entry past their due time + 7 days, or when the entry makes
     // their transition invalid at a hypothetical activate.
     let issued = e.issued;
@@ -2664,11 +2684,11 @@ pub(crate) fn resolve_conflict(
     heads: &HeadSet,
     all: Vec<&Entry>,
 ) -> Option<usize> {
-    let mut winner = 0usize;
-    for j in 1..valid.len() {
-        winner = pair(s, valid, winner, j, heads, &all)?;
-    }
-    Some(winner)
+    // The pairwise rules need not be transitive. A fold can return a loser in a
+    // cycle, or stop at an unresolved pair before reaching a candidate that beats both.
+    // Stand only a candidate that wins against every other valid candidate (§8.6).
+    (0..valid.len())
+        .find(|&i| (0..valid.len()).all(|j| i == j || pair(s, valid, i, j, heads, &all) == Some(i)))
 }
 fn pair(
     s: &State,

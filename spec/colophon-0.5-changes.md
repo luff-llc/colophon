@@ -774,6 +774,13 @@ the machinery it makes redundant.
 | "Outnumbers" is sufficient, not necessary | §8.7 "Liveness of recovery" |
 | Stale unconditional wording | changes rows 85, 89, B.4 34; §8.4 |
 
+### G.15 Engine corrections after revision 11
+
+| Finding | Correction |
+| --- | --- |
+| Builder question 4: every witness later excused | §8.7 finality: after each entry, an empty remaining witness set makes the activation final without an empty `final`; repeat to a fixed point. `t-all-witnesses-excused` |
+| Builder question 5: non-transitive comparisons | §8.6: with three or more valid candidates, stand only one that wins every pairwise comparison; otherwise an unresolved fork, including cycles. `t-three-candidate-cycle`, `t-three-candidate-winner` |
+
 ## H. Theft and loss, worked through
 
 **Reference person:** a Mac device key M (with the vault slot), a phone device key Ph and a synced

@@ -311,3 +311,76 @@ fn no_panics_on_hostile_objects() {
     }
     assert!(runs > 3_000, "{runs}");
 }
+
+fn vector(name: &str) -> (Objects, i64) {
+    let dir = cand().join("rules").join(name);
+    let case: Value = serde_json::from_slice(&fs::read(dir.join("case.json")).unwrap()).unwrap();
+    (
+        objects_of(&dir),
+        parse_date(case["verifier"]["now"].as_str().unwrap()).unwrap(),
+    )
+}
+fn body_digest(env: &[u8]) -> String {
+    let env: Value = serde_json::from_slice(env).unwrap();
+    colophon_core::v05::encoding::digest(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
+}
+
+#[test]
+fn all_witnesses_excused_makes_addition_final_without_empty_final() {
+    let (objects, now) = vector("t-all-witnesses-excused");
+    // Revoking the first home is final, but the addition still needs the other home.
+    let prefix = Objects {
+        entries: objects.entries[..5].to_vec(),
+        ..Default::default()
+    };
+    let v = verify_history(&prefix, &Persisted::default(), now);
+    assert_eq!(v.code(), "ok");
+    assert!(
+        !v.state
+            .unwrap()
+            .activations()
+            .iter()
+            .find(|a| a.seq == 3)
+            .unwrap()
+            .final_
+    );
+    // Revoking the last home makes the addition final; its added key may sign seq 7.
+    let v = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!((v.code(), v.seq()), ("ok".into(), 7));
+    assert!(v.state.unwrap().activations().iter().all(|a| a.final_));
+}
+
+#[test]
+fn three_candidate_comparison_cycle_is_an_unresolved_fork() {
+    let (objects, now) = vector("t-three-candidate-cycle");
+    let dir = cand().join("rules/t-three-candidate-cycle");
+    let low = body_digest(&files(&dir.join("branch-low/authority"))[0]);
+    let high = body_digest(&files(&dir.join("branch-high/authority"))[0]);
+    let vetoed = body_digest(&files(&dir.join("records/authority"))[2]);
+    // Prove the cycle from actual verification of each two-candidate subset.
+    for (excluded, winner) in [(&vetoed, &low), (&low, &high), (&high, &vetoed)] {
+        let mut pair = objects.clone();
+        pair.entries.retain(|e| body_digest(e) != *excluded);
+        let v = verify_history(&pair, &Persisted::default(), now);
+        assert_eq!(v.code(), "ok");
+        assert_eq!(v.branch.get(2), Some(winner));
+    }
+    let v = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!((v.code(), v.seq()), ("refused:fork".into(), 3));
+    assert!(
+        v.conflicts.is_empty(),
+        "no candidate can be dropped in a cycle"
+    );
+}
+
+#[test]
+fn three_candidates_find_winner_despite_undecided_losing_pair() {
+    let (objects, now) = vector("t-three-candidate-winner");
+    let v = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!((v.code(), v.seq()), ("ok".into(), 3));
+    let winner =
+        body_digest(&files(&cand().join("rules/t-three-candidate-winner/branch-2/authority"))[0]);
+    assert_eq!(v.branch.get(2), Some(&winner));
+    assert_eq!(v.conflicts.len(), 1);
+    assert_eq!(v.conflicts[0].2.len(), 2);
+}

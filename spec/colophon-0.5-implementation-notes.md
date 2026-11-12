@@ -92,9 +92,9 @@ Implemented, following the state table:
 | --- | --- | --- | --- | --- |
 | 1 | §8.7 "Choosing receipts" | A verifier can't know which receipts the entry's builder held, so it can't check "the lowest member IDs whose valid receipts it holds" | Checked: exactly `headQuorum` valid receipts from distinct current homes, sorted by home. Differing choices for one transition are decided by §8.6 (lower body digest). | `rules/t-activate-differing-receipts` |
 | 2 | §8.7 "dead" transitions vs "Revoking a home" | Does "revoked before activation" mean activated or final? | Final: a home stays current until its revocation is final. | `t-receipt-by-revoked-home` |
-| 3 | §8.7 "Finality", `final` row | Homes excused by a removal-only `final` count for the earlier activations that same `final` finalizes? | No: excusal follows A's finality, so earlier activations need a later `final`. | `rules/t-removal-unblocks-addition` |
-| 4 | §8.7 | An activation whose witnesses are all excused later: final at once, or does it need a `final` (which can't be empty)? | Its required witness set shrinks, but it needs a `final` entry, and a `final` with no heads is `malformed`. This can't complete: the text should say it is final once its remaining witness set is empty. | none (no vector) |
-| 5 | §8.6 | More than two valid candidates at one seq | Pairwise, in body-digest order. Rule 1's mixed comparisons aren't obviously transitive, so a three-way conflict of recording and signed entries could depend on the pairing order. | none (no vector) |
+| 3 | §8.7 "Finality", `final` row | Homes excused by a removal-only `final` count for the earlier activations that same `final` finalizes? | No: excusal follows A's finality, so earlier activations need a later `final`, unless no remaining witnesses need heads (question 4's correction). | `rules/t-removal-unblocks-addition` |
+| 4 | §8.7 | An activation whose witnesses are all excused later | Corrected after revision 11: final without an empty `final` once every remaining witness is excused; repeat after each entry to a fixed point. | `all_witnesses_excused_makes_addition_final_without_empty_final`, `t-all-witnesses-excused` |
+| 5 | §8.6 | More than two valid candidates at one seq | Corrected after revision 11: stand only a candidate winning every pairwise comparison. Otherwise keep all as an unresolved fork. A deterministic fold is insufficient: it can pick a loser in a cycle or miss a universal winner after an undecided pair. | `three_candidate_comparison_cycle_is_an_unresolved_fork`, `three_candidates_find_winner_despite_undecided_losing_pair`; vectors `t-three-candidate-cycle`, `t-three-candidate-winner` |
 | 6 | §8.4 Recovery | What may the recovery rule add? | Controllers with roles within `approve` and `control`. An `update` that adds roles counts as control-rule only. | `t-recovery-installs-control-pending`, `t-recovery-adds-recover-refused` |
 | 7 | §8.3 planted keys | Keys planted by a planted key? | Followed transitively (charged signer chain). | `t-planted-key-dropped` (one level) |
 | 8 | §8.7 suspension end | "The first entry after which T is no longer valid at a hypothetical `activate`" | T is re-checked after every entry (rule, consent, escalation, receipts, anchor), ignoring its due time. | `t-suspension-ends-with-veto`, `t-suspension-ends-at-expiry` |
@@ -106,3 +106,17 @@ Implemented, following the state table:
 All three fixes are in `rules_v8.py` and its deterministic generated files. The runner now fails on every in-scope mismatch; it has no dispute exemptions. No engine or normative text change was needed.
 
 Step-1 verification: 315 workspace tests pass; conformance 237 in scope, 237 pass, 0 fail, 38 not implemented. Offline locked clippy (workspace/all targets), WASM check and FFI build pass. The changed Rust file passes rustfmt; workspace rustfmt reports pre-existing differences in `library.rs`, `authority.rs`, `keys_performance.rs`, `route_binding.rs`, and both binding `lib.rs` files. These released 0.4 files are unchanged.
+
+## Step 2 of engine-0.5-rest: finality and multi-candidate conflicts
+
+Corrections after revision 11 are recorded in changes §G.15. The all-excused vector removes
+both original homes by two recovery transitions; the earlier addition becomes final and its
+added controller signs a grant. The cycle vector uses two receipt variants of one activation:
+the lower digest beats the higher; a `final` covers only the higher, so it beats `vetoed`;
+`vetoed` beats the lower. No candidate wins every comparison, so the account stays forked.
+The unique-winner vector has three signed entries, with a quorum head covering only the
+highest digest; an undecided comparison between the two losers cannot stop its selection.
+All three are included automatically in the existing shuffled-object and hostile-input tests.
+The named cycle test also verifies each two-candidate subset to prove the non-transitivity.
+
+Step-2 verification: 318 workspace tests pass (4 existing ignored tests); conformance 240 in scope, 240 pass, 0 fail, 38 not implemented. All 1,058 generated files reproduce. Offline locked clippy (workspace/all targets), WASM check and FFI build pass. Changed Rust files pass rustfmt; workspace rustfmt still reports only the unchanged 0.4 files listed above. No dependency or lockfile changes.

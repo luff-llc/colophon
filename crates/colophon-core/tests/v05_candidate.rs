@@ -233,7 +233,7 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
         let v = verify_history(&objects_of(dir), &Persisted::default(), now_of(case));
         let got = v.branch.get(2).cloned().unwrap_or_default();
         return if got == want {
-            Outcome::Pass("the lower body digest stands".into())
+            Outcome::Pass("the expected conflict winner stands".into())
         } else {
             Outcome::Fail(format!("stands {got} ({})", v.code()))
         };
