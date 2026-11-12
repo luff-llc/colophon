@@ -225,7 +225,7 @@ case("t-anchor-before-first-home", c, bad("malformed", 3),
 t_rv = prop({"homes": {"revoke": [H2K.id]}}, [A, K1]); c = base.copy(); activate(c, t_rv, [rec(t_rv)])
 t_by2 = prop({"keyring": {"remove": [B.id]}}, [A], at=DUE0 + 120, chain=c)
 c3 = c.copy(); activate(c3, t_by2, [receipt_of(acct, t_by2, H2K, ts(DUE0 + 121))])
-case("t-receipt-by-revoked-home", c3, bad("malformed", 4), "Receipted only by a home revoked before it: it can never be due.",
+case("t-receipt-by-revoked-home", c3, ok_at(4), "H2 remains current for receipts until its control-rule revocation is final; no final is held.",
      ["8.5", "8.7", "13.5"], verifier=VER(DUE0 + 120 + W + D + 60))
 side = base.copy(); grant_agent(side, A, ts(R0 - 100), A)
 t_off = prop({"keyring": {"remove": [B.id]}}, [A], chain=side)
@@ -518,7 +518,7 @@ case("call-suspension-expired", cse, {"call": "ok"},
 # 9b. Revision-7 statements without an engine.
 kr_q = keyring([ctrl(A, ["approve", "control"], "Mac"), ctrl(Ph, ["approve", "control"], "Phone"),
                 ctrl(K1, ["recover"], "Security key")], threshold=2, rt=1)
-q = Chain(); genesis(q, kr_q, [A], adds=[Ph, K1], label="Threshold two"); aq = account_id(q)
+q = Chain(); genesis(q, kr_q, [A, Ph], adds=[Ph, K1], label="Threshold two"); aq = account_id(q)
 activate(q, transition(q, {"homes": {"appoint": [home_appointment(aq, H1K, H1A, "Home one")]}}, [A, Ph, K1], ts(60)), [])
 t_q = transition(q, {"homes": {"appoint": [home_appointment(aq, H2K, H2A, "Home two")]}}, [K1], ts(R0))
 qa = q.copy(); activate(qa, t_q, [receipt_of(aq, t_q, H1K, ts(R0 + 1))])
@@ -538,7 +538,7 @@ nsc.add("rekey", A, ts(30), A, epochs=[epoch_obj("notes", 1, "e1")])
 nsc.add("rekey", K1, ts(60), K1, epochs=[epoch_obj("notes", 2, "e2")])
 case("t-rekey-by-recover-key", nsc, ok_at(3), "A recover-only key may sign a `rekey` (after a recovery, it may be the only key present).",
      ["8.3", "8.4"])
-many = [derived(f"r7/many/{i}") for i in range(23)]
+many = [A] + [derived(f"r7/many/{i}") for i in range(1, 23)]  # A owns the default genesis slot.
 kr_m = keyring([ctrl(k, ["approve", "control"], f"Key {i}") for i, k in enumerate(many)], threshold=1)
 mc = Chain(); genesis(mc, kr_m, [many[0]], adds=many[1:], label="Many"); am = account_id(mc)
 activate(mc, transition(mc, {"homes": {"appoint": [home_appointment(am, H1K, H1A, "Home one")]}}, [many[0]], ts(60)), [])

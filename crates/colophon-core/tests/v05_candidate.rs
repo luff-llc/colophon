@@ -2,8 +2,7 @@
 //!
 //! Every case is reported as PASS, FAIL or NOT-IMPLEMENTED. Out-of-scope cases (pending
 //! transitions, forks, succession, upgrade, immediate keyring rules, pairing, ...) are never
-//! reported as passing. The test fails on any in-scope FAIL that isn't in `DISPUTED`, and on
-//! any disputed vector that starts passing.
+//! reported as passing. The test fails on every in-scope FAIL.
 //!
 //! Authority histories are loaded by a **fixture view loader**. It checks canonical bytes,
 //! shapes and every signature it can attribute (with the UV requirement of the rule each
@@ -31,26 +30,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// In-scope vectors whose expected outcome contradicts the spec text as this implementation
-/// reads it, with the reason. They are reported as FAIL (disputed), not bent to pass.
-const DISPUTED: &[(&str, &str)] = &[
-    (
-        "rules/t-receipt-by-revoked-home",
-        "H2's revocation at seq 3 is under the control rule and has no `final`; §8.7 \"Revoking a home\": a revoked home \
-         stays current, for receipts too, until its revocation is final, so its receipt at seq 4 is valid",
-    ),
-    (
-        "rules/t-recovery-rule-appoints-home-low-threshold",
-        "the genesis has threshold 2 and one control signer (Ph signs only `additions`, which never count toward a rule, \
-         §4.1): the genesis fails the control rule at seq 1",
-    ),
-    (
-        "rules/t-veto-22-signers",
-        "the genesis keyring keeps the base slot naming A, who is not a controller of this account (§7.2: slots name \
-         current controllers): the genesis is malformed at seq 1",
-    ),
-];
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -730,26 +709,16 @@ fn candidate_conformance() {
 
     let (mut pass, mut fail, mut ni) = (0, 0, 0);
     let mut unexpected = Vec::new();
-    let mut stale_disputes = Vec::new();
     for (rel, o) in &results {
-        let disputed = DISPUTED.iter().find(|(d, _)| d == rel);
         match o {
             Outcome::Pass(s) => {
                 pass += 1;
                 println!("PASS  {rel}: {s}");
-                if disputed.is_some() {
-                    stale_disputes.push(rel.clone());
-                }
             }
             Outcome::Fail(s) => {
                 fail += 1;
-                match disputed {
-                    Some((_, why)) => println!("FAIL  {rel}: {s} [disputed: {why}]"),
-                    None => {
-                        println!("FAIL  {rel}: {s}");
-                        unexpected.push(rel.clone());
-                    }
-                }
+                println!("FAIL  {rel}: {s}");
+                unexpected.push(rel.clone());
             }
             Outcome::NotImplemented(why) => {
                 ni += 1;
@@ -762,8 +731,4 @@ fn candidate_conformance() {
         pass + fail
     );
     assert!(unexpected.is_empty(), "unexpected failures: {unexpected:?}");
-    assert!(
-        stale_disputes.is_empty(),
-        "disputed vectors now pass: {stale_disputes:?}"
-    );
 }

@@ -78,20 +78,20 @@ Implemented, following the state table:
 - seal recipients in `shares` and `epochs`;
 - slot cryptography.
 
-### Disputed vectors
+### Step 1 of engine-0.5-rest: corrected vectors
 
 | Vector | Expected | This verifier | Why |
 | --- | --- | --- | --- |
-| `rules/t-receipt-by-revoked-home` | `malformed` at 4 | `ok` | H2's revocation at seq 3 is under the control rule and has no `final`. Per §8.7 "Revoking a home", it stays current, for receipts too, until the revocation is final. The vector reads §8.7's "a transition whose only receipting homes are revoked before activation is dead" as applying at activation. |
-| `rules/t-recovery-rule-appoints-home-low-threshold` | `badSignature` at 3 | `badSignature` at 1 | The genesis has `threshold` 2 and one control signer; Ph signs only `additions`, which never count toward a rule (§4.1). |
-| `rules/t-veto-22-signers` | `ok` at 3 | `malformed` at 1 | The genesis keyring keeps the base slot naming A, who isn't a controller there (§7.2: slots name current controllers). |
+| `rules/t-receipt-by-revoked-home` | `ok` at 4 (corrected) | `ok` | H2's revocation at seq 3 is under the control rule and has no `final`. Per §8.7 "Revoking a home", it stays current, for receipts too, until the revocation is final. Corrected the generator expectation and description: "revoked" here means final. |
+| `rules/t-recovery-rule-appoints-home-low-threshold` | `badSignature` at 3 | `badSignature` at 3 | The genesis had `threshold` 2 and one control signer; Ph signed only `additions`, which never count toward a rule (§4.1). Added Ph as a genesis cosigner, retaining its possession proof, so the intended refusal at seq 3 is reached. |
+| `rules/t-veto-22-signers` | `ok` at 3 | `ok` at 3 | The genesis keyring kept the base slot naming A, who isn't a controller there (§7.2: slots name current controllers). Made A the first of the 23 control keys, retaining its valid slot (§6.2 requires at least one at genesis). The vector now reaches its 22-signer veto. |
 
 ### Questions, and the reading chosen
 
 | # | Section | Question | Reading implemented | Test |
 | --- | --- | --- | --- | --- |
 | 1 | §8.7 "Choosing receipts" | A verifier can't know which receipts the entry's builder held, so it can't check "the lowest member IDs whose valid receipts it holds" | Checked: exactly `headQuorum` valid receipts from distinct current homes, sorted by home. Differing choices for one transition are decided by §8.6 (lower body digest). | `rules/t-activate-differing-receipts` |
-| 2 | §8.7 "dead" transitions vs "Revoking a home" | Does "revoked before activation" mean activated or final? | Final: a home stays current until its revocation is final. | disputed `t-receipt-by-revoked-home` |
+| 2 | §8.7 "dead" transitions vs "Revoking a home" | Does "revoked before activation" mean activated or final? | Final: a home stays current until its revocation is final. | `t-receipt-by-revoked-home` |
 | 3 | §8.7 "Finality", `final` row | Homes excused by a removal-only `final` count for the earlier activations that same `final` finalizes? | No: excusal follows A's finality, so earlier activations need a later `final`. | `rules/t-removal-unblocks-addition` |
 | 4 | §8.7 | An activation whose witnesses are all excused later: final at once, or does it need a `final` (which can't be empty)? | Its required witness set shrinks, but it needs a `final` entry, and a `final` with no heads is `malformed`. This can't complete: the text should say it is final once its remaining witness set is empty. | none (no vector) |
 | 5 | §8.6 | More than two valid candidates at one seq | Pairwise, in body-digest order. Rule 1's mixed comparisons aren't obviously transitive, so a three-way conflict of recording and signed entries could depend on the pairing order. | none (no vector) |
@@ -102,3 +102,7 @@ Implemented, following the state table:
 | 10 | §8.6 rule 1 | "A head of the primary home covering Y" | A head by the primary home (from the state before seq n) whose digest is Y's or a descendant's among the held entries, verified under that home's key. | `t-activate-after-covered-entry`, `t-backdated-entry-vs-provisional`, `t-final-not-displaced` |
 | 11 | §8.7 order | "T not recorded on the branch" before validity | Yes for `activate` and `vetoed`, so a duplicate is `malformed` even when its signer's escalation count has changed. | `t-vetoed-duplicate`, `t-activate-reappended` |
 | 12 | §8.4 possession | Possession for an `add` of a key that is already present | Not required: nothing is added (the delta voids it if the roles differ). | `t-add-present-different-roles` |
+
+All three fixes are in `rules_v8.py` and its deterministic generated files. The runner now fails on every in-scope mismatch; it has no dispute exemptions. No engine or normative text change was needed.
+
+Step-1 verification: 315 workspace tests pass; conformance 237 in scope, 237 pass, 0 fail, 38 not implemented. Offline locked clippy (workspace/all targets), WASM check and FFI build pass. The changed Rust file passes rustfmt; workspace rustfmt reports pre-existing differences in `library.rs`, `authority.rs`, `keys_performance.rs`, `route_binding.rs`, and both binding `lib.rs` files. These released 0.4 files are unchanged.
