@@ -1,1 +1,1 @@
-{"description":"A is suspended.","expected":{"call":"refused:revoked"},"sections":["8.7","12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-11T09:17:00Z"}}
+{"description":"A is suspended.","expected":{"call":"refused:revoked"},"sections":["8.7","12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-11T09:17:00Z","statuses":{"controllers":{"b609e0fd25ac2aefc193156581e112cb":"suspended"}}}}

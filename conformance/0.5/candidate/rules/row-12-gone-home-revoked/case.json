@@ -1,0 +1,1 @@
+{"description":"H1 is gone for good: one recovery key revokes it and adds a key; the `final` needs no head from the home it revokes.","expected":{"result":"ok","seq":5},"sections":["8.7","changes §H"],"verifier":{"now":"2026-11-14T09:08:20Z"}}

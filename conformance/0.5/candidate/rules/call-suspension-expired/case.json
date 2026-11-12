@@ -1,0 +1,1 @@
+{"description":"No entry after the suspension, but the verifier's clock is past its transition's due time + 7 days: it has ended.","expected":{"call":"ok"},"sections":["8.7","12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-21T09:15:00Z"}}

@@ -1,1 +1,1 @@
-{"description":"Removing the slotted Mac key without changing the vault is void.","expected":{"result":"malformed","seq":3},"sections":["8.3","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}
+{"description":"Removing the slotted Mac key needs no vault change: its slot is dropped and the vault is retiring.","expected":{"result":"ok","seq":3,"slots":0,"vault":"retiring"},"sections":["8.3","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

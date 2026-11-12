@@ -1,9 +1,9 @@
 # Colophon 0.5: implementation plan
 
-**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 6, 2026-11-12. Steps 0, 1 and 4
-are under way on `engine-0.5-foundation` (luff-llc/colophon#4); revision 6's effect on them is
-listed under each step. The §8.7 state machine (step 2's transition part and step 3's conflict
-rules) may start from revision 6, whose §17.2 lists the state it persists. No engine code has
+**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 7, 2026-11-12. Steps 0, 1 and 4
+are merged into `spec-0.5` (luff-llc/colophon#4); revision 7's effect on them is listed under
+each step. The §8.7 state machine (step 2's transition part and step 3's conflict rules) is the
+state table of §8.7, over the persisted state of §17.2. No engine code has
 been changed by the spec work. Steps are in order. The vectors come first, because §21 says the
 spec can't freeze without them, and every verifier step is then tested against them.
 
@@ -71,6 +71,9 @@ there, and say in a README that they aren't 0.5. (Done on `engine-0.5-foundation
 A new 0.5 module beside 0.4 (`colophon_core::v05`), so that 0.4 behaviour can't change; it may
 reuse 0.4 code unchanged (`keys::strict_json::parse`), and changes no 0.4 file.
 
+- **Revision 7 changes here:** bounds transition 622,592, veto envelope 131,072, veto body 4,096,
+  receipt envelope 1,024, receipt body 512; ties to even; lone surrogates refused; nesting at most
+  64; the origin-prefix label grammar; an unknown form is the last result before `ok`.
 - **Revision 6 changes here:** envelope bounds for transitions (655,360), vetoes (98,304) and
   receipts (2,048) in §2.4; an oversized `clientData` is `malformed` in every envelope; dates are
   years 0001–9999; printable ASCII is 0x21–0x7E; one verification order (§1), with an unknown
@@ -107,8 +110,9 @@ Files: `authority.rs`, `slots.rs`, `vault.rs`.
   - determined, once-only recording entries (`activate`, `vetoed`, `successionVetoed`), all
     unsigned, with `malformed` for invalid receipts, non-determined fields and the 7-day bound;
   - `keep`; `previousVault` and the `rekey` that follows a vault change;
-  - finality against the homes before the activation (full sets: after), in order; additions
-    counting for nothing until final; rollback of the suffix;
+  - `final` entries (witness heads verified in the state before the activation; revoked witnesses
+    excepted), in order; additions counting for nothing until final; rollback of the suffix;
+  - the vault's retiring state, `vault` entries and self-slots;
   - suspension carrying its transition, with its computable end;
   - the rate limit (§13.1), charged signers included;
   - the persisted state of §17.2;
@@ -168,6 +172,11 @@ Files: `v5/speaks.rs` (rewritten as `calls.rs`), `v5/terms.rs`, new `heads.rs`.
   - controller-call origin and purpose configuration;
   - the replay store interface (§12.4): a read-only look-up at step 3, then an atomic
     reservation after step 8 and before any effect, keyed with the acting key, retained 7,200 s.
+- **Revision 7 changes here:** retention 7,260 s inclusive; step 6 checks bindings before refusals;
+  `any:[true, unknown]` is true (only an unknown result is `newerFormat`); a controller must meet
+  both forms; removed-and-re-added after S is `refused:revoked`; additions count only after a
+  `final` in the held history; a suspension also ends by the clock; members may read history at a
+  home with their own key.
 - **Revision 6 changes here (the builder's readings, now text):** policy for freshness and quorum
   is the latest held, `callWindow` and `linkMaxAge` the stricter of S and later; a controller must
   pass at S and at its latest state; member expiry against the verifier's clock; link checks link
@@ -206,6 +215,8 @@ Files: `relay/relay.js`, `relay/server.js`, `relay/README.md`.
 - `GET`/`POST {base}/authority` with receipts, and 409 and 421 answers.
 - Primary-home ordering, and storage only of entries covered by a primary head.
 - The 60 s clock rule; the 300 s receipt window.
+- `GET`/`POST {base}/pending` with cursors (§14); appending `final`; refusing entries 300 s
+  behind the clock; persisting first-seen and serving facts.
 - Signing receipts (one per object) and notices; forwarding transitions, vetoes and receipts to
   the other homes; storing an unreceipted `activate` only if seen within its window.
 - The rate limit, refused as `malformed`.

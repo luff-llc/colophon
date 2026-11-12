@@ -374,7 +374,7 @@ def call(acting: Key, links=None, audience=AUD, purpose="task.read", args=None, 
 
 
 narrow = {"services": [{"audience": AUD, "purposes": ["task.read"]}], "conditions": [{"prefix": ["args.task", "T-"]}]}
-wide = {"services": [{"audience": AUD, "purposes": ["*"]}]}
+wide = {"services": [{"audience": AUD, "purposes": ["*"]}], "conditions": [{"prefix": ["args.task", "T-"]}]}
 l_ok = link(agent_sign, session1, narrow, session=0)
 
 calls = {
@@ -402,6 +402,12 @@ calls = {
     "link-expired": (call(session1, [link(agent_sign, session1, narrow, session=0, nb="2026-11-11T08:00:00Z",
                                           exp="2026-11-11T08:30:00Z")], rid_seed="12"), "refused:expired",
                      "The link expired at 08:30 (step 6)."),
+    "link-unknown-operator-not-deciding": (call(session1, [link(agent_sign, session1, dict(narrow, conditions=narrow["conditions"] + [
+        {"any": [{"prefix": ["args.task", "T-"]}, {"future": ["args.task", 1]}]}]), session=0)], rid_seed="15"), "ok",
+        "A link adds any:[true, unknown]: the any is true, so the unknown operator decides nothing (§10.4, step 8)."),
+    "link-unknown-operator-deciding": (call(session1, [link(agent_sign, session1, dict(narrow, conditions=narrow["conditions"] + [
+        {"any": [{"prefix": ["args.task", "X-"]}, {"future": ["args.task", 1]}]}]), session=0)], rid_seed="16"), "newerFormat",
+        "A link adds any:[false, unknown]: the result is unknown, so step 8 is newerFormat."),
     "unknown-field-valid": (envelope(dict(json.loads(body_of(call(agent_sign, rid_seed="13"))), future=1), agent_sign),
                             "newerFormat", "An unknown body field on an otherwise valid, authorized call (step 8)."),
     "unknown-field-invalid": (dict(envelope(dict(json.loads(body_of(call(agent_sign, rid_seed="14"))), future=1), agent_sign),
@@ -415,6 +421,19 @@ for name, (env, expected, why) in calls.items():
         "verifier": {"now": NOW, "audiences": [AUD], "replay": "empty",
                      "history": "conformance/0.5/candidate/account/records", "heads": ["conformance/0.5/candidate/account/head.json"]},
     })
+
+# Number ties (spec §2.1): two shortest decimals round-trip and the value lies exactly between
+# them; the canonical form is the one whose last digit is even (Ryū, ECMAScript).
+import struct as _struct
+ties = []
+for x, even, odd in [(-276804372109801.38, "-276804372109801.38", "-276804372109801.37"),
+                     (142129249267021.88, "142129249267021.88", "142129249267021.87"),
+                     (1059438285926254.2, "1059438285926254.2", "1059438285926254.3"),
+                     (2124241711641300.2, "2124241711641300.2", "2124241711641300.3")]:
+    assert float(even) == x and float(odd) == x and repr(x) == even
+    ties.append({"bits": _struct.pack(">d", x).hex(), "canonical": even, "refused": odd})
+write("encoding/number-ties.json", {"description": "Tie cases: both decimals round-trip; a body spelling the number as `refused` is not canonical (malformed).",
+                                    "sections": ["2.1"], "cases": ties})
 
 # Heads (spec §13.3).
 stale = envelope(dict(head, issued="2026-11-11T08:50:00Z"), home_sign)

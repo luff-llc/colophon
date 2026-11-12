@@ -1,13 +1,14 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 6, for review, 2026-11-12.** Not frozen, not
+**Status: final candidate, revision 7, for review, 2026-11-12.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
 transitions with veto (§8.7); revision 5 answers two reviews of revision 4 (4032d44) by finishing
 that mechanism's state model; revision 6 answers two reviews of revision 5 (a1decc6) and the
-first engine builder's questions, making that state model checkable by every verifier. The
-mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
+first engine builder's questions, making that state model checkable by every verifier;
+revision 7 answers two reviews of revision 6 (281e7c4) and the engine attack, recording finality
+in the history and stating §8.7 as a state table. The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
 [colophon-0.5-guide.md](colophon-0.5-guide.md).
@@ -22,32 +23,12 @@ so that every binding can verify a predecessor.
 
 MUST, MUST NOT, SHOULD and MAY are requirements on a conforming reader or writer.
 
-## 0. What an account is
+## 0. Overview
 
-- **An account is a keyring.** A person, a company or a project is an account. Its identifier
-  is the digest of its first authority record, so it means the same thing everywhere, before
-  any server has heard of it, and it outlives every key, device, server and app.
-- **Controllers hold authority.** A controller is a passkey, a security key, a device owner key
-  or a recovery kit, with roles. How many are needed for each kind of change is a setting of
-  the keyring, with a default and a range (§18).
-- **Members do the work.** Apps, devices, agents and servers are members with **grants**: a
-  signed, scoped, expiring permission from the account to a key. A key that has ever been a
-  member of an account can never be its controller, and the reverse (§3.3).
-- **One key may serve many accounts**, and anyone who sees two histories can tell that the same
-  key controls both (§3.3). One person may hold many keys. The format knows no "work" or
-  "personal" identity.
-- **Data belongs to the owner.** Records are encrypted to the account's vault and to members
-  that may read. Nothing in the format binds an account to a server, a deployment or a web
-  origin, except the relying-party ID that WebAuthn attaches to each passkey (§3.2, §4.3).
-- **Short sessions speak for members.** A member can pass part of its grant to a short-lived
-  key through a signed **link**, and that key signs **calls** to services (§12). Sessions never
-  appear in the account's history and never author records.
-- **Homes keep and vouch for copies.** A home is a member appointed to keep the account's
-  history and sign **heads**. One home is primary and orders new entries (§13).
-
-**Words.** 0.4's *library* is an *account*; "library" remains the word apps may show. New
-words: *terms*, *link*, *call*, *home*, *primary home*, *head*, *receipt*, *policy*,
-*holder*, *upgrade*, *predecessor*, *successor*.
+An account is a keyring of controllers (passkeys, security keys, device keys, kits) whose
+identifier is the digest of its first authority record. Members (apps, devices, agents, servers)
+act under grants; short sessions act for members through links and calls; homes keep and vouch
+for the history. A plain overview is in [colophon-0.5-guide.md](colophon-0.5-guide.md) §0.
 
 ## 1. Results
 
@@ -73,8 +54,10 @@ words: *terms*, *link*, *call*, *home*, *primary home*, *head*, *receipt*, *poli
 A failure at an earlier step always wins. Unknown content that is not yet authenticated never
 yields `newerFormat`. An unknown **protocol marker** is never authenticated content: it names an
 object type this reader can't verify and is `malformed`. A signature by a key whose descriptor has
-an unknown `form` can't be decided, and is `newerFormat`: such a descriptor reached the reader only
-in an entry that was itself authenticated, or in a genesis anyone could have made. For calls,
+an unknown `form` can't be decided: it is `newerFormat`, reported only after every other check of
+the object has passed (never before authentication), as the last result before `ok`. Such a
+descriptor reached the reader only in an entry that was itself authenticated, or in a genesis
+anyone could have made. For calls,
 links, requests, heads and receipts, every known field is read by a later step, so step 5 is empty;
 for authority entries, step 1 is §8.5's header and kind-specific fields are step 5.
 
@@ -87,7 +70,9 @@ Writers encode with object keys sorted recursively by their UTF-8 bytes, no insi
 whitespace, slashes unescaped, non-ASCII characters as UTF-8, and the minimal escapes JSON
 requires. Numbers follow the serde_json 1.0.145 writer with Ryū formatting: integer tokens
 within the signed or unsigned 64-bit range in decimal without leading zeros; other numbers as
-IEEE-754 binary64, correctly rounded, written as the shortest round-tripping decimal with
+IEEE-754 binary64, correctly rounded, written as the shortest round-tripping decimal (when two
+shortest decimals both round-trip, the one nearer the exact value; if both are equally near, the
+one whose last digit is even, as Ryū and ECMAScript, not half-up) with
 lowercase `e`, no exponent leading zeros or positive sign, and `.0` for integral floats in fixed
 notation; `-0.0` for negative zero; `1` and `1.0` are different bytes; non-finite numbers are
 forbidden. **Readers verify the exact received body bytes and never re-encode them for
@@ -118,6 +103,9 @@ verified as their own version required.
 
 - Any JSON object, at any depth, with a duplicate member name is `malformed`, including
   `clientData` and operation payloads.
+- A string containing a lone surrogate escape (`\ud800` without its pair, or the reverse) is
+  `malformed` everywhere, including in members a reader ignores and in `clientData`.
+- Values nest at most 64 containers deep; deeper is `malformed`.
 - Every object this document defines has exactly the fields it lists. Optional fields MUST be
   omitted when absent. `null` appears only where a rule allows it. Arrays called non-empty MUST
   NOT be empty. A field of the wrong type is `malformed`.
@@ -132,10 +120,11 @@ verified as their own version required.
 | Object | Bound on canonical bytes |
 | --- | --- |
 | Authority body (`/5`) | 1,048,576 |
-| Transition envelope | 655,360 |
-| Veto envelope | 98,304 |
-| Receipt envelope | 2,048 |
-| Receipt, veto body | 1,024 |
+| Transition envelope | 622,592 |
+| Veto envelope | 131,072 |
+| Veto body | 4,096 |
+| Receipt envelope | 1,024 |
+| Receipt body | 512 |
 | Membership request body | 16,384 |
 | Link body | 8,192 |
 | Call body, including embedded links | 65,536 |
@@ -146,9 +135,14 @@ verified as their own version required.
 | `clientData` | 8,192 |
 
 Exceeding a bound is `malformed`, wherever the object is, including a `clientData` inside any
-envelope. A verifier MUST NOT allocate in proportion to a claimed length before checking it. The
-envelope bounds let an entry embed a transition, a veto and their receipts within the authority
-bound.
+envelope. A verifier MUST NOT allocate in proportion to a claimed length before checking it.
+
+**The bounds compose.** The largest recording entry is a `vetoed` at `headQuorum` 8: base64 (4⌈n/3⌉)
+of a transition envelope (622,592 → 830,124), a veto envelope (131,072 → 174,764) and 16 receipt
+envelopes (1,024 → 1,368 each, 21,888), plus at most 2,048 bytes of header, field names and
+punctuation: 1,028,824 ≤ 1,048,576. Every other entry embeds a subset. A veto body of 4,096 bytes
+holds 64 signer IDs (64 × 35 + about 300). An honest WebAuthn signature item is about 1.5 KB, so 64
+of them fit in a veto envelope; an envelope over its bound is `malformed`, whatever its signers.
 
 **Portability floor.** Every service and verifier MUST be able to verify, on first contact, an
 account whose history and pending objects together have at least:
@@ -294,9 +288,9 @@ A verifier MUST check, in order:
    these checks. Stored bytes never change.
 
 **Allowed origins (general rule).** An origin is allowed when it is a member of `origins`, or
-is `https://` followed by a host with no port, path, query, fragment or user information (none
-of `/ : ? # @ \`) that equals `rp` or ends with `.` ‖ `rp` with a non-empty prefix not starting
-or ending with `.` and not containing `..`.
+is `https://` followed by a host with no port, path, query, fragment or user information that
+equals `rp` or is one or more labels of the `rp` grammar (§3.1: lowercase ASCII letters, digits
+and `-`, 1–63 bytes, not starting or ending with `-`), each followed by `.`, then `rp`.
 
 **Authority origins.** A signature on an authority entry, a transition, a veto, an `additions` item or a `handover`
 item is valid only from an origin in `authorityOrigins` when that field is present, and
@@ -389,7 +383,7 @@ transition that the labelled key signs.
 | `addThreshold` | 1 to `threshold`: units needed for an immediate addition. |
 | `policy` | §6.3. |
 | `vault` | The vault's public identity (§7.1). |
-| `slots` | 1–256. A `keyring` entry MUST NOT leave more than 224; only `activate` may use the rest. |
+| `slots` | 1–256 at genesis; 0–256 after an activation drops slots (§8.3). A `keyring` entry MUST NOT leave more than 224; only `activate` may use the rest. |
 
 ### 6.3 Policy
 
@@ -404,7 +398,7 @@ account; a verifier MAY be stricter for calls only.
 | `history` | Who a home serves the history to: `members` or `public` (§13.4) | — |
 | `linkMaxAge` | Most seconds from a link's `notBefore` to its `expires` | 60–2,592,000 |
 | `memberRule` | `single` or `control` (§8.4) | — |
-| `primaryHome` | Member ID of the primary home. Absent: the earliest-appointed current home. | a current home |
+| `primaryHome` | Member ID of the primary home. Absent: the earliest-appointed current home (homes appointed together in `appoint` order). | a current home |
 | `rate` | `{"signer":{"entries","bytes"},"account":{"entries","bytes"}}`: immediate entries allowed per 24 hours of `issued` (§13.1) | signer entries 16–1,024, bytes 1–64 MiB; account entries 64–4,096, bytes 4–256 MiB |
 | `recoveryDelay` | Seconds a pending transition waits for a veto (§8.7) | 0–2,592,000, and at least 3,600 while the account has a home |
 
@@ -425,7 +419,10 @@ wording is in [colophon-0.5-guide.md](colophon-0.5-guide.md) §2):
 - the account has one home;
 - every control key is on one device (for example a phone's device key and its synced passkey);
 - only one `recover` controller exists, or all recovery keys are kept together;
-- a company has two holders and `threshold` 2 or `threshold` 1.
+- a company has two holders and `threshold` 2 or `threshold` 1;
+- a remaining controller has no slot after a rotation, or the vault is retiring (§8.3);
+- a home has signed no head for longer than `recoveryDelay`: until it is revoked, no addition can
+  become final, and revoking it is an ordinary transition (§8.7 "Revoked witnesses").
 
 ## 7. Vault and slots
 
@@ -549,15 +546,18 @@ has `colophon/authority/4` entries up to and including its `upgrade` entry and `
 | `revoke` | `member`, `kept`, `heads`, `epochs` | Ends a member (§9.5). |
 | `endSessions` | `member` | Ends every link under a member (§9.6). |
 | `keyring` | `keyring` | An immediate additive keyring change (§8.4). |
+| `vault` | `vault`, `slots`, `previousVault` | Rotates a retiring vault (§8.3). |
 | `suspend` | `key`, `transition`, `receipts` | Suspends a key while a transition removing it is pending (§8.7). |
 | `activate` | `transition`, `receipts` | Applies a due transition (§8.7). Unsigned. |
 | `vetoed` | `transition`, `transitionReceipts`, `veto`, `receipts` | Records a vetoed transition (§8.7). Unsigned. |
+| `final` | `activation` (`{seq, digest}`), `heads` | Records that an activation is final (§8.7). Unsigned. |
 | `successionVetoed` | `veto`, `receipts`, `genesisReceipts` | Records a veto of this account's own succession from a Swift predecessor (§15.1). Unsigned. |
 
-`transition` and `veto` are embedded envelopes (§2.2). `receipts`, `transitionReceipts` and
-`genesisReceipts` are arrays of embedded receipt envelopes, chosen and sorted as §8.7 says.
+`transition` and `veto` are embedded envelopes (§2.2). `receipts`, `transitionReceipts`,
+`genesisReceipts` and `heads` are arrays of embedded envelopes, chosen and sorted as §8.7 says.
 `shares` and `epochs` are arrays of epoch objects (§11.1) sorted by namespace, then epoch; in
-`shares` each `seals` holds exactly the recipients the entry adds.
+`shares` each `seals` holds exactly the recipients the entry adds. **Recording entries** are
+`activate`, `vetoed`, `final` and `successionVetoed`.
 
 `namespaces` is 0–64 distinct sorted names of lowercase ASCII letters, digits, `.` and `_`, at
 most 128 bytes. A `/5` account is at layout 2 from genesis (§11.8). Raising the layout and
@@ -566,34 +566,46 @@ writing `migration` are transitions (§8.4).
 ### 8.3 Keyring changes and the vault
 
 Immediate `keyring` entries only add or tighten (§8.4); transitions do the rest (§8.7). When the
-vault is unchanged, every existing slot stays (multiset by canonical JSON without `label`), and
-labels and order may change.
+vault is unchanged, every existing slot stays (multiset by canonical JSON without `label`) except
+those an activation drops, and labels and order may change.
 
-**Rotation is required** when a controller that any slot or part in this account's history has
-named is removed (including by `keep`), loses a role, or has its `agreement` changed, and when a
-slot is deleted or its cryptographic fields change. The transition doing that MUST also change
-the vault, in the same `change` (§8.7); otherwise it is void. A never-slotted controller is
-removed or demoted without rotation. A removed controller may be re-added as the same principal
-(§3.3); slots naming it must be new.
+**Removing a slotted key needs no vault change.** A transition may remove or demote a controller
+that a slot or part of the current vault names, or change its `agreement`, by its ordinary rule:
+one recovery key can start it. At its activation every slot naming that controller is dropped
+(an account may then have no slot), and the vault is **retiring**: the removed key may still know
+its seed. While the vault is retiring:
+- The host of any current controller holding `approve`, `control` or `recover` that holds the seed
+  MUST at once append a **`vault` entry**: `vault` (a fresh identity, §7.1), `slots` (one naming
+  its signer, and every other remaining controller's slot that this host can build: every
+  `sealed` slot, and `prf` or `combined` slots whose credentials are present) and
+  `previousVault` (below). One such signer suffices. It ends the retirement.
+- A remaining controller without a slot in the new vault gets the new seed by §7.4 from a device
+  that holds it, the next time it is present, and adds its own slot by a self-slot `keyring` entry
+  (§8.4). Hosts MUST warn (§6.4) while a remaining controller has no slot. The old seed is
+  retired once every remaining controller that had an old slot has a new one; until then it opens
+  only what it opened before.
+- Hosts MUST NOT introduce epochs, and a `revoke` MAY carry empty `epochs`; the `rekey` after the
+  rotation covers them.
+- **What the removed key can still read:** everything sealed to the retiring vault, which is every
+  epoch introduced before the `vault` entry and every record under them, including records written
+  while the vault was retiring. Nothing introduced after the `vault` entry is sealed to it.
 
-**A vault change** is the component `{"vault":{…},"slots":[…],"previousVault":{"enc","ciphertext"}}`.
-- `vault` is a fresh vault identity (§7.1) and `slots` its slots.
-- `previousVault`, optional, is the current vault seed sealed to the new vault: HPKE (§11.1 suite)
-  to the new vault's agreement key with `info` and AAD
-  `"colophon/vault-previous/5\n" ‖ newVaultID ‖ "\n" ‖ oldVaultID`. Whoever opens the new vault
-  opens this to reach the old vault and every epoch sealed to it, and so on back through the
-  history. It is absent when the proposers can't open the current vault; older epochs are then not
-  reachable through the new vault.
-- At activation, the new vault MUST have a slot for every controller that had one at the anchor
-  and remains a controller after the change; slots added after the anchor, and slots of
-  controllers it removes, are dropped.
-- The vault-change `activate` is determined like any other (§8.7). The host of any signer of the
-  transition that holds the new seed MUST then at once append a `rekey` introducing a new epoch in
-  every namespace, and rebuild `sealed` slots by immediate entries for every remaining controller
-  whose slot was dropped, prompting for `prf` ones. Until that `rekey`, writers MUST NOT seal new
-  records under an epoch introduced before the vault change.
+**A vault change inside a transition** is the component `{"vault":{…},"slots":[…],"previousVault":{…}}`,
+for a voluntary rotation, or a removal proposed by a seed holder that rotates at once. At
+activation slots added after the anchor, and slots of controllers it removes, are dropped; it then
+leaves the vault not retiring.
 
-Hosts MUST build every new slot to open the new vault; verifiers can't check that.
+**`previousVault`** is the current vault seed sealed to the new vault: HPKE (§11.1 suite) to the
+new vault's agreement key with `info` and AAD
+`"colophon/vault-previous/5\n" ‖ newVaultID ‖ "\n" ‖ oldVaultID`. Whoever opens the new vault
+opens this to reach the old vault and every epoch sealed to it, and so on back through the
+history. It is required in a `vault` entry and optional in a transition (absent when the proposers
+can't open the current vault; older epochs are then not reachable through the new vault).
+
+After any vault rotation, the host of any controller holding the new seed appends a `rekey`
+introducing a new epoch in every namespace (§8.4: a `recover` signer suffices), and writers MUST
+NOT seal new records under an epoch introduced before the rotation until it exists. Hosts MUST
+build every new slot to open the new vault; verifiers can't check that.
 
 ### 8.4 Who may sign what
 
@@ -602,16 +614,18 @@ its `activate` (§8.7). `sign` controllers never count, and neither does anythin
 activation that isn't final (§8.7).
 
 **Immediate entries.** Each is subject to the rate limit (§13.1). What one key can do with each,
-and its bound, is worked through in [colophon-0.5-guide.md](colophon-0.5-guide.md) §1.
+and its bound, is in [colophon-0.5-guide.md](colophon-0.5-guide.md) §1.
 
 | Kind | Rule |
 | --- | --- |
-| `genesis` | Control rule over its keyring; possession; predecessor rule (§15.1). The primary signature is the primary signer's possession proof; it has no `additions` item. |
+| `genesis` | Control rule over its keyring; possession; predecessor rule (§15.1). The primary signature is the primary signer's possession proof. |
 | `grant`, `renew`, `revoke` (not homes, not `import`) | Single rule; control rule when `memberRule` is `control` |
-| `rekey`, `endSessions` | Single rule (one `control` signer also suffices for `rekey`; the member rule for `endSessions`); control rule when `memberRule` is `control` |
-| `keyring` | `addThreshold` units holding `control`, with UV, plus possession. It may only: add at most four controllers, each with roles `["approve"]` or `["sign"]` (with slots for them in the same entry); add slots for existing non-`sign` controllers; change labels; and tighten the **signing controller's own** authentication or policy (§6.3 lowering only). |
+| `rekey` | Single rule, or one `control` or `recover` signer; control rule when `memberRule` is `control` |
+| `endSessions` | Single rule, or the member rule; control rule when `memberRule` is `control` |
+| `keyring` | `addThreshold` units holding `control`, with UV, plus possession. It may only: add at most four controllers, each with roles `["approve"]` or `["sign"]` (with slots for them in the same entry); add slots for existing non-`sign` controllers; change labels; and tighten the **signing controller's own** authentication or policy (§6.3 lowering only). **Self-slot:** an entry whose only change adds slots to the current vault naming only its signer may be signed by that one non-`sign` controller. |
+| `vault` | One controller holding `approve`, `control` or `recover`, only while the vault is retiring (§8.3) |
 | `suspend` | One signer of the pending transition it carries (§8.7) |
-| `activate`, `vetoed`, `successionVetoed` | §8.7, §15.1 |
+| Recording entries | §8.7, §15.1 |
 | `upgrade` (`/4`) | 0.4 control rule (§16.1) |
 
 **Pending transitions.** Everything else, including unknown change members and anything in
@@ -622,8 +636,9 @@ doubt. Each needs the control rule unless stated:
 | Remove or demote a controller; add `control` or `recover`; `keep` | The recovery rule may also propose these, removing only controllers without `recover`, and adding only `approve` when `recoverThreshold` < `threshold`. `keep` needs the recovery rule. |
 | `threshold`, `addThreshold`, `recoverThreshold`, `countBy` | Count the larger of old and new `threshold` |
 | Another controller's descriptor, `verification`, `origins`, `authorityOrigins` or `holder`, in either direction | The labelled key signs a holder change |
-| Delete or change a slot; change the vault | The recovery rule may also propose a vault change that accompanies its own removals |
-| Appoint, renew or revoke a home; `primaryHome`, `headQuorum` | The recovery rule may also propose these |
+| Delete or change a slot; change the vault | The recovery rule may also propose a vault change with its own removals |
+| Revoke a home | The recovery rule may also propose it |
+| Appoint or renew a home; `primaryHome`, `headQuorum` | The recovery rule may also propose these when `recoverThreshold ≥ threshold`, or in a full set |
 | A grant with `import`; `recoveryDelay`; raising `rate` | — |
 | Raise `headMaxAge`, `callWindow`, `linkMaxAge`; `memberRule` to `single`; `history` to `public` | — |
 | `layout`; `migration` (only with a `predecessor`); `successor`; `resolve` (control rule of the keyring before the fork) | — |
@@ -641,60 +656,78 @@ A transition meeting the recovery rule has consent.
 
 **Rules.**
 - **Control rule:** `control` units at least the larger of the old and new `threshold`; other
-  signers may hold `control` or `recover`; UV on every WebAuthn signature.
-- **Recovery rule:** every signer holds `recover`; at least `recoverThreshold` units; UV.
+  signers may hold `control` or `recover`.
+- **Recovery rule:** every signer holds `recover`; at least `recoverThreshold` units.
 - **Single rule:** exactly one signer holding `approve`.
 - **Member rule:** `endSessions` signed `raw` by the member it names.
 - **Possession:** every controller added, and every controller whose `holder` is set, signs the
   body in `additions`, from an authority origin (a `sign` controller's from any origin its
-  descriptor allows), with UV if it has `verification`. Exempt: `upgrade`, and keys carried over
-  by a verified succession (§15.1).
+  descriptor allows). Exempt: `upgrade`, and, at a successor genesis, keys whose descriptors equal
+  predecessor keys current at `head` (an unverified or vetoed succession still confers nothing,
+  §15.1).
+- **UV.** Required on every WebAuthn signature under the control or recovery rule, on immediate
+  `keyring` and `vault` entries, and on transitions, vetoes and `handover`. Single-rule,
+  `rekey`, `suspend` and possession signatures need UV only when the controller has
+  `verification`.
 
-### 8.5 Verification order
+**Removal follow-up.** A host building the removal of a controller MUST list in the same
+transition, by default, every `approve` or `sign` controller the removed key added by immediate
+entries, and SHOULD use `keep` when a recovery key signs.
+
+### 8.5 Verification order and results
 
 For seq > 1 the verifier MUST, in this order (the pipeline of §1):
 
 1. Bounded generic parse (duplicates refused). Header: `protocol` (as §8.1 allows here), `seq`,
-   `previous`, `issued` (format and monotonic); failure is `malformed`. `by` names a controller of
-   the prior keyring (or, for `endSessions`, a current member; for `activate` and `vetoed`, the
-   `by` of the embedded transition or veto; for `successionVetoed`, an eligible predecessor key,
-   §15.1), else `badSignature`. An `issued` more than 60 s ahead of the verifier's clock: *held*.
+   `previous`, `issued` (format and monotonic). `by` names a controller of the prior keyring (or,
+   for `endSessions`, a current member; for `activate`, `vetoed` and `final`, the `by` of the
+   embedded transition, veto or activation; for `successionVetoed`, an eligible predecessor key,
+   §15.1). An `issued` more than 60 s ahead of the verifier's clock: *held*.
 2. Verify every attached signature (§4) against the prior keyring, member table or added
-   controllers. Any failure: `badSignature`.
-3. Decide the rule (§8.4; unknown kinds use the control rule). Not met: `badSignature`. For
-   `suspend`, `activate`, `vetoed` and `successionVetoed`, check the embedded objects under §8.7
-   and §15.1: an embedded object or receipt that isn't valid in the state before the entry, a
-   determined field with another value, or a second entry for one transition is `malformed`. Only
-   an `activate` whose objects are all valid and whose due time is after the verifier's clock is
-   *held*.
-4. Only now look for unknown content anywhere in the body. Found: `newerFormat`.
+   controllers.
+3. Decide the rule (§8.4; unknown kinds use the control rule), and for `suspend` and recording
+   entries the checks of §8.7's state table.
+4. Only now look for unknown content anywhere in the body (`newerFormat`).
 5. Apply the typed schema, bounds and the rules of §6, §8.2, §8.3, §9, §13, §15 and §16, and the
-   rate limit (§13.1). A violation: `malformed`.
+   rate limit (§13.1).
 
 Genesis follows the same order with its own keyring. No verifier may be stricter or more
-lenient than this section for authority entries.
+lenient than this section for authority entries. **Every failure has exactly one result:**
+
+| Failure | Result |
+| --- | --- |
+| Bounds, parse, header, canonical bytes, an oversized `clientData` | `malformed` |
+| `by` not as step 1 requires; a signature that fails or is foreign | `badSignature` |
+| A rule, consent, threshold, possession or escalation not met — by the entry, or by a transition it embeds; a signer (of the entry or of an embedded transition) not current with the role it signed with, suspended, or added by an activation with no `final` | `badSignature` |
+| Every other failure of an embedded object: receipts (missing, invalid, wrong homes, wrong count or choice), anchor, veto unit count, disjointness, vetoer role or currency, deadline, determined fields, once only, the 7-day bound, heads in `final`, one suspension per unit, a void delta | `malformed` |
+| Unknown content after steps 1–3 pass | `newerFormat` |
+| Schema, §6 and §8.3 violations, the rate limit | `malformed` |
+| `issued` ahead; an `activate` whose objects are all valid and whose due time is after the clock | *held* |
 
 ### 8.6 Conflicting entries
 
 Entries are equal when their bodies are equal. Two **conflicting** entries are valid entries with
 the same `seq` and `previous` and different bodies. A verifier classifies a conflict between X and
-Y:
+Y, using only the objects it holds, so the same objects give the same answer in any order:
 
-1. **Activation order.** "Recording entries" are `activate`, `vetoed` and `successionVetoed`.
-   - If X is a recording entry and Y is not, X stands only if Y's `issued` is later than X's due
-     time (for `vetoed`, its transition's); otherwise Y stands and X belongs after the current head.
+1. **Activation order.**
+   - If X is a recording entry and Y is not, **Y stands only if** the verifier holds a head of the
+     primary home (in the state before seq n) covering Y, Y's `issued` is not later than X's due
+     time (for `vetoed`, its transition's), and no `final` follows X; otherwise X stands. Homes
+     refuse immediate entries dated more than 300 s before their clock (§13.1), so an honest
+     primary covers no backdated Y.
    - Between an `activate` and a `vetoed` of one transition, the `vetoed` stands if its veto is
-     valid, unless the activation is final (§8.7).
+     valid, unless a `final` follows the `activate` (§8.7).
    - Between recording entries for different transitions, the earlier due time stands, then the
      lower transition-body digest.
-   - Between two recording entries of one kind for one transition (they differ only in the
-     receipts or the veto they carry), the lower body digest stands; their effects are identical.
-   Every such case decides only order: both entries are authorized. A recording entry that loses is
-   rebuilt after the head by any home. A signed entry that loses is not re-appended by anyone else:
-   its signer's host is told (409, §14) and MUST offer to sign it again at the new head.
+   - Between two recording entries of one kind for one transition, the lower body digest stands
+     and the other is **dropped**: it records the same effect and is never rebuilt.
+   A recording entry that loses to an entry of another transition is rebuilt after the head by any
+   home. A signed entry that loses is not re-appended by anyone else: its signer's host is told
+   (409, §14) and MUST offer to sign it again at the new head.
 2. **Equivocation.** Otherwise, if X is covered by heads of `headQuorum` current homes or by the
    verifier's high-water mark, and no current home's head covers Y, Y is equivocation evidence
-   against its signers. The evidence object is §13.3's, with `entries` in place of `heads`.
+   against its signers (§13.3).
 3. **Fork.** Otherwise (including any conflict in an account without homes), the verifier answers
    `refused:fork` for everything that depends on either branch until a `resolve` transition
    activates on one branch. A transition anchored on a losing branch is void.
@@ -706,158 +739,115 @@ citing a seq at or after an unresolved fork are held.
 
 ```json
 {"protocol":"colophon/transition/5","account":"<64 hex>","anchor":{"seq":41,"digest":"<64 hex>"},
- "issued":"…","by":"<keyID>","signers":["<keyID>","…"],
- "change":{"keyring":{"remove":["<id>"]},"vault":{"vault":{…},"slots":[…],"previousVault":{…}}}}
+ "issued":"…","by":"<keyID>","signers":["<keyID>","…"],"change":{"keyring":{"remove":["<id>"]}}}
 ```
 
-**Object.**
-- `signers` is the sorted list of the primary signer (`by`) and the cosigners; never `additions`.
-  An envelope whose signatures don't match `signers` exactly is `malformed`.
-- Signatures are authority signatures for §4.3: authority origins, and UV for WebAuthn.
-- `anchor` names an entry the proposer verified, binding the transition to its branch. `issued` is
-  not earlier than the anchor's.
-- `change` has one or more components: `keyring` (`add`, `remove`, `keep`, `update` with whole
-  replacement controllers, `threshold`, `recoverThreshold`, `addThreshold`, `countBy`), `policy`
-  (fields to set; `primaryHome: null` unsets it), `vault` (§8.3), `homes` (`appoint:
-  [{request, terms}]`, `revoke`), `grant` (`{request, terms}` with `import`), `layout`,
-  `migration` (§15.4), `successor` (`{account}`), `resolve` (`{discarded: {seq, digest}}`).
-- **Composite rule.** One signer set must meet, for every component, a rule that component allows
-  (§8.4), using the same rule, control or recovery, for all of them. It needs recovery-set consent
-  if any component does. Escalation and the full set are judged once, over the whole transition. It
-  activates atomically or not at all.
+**The objects.**
+- **Transition.** `signers` is the sorted list of the primary signer (`by`) and the cosigners,
+  never `additions`; an envelope whose signatures don't match it is `malformed`. Signatures are
+  authority signatures (§4.3). `anchor` names an entry the proposer verified; `issued` is not
+  earlier than the anchor's. `change` has one or more components: `keyring` (`add`, `remove`,
+  `keep`, `update` with whole replacement controllers, `threshold`, `recoverThreshold`,
+  `addThreshold`, `countBy`), `policy` (fields to set; `primaryHome: null` unsets it), `vault`
+  (§8.3), `homes` (`appoint: [{request, terms}]`, `revoke`), `grant` (`{request, terms}` with
+  `import`), `layout`, `migration` (§15.4), `successor` (`{account}`), `resolve`
+  (`{discarded: {seq, digest}}`).
+- **Composite rule.** One signer set meets, for every component, a rule that component allows,
+  using the same rule (control or recovery) for all; consent if any component needs it;
+  escalation and the full set judged once over the whole. It activates atomically or not at all.
+- **Delta at activation.** `remove` of an absent ID, a `keep` naming an absent ID, or `add` of a
+  key present with the same roles, does nothing. `keep` lists every controller without `recover`
+  that remains; every other one, including any added after the anchor, is removed. `add` of a
+  present key with other roles, or `update` of an absent ID, voids the transition, as does a
+  transition that changes nothing or whose result breaks §6.
+- **Veto.** `{"protocol":"colophon/veto/5","account","transition":"<body digest>","issued","by","signers":[…]}`,
+  authority signatures. Signed by at least as many units as the transition, none a signer unit of
+  it, each a `control` or `recover` controller current in the state before the entry recording
+  it; a key the transition would remove may sign.
+- **Receipt** (§13.5): by a current home, `received` within 300 s after the object's `issued`.
+  **Choosing receipts:** an entry carries exactly `headQuorum` receipts for an object, from the
+  homes with the lowest member IDs whose valid receipts it holds, for each home its receipt with
+  the lowest body digest, sorted by home ID.
 
-**Delta semantics at activation.**
-- `remove` of an absent ID, or `add` of a key already present with the same roles, does nothing.
-- `keep` lists the IDs of every controller without `recover` that remains; every other controller
-  without `recover`, including any added after the anchor, is removed. It lets a recovery remove
-  keys it doesn't know about.
-- `add` of a present key with different roles, or `update` of an absent ID, voids the
-  transition.
-- Thresholds are absolute values.
-- A transition that changes nothing, whose result breaks §6, or that breaks §8.3, is void.
+**Times.** For a transition T judged in state S:
+- the delay is the larger of `recoveryDelay` at T's anchor and in S;
+- **due** = T's `issued` + 300 s + delay; **veto deadline** = T's `issued` + delay;
+- a **full set** (below) is due at its latest chosen receipt's `received`, or at its `issued` if S
+  has no home; it has no veto deadline.
 
-**Evaluation point.** A transition is valid at an entry that relies on it (`activate`, `vetoed`,
-`suspend`) only if, against the state immediately before that entry:
-- its signers meet the rule, consent and escalation;
-- each signer is still a current controller holding the role it signed with;
-- it has valid receipts from `headQuorum` distinct current homes, unless that state has no home or
-  it is a full set;
-- its anchor is on that branch.
+**Validity of T at an entry E** (`suspend`, `activate`, `vetoed`), against the state S immediately
+before E:
+1. its signers meet the rule, consent and escalation, and each is current with the role it signed
+   with (`badSignature`);
+2. it has `headQuorum` valid receipts from distinct homes current in S, unless S has no home
+   (`malformed`);
+3. its anchor is on E's branch (`malformed`).
 
-The delay is the larger of `recoveryDelay` at the anchor and in that state. "No home" means that
-state has no home. A transition whose only receipting homes are revoked before activation is dead:
-the owner proposes again.
+A transition whose only receipting homes are revoked before activation is dead.
 
-**Receipts and due time.**
-- Each current home receipts a transition (§13.5) when, against the home's latest state, it meets
-  the conditions above except receipts, its delta is not void, its `issued` is within 300 s of the
-  home's clock, and the home holds fewer than 32 pending transitions for the account and fewer than
-  2 by the same proposer. A home signs at most one receipt per object.
-- Each home forwards every transition, veto and receipt it receives or signs to every other current
-  home at once.
-- The transition is **due** at its `issued` plus 300 s plus the delay. Its **veto deadline** is its
-  `issued` plus the delay, 300 s before it is due, so that homes can exchange veto receipts.
-- With no home, and for a full set, it is due when issued and carries no receipts.
-- **Choosing receipts.** An entry carrying receipts for an object carries exactly `headQuorum` of
-  them: from the homes with the lowest member IDs among those whose valid receipts it holds, for
-  each home its receipt with the lowest body digest, sorted by home ID.
+**Escalation.** v(u) is the number of distinct transitions signed by unit u with a `vetoed` on the
+branch since the last `activate` of a transition u signed that met the escalation rule then. T
+with signer units U needs |U| ≥ 1 + max v(u) over U, checked at receipt and again at activation.
+A unit removed and re-added keeps its count. It terminates: each veto raises v for every signer
+and |U| ≤ 64. Equal sides **stall**: both keep their immediate powers, until one side obtains
+another unit.
 
-**Veto.**
-- `{"protocol":"colophon/veto/5","account","transition":"<body digest>","issued","by","signers":[…]}`,
-  signed by at least as many units as the transition, none of them a signer unit of the
-  transition. Every signer is a current `control` or `recover` controller; a key the transition
-  would remove may sign.
-- Signatures are authority signatures (authority origin, UV).
-- A veto is **valid** when the transition has `headQuorum` valid receipts and the veto has valid
-  receipts from `headQuorum` distinct current homes, each `received` before the transition's veto
-  deadline.
-- A home that holds a valid veto MUST append `vetoed` and MUST NOT store the transition's
-  `activate`.
+**Full set.** T is a full set, can't be vetoed and is due as above when it has at least two signer
+units and either (a) meets the recovery rule and every current `recover` controller signed it, or
+(b) meets the control rule, every current `control` controller signed it, and, if it needs
+consent, every current `recover` controller too. "Current" includes every key T removes. Whoever
+holds every recovery key is treated as the owner.
 
-**Recording entries.** `activate`, `vetoed` and `successionVetoed` carry no signature of their
-own: their envelope is `{"body"}`, authenticated by what they embed, and their body is determined,
-so every home produces the same bytes.
-- `activate`: `by` is the transition's `by`; `issued` is the later of the due time and the
-  preceding entry's `issued`; `transition` and its chosen `receipts` (`[]` with no home or for a
-  full set).
-- `vetoed`: `by` is the veto's `by`; `issued` is the later of the latest chosen veto receipt's
-  `received` and the preceding entry's `issued`; `transition`, its chosen `transitionReceipts`, the
-  `veto` and its chosen `receipts`.
-- **Once only.** A transition digest appears in at most one `activate` or `vetoed` entry of a
-  branch; a later entry naming it is `malformed`.
-- **Bounded in time.** An `activate` whose `issued` is more than 7 days after its due time, or a
-  `vetoed` whose `issued` is more than 7 days after its latest chosen veto receipt, is `malformed`.
-- Any current home may append one, after its current head (§8.6 rule 1), and MUST do so before
-  storing other entries once the transition is due or the veto valid.
+**Finality is a recorded fact.** An activation's **witnesses** are the homes current in the state
+before it; for a full set, those of them that remain after it. It is **final** when a `final`
+entry for it is on the branch, or when its witness set is empty, or when a later full set's anchor
+follows it. A verifier judges finality only from the history, never from heads it has seen.
+- Until final, whatever an activation adds — controller, home, member — counts for nothing: it
+  signs no entry, transition, veto, `suspend` or call (`refused:revoked`); counts toward no rule,
+  unit, quorum, full set or escalation; and its receipts and heads don't count. Removals and
+  restrictions apply at once (fail-safe). Records by a member it added are held
+  (`authorityBehind`).
+- **A final activation is never displaced.** A `vetoed` for its transition changes no state; it is
+  equivocation evidence against every witness that receipted the veto (§13.3).
+- **Revoked witnesses.** Homes that the activation itself revokes need not sign heads for its
+  `final`. Such an activation is final against everything except a valid `vetoed` whose veto
+  receipts are all by homes it revoked; that `vetoed` still stands. So a dead or hostile home can
+  be revoked by an ordinary transition, while an honest home that holds a veto can't be revoked
+  past it.
+- **Rollback** of an activation with no `final` removes it and every later entry on its branch,
+  and nothing else; nothing it added has signed. Transitions anchored on a removed entry are void;
+  recording entries are rebuilt by the homes; displaced signed entries go back to their signers'
+  hosts; escalation counts, suspensions and the high-water mark are recomputed. Services MUST NOT
+  take irreversible effects on entries after an activation with no `final`.
 
-**Finality.**
-- An activation is **final** at a verifier once every earlier activation on its branch is final and
-  fresh heads of every home current in the state before it cover it. Before that it is
-  provisional.
-- A full-set activation can't be vetoed, so it is final once fresh heads of every home current in
-  the state after it cover it, and it makes final every activation before its anchor.
-- **Until final, whatever an activation adds counts for nothing.** An added controller signs no
-  entry, transition, veto, `suspend` or call (`refused:revoked`), and counts toward no rule, unit,
-  quorum, full set or escalation. An added home's receipts and heads don't count, and an added
-  member's calls are `refused:revoked` and its records held (`authorityBehind`). Removals and
-  restrictions apply at once (fail-safe).
-- **A final activation is never displaced.** A `vetoed` for its transition changes no state: it is
-  equivocation evidence against every home that both receipted the veto and signed a head covering
-  the `activate`, and verifiers stop counting those homes (§13.3).
-- **What a rollback undoes.** When rule 1 displaces a provisional `activate`, it removes that entry
-  and every later entry on its branch, and nothing else. Because nothing the activation added has
-  signed anything, no other authority depends on it. Transitions anchored on a removed entry are
-  void; recording entries are rebuilt by the homes; displaced signed entries go back to their
-  signers' hosts (§8.6 rule 1); escalation counts, suspensions and the high-water mark are
-  recomputed on the new branch; records citing a removed entry are held. Services MUST NOT take
-  irreversible effects on entries after a provisional activation.
-- **One home gone for good.** At two homes and `headQuorum` 1, removals and restrictions still take
-  effect at their due time, the delay plus 300 s after proposal. Additions can't become final while
-  the gone home is current. The owner revokes it, and adds any keys, in one full-set transition
-  (at the reference setup, both security keys), which is final once the remaining home covers it.
+**Suspension** is an explicit `suspend` by a signer of a pending removal. While it lasts the key
+signs no immediate entry and no call except `colophon.history.read`; it may sign vetoes and
+transitions.
 
-**Escalation.**
-- v(u) is the number of distinct transitions signed by unit u that have a `vetoed` entry on the
-  branch since the last `activate` of a transition u signed that itself met the escalation rule
-  then.
-- A transition with signer units S needs |S| ≥ 1 + max v(u) over S. This is checked at receipt
-  and again before activation, using every preceding `vetoed`.
-- A unit removed and re-added keeps its count.
-- It terminates: each veto raises v for every signer, and |S| can't exceed 64.
-- The side with more units completes; equal sides **stall**. In a stall, both keep their
-  immediate powers (subject to suspension and the rate limit), and the stall ends only when one
-  side obtains another unit.
-
-**Full set.** A transition is due when issued, carries no receipts and can't be vetoed when it has
-at least two signer units and either:
-- (a) it meets the recovery rule and every current `recover` controller signed it; or
-- (b) it meets the control rule, every current `control` controller signed it, and, if it needs
-  consent, every current `recover` controller too.
-
-"Current" includes every key the transition removes. Whoever holds every recovery key is treated
-as the owner.
-
-**Suspension.**
-- A `suspend` entry names `key` and carries the transition and its chosen `receipts`. One signer of
-  that transition signs it. It is valid only if, against the state before it, the transition is
-  valid (evaluation point above), has no `activate` or `vetoed`, removes or demotes `key`, and its
-  delta is not void; and the signer's unit has no other suspension outstanding. A `suspend` citing
-  a void transition is itself void (`malformed`).
-- It ends at the earliest of: the transition's `activate` or `vetoed`; the first entry after which
-  the transition could no longer be valid (a signer no longer current with its role, escalation no
-  longer met, the delta void, the anchor off the branch); and the first entry whose `issued` is more
-  than 7 days after the transition's due time.
-- While it lasts, the key signs no immediate entry and no call except `colophon.history.read`
-  (`refused:revoked`). It may sign vetoes and transitions.
-
-**Calls during transitions.** A key a pending transition would add is not a controller until a
-final activation. A key it would remove works until activation, unless suspended.
+**Calls during transitions.** A key a pending transition would add is not a controller until its
+activation is final. A key it would remove works until activation, unless suspended.
 
 **No home.** There is no delay and no veto; conflicts are forks. **An account without a home has
 no theft safety.**
 
-The outcomes of theft and loss scenarios under these rules are worked through in
-[colophon-0.5-changes.md](colophon-0.5-changes.md) §H.
+#### The state machine
+
+This table is normative; the prose above defines its terms. State is §17.2's. "S" is the state
+immediately before the entry; every check fails with the result shown, and an entry that fails
+changes nothing. Every recording entry has `issued` determined as shown; another value is
+`malformed`.
+
+| Event | Checks, in order | Effects |
+| --- | --- | --- |
+| **Immediate entry E** | §8.5 steps 1–2; signer current, not suspended, not added without `final` (`badSignature`); §8.4 rule (`badSignature`); rate (§13.1, `malformed`); kind rules (`malformed`) | Apply. A suspension whose transition E makes invalid, or whose due time + 7 days is before E's `issued`, ends. |
+| **`suspend` (key K, T, receipts)** | Signer is a signer of T (`badSignature`); T valid at E; T not recorded on the branch; T removes or demotes K; T's delta not void; the signer's unit has no outstanding suspension (`malformed`) | K suspended until the earliest of: T's `activate` or `vetoed`; the first entry after which T is no longer valid at a hypothetical `activate`; the first entry, or the verifier's clock, past T's due time + 7 days. |
+| **`activate` (T, receipts)** | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); due after the clock: *held*; delta not void (`malformed`) | Apply the delta (with `keep` and §8.3's slot drops and retiring); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set. |
+| **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts chosen, each within 300 s of V's `issued` and before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
+| **`final` (activation A, heads)** | A is an `activate` on the branch with no `final` and not yet final; every earlier activation is final; `heads` has exactly one head per witness of A (revoked witnesses excepted), each signed by that home's key in the state before A, covering A on this branch (not necessarily fresh); `by` = A's `by`; `issued` = max(latest head's `issued`, previous `issued`) (`malformed`) | A is final; what it added counts. |
+| **`successionVetoed`** | §15.1 step 4 (`malformed`; a veto signature by an ineligible key `badSignature`) | The succession is never verified. |
+| **Conflict at one seq** | §8.6 | The standing entry is on the branch; rollback as above. |
+| **Clock** | — | A *held* `activate` is decided when its due time passes; a suspension ends at its due time + 7 days. |
+| **Full set's activation** | As `activate`, with its own due time; no veto | As `activate`, and every activation before its anchor becomes final. |
 
 ## 9. Members
 
@@ -1004,8 +994,8 @@ A predicate is `{"eq":[path,value]}`, `{"in":[path,[values]]}` (1–64 values),
 - Empty `all` is true, empty `any` false; `not` inverts, including a missing-path false.
 - A predicate with an unknown operator is *unknown*. `not` of unknown is unknown; `all` is false if
   any member is false, else unknown if any is; `any` is true if any member is true, else unknown if
-  any is. A false result is `refused:outOfScope` (§12.3 step 7); an unknown one passes step 7 and is
-  `newerFormat` at step 8.
+  any is. So `any:[true, unknown]` is true and the call can be `ok`. A false result is
+  `refused:outOfScope` (§12.3 step 7); an unknown one passes step 7 and is `newerFormat` at step 8.
 - At most 32 predicates (logical ones count), nested at most 4 deep (outermost depth 1), 4,096
   bytes for the whole array; beyond is `malformed`.
 
@@ -1072,8 +1062,10 @@ After the header's signature, account binding, format and path:
 7. `writes` spent by earlier admitted headers: refused `budgetSpent`.
 8. Otherwise admitted; reserves one budget slot per distinct `(author, id)`.
 
-After opening: a kind outside `kinds`, or a failing `conditions` predicate, is refused
-`outOfScope` and still reserves its slot. Missing epoch key: held `unavailable`. 0.3 §5's rules
+After opening: a kind outside `kinds`, or a `conditions` predicate that is false (§10.4), is
+refused `outOfScope` and still reserves its slot; one that is unknown is `newerFormat`. (A new
+operator in any grant already makes the account's history `newerFormat` for an older reader at
+§8.5 step 4, so three-valued conditions matter for link terms.) Missing epoch key: held `unavailable`. 0.3 §5's rules
 for `invalidPayload`, `duplicateID` and unknown payload versions apply. **In an upgraded
 account** a `/3` header is admitted under 0.3 §5 and 0.4 only if it cites authority before the
 `upgrade` and its `library` is the legacy ID; a `/5` header cites the `upgrade` seq or later;
@@ -1204,9 +1196,12 @@ A verifier MUST, in order (the pipeline of §1):
    stricter by every later held policy. A pending transition changes nothing until its `activate`
    entry (§8.7). Then:
    - **A controller** must pass under both its state at S and its latest held state (roles
-     intersected, `verification` from either, the assertion verified under both descriptors):
-     - It must be present, not suspended, and not added by an activation that isn't yet final
-       (§8.7), else `refused:revoked`.
+     intersected, `verification` from either, the call meeting both descriptors' forms and
+     verified under both; a form that differs can't be met, `badSignature`). A controller removed
+     after S is `refused:revoked` even if re-added after S. A suspension that has ended by the
+     verifier's latest held entry or clock no longer applies.
+     - It must be present, not suspended, and not added by an activation with no `final` (or
+       other finality, §8.7) in the history the verifier holds, else `refused:revoked`.
      - Its roles must include `approve` or `control`; or be `sign` with `audience` in its
        `audiences`; or include `recover` when `purpose` is `colophon.history.read`. Otherwise
        `refused:outOfScope`. A suspended controller is refused only for other purposes.
@@ -1214,24 +1209,27 @@ A verifier MUST, in order (the pipeline of §1):
        else `badSignature`.
      - For an assertion, the `origin` must be exactly one of the verifier's call-ceremony origins
        for its `rp`, else `refused:origin`.
-   - **A member:** it must be present, not revoked, and not added by an activation that isn't yet
-     final, else `refused:revoked`, and not expired at the verifier's clock (`expires` is the last
+   - **A member:** it must be present, not revoked, and not added by an activation with no
+     `final` in the history the verifier holds, else `refused:revoked`, and not expired at the verifier's clock (`expires` is the last
      valid moment), else `refused:expired`.
-6. **Chain.** Link by link from the member outward, in this order: it verifies under the previous
-   key and has this `account` and `from`, else `badSignature`; the first link's `session` equals
-   the member's session number, else `refused:ended`; `notBefore` ≤ now ≤ `expires`, `expires`
-   within the previous link's and the member's and within `linkMaxAge` of `notBefore`, else
-   `refused:expired`; its terms narrow the parent's, else `refused:notNarrower`; its `to.signing`
-   is no principal's point (§3.3), else `malformed`. Then the acting `key` equals the last link's
-   `to.signing` (no links: the member's key), else `badSignature`.
+6. **Chain.** First the bindings, for every link from the member outward: it verifies under the
+   previous key and has this `account` and `from`; then the acting `key` equals the last link's
+   `to.signing` (no links: the member's key). Any failure: `badSignature`. Then, link by link:
+   the first link's `session` equals the member's session number, else `refused:ended`;
+   `notBefore` ≤ now ≤ `expires`, `expires` within the previous link's and the member's and within
+   `linkMaxAge` of `notBefore`, else `refused:expired`; its terms narrow the parent's, else
+   `refused:notNarrower`; its `to.signing` is no principal's point (§3.3), else `malformed`.
 7. **Purpose.** For a member, its terms and every link's must allow `audience` and `purpose`, and
    no `conditions` predicate may be false on `args` (§10.4). For a controller, `purpose` must be
    among the verifier's configured purposes for controller calls; there is no generic or fallback
    purpose, except that a home always accepts `colophon.history.read`, `colophon.home.read` and
-   `colophon.home.write` at its own endpoints, allowed as §13.4 and §14 say. Else
-   `refused:outOfScope`.
-8. **Extensions.** Unknown fields, terms, values or condition operators in the authenticated
-   call, links or terms: `newerFormat`.
+   `colophon.home.write` at its own endpoints, allowed as §13.4 and §14 say. A current member
+   calling with its own key may read the history and records at a home; through links, only when
+   every link's terms grant the purpose there. Else `refused:outOfScope`.
+8. **Extensions.** Unknown fields, terms or values in the authenticated call, links or terms, or
+   a `conditions` result that is unknown (§10.4): `newerFormat`. An unknown operator whose
+   predicate doesn't decide the result (for example inside an `any` with a true member) is not
+   reported.
 9. Otherwise `ok`, recorded in the replay store as §12.4 says.
 
 ### 12.4 Replay store
@@ -1251,8 +1249,9 @@ A verifier MUST, in order (the pipeline of §1):
   effect committed, otherwise to `abandoned`. It is never resolved by re-running the effect.
 - **Later identical calls** are `refused:replay`. An audience MAY return the recorded result of a
   non-read purpose to the same acting key.
-- **Sharing and retention.** The store is shared by every instance serving the audience and keeps
-  reservations for 7,200 s.
+- **Sharing and retention.** The store is shared by every instance serving the audience. A
+  reservation is kept while `now − reservedAt ≤ 7,260 s` (more than twice the 3,600 s window of
+  step 3, plus 60 s of clock skew), so no call it guards can be accepted again.
 - **Rate.** A store MAY rate-limit keys with `refused:window`.
 - **Records.** `ok` is not a record in the account. A service that acts on a call writes records
   under its own member key, with a `basis` naming the call's digest.
@@ -1269,28 +1268,38 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
 - **Ordering.** Immediate entries go first to the primary home (`policy.primaryHome`, else the
   earliest-appointed current home), which stores the first valid entry per seq. Other homes store
   them once a primary head covers them.
-- **Transitions.** Every home receipts and forwards transitions and vetoes and appends recording
-  entries (§8.7), whatever the primary does. A home stores an `activate` for a transition it didn't
-  receipt only if it first saw the transition, or a receipt of it forwarded by another current
-  home, within 300 s after the transition's `issued`, or it was not serving for any part of that
-  window. Otherwise it refuses it for ever and notifies the controllers; verifiers that hold both
-  branches then see a vouched fork (§13.3), resolved by `resolve` (§8.6 rule 3). The same rule
-  applies to a `vetoed` and its veto.
-- **Clock.** A home refuses an entry more than 60 s ahead of its clock.
+- **Transitions.** Every home receipts and forwards transitions, vetoes, receipts and its heads
+  to every other current home, and appends recording entries (§8.7), whatever the primary does:
+  `activate` once due, `vetoed` once a veto is valid, and `final` as soon as it holds the witness
+  heads, before storing anything signed or receipted by what the activation added. A home that
+  holds a valid veto MUST NOT store that transition's `activate`. A home stores an `activate` for a
+  transition it didn't receipt only if it first saw the transition, or a receipt of it forwarded by
+  another current home, within 300 s after the transition's `issued`, or it was not serving for any
+  part of that window. Otherwise it refuses that `activate` for ever and notifies the controllers,
+  and it **still stores and serves the transition and its receipts** (§14), so the owner can veto
+  it before its deadline; a late transition with a valid veto is vetoed like any other. A home
+  persists, per object, when it first saw it, its own serving intervals over the object's window,
+  and its decision, and reuses that decision after a restart.
+- **Clock.** A home refuses an entry more than 60 s ahead of its clock, an immediate entry more
+  than 300 s behind it, and a full set whose `issued` is more than 300 s behind it. So at an
+  honest primary an immediate entry's `issued` is its admission time to within 300 s.
 - **Rate.** For each immediate entry E (every kind except `genesis`, `upgrade` and recording
   entries), its **charged signer** is its `by`, or, when `by` was added by an immediate `keyring`
-  entry, that entry's charged signer. Over the immediate entries with `issued` in the 24 hours
-  ending at E's `issued`, E included, those charged to E's charged signer MUST NOT exceed
-  `policy.rate.signer`, and those of the account MUST NOT exceed `policy.rate.account`, in entries
-  and in body bytes; `revoke`, `endSessions` and `suspend` count toward the signer limit only.
-  Every verifier and home refuses an entry exceeding either as `malformed` (§8.5 step 5).
-  Transitions and vetoes are not entries; homes bound them by §8.7's pending caps.
+  entry, that entry's charged signer. Over E and the immediate entries **preceding E in the
+  sequence** with `issued` in the 24 hours ending at E's `issued`, those charged to E's charged
+  signer MUST NOT exceed `policy.rate.signer`, and those of the account MUST NOT exceed
+  `policy.rate.account`, in entries and in body bytes; `revoke`, `endSessions`, `rekey`, `vault`
+  and `suspend` count toward the signer limit only. Every verifier and home refuses an entry
+  exceeding either as `malformed` (§8.5). A verifier checks the window over `issued`; only a home
+  can check that `issued` is the admission time (the clock rule), which is what stops a dormant
+  account's history being filled in one sitting. A hostile primary can still admit backdated
+  entries (changes §H). Transitions and vetoes are bounded by §8.7's pending caps.
 - **Honest bulk work** fits the defaults: a first import is records, not authority entries;
   onboarding twenty people is twenty grants. A clean copy with more than 64 members to re-admit
   needs a second approver or a day's pause (§15.3), or a transition raising `rate`.
 - **Notices.** On receipting a transition, a veto or a `suspend`, a home MUST push a notice to
-  every controller device that has registered a delivery endpoint with it, and MAY send
-  out-of-band notices (for example e-mail) the owner configured.
+  every delivery route registered with it, and MUST support at least one out-of-band route (for
+  example e-mail) the owner configures (§17.5).
 - **First upload.** A genesis may be followed in one upload by the transition appointing a home
   and its `activate` (due when issued, since the state before it has no home).
 
@@ -1311,7 +1320,8 @@ verifier's latest held history and its key verifies the signature (else `badSign
 `issued` is at most 60 s ahead of the clock (else `unavailable` until it is); and the verifier's history, fetched further if
 needed, contains `authority.seq` with that digest (a different digest: `refused:fork`; fetch
 failure: `unavailable`). A head is **fresh** while `now − issued ≤ policy.headMaxAge`. A head that
-is not fresh is never used as evidence of the current state.
+is not fresh is never used as evidence of the current state. Heads embedded in a `final` entry are
+verified as §8.7 says (the home's key in the state before the activation, freshness not needed).
 
 - **High-water mark.** A verifier persists per account its highest accepted `(seq, digest)` and
   the folded state there, and accepts later only histories that extend it (`refused:rollback`
@@ -1324,18 +1334,18 @@ is not fresh is never used as evidence of the current state.
   wrong; divergent histories are a fork.
 - **Equivocation.** Two heads by one home with the same `seq` and different digests prove that
   home misbehaved, unless the later head's entry at that seq displaced the earlier one under §8.6
-  rule 1. A home that receipted a valid veto and signed a head covering its transition's final
-  `activate` misbehaved too (§8.7). A verifier holding both MUST keep the evidence object
-  `{"protocol":"colophon/equivocation/5","account":…,"heads":["<base64 head envelope>", "<…>"]}`
-  (heads sorted by body digest), MUST stop counting that home for this account, and SHOULD send the
-  evidence to the account's controllers. Anyone can verify it from the home's key alone.
-- **What freshness gives.** With `headQuorum` 1, heads give availability and a bound on how stale
-  an honest primary's view can be; a compromised home key can keep signing fresh heads over an
-  old history for a verifier that has seen nothing newer. A newer verifier then learns of
-  removals only from other sources (devices, other homes). The account bounds this by raising
-  `headQuorum` with independently run homes, and by appointing a new primary under the control
-  rule (§13.1). A brand-new verifier fetches the history from any source, verifies it from seq 1,
-  asks every home the history names, and applies §12.3 step 4.
+  rule 1. A verifier holding such proof MUST keep an evidence object, MUST stop counting that home
+  for this account, and SHOULD send the evidence to the account's controllers. Each form is
+  verifiable from the keys it names alone:
+  - two heads: `{"protocol":"colophon/equivocation/5","account","heads":[…]}`, sorted by body
+    digest;
+  - two conflicting entries (§8.6 rule 2): the same with `entries` in place of `heads`;
+  - a veto against a final activation (§8.7): `{"protocol","account","veto","receipt","final"}`,
+    the veto envelope, the home's receipt of it before the deadline, and the `final` entry whose
+    heads include that home's.
+- What freshness gives, and doesn't, is explained in the guide §3. A brand-new verifier fetches
+  the history from any source, verifies it from seq 1, asks every home the history names, and
+  applies §12.3 step 4.
 - A home SHOULD sign a new head at least every `policy.headMaxAge` / 2 and MUST NOT sign a head for
   an entry it hasn't verified.
 
@@ -1355,8 +1365,8 @@ home.
 ```
 
 Signed `raw` by a home's member key for a transition, a veto or a successor genesis, and stored
-beside it as `<home member ID>.receipt.json`. A home signs at most one receipt per object. It is
-valid when:
+beside it as `<home member ID>.receipt.json`. A home signs at most one receipt per object, and
+only while its clock is between the object's `issued` and 300 s after it. It is valid when:
 
 - `by` is a current home in the state the verifier evaluates, not one added by a provisional
   activation;
@@ -1374,6 +1384,17 @@ A home is a relay (0.3 §8) whose `GET {base}` response adds `"home":{"member":"
 | `GET {base}/head` | 200 latest head envelope; 404 if none. Public, `no-store`. |
 | `GET {base}/authority?after={seq}&limit={n}` | 200 `{"entries":[…],"receipts":[…],"more":bool}`, 1–64 entries from `after + 1`, under §13.4. |
 | `POST {base}/authority` | `{"from":<seq>,"entries":[…],"receipts":[…]}`, 1–64 contiguous entries. 200 `{"head":…,"receipts":[…]}`; 409 with the current head if `from` overlaps different bytes or leaves a gap; 422 with the §1 result; a non-primary home answers 421 with the primary's endpoints for an entry no primary head covers. No other authorization is needed. |
+| `GET {base}/pending?after={cursor}&limit={n}` | 200 `{"objects":[{"seq":<cursor>,"digest","kind","envelope"}…],"more":bool}`: 1–64 pending objects in the order the home first stored them, after `cursor` (0 to start). `kind` is `transition`, `veto` or `receipt` (a receipt by any current home). Cursors are the home's own increasing integers and never reused. Under §13.4. |
+| `GET {base}/pending/{digest}` | 200 `{"envelope","receipts":[…]}` for a pending transition or veto with every receipt the home holds for it; 404 otherwise. Under §13.4. |
+| `POST {base}/pending` | `{"objects":[…]}`, 1–16 transition, veto or receipt envelopes. 200 `{"receipts":[…]}` with this home's receipts for those it receipted; 422 with the §1 result for each it refused. No other authorization is needed. |
+
+**Pending objects.** A home lists every transition and veto it stores that has no recording entry
+on its branch, and every receipt of them, until 7 days after the transition's due time; then it
+MAY drop them. One object appears once in a listing; a listing from cursor 0 until `more` is false
+is complete for the moment it ends. A home holds at most 32 pending transitions per account (2 per
+proposer), 8 vetoes per transition and one receipt per home per object, so a listing is at most
+about 2,600 objects. Hosts poll with `after` set to the last cursor they saw (§17.5). Reading
+follows §13.4, which includes recover-only and suspended controllers.
 
 A home that is a successor's home also serves `GET {base}/predecessor/authority/<8 digits>.json`
 (and its receipts) for the predecessor's history through its final entry (§15.1). A `PUT` or
@@ -1416,13 +1437,19 @@ library upgrades in place instead.
      window (§13.5). The succession is due at the window's end plus the `recoveryDelay` in force
      at that entry, provided `headQuorum` of those homes receipted it; its veto deadline is 300 s
      before that.
-  3. **Vetoers.** Until the veto deadline it may be vetoed by any key current at any predecessor
-     entry whose `issued` is within that `recoveryDelay` before the genesis `issued`, or current
-     immediately before the last predecessor entry that replaced the root or recovery identity or
-     removed a controller (so the kit, an old root, or a removed device can object). A veto needs
-     as many keys as `handover` has signers. A thief who already took the Swift library (for
-     example a root thief who rotated the recovery kit and waited) can't be stopped here: the
-     predecessor was already lost.
+  3. **Vetoers.** Let W0 be the `issued` of the succession window's entry, which the homes
+     witness (they receipt the genesis only within 300 s of it and refuse it more than 300 s
+     behind their clocks). The genesis `issued` MUST NOT be earlier than `head`'s `issued` nor
+     later than W0 (`malformed`). Until the veto deadline the succession may be vetoed by any key
+     current at **any instant** from W0 minus that `recoveryDelay` through `head`: in the state
+     after the last predecessor entry issued at or before that instant, and in the states before
+     and after every later predecessor entry, taking each entry's time as the latest `issued` of it
+     and the entries before it. Also by any key current immediately before the last predecessor
+     entry that replaced the root or recovery identity or removed a controller. A veto needs as
+     many keys as `handover` has signers. **Limit:** Swift entries' times are the signer's own, so
+     a root thief in a library quiet for longer than the delay can date his rotations before the
+     window; the owner's defence there is a `handover` with more keys and hosts that show the
+     predecessor's last entries before the person confirms (changes §H).
   4. **Recording.** A successor home that holds a valid veto MUST append a `successionVetoed`
      entry (unsigned, determined): `by` is the veto's `by`; `issued` is the later of the latest
      chosen veto receipt's `received` and the preceding entry's `issued`; `veto` is the veto
@@ -1434,9 +1461,7 @@ library upgrades in place instead.
      such entry; it is ordered by §8.6 rule 1 with the succession's due time and bounded in time
      like a `vetoed`. After it the succession is never verified and no `migration` activates.
   5. **Write F.** F is written only after the due time.
-  - **Why root alone for a root library:** in the shipping app the root alone can
-    `rotateRecovery()`, and the kit alone can `recover()` a new root, so requiring both adds
-    friction without stopping either thief. What protects the owner is the veto window.
+  - A root library's hand-over is signed by the root alone (rationale: guide §7).
 - **Published** at the predecessor's own homes (`/5`), or at the successor's homes under
   `{base}/predecessor/` (Swift).
 
@@ -1591,8 +1616,8 @@ assertion (high-S valid). A `webauthn` signature is §4.3 with `rpID` as `rp`, n
 general origin rule, and UV when `verification` or when the rule requires it.
 
 **Historical encodings.** Predecessor signatures use §4.3 step 5 exactly, with no lenient form
-(`r` or `s` of zero is refused): on macOS 27 CryptoKit
-accepts minimal DER and high-S, and refuses every other form tested (candidate `probes/swift-der`).
+(`r` or `s` of zero is refused); this matches what CryptoKit accepted on macOS 27 (candidate
+README).
 Duplicate `clientData` members, which Swift's decoder accepted (keeping the first), are refused,
 and the preflight stops. iOS and visionOS are unverified until the probe runs there (§21).
 
@@ -1633,17 +1658,22 @@ seed or a raw ECDH output. The host interface and the history verifier's report 
 
 ### 17.2 Persisted verifier state
 
-A verifier that resumes (§13.3) MUST persist, per account, atomically and with a format version:
+A verifier that resumes (§13.3) MUST persist, per account, atomically and with a format version.
+Every item is a function of the history and the objects held, recomputed identically by replay
+from seq 1, so two verifiers that persist it reach the same verdicts:
 - the high-water `(seq, digest)` and the folded state there: keyring, members (terms, expiry,
-  session number, revoked seq), homes in appointment order, policy, epochs;
-- the digests of transitions that have an `activate` or `vetoed` on the branch;
-- every provisional activation since the last final one, with the homes whose heads it needs and
-  those that have covered it;
+  session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
+  is retiring;
+- the digests of transitions with an `activate` or `vetoed` on the branch;
+- each activation with no `final` yet, with its witness set; the `final` entries;
 - v(u) per unit and, per unit, the seq of its last compliant activation;
 - each outstanding suspension: key, suspending unit, the transition with its chosen receipts, and
   its due time;
 - the immediate entries of the last 24 hours of `issued` with their charged signers and sizes;
-- the exact bytes of transitions, vetoes and receipts held outside the history;
+- entries held (future `issued`, an `activate` not yet due);
+- the exact bytes of transitions, vetoes and receipts held outside the history, with each object's
+  receipts per home;
+- signed entries displaced by §8.6 rule 1 and not yet re-signed;
 - the latest fresh head per home, equivocation evidence and the homes it no longer counts, and
   unresolved conflicts;
 - a verified succession, if any.
@@ -1674,25 +1704,33 @@ account exists, and to 32 random bytes otherwise. Verifiers find a controller by
 
 The mechanism is only as safe as people's knowledge of pending transitions, so:
 
-- **Polling.** Every host holding a controller key MUST fetch pending transitions, vetoes and
-  suspensions from every current home at launch and at least every `recoveryDelay` / 6.
-- **Showing.** It MUST show each one it hasn't shown, with its signers' labels, key IDs and
-  first-seen seq, its due time, and a one-tap **veto**.
-- **Recovery keys first.** A host that is about to use a recovery key MUST fetch pending
-  transitions first. A person whose only device was stolen learns of the thief's transitions the
+- **Routes.** At setup, hosts MUST register at least two delivery routes with every home, on
+  different devices or services (for example push to a second device, and e-mail).
+- **Polling.** Every host holding a controller key MUST list pending objects (§14) at every current
+  home at launch and at least every `recoveryDelay` / 6.
+- **Showing.** It MUST show each transition it hasn't shown, with its signers' labels, key IDs and
+  first-seen seq, its veto deadline, and a one-tap **veto**.
+- **Missed notices are visible afterwards.** Whenever a person uses any key with any host, the host
+  MUST first show every activation since that host last showed the account's history that no key
+  on this device signed and the person hasn't seen, with when each home receipted it. A recovery
+  key is no exception: a person whose only device was stolen learns of the thief's transitions the
   next time they use any recovery key with any host.
+- **Submitting.** Hosts MUST submit every transition, veto and `suspend` to every current home
+  directly, and retry until each has receipted it or 300 s have passed; and publish entries to the
+  primary home and then every home.
 - **Removal follow-up.** When a controller's removal activates, hosts MUST list every member whose
   grant it signed, and every `approve` or `sign` controller it added by immediate entries, since
-  that transition's anchor, and offer to remove them in one action (revocations and one composite
-  transition).
+  that transition's anchor, that the removal didn't already remove, and offer to remove them in
+  one action.
 - **What to tell people.** Hosts MUST say, when an account is set up with one device, that a
   stolen sole device can't veto, and in every notice that the delay protects who controls the
   account, not data a stolen key could already read (wording: guide §5).
 - **Quorum 2.** At `headQuorum` ≥ 2, a transition that fewer than `headQuorum` homes receipt within
   300 s of its `issued` is dead; hosts MUST say so and offer to sign it again.
-- **Publishing.** Hosts MUST publish entries to the primary home and then every home.
-- **Testability.** These are host requirements with observable behaviour, and the conformance plan
-  (§21) tests them with a simulated home.
+- **Testability.** These are host requirements with observable behaviour, tested with a simulated
+  home (§21).
+
+With two routes and missed notices shown afterwards, the default delay stays 72 hours.
 
 ## 18. Policy fields and defaults
 
@@ -1732,46 +1770,31 @@ set.
 **Upgraded accounts** keep their roles exactly (§16.1, §16.2). Hosts SHOULD show the reference
 and offer the role change as an ordinary pending transition.
 
-**What a host can tell the person** (for the reference person; adapt the numbers):
-
-> Your account is held by your devices, your passkey and two security keys. If you lose one, or
-> one is stolen, you can remove it, and no one can take your account without giving you three
-> days in which any of your other keys can say no. That protection has limits. Someone who gets
-> more of your keys than you still hold (for example your phone and one security key, or
-> everything kept in one place) can take the account after three days even if you object; someone
-> who gets both security keys can take it at once. So keep one security key away from home, and
-> open the app at least every few days. A stolen key can still read whatever it could already
-> read, and can keep signing in until you suspend or remove it. Your account's history is kept by
-> two services: if one is down, removals still work and new keys wait; if one turns dishonest
-> while someone also has one of your keys, you can lose the account.
-
-At `headQuorum` 1, one hostile home together with one stolen control or recovery key can still
-win, because it can receipt a backdated transition and hide vetoes. Three homes at `headQuorum` 2
-close that and keep working with one home down. What this protects, and what it doesn't, is in
-the guide §5.
+A paragraph a host can show the person, and what the reference protects, are in the guide §5. At
+`headQuorum` 1, one hostile home with one stolen key can still win; three homes at `headQuorum` 2
+close that.
 
 ## 19. Results and reasons
 
 | Where | Reasons |
 | --- | --- |
-| Authority (§8) | `malformed`, `badSignature`, `newerFormat`; held (future `issued`, a transition not yet due); `refused:fork` |
+| Authority (§8) | The one table in §8.5; `refused:fork` (§8.6) |
 | Slots (§7) | `refused:vaultLocked` |
-| Records (§11.5) | refused `notGranted`, `expired`, `revoked`, `wrongEpoch`, `clockJump`, `budgetSpent`, `outOfScope`, `invalidPayload`, `duplicateID`, `wrongFormat`, `budgetScopeUnavailable`; held `revokedBackdated`, `authorityBehind`, `unavailable` |
+| Records (§11.5) | `newerFormat` (an unknown condition result); refused `notGranted`, `expired`, `revoked`, `wrongEpoch`, `clockJump`, `budgetSpent`, `outOfScope`, `invalidPayload`, `duplicateID`, `wrongFormat`, `budgetScopeUnavailable`; held `revokedBackdated`, `authorityBehind`, `unavailable` |
 | Evidence (§8.6, §15.1) | equivocation evidence; `malformed` entries after a final entry |
-| Transitions (§8.7) | due, vetoed, activated (provisional or final), void (signer gone, no change, expired, result breaks §6 or §8.3); a `suspend` citing a void transition is `malformed`; a recording entry for a transition already recorded, with a non-determined field, or with invalid receipts is `malformed` |
+| Transitions (§8.7) | pending, due, vetoed, activated (provisional or final), void |
 | Calls (§12.3) | `refused:audience`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`, `refused:revoked`, `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:outOfScope`, `refused:origin`; `unavailable` |
 | Heads (§13.3) | `refused:fork`, `refused:rollback`; `unavailable` |
 | Succession (§15) | `refused:fork`; unverified claim |
 
-Inside an envelope, any failure verifying an attached signature is `badSignature`, with the failed
+After §1 step 1, any failure verifying an attached signature is `badSignature`, with the failed
 check as an optional diagnostic.
 
 ## 20. Versions
 
 **Versions.** 0.5 accepts exactly these markers: `colophon/authority/5`, `/request/5`, `/link/5`,
 `/call/5`, `/head/5`, `/receipt/5`, `/transition/5`, `/veto/5`, `/equivocation/5`,
-`/operation/5`, the legacy markers of an
-upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
+`/operation/5`, the legacy markers of an upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
 `colophon/relay/3`, and `colophon/swift-keyring/2` for predecessors. A verifier MUST NOT read a
 0.5 account under 0.4 rules, and MUST NOT accept a `/3` or `/4` object where §11.5 or §16.1 fences
 it out. A later version that adds markers will say which 0.5 markers it retires and how an account
@@ -1783,7 +1806,7 @@ What is not in this version is listed in the guide §6.
 
 0.5 freezes only when all of these are done:
 
-1. **Vectors.** Every vector below is published under `conformance/0.5/`, with exact bytes and
+1. **Vectors.** Every required vector (below) is published under `conformance/0.5/`, with exact bytes and
    one named outcome per case.
 2. **Two implementations.** Rust and one other language replay them all.
 3. **Swift corpus.** A differential corpus shows the §16.3 verifier matches the released Swift
@@ -1797,59 +1820,9 @@ What is not in this version is listed in the guide §6.
 `conformance/0.5/candidate/` holds the vectors built before any implementation; its README lists
 them. The rest are plan step V1.
 
-**Required vectors:**
-- **Keys, encoding and upgrade:**
-  - every 0.4 key case as `/5`;
-  - authority origins for entries, transitions and vetoes;
-  - controller calls from call and authority origins;
-  - non-canonical JSON and base64; malleated envelopes; invalid dates;
-  - the 0.4 upgrade with every refusal.
-- **Immediate entries:**
-  - each §8.4 row accepted, and the same change refused as immediate;
-  - tightening another key's authentication refused;
-  - `layout` and `migration` as immediate refused;
-  - two epochs for one namespace in a `rekey` refused;
-  - the rate limit at every verifier, keys planted by an addition charged to their adder, revocations
-    outside the account limit; at most four controllers per addition; headroom at 56 controllers
-    and 224 slots.
-- **Transitions:**
-  - composite removal with a vault change and `previousVault`, slot rebasing at activation, and
-    the `rekey` that follows; composite rules mixing components;
-  - `keep`, including keys added after the anchor;
-  - evaluation before `activate`: an anchor before the first home, an anchor at a lower past
-    delay, a receipt by a revoked home (`malformed`), an anchor off the branch;
-  - due time as `issued` + 300 s + delay; the veto deadline; receipt choice;
-  - `signers` not matching the envelope;
-  - determined recording entries from two homes, and two that differ only in receipts;
-  - once only: a duplicate `vetoed`, a re-appended `activate`; the 7-day bound;
-  - an `activate` that doesn't displace covered entries;
-  - veto validity: count, disjoint units, eligibility, UV, origin, quorum, the deadline;
-  - escalation at receipt and before activation, its reset, distinct transitions;
-  - the full set (a) and (b), with removed keys counted and no receipts;
-  - suspension: carried objects, its end, a void transition, one per unit, history reads,
-    calls and immediate entries;
-  - delta void cases;
-  - mutual removal and the tie;
-  - finality: the home set before, full sets, a `vetoed` after finality as evidence; rollback of a
-    provisional activation and what it removes;
-  - every row of changes §H.
-- **Conflicts:** evidence; a fork with and without homes; `resolve`; a transition anchored on a
-  losing branch.
-- **Members and records:**
-  - request coverage; pairing; `serves` and import;
-  - renew; revoke with `kept` and up to 16 `heads`; `endSessions`;
-  - `/5` headers; proposals.
-- **Calls:** every §12.3 refusal; replay states (replay, conflict, abandoned); quorum; S.
-- **Heads:** valid, stale, non-home, fork, rollback, equivocation.
-- **Succession:**
-  - `/5` and Swift (root and keyring, WebAuthn, `rotateRecovery`);
-  - the genesis receipt window from the appointing entry;
-  - the veto window: in time, too few, by a key no longer current, by a key current within the
-    delay before the genesis, recorded as `successionVetoed`;
-  - a premature freeze followed by a verified attempt;
-  - an entry after the final one; two attempts.
-- **Seed transfer:** the HPKE label, wrong nonces.
+**Required vectors.** The list in [conformance/0.5/candidate/README.md](../conformance/0.5/candidate/README.md)
+"Required for freeze" is normative for condition 1.
 
 ## 22. Review log
 
-The reviews and their resolutions are listed in the guide §7 and mapped in changes §G.
+The reviews and their resolutions are listed in the guide §8 and mapped in changes §G.
