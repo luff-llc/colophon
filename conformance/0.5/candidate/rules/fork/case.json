@@ -1,1 +1,0 @@
-{"description":"Two valid entries at seq 2.","expected":{"result":"refused:fork","seq":2},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

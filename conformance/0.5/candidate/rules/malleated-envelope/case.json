@@ -1,0 +1,1 @@
+{"description":"The same body with s replaced by n − s. Both verify; they are one entry.","expected":{"equal":true,"home":"200, keeps the first"},"sections":["2.2","8.6","14"]}

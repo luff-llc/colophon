@@ -1,0 +1,1 @@
+{"description":"A receipt signed by a key that is not a home.","expected":{"result":"held","seq":5,"why":"receipt by a non-home is malformed"},"sections":["13.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"Resolve without the recovery quorum.","expected":{"result":"refused:fork","seq":4,"why":"resolve at 5 is badSignature"},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

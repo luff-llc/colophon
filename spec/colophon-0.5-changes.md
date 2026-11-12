@@ -1,10 +1,11 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 2, 2026-11-11. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 3, 2026-11-11. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
-"Codex N" and "H/M/L N" are the two reviews of revision 1 (152d991). They map to sections in §G.
+"Codex N" and "H/M/L N" are the two reviews of revision 1 (152d991), mapped in §G.1–§G.3.
+"Opus R/M" and "Codex2 H/M" are the two reviews of revision 2 (9e90470), mapped in §G.4–§G.5.
 
 ## What existing keyrings actually are
 
@@ -64,6 +65,11 @@ that cite earlier authority; 0.5 admits those, so nothing is lost (H-review note
 | 25 | Seed transfer to a new device (§7.4) | Adding a passkey where no controller has the seed | Additive | — |
 | 26 | Restricted vault HPKE open (§17.2) | Backups without exporting the seed (R10); not an oracle for members (L8) | Additive | — |
 | 27 | Removing a never-slotted controller needs no rotation; re-adding a removed controller is allowed with new slots (§8.3) | M1, M8 | Additive | — |
+| 28 | Attempt-2 recovery, counter-recovery, full recovery; removal of delayed keys only by cancel (§8.4) | Repeated cancel and dead homes (rev-2 reviews) | Additive | — |
+| 29 | Policy classification: which changes need the recovery-set rule (§6.3) | Missing triggers (rev-2 reviews) | Yes | Applies to entries after the upgrade |
+| 30 | Fork classification: evidence, vouched forks, no-home priority; body-byte equality (§2.2, §8.6) | Removed keys and narrow roles could freeze an account | Yes | — |
+| 31 | Succession: publication places, original identities after rotation, recovery-added signers delayed with refusal, persistence, preflight, drain (§15) | Rev-2 reviews R6–R8, M-b–M-f, Codex2 H3 | Yes | Swift path (§16.2) |
+| 32 | Portability floor of 65,536 entries and 256 MiB; documented service limits (§2.4) | Unbounded first-contact work | Yes | — |
 
 Unchanged and restated in full: strict parsing, key descriptors, one key one principal (now
 explicitly across time), private-key work in the host, COSE, envelopes, `raw` and `webauthn`
@@ -127,20 +133,31 @@ The contract puts authority ceremonies and PRF on `keys.id.luff.works`, calls on
   because the code there is production's; staging's own passkeys need a different `rp` and are
   `sign` controllers.
 
-### B.4 Where the contract still assumes what 0.5 does not provide
+### B.4 What Galley's contract must change (from the second Opus review, §6)
 
-1. **Accounts as controllers** (contract 0.1, 1.4, 7.1): not in 0.5 (§C). A company's controllers
-   are its people's keys, with `holder` and `countBy: holders`.
-2. **A verifier stricter than Colophon on ceremony origins for authority** (contract 4.6 applies
-   it to calls only, which is allowed). For authority entries, no verifier may be stricter (§4.3,
-   §8.5).
-3. **The contract's §11** already uses the succession path (§16.2) for people with Swift
-   libraries. It must add these, which 0.5 now requires:
-   - the freezing `layout` entry;
-   - possession proofs for every controller that is not carried over;
-   - for a root library, the recovery identity's signature;
-   - for a Two Keys library whose `recoverThreshold` is lowered, recover signers in `handover`;
-   - the `migration` entry, which any principal move (contract §7.5) MUST require.
+| # | Contract | Conflict | 0.5 rule the contract must follow |
+| --- | --- | --- | --- |
+| 1 | §0.1, R-A3: delay "1 h – 30 d, never 0" | 0.5 allows 0 only without a home | Keep "never 0" as Galley's reference default, but say that 0.5 accounts without a home have no delay (§8.4) and that the reference setup appoints a home first (§18) |
+| 2 | §8.3: only `control` additions delayed; approve-only immediate; "any existing controller" cancels | 0.5 delays every signature by a recovery-added key, and only a pre-existing, not recovery-added `control` key cancels; attempt 2 needs a counter-recovery | §8.4 delay, cancel and attempt 2 |
+| 3 | §2 step 6: home allows 300 s ahead; no primary ordering, receipts or notices | 0.5: 60 s ahead; ±300 s for recovery and cancel entries; primary ordering (421); per-home receipts; notices | §13.1, §13.5, §14 |
+| 4 | §3.2–§3.3: a diverging home "stops counting" | 0.5 classifies the conflict (§8.6): equivocation evidence; recovery at a non-primary home; a vouched fork (`refused:fork` until `resolve`); or no-home priority | §8.6, and handle `resolve` |
+| 5 | §4.6: accepts bare `https://<rp>` and `origins` for calls | 0.5 accepts only configured call-ceremony origins | §12.3 step 5 |
+| 6 | §4.4 consent omits `additions` | Possession proofs make every non-carried controller consenting; carried-over Swift keys are exempt and must be treated as consented by the verified succession | §8.4 possession |
+| 7 | §4.5 "until 0.5 has R-A2" | R-A2 is in 0.5; a staging-made key needs its own `rp` and is `sign` | §3.2, §6.1, §17.3 |
+| 8 | §6.1 agent grants fixed to the single rule | Companies with `memberRule` `control` need the control rule | §8.4 |
+| 9 | §7.3 bind quorum counts keys; §0.1 company default omits `countBy`, `memberRule` | 0.5 counts holders under `countBy: holders` | §6.2, §18 |
+| 10 | §7.5 bind moves on a verified succession alone | 0.5 requires the `migration` entry too | §15.4 |
+| 11 | §11.2: no freezing entry; no possession for non-carried keys; root library signed by root only; no Two Keys recover signers; no `migration`; the passkey role swap without recovery consent | All required by 0.5 | §15.1 rules 4–6, §15.3, §16.2 |
+| 12 | §13.2 still lists R-A1–R-A11 as missing | All are in 0.5 except R-A9 (refused); R4 refused | Update the citations |
+| 13 | `reference/verifier.ts`: `decodeEntries(list, max = 256)` and a 1 MiB history limit | 0.5's portability floor is 65,536 entries and 256 MiB | §2.4 |
+
+Two further points the contract needs:
+
+- **Accounts as controllers** (contract 0.1, 1.4, 7.1) aren't in 0.5 (§C). A company's controllers
+  are its people's keys, with `holder` and `countBy: holders`.
+- **A home is whatever the owner chooses.** The contract's reference home is LUFF's identity
+  service; 0.5 assumes none. The reference setup must appoint one before any recovery key is
+  added (§18).
 
 ## C. Deliberately left for later
 
@@ -221,6 +238,15 @@ The contract puts authority ceremonies and PRF on `keys.id.luff.works`, calls on
 | Freshness | Primary home plus `headQuorum`, stated limits | Codex 5's pinned witness or checkpoint. It is a new trust root; left as an extension. |
 | Pairing | Commit-then-reveal SAS, or QR | A PAKE: no allowlisted implementation, and SAS has the same one-in-a-million bound per attempt. |
 | Epoch and slot labels | Unchanged | `/5` labels: no gain, double code. |
+| Recovery without a home | Allowed, with no delay, and a MUST warning; the reference setup appoints a home before adding any recovery key | Codex2 H1's "two recovery holders when no witness". It would override the owner's one-key default. The owner can still choose `recoverThreshold` 2 |
+| Delay witness | Receipts from `headQuorum` homes, latest counts; any home stores recovery and cancel entries | Codex2 H1's mandatory two independent homes. `headQuorum` 2 gives exactly that as a setting; companies default to it |
+| Repeated cancel | Attempt 2: twice the delay, cancellable only with a counter-recovery; attempt-2 additions removable only under the recovery-set rule | Codex2 M1's "solo cancel once per epoch, then final after a dispute period". Attempt 2 is the same idea with a deterministic trigger. The full-quorum override the architect suggested is kept as "full recovery" for the homes-gone case |
+| Fork classification | Evidence when heads cover one branch; recovery at a non-primary home yields to the primary; vouched forks need `resolve`; no-home conflicts by rule strength, then digest | Codex2 H2's "finality certificate from a home quorum" for every account. This needs homes for everyone; rule 4 covers accounts without homes and can never freeze |
+| Succession finality | Publication at named places (the predecessor's homes; the successor's homes for Swift), persistence, refusal for recovery-added signers | Codex2 H3's fixed multi-home finality proof with a fresh challenge. It is a new protocol; `headQuorum` ≥ 2 on the predecessor gives the multi-home property as a setting, and the limit at quorum 1 is stated |
+| Holders | Labels attested by the controllers; the key co-signs its own label; recovery-set rule for recover keys | Codex2 M4's "cryptographically bound stable principal". 0.5 has no identity layer for people, and inventing one would be a second account system |
+| Provisional authority | Calls and services-only grants; bound to sponsors; one at a time; `until` never extended | Codex2 M3's "no grants at all before confirmation". Services-only grants keep the one-approval new-platform case useful; records grants are refused |
+| History bound | Portability floor 65,536 entries and 256 MiB; services MAY set higher limits and answer `unavailable` beyond them | Codex2 M6's "resumable from an authenticated checkpoint". Resumption is from the verifier's own persisted state; a signed checkpoint is still refused (R4) |
+| Swift DER leniency | Exactly what CryptoKit accepted on macOS 27, probed; duplicate `clientData` refused, with the preflight to find any | Strict §4.3 grammar for predecessors, which could make real libraries unmigratable (Opus M-f) |
 
 ## G. Changes after review
 
@@ -288,3 +314,79 @@ The contract puts authority ceremonies and PRF on `keys.id.luff.works`, calls on
 | Controller-call purposes | §12.3 step 7: the verifier configures them; recover-only never |
 | Replay-store sharing | §12.4 |
 | The Swift predecessor verifier outside Swift | §16.3, §17.2 |
+
+### G.4 Second Opus review (of 9e90470)
+
+| Finding | Settled in | How |
+| --- | --- | --- |
+| R1 no home, no delay | §6.4, §8.4, §18 | Stated; MUST warning; reference setup appoints a home before any recovery key |
+| R2 calls by delayed or provisional keys | §12.3 step 5 | `refused:revoked`; vectors `call-by-delayed`, `call-by-provisional-after-until` |
+| R3 primary home blocks recovery | §8.4 full recovery, §8.6 rule 2, §13.1, §6.3 | Any home stores and receipts recovery and cancel entries; home and primary changes are recovery-set triggers; the way out when homes are gone; the unrecoverable case stated |
+| R4 receipts and cancels | §8.4, §13.1, §13.5 | Latest of `headQuorum` receipts; cancels under the ±300 s clock rule; attempt 2 and counter-recovery; delay protects authority, not data; security keys `recover` only |
+| R5 removed keys fork forever | §8.6 rules 1 and 4 | Equivocation evidence; vector `removed-key-equivocation` |
+| R6 `rotateRecovery` defeats rule 5 | §15.1 rule 5 | Genesis root and recovery identities also sign after any rotation; vectors `swift-rotate-recovery-*` |
+| R7 Swift recovery addition signs F | §15.1 rule 6, §16.2, §16.3 | Successor activation before verified; refusal; home before F; vector `swift-recovery-added-freeze` |
+| R8 entries after F | §15.1, §15.2 | `malformed` evidence; persistence; fresh-verifier rule |
+| M-a missing triggers | §6.3, §8.4 | Policy classification table; every recover-key field |
+| M-b recover-set swap | §15.1 rule 4 | Swap needs recovery consent; vectors `swift-webauthn-role-swap-*` |
+| M-c data between snapshot and F | §15.3, §15.4 | Preflight, F, drain window, `migration.drain`, left-behind records shown |
+| M-d no way back | §15.2, §16.2 | Stated irreversible |
+| M-e where the predecessor is published | §15.1, §14 | Predecessor homes; successor homes for Swift at `{base}/predecessor/` |
+| M-f strict DER | §16.3, §15.3, §21 | CryptoKit-observed acceptance; preflight; Swift WebAuthn vectors; dry run in §21 |
+| M-g equality and malleability | §2.2, §8.6, §11.8, §14 | Body-byte equality; 0.3 §7.1 and §8.2 substitutions; vector `malleated-envelope` |
+| M-h `memberRule: control` gaps | §8.4 | `endSessions` and `rekey` follow it |
+| M-i provisional repeats, `until` | §6.1 | One at a time; never extended; confirmation by control rule; slots only after confirmation |
+| M-j §11.8 gaps | §11.8, §9.5 | Paragraphs named by their opening words; layout 2 from genesis; `duplicateID`; kept invalid payloads; uncaveated; reducer inputs; batch acknowledgement; envelope bytes |
+| M-k unbounded history | §2.4 | Portability floor; documented service limits; `unavailable` beyond them; owner warning |
+| M-l receipt timing and paths | §13.5 | `received` ≥ `issued`; one file per home |
+| Low: raw high-S | §4.2 | Restated |
+| Low: links 1–8 vs depth | §12.2 | 1–4 |
+| Low: redundant delayed exception | §12.3 step 5 | Replaced by a held recovery entry changing nothing |
+| Low: QR `nA` | §7.3 | H still sends `nA` |
+| Low: sign-only host rule | §17.3 | Host MUST |
+| Low: native beta builds | §3.2 | MUST NOT share the production `rp` |
+| Low: `handover` origins for carried-over keys | §15.1 | The genesis descriptor's |
+| Low: new `agreement` for carried-over keys | §8.4 possession | Stated harmless |
+| Low: `migration.view` | §15.4 | Defined |
+| Low: L1 draft-1 vectors | Plan step V1 | Before freeze |
+| §5 vectors without an engine | candidate README | Max-threshold rule, every trigger, receipts, calls by delayed and provisional keys, removed-key conflict, malleated envelope, Swift WebAuthn predecessors, `rotateRecovery`: all now exist. Still missing: future `issued` held, cancel by a recovery-added key, possession from a non-authority origin, two `resolve`s, quorum-2 stale call, `/5` predecessor (step V1) |
+| §5 freeze condition | §21 | Dry run, security review and Galley alignment added; differential Swift corpus added |
+| §6 Galley contract | §B.4 | Thirteen items listed for the contract |
+
+### G.5 Second Codex review (of 9e90470)
+
+| Finding | Settled in | How |
+| --- | --- | --- |
+| H1 delay timing and liveness | §8.4, §13.1, §13.5 | No-home delay stated as none (not backdatable, simply absent); receipts by `headQuorum` homes, latest counts; every home receipts recovery; full recovery when homes are gone. The two-homes-mandatory form was rejected (§F) |
+| H2 narrow key freezes account | §8.6 | Evidence vs vouched fork vs no-home priority; no narrow key can freeze |
+| H3 succession uniqueness | §15.1 | Named publication places; persistence; stated limit at quorum 1. Multi-home finality proof rejected (§F) |
+| M1 indefinite cancel | §8.4 attempt 2 | Solo cancel works once; attempt 2 needs a counter-recovery |
+| M2 missing policy triggers | §6.3 | Classification of every field: `primaryHome`, homes, `headQuorum`, raising `headMaxAge` and more |
+| M3 provisional authority | §6.1 | Sponsors, one at a time, calls and services-only grants only |
+| M4 holders | §6.1 | Who may set them, the key's co-signature, the honest statement |
+| M5 at-most-once effects | §12.4 | CAS reservation with `pending` and `completed`; purpose in the key |
+| M6 attacker-selected work | §2.4 | Documented limits, `unavailable` beyond them, floor every service supports |
+| M7 legacy behaviour | §16.1, §16.3, §21 | 0.4-keys §2–§7 incorporated for the `/4` prefix; CryptoKit-observed acceptance; differential corpus in §21 |
+| Low: PRF invariant | §3.2 | Stated as a security invariant |
+| Low: no generic call purpose | §12.3 step 7 | Stated |
+| Low: pairing encoding, one reveal, rate limit | §7.3 | Stated |
+| Low: held recovery doesn't mutate state | §8.4, §12.3 | Stated |
+| Low: migration is an assertion | §15.4 | Stated |
+| Low: conformance self-consistency only | §21, README | Agreed; freeze waits for step V1 and two implementations |
+
+### G.6 Places two teams would still guess (second Opus review, §4), closed
+
+| Guess | Closed by |
+| --- | --- |
+| Equality of entries, records, heads | §2.2 |
+| Initial layout of a `/5` account | §11.8 (layout 2 from genesis, no entry) |
+| Where a Swift predecessor's history is fetched | §15.1, §14 |
+| Entries after F; `resolve` after `successor` | §15.1, §15.2 (`malformed` evidence; no resolve) |
+| Extending `until` | §6.1 (never) |
+| Receipt paths for several homes | §13.5 |
+| QR path's `nA` | §7.3 |
+| Whose `authorityOrigins` govern carried-over keys | §15.1 (the genesis descriptor's) |
+| "Canonical view" in `migration` | §15.4 |
+| 0.3 "Fold order paragraphs" range, "uncaveated" | §11.8 |
+| Kept record with `invalidPayload` | §9.5, §11.8 |
+| What a service may do with a huge history | §2.4 |

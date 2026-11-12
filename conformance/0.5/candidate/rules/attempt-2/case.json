@@ -1,0 +1,1 @@
+{"description":"After a cancel, K1 tries again with attempt 2: delayed twice as long.","expected":{"activation":"2026-11-17T11:00:02Z","result":"ok","seq":7},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

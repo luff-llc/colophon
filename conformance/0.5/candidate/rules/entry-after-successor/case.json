@@ -1,1 +1,1 @@
-{"description":"An entry after a successor.","expected":{"result":"refused:fork","seq":3},"sections":["15.2"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"An entry after a successor: malformed evidence; the successor stands.","expected":{"evidence":"entry 3 is malformed evidence","result":"ok","seq":2},"sections":["15.2"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

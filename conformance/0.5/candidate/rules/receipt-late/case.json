@@ -1,0 +1,1 @@
+{"description":"A receipt 301 s after issued.","expected":{"result":"held","seq":5,"why":"receipt by home two is malformed (received > issued + 300 s)"},"sections":["13.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

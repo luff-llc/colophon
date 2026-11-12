@@ -1,1 +1,0 @@
-{"description":"A resolve without the recovery quorum doesn't settle the fork.","expected":{"result":"refused:fork","seq":2,"why":"resolve at 3 is badSignature"},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

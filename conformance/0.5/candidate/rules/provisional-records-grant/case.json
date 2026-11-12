@@ -1,0 +1,1 @@
+{"description":"A provisional key grants `records`.","expected":{"result":"badSignature","seq":4},"sections":["6.1"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

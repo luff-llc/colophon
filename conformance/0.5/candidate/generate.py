@@ -437,6 +437,7 @@ write("keys.json", {
 # ---------------------------------------------------------------------------------------
 # Revision 2 cases (spec revision 2): rules, origins, pairing, Swift succession.
 exec(compile((HERE / "rules.py").read_text(), str(HERE / "rules.py"), "exec"))
+exec(compile((HERE / "rules_r3.py").read_text(), str(HERE / "rules_r3.py"), "exec"))
 
 # ---------------------------------------------------------------------------------------
 # Self-checks: every envelope in the output whose signer is honest verifies.

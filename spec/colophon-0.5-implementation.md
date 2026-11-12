@@ -1,6 +1,6 @@
 # Colophon 0.5: implementation plan
 
-**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 2, 2026-11-11. No engine code
+**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 3, 2026-11-11. No engine code
 has been changed for it. Steps are in order. The vectors come first, because §21 says the
 spec can't freeze without them, and every verifier step is then tested against them.
 
@@ -39,6 +39,16 @@ verifier.
   4. Seed transfer under the pairing scheme.
   5. Calls with two homes and one stale head; additions after S ignored.
   6. `/5` succession with fresh predecessor heads; the migration entry with real view digests.
+  7. Revision-3 items not yet built:
+     - a future `issued` held, and a cancel by a recovery-added key;
+     - possession from a non-authority origin, and two `resolve`s;
+     - a quorum-2 stale call, and a recovery at a non-primary home colliding with a primary entry;
+     - the replay store's `pending` state;
+     - the whole §21 list.
+  8. **The Swift differential corpus**, extended from `probes/swift-der`:
+     - every DER and raw form, run through both the released Swift verifier and the §16.3
+       verifier, on macOS, iOS and visionOS;
+     - duplicate and missing `clientData` members.
 - **Also:** move the draft-1 vectors (`conformance/0.5/speaks-for`, `conformance/0.5/terms`) to
   `conformance/0.5/legacy-draft-1/`, update `tests/v5_conformance.rs` to read them there, and say
   in a README that they aren't 0.5.
@@ -66,7 +76,12 @@ Files: `authority.rs`, `slots.rs`, `vault.rs`.
   recovery-set rule. Counting is by keys or holders. The control rule counts the larger
   threshold. Delayed and provisional signers count for nothing. Factor the "only adds" check
   out and share it.
-- Recovery-added tracking with the receipt time, and the delay computation.
+- Recovery-added tracking from per-home receipts: the latest of `headQuorum`, attempt 2 at
+  twice the delay, counter-recovery, and full recovery. Removing a delayed key is possible only
+  by a cancel.
+- The policy classification table (§6.3) as the recovery-set trigger list.
+- Provisional sponsors, the one-at-a-time limit, and services-only grants.
+- Holder labelling with the key's co-signature.
 - Rotation only for controllers some slot ever named (§8.3). Re-adding a removed controller.
 - Seed transfer (§7.4) and pairing (§7.3): `begin_pairing`, `reveal`, `pairing_code`.
 - The restricted vault HPKE open (§17.2).
@@ -81,7 +96,7 @@ Files: `authority.rs`, `model.rs`, `protocol.rs`, `library.rs`; new `swift_prede
   - new: `renew`, `endSessions`, `resolve`, `migration`, `successor` (terminal);
   - changed: `revoke` (`member`, `kept`, `heads`), `grant` (`terms`), and genesis (optional
     `predecessor`, zero namespaces).
-- Fork detection across held branches, and `resolve` (§8.6).
+- Conflict classification (§8.6): evidence, recovery at a non-primary home, vouched forks with `resolve`, and no-home priority. Body-byte equality everywhere.
 - `upgrade` (§16.1) and the conversion of 0.4 grants to terms.
 - Succession (§15.1). For `/5` predecessors, use the core's own verifier.
 - **Swift predecessor verifier in Rust** (§16.3), a pure function of stored bytes, so the WASM
@@ -157,7 +172,13 @@ from Marginalia `origin/main` first: the reference copy lacks the `layout` kind)
 
 - 0.4 in place: the host asks whether every writing app reads 0.5, shows the chosen settings,
   and signs `upgrade`.
-- Swift to 0.5:
+- Swift to 0.5. Follow §15.3 and §16.2 in order:
+  - preflight under §16.3, with the CryptoKit-observed DER leniency;
+  - appoint a home and publish the predecessor at `{base}/predecessor/`;
+  - write F only after the person confirms;
+  - drain for the window; then write `migration` with `drain`;
+  - support refusals for recovery-added signers.
+- Swift to 0.5, details:
   - build the genesis from the old public keys, collecting possession proofs only for keys
     that aren't carried over;
   - collect `handover` (the recovery identity for a root library; recover signers when the

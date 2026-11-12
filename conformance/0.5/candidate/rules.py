@@ -299,12 +299,12 @@ write_case("holders-two-holders", c2, ok_at(2), "Two holders meet threshold 2.",
 # Recovery, receipt, delay and cancel (§8.4, §13.5). Threshold 2 so cancel is distinguishable.
 kr_r = keyring([ctrl(A, ["approve", "control"], "Device"), ctrl(B, ["approve", "control"], "Laptop"),
                 ctrl(K1, ["approve", "recover"], "Security key")], threshold=2, rt=1)
-c = Chain(); genesis(c, kr_r, [A, B], adds=[K1]); grant_home(c, A, ts(60), A, cos=[B])
+c = Chain(); genesis(c, kr_r, [A, B], adds=[K1]); grant_home(c, A, ts(60), A, cos=[B, K1])
 rec_kr = with_added(kr_r, ctrl(NK, ["approve"], "Recovered phone"))
 issued_rec = ts(3600)
 received = ts(3602)
 crec = c.copy(); crec.add("keyring", K1, issued_rec, K1, adds=[NK], keyring=rec_kr)
-rcpt = {"records/authority/00000003.receipt.json": receipt(crec, 3, received)}
+rcpt = {f"records/authority/00000003.{HOME_K.id}.receipt.json": receipt(crec, 3, received)}
 write_case("recovery-with-receipt", crec, ok_at(3), "Recovery rule (approve-only addition since recoverThreshold < threshold), with a home receipt.",
            ["8.4", "13.5"], extra=rcpt)
 write_case("recovery-without-receipt", crec, {"result": "held", "seq": 3, "why": "unavailable: receipt"},
@@ -335,20 +335,22 @@ write_case("successor", s_ok, ok_at(2), "Successor under control and recovery-se
 s_bad = c.copy(); s_bad.add("successor", A, ts(60), A, account="ab" * 32)
 write_case("successor-without-recovery", s_bad, bad("badSignature", 2), "Successor with the control key alone.", ["8.4"])
 s_after = s_ok.copy(); s_after.add("layout", A, ts(120), A, layout=2)
-write_case("entry-after-successor", s_after, {"result": "refused:fork", "seq": 3}, "An entry after a successor.", ["15.2"])
+write_case("entry-after-successor", s_after, {"result": "ok", "seq": 2, "evidence": "entry 3 is malformed evidence"},
+           "An entry after a successor: malformed evidence; the successor stands.", ["15.2"])
 
-# Forks and resolve (§8.6).
+# Forks without homes: deterministic priority, never a freeze (§8.6 rule 4). Vouched forks: rules_r3.py.
 c = Chain(); genesis(c, kr_one, [A], adds=[K1])
-fa = c.copy(); fa.add("keyring", A, ts(60), A, keyring=change(kr_one, policy={"headMaxAge": 600}))
-fb = c.copy(); fb.add("keyring", A, ts(61), A, keyring=change(kr_one, policy={"headMaxAge": 900}))
-write_case("fork", fa, {"result": "refused:fork", "seq": 2}, "Two valid entries at seq 2.", ["8.6"],
+fa = c.copy(); fa.add("keyring", A, ts(60), A, keyring=change(kr_one, policy={"headMaxAge": 120}))
+fb = c.copy(); fb.add("keyring", A, ts(61), A, keyring=change(kr_one, policy={"headMaxAge": 60}))
+da, db = sha(body_of(fa.envs[1])), sha(body_of(fb.envs[1]))
+write_case("conflict-no-home-tie", fa, {"result": "ok", "seq": 2, "kept": min(da, db), "evidence": max(da, db)},
+           "Two control-rule entries at seq 2, no homes: the lower body digest is kept, the other is evidence.", ["8.6"],
            branches={"b": [(2, fb.envs[1])]})
-fr = fa.copy(); fr.add("resolve", A, ts(120), A, cos=[K1], discarded={"seq": 2, "digest": sha(body_of(fb.envs[1]))})
-write_case("fork-resolved", fr, ok_at(3), "Branch a resolves the fork under control and recovery-set rules.", ["8.6"],
-           branches={"b": [(2, fb.envs[1])]})
-fr2 = fa.copy(); fr2.add("resolve", A, ts(120), A, discarded={"seq": 2, "digest": sha(body_of(fb.envs[1]))})
-write_case("resolve-without-recovery", fr2, {"result": "refused:fork", "seq": 2, "why": "resolve at 3 is badSignature"},
-           "A resolve without the recovery quorum doesn't settle the fork.", ["8.6"], branches={"b": [(2, fb.envs[1])]})
+fc = c.copy(); fc.add("keyring", A, ts(62), A, cos=[K1], keyring=change(kr_one, policy={"headMaxAge": 90}))
+write_case("conflict-no-home-stronger-rule", fc,
+           {"result": "ok", "seq": 2, "kept": sha(body_of(fc.envs[1])), "evidence": [da, db]},
+           "The same conflict with a third entry that also meets the recovery-set rule: it wins whatever its digest.",
+           ["8.6"], branches={"a": [(2, fa.envs[1])], "b": [(2, fb.envs[1])]})
 
 # ---------------------------------------------------------------------------------------------
 # Authority origins (§4.3) with a synthetic passkey.
@@ -369,7 +371,7 @@ for name, auth, origin, expected, why in [
 kr_p = keyring([ctrl(A, ["approve", "control"], "Device"), ctrl(P_pin, ["approve", "control"], "Passkey", verification=True),
                 ctrl(K1, ["recover"], "Kit")], rt=1)
 cc = Chain(); genesis(cc, kr_p, [A], adds=[K1, P_pin], origin="https://keys.id.example")
-grant_home(cc, A, ts(60), A)
+grant_home(cc, A, ts(60), A, cos=[K1])
 acct_cc = account_id(cc)
 head_cc = envelope({"protocol": "colophon/head/5", "account": acct_cc,
                     "authority": {"seq": 2, "digest": sha(body_of(cc.envs[1]))}, "issued": "2026-11-11T09:00:00Z",

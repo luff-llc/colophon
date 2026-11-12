@@ -1,0 +1,1 @@
+{"description":"The recovery-added key calls during its delay.","expected":{"call":"refused:revoked"},"sections":["12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-20T00:01:00Z"}}

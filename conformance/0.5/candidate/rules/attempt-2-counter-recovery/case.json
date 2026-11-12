@@ -1,0 +1,1 @@
+{"description":"A control key plus K2 (not a signer of attempt 2) cancels it.","expected":{"result":"ok","seq":8},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

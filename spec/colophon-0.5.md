@@ -1,9 +1,9 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 2, for review, 2026-11-11.** Not frozen, not
+**Status: final candidate, revision 3, for review, 2026-11-11.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
-answers two independent reviews of revision 1 (152d991); the mapping is in
-[colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
+answered two reviews of revision 1 (152d991); revision 3 answers two reviews of revision 2
+(9e90470). The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 
 **What it replaces.** This document is complete for every identity, authority, grant, call,
@@ -91,6 +91,8 @@ verified as their own version required.
   "no expiry". Comparison uses the components with omitted milliseconds as zero.
 - **Digests** are lowercase hex SHA-256 of exact bytes, 64 characters unless "first 32".
 - **Integers** in fields defined here are integer tokens from 0 to 2^53−1 unless stated.
+- **Equality** of authority entries, records, heads and receipts is equality of their body bytes.
+  Two envelopes over one body are the same object; the first one received is kept.
 - **Signature bytes are never identifiers.** ECDSA signatures are malleable (high-S is valid,
   §4.3), so no record, cache, replay store or index may be keyed by signature bytes or by a
   digest of an envelope that includes them; use body digests, `requestId`s and key IDs.
@@ -113,19 +115,29 @@ verified as their own version required.
 | Object | Bound on canonical bytes |
 | --- | --- |
 | Authority body (`/5`) | 1,048,576 |
-| Receipt body | 1,024 |
+| Receipt, refusal body | 1,024 |
 | Membership request body | 16,384 |
 | Link body | 8,192 |
 | Call body, including embedded links | 65,536 |
 | `args` of a call | 16,384 |
 | Head body | 4,096 |
-| Equivocation evidence | 16,384 |
+| Equivocation evidence | 2,097,152 |
 | Operation header body (including `ciphertext`) | 16,777,216 |
 | `clientData` | 8,192 |
 
 Exceeding a bound is `malformed`. A verifier MUST NOT allocate in proportion to a claimed
-length before checking it. There is no bound on the number of entries in a history: a verifier
-MUST accept histories of at least 1,048,576 entries, fetched in pages (§14).
+length before checking it.
+
+**History size.** The format sets no total bound on a history. Every service and verifier MUST
+be able to verify, on first contact, a history of at least **65,536 entries and 256 MiB** of
+envelopes in total (the **portability floor**), fetched in pages of at most 64 entries (§14). A
+service MAY set higher limits, and MUST document its limits on bytes, entries, signatures
+verified and elapsed time per account. When it exceeds a limit it answers `unavailable`
+(history incomplete), never partial validity. Verification is resumable from the verifier's own
+persisted state (§13.3). Hosts MUST warn an account's owner when its history passes half the
+floor. An honest person's account grows by entries that people sign, not by sessions or
+records, so it stays far below the floor; an account that exceeds it remains valid but may be
+refused service by verifiers that hold to the floor.
 
 ## 3. Keys
 
@@ -168,6 +180,11 @@ Therefore:
   **not** separate **vault access**: every origin under the `rp` can read every `prf` slot of
   its passkeys. Code that must never be able to open the vault must not run on any origin under
   that `rp`; it needs its own `rp`, and therefore its own passkeys.
+- Native builds are origins too. A beta or test build (TestFlight, an internal track) of an app
+  is another release channel: it MUST NOT be listed in the production `rp`'s association files,
+  or it MUST use another `rp`.
+- **Security invariant:** whoever controls code on any origin a browser allows for an `rp` can
+  read every `prf` slot of that `rp`'s passkeys. No field in an account changes this.
 - The bare `rp` origin SHOULD serve only `/.well-known/` association files, because native-app
   assertions are commonly reported with that origin and it is then in `authorityOrigins`.
 
@@ -235,7 +252,8 @@ recorded and MUST NOT be required.
 
 ### 4.2 `raw`
 
-`signature` is 64 bytes, `r ‖ s`: ES256 over the exact body bytes.
+`signature` is 64 bytes, `r ‖ s`: ES256 over the exact body bytes. `r` and `s` are in [1, n−1];
+high-S values are valid, and a library enforcing low-S normalizes before verifying.
 
 ### 4.3 `webauthn`
 
@@ -318,23 +336,39 @@ an account is resolved only by obtaining the history and checking the prefix.
 | `label` | 1–200 bytes. Display only. |
 | `roles` | Non-empty, sorted, duplicate-free subset of `approve`, `control`, `recover`, `sign`. `sign` appears only alone. |
 | `verification` | `webauthn` only. Present only as `true`: every signature needs UV. |
-| `holder` | Optional, 1–64 bytes. Who holds the key: the same value on every key one person holds. Required on every controller when `countBy` is `holders`. |
-| `audiences` | Optional; present if and only if roles are `["sign"]`. 1–32 distinct audiences (§10.1 grammar), sorted. |
-| `until` | Optional date. Set only by the add rule on a provisional controller (§8.4). |
+| `holder` | Optional, 1–64 bytes: a label for the person or custody unit that holds the key. Required on every controller when `countBy` is `holders`. |
+| `audiences` | Present if and only if roles are `["sign"]`. 1–32 distinct sorted audiences (§10.1 grammar). |
+| `until` | Optional date. Present only on a provisional controller (below). |
 
 The controller ID is its key ID. A controller is always a key: an account is never a controller
 of another account in 0.5.
 
 | Role | What it can do |
 | --- | --- |
-| `approve` | Under the single rule (with `policy.memberRule` `single`): admit any member with any `records` or `services` terms, renew any member, revoke any member except a home, end any member's sessions, introduce epochs. **The control threshold does not protect these.** A company that wants it to sets `memberRule` to `control`. |
-| `control` | Change the keyring, layout, policy, primary home and homes; make the account's successor; with the recovery-set rule, change recovery. |
+| `approve` | Under `policy.memberRule` `single`: admit any member with any `records` or `services` terms, renew any member, revoke any member except a home, end any member's sessions, introduce epochs (single rule). **The control threshold does not protect these.** Under `memberRule` `control` all of them need the control rule. |
+| `control` | Change the keyring, layout, policy and homes; make the account's successor; each within the rules of §8.4. |
 | `recover` | Add keys when others are lost (recovery rule), and consent to changes of the recovery set. |
-| `sign` | Sign calls (§12) at the listed `audiences` only. It never signs an authority entry, never counts toward any rule, and never opens a slot. |
+| `sign` | Sign calls (§12) at the listed `audiences` only. Never signs an authority entry, never counts toward any rule, never named by a slot. |
 
-A **provisional** controller (one with `until`) has only `approve`; its signatures count only
-on entries whose `issued` is at most `until`; no slot or part names it. A control-rule entry
-that removes `until` confirms it.
+**Provisional controllers.** A controller added by the add rule while `addThreshold` is below
+`threshold` is provisional: roles exactly `["approve"]`, `until` no later than the adding
+entry's `issued` + 30 days, and no slot or part names it. While provisional:
+
+- it may sign calls, and `grant` entries whose terms contain only `services` (no `records`,
+  `serves` or `import`), and nothing else;
+- its signatures count only on entries issued no later than `until`, and only while every
+  controller that signed the entry adding it (its **sponsors**) is still a non-provisional
+  controller with `control`;
+- there is at most one provisional controller in a keyring at a time;
+- `until` can never be extended or added again. A control-rule entry that removes `until`
+  **confirms** it, and only then may a slot name it.
+
+**Holders.** `holder` is a label that the keyring's controllers attest, not proof that two
+labels are two independent people. `countBy: holders` therefore counts attested labels. Setting
+or changing a controller's `holder` needs the control rule (for a `recover` controller, the
+recovery-set rule as well), and the key being labelled MUST sign the entry (in `additions`, §4.1)
+the first time it gets a holder and every time its holder changes. One key, alone, can't
+attest two people.
 
 ### 6.2 Keyring
 
@@ -363,10 +397,10 @@ account; a verifier MAY be stricter for calls only.
 | --- | --- | --- |
 | `callWindow` | Seconds a call's `created` may differ from the verifier's clock (§12.3) | 30–3,600 |
 | `headMaxAge` | Seconds a head stays fresh (§13.3) | 30–86,400 |
-| `headQuorum` | Distinct homes whose fresh heads a call verifier needs | 1–8 |
+| `headQuorum` | Distinct homes whose fresh heads or receipts are needed (§12.3, §13.5) | 1–8 |
 | `history` | Who a home serves the history to: `members` or `public` (§13.4) | — |
 | `linkMaxAge` | Most seconds from a link's `notBefore` to its `expires` | 60–2,592,000 |
-| `memberRule` | `single` or `control`: the rule for `grant`, `renew`, `revoke` (§8.4) | — |
+| `memberRule` | `single` or `control` (§8.4) | — |
 | `primaryHome` | Member ID of the primary home. Absent: the earliest-appointed current home. | a current home |
 | `recoveryDelay` | Seconds before a controller added by the recovery rule can sign (§8.4) | 0–2,592,000, and at least 3,600 while the account has a home |
 
@@ -374,14 +408,39 @@ An entry that leaves the account with one or more homes and `recoveryDelay` belo
 fewer current homes than `headQuorum` while it has any home, or names as `primaryHome` a member
 that is not a current home, is `malformed`.
 
+**Which changes weaken recovery.** Each change in this table needs the recovery-set rule (§8.4)
+on top of its own rule. Every other change of these fields needs only the control rule.
+
+| Field | Change that needs the recovery-set rule | Why |
+| --- | --- | --- |
+| `recoverThreshold` | any change | Lowering weakens recovery; raising can lock out an owner who holds fewer keys |
+| `recoveryDelay` | any change | Shortening removes the owner's time to cancel; lengthening delays the owner |
+| `countBy` | any change | It changes what counts as a recovery quorum |
+| `headQuorum` | any change | It sets how many receipts start a delay |
+| `primaryHome` | any change | The primary orders entries and can delay a cancel |
+| `headMaxAge` | raising | Staler heads let a removed key act longer |
+| `callWindow` | raising | Older calls stay acceptable |
+| `linkMaxAge` | raising | Longer sessions outlive a revocation |
+| `memberRule` | `control` → `single` | One `approve` key regains member power |
+| `history` | `members` → `public` | Disclosure, not recovery; listed so a thief can't publish the history alone |
+| `threshold`, `addThreshold` | none: the control rule counts the larger of old and new `threshold` | — |
+| Homes (appointing or revoking any home) | any | Homes witness the delay and store cancels |
+
 ### 6.4 Warnings
 
-Hosts MUST warn, in words, before writing an entry after which losing any one key (or holder)
-leaves no control quorum, no recovery quorum where the person chose to have one, or no openable
-slot; when fewer recovery controllers exist than the person's chosen number; when no recovery
-controller has a slot; when a company has exactly two holders and `threshold` 2 ("neither of you
-can be removed without the other"); and when a company has two holders and `threshold` 1
-("either of you can act alone, including removing the other").
+Hosts MUST warn, in words, before writing an entry after which:
+
+- losing any one key (or holder) leaves no control quorum, no recovery quorum where the person
+  chose to have one, or no openable slot;
+- fewer recovery controllers exist than the person's chosen number, or no recovery controller
+  has a slot;
+- **the account has a `recover` controller and no home: "Without a home, any one recovery key
+  takes control at once. There is no delay and no time to cancel."**;
+- only one `recover` controller exists: "If this one recovery key is stolen, nothing can stop
+  it after the delay.";
+- a company has exactly two holders and `threshold` 2 ("neither of you can be removed without
+  the other"), or two holders and `threshold` 1 ("either of you can act alone, including
+  removing the other").
 
 ## 7. Vault and slots
 
@@ -447,20 +506,22 @@ checks the vault before it is published. The host is trusted to pass PRF bytes u
 
 Pairing joins two devices that a person can see: a **joining** side J holding a key point `E`
 (an ephemeral transfer key, §7.4, or a new member's signing key, §9.1) and an **existing** side
-H. `accountID` is the 64 ASCII hex characters.
+H. All inputs are raw bytes: `accountID` is its 64 ASCII hex characters, `E` the 65-byte
+uncompressed point, `nA` and `nB` 32 bytes each.
 
-1. J chooses 32 random bytes `nB` and sends `C = SHA-256("colophon/pair/5" ‖ accountID ‖ E ‖ nB)`.
-2. Only after receiving `C`, H chooses 32 random bytes `nA` and sends them.
+1. J chooses `nB` at random and sends `C = SHA-256("colophon/pair/5" ‖ accountID ‖ E ‖ nB)`.
+2. Only after receiving `C`, H chooses `nA` at random and sends it.
 3. J sends `E` and `nB`. H checks `C`; a mismatch aborts.
 4. Both display the code: the first four bytes of
    `SHA-256("colophon/pair-code/5" ‖ accountID ‖ E ‖ nA ‖ nB)`, big-endian, modulo 1,000,000,
    as six digits. The person confirms they match.
 
-One mismatch, abort or timeout ends the session; H MUST NOT accept a second reveal for one
-commitment, and a retry starts again with new nonces. A relay that substitutes `E` must commit
-before it sees `nA`, so it matches the code with probability one in a million per attempt. As
-an alternative, H MAY scan from J's screen a QR code carrying `accountID`, `E` and `nB`; H then
-checks `E` directly and no code is compared.
+Each commitment permits exactly one reveal. A mismatch, abort or timeout ends the session; a
+retry starts again with new nonces, and H MUST allow no more than 5 failed sessions per hour. A
+relay that substitutes `E` must commit before it sees `nA`, so it matches the code with
+probability one in a million per attempt. **QR alternative:** H scans from J's screen a QR code
+carrying `accountID`, `E` and `nB`, checks `E` directly, and still sends `nA` to J, so that
+§7.4's label has both nonces; no code is compared.
 
 ### 7.4 Moving the seed to a new device
 
@@ -502,7 +563,7 @@ has `colophon/authority/4` entries up to and including its `upgrade` entry and `
 | `renew` | `member`, `expires`, `shares` | Extends a member's expiry (§9.4). |
 | `revoke` | `member`, `kept`, `heads`, `epochs` | Ends a member (§9.5). |
 | `endSessions` | `member` | Ends every link under a member (§9.6). |
-| `keyring` | `keyring`, and `shares` plus `epochs` only if the vault changes | Replaces the keyring wholesale (§8.3). |
+| `keyring` | `keyring`; `shares` plus `epochs` only if the vault changes; optional `attempt` (only `2`, §8.4) | Replaces the keyring wholesale (§8.3). |
 | `layout` | `layout` | Raises the storage layout; never lowers it. |
 | `resolve` | `discarded` (`{seq, digest}`) | Ends a fork in favour of this branch (§8.6). |
 | `migration` | §15.4 | States what a copy carried and what it didn't. At most once, at seq 2 or later. |
@@ -533,62 +594,111 @@ naming it must be new (fresh secrets for the current vault); its historical slot
 ### 8.4 Who may sign what
 
 Signers are evaluated against the keyring and member table **before** the entry (genesis:
-against its own keyring). Counts are by keys or holders per `countBy` of that keyring. Only
-signatures by non-`sign`, non-provisional-expired, non-delayed controllers count (below).
+against its own keyring). Counts are by keys or holders per the prior keyring's `countBy`. A
+signature counts only if its controller is not `sign`, not delayed, and not a provisional
+controller outside its limits (§6.1).
 
 | Kind | Rule |
 | --- | --- |
 | `genesis` | Control rule over its keyring; possession; and the predecessor rule if `predecessor` is present (§15.1). |
-| `keyring` | Control rule; else add rule; else recovery rule; else cancel rule; else `badSignature`. Then, in every case, possession and the recovery-set rule where it applies. |
-| `layout` | Control rule. |
-| `grant`, `renew`, `revoke` | Control rule when `memberRule` is `control`, when the member's terms (granted or existing) contain `import` or `serves`, or when the entry revokes or renews a home; otherwise the single rule. |
-| `rekey` | Single rule, or one `control` signer with no cosignatures. |
-| `endSessions` | Single rule, or the member rule. |
-| `resolve` | Control rule and recovery-set rule of the keyring at the fork point (§8.6). |
-| `migration` | Control rule. |
+| `keyring` | Control rule; else add rule; else recovery rule; else cancel rule; else `badSignature`. Then, in every case, possession, the recovery-set rule where §6.3 or the triggers below require it, and the delay rules. |
+| `layout`, `migration` | Control rule. |
+| `grant`, `renew`, `revoke` | Control rule when `memberRule` is `control`, when the member's terms (granted or existing) contain `import` or `serves`, or when the entry appoints, renews or revokes a home (then also the recovery-set rule); otherwise the single rule, or a provisional signer within §6.1. |
+| `rekey` | Control rule when `memberRule` is `control`; otherwise the single rule, or one `control` signer with no cosignatures. |
+| `endSessions` | The member rule; or the control rule when `memberRule` is `control`; otherwise the single rule. |
+| `resolve` | Control rule and recovery-set rule of the keyring before the fork (§8.6). |
 | `successor` | Control rule and recovery-set rule. |
 | `upgrade` (`/4`) | 0.4 control rule (§16.1). |
 | unknown kind | Control rule. |
+
+**The rules.**
 
 - **Control rule.** Signers holding `control` number at least the **larger** of the prior
   `threshold` and the new keyring's `threshold` (for kinds that set a keyring); every other signer
   holds `recover` and is there for the recovery-set rule, which must then apply; every WebAuthn
   signature has UV.
 - **Add rule.** Every signer holds `control`; at least `addThreshold` distinct signers; UV; the
-  change only adds; and if `addThreshold` < `threshold`, every added controller is provisional:
-  roles exactly `["approve"]`, `until` no later than `issued` + 30 days, and no slot or part names
-  it. A `sign` controller may be added under the add rule at any `addThreshold`.
+  change only adds; if `addThreshold` < `threshold`, every added controller is provisional (§6.1).
+  A `sign` controller may be added under the add rule at any `addThreshold`.
 - **Recovery rule.** `recoverThreshold > 0`; every signer holds `recover`; at least
   `recoverThreshold` distinct signers; UV; only adds; if `recoverThreshold < threshold`, every
   added controller has roles exactly `["approve"]`. Controllers it adds are **recovery-added**.
 - **Only adds.** Every existing controller is identical by canonical JSON; `threshold`,
   `recoverThreshold`, `addThreshold`, `countBy`, `policy` and `vault` unchanged; every existing
-  slot preserved as a multiset by canonical JSON including label; only new controllers, and
-  slots naming only new controllers, are added.
-- **Recovery-set rule.** When the prior keyring has `recoverThreshold ≥ 1`, an entry that removes
-  a `recover` controller, removes `recover` from one, lowers `recoverThreshold`, adds a controller
-  with `recover`, changes `recoveryDelay` or `countBy`, deletes or changes a slot naming a
-  `recover` controller, or is `resolve` or `successor`, meets its rule only if it also carries
-  at least the prior `recoverThreshold` distinct `recover` signers of the prior keyring, with UV.
-  One signature may count for both rules. The cancel rule is exempt.
-- **Delay.** A recovery-added controller is **delayed** until `received + policy.recoveryDelay`,
-  where `received` is from the entry's receipt (§13.5), or, in an account with no home at that
-  entry, until the entry's `issued`. A delayed controller's signature counts for nothing on any
-  entry whose `issued` is earlier than that time. In an account with a home, a recovery-rule
-  entry without a valid receipt is *held* (`unavailable`).
-- **Cancel rule.** A `keyring` entry signed by exactly one controller that held `control` in the
-  keyring before the most recent recovery-rule entry, with UV, that only removes controllers
-  still delayed at its own `issued` (with their slots, rotating the vault as §8.3 requires) and
-  changes nothing else.
-- **Possession.** Every controller an entry adds (every genesis controller that isn't a signer,
-  and every new controller of a `keyring` entry) MUST sign the body in `additions`, from an
-  authority origin (a `sign` controller from any origin its descriptor allows), with UV if it has
-  `verification`. Exempt: in a genesis with a verified
-  predecessor, controllers whose key is a controller of the predecessor at `head`; and the
-  `upgrade` entry. A missing or failing proof is `badSignature`.
+  slot preserved as a multiset by canonical JSON including label; only new controllers, and slots
+  naming only new controllers, are added.
+- **Recovery-set rule.** When the prior keyring has `recoverThreshold ≥ 1`, an entry meets its
+  rule only if it also carries at least the prior `recoverThreshold` distinct `recover` signers of
+  the prior keyring, with UV (one signature may count for both rules), whenever it:
+  - removes a `recover` controller, removes `recover` from one, or adds a controller with
+    `recover`;
+  - changes any field of a `recover` controller other than `label` (its key, descriptor,
+    `origins`, `authorityOrigins`, `verification` or `holder`);
+  - deletes or changes a slot or part naming a `recover` controller;
+  - makes a policy change §6.3 lists, or appoints or revokes a home;
+  - is `resolve` or `successor`.
+
+  The cancel rule is exempt.
 - **Single rule.** Exactly one signer, no cosignatures, holding `approve`.
 - **Member rule.** `endSessions` only: `by` equals `member`; signed `raw` by that current member;
   no cosignatures.
+- **Possession.** Every controller an entry adds (every genesis controller that isn't a signer,
+  and every new controller of a `keyring` entry), and every controller whose `holder` the entry
+  sets or changes, MUST sign the body in `additions`. The signature comes from an authority
+  origin; a `sign` controller's may come from any origin its descriptor allows. It needs UV if
+  the controller has `verification`. Exempt: the `upgrade` entry, and, in a genesis with a
+  verified predecessor, controllers whose key was a controller of the predecessor at `head`. A
+  carried-over key may be given a new `agreement` point without proof; a slot sealed to a point
+  its holder can't open is useless, never dangerous. A missing or failing proof is `badSignature`.
+
+**Recovery timing.**
+
+- **Delay.** A recovery-added controller is **delayed** until **activation**:
+  - with a home: the latest `received` among valid receipts (§13.5) of the recovery entry by
+    `policy.headQuorum` distinct current homes, plus `recoveryDelay` (doubled for an attempt-2
+    entry). Until that many receipts exist, the recovery entry is *held* (`unavailable`) and has
+    no effect on any state;
+  - **with no home: activation is the entry's own `issued`. There is no delay.** Any one
+    recovery key at `recoverThreshold` 1 takes control at once. Hosts MUST warn (§6.4).
+  A delayed controller's signature counts for nothing on any entry whose `issued` is before
+  activation, and on no call made before activation (§12.3).
+- **Cancel rule.** A `keyring` entry signed by exactly one controller that held `control` before
+  the recovery entry it cancels and is not itself recovery-added, with UV, that only removes
+  controllers still delayed at its own `issued` (with their slots, rotating the vault as §8.3
+  requires) and changes nothing else. A still-delayed recovery-added controller can be removed
+  **only** by a cancel-rule entry (or by a cancel meeting the counter-recovery below); no other
+  rule removes it.
+- **Attempt 2.** A recovery-rule `keyring` entry MAY carry `"attempt":2` when the most recent
+  recovery-rule entry in the history was undone by a cancel, and at least one of its recover
+  signers also signed that cancelled entry. An attempt-2 entry:
+  - is delayed by twice `recoveryDelay`;
+  - can be cancelled only by a cancel that also carries at least `recoverThreshold` distinct
+    `recover` signers not among the attempt-2 entry's own signers (a **counter-recovery**). One
+    control key alone can't cancel it;
+  - once active, its added controllers can be removed only by an entry that meets the
+    recovery-set rule.
+- **Full recovery.** A recovery-rule entry signed by **every** current `recover` controller (at
+  least two distinct keys, or holders under `countBy: holders`) needs no receipt and has no delay.
+  This is the way out when every home is gone or refuses: with all recovery keys, the owner adds a
+  control key, which then appoints new homes under the control and recovery-set rules. A person
+  who has lost every control key, every home, and any one of their recovery keys has no way to
+  regain authority. Their data stays readable through any slot they can still open.
+- **The delay protects authority, not data.** A recovery controller with a `prf` or sealed slot
+  opens the vault the moment its holder (or a thief who has it and its PIN) uses it; no delay
+  applies to reading.
+
+**Who wins.** The reference personal setup (§18) has device keys and passkeys with `control`,
+two security keys with `recover` only, `threshold` 1, `recoverThreshold` 1, one home and a 72 h
+delay. D is `recoveryDelay`. Here a "thief" holds the keys named; the owner holds every other key.
+
+| Scenario | Outcome at the default setup |
+| --- | --- |
+| Owner has every key but one, lost (no thief) | Owner removes the lost key under the control rule. Owner wins. |
+| Thief holds one control key | Both can act at once under the control rule; the thief can't touch recover keys, homes, the delay or `successor` (recovery-set rule). If the thief removes the owner's control keys first, the owner recovers: attempt 1 (the thief cancels it), then attempt 2, which the thief can't cancel or remove. After D + 2D the owner's new key removes the thief's. **Owner wins within 3D**; the thief can read data and act under the control rule meanwhile. |
+| Thief holds one recovery key | The thief's attempt 1 is cancelled by any owner control key. Attempt 2 is cancelled by an owner control key plus the owner's other recovery key. Meanwhile the owner removes the stolen recovery key (control rule plus the other recovery key). **Owner wins.** The thief reads data at once if that key has a slot. |
+| Thief holds one control and one recovery key | The thief meets the recovery-set rule with its recovery key and can remove the owner's other recovery key and every owner control key. **Not safe at the default: the first to act wins.** Closed by `recoverThreshold` 2 (then one stolen recovery key meets nothing, and the owner needs both to recover), or `threshold` 2 with keys held apart. |
+| Owner has a single recovery key, and a thief steals it | Nobody else can counter-cancel attempt 2. **The thief wins after D + 2D** unless the owner removes it first, which needs a recovery key. Closed by having two recovery keys (the reference default); §6.4 warns. |
+| No home, thief holds one recovery key | No delay: **the thief wins at once.** Closed by appointing a home (the reference setup does so before adding any recovery key). |
 
 ### 8.5 Verification order
 
@@ -611,17 +721,38 @@ lenient than this section for authority entries.
 
 ### 8.6 Forks
 
-Two different valid entries with the same `seq` and the same `previous` are a **fork**. A
-verifier that holds both MUST keep both and MUST answer `refused:fork` for every call, grant
-check, head and succession that depends on either branch, until a `resolve` entry settles it.
+Entries are **equal** when their body bytes are equal, whatever their envelopes (signatures are
+malleable, §2.2). Two **conflicting** entries are valid entries with the same `seq` and
+`previous` and different bodies. A verifier classifies a conflict between X and Y as follows:
 
-`resolve` is an entry on one branch, at any later seq, whose `discarded` names the other
-branch's entry at the fork (`seq`, body digest), signed under the control rule and the
-recovery-set rule of the keyring **before the fork**. A verifier holding a valid `resolve` treats
-its branch as the history and the other as refused evidence. Two valid `resolve` entries on both
-branches leave the fork unresolved. A verifier's high-water mark (§13.3) moves to another branch
-only through a valid `resolve`. Records citing a seq at or after the fork are held until the fork
-is resolved, then admitted against the resolving branch.
+1. **Equivocation, not a fork.** If X is covered by heads of at least `headQuorum` current homes,
+   or by the verifier's high-water mark, and no current home's head covers Y, then Y is
+   equivocation evidence against Y's signers. The verifier keeps
+   `{"protocol":"colophon/equivocation/5","account":…,"entries":["<base64>","<base64>"]}` (sorted
+   by body digest), shows it to the account's controllers, and goes on using X. This covers a key
+   that has since been removed signing at an old seq: it can't freeze the account.
+2. **Recovery at a non-primary home.** If X is covered by the primary home and Y is a
+   recovery-rule or cancel-rule entry covered only by other homes, X stands and Y is evidence. The
+   recovering device signs Y again at the next seq on X's history, and every home stores it
+   (§13.1).
+3. **A vouched fork.** If current homes' heads cover both X and Y (and rule 2 doesn't apply), the
+   verifier MUST answer `refused:fork` for every call, grant check, head and succession that
+   depends on either branch, until a `resolve` entry settles it. `resolve` is on one branch, at any
+   later seq. Its `discarded` names the other branch's entry (`seq`, body digest). It is signed
+   under the control rule and the recovery-set rule of the keyring before the fork. A valid
+   `resolve` makes its branch the history; two `resolve` entries on both branches leave the fork
+   unresolved.
+4. **No coverage** (an account without homes, or entries no home has seen). The verifier keeps the
+   entry whose signers meet the strongest rule, in this order: control rule with recovery-set
+   rule; control rule; cancel rule; recovery rule; add rule; single or member rule. A tie goes to
+   the lower body digest. The other is evidence. A narrow-role key therefore can never displace a
+   control-rule entry, and nobody can freeze the account. An account without homes has no
+   protection against a removed key rewriting history for a verifier that has seen neither
+   branch; persisted high-water marks protect every verifier that has.
+
+A verifier's high-water mark (§13.3) moves to another branch only through rule 2, rule 4 or a
+valid `resolve`. Records citing a seq at or after an unresolved vouched fork are held until it is
+resolved, then admitted against the resolving branch.
 
 ## 9. Members
 
@@ -696,7 +827,8 @@ A kept record still passes every other admission check, and a kept record citing
 seq or later is refused `revoked`. A reader that cannot complete a walk because an intermediate
 header is missing holds the records it would decide as *held* (`unavailable`), never as not
 kept. The approver's host computes `kept` and `heads` from every record it holds, including
-every fork head (up to 16) so no branch is lost.
+every fork head (up to 16) so no branch is lost. A kept record whose payload doesn't
+authenticate is refused `invalidPayload`, not preserved (§11.8).
 
 ### 9.6 Ending sessions
 
@@ -858,24 +990,45 @@ The core checks only its shape.
 
 ### 11.8 Incorporated 0.3 sections
 
-Exactly these sections of [colophon-0.3.md](colophon-0.3.md) are normative for 0.5, with the
-substitutions below. Everything else 0.3 says is replaced by this document.
+Exactly these parts of [colophon-0.3.md](colophon-0.3.md) are normative for 0.5, with the
+substitutions below. They are named by their opening words; each runs to the next paragraph
+named here or the end of its section. Everything else 0.3 says is replaced by this document.
 
-| 0.3 section | What it governs |
+| 0.3 part | What it governs |
 | --- | --- |
-| §4, paragraphs on storage paths, immutability, `state/` and `history/`, read scopes and `budgetScopeUnavailable`, and layout 2 (not its authority kinds or request format) | Record layout and replica merge rules |
-| §5, paragraph "A reader missing a historical key…" through "…enforce a globally fresh budget" | `invalidPayload`, `duplicateID`, unknown versions, budget reservation, local action checks |
-| §5, "Fold order" paragraphs | Live heads and clock anchoring detail |
+| §4, from "Hosts store records and merge them as a set" through "…merge validates the entire proposed authority chain before changing the replica." | Paths, immutability, `state/` and `history/`, read scopes, `budgetScopeUnavailable` |
+| §4, "New libraries MUST write a root-signed `layout` …" | Read as: a `/5` account is at layout 2 from genesis and writes no `layout` entry for it; `layout` entries only raise it above 2. Readers stop on an authenticated layout they don't support. |
+| §5, "Only authenticated, admissible payloads compete for a same-author operation ID…" | `duplicateID` |
+| §5, "A reader missing a historical key…" through "…enforce a globally fresh budget from an incomplete record set." | `invalidPayload`, budget reservation, unknown versions, local action checks |
+| §5, "Fold order is `(clock, author, id)`…" through "…ordering tails." and "Clocks are positive integers…" through "…Budget accounting uses the same order across namespaces." | Clocks, live heads, anchoring |
+| §5, "An exact copy of a currently authenticated live head…" | The live-head insertion optimization |
 | §5.1 | Live playback state and engagement evidence |
 | §6 | Domain modules, views, tools and the ledger |
 | §7, §7.1, §7.2 | Host contract, verified-prefix cache, import and blobs |
 | §8 | The HTTP relay |
 
-Substitutions: "library" reads "account"; `libraryID` in a live stamp reads `account` with the
-64-hex ID; "root-only" and "root role" read "the `import` term"; "member kind" reads the request
-`kind`; a grant's namespaces and access read its `records` entries, each with its own access;
-`writeBudget` reads `writes`; `/3` header rules read §11.2–§11.5 for `/5` headers;
-authority-history publication and reading on a relay that is a home read §13–§14.
+Substitutions:
+
+- "library" reads "account"; `libraryID` in a live stamp reads `account` with the 64-hex ID.
+- "root-only" and "the root's import role" read "the `import` term". "Reducers receive kind,
+  immutable grant and root role" reads "reducers receive the member's request `kind`, its terms
+  and whether they contain `import`".
+- "member kind" reads the request `kind`. A grant's namespaces and access read its `records`
+  entries, each with its own access. `writeBudget` reads `writes`.
+- An **uncaveated** writer is one whose terms have no `expires`, `writes`, `kinds` or
+  `conditions`. A **caveated** live stamp is one by any other writer.
+- `/3` header rules read §11.2–§11.5 for `/5` headers.
+- "Revocation … preserves only admitted records whose payload and content-derived ID
+  authenticated" applies to §9.5: a kept record whose payload doesn't authenticate is refused
+  `invalidPayload`, not preserved.
+- §7.1's "exact outer envelope bytes (including signatures)" reads "exact body bytes" (§8.6).
+- §8.2's 412 for different bytes at an immutable path reads: different envelope bytes over an
+  identical body are identical (200, the first envelope is kept), and only a different body is
+  412.
+- §8's "await acknowledgement of each authority sequence before uploading its successor" reads:
+  a home's acknowledgement of a `POST {base}/authority` batch (§14) acknowledges every entry in
+  it.
+- Publication and reading of authority history on a relay that is a home read §13–§14.
 
 ## 12. Links and calls
 
@@ -903,7 +1056,7 @@ Signed `raw` by `from`'s key: the member for the first link, the previous link's
 | `asOf` | An entry the signer had seen. |
 | `signer` | `{"member":…}` or `{"controller":…}`. |
 | `key` | The acting key's signing point. |
-| `links` | 1–8 links from the member outward; absent for the member's own key and always for a controller. |
+| `links` | 1–4 links (the most `depth` allows) from the member outward; absent for the member's own key and always for a controller. |
 | `audience`, `purpose` | §10.1 grammar. Purposes starting `colophon.` are reserved (§13.4, §14). |
 | `args` | A JSON object, at most 16,384 bytes. |
 | `requestId` | 32 random bytes, unpadded base64url. |
@@ -921,70 +1074,91 @@ A verifier MUST, in order:
    `badSignature`. Nothing is fetched before this.
 3. **Audience, window, replay.** `audience` is one of the verifier's own (§10.1), else
    `refused:audience`. `created` within 3,600 s of the clock, else `refused:window`. The replay
-   store (§12.4) holds this `(account, audience, key, requestId)`: same body bytes,
-   `refused:replay`; different bytes, `refused:conflict`.
+   store (§12.4) is consulted as it says.
 4. **History.** The verifier holds a verified history containing `asOf` (a different digest there
    is `refused:fork`) and fresh heads from at least `policy.headQuorum` distinct current homes,
    and has fetched up to the highest of them. No homes, or too few fresh heads: `unavailable`.
    Let **S** be the highest seq covered by `headQuorum` fresh heads. `created` within
-   `policy.callWindow`, else `refused:window`. An unresolved fork: `refused:fork`.
+   `policy.callWindow`, else `refused:window`. An unresolved vouched fork: `refused:fork`.
 5. **Signer, evaluated at S, with removals beyond S applied.** Grants, controllers and terms added
-   after S don't count. Revocations, controller removals, demotions, `endSessions` and shorter
-   policy that the verifier holds after S apply at once, unless signed by a controller delayed at
-   that entry. Then:
-   - A controller: present, else `refused:revoked`; roles include `approve` or `control`, or are
-     `sign` with `audience` in its `audiences`, else `refused:outOfScope`; `signing` equals
-     `key` and the assertion passes all of §4.3 with its descriptor, else `badSignature`; the
-     `origin` is one of the verifier's call-ceremony origins for its `rp`, else `refused:origin`.
-   - A member: present and not revoked, else `refused:revoked`; not expired, else
-     `refused:expired`.
+   after S don't count. Revocations, controller removals, demotions, `endSessions` and policy
+   changes that shorten or restrict, held by the verifier after S, apply at once. A held recovery
+   entry that isn't yet active changes nothing. Then:
+   - **A controller:**
+     - It must be present, else `refused:revoked`.
+     - It must be neither delayed nor a provisional controller past its `until` or without its
+       sponsors (§6.1, §8.4), at the verifier's clock, else `refused:revoked`.
+     - Its roles must include `approve` or `control`, or be `sign` with `audience` in its
+       `audiences`, else `refused:outOfScope`.
+     - Its `signing` must equal `key`, and the assertion must pass all of §4.3 with its
+       descriptor, else `badSignature`.
+     - The `origin` must be exactly one of the verifier's call-ceremony origins for its `rp`, else
+       `refused:origin`.
+   - **A member:** it must be present and not revoked, else `refused:revoked`, and not expired,
+     else `refused:expired`.
 6. **Chain.** Each link verifies under the previous key and has this `account` and `from`, else
    `badSignature`; first link's `session` equals the member's session number, else
    `refused:ended`; `notBefore` ≤ now ≤ `expires` and `expires` within the previous link's and
    the member's, else `refused:expired`; terms narrow, else `refused:notNarrower`. The acting
    `key` equals the last link's `to.signing` (no links: the member's key), else `badSignature`.
-7. **Purpose.** Member: its terms and every link's allow `audience` and `purpose`, and every
-   `conditions` predicate holds on `args`. Controller: the verifier's configured purposes for
-   controller calls include `purpose`. Else `refused:outOfScope`.
+7. **Purpose.** For a member, its terms and every link's must allow `audience` and `purpose`, and
+   every `conditions` predicate must hold on `args`. For a controller, `purpose` must be among
+   the verifier's configured purposes for controller calls; there is no generic or fallback
+   purpose. Else `refused:outOfScope`.
 8. **Extensions.** Unknown fields, terms or values in the authenticated call, links or terms:
    `newerFormat`.
-9. Otherwise `ok`.
+9. Otherwise `ok`, recorded in the replay store as §12.4 says.
 
 ### 12.4 Replay store
 
-- Every call that passes step 2 is recorded with its body digest and result, keyed by
-  `(account, audience, acting key ID, requestId)`, **before** any effect, in one atomic write.
-- The store MUST be shared by every instance that serves the audience, so two instances never
-  both perform one call.
-- Records are kept for 7,200 seconds regardless of current policy; step 3 refuses anything older.
-- `refused:replay` never performs an effect. An audience MAY return the recorded result of a
-  non-read purpose to the same acting key; for purposes it declares read-only it returns nothing.
-- A store MAY refuse a key that exceeds a rate it sets, with `refused:window`.
-- `ok` is not a record in the account. A service that acts on a call and writes records does so
-  under its own member key with a `basis` naming the call's body digest.
+- **Key.** `(account, audience, acting key ID, purpose, requestId)`.
+- **Reservation.** After step 2, the verifier makes an atomic compare-and-swap reservation of the
+  key with state `pending` and the body digest. If a reservation exists:
+  - with the same body digest, the call is `refused:replay` and performs nothing;
+  - with a different body digest, `refused:conflict`.
+- **Completion.** The protected effect MUST either commit in the same transaction that sets the
+  reservation to `completed` with its result, or be idempotent under the reservation key. A
+  `pending` reservation found after a crash MUST NOT cause the effect to run again
+  independently; the service completes or abandons it under its own recovery procedure.
+- **Sharing.** The store MUST be shared by every instance that serves the audience.
+- **Retention.** Reservations are kept 7,200 seconds regardless of current policy; step 3 refuses
+  anything older.
+- **Results of replays.** An audience MAY return the recorded result of a completed, non-read
+  purpose to the same acting key. For purposes it declares read-only it returns nothing.
+- **Rate.** A store MAY refuse a key that exceeds a rate it sets, with `refused:window`.
+- **Records.** `ok` is not a record in the account. A service that acts on a call and writes
+  records does so under its own member key, with a `basis` naming the call's body digest.
 
 ## 13. Homes and heads
 
 ### 13.1 Homes and the primary home
 
-A home is a member with `serves: ["home"]`, appointed by a grant under the control rule. It keeps
-the history exactly as signed, verifies every entry under §8 before storing it, and stores no
-entry that doesn't extend its history. It holds no controller or member private key, PRF output
-or seed. An account appoints up to 8 homes.
+A home is a member with `serves: ["home"]`, appointed by a grant under the control and
+recovery-set rules. Any server, device or service the owner chooses can be one; the format
+assumes no particular operator. A home keeps the history exactly as signed, verifies every
+entry under §8 before storing it, and stores no entry that doesn't extend its history. It holds
+no controller or member private key, PRF output or seed. An account appoints up to 8 homes.
 
 - **The primary home orders.** Every authority entry is first published to the primary home
-  (`policy.primaryHome`, else the earliest-appointed current home). It stores the first valid
-  entry for each seq and answers later candidates with a conflict (§14). Devices hold their
-  entries locally until the primary accepts them.
-- **Other homes store only entries covered by a primary head,** except that any home MAY store an
-  entry that changes `primaryHome` or revokes the primary, and the entries after it once the new
-  primary's head covers them.
-- **Delay enforcement.** A home MUST refuse an entry whose `issued` is more than 60 s ahead of its
-  clock, and MUST refuse a recovery-rule entry whose `issued` differs from its clock by more than
-  300 s in either direction. On storing a recovery-rule entry a home signs its receipt (§13.5) and
-  MUST notify the account's controllers (§17.5).
-- A genesis may be followed in one upload by the entries that appoint a home; a home verifies the
-  batch and stores it only if its own appointment is in it.
+  (`policy.primaryHome`, else the earliest-appointed current home). The primary stores the first
+  valid entry for each seq and answers later candidates with a conflict (§14). Devices hold
+  their entries locally until the primary accepts them.
+- **Other homes store only entries covered by a primary head,** with two exceptions:
+  - any home MAY store an entry that changes `primaryHome` or revokes the primary, and the
+    entries after it once the new primary's head covers them;
+  - **every current home MUST store and receipt a valid recovery-rule or cancel-rule entry that
+    extends that home's own latest history**, without primary coverage. A primary therefore
+    can't block recovery or a cancel by refusing it. Conflicts with the primary's history follow
+    §8.6 rule 2.
+- **Clock rules.** A home MUST refuse an entry whose `issued` is more than 60 s ahead of its
+  clock. It MUST refuse a recovery-rule or cancel-rule entry whose `issued` differs from its clock
+  by more than 300 s in either direction.
+- **Receipts and notices.** On storing a recovery-rule or cancel-rule entry a home signs its
+  receipt (§13.5) and MUST notify the account's controllers (§17.5).
+- **First upload.** A genesis may be followed in one upload by the entries that appoint a home; a
+  home verifies the batch and stores it only if its own appointment is in it.
+- **Reaching other homes.** A device MUST publish every recovery-rule and cancel-rule entry to
+  every current home it can reach.
 
 ### 13.2 Head
 
@@ -1007,7 +1181,7 @@ is not fresh is never used as evidence of the current state.
 
 - **High-water mark.** A verifier persists per account its highest accepted `(seq, digest)` and
   the folded state there, and accepts later only histories that extend it (`refused:rollback`
-  otherwise), moving across a fork only by `resolve` (§8.6).
+  otherwise), moving across a conflict only as §8.6 allows.
 - **Incremental verification.** A verifier MAY resume from its persisted state: it fetches entries
   after its high-water seq, checks the first one's `previous` against its persisted digest, and
   verifies each under §8. A verifier with no persisted state MUST fetch and verify the complete
@@ -1044,9 +1218,19 @@ including `records/authority/*` on a relay that is also a home.
  "received":"2026-11-11T09:00:03Z","by":"<home member ID>"}
 ```
 
-Signed `raw` by a current home's member key, stored at `authority/<8 digits>.receipt.json`.
-Valid when `by` is a current home at the prior entry, `entry` matches, and `received` is within
-300 s of the entry's `issued`. Any current home's receipt serves; the earliest valid one counts.
+Signed `raw` by a current home's member key, stored at
+`authority/<8 digits>.<home member ID>.receipt.json`, one file per signing home. A receipt is
+valid when:
+
+- `by` is a current home at the prior entry;
+- `entry` matches the entry's body digest;
+- `received` is not earlier than the entry's `issued` and not more than 300 s after it.
+
+A recovery takes effect only when receipts by `policy.headQuorum` distinct current homes exist.
+Its delay runs from the **latest** `received` among them (§8.4), so one colluding home can't
+start the clock early. A receipt that predates `issued`, comes too late, or is signed by a
+non-home is `malformed`. Adding homes without raising `headQuorum` doesn't change how many homes
+must agree.
 
 ## 14. Exchange
 
@@ -1058,6 +1242,11 @@ A home is a relay (0.3 §8) whose `GET {base}` response adds `"home":{"member":"
 | `GET {base}/head` | 200 latest head envelope; 404 if none. Public, `no-store`. |
 | `GET {base}/authority?after={seq}&limit={n}` | 200 `{"entries":[…],"receipts":[…],"more":bool}`, 1–64 entries from `after + 1`, under §13.4. |
 | `POST {base}/authority` | `{"from":<seq>,"entries":[…],"receipts":[…]}`, 1–64 contiguous entries. 200 `{"head":…,"receipts":[…]}`; 409 with the current head if `from` overlaps different bytes or leaves a gap; 422 with the §1 result; a non-primary home answers 421 with the primary's endpoints for an entry no primary head covers. No other authorization is needed. |
+
+A home that is a successor's home also serves `GET {base}/predecessor/authority/<8 digits>.json`
+(and its receipts) for the predecessor's history through its final entry (§15.1). A `PUT` or
+`POST` of an envelope whose body equals a stored one answers 200 and keeps the stored envelope
+(§2.2, §11.8).
 
 `Authorization: Colophon <base64url of a call envelope>` MAY replace a bearer token, verified under
 §12.3 with audience `{base}`: `colophon.home.read` for reading records, allowed as §13.4 allows
@@ -1079,61 +1268,124 @@ member writing only paths under its own author ID. A bearer token remains storag
 | `account` | 64 hex for `/5`; the 32-hex library ID for Swift. |
 | `head` | The predecessor's last entry **before** its final entry: `seq` and body digest. |
 
-The predecessor's **final entry** F is at `head.seq + 1` with `previous` equal to `head.digest`. A
-genesis can't name F's digest, because F names the genesis's own digest; this one-entry offset is
-how the two commit to each other. A succession is **verified** only when all of these hold:
+The predecessor's **final entry** F is at `head.seq + 1`, with `previous` equal to `head.digest`.
+A genesis can't name F's digest, because F names the genesis's own digest; this one-entry offset
+is how the two commit to each other.
 
-1. The verifier holds and has verified the predecessor's history through F under its format.
-2. F names this account: for `/5`, F is `successor` with `account` equal to this account's ID;
-   for Swift, F is the freezing `layout` entry of §16.3 whose `successor` equals this ID.
-3. No valid entry after F, no fork at or before F, and no second verified genesis naming the same
-   predecessor exists in anything the verifier fetched; otherwise `refused:fork` for every
-   succession of that predecessor. For a `/5` predecessor, the verifier holds fresh heads under
-   the predecessor's policy covering F.
-4. If the genesis keyring's `recoverThreshold` is below the predecessor's at `head` (Swift: absent
-   means 1), `handover` carries at least the predecessor's `recoverThreshold` distinct signers
-   holding `recover` there, with UV.
-5. For a Swift **root library** (no adopted keyring), `handover` carries a `raw` signature by the
-   predecessor's current recovery identity (its key ID as `signer`), because the root alone can
-   rewrite such a library.
+**Where the predecessor is published.**
 
-`handover` signatures are over the genesis body, by §4.3 with authority origins. A verifier that
-can't establish 1–5 still verifies the genesis under its own rules and reports the predecessor as
-an unverified claim. A predecessor confers nothing: no member, grant or key comes from it.
+- For a `/5` predecessor: its own homes. F MUST be covered by fresh heads of the predecessor's
+  `headQuorum` current homes.
+- For a Swift predecessor: the successor's homes. Each MUST serve the predecessor's history
+  through F at `{base}/predecessor/authority/<8 digits>.json` (with the Swift file name and
+  bytes) before it stores the successor's genesis. Each successor home receipts F there (a
+  receipt whose `entry` names F's seq and body digest and whose `account` is the predecessor's
+  ID).
+- Verifiers look in these places and nowhere else for competing entries. Uniqueness means
+  uniqueness among what those homes serve. It is no stronger than those homes, and with
+  `headQuorum` 1, one compromised home can show two verifiers two histories.
+
+**Verified.** A succession is verified only when all of these hold:
+
+1. The verifier has verified the predecessor's history through F under its format, as published
+   above.
+2. F names this account. For `/5`, F is `successor` with `account` equal to this account's ID.
+   For Swift, F is the freezing `layout` entry of §16.3 whose `successor` equals this ID.
+3. The published history has no fork at or before F.
+4. **Recovery consent.** If the genesis keyring's set of `recover` keys (or holders) differs from
+   the predecessor's at `head`, or its `recoverThreshold` is lower, `handover` carries at least
+   the predecessor's `recoverThreshold` distinct signers holding `recover` at `head`, with UV.
+   Swift: an absent `recoverThreshold` means 1.
+5. **Swift root libraries** (no adopted keyring at `head`). `handover` carries `raw` signatures
+   by the current root and the current recovery identity. If the history contains any
+   `handover`, `rotateRecovery` or `stewards` entry, it also carries signatures by the root and
+   recovery identity named in the genesis. A single key of either kind can never move a root
+   library. An owner who has lost an original identity can still copy the library, but the
+   succession stays an unverified claim.
+6. **Recovery-added signers.** If any signer of F or `handover` was recovery-added in the
+   predecessor, the succession is verified only after the successor's activation (§8.4: receipts
+   by the successor's `headQuorum` homes of the successor genesis, plus its `recoveryDelay`).
+   Swift: a controller first appearing in a `keyring` entry that only `recover` signers signed.
+   Until then, any predecessor `control` controller that is not recovery-added MAY sign a
+   **refusal**, `{"protocol":"colophon/refusal/5","predecessor":…,"successor":…,"issued":…,"by":"<keyID>"}` signed `raw` or with an assertion by that controller,
+   delivered to the successor's homes. A valid refusal makes the succession unverified for good.
+
+`handover` signatures are over the genesis body, by §4.3, with the **genesis** descriptor's
+authority origins for carried-over keys.
+
+**After verification.**
+
+- A verifier that has persisted a verified succession keeps it.
+- Any entry after F, or a second final entry at F's seq, is `malformed` evidence, shown to the
+  successor's controllers. It never undoes a succession that was verified and persisted.
+- A verifier seeing both for the first time verifies the succession whose F is covered by
+  receipts of the successor's homes (Swift) or by the predecessor's home heads (`/5`). If both
+  are, both are `refused:fork`.
+
+A verifier that can't establish 1–6 still verifies the genesis under its own rules and reports
+the predecessor as an unverified claim. A predecessor confers nothing: no member, grant or key
+comes from it.
 
 ### 15.2 Successor
 
-`successor` is terminal: the account accepts no entry after it, and a verifier holding a valid
-entry after a `successor` treats both as a fork (§8.6). The old account stays readable.
+`successor` is terminal. Any entry after a valid `successor` is `malformed` evidence, never a fork
+and never a reason to doubt the succession (§15.1). The old account stays readable. Freezing is
+irreversible: a `successor` or a Swift F can't be undone, and a person who wants the old account
+back must make a new succession.
 
 ### 15.3 Clean copy
 
-A copy tool reads a private snapshot with the old format's verifier, as a member with read access;
-creates the new account (owner's keyring, same namespaces, `predecessor` and `handover`); writes
-the predecessor's final entry (F); grants its copying member `write` and `import` with a short
-expiry; publishes `colophon.importBatch` units (0.3 §7.2) with source IDs and body digests as
-encrypted evidence; and writes the `migration` entry. It MUST rebuild a slot for every controller
-that had one, or stop. It MUST give every carried value a 0.5 form (§16.2) or stop and say which
-value has none; it never drops one silently. A reader who isn't a controller may copy what it can
-open, with no `predecessor` or `handover`.
+A copy tool moves records into a new account. In order:
+
+1. **Preflight.** Read the whole predecessor with its format's verifier (for Swift, §16.3).
+   Stop if any entry fails. Nothing is written before this passes.
+2. **Create the new account:** the owner's keyring, the same namespaces, `predecessor` and
+   `handover`. Appoint at least one home and publish the predecessor where §15.1 says.
+3. **Write F,** after the new account verifies at a home and the person has been told that the
+   old apps will stop reading the old library.
+4. **Drain.** Keep reading the predecessor for the **drain window** (a host setting; default 7
+   days, range 0–30 days). Copy every record that appears, including records written by devices
+   that hadn't yet seen F.
+5. **Copy and record.** Grant the copying member `write` and `import` with an expiry after the
+   window. Publish `colophon.importBatch` units (0.3 §7.2), with source IDs and body digests as
+   encrypted evidence. When the window ends, write the `migration` entry.
+
+Further rules:
+
+- The tool MUST rebuild a slot for every controller that had one, or stop.
+- It MUST give every carried value a 0.5 form (§16.2), or stop and say which value has none. It
+  never drops a value silently.
+- Records that arrive after the window stay in the frozen predecessor. Hosts MUST show them as
+  left behind, with an action to copy them.
+- A reader who isn't a controller may copy what it can open, with no `predecessor` or
+  `handover`.
 
 ### 15.4 Migration entry
 
 ```json
 {"kind":"migration","predecessor":{"format":"…","account":"…","final":{"seq":13,"digest":"<64 hex>"}},
+ "drain":{"from":"2026-11-11T08:05:00Z","until":"2026-11-18T08:05:00Z"},
  "namespaces":[{"namespace":"notes","source":120,"copied":118,"omitted":2,"view":"<64 hex>"}],
  "omitted":[{"ref":"<64 hex>","reason":"invalidPayload"}],
  "controllers":[{"id":"<keyID>","slot":true}],
  "members":[{"id":"<memberID>","label":"Taupe on iPhone","kind":"app","outcome":"rejoin"}]}
 ```
 
-Signed under the control rule. `namespaces` lists every predecessor namespace; `view` is the
-digest of the canonical view of the copied namespace; `omitted` lists up to 4,096 source records
-not copied, each by body digest with a reason (more than that: the tool stops); `controllers`
-lists every predecessor controller with whether it has a slot here; `members` lists every
-predecessor member with its mapped kind and `outcome` `rejoin` or `dropped` (with `reason`). Any
-application that moves its own references from the predecessor to this account (for example a
-principal binding) MUST require a verified succession **and** this entry.
+Signed under the control rule; at most once.
+
+| Field | Rule |
+| --- | --- |
+| `drain` | The drain window (§15.3). |
+| `namespaces` | Every predecessor namespace. `view` is the SHA-256 of the sorted, newline-joined lowercase hex body digests of the destination records copied into the namespace. |
+| `omitted` | Up to 4,096 source records not copied, each by body digest with a reason. More than that: the tool stops. |
+| `controllers` | Every predecessor controller, with whether it has a slot here. |
+| `members` | Every predecessor member with its mapped kind and `outcome` `rejoin` or `dropped`, with `reason`. |
+
+**It is the owner's assertion, not proof.** It says what the owner's tool copied; no verifier can
+check that every old record or key was carried, and none may treat it as proof of completeness.
+Any application that moves its own references from the predecessor to this account (for example a
+principal binding) MUST still require a verified succession **and** this entry, so that the move
+is never made silently.
 
 ## 16. Upgrading existing accounts
 
@@ -1159,26 +1411,37 @@ A 0.4 library becomes a 0.5 account by appending, under the 0.4 control rule:
 
 The upgrading host MUST NOT write it until every app writing to the library reads 0.5.
 
+**The `/4` prefix.** An upgraded account's entries up to and including `upgrade` are verified by
+[colophon-0.4-keys.md](colophon-0.4-keys.md) §2–§7 exactly as written, which this section
+incorporates for that prefix and nothing else. Those rules are the released 0.4 engine's, and the
+candidate's upgrade vectors were replayed on it.
+
 ### 16.2 From the Swift keyring authority (the shipped apps)
 
 Libraries made by Taupe and Marginalia use the format of §16.3, not 0.4. They move by clean copy
 (§15.3) into a new 0.5 account with `predecessor.format` `colophon/swift-keyring/2`:
 
-1. The host builds the new genesis: its keyring reuses the old controllers' public keys (same
-   passkeys, security keys, device keys and kit, same key IDs), with roles the person chooses,
-   `authorityOrigins` on each `webauthn` controller, and a `recoverThreshold` not below the old
-   one unless the old recovery quorum signs `handover` (§15.1 rule 4). **No new account at any
-   service and no new passkey.**
-2. The old control quorum (or, for a root library, the root and the recovery identity) signs:
-   `handover` over the genesis where §15.1 requires it, and the freezing `layout` entry F naming
-   the new ID, which makes every released Swift reader stop (§16.3).
-3. One assertion per passkey or security key with PRF builds its new `prf` slot; sealed slots for
-   device keys and the kit need none. Every controller that had a slot gets one, or the copy stops.
-4. Records are copied with evidence; the `migration` entry records the result.
-5. Members rejoin: Swift roles map `device`→`device`, `app`→`app`, `web`→`app`, `agent`→`agent`,
-   `service`→`server`; `custody` and `keyOperator` map to request `custody` and `operator`; grant
-   caveats `kinds` map to `records.kinds` and `ceiling` to an `lte` condition; a `budget` caveat has
-   no 0.5 form, so the tool stops unless the person marks that member `dropped`.
+1. **Preflight** the whole library under §16.3 (§15.3 step 1).
+2. **Build the new genesis.** Its keyring reuses the old controllers' public keys (same passkeys,
+   security keys, device keys and kit, same key IDs), with roles the person chooses and
+   `authorityOrigins` on each `webauthn` controller. Its recover set and `recoverThreshold` stay as
+   they were unless the old recovery quorum signs `handover` (§15.1 rule 4). **No new account at
+   any service and no new passkey.**
+3. **Sign the hand-over.** The old control quorum (and, for a root library, the identities of
+   §15.1 rule 5) signs `handover` where §15.1 requires it.
+4. **Appoint a home** and publish the predecessor there (§15.1).
+5. **Write the freezing entry F** (§16.3), naming the new ID. Every released Swift reader stops at
+   it. **This can't be undone.**
+6. **Rebuild slots.** One assertion per passkey or security key with PRF builds its new `prf`
+   slot. Sealed slots for device keys and the kit need none. Every controller that had a slot gets
+   one, or the copy stops.
+7. **Drain, copy and record** (§15.3).
+8. **Members rejoin.** Swift roles map as follows:
+   - `device`→`device`, `app`→`app`, `web`→`app`, `agent`→`agent`, `service`→`server`;
+   - `custody` and `keyOperator` map to the request's `custody` and `operator`;
+   - grant caveats: `kinds` maps to `records.kinds`, and `ceiling` to an `lte` condition. A
+     `budget` caveat has no 0.5 form, so the tool stops unless the person marks that member
+     `dropped`.
 
 ### 16.3 The Swift keyring format (`colophon/swift-keyring/2`)
 
@@ -1205,8 +1468,19 @@ An unknown `kind`, `by` (`root`, `recovery`, `quorum`, `controller`), `role`, `c
 
 **Controllers.** `{kind, key (65-byte point), rpID?, credential?, label, roles, verification?}`; ID
 the first 32 hex of SHA-256 of `key`. A `p256` signature is raw 64-byte ES256 over the body with no
-assertion. A `webauthn` signature is §4.3 with `rpID` as `rp`, no `origins`, the general origin
-rule, UV when `verification` or when the rule requires it, and DER per §4.3 step 5.
+assertion (high-S valid). A `webauthn` signature is §4.3 with `rpID` as `rp`, no `origins`, the
+general origin rule, and UV when `verification` or when the rule requires it.
+
+**Historical encodings.** For predecessor entries only, a verifier accepts exactly what the
+released Swift verifier (CryptoKit `ECDSASignature(derRepresentation:)`) accepted. On macOS 27,
+observed by the probe recorded in the candidate README: minimal DER, and high-S, are accepted;
+non-minimal integers, long-form lengths and trailing bytes are refused; **an integer whose first
+byte is 0x80 or more with no leading 0x00 is accepted and read as unsigned**. §4.3 step 5 refuses
+that last form, and §16.3 accepts it for predecessor entries. `clientData` with a duplicate member
+was accepted by Swift's `JSONDecoder`, which read the **first** occurrence. A §16.3 verifier
+refuses it instead (§2.3) and the preflight stops: no authenticator emits duplicates, and
+accepting first-wins JSON would make the verifier depend on one platform's decoder. iOS and
+visionOS behaviour was not probed; the dry run (§21) is the check.
 
 **Rules.** Entry 1 is `genesis`, `by: root`, signed by `root`; `layout` absent or 1–2. Before a
 keyring is adopted: `by: root` entries are signed by the current root; `by: recovery` only on
@@ -1231,6 +1505,10 @@ layout.
 after). Released Swift readers verify it and then stop with `unsupportedStorageLayout(3)` (those
 that predate `layout` stop with `newerAuthority`); they never write after it. A verifier of a
 predecessor reads `successor` from F's body.
+
+**Recovery-added Swift controllers** (§15.1 rule 6) are those first appearing in a `keyring`
+entry whose signers all hold `recover` and that `verifyKeyringChange` admitted by its recovery
+path (`admitsRecovery`).
 
 ## 17. Host interface
 
@@ -1278,8 +1556,9 @@ predecessor reads `successor` from F's body.
 3. An existing controller signs the `keyring` entry under the add rule.
 
 With `threshold` above `addThreshold`, the new key is provisional (approve only, no slot) until a
-control-rule entry confirms it. A key made on a page outside the `rp`'s authority origins (for
-example on a staging release) is added only as a `sign` controller limited to its audiences.
+control-rule entry confirms it. A host MUST NOT add a controller whose `rp` belongs to a
+non-production release channel except as a `sign` controller limited to that channel's
+audiences.
 
 ### 17.4 WebAuthn user handles
 
@@ -1290,40 +1569,45 @@ account exists, and to 32 random bytes otherwise. Verifiers find a controller by
 ### 17.5 Notices
 
 Every entry under the add, recovery or cancel rule, every controller removal or demotion, every
-receipt, every `successor`, `resolve` and policy change, and every fork or equivocation a host
+receipt, every attempt-2 recovery, every `successor`, `resolve`, refusal and policy change, every
+succession naming this account as predecessor or successor, and every fork or equivocation a host
 learns of MUST be shown on every other device that holds a controller of the account, with who
 signed it, when, and *That was me* / *Remove it*. A host MUST publish authority entries to the
 primary home, then to every home, and SHOULD NOT tell the person a removal is done until
-`n − headQuorum + 1` of the `n` homes hold it.
+`n − headQuorum + 1` of the `n` homes hold it. The notice of a recovery says plainly that the
+delay protects who controls the account, not the data: a recovery key with a slot has already
+been able to read it.
 
 ## 18. Policy fields and defaults
 
 Colophon fixes the field, range, default and who may change it. A host is a reference
-implementation of these defaults; another may ship others within the ranges.
+implementation of these defaults; another may ship others within the ranges. §6.3 classifies
+which changes need the recovery-set rule.
 
 | Field | Default | Range | Changed by |
 | --- | --- | --- | --- |
-| `threshold` | 1 | 1 … control keys or holders | control rule |
+| `threshold` | 1 | 1 … control keys or holders | control rule (larger of old and new) |
 | `recoverThreshold` | 1 (any one recovery key) when any controller has `recover`, else 0 | 0, or 1 … recover keys or holders | control + recovery-set rules |
 | `addThreshold` | 1 | 1 … `threshold` | control rule |
 | `countBy` | `keys` (person), `holders` (company) | `keys`, `holders` | control + recovery-set rules |
 | `policy.recoveryDelay` | 259,200 s (72 h) | 0–2,592,000 s; at least 3,600 s while the account has a home | control + recovery-set rules |
-| `policy.headMaxAge` | 300 s | 30–86,400 s | control rule |
-| `policy.headQuorum` | 1 | 1–8, at most the number of homes | control rule |
-| `policy.callWindow` | 300 s | 30–3,600 s | control rule |
-| `policy.linkMaxAge` | 86,400 s | 60–2,592,000 s | control rule |
-| `policy.history` | `members` | `members`, `public` | control rule |
-| `policy.memberRule` | `single` (person), `control` (company) | `single`, `control` | control rule |
-| `policy.primaryHome` | absent (earliest home) | a current home | control rule |
-| `authorityOrigins` | set at registration (§4.3) | §3.1 | control rule |
-| `verification` | `true` on every `webauthn` controller | present or absent | control rule |
+| `policy.headMaxAge` | 300 s | 30–86,400 s | control rule; raising also recovery-set |
+| `policy.headQuorum` | 1 | 1–8, at most the number of homes | control + recovery-set rules |
+| `policy.callWindow` | 300 s | 30–3,600 s | control rule; raising also recovery-set |
+| `policy.linkMaxAge` | 86,400 s | 60–2,592,000 s | control rule; raising also recovery-set |
+| `policy.history` | `members` | `members`, `public` | control rule; to `public` also recovery-set |
+| `policy.memberRule` | `single` (person), `control` (company) | `single`, `control` | control rule; to `single` also recovery-set |
+| `policy.primaryHome` | absent (earliest home) | a current home | control + recovery-set rules |
+| `authorityOrigins` | set at registration (§4.3) | §3.1 | control rule; for `recover` keys also recovery-set |
+| `verification` | `true` on every `webauthn` controller | present or absent | control rule; for `recover` keys also recovery-set |
 | Member `expires` | 7 days for `agent`; none for `device`, `app` | any, or absent | approver at grant; `renew` extends |
 | Member `depth` | 1 for `agent`, else 0 | 0–4 | approver at grant |
-| Homes | none until the person enables one | 0–8 | control rule |
+| Homes | **one, appointed before any `recover` controller is added** | 0–8 | control + recovery-set rules |
+| Drain window (§15.3) | 7 days | 0–30 days | the copying host, per copy |
 
-A recovery delay of zero is allowed only without a home, because nothing can attest time then;
-with a home it is never below an hour, so a stolen recovery key always leaves the owner time to
-cancel from any key they still hold.
+**The delay needs a home.** With no home, `recoveryDelay` has no effect and recovery is immediate
+(§8.4). The reference setup therefore appoints a home, of the owner's choosing, before it adds
+any `recover` controller at `recoverThreshold` 1. With a home, the delay is never below an hour.
 
 **Reference setups** (host defaults):
 
@@ -1331,9 +1615,16 @@ cancel from any key they still hold.
 | --- | --- | --- |
 | Device owner keys | `approve`, `control`; sealed slot | one per founder device, `approve`, `control`, `holder` the founder |
 | Passkeys | one per platform or password manager, `approve`, `control`, `prf` slot when PRF works | each founder's, `approve`, `control`, `holder` |
-| Security keys | two, `approve`, `recover`, `prf` slot where delivered | two per founder, `approve`, `recover`, `holder` |
+| Security keys | two, **`recover` only**, each with a `prf` slot where delivered | two per founder, `recover` only, `holder` |
 | Rp-independent key | a kit or device key, so no one domain holds every way in | the same per founder |
+| Homes | one, before any security key is added | at least two, `headQuorum` 2 |
 | Counting | `countBy` `keys`; thresholds 1, 1, 1 | `countBy` `holders`; `threshold` and `recoverThreshold` a majority of holders (2 of 3); `addThreshold` 1; `memberRule` `control` |
+
+Security keys carry `recover` only. With `approve` too, a stolen key could admit an attacker's
+member at once, which the delay doesn't cover. A security key's `prf` slot lets it restore data
+when every device is lost. It also means anyone who holds the key and its PIN can read the vault
+at once. Hosts MUST say so, and offer a combined slot (key and kit together) instead for people
+who want that exposure closed.
 
 A company of two holders can't avoid both risks: with `threshold` 2 neither founder can be removed
 without signing, and with 1 either can remove the other. Three holders with two to act avoid both:
@@ -1347,6 +1638,7 @@ act alone. Hosts warn (§6.4).
 | Authority (§8) | `malformed`, `badSignature`, `newerFormat`; held (future `issued`, missing receipt); `refused:fork` |
 | Slots (§7) | `refused:vaultLocked` |
 | Records (§11.5) | refused `notGranted`, `expired`, `revoked`, `wrongEpoch`, `clockJump`, `budgetSpent`, `outOfScope`, `invalidPayload`, `duplicateID`, `wrongFormat`, `budgetScopeUnavailable`; held `revokedBackdated`, `authorityBehind`, `unavailable` |
+| Evidence (§8.6, §15.1) | equivocation evidence; `malformed` entries after a final entry; refusals |
 | Calls (§12.3) | `refused:audience`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`, `refused:revoked`, `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:outOfScope`, `refused:origin`; `unavailable` |
 | Heads (§13.3) | `refused:fork`, `refused:rollback`; `unavailable` |
 | Succession (§15) | `refused:fork`; unverified claim |
@@ -1357,7 +1649,7 @@ check as an optional diagnostic.
 ## 20. Versions, and what is not in this version
 
 **Versions.** 0.5 accepts exactly these markers: `colophon/authority/5`, `/request/5`, `/link/5`,
-`/call/5`, `/head/5`, `/receipt/5`, `/equivocation/5`, `/operation/5`, the legacy markers of an
+`/call/5`, `/head/5`, `/receipt/5`, `/refusal/5`, `/equivocation/5`, `/operation/5`, the legacy markers of an
 upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
 `colophon/relay/3`, and `colophon/swift-keyring/2` for predecessors. A verifier MUST NOT read a
 0.5 account under 0.4 rules, and MUST NOT accept a `/3` or `/4` object where §11.5 or §16.1 fences
@@ -1377,38 +1669,85 @@ opts in by an authority entry; until an account does, 0.5 markers stay valid for
 
 ## 21. Conformance and freeze
 
-0.5 freezes only when **every** vector below is published under `conformance/0.5/` with exact
-bytes, intermediates and one named outcome per refuse case, **and** an implementation in Rust and
-one in another language replay them. `conformance/0.5/candidate/` holds those produced before any
-implementation; its README lists which exist. The rest are step V1 of the implementation plan,
-and the spec cannot freeze before them.
+0.5 freezes only when **all** of these are done:
 
-- **Keys and signatures:** every 0.4 key case as `/5`, with synthetic WebAuthn; authority origins
-  with and without `authorityOrigins`; controller calls from a call origin and from an authority
-  origin; non-canonical JSON and base64 refused; dates (invalid day, two fraction digits).
-- **Upgrade:** accepted; 0.4's `newerFormat`; every refusal; `/3` records before and after; `/5`
-  before.
-- **Keyring rules:** add rule at `threshold` 1 (full) and 2 (provisional); provisional after
-  `until`; possession missing and wrong; recovery rule; recovery-set rule for each trigger with
-  and without recover signers; control rule with lower and higher new threshold; cancel during
-  delay and after it; delayed signer before and after its time; receipt missing, late, from a
-  non-home; `countBy` holders with two keys of one holder; `sign` controller signing an authority
-  entry; re-add of a removed controller with a new slot; removal of a never-slotted controller
-  without rotation; slots and rotation for every trigger; member key as controller and controller
-  key as member, now and after removal; monotonic `issued`; policy ranges including
-  `recoveryDelay` with and without a home.
-- **Forks:** fork refused on both branches; `resolve` with and without the recovery-set rule; two
-  resolves; high-water across a fork.
-- **Members and records:** request coverage; pairing commitments and codes; `serves` and import
-  rules; renew forward and backward; revoke with `kept` and up to 16 `heads`, a walk through a
-  refused header, a missing intermediate, a fork; `endSessions` three ways; `/5` headers and AAD;
-  proposals in each order including a resolution whose clock is not higher.
-- **Calls:** every §12.3 step's refusal; replay identical and conflicting; quorum 2 with one
-  stale; additions after S ignored and removals after S applied; delayed removals not applied.
+1. **Vectors.** Every vector below is published under `conformance/0.5/`, with exact bytes,
+   intermediates and one named outcome per refuse case.
+2. **Two implementations.** One in Rust and one in another language replay them all.
+3. **Swift corpus.** A differential corpus shows the §16.3 verifier accepts and refuses every
+   historical Swift signature form exactly as the released Swift verifier does.
+4. **Dry run.** A read-only §16.3 run (preflight only, no F) over a copy of the owner's real
+   library, on his device, passes.
+5. **Security review.** An independent implementation security review is complete.
+6. **Galley.** Galley's identity contract is aligned with this text.
+
+`conformance/0.5/candidate/` holds the vectors produced before any implementation; its README
+lists which exist. The rest are step V1 of the implementation plan.
+
+**Required vectors:**
+
+- **Keys and signatures:**
+  - every 0.4 key case as `/5`, with synthetic WebAuthn;
+  - authority origins with and without `authorityOrigins`;
+  - controller calls from a call origin and from an authority origin;
+  - non-canonical JSON and base64 refused;
+  - a malleated envelope (same body) treated as equal;
+  - dates (an invalid day, two fraction digits).
+- **Upgrade:**
+  - accepted, and 0.4's `newerFormat` on it;
+  - every refusal;
+  - `/3` records cited before and after the upgrade;
+  - `/5` before the upgrade.
+- **Keyring rules:**
+  - control rule with a lower and a higher new threshold;
+  - add rule at `threshold` 1 (full) and 2 (provisional);
+  - provisional key: after `until`, without its sponsor, a second one, a slot naming it, a
+    records grant by it, its call;
+  - possession missing and wrong, and holder labelling with and without the key's signature;
+  - recovery rule;
+  - each recovery-set trigger, with and without recover signers;
+  - receipts: quorum, the latest one counts, late, early, non-home;
+  - cancel during and after the delay; attempt 2 and counter-recovery; removal of a delayed key
+    by the control rule (refused);
+  - full recovery without receipts;
+  - delayed signer before and after activation, including its call;
+  - `countBy` holders;
+  - `sign` controller signing authority;
+  - re-adding a removed controller with a new slot;
+  - removing a never-slotted controller without rotation;
+  - slots and rotation for every trigger;
+  - principals across time;
+  - monotonic `issued`;
+  - policy ranges.
+- **Forks:**
+  - equivocation by a removed key;
+  - recovery at a non-primary home;
+  - a vouched fork with `resolve`, without the recovery-set rule, and two resolves;
+  - no-home priority;
+  - high-water mark across a fork.
+- **Members and records:**
+  - request coverage; pairing commitments and codes;
+  - `serves` and import rules;
+  - renew forward and backward;
+  - revoke with `kept` and up to 16 `heads`: a walk through a refused header, a missing
+    intermediate, a fork, a kept record with an invalid payload;
+  - `endSessions` three ways;
+  - `/5` headers and AAD;
+  - proposals in each order.
+- **Calls:**
+  - every §12.3 step's refusal;
+  - replay identical, conflicting and pending;
+  - quorum 2 with one stale;
+  - additions after S ignored, removals after S applied.
 - **Heads and receipts:** valid, stale, non-home, fork, rollback, equivocation evidence.
-- **Succession:** `/5` and Swift (root and keyring libraries) predecessors; stale head; an entry
-  after F; two successors; Two Keys lowering with and without recover signers; root library
-  without recovery signature; migration entry required for principal moves.
+- **Succession:**
+  - `/5` and Swift predecessors (root and keyring libraries, with WebAuthn controllers);
+  - `rotateRecovery`;
+  - stale head; an entry after F; two final entries;
+  - recover-set change with and without consent;
+  - a recovery-added signer, and a refusal;
+  - persistence after a later rival;
+  - migration entry required for principal moves.
 - **Seed transfer:** HPKE under the transfer label; wrong nonces.
 
 ## 22. Review log
@@ -1416,6 +1755,8 @@ and the spec cannot freeze before them.
 | Date | Reviewer | Findings | Resolution |
 | --- | --- | --- | --- |
 | 2026-11-11 | — | Revision 1 written | — |
-| 2026-11-11 | Codex (Daybreak Blue) | 6 High, 5 Medium, low points | All adopted or answered; changes §G |
-| 2026-11-11 | Independent attack review | 6 High, 8 Medium, 8 Low, 11 guesses | All adopted or answered; changes §G |
-| 2026-11-11 | Galley contract R-A1–R-A11 | 11 requests | Settled or refused with reasons; changes §B |
+| 2026-11-11 | Codex (Daybreak Blue) | 6 High, 5 Medium | Revision 2; changes §G.1 |
+| 2026-11-11 | Independent attack review | 6 High, 8 Medium, 8 Low | Revision 2; changes §G.2 |
+| 2026-11-11 | Galley contract R-A1–R-A11 | 11 requests | Changes §B |
+| 2026-11-11 | Opus, second review of revision 2 | 8 High, 12 Medium, Low notes | Revision 3; changes §G.4 |
+| 2026-11-11 | Codex, second review of revision 2 | 3 High, 7 Medium | Revision 3; changes §G.5 |

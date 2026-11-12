@@ -1,0 +1,1 @@
+{"description":"The genesis swaps which key recovers, with no handover by the old recover key (§15.1 rule 4).","expected":{"genesis":"ok","succession":"unverified"},"sections":["15.1","16.3"]}
