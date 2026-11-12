@@ -1,1 +1,0 @@
-{"description":"Lowering recoverThreshold 2→1 with the control key alone: the recovery-set rule needs 2 recover signers.","expected":{"result":"badSignature","seq":2},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

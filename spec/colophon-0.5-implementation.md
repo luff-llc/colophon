@@ -1,6 +1,6 @@
 # Colophon 0.5: implementation plan
 
-**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 3, 2026-11-11. No engine code
+**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 4, 2026-11-12. No engine code
 has been changed for it. Steps are in order. The vectors come first, because §21 says the
 spec can't freeze without them, and every verifier step is then tested against them.
 
@@ -34,13 +34,17 @@ verifier.
        intermediate, and a fork;
      - renew with shares;
      - proposals in each order, including a resolution whose clock is not higher.
-  3. Rotating keyring changes: removing or demoting a slotted controller, and cancelling a
-     slotted recovery addition.
+  3. Rotating keyring changes: removing or demoting a slotted controller.
   4. Seed transfer under the pairing scheme.
   5. Calls with two homes and one stale head; additions after S ignored.
   6. `/5` succession with fresh predecessor heads; the migration entry with real view digests.
-  7. Revision-3 items not yet built:
-     - a future `issued` held, and a cancel by a recovery-added key;
+  7. Revision-4 transition cases not yet built:
+     - two homes with `headQuorum` 2; late, early and non-home transition receipts;
+     - mutual removal by two transitions;
+     - a vault-changing transition;
+     - a `/5` `successor` transition.
+     Revision-3 items not yet built:
+     - a future `issued` held;
      - possession from a non-authority origin, and two `resolve`s;
      - a quorum-2 stale call, and a recovery at a non-primary home colliding with a primary entry;
      - the replay store's `pending` state;
@@ -72,15 +76,19 @@ Files: `authority.rs`, `slots.rs`, `vault.rs`.
 
 - `Keyring` gains `addThreshold`, `countBy` and `policy`; controllers gain `holder`, `audiences`,
   `until` and role `sign`; bounds of 64 controllers and 256 slots.
-- Rule evaluation (§8.4), in this order: control, add, recovery, cancel. Then possession and the
-  recovery-set rule. Counting is by keys or holders. The control rule counts the larger
-  threshold. Delayed and provisional signers count for nothing. Factor the "only adds" check
-  out and share it.
-- Recovery-added tracking from per-home receipts: the latest of `headQuorum`, attempt 2 at
-  twice the delay, counter-recovery, and full recovery. Removing a delayed key is possible only
-  by a cancel.
-- The policy classification table (§6.3) as the recovery-set trigger list.
-- Provisional sponsors, the one-at-a-time limit, and services-only grants.
+- Rule evaluation (§8.4): control, recovery, single and member rules; possession; recovery-set consent; the larger-threshold count.
+- **Pending transitions (§8.7).** This is the core state machine, and it should be built and
+  reviewed on its own before anything that depends on it:
+  - transition, veto and receipt objects;
+  - due-time computation (the latest of `headQuorum` receipts);
+  - veto validity (signer count, eligibility, receipt before due);
+  - the escalation counters v(K) computed from `vetoed` entries;
+  - the full-set check;
+  - delta application at `activate`, with the void cases;
+  - the 7-day bound.
+- The §8.4 classification as data: every change kind is immediate or pending, and the default
+  for unknown changes is pending.
+- Headroom: immediate entries stop at 56 controllers.
 - Holder labelling with the key's co-signature.
 - Rotation only for controllers some slot ever named (§8.3). Re-adding a removed controller.
 - Seed transfer (§7.4) and pairing (§7.3): `begin_pairing`, `reveal`, `pairing_code`.
@@ -96,7 +104,7 @@ Files: `authority.rs`, `model.rs`, `protocol.rs`, `library.rs`; new `swift_prede
   - new: `renew`, `endSessions`, `resolve`, `migration`, `successor` (terminal);
   - changed: `revoke` (`member`, `kept`, `heads`), `grant` (`terms`), and genesis (optional
     `predecessor`, zero namespaces).
-- Conflict classification (§8.6): evidence, recovery at a non-primary home, vouched forks with `resolve`, and no-home priority. Body-byte equality everywhere.
+- Conflict classification (§8.6): `activate` and `vetoed` first, equivocation evidence, and forks resolved only by a `resolve` transition. Body-byte equality everywhere.
 - `upgrade` (§16.1) and the conversion of 0.4 grants to terms.
 - Succession (§15.1). For `/5` predecessors, use the core's own verifier.
 - **Swift predecessor verifier in Rust** (§16.3), a pure function of stored bytes, so the WASM
@@ -144,7 +152,7 @@ Files: `crates/colophon-ffi/src/{lib.rs,keys.rs,types.rs}`, `crates/colophon-was
   - call, link, head and receipt prepare and verify;
   - pairing;
   - add-key enrolment with possession and seed transfer;
-  - recovery with the delay, and cancel;
+  - transitions, vetoes and receipts: prepare, verify, and their notices;
   - `renew`, `endSessions`, `resolve`, `successor`, `migration`;
   - the restricted vault HPKE open.
 - `ColophonKeys`:
@@ -173,11 +181,12 @@ from Marginalia `origin/main` first: the reference copy lacks the `layout` kind)
 - 0.4 in place: the host asks whether every writing app reads 0.5, shows the chosen settings,
   and signs `upgrade`.
 - Swift to 0.5. Follow §15.3 and §16.2 in order:
-  - preflight under §16.3, with the CryptoKit-observed DER leniency;
-  - appoint a home and publish the predecessor at `{base}/predecessor/`;
-  - write F only after the person confirms;
-  - drain for the window; then write `migration` with `drain`;
-  - support refusals for recovery-added signers.
+  - preflight under §16.3 (the strict §4.3 DER grammar);
+  - appoint a home, publish the predecessor at `{base}/predecessor/`, and collect the homes'
+    genesis receipts;
+  - wait out the veto window, telling every device that holds an old key;
+  - write F only after the window and with no veto;
+  - drain for the window; then write `migration` with `drain`.
 - Swift to 0.5, details:
   - build the genesis from the old public keys, collecting possession proofs only for keys
     that aren't carried over;

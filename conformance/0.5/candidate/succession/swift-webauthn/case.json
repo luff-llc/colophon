@@ -1,1 +1,1 @@
-{"description":"Swift library with a passkey (approve, recover) and a security key (approve, control), as the shipped app makes them. The security key signs F with WebAuthn; the genesis keeps the same roles.","expected":{"genesis":"ok","succession":"verified"},"sections":["15.1","16.3"]}
+{"description":"Passkey and security key as the shipped app makes them; F signed by WebAuthn.","expected":{"succession":"verified"},"sections":["15.1","16.3"]}

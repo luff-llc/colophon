@@ -1,1 +1,1 @@
-{"description":"A root library frozen by its root; handover carries the recovery identity.","expected":{"genesis":"ok","succession":"verified"},"sections":["15.1","16.3"]}
+{"description":"Root library: the current root and recovery identity sign handover.","expected":{"succession":"verified"},"sections":["15.1","16.3"]}

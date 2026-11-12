@@ -1,11 +1,16 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 3, 2026-11-11. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 4, 2026-11-12. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
 "Codex N" and "H/M/L N" are the two reviews of revision 1 (152d991), mapped in §G.1–§G.3.
 "Opus R/M" and "Codex2 H/M" are the two reviews of revision 2 (9e90470), mapped in §G.4–§G.5.
+"Codex3" and "Opus3" are the third reviews (of 365f52b), mapped in §G.7. Revision 4 replaces the
+revision-2 and revision-3 recovery machinery (provisional keys, cancel, attempt 2,
+counter-recovery, full recovery, the primary yield, the no-home digest tie-break) with one
+mechanism: **pending transitions with veto** (spec §8.7). Rows of §A, §F and §G below that name
+the removed machinery are kept as history and marked superseded by §G.7.
 
 ## What existing keyrings actually are
 
@@ -76,6 +81,17 @@ explicitly across time), private-key work in the host, COSE, envelopes, `raw` an
 checks (now with a stated flags and counter policy), vault and slots with their labels, PRF
 rules, rotation, the verification order, import grants, epochs, operation IDs, fold order,
 clocks and admission.
+
+### A.1 Revision 4
+
+| # | Change | Why | Breaking |
+| --- | --- | --- | --- |
+| 33 | **Pending transitions with veto** (§8.4, §8.7): every authority-reducing or authority-seizing change is a signed transition, stored outside the sequence and received by homes. It activates after `recoveryDelay` from the latest `headQuorum` receipts unless vetoed. Vetoes need as many keys as signed; escalation v(K); full set immediate; `activate` and `vetoed` entries ordered first | Codex3 H1–H3; Opus3 H1–H3; one mechanism instead of six | Yes |
+| 34 | Removed: provisional controllers and `until`; cancel, attempt 2, counter-recovery; the separate full-recovery rule; recovery receipts on entries; primary yield; no-home digest tie-break; the separate succession refusal | Superseded by 33 | Yes |
+| 35 | Immediate `keyring` entries only add approve or sign keys, add slots, relabel and tighten; headroom of 8 controllers reserved for transitions | Opus3 H2 | Yes |
+| 36 | Swift succession waits for a veto window before F; signed by the keys the app actually holds; no original identities | Opus3 (rule 5 unmeetable: `protect()`, `recover()`, `rotateRecovery()`), Codex3 M6 | Yes |
+| 37 | Replay store state machine; signature budget in the portability floor | Codex3 M7, M9 | Yes |
+| 38 | §16.3 DER: the probe error corrected; §4.3 step 5 applies unchanged | Probe re-run (README) | — |
 
 ## B. Galley's requirements
 
@@ -150,6 +166,15 @@ The contract puts authority ceremonies and PRF on `keys.id.luff.works`, calls on
 | 11 | §11.2: no freezing entry; no possession for non-carried keys; root library signed by root only; no Two Keys recover signers; no `migration`; the passkey role swap without recovery consent | All required by 0.5 | §15.1 rules 4–6, §15.3, §16.2 |
 | 12 | §13.2 still lists R-A1–R-A11 as missing | All are in 0.5 except R-A9 (refused); R4 refused | Update the citations |
 | 13 | `reference/verifier.ts`: `decodeEntries(list, max = 256)` and a 1 MiB history limit | 0.5's portability floor is 65,536 entries and 256 MiB | §2.4 |
+
+Revision 4 adds these for the contract:
+
+| # | Contract | 0.5 revision 4 |
+| --- | --- | --- |
+| 14 | §8.2, §8.3 anti-weakening and delay | Replace with the pending-transition rules (§8.4 table, §8.7): delay from the latest `headQuorum` receipts, veto by any non-signing control or recover key with as many keys as signed, escalation, full set immediate. The contract's "never 0" is the 0.5 rule for every account with a home; its "approve-only additions take effect at once" matches the immediate class |
+| 15 | §11.2 step order | Genesis, home, receipts of the genesis, veto window, then F, drain, `migration`. Handover by the current root and recovery kit (root library) or the control quorum (keyring library); no original identities |
+| 16 | Its own homes | Must receipt transitions and vetoes, append `activate` and `vetoed` first, and serve `transitions/` |
+| 17 | Agent approvals | Grants with `services` remain immediate under the single rule; homes and `import` grants are pending |
 
 Two further points the contract needs:
 
@@ -390,3 +415,46 @@ Two further points the contract needs:
 | 0.3 "Fold order paragraphs" range, "uncaveated" | §11.8 |
 | Kept record with `invalidPayload` | §9.5, §11.8 |
 | What a service may do with a huge history | §2.4 |
+
+### G.7 Third reviews (of 365f52b)
+
+The architect adopted Codex3's pending-transition design. Revision 4 implements it and removes
+the machinery it makes redundant.
+
+| Finding | Settled in | How |
+| --- | --- | --- |
+| Codex3 H1 recovery starved by primary collisions | §8.6 rule 1, §8.7, §13.1 | Transitions are outside the sequence; every home receipts them; `activate` is ordered before ordinary entries; absolute bound of 7 days after due |
+| Codex3 H2 control plus recovery key capture | §8.7 table | Every reducing change is pending and vetoable; vetoes need as many keys as signed; the owner with more keys wins (vector `row-thief-control-and-recovery`) |
+| Codex3 H3 digest tie-break | §8.6 rule 3 | No digest ordering; without homes a conflict is a fork until a full-set `resolve` |
+| Codex3 M4 full recovery vs approve-only rule | §8.7 full set | The separate rule is gone; a full-set transition is still bound by its change's rule (recovery adds only `approve` when `recoverThreshold` < `threshold`, a setting the owner chose) |
+| Codex3 M5 provisional grants | §6.1 | Provisional controllers are removed. Approve-only keys are added immediately by `addThreshold` signers and grant like any `approve` key |
+| Codex3 M6 succession activation | §15.1 | Successor homes receipt the genesis digest (§13.5 validity rule extended); veto object and window defined; F only after |
+| Codex3 M7 replay states | §12.4 | `pending` → `completed(result, effect)` or `completed(result, none)`; every refusal completes; crash recovery by the idempotency record |
+| Codex3 M8 loosening authentication | §8.4 table | Every loosening of any controller is pending (vetoable); recovery keys also need consent |
+| Codex3 M9 CPU floor | §2.4 | 262,144 signature verifications; no time limit that refuses such a history |
+| Codex3 lows | §8.7 table, §15.1, README | Lost recovery key needs consent (row 1); the Swift post-final vector fixed; iOS and visionOS stated unverified |
+| Opus3 H1 raising `threshold` | §8.4 | Raising `threshold` is pending with recovery-set consent; vector `t-raise-threshold-no-consent` |
+| Opus3 H2 filling the keyring | §6.2 | Immediate entries stop at 56; vectors `i-headroom-56`, `i-headroom-57` |
+| Opus3 H3 stranded slots | §8.3 | Vault changes are pending; the new slot set must name every slotted controller; changing the vault while a recover key has a slot needs recovery consent |
+| Opus3 rule 5 unmeetable | §15.1 | Replaced: current root and recovery kit (as the app holds them after `protect()`, `recover()`, `rotateRecovery()`), plus the veto window; vector `swift-rotate-recovery` now verified |
+| Opus3 two inverted vectors | candidate | `call-by-provisional` and `call-by-delayed` are gone with their rules; replaced by `call-by-pending-addition` (refused) and `call-by-pending-removal` (ok) |
+| Opus3 DER probe on `s` | §16.3, README | Extended to `r`, `s` and high `s`; the unpadded form is refused, not accepted; revision 3's claim corrected |
+
+**Kept from the old machinery, and why:**
+
+- **Receipts, latest of `headQuorum`.** That is how the delay gets a time nobody backdates.
+- **The recovery-set consent list.** A veto needs someone awake. Consent stops a thief with one
+  control key from even proposing to touch recovery while the owner is away.
+- **The recovery rule's approve-only limit when `recoverThreshold` < `threshold`.** It is the
+  owner's own setting, and a threshold raise can no longer be forced on them.
+- **The fork rule for homes that vouch for both branches.** Transitions can't create such forks,
+  but ordinary immediate entries can when homes misbehave.
+- **`resolve`**, now as a transition.
+
+**Rejected:**
+
+- **Codex3's "require two recovery controllers without a home"**: rejected again. The owner's
+  one-key default stands, and the spec says plainly that an account without a home has no theft
+  safety.
+- **Making `approve`-only additions pending:** rejected. The architect classed them immediate. A
+  company that wants otherwise sets `addThreshold` to `threshold` and `memberRule` to `control`.

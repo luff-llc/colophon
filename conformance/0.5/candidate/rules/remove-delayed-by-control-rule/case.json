@@ -1,1 +1,0 @@
-{"description":"Removing the delayed key while also renaming A: not a cancel, and no other rule removes a delayed key.","expected":{"result":"badSignature","seq":8},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

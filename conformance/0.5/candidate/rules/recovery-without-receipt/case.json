@@ -1,1 +1,0 @@
-{"description":"The same recovery entry in an account with a home, without a receipt.","expected":{"result":"held","seq":3,"why":"unavailable: receipt"},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

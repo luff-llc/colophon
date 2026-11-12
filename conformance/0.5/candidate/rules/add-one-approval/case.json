@@ -1,1 +1,0 @@
-{"description":"threshold 1: one existing key adds a full controller (one approval).","expected":{"result":"ok","seq":2},"sections":["8.4","17.3"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

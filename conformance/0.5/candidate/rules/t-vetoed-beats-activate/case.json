@@ -1,0 +1,1 @@
+{"description":"vetoed and activate for one transition at seq 3: the veto was in time.","expected":{"result":"ok","seq":3},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

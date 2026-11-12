@@ -1,0 +1,1 @@
+{"description":"B's removal is pending: B keeps working until activation.","expected":{"call":"ok"},"sections":["8.7","12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-11T09:17:00Z"}}

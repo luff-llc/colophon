@@ -1,1 +1,0 @@
-{"description":"Two homes vouch for different entries at seq 4.","expected":{"result":"refused:fork","seq":4},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

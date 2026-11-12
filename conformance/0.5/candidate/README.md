@@ -1,7 +1,7 @@
 # Colophon 0.5 candidate vectors
 
 **Status: hand-built for review, not replayed by any 0.5 implementation.** These files go with
-[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 3. No 0.5 verifier exists yet,
+[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 4. No 0.5 verifier exists yet,
 so every `expected` outcome for 0.5 is the spec author's reading of the text. The bytes are
 real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256 (raw, or
 WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except
@@ -18,7 +18,7 @@ python3 -I conformance/0.5/candidate/generate.py          # write
 python3 -I conformance/0.5/candidate/generate.py --check  # compare with the files here
 ```
 
-`generate.py` runs `rules.py` (revision-2 cases) and `rules_r3.py` (revision-3 cases). It needs Python 3 and `cryptography`
+`generate.py` runs `rules.py` (shared helpers and the cases that still hold), which runs `rules_v4.py` (pending transitions, who-wins rows, succession). It needs Python 3 and `cryptography`
 (Apache-2.0 OR BSD-3-Clause; checked with 50.0.2), for tooling only. Signatures are
 deterministic (RFC 6979), so regeneration is byte-identical. The generator also re-encodes all
 267 published 0.4 authority bodies without duplicate names, and checks that its canonical encoder
@@ -31,74 +31,54 @@ reproduces them byte for byte.
 | `identifiers.json` | §5.1 | 0.5 IDs of every published 0.4 genesis; legacy prefixes; reference cases |
 | `upgrade/*` | §16.1 | `upgrade` on published 0.4 chains, and refusals |
 | `account/`, `calls/*`, `heads/*` | §9, §12, §13 | Identity account with an agent and a home; 14 call cases; 4 head cases |
-| `rules/rs-*` | §8.4 | Recovery-set rule: lower `recoverThreshold`, add a recover key, remove one; each with and without recover signers |
-| `rules/add-*`, `rules/provisional-*` | §8.4, §17.3 | Add rule at threshold 1 (one approval) and 2 (provisional: approve only, `until`, no slot); possession missing and wrong |
-| `rules/issued-backwards` | §8.1 | Monotonic `issued` |
-| `rules/readd-removed-controller` | §8.3 | Remove a never-slotted controller without rotation, re-add it |
-| `rules/member-key-as-controller`, `rules/former-controller-as-member` | §3.3 | Principals across time |
-| `rules/sign-controller-authority` | §6.1 | A `sign` controller can't sign authority |
-| `rules/holders-*` | §6.2 | `countBy` `holders` |
-| `rules/recovery-*`, `rules/delayed-signer-*`, `rules/cancel-*`, `rules/delay-zero-with-home` | §8.4, §13.5 | Receipts, the recovery delay, the cancel rule, the delay floor |
-| `rules/successor*`, `rules/entry-after-successor` | §15.2 | Terminal successor under the recovery-set rule |
-| `rules/conflict-no-home-*`, `rules/vouched-fork*`, `rules/vouched-resolve-without-recovery`, `rules/removed-key-equivocation` | §8.6 | No-home priority (lower digest; stronger rule wins); a fork two homes vouch for, `resolve`; a removed key's rival at an old seq is evidence, not a fork |
-| `rules/malleated-envelope` | §2.2, §8.6 | s → n − s over the same body: one entry |
-| `rules/control-*-threshold-*` | §8.4 | The control rule counts the larger of old and new `threshold` |
-| `rules/rs-*-control-only`, `rules/rs-*-with-recover`, `rules/lower-head-max-age-control-only`, `rules/holder-without-key-signature` | §6.1, §6.3, §8.4 | Every recovery-set trigger: demotion, raising `recoverThreshold`, `recoveryDelay`, raising `headMaxAge`, `callWindow`, `linkMaxAge`, `history` to public, a recover key's descriptor and holder, appointing a home |
-| `rules/receipts-*`, `rules/receipt-*`, `rules/full-recovery-no-receipts` | §8.4, §13.5 | Two homes, `headQuorum` 2: activation from the later receipt; one of two; late, early, non-home receipts; full recovery |
-| `rules/attempt-2*`, `rules/remove-delayed-by-control-rule` | §8.4 | Attempt 2, its solo cancel refused, counter-recovery, removing a delayed key by another rule refused |
-| `rules/call-by-*` | §12.3 | Calls by a delayed key and by a provisional key before and after `until` |
-| `rules/second-provisional`, `rules/provisional-records-grant`, `rules/provisional-sponsor-removed` | §6.1 | Provisional limits |
-| `rules/origin-*` | §4.3 | Authority origins with and without `authorityOrigins` (synthetic authenticator) |
-| `rules/controller-call*` | §12.3 | Controller calls from the call origin, from the authority origin, and by a recover-only key |
-| `rules/replay-*`, `rules/removal-after-heads` | §12.3, §12.4 | Replay identical and conflicting; a held removal beyond the heads applies at once |
-| `rules/equivocation`, `rules/rollback` | §13.3 | Evidence object; rollback below the high-water mark |
-| `rules/non-canonical-*`, `rules/invalid-expires-date` | §2.1, §2.2 | Unsorted keys; a non-zero padding bit; February 30 |
-| `pairing/pairing.json` | §7.3 | Commitment and code for fixed inputs; two mismatching reveals |
-| `succession/swift-*` | §15.1, §16.3 | Swift keyring and root libraries frozen by their final `layout` entry; stale head; an entry after the final one; two successors; Two Keys lowered with and without recover signers; root library with and without the recovery identity; **WebAuthn passkey and security-key controllers** (F signed by WebAuthn), a recover-set swap with and without consent; a **recovery-added** control key signing F, with a refusal; **`rotateRecovery`** with current identities only and with the originals |
+| `rules/t-*` | §8.4, §8.7 | Pending transitions: activation after the delay, too early, expired; veto by the target, late veto, veto by too few keys, activation after a veto; escalation alone and with one more signer; full set and a one-key "full set"; recovery-set consent (demotion, raising `threshold`); a signer removed first; a delta that breaks §6; `vetoed` and `activate` beating other entries at one seq |
+| `rules/i-*` | §6.2, §8.4 | Immediate entries: approve-only addition; a control addition or a loosening written as immediate (refused); tightening; headroom at 56 and 57 |
+| `rules/call-by-pending-*` | §8.7, §12.3 | A key whose addition is pending can't call; a key whose removal is pending can |
+| `rules/controller-call*` | §12.3 | WebAuthn controller calls from the call origin, the authority origin, a recover-only key |
+| `rules/row-*` | §8.7 who-wins table | Event sequences with per-event outcomes: thief with a control key; with a recovery key; with one of each (owner with three keys); owner with both recovery keys and no device; burglar with both; an honest mistake; a hostile home countered by a second home |
+| `rules/removed-key-equivocation`, `rules/malleated-envelope`, `rules/equivocation`, `rules/rollback` | §2.2, §8.6, §13.3 | Evidence, body-byte equality, heads |
+| `rules/origin-*` | §4.3 | Authority origins with and without `authorityOrigins` |
+| `rules/replay-*`, `rules/removal-after-heads` | §12.3, §12.4 | Replay identical and conflicting; a held removal |
+| `rules/non-canonical-*`, `rules/invalid-expires-date` | §2.1, §2.2 | Encodings |
+| `rules/keys-r4.json` | — | Public test keys used by revision-4 cases |
+| `pairing/pairing.json` | §7.3 | Commitment and code |
+| `succession/swift-*` | §15.1, §16.3 | Succession as a pending transition: the successor home's receipt of the genesis (`genesis-receipt.json`), F after the window (verified), F before it (unverified), a veto by an old key in the window, stale head, an entry after F (evidence; the succession stands), root library with root and recovery identity and with root only, `rotateRecovery` (current identities suffice), WebAuthn controllers, recover-set swap with and without consent, a recovery-added key vetoed, Two Keys lowered with and without recover signers |
 | `probes/swift-der/` | §16.3 | The CryptoKit acceptance probe (Swift package, not part of the build) |
 
 ## What was run
 
-- `generate.py --check`: 573 files match.
-- An independent signature check (a separate script, not committed) verified all **646**
-  signatures in `rules/` and `succession/` (primary, cosignatures, `additions`, `handover`;
-  WebAuthn with the challenge recomputed). None failed.
-- **0.4 engine** (`colophon_core::authority::Authority::replay` at `d8568c6`) on `upgrade/*`:
-  `newerFormat: unknown authority kind` for every case except `foreign-signer`
-  (`badSignature: foreign controller`).
-- **Swift verifier** (Marginalia `origin/main` `c8280332`: `ColophonCore`, `ColophonStore` and
-  `ColophonAuthority` built unmodified in a scratch package, then `AuthorityState(records:)`):
-  - every `succession/*/predecessor` up to the entry before the final one is **accepted**: keyring
-    adoption, the sealed slot's structure, the Two Keys thresholds and the root library;
-  - every full predecessor stops at the final entry with **`unsupportedStorageLayout(3)`**, after
-    verifying its signature;
-  - the rival final entry also stops with `unsupportedStorageLayout(3)`;
-  - a copy with one bit of the final signature flipped gives `badSignature("authority entry 3")`,
-    for the raw case and for the WebAuthn security-key case;
-  - the WebAuthn libraries (keyring adoption with a passkey and a security key, the passkey's
-    recovery-path addition of a control key, and F signed by WebAuthn) and the `rotateRecovery`
-    root library are accepted up to F and stop at F.
-- **CryptoKit DER probe** (`probes/swift-der`, macOS 27, three runs): minimal DER and high-S are
-  accepted; an extra leading zero, long-form sequence or integer lengths, and a trailing byte are
-  refused; an integer with its top bit set and no 0x00 pad is **accepted** (§16.3 accepts it for
-  predecessor entries). `JSONDecoder` accepts duplicate members and keeps the **first**. iOS was
-  not probed.
-  So released Swift readers verify and then stop at the freezing entry, as §16.3 says.
+- `generate.py --check`: 452 files match. The revision-3 cases built on attempt 2, cancels,
+  provisional keys and digest tie-breaks are gone with those rules.
+- An independent signature check (a separate script, not committed) verified all **594**
+  signatures in `rules/` and `succession/` (primary, cosignatures, `additions`, `handover`,
+  transitions, vetoes, receipts, `activate`/`vetoed` entries; WebAuthn with the challenge
+  recomputed). None failed.
+- **0.4 engine** (`Authority::replay` at `d8568c6`) on `upgrade/*`: `newerFormat` everywhere except
+  `foreign-signer` (`badSignature: foreign controller`).
+- **Swift verifier** (Marginalia `origin/main` `c8280332`, unmodified, in a scratch package):
+  - every `succession/*/predecessor` up to the entry before F is accepted, including the WebAuthn
+    libraries, the passkey's recovery-path addition, `rotateRecovery` and the Two Keys library;
+  - every full predecessor stops at F with `unsupportedStorageLayout(3)` after verifying it.
+- **CryptoKit DER probe** (`probes/swift-der`, macOS 27.0.1, 200 random keys):
+  - accepted: minimal DER, high-S (DER and raw);
+  - refused: an extra leading zero on `r` or `s`, an `r` or `s` with its top bit set and no 0x00
+    pad (87 and 93 cases), long-form lengths, trailing bytes;
+  - `JSONDecoder` accepts duplicate members and keeps the first.
+
+  Revision 3 reported the unpadded form as accepted. That was a probe error (it built a minimal
+  encoding when the top bit was clear) and is corrected. **iOS and visionOS were not probed.**
 
 ## Still missing: these need an engine (implementation plan, step V1)
 
-- Every 0.4 key case re-expressed as `/5`, including slots, rotation and the WebAuthn refusal
-  cases.
-- Everything with namespaces: these need HPKE seals and AES-GCM payloads built to the spec. That
-  covers rekey, grant shares, `/5` headers and AAD, author chains, revoke with `kept` and up to 16
-  `heads` (including a fork and a walk through a refused header), renew with shares, and proposal
-  ordering.
-- Keyring changes that rotate the vault (removing or demoting a slotted controller, cancelling a
-  slotted recovery addition). The re-add and removal vectors here use never-slotted controllers
-  for that reason.
-- Seed transfer under the pairing scheme (an HPKE seal with the transfer label).
-- A call evaluated with two homes and one stale head, and additions after S being ignored.
-- Receipt-backed cancels at a non-primary home colliding with a primary entry (§8.6 rule 2).
-- `/5` succession with fresh heads over the predecessor's `successor`, and the migration entry
-  with a real copy's view digests.
-- Hint fetching. That is a host test, not a vector.
+- Every 0.4 key case as `/5`, with slots and rotation; a vault-changing transition with its
+  `activate` shares.
+- Everything with namespaces: rekey, shares, `/5` headers and AAD, author chains, revoke heads
+  and the walk, renew shares, proposals.
+- Seed transfer under the pairing scheme.
+- Two homes with `headQuorum` 2 (latest receipt counts, one of two missing), late, early and
+  non-home receipts of transitions; mutual removal by two pending transitions; the replay
+  store's states.
+- `/5` succession (a `successor` transition activated in the predecessor) and the migration
+  entry.
+- The Swift differential corpus on iOS and visionOS, and the dry run on a real library.
+- Hint fetching (a host test).

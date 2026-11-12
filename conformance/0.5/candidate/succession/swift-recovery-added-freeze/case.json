@@ -1,1 +1,0 @@
-{"description":"The passkey's Swift recovery path adds a control key, which signs F at once (§15.1 rule 6).","expected":{"genesis":"ok","succession":"pending until the successor's activation; unverified with refusal.json"},"sections":["15.1","16.3"]}

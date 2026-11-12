@@ -1,0 +1,1 @@
+{"description":"NEW's addition is pending: it isn't a controller yet.","expected":{"call":"refused:revoked"},"sections":["8.7","12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-11T09:17:00Z"}}

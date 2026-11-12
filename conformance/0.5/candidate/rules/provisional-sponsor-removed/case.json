@@ -1,1 +1,0 @@
-{"description":"B sponsored the provisional key; after B is removed (never slotted, so no rotation), the key's grant doesn't count.","expected":{"result":"badSignature","seq":5},"sections":["6.1"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

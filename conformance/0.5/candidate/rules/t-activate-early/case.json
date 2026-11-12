@@ -1,0 +1,1 @@
+{"description":"The same activation one minute before the due time.","expected":{"result":"held","seq":3,"why":"transition not yet due"},"sections":["8.5","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

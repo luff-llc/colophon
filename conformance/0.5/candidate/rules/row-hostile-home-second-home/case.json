@@ -1,0 +1,1 @@
+{"description":"Home one (hostile) activates the thief's removal of A and hides the veto; home two records the veto: vetoed stands.","expected":{"result":"ok","seq":3},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

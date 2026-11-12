@@ -1,1 +1,0 @@
-{"description":"Root rotated recovery; handover carries the root (as F) and the new recovery identity only.","expected":{"genesis":"ok","succession":"unverified"},"sections":["15.1","16.3"]}

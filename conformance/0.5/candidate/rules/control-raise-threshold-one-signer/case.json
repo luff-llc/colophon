@@ -1,1 +1,0 @@
-{"description":"Raising threshold 1→2 needs two signers (the larger of old and new).","expected":{"result":"badSignature","seq":2},"sections":["8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

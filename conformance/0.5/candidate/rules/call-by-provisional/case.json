@@ -1,1 +1,0 @@
-{"description":"The provisional key calls before `until`.","expected":{"call":"ok"},"sections":["6.1","12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-20T00:01:00Z"}}

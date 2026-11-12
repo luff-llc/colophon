@@ -1,1 +1,0 @@
-{"description":"Remove a never-slotted controller (no rotation), then add it back.","expected":{"result":"ok","seq":3},"sections":["3.3","8.3"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

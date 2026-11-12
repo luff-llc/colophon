@@ -1,1 +1,0 @@
-{"description":"Two control-rule entries at seq 2, no homes: the lower body digest is kept, the other is evidence.","expected":{"evidence":"84f43960524179446a7daef281ca51e57a44b1a5b4e8a46d212663a1a16ab6e2","kept":"36835599ce3d2cffef7ed7c1bd8f86c3df712079d1cfc6fa3e448215ad08ac5e","result":"ok","seq":2},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

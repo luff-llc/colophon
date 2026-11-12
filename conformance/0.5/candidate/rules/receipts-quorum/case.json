@@ -1,1 +1,0 @@
-{"description":"Two receipts (headQuorum 2): activation runs from the later one.","expected":{"activation":"2026-11-14T09:01:40Z","result":"ok","seq":5},"sections":["8.4","13.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
