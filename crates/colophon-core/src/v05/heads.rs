@@ -7,19 +7,14 @@ use super::ids::AccountId;
 use super::signature::RawEnvelope;
 use super::{bad_signature, require, Failure, Reason, Result, Unknown};
 
-/// A verified head.
+/// A verified head. It exists only as the result of [`verify_head`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Head {
-    /// The home member ID that signed it.
-    pub by: String,
-    /// The covered seq.
-    pub seq: u64,
-    /// The body digest at `seq`.
-    pub digest: String,
-    /// `issued`, in ms.
-    pub issued_ms: i64,
-    /// Body digest of the head itself.
-    pub body_digest: String,
+    by: String,
+    seq: u64,
+    digest: String,
+    issued_ms: i64,
+    body_digest: String,
 }
 
 /// What a head is checked against.
@@ -63,7 +58,7 @@ pub fn verify_head(envelope: &[u8], ctx: HeadContext<'_>) -> Result<Head> {
     env.verify(signing)
         .map_err(|e| bad_signature(e.to_string()))?;
     unknown.check()?;
-    if issued_ms > ctx.now_ms + 60_000 {
+    if i128::from(issued_ms) > i128::from(ctx.now_ms) + 60_000 {
         return Err(Failure::Unavailable(
             "head issued more than 60 s ahead".into(),
         ));
@@ -86,11 +81,28 @@ pub fn verify_head(envelope: &[u8], ctx: HeadContext<'_>) -> Result<Head> {
     }
 }
 impl Head {
-    /// Fresh while `now − issued ≤ headMaxAge` (§13.3).
+    /// The home member ID that signed it.
+    pub fn by(&self) -> &str {
+        &self.by
+    }
+    /// The covered seq (at least 1).
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+    /// The body digest at `seq`.
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+    /// `issued`, in ms.
+    pub fn issued_ms(&self) -> i64 {
+        self.issued_ms
+    }
+    /// Body digest of the head itself.
+    pub fn body_digest(&self) -> &str {
+        &self.body_digest
+    }
+    /// Fresh while `now − issued ≤ headMaxAge` (§13.3), in checked arithmetic.
     pub fn fresh(&self, now_ms: i64, head_max_age_s: u64) -> bool {
-        now_ms - self.issued_ms
-            <= i64::try_from(head_max_age_s)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(1_000)
+        i128::from(now_ms) - i128::from(self.issued_ms) <= i128::from(head_max_age_s) * 1_000
     }
 }

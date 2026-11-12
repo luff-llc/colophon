@@ -9,21 +9,25 @@
 use base64::{engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use colophon_core::v05::{
     calls::{
-        verify_call, AccountView, CallConfig, ControllerStatus, ViewController, ViewMember,
-        HISTORY_READ,
+        verify_call, AccountView, CallConfig, ControllerStatus, HistoryVerifierOutput,
+        MemberStatus, ViewController, ViewMember, HISTORY_READ,
     },
-    descriptor::{Controller, KeyDescriptor, KeyForm, Policy, Role, WebAuthnKey},
-    encoding::{canonical, canonical_body, digest, encode_base64, parse_date, Obj},
-    heads::Head,
+    descriptor::{Controller, KeyDescriptor, Policy, WebAuthnKey},
+    encoding::{canonical, canonical_body, digest, encode_base64, parse_date, strict_parse, Obj},
+    floor::{FloorCounter, FLOOR},
     ids::{key_id, AccountId},
     members::{check_members_never_controllers, AuthorityHeader, Grant, GrantContext, MemberKind},
     records::{
-        admit, operation_id, Admission, AuthorView, Kept, Level, NamespaceView, OperationHeader,
+        admit, admit_opened, operation_id, Admission, AuthorView, Kept, NamespaceView,
+        OperationHeader,
     },
-    replay::{MemoryReplayStore, ReplayState, ReplayStore},
-    signature::{parse_der, verify_webauthn, AssertionBytes, OriginRule, SigFailure, Strictness},
+    replay::{retained, MemoryReplayStore, ReplayState, ReplayStore, MAX_WINDOW_MS, RETENTION_MS},
+    signature::{
+        parse_der, verify_authority_signature, verify_webauthn, AssertionBytes, AuthorityRule,
+        Checked, OriginRule, SigFailure, Strictness,
+    },
     terms::{Terms, TermsKind},
-    Reason, Unknown,
+    Reason,
 };
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use serde_json::{json, Map, Value};
@@ -343,12 +347,7 @@ impl Authn {
             .to_vec()
     }
     fn key(&self, authority: Option<Vec<String>>) -> WebAuthnKey {
-        WebAuthnKey {
-            rp: self.rp.clone(),
-            credential: vec![1],
-            origins: None,
-            authority_origins: authority,
-        }
+        WebAuthnKey::new(self.rp.clone(), vec![1], None, authority).unwrap()
     }
     fn client(&self, body: &[u8], origin: &str) -> Vec<u8> {
         format!(
@@ -431,7 +430,7 @@ fn webauthn_negative_cases_in_order() {
     let big = format!(r#"{{"type":"webauthn.get","pad":"{}"}}"#, "x".repeat(8_200)).into_bytes();
     assert_eq!(
         wa(&a, &open, body, &d, &big, false, OriginRule::General),
-        Err(SigFailure::ClientData)
+        Err(SigFailure::ClientDataBound)
     );
     let wrong_type = String::from_utf8(ok_client.clone())
         .unwrap()
@@ -623,8 +622,9 @@ fn webauthn_negative_cases_in_order() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Calls over a hand-built view.
+// Calls over views built by the sealed builder.
 const AUD: &str = "https://projects.example/scopes/7";
+const HOME_EP: &str = "https://home.example/v1/accounts/x";
 const NOW: &str = "2026-11-11T09:01:00Z";
 fn k(seed: u8) -> SigningKey {
     SigningKey::from_slice(&[seed; 32]).unwrap()
@@ -642,106 +642,143 @@ fn raw_env(body: &Value, signer: &SigningKey) -> Vec<u8> {
         .unwrap()
 }
 fn terms(v: Value, kind: TermsKind) -> Terms {
-    Terms::parse(v, kind, &mut Unknown::default()).unwrap()
+    Terms::parse(v, kind).unwrap()
+}
+fn now() -> i64 {
+    parse_date(NOW).unwrap()
+}
+fn raw_ctrl(key: &SigningKey, roles: &[&str]) -> Controller {
+    Controller::parse(
+        json!({"key":{"form":"raw","signing":encode_base64(&pt(key))},"label":"k","roles":roles}),
+        "c",
+    )
+    .unwrap()
+}
+fn passkey_ctrl(a: &Authn) -> Controller {
+    Controller::parse(
+        json!({"key":{"form":"webauthn","signing":encode_base64(&a.point()),"rp":a.rp,"credential":"AQ==",
+               "authorityOrigins":["https://keys.id.example"]},"label":"p","roles":["approve","control"],"verification":true}),
+        "c",
+    )
+    .unwrap()
+}
+
+type CtrlParts = (String, Vec<(u64, Option<Controller>)>, ControllerStatus);
+/// The inputs of a view, which tests vary before building.
+#[derive(Clone)]
+struct Parts {
+    account: AccountId,
+    history: Vec<String>,
+    member_terms: Value,
+    member_granted: u64,
+    member_end_sessions: Vec<u64>,
+    member_revoked: Option<u64>,
+    member_status: MemberStatus,
+    home_status: MemberStatus,
+    controllers: Vec<CtrlParts>,
+    policies: Vec<(u64, Policy)>,
+    head_seq: u64,
+    head_issued: String,
 }
 struct Fx {
-    view: AccountView,
+    parts: Parts,
     member: SigningKey,
+    home: SigningKey,
     passkey: Authn,
     recover: SigningKey,
 }
 fn fixture() -> Fx {
-    let account = AccountId::parse(&"e".repeat(64)).unwrap();
-    let history: Vec<String> = (1..=3)
-        .map(|i| digest(format!("entry {i}").as_bytes()))
-        .collect();
     let member = k(21);
     let home = k(22);
     let passkey = Authn::new(23, "id.example");
     let recover = k(24);
-    let mem_terms = terms(
-        json!({"services":[{"audience":AUD,"purposes":["task.propose","task.read"]}],"depth":2,
-               "expires":"2026-11-18T08:00:00Z","conditions":[{"prefix":["args.task","T-"]}]}),
-        TermsKind::Member,
-    );
-    let members = vec![
-        ViewMember {
-            id: key_id(&pt(&member)),
-            signing: pt(&member),
-            kind: MemberKind::Agent,
-            terms: mem_terms,
-            granted_seq: 2,
-            renewals: vec![],
-            end_sessions: vec![],
-            revoked_seq: None,
-        },
-        ViewMember {
-            id: key_id(&pt(&home)),
-            signing: pt(&home),
-            kind: MemberKind::Server,
-            terms: terms(json!({"serves":["home"]}), TermsKind::Member),
-            granted_seq: 3,
-            renewals: vec![],
-            end_sessions: vec![],
-            revoked_seq: None,
-        },
-    ];
-    let pk = KeyDescriptor {
-        signing: passkey.point(),
-        form: KeyForm::WebAuthn(passkey.key(Some(vec!["https://keys.id.example".into()]))),
-    };
-    let ctrl = |key: KeyDescriptor, roles: Vec<Role>, verification: bool| Controller {
-        key,
-        label: "k".into(),
-        roles,
-        verification,
-        holder: None,
-        audiences: None,
-    };
-    let rk = KeyDescriptor {
-        signing: pt(&recover),
-        form: KeyForm::Raw { agreement: None },
-    };
-    let controllers = vec![
-        ViewController {
-            id: pk.id(),
-            versions: vec![(
-                1,
-                Some(ctrl(pk.clone(), vec![Role::Approve, Role::Control], true)),
-            )],
-            status: ControllerStatus::Active,
-        },
-        ViewController {
-            id: rk.id(),
-            versions: vec![(1, Some(ctrl(rk.clone(), vec![Role::Recover], false)))],
-            status: ControllerStatus::Active,
-        },
-    ];
-    let heads = vec![Head {
-        by: key_id(&pt(&home)),
-        seq: 3,
-        digest: history[2].clone(),
-        issued_ms: parse_date("2026-11-11T09:00:00Z").unwrap(),
-        body_digest: "0".repeat(64),
-    }];
-    let view = AccountView {
-        account,
-        history,
-        policies: vec![(1, Policy::default_person())],
-        controllers,
-        members,
-        heads,
-        vouched_fork: false,
-        principal_points: [pt(&member), pt(&home), passkey.point(), pt(&recover)]
-            .into_iter()
+    let pc = passkey_ctrl(&passkey);
+    let rc = raw_ctrl(&recover, &["recover"]);
+    let parts = Parts {
+        account: AccountId::parse(&"e".repeat(64)).unwrap(),
+        history: (1..=3)
+            .map(|i| digest(format!("entry {i}").as_bytes()))
             .collect(),
+        member_terms: json!({"services":[{"audience":AUD,"purposes":["task.propose","task.read"]}],"depth":2,
+                             "expires":"2026-11-18T08:00:00Z","conditions":[{"prefix":["args.task","T-"]}]}),
+        member_granted: 2,
+        member_end_sessions: vec![],
+        member_revoked: None,
+        member_status: MemberStatus::Active,
+        home_status: MemberStatus::Active,
+        controllers: vec![
+            (pc.id(), vec![(1, Some(pc))], ControllerStatus::Active),
+            (rc.id(), vec![(1, Some(rc))], ControllerStatus::Active),
+        ],
+        policies: vec![(1, Policy::default_person())],
+        head_seq: 3,
+        head_issued: "2026-11-11T09:00:00Z".into(),
     };
     Fx {
-        view,
+        parts,
         member,
+        home,
         passkey,
         recover,
     }
+}
+fn head_env(fx: &Fx, p: &Parts) -> Vec<u8> {
+    raw_env(
+        &json!({"protocol":"colophon/head/5","account":p.account.as_str(),
+                "authority":{"seq":p.head_seq,"digest":p.history[p.head_seq as usize - 1]},
+                "issued":p.head_issued,"by":key_id(&pt(&fx.home))}),
+        &fx.home,
+    )
+}
+fn build(fx: &Fx, p: &Parts) -> AccountView {
+    let members = vec![
+        ViewMember::new(
+            pt(&fx.member),
+            MemberKind::Agent,
+            Terms::parse(p.member_terms.clone(), TermsKind::Member).unwrap(),
+            p.member_granted,
+            vec![],
+            p.member_end_sessions.clone(),
+            p.member_revoked,
+            p.member_status,
+        )
+        .unwrap(),
+        ViewMember::new(
+            pt(&fx.home),
+            MemberKind::Server,
+            terms(json!({"serves":["home"]}), TermsKind::Member),
+            3,
+            vec![],
+            vec![],
+            None,
+            p.home_status,
+        )
+        .unwrap(),
+    ];
+    let controllers = p
+        .controllers
+        .iter()
+        .map(|(id, v, st)| ViewController::new(id.clone(), v.clone(), *st).unwrap())
+        .collect();
+    let points: BTreeSet<Vec<u8>> = [
+        pt(&fx.member),
+        pt(&fx.home),
+        fx.passkey.point(),
+        pt(&fx.recover),
+    ]
+    .into_iter()
+    .collect();
+    AccountView::from_history_verifier(HistoryVerifierOutput {
+        account: p.account.clone(),
+        history: p.history.clone(),
+        policies: p.policies.clone(),
+        controllers,
+        members,
+        heads: vec![head_env(fx, p)],
+        vouched_fork: false,
+        principal_points: points,
+    })
+    .unwrap()
 }
 fn call_body(
     fx: &Fx,
@@ -752,7 +789,7 @@ fn call_body(
     args: Value,
     rid: u8,
 ) -> Value {
-    let mut b = json!({"protocol":"colophon/call/5","account":fx.view.account.as_str(),"asOf":{"seq":3,"digest":fx.view.history[2]},
+    let mut b = json!({"protocol":"colophon/call/5","account":fx.parts.account.as_str(),"asOf":{"seq":3,"digest":fx.parts.history[2]},
         "signer":signer,"key":encode_base64(key),"audience":AUD,"purpose":purpose,"args":args,
         "requestId":URL_SAFE_NO_PAD.encode([rid; 32]),"created":NOW});
     if let Some(l) = links {
@@ -761,36 +798,53 @@ fn call_body(
     b
 }
 fn link(fx: &Fx, from: &SigningKey, to: &SigningKey, t: Value, session: Option<u64>) -> String {
-    let mut b = json!({"protocol":"colophon/link/5","account":fx.view.account.as_str(),"from":key_id(&pt(from)),
+    let mut b = json!({"protocol":"colophon/link/5","account":fx.parts.account.as_str(),"from":key_id(&pt(from)),
         "to":{"signing":encode_base64(&pt(to))},"terms":t,"notBefore":"2026-11-11T09:00:00Z","expires":"2026-11-11T09:10:00Z","created":"2026-11-11T09:00:00Z"});
     if let Some(s) = session {
         b["session"] = json!(s);
     }
     STANDARD.encode(raw_env(&b, from))
 }
-fn run(fx: &Fx, env: &[u8], store: &mut MemoryReplayStore, purposes: &[&str]) -> String {
-    let aud = vec![AUD.to_string()];
+fn run_at(
+    view: &AccountView,
+    env: &[u8],
+    store: &mut MemoryReplayStore,
+    purposes: &[&str],
+    homes: &[&str],
+    at: i64,
+) -> String {
+    let aud = vec![AUD.to_string(), HOME_EP.to_string()];
     let origins: BTreeMap<String, Vec<String>> = [(
         "id.example".to_string(),
         vec!["https://sign.id.example".to_string()],
     )]
     .into();
     let purposes: Vec<String> = purposes.iter().map(|s| s.to_string()).collect();
+    let homes: Vec<String> = homes.iter().map(|s| s.to_string()).collect();
     let cfg = CallConfig {
-        now_ms: parse_date(NOW).unwrap(),
+        now_ms: at,
         audiences: &aud,
         call_origins: &origins,
         controller_purposes: &purposes,
+        home_endpoints: &homes,
     };
-    match verify_call(env, &fx.view, &cfg, store) {
+    match verify_call(env, view, &cfg, store) {
         Ok(_) => "ok".into(),
         Err(e) => e.code(),
     }
+}
+fn run(view: &AccountView, env: &[u8], store: &mut MemoryReplayStore, purposes: &[&str]) -> String {
+    run_at(view, env, store, purposes, &[], now())
+}
+const NARROW: &str = r#"{"services":[{"audience":"https://projects.example/scopes/7","purposes":["task.read"]}],"conditions":[{"prefix":["args.task","T-"]}]}"#;
+fn narrow() -> Value {
+    serde_json::from_str(NARROW).unwrap()
 }
 
 #[test]
 fn member_calls_links_and_reservations() {
     let fx = fixture();
+    let view = build(&fx, &fx.parts);
     let mid = json!({"member": key_id(&pt(&fx.member))});
     let mut store = MemoryReplayStore::new();
     let own = raw_env(
@@ -805,10 +859,9 @@ fn member_calls_links_and_reservations() {
         ),
         &fx.member,
     );
-    assert_eq!(run(&fx, &own, &mut store, &[]), "ok");
-    // Reserved and left pending for the service; an identical call is a replay.
+    assert_eq!(run(&view, &own, &mut store, &[]), "ok");
     assert_eq!(store.len(), 1);
-    assert_eq!(run(&fx, &own, &mut store, &[]), "refused:replay");
+    assert_eq!(run(&view, &own, &mut store, &[]), "refused:replay");
     let other = raw_env(
         &call_body(
             &fx,
@@ -821,8 +874,7 @@ fn member_calls_links_and_reservations() {
         ),
         &fx.member,
     );
-    assert_eq!(run(&fx, &other, &mut store, &[]), "refused:conflict");
-    // Refusals don't reserve.
+    assert_eq!(run(&view, &other, &mut store, &[]), "refused:conflict");
     let bad = raw_env(
         &call_body(
             &fx,
@@ -835,12 +887,10 @@ fn member_calls_links_and_reservations() {
         ),
         &fx.member,
     );
-    assert_eq!(run(&fx, &bad, &mut store, &[]), "refused:outOfScope");
-    assert_eq!(store.len(), 1);
-    // A link carrying the member's condition narrows; one dropping it doesn't.
+    assert_eq!(run(&view, &bad, &mut store, &[]), "refused:outOfScope");
+    assert_eq!(store.len(), 1, "refusals don't reserve");
     let session = k(31);
-    let narrow = json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"conditions":[{"prefix":["args.task","T-"]}]});
-    let l = link(&fx, &fx.member, &session, narrow.clone(), Some(0));
+    let l = link(&fx, &fx.member, &session, narrow(), Some(0));
     let via = raw_env(
         &call_body(
             &fx,
@@ -853,7 +903,7 @@ fn member_calls_links_and_reservations() {
         ),
         &session,
     );
-    assert_eq!(run(&fx, &via, &mut store, &[]), "ok");
+    assert_eq!(run(&view, &via, &mut store, &[]), "ok");
     let dropped = link(
         &fx,
         &fx.member,
@@ -873,8 +923,7 @@ fn member_calls_links_and_reservations() {
         ),
         &session,
     );
-    assert_eq!(run(&fx, &via2, &mut store, &[]), "refused:notNarrower");
-    // A copied (narrowing) link signed by another key: badSignature at the end of step 6.
+    assert_eq!(run(&view, &via2, &mut store, &[]), "refused:notNarrower");
     let attacker = k(32);
     let copied = raw_env(
         &call_body(
@@ -888,66 +937,47 @@ fn member_calls_links_and_reservations() {
         ),
         &attacker,
     );
-    assert_eq!(run(&fx, &copied, &mut store, &[]), "badSignature");
-    // Wrong session number, two links, a repeated to.signing, a link to a principal's key.
+    assert_eq!(run(&view, &copied, &mut store, &[]), "badSignature");
     let ended = raw_env(
         &call_body(
             &fx,
             mid.clone(),
             &pt(&session),
-            Some(vec![link(
-                &fx,
-                &fx.member,
-                &session,
-                narrow.clone(),
-                Some(1),
-            )]),
+            Some(vec![link(&fx, &fx.member, &session, narrow(), Some(1))]),
             "task.read",
             json!({"task":"T-1"}),
             6,
         ),
         &session,
     );
-    assert_eq!(run(&fx, &ended, &mut store, &[]), "refused:ended");
+    assert_eq!(run(&view, &ended, &mut store, &[]), "refused:ended");
     let s2 = k(33);
-    let l2 = link(&fx, &session, &s2, narrow.clone(), None);
     let two = raw_env(
         &call_body(
             &fx,
             mid.clone(),
             &pt(&s2),
-            Some(vec![l.clone(), l2]),
+            Some(vec![l.clone(), link(&fx, &session, &s2, narrow(), None)]),
             "task.read",
             json!({"task":"T-1"}),
             7,
         ),
         &s2,
     );
-    assert_eq!(
-        run(&fx, &two, &mut store, &[]),
-        "refused:notNarrower",
-        "second link needs depth < first link's 0"
-    );
+    assert_eq!(run(&view, &two, &mut store, &[]), "refused:notNarrower");
     let to_principal = raw_env(
         &call_body(
             &fx,
             mid.clone(),
             &pt(&fx.recover),
-            Some(vec![link(
-                &fx,
-                &fx.member,
-                &fx.recover,
-                narrow.clone(),
-                Some(0),
-            )]),
+            Some(vec![link(&fx, &fx.member, &fx.recover, narrow(), Some(0))]),
             "task.read",
             json!({"task":"T-1"}),
             8,
         ),
         &fx.recover,
     );
-    assert_eq!(run(&fx, &to_principal, &mut store, &[]), "malformed");
-    // Shape refusals at step 1: unknown signer kind, assertion on a member call, protocol.
+    assert_eq!(run(&view, &to_principal, &mut store, &[]), "malformed");
     let mut body = call_body(
         &fx,
         json!({"account": "x"}),
@@ -958,16 +988,15 @@ fn member_calls_links_and_reservations() {
         9,
     );
     assert_eq!(
-        run(&fx, &raw_env(&body, &fx.member), &mut store, &[]),
+        run(&view, &raw_env(&body, &fx.member), &mut store, &[]),
         "malformed"
     );
     body["signer"] = mid.clone();
     body["protocol"] = json!("colophon/call/6");
     assert_eq!(
-        run(&fx, &raw_env(&body, &fx.member), &mut store, &[]),
+        run(&view, &raw_env(&body, &fx.member), &mut store, &[]),
         "malformed"
     );
-    // Unknown content is newerFormat only when authentic and authorized.
     let mut future = call_body(
         &fx,
         mid.clone(),
@@ -979,19 +1008,294 @@ fn member_calls_links_and_reservations() {
     );
     future["future"] = json!(1);
     assert_eq!(
-        run(&fx, &raw_env(&future, &fx.member), &mut store, &[]),
+        run(&view, &raw_env(&future, &fx.member), &mut store, &[]),
         "newerFormat"
     );
     future["purpose"] = json!("task.delete");
     assert_eq!(
-        run(&fx, &raw_env(&future, &fx.member), &mut store, &[]),
+        run(&view, &raw_env(&future, &fx.member), &mut store, &[]),
         "refused:outOfScope"
     );
 }
 
 #[test]
-fn evaluation_point_and_removals_after_s() {
+fn unknown_condition_operators_are_three_valued() {
+    let fx = fixture();
+    let mid = json!({"member": key_id(&pt(&fx.member))});
+    // A view whose member terms carry an unknown operator: the pipeline re-checks them.
+    let mut p = fx.parts.clone();
+    p.member_terms = json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"depth":1,"conditions":[{"not":{"future":["task",1]}}]});
+    let view = build(&fx, &p);
+    let env = raw_env(
+        &call_body(
+            &fx,
+            mid.clone(),
+            &pt(&fx.member),
+            None,
+            "task.read",
+            json!({"task":"T-1"}),
+            1,
+        ),
+        &fx.member,
+    );
+    assert_eq!(
+        run(&view, &env, &mut MemoryReplayStore::new(), &[]),
+        "newerFormat",
+        "not(unknown) is unknown, not outOfScope"
+    );
+    p.member_terms = json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"depth":1,"conditions":[{"future":1},{"eq":["task","X"]}]});
+    let view = build(&fx, &p);
+    assert_eq!(
+        run(&view, &env, &mut MemoryReplayStore::new(), &[]),
+        "refused:outOfScope",
+        "a false predicate decides"
+    );
+    // An unknown term (not a condition) in view terms is newerFormat too.
+    p.member_terms = json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"later":1});
+    let view = build(&fx, &p);
+    let mut store = MemoryReplayStore::new();
+    assert_eq!(run(&view, &env, &mut store, &[]), "newerFormat");
+    assert!(store.is_empty());
+    // An unknown operator in a link.
+    let view = build(&fx, &fx.parts);
+    let session = k(31);
+    let t = json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"conditions":[{"prefix":["args.task","T-"]},{"future":1}]});
+    let via = raw_env(
+        &call_body(
+            &fx,
+            mid,
+            &pt(&session),
+            Some(vec![link(&fx, &fx.member, &session, t, Some(0))]),
+            "task.read",
+            json!({"task":"T-1"}),
+            2,
+        ),
+        &session,
+    );
+    assert_eq!(
+        run(&view, &via, &mut MemoryReplayStore::new(), &[]),
+        "newerFormat"
+    );
+}
+
+#[test]
+fn replay_window_and_retention_boundary() {
+    // H1: a call created at T + 3,600 s is accepted at T and must stay refused at T + 7,200 s.
+    const _: () = assert!(RETENTION_MS > 2 * MAX_WINDOW_MS);
+    let t = 1_000_000_000_000i64;
+    assert!(retained(t, t + 2 * MAX_WINDOW_MS));
+    assert!(retained(t, t + RETENTION_MS));
+    assert!(!retained(t, t + RETENTION_MS + 1));
+    assert!(
+        retained(i64::MIN, i64::MIN) && !retained(i64::MIN, i64::MAX),
+        "no overflow"
+    );
     let mut fx = fixture();
+    // A policy with callWindow 3,600 so that only step 3's window binds.
+    let pol = Policy::parse(
+        json!({"callWindow":3600,"headMaxAge":86400,"headQuorum":1,"history":"members","linkMaxAge":86400,"memberRule":"single",
+               "rate":{"signer":{"entries":64,"bytes":4194304},"account":{"entries":256,"bytes":16777216}},"recoveryDelay":259200}),
+        "policy",
+    )
+    .unwrap();
+    fx.parts.policies = vec![(1, pol)];
+    let created = now() + MAX_WINDOW_MS;
+    let mut p = fx.parts.clone();
+    let iso = |ms: i64| -> String {
+        let s = (ms / 1000) % 86_400;
+        format!(
+            "2026-11-{:02}T{:02}:{:02}:{:02}Z",
+            11 + ms / 1000 / 86_400 - now() / 1000 / 86_400,
+            s / 3600,
+            s / 60 % 60,
+            s % 60
+        )
+    };
+    let mid = json!({"member": key_id(&pt(&fx.member))});
+    let mut body = call_body(
+        &fx,
+        mid,
+        &pt(&fx.member),
+        None,
+        "task.read",
+        json!({"task":"T-1"}),
+        1,
+    );
+    body["created"] = json!(iso(created));
+    let env = raw_env(&body, &fx.member);
+    let mut store = MemoryReplayStore::new();
+    for (at, want) in [
+        (now(), "ok"),
+        (now() + 2 * MAX_WINDOW_MS, "refused:replay"),
+        (now() + 2 * MAX_WINDOW_MS + 1, "refused:window"),
+    ] {
+        p.head_issued = iso(at - 1000);
+        let view = build(&fx, &p);
+        assert_eq!(
+            run_at(&view, &env, &mut store, &[], &[], at),
+            want,
+            "at {at}"
+        );
+    }
+}
+
+#[test]
+fn sealed_view_refuses_invalid_input_and_never_panics() {
+    let fx = fixture();
+    let ok = || HistoryVerifierOutput {
+        account: fx.parts.account.clone(),
+        history: fx.parts.history.clone(),
+        policies: fx.parts.policies.clone(),
+        controllers: vec![],
+        members: vec![],
+        heads: vec![],
+        vouched_fork: false,
+        principal_points: BTreeSet::new(),
+    };
+    assert!(AccountView::from_history_verifier(ok()).is_ok());
+    for bad in [
+        HistoryVerifierOutput {
+            history: vec![],
+            ..ok()
+        },
+        HistoryVerifierOutput {
+            history: vec!["x".into()],
+            ..ok()
+        },
+        HistoryVerifierOutput {
+            policies: vec![],
+            ..ok()
+        },
+        HistoryVerifierOutput {
+            policies: vec![(2, Policy::default_person())],
+            ..ok()
+        },
+        HistoryVerifierOutput {
+            policies: vec![(1, Policy::default_person()), (9, Policy::default_person())],
+            ..ok()
+        },
+        HistoryVerifierOutput {
+            heads: vec![vec![0; 20_000]],
+            ..ok()
+        },
+    ] {
+        assert!(AccountView::from_history_verifier(bad).is_err());
+    }
+    let pc = passkey_ctrl(&fx.passkey);
+    assert!(ViewController::new(
+        pc.id(),
+        vec![(0, Some(pc.clone()))],
+        ControllerStatus::Active
+    )
+    .is_err());
+    assert!(ViewController::new(
+        pc.id(),
+        vec![(2, Some(pc.clone())), (2, None)],
+        ControllerStatus::Active
+    )
+    .is_err());
+    assert!(ViewController::new(pc.id(), vec![(1, None)], ControllerStatus::Active).is_err());
+    assert!(ViewController::new(
+        "0".repeat(32),
+        vec![(1, Some(pc.clone()))],
+        ControllerStatus::Active
+    )
+    .is_err());
+    assert!(ViewController::new(pc.id(), vec![], ControllerStatus::Active).is_err());
+    let t = || {
+        terms(
+            json!({"services":[{"audience":AUD,"purposes":["x"]}]}),
+            TermsKind::Member,
+        )
+    };
+    assert!(ViewMember::new(
+        pt(&fx.member),
+        MemberKind::Agent,
+        t(),
+        0,
+        vec![],
+        vec![],
+        None,
+        MemberStatus::Active
+    )
+    .is_err());
+    assert!(ViewMember::new(
+        pt(&fx.member),
+        MemberKind::Agent,
+        t(),
+        2,
+        vec![(2, 0)],
+        vec![],
+        None,
+        MemberStatus::Active
+    )
+    .is_err());
+    assert!(ViewMember::new(
+        pt(&fx.member),
+        MemberKind::Agent,
+        t(),
+        2,
+        vec![],
+        vec![],
+        Some(1),
+        MemberStatus::Active
+    )
+    .is_err());
+    assert!(ViewMember::new(
+        vec![4; 65],
+        MemberKind::Agent,
+        t(),
+        2,
+        vec![],
+        vec![],
+        None,
+        MemberStatus::Active
+    )
+    .is_err());
+    let m = ViewMember::new(
+        pt(&fx.member),
+        MemberKind::Agent,
+        t(),
+        9,
+        vec![],
+        vec![],
+        None,
+        MemberStatus::Active,
+    )
+    .unwrap();
+    assert!(
+        AccountView::from_history_verifier(HistoryVerifierOutput {
+            members: vec![m],
+            ..ok()
+        })
+        .is_err(),
+        "grant beyond history"
+    );
+    // Extreme clocks never panic.
+    let view = build(&fx, &fx.parts);
+    let env = raw_env(
+        &call_body(
+            &fx,
+            json!({"member": key_id(&pt(&fx.member))}),
+            &pt(&fx.member),
+            None,
+            "task.read",
+            json!({"task":"T-1"}),
+            1,
+        ),
+        &fx.member,
+    );
+    for at in [i64::MIN, i64::MAX, 0, -1] {
+        assert_eq!(
+            run_at(&view, &env, &mut MemoryReplayStore::new(), &[], &[], at),
+            "refused:window"
+        );
+    }
+}
+
+#[test]
+fn evaluation_point_and_removals_after_s() {
+    let fx = fixture();
     let mid = json!({"member": key_id(&pt(&fx.member))});
     let env = raw_env(
         &call_body(
@@ -1005,30 +1309,23 @@ fn evaluation_point_and_removals_after_s() {
         ),
         &fx.member,
     );
-    // A grant after S doesn't count.
-    fx.view.members[0].granted_seq = 4;
-    fx.view.history.push(digest(b"entry 4"));
+    let mut p = fx.parts.clone();
+    p.history.push(digest(b"entry 4"));
+    p.member_granted = 4;
     assert_eq!(
-        run(&fx, &env, &mut MemoryReplayStore::new(), &[]),
-        "refused:revoked"
+        run(&build(&fx, &p), &env, &mut MemoryReplayStore::new(), &[]),
+        "refused:revoked",
+        "grant after S"
     );
-    fx.view.members[0].granted_seq = 2;
-    // endSessions and revocation after S apply at once.
-    fx.view.members[0].end_sessions = vec![4];
+    p.member_granted = 2;
+    p.member_end_sessions = vec![4];
     let session = k(31);
-    let l = link(
-        &fx,
-        &fx.member,
-        &session,
-        json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"conditions":[{"prefix":["args.task","T-"]}]}),
-        Some(0),
-    );
     let via = raw_env(
         &call_body(
             &fx,
             mid.clone(),
             &pt(&session),
-            Some(vec![l]),
+            Some(vec![link(&fx, &fx.member, &session, narrow(), Some(0))]),
             "task.read",
             json!({"task":"T-1"}),
             2,
@@ -1036,33 +1333,48 @@ fn evaluation_point_and_removals_after_s() {
         &session,
     );
     assert_eq!(
-        run(&fx, &via, &mut MemoryReplayStore::new(), &[]),
+        run(&build(&fx, &p), &via, &mut MemoryReplayStore::new(), &[]),
         "refused:ended"
     );
-    fx.view.members[0].revoked_seq = Some(4);
+    p.member_end_sessions = vec![];
+    p.member_revoked = Some(4);
     assert_eq!(
-        run(&fx, &env, &mut MemoryReplayStore::new(), &[]),
+        run(&build(&fx, &p), &env, &mut MemoryReplayStore::new(), &[]),
         "refused:revoked"
     );
-    fx.view.members[0].revoked_seq = None;
-    // A head beyond the held history, no fresh head, a fork at asOf.
-    fx.view.heads[0].issued_ms -= 400_000;
+    p.member_revoked = None;
+    p.member_status = MemberStatus::AddedNotFinal;
     assert_eq!(
-        run(&fx, &env, &mut MemoryReplayStore::new(), &[]),
-        "unavailable"
+        run(&build(&fx, &p), &env, &mut MemoryReplayStore::new(), &[]),
+        "refused:revoked",
+        "member not final"
     );
-    fx.view.heads[0].issued_ms += 400_000;
-    fx.view.history[2] = digest(b"other");
-    fx.view.heads[0].digest = fx.view.history[2].clone();
+    p.member_status = MemberStatus::Active;
+    p.home_status = MemberStatus::AddedNotFinal;
     assert_eq!(
-        run(&fx, &env, &mut MemoryReplayStore::new(), &[]),
-        "refused:fork"
+        run(&build(&fx, &p), &env, &mut MemoryReplayStore::new(), &[]),
+        "unavailable",
+        "a non-final home's heads don't count"
+    );
+    p.home_status = MemberStatus::Active;
+    p.head_issued = "2026-11-11T08:50:00Z".into();
+    assert_eq!(
+        run(&build(&fx, &p), &env, &mut MemoryReplayStore::new(), &[]),
+        "unavailable",
+        "stale head"
+    );
+    let mut f = fx.parts.clone();
+    f.history[2] = digest(b"other");
+    assert_eq!(
+        run(&build(&fx, &f), &env, &mut MemoryReplayStore::new(), &[]),
+        "refused:fork",
+        "asOf names another digest"
     );
 }
 
 #[test]
 fn controller_calls_origins_roles_and_statuses() {
-    let mut fx = fixture();
+    let fx = fixture();
     let pid = key_id(&fx.passkey.point());
     let body = call_body(
         &fx,
@@ -1073,7 +1385,7 @@ fn controller_calls_origins_roles_and_statuses() {
         json!({}),
         1,
     );
-    let make = |fx: &Fx, origin: &str, flags: u8, b: &Value| -> Vec<u8> {
+    let make = |origin: &str, flags: u8, b: &Value| -> Vec<u8> {
         let bytes = canonical(b).unwrap();
         let client = fx.passkey.client(&bytes, origin);
         let data = fx.passkey.data(flags);
@@ -1082,10 +1394,11 @@ fn controller_calls_origins_roles_and_statuses() {
             "assertion":{"authenticatorData":STANDARD.encode(&data),"clientData":STANDARD.encode(&client)}})).unwrap()
     };
     let p = ["sign-in"];
+    let view = build(&fx, &fx.parts);
     assert_eq!(
         run(
-            &fx,
-            &make(&fx, "https://sign.id.example", 0x05, &body),
+            &view,
+            &make("https://sign.id.example", 0x05, &body),
             &mut MemoryReplayStore::new(),
             &p
         ),
@@ -1093,8 +1406,8 @@ fn controller_calls_origins_roles_and_statuses() {
     );
     assert_eq!(
         run(
-            &fx,
-            &make(&fx, "https://keys.id.example", 0x05, &body),
+            &view,
+            &make("https://keys.id.example", 0x05, &body),
             &mut MemoryReplayStore::new(),
             &p
         ),
@@ -1102,56 +1415,57 @@ fn controller_calls_origins_roles_and_statuses() {
     );
     assert_eq!(
         run(
-            &fx,
-            &make(&fx, "https://sign.id.example", 0x01, &body),
+            &view,
+            &make("https://sign.id.example", 0x01, &body),
             &mut MemoryReplayStore::new(),
             &p
         ),
-        "badSignature",
-        "verification needs UV"
+        "badSignature"
     );
     assert_eq!(
         run(
-            &fx,
-            &make(&fx, "https://sign.id.example", 0x05, &body),
+            &view,
+            &make("https://sign.id.example", 0x05, &body),
             &mut MemoryReplayStore::new(),
             &["other"]
         ),
         "refused:outOfScope"
     );
-    for status in [
+    let with_status = |st: ControllerStatus| {
+        let mut q = fx.parts.clone();
+        q.controllers[0].2 = st;
+        build(&fx, &q)
+    };
+    for st in [
         ControllerStatus::PendingAddition,
         ControllerStatus::Suspended,
         ControllerStatus::AddedNotFinal,
     ] {
-        fx.view.controllers[0].status = status;
         assert_eq!(
             run(
-                &fx,
-                &make(&fx, "https://sign.id.example", 0x05, &body),
+                &with_status(st),
+                &make("https://sign.id.example", 0x05, &body),
                 &mut MemoryReplayStore::new(),
                 &p
             ),
             "refused:revoked",
-            "{status:?}"
+            "{st:?}"
         );
     }
-    fx.view.controllers[0].status = ControllerStatus::PendingRemoval;
     assert_eq!(
         run(
-            &fx,
-            &make(&fx, "https://sign.id.example", 0x05, &body),
+            &with_status(ControllerStatus::PendingRemoval),
+            &make("https://sign.id.example", 0x05, &body),
             &mut MemoryReplayStore::new(),
             &p
         ),
         "ok"
     );
-    // A recover-only key: only colophon.history.read.
-    let rid = key_id(&pt(&fx.recover));
+    // A suspended controller may still read the history (§12.3 step 5, revision 6).
     let read = call_body(
         &fx,
-        json!({"controller": rid}),
-        &pt(&fx.recover),
+        json!({"controller": pid}),
+        &fx.passkey.point(),
         None,
         HISTORY_READ,
         json!({}),
@@ -1159,74 +1473,228 @@ fn controller_calls_origins_roles_and_statuses() {
     );
     assert_eq!(
         run(
-            &fx,
-            &raw_env(&read, &fx.recover),
+            &with_status(ControllerStatus::Suspended),
+            &make("https://sign.id.example", 0x05, &read),
             &mut MemoryReplayStore::new(),
             &[HISTORY_READ]
         ),
         "ok"
     );
-    let other = call_body(
-        &fx,
-        json!({"controller": rid}),
-        &pt(&fx.recover),
-        None,
-        "sign-in",
-        json!({}),
-        3,
-    );
-    assert_eq!(
-        run(
-            &fx,
-            &raw_env(&other, &fx.recover),
-            &mut MemoryReplayStore::new(),
-            &p
-        ),
-        "refused:outOfScope"
-    );
-    // A controller removed after S: revoked at once.
-    fx.view.controllers[1].versions.push((4, None));
-    fx.view.history.push(digest(b"entry 4"));
-    assert_eq!(
-        run(
-            &fx,
-            &raw_env(&read, &fx.recover),
-            &mut MemoryReplayStore::new(),
-            &[HISTORY_READ]
-        ),
-        "refused:revoked"
-    );
-    // A controller call carrying links is malformed.
-    let mut with_links = call_body(
+    // A recover-only key: only colophon.history.read; a home accepts it at its own endpoint.
+    let rid = key_id(&pt(&fx.recover));
+    let mut read = call_body(
         &fx,
         json!({"controller": rid}),
         &pt(&fx.recover),
         None,
         HISTORY_READ,
         json!({}),
-        4,
+        3,
     );
-    with_links["links"] = json!(["AA=="]);
+    read["audience"] = json!(HOME_EP);
+    let read_env = raw_env(&read, &fx.recover);
+    assert_eq!(
+        run(&view, &read_env, &mut MemoryReplayStore::new(), &[]),
+        "refused:outOfScope",
+        "not configured, not a home"
+    );
+    assert_eq!(
+        run_at(
+            &view,
+            &read_env,
+            &mut MemoryReplayStore::new(),
+            &[],
+            &[HOME_EP],
+            now()
+        ),
+        "ok",
+        "home purposes need no configuration"
+    );
+    let mut write = read.clone();
+    write["purpose"] = json!("colophon.home.write");
+    assert_eq!(
+        run_at(
+            &view,
+            &raw_env(&write, &fx.recover),
+            &mut MemoryReplayStore::new(),
+            &[],
+            &[HOME_EP],
+            now()
+        ),
+        "refused:outOfScope"
+    );
+    // L2: removed after S (even if re-added after S) is revoked at once.
+    let rc = raw_ctrl(&fx.recover, &["recover"]);
+    let mut q = fx.parts.clone();
+    q.history.push(digest(b"entry 4"));
+    q.history.push(digest(b"entry 5"));
+    q.controllers[1].1 = vec![(1, Some(rc.clone())), (4, None), (5, Some(rc))];
+    assert_eq!(
+        run_at(
+            &build(&fx, &q),
+            &read_env,
+            &mut MemoryReplayStore::new(),
+            &[],
+            &[HOME_EP],
+            now()
+        ),
+        "refused:revoked"
+    );
+    // L1: WebAuthn with verification at S and raw at the latest state: a raw call fails.
+    let raw_same = Controller::parse(json!({"key":{"form":"raw","signing":encode_base64(&fx.passkey.point())},"label":"p","roles":["approve","control"]}), "c").unwrap();
+    let mut q = fx.parts.clone();
+    q.history.push(digest(b"entry 4"));
+    q.controllers[0].1.push((4, Some(raw_same)));
+    let raw_call = raw_env(&body, &fx.passkey.k);
     assert_eq!(
         run(
-            &fx,
-            &raw_env(&with_links, &fx.recover),
+            &build(&fx, &q),
+            &raw_call,
             &mut MemoryReplayStore::new(),
-            &[HISTORY_READ]
+            &p
         ),
-        "malformed"
+        "badSignature"
+    );
+    // M3: a controller whose key form is unknown: newerFormat only after every other check.
+    let unknown = Controller::parse(json!({"key":{"form":"future","signing":encode_base64(&pt(&k(25)))},"label":"u","roles":["approve"]}), "c").unwrap();
+    let mut q = fx.parts.clone();
+    q.controllers.push((
+        unknown.id(),
+        vec![(1, Some(unknown.clone()))],
+        ControllerStatus::Active,
+    ));
+    let uview = build(&fx, &q);
+    let ub = call_body(
+        &fx,
+        json!({"controller": unknown.id()}),
+        &pt(&k(25)),
+        None,
+        "sign-in",
+        json!({}),
+        4,
+    );
+    let mut store = MemoryReplayStore::new();
+    assert_eq!(
+        run(&uview, &raw_env(&ub, &k(25)), &mut store, &p),
+        "newerFormat"
+    );
+    assert!(store.is_empty());
+    assert_eq!(
+        run(
+            &uview,
+            &raw_env(&ub, &k(25)),
+            &mut MemoryReplayStore::new(),
+            &["other"]
+        ),
+        "refused:outOfScope",
+        "authorization first"
+    );
+    assert_eq!(
+        run(
+            &uview,
+            &raw_env(&ub, &k(26)),
+            &mut MemoryReplayStore::new(),
+            &p
+        ),
+        "badSignature",
+        "possession first"
+    );
+}
+
+#[test]
+fn authority_signatures_apply_the_rule() {
+    let a = Authn::new(7, "id.example");
+    let c = passkey_ctrl(&a);
+    let plain = Controller::parse(
+        json!({"key":{"form":"webauthn","signing":encode_base64(&a.point()),"rp":"id.example","credential":"AQ=="},"label":"p","roles":["approve"]}),
+        "c",
+    )
+    .unwrap();
+    let body = b"{\"x\":1}";
+    let sig_of = |origin: &str, flags: u8| {
+        let client = a.client(body, origin);
+        let data = a.data(flags);
+        (a.sign(&data, &client), data, client)
+    };
+    let check = |c: &Controller, origin: &str, flags: u8, rule: AuthorityRule| {
+        let (s, d, cl) = sig_of(origin, flags);
+        verify_authority_signature(
+            c,
+            body,
+            &s,
+            Some(AssertionBytes {
+                authenticator_data: &d,
+                client_data: &cl,
+            }),
+            rule,
+        )
+    };
+    assert_eq!(
+        check(&c, "https://keys.id.example", 0x05, AuthorityRule::Veto),
+        Ok(Checked::Verified)
+    );
+    assert!(
+        check(&plain, "https://id.example", 0x01, AuthorityRule::Veto).is_err(),
+        "vetoes need UV"
+    );
+    assert_eq!(
+        check(&plain, "https://id.example", 0x01, AuthorityRule::Single),
+        Ok(Checked::Verified),
+        "single rule: UV only with verification"
+    );
+    assert!(
+        check(&c, "https://keys.id.example", 0x01, AuthorityRule::Single).is_err(),
+        "verification forces UV"
+    );
+    assert!(
+        check(
+            &plain,
+            "https://sign.id.example",
+            0x05,
+            AuthorityRule::Transition
+        )
+        .is_err(),
+        "not an authority origin"
+    );
+    // Oversized clientData is malformed in every envelope.
+    let big = format!(r#"{{"type":"webauthn.get","pad":"{}"}}"#, "x".repeat(8_200)).into_bytes();
+    let d = a.data(0x05);
+    let s = a.sign(&d, &big);
+    let e = verify_authority_signature(
+        &c,
+        body,
+        &s,
+        Some(AssertionBytes {
+            authenticator_data: &d,
+            client_data: &big,
+        }),
+        AuthorityRule::Control,
+    )
+    .unwrap_err();
+    assert_eq!(e.code(), "malformed");
+    // A raw signature for a WebAuthn signer, and an unknown form.
+    assert_eq!(
+        verify_authority_signature(&c, body, &[0; 64], None, AuthorityRule::Control)
+            .unwrap_err()
+            .code(),
+        "badSignature"
+    );
+    let u = Controller::parse(json!({"key":{"form":"future","signing":encode_base64(&a.point())},"label":"u","roles":["approve"]}), "c").unwrap();
+    assert_eq!(
+        verify_authority_signature(&u, body, &[0; 64], None, AuthorityRule::Control),
+        Ok(Checked::UndecidableForm)
     );
 }
 
 #[test]
 fn replay_store_crash_recovery_after_ok() {
     let fx = fixture();
-    let mid = json!({"member": key_id(&pt(&fx.member))});
+    let view = build(&fx, &fx.parts);
     let mut store = MemoryReplayStore::new();
     let env = raw_env(
         &call_body(
             &fx,
-            mid,
+            json!({"member": key_id(&pt(&fx.member))}),
             &pt(&fx.member),
             None,
             "task.read",
@@ -1235,27 +1703,62 @@ fn replay_store_crash_recovery_after_ok() {
         ),
         &fx.member,
     );
-    assert_eq!(run(&fx, &env, &mut store, &[]), "ok");
-    let aud = vec![AUD.to_string()];
-    let empty = BTreeMap::new();
-    let cfg = CallConfig {
-        now_ms: parse_date(NOW).unwrap(),
-        audiences: &aud,
-        call_origins: &empty,
-        controller_purposes: &[],
-    };
-    let err = verify_call(&env, &fx.view, &cfg, &mut store).unwrap_err();
-    assert_eq!(err.code(), "refused:replay");
-    // The service crashed before its effect committed: recovery abandons, never re-runs.
+    assert_eq!(run(&view, &env, &mut store, &[]), "ok");
+    assert_eq!(run(&view, &env, &mut store, &[]), "refused:replay");
     let call = colophon_core::v05::calls::Call::parse(&env).unwrap();
-    let state = store.recover(&call.replay_key(), None).unwrap();
-    assert!(matches!(state, ReplayState::Abandoned { .. }));
+    assert!(matches!(
+        store.recover(&call.replay_key(), None).unwrap(),
+        ReplayState::Abandoned { .. }
+    ));
+    assert_eq!(run(&view, &env, &mut store, &[]), "refused:replay");
+}
+
+#[test]
+fn json_spec_gaps_take_the_safe_reading() {
+    // Lone surrogates are refused everywhere, including inside members a reader ignores.
+    for bad in [
+        r#"{"a":"\ud800"}"#,
+        r#"{"a":"\udc00x"}"#,
+        r#"{"ignored":{"x":"\ud83d"}}"#,
+    ] {
+        assert!(strict_parse(bad.as_bytes()).is_err(), "{bad}");
+    }
+    let client = br#"{"type":"webauthn.get","challenge":"x","origin":"https://id.example","other":"\ud800"}"#;
+    let a = Authn::new(7, "id.example");
+    let d = a.data(0x05);
+    let w = a.key(None);
     assert_eq!(
-        verify_call(&env, &fx.view, &cfg, &mut store)
-            .unwrap_err()
-            .code(),
-        "refused:replay"
+        wa(&a, &w, b"{}", &d, client, false, OriginRule::General),
+        Err(SigFailure::ClientData)
     );
+    // Nesting: 127 levels parse, 129 don't, and neither overflows the stack.
+    let deep = |n: usize| {
+        format!(
+            "{}{}",
+            "{\"a\":".repeat(n),
+            "1".to_string() + &"}".repeat(n)
+        )
+    };
+    assert!(strict_parse(deep(127).as_bytes()).is_ok());
+    assert!(strict_parse(deep(129).as_bytes()).is_err());
+    assert!(strict_parse(deep(100_000).as_bytes()).is_err());
+    // Ryū picks the shortest round-tripping decimal; spot-check values with two candidates.
+    for (f, s) in [
+        (5e-324, "5e-324"),
+        (9007199254740993.0, "9007199254740992.0"),
+        (1.7976931348623157e308, "1.7976931348623157e308"),
+    ] {
+        assert_eq!(String::from_utf8(canonical(&json!(f)).unwrap()).unwrap(), s);
+    }
+}
+
+#[test]
+fn floor_counters_saturate() {
+    let mut c = FloorCounter::new(FLOOR);
+    assert!(c.signatures(u64::MAX).is_err());
+    assert!(c.signatures(u64::MAX).is_err());
+    assert_eq!(c.counts().3, u64::MAX);
+    assert!(c.past_half_floor());
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1286,7 +1789,7 @@ fn operation_header_round_trip_and_admission_order() {
         .unwrap();
     header["ciphertext"] = json!(encode_base64(&ct));
     let env = raw_env(&header, &author);
-    let (h, raw) = OperationHeader::parse(&env, &mut Unknown::default()).unwrap();
+    let (h, raw) = OperationHeader::parse(&env).unwrap();
     OperationHeader::verify(&raw, &pt(&author)).unwrap();
     assert!(OperationHeader::verify(&raw, &pt(&k(42))).is_err());
     assert_eq!(h.aad().unwrap(), aad);
@@ -1302,7 +1805,7 @@ fn operation_header_round_trip_and_admission_order() {
     let mut live = header.clone();
     live["live"] = json!({"account":account,"slot":"s","generation":7,"operationID":id});
     live["level"] = json!("propose");
-    assert!(OperationHeader::parse(&raw_env(&live, &author), &mut Unknown::default()).is_err());
+    assert!(OperationHeader::parse(&raw_env(&live, &author)).is_err());
     // Admission order (§11.5 steps 1–8).
     let author_view = AuthorView {
         access: Some(colophon_core::v05::terms::Access::Write),
@@ -1310,6 +1813,7 @@ fn operation_header_round_trip_and_admission_order() {
         revoked_seq: None,
         kept: Kept::NotKept,
         writes_left: None,
+        provisional: false,
     };
     let ns = NamespaceView {
         authority_seq: 5,
@@ -1406,7 +1910,6 @@ fn operation_header_round_trip_and_admission_order() {
         ),
         Admission::Admitted
     );
-    let _ = Level::Write;
     let budget = AuthorView {
         writes_left: Some(0),
         ..author_view
@@ -1448,7 +1951,7 @@ fn grants_requests_and_principals() {
     };
     let parse = |g: Value, ctx: GrantContext<'_>| -> String {
         let (_, fields): (AuthorityHeader, Obj) = AuthorityHeader::split(g).unwrap();
-        match Grant::parse(fields, ctx, &mut Unknown::default()) {
+        match Grant::parse(fields, ctx) {
             Ok(_) => "ok".into(),
             Err(e) => format!("{}: {}", e.code(), e.detail()),
         }
@@ -1501,27 +2004,134 @@ fn grants_requests_and_principals() {
     };
     assert!(parse(grant(req("agent", svc.clone()), svc.clone()), ctx3).contains("another account"));
     // §9.7: an agent's key never becomes a controller.
-    let controller = KeyDescriptor {
-        signing: pt(&m),
-        form: KeyForm::Raw { agreement: None },
-    };
+    let controller = KeyDescriptor::new_raw(pt(&m), None).unwrap();
     assert!(check_members_never_controllers(
         &[controller],
         &[(pt(&m), pt(&ma), MemberKind::Agent)]
     )
     .is_err());
-    let other = KeyDescriptor {
-        signing: pt(&k(53)),
-        form: KeyForm::Raw {
-            agreement: Some(pt(&ma)),
-        },
-    };
+    let other = KeyDescriptor::new_raw(pt(&k(53)), Some(pt(&ma))).unwrap();
     assert!(
         check_members_never_controllers(&[other], &[(pt(&m), pt(&ma), MemberKind::Agent)]).is_err()
     );
-    let fine = KeyDescriptor {
-        signing: pt(&k(54)),
-        form: KeyForm::Raw { agreement: None },
-    };
+    let fine = KeyDescriptor::new_raw(pt(&k(54)), None).unwrap();
     check_members_never_controllers(&[fine], &[(pt(&m), pt(&ma), MemberKind::Agent)]).unwrap();
+}
+
+#[test]
+fn admission_lows() {
+    use colophon_core::v05::terms::Access;
+    let author = k(41);
+    let nonce = [3u8; 12];
+    let id = "a".repeat(32);
+    let header = json!({"protocol":"colophon/operation/5","account":"e".repeat(64),"namespace":"notes","author":key_id(&pt(&author)),
+        "epoch":1,"id":id,"clock":7,"authority":2,"created":"2026-11-11T12:00:00Z","level":"write","previous":null,
+        "nonce":encode_base64(&nonce),"ciphertext":encode_base64(&[0u8; 32])});
+    let (h, _) = OperationHeader::parse(&raw_env(&header, &author)).unwrap();
+    // L3: an incomplete walk on a header citing the revocation or later is refused, not held.
+    let av = AuthorView {
+        access: Some(Access::Write),
+        expires_ms: None,
+        revoked_seq: Some(2),
+        kept: Kept::Incomplete,
+        writes_left: None,
+        provisional: false,
+    };
+    let ns = NamespaceView {
+        authority_seq: 5,
+        fork_seq: None,
+        epoch_at_cited: 1,
+        highest_clock: 6,
+    };
+    assert_eq!(admit(&h, &av, &ns), Admission::Refused(Reason::Revoked));
+    // A member added by a non-final activation: its records are held authorityBehind.
+    let av = AuthorView {
+        revoked_seq: None,
+        kept: Kept::NotKept,
+        provisional: true,
+        ..av
+    };
+    assert_eq!(admit(&h, &av, &ns), Admission::Held("authorityBehind"));
+    // L4: invalidPayload on opening; after opening, kinds and conditions.
+    assert_eq!(
+        h.open(&[9u8; 32]).unwrap_err().code(),
+        "refused:invalidPayload"
+    );
+    let t = Terms::parse(json!({"records":[{"namespace":"notes","access":"write","kinds":["addNote"]}],"conditions":[{"lte":["amount",5]}]}), TermsKind::Member).unwrap();
+    let entry = &t.records().unwrap()[0];
+    assert_eq!(
+        admit_opened(&json!({"kind":"addNote","payload":{"amount":5}}), entry, &t),
+        Admission::Admitted
+    );
+    assert_eq!(
+        admit_opened(&json!({"kind":"delete","payload":{"amount":5}}), entry, &t),
+        Admission::Refused(Reason::OutOfScope)
+    );
+    assert_eq!(
+        admit_opened(&json!({"kind":"addNote","payload":{"amount":6}}), entry, &t),
+        Admission::Refused(Reason::OutOfScope)
+    );
+    let u = Terms::parse(
+        json!({"records":[{"namespace":"notes","access":"write"}],"conditions":[{"future":1}]}),
+        TermsKind::Member,
+    )
+    .unwrap();
+    assert_eq!(
+        admit_opened(
+            &json!({"kind":"x","payload":{}}),
+            &u.records().unwrap()[0],
+            &u
+        ),
+        Admission::NewerFormat
+    );
+}
+
+#[test]
+fn a_malleated_signature_is_the_same_reservation() {
+    use p256::elliptic_curve::ops::Neg;
+    let fx = fixture();
+    let view = build(&fx, &fx.parts);
+    let body = canonical(&call_body(
+        &fx,
+        json!({"member": key_id(&pt(&fx.member))}),
+        &pt(&fx.member),
+        None,
+        "task.read",
+        json!({"task":"T-1"}),
+        1,
+    ))
+    .unwrap();
+    let sig: Signature = fx.member.sign(&body);
+    let (r, s) = sig.split_scalars();
+    let high = Signature::from_scalars(r, s.neg()).unwrap();
+    let env = |sig: &Signature| {
+        canonical(
+            &json!({"body":STANDARD.encode(&body),"signature":STANDARD.encode(sig.to_bytes())}),
+        )
+        .unwrap()
+    };
+    let mut store = MemoryReplayStore::new();
+    assert_eq!(run(&view, &env(&sig), &mut store, &[]), "ok");
+    assert_eq!(
+        run(&view, &env(&high), &mut store, &[]),
+        "refused:replay",
+        "signature bytes are never identifiers"
+    );
+}
+
+#[test]
+fn nesting_bound_is_127() {
+    let obj = |n: usize| {
+        format!(
+            "{}{}",
+            "{\"a\":".repeat(n),
+            "1".to_string() + &"}".repeat(n)
+        )
+    };
+    let max = (1..300)
+        .take_while(|n| strict_parse(obj(*n).as_bytes()).is_ok())
+        .last()
+        .unwrap();
+    println!("deepest accepted nesting: {max}");
+    assert_eq!(max, 127);
 }

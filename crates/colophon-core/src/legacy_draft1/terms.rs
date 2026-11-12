@@ -349,10 +349,8 @@ fn validate_condition(v: &Value, depth: usize, count: &mut usize) -> Result<(), 
                 "prefix" => {
                     string(&parts[1])?;
                 }
-                "lte" | "gte" => {
-                    if !parts[1].is_number() {
-                        return Err(Verdict::Malformed);
-                    }
+                "lte" | "gte" if !parts[1].is_number() => {
+                    return Err(Verdict::Malformed);
                 }
                 _ => {}
             }

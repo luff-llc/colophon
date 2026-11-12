@@ -79,10 +79,13 @@ pub struct Reference {
     pub account: AccountId,
     /// Untrusted location hints.
     pub hints: Option<Vec<String>>,
+    /// Unknown fields.
+    pub unknown: super::Unknown,
 }
 impl Reference {
     /// Parse a reference value. Unknown fields go to `unknown`.
-    pub fn parse(value: serde_json::Value, unknown: &mut super::Unknown) -> Result<Self> {
+    pub fn parse(value: serde_json::Value) -> Result<Self> {
+        let mut unknown = super::Unknown::default();
         let mut o = super::encoding::Obj::new(value, "reference")?;
         let account = AccountId::parse(&o.string("account")?)?;
         let hints = match o.opt_nonempty_array("hints")? {
@@ -103,8 +106,12 @@ impl Reference {
                 Some(list)
             }
         };
-        o.finish(unknown);
-        Ok(Self { account, hints })
+        o.finish(&mut unknown);
+        Ok(Self {
+            account,
+            hints,
+            unknown,
+        })
     }
 }
 

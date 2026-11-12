@@ -62,6 +62,12 @@ pub struct OperationHeader {
     pub ciphertext: Vec<u8>,
     /// Live stamp.
     pub live: Option<LiveStamp>,
+    /// Unknown content in the header.
+    pub unknown: Unknown,
+}
+
+fn invalid_payload(_why: &str) -> super::Failure {
+    super::Failure::Refused(Reason::InvalidPayload)
 }
 
 /// The storage path of a header (§11.2).
@@ -72,7 +78,9 @@ pub fn operation_path(author: &str, namespace: &str, clock: u64, id: &str) -> St
 impl OperationHeader {
     /// Parse a header envelope and check its shape. The signature is checked by
     /// [`OperationHeader::verify`] once the author's key is known.
-    pub fn parse(envelope: &[u8], unknown: &mut Unknown) -> Result<(Self, RawEnvelope)> {
+    pub fn parse(envelope: &[u8]) -> Result<(Self, RawEnvelope)> {
+        let mut sink = Unknown::default();
+        let unknown = &mut sink;
         let env = RawEnvelope::parse(envelope, bounds::OPERATION_HEADER_BODY, false)?;
         let mut o = Obj::new(env.value.clone(), "header")?;
         require(
@@ -146,6 +154,7 @@ impl OperationHeader {
                 nonce,
                 ciphertext,
                 live,
+                unknown: sink,
             },
             env,
         ))
@@ -192,36 +201,40 @@ impl OperationHeader {
                     aad: &aad,
                 },
             )
-            .map_err(|_| malformed("invalidPayload: decryption failed"))?;
-        let value = super::encoding::strict_parse(&plain)
-            .map_err(|_| malformed("invalidPayload: plaintext JSON"))?;
-        let mut o = Obj::new(value.clone(), "plaintext")?;
-        let id = o.string("id")?;
-        let _kind = o.string("kind")?;
-        let _v = o.uint("v")?;
-        let clock = o.uint("clock")?;
-        let authority = o.uint("authority")?;
-        let created = o.string("created")?;
-        let _payload = o.value("payload")?;
-        o.finish_closed()?;
-        require(
-            id == self.id
-                && clock == self.clock
-                && authority == self.authority
-                && created == self.created.0,
-            "invalidPayload: plaintext does not match the header",
-        )?;
-        require(
-            operation_id(
-                &self.namespace,
-                &self.author,
-                self.epoch,
-                &self.nonce,
-                &value,
-            )? == self.id,
-            "invalidPayload: operation ID",
-        )?;
-        Ok(value)
+            .map_err(|_| invalid_payload("decryption failed"))?;
+        let check = || -> Result<Value> {
+            let value = super::encoding::strict_parse(&plain)
+                .map_err(|_| invalid_payload("plaintext JSON"))?;
+            let mut o = Obj::new(value.clone(), "plaintext")?;
+            let id = o.string("id")?;
+            let _kind = o.string("kind")?;
+            let _v = o.uint("v")?;
+            let clock = o.uint("clock")?;
+            let authority = o.uint("authority")?;
+            let created = o.string("created")?;
+            let _payload = o.value("payload")?;
+            o.finish_closed()?;
+            require(
+                id == self.id
+                    && clock == self.clock
+                    && authority == self.authority
+                    && created == self.created.0,
+                "plaintext does not match the header",
+            )?;
+            require(
+                operation_id(
+                    &self.namespace,
+                    &self.author,
+                    self.epoch,
+                    &self.nonce,
+                    &value,
+                )? == self.id,
+                "operation ID",
+            )?;
+            Ok(value)
+        };
+        // Every failure after decryption is `invalidPayload` (0.3 §5, §11.8).
+        check().map_err(|_| invalid_payload("plaintext"))
     }
     /// Verify the header's `raw` signature under the author's member key.
     pub fn verify(env: &RawEnvelope, author_signing: &[u8]) -> Result<()> {
@@ -269,6 +282,9 @@ pub struct AuthorView {
     pub kept: Kept,
     /// The member's remaining `writes` budget (`None`: unbounded).
     pub writes_left: Option<u64>,
+    /// The member was added by an activation that isn't final yet: its records are held
+    /// `authorityBehind` (§8.7, revision 6).
+    pub provisional: bool,
 }
 /// The revocation walk outcome for one header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,6 +317,35 @@ pub enum Admission {
     Refused(Reason),
     /// Held with a reason (`revokedBackdated`, `authorityBehind`, `unavailable`).
     Held(&'static str),
+    /// An unknown condition operator decided the after-opening check (§10.4).
+    NewerFormat,
+}
+
+/// §11.5 after opening: a kind outside the member's `kinds`, or a `conditions` predicate that
+/// is false on the payload, is refused `outOfScope` (and still reserves its slot); an unknown
+/// operator that decides the result is `newerFormat`.
+pub fn admit_opened(
+    plaintext: &Value,
+    entry: &super::terms::RecordsEntry,
+    terms: &super::terms::Terms,
+) -> Admission {
+    let kind = plaintext
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if entry
+        .kinds
+        .as_ref()
+        .is_some_and(|k| !k.iter().any(|x| x == kind))
+    {
+        return Admission::Refused(Reason::OutOfScope);
+    }
+    let payload = plaintext.get("payload").unwrap_or(&Value::Null);
+    match terms.conditions_on(payload) {
+        super::terms::Truth::True => Admission::Admitted,
+        super::terms::Truth::False => Admission::Refused(Reason::OutOfScope),
+        super::terms::Truth::Unknown => Admission::NewerFormat,
+    }
 }
 
 /// §11.5 steps 1–8, in order, after the signature, binding, format and path checks.
@@ -316,23 +361,21 @@ pub fn admit(header: &OperationHeader, author: &AuthorView, ns: &NamespaceView) 
         return Admission::Refused(Reason::Expired);
     }
     if let Some(revoked) = author.revoked_seq {
+        // A record citing the revocation or later is refused whatever the walk says: a kept
+        // record citing it is refused too (§9.5), so an incomplete walk can't change that.
+        if header.authority >= revoked {
+            return Admission::Refused(Reason::Revoked);
+        }
         match author.kept {
-            Kept::Kept => {
-                if header.authority >= revoked {
-                    return Admission::Refused(Reason::Revoked);
-                }
-            }
+            Kept::Kept => {}
             Kept::Incomplete => return Admission::Held("unavailable"),
-            Kept::NotKept => {
-                return if header.authority >= revoked {
-                    Admission::Refused(Reason::Revoked)
-                } else {
-                    Admission::Held("revokedBackdated")
-                }
-            }
+            Kept::NotKept => return Admission::Held("revokedBackdated"),
         }
     }
-    if header.authority > ns.authority_seq || ns.fork_seq.is_some_and(|f| header.authority >= f) {
+    if author.provisional
+        || header.authority > ns.authority_seq
+        || ns.fork_seq.is_some_and(|f| header.authority >= f)
+    {
         return Admission::Held("authorityBehind");
     }
     if header.epoch != ns.epoch_at_cited {

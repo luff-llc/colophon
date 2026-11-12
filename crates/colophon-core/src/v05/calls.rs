@@ -1,59 +1,112 @@
 //! Links and calls (§12.1–§12.3) as a pure function over a **given** verified view.
 //!
-//! The view is the caller's: the held verified history, verified heads, controllers and members
-//! with the seqs at which they changed, policies, and the statuses that come from pending
-//! transitions (pending addition or removal, suspension, addition not yet final), which this
-//! module takes as inputs and never computes (§8.7 is outside this step).
+//! The view ([`AccountView`]) is built only by [`AccountView::from_history_verifier`], which
+//! validates every structural invariant and returns an error instead of panicking. Its only
+//! production caller is the history verifier of plan Step 3 (§17.2); this crate does not
+//! verify authority histories yet, so the controllers, members and policies it is given are
+//! the caller's claim. Heads are never taken on trust: the view holds head *envelopes*, and
+//! [`verify_call`] verifies each with [`super::heads::verify_head`] at the call's clock.
 //!
-//! The pipeline is §12.3's, in order. The replay store (§12.4, revision 5) is consulted
-//! read-only at step 3 and reserved by compare-and-swap only once every step has passed, so no
-//! refusal reserves; the reservation is left `Pending` for the service to complete.
-use super::descriptor::{Controller, Policy, Role};
+//! Statuses that come from pending transitions (pending addition or removal, suspension,
+//! additions not yet final) are inputs; §8.7 is outside this step.
+//!
+//! The replay store (§12.4) is read at step 3 and reserved by compare-and-swap only after step
+//! 8, so no refusal reserves; the reservation is left `Pending` for the service.
+use super::descriptor::{Controller, KeyForm, Policy, Role};
 use super::encoding::{
-    bounds, canonical, canonical_body, decode_base64, decode_request_id, digest, Obj,
+    bounds, canonical, canonical_body, decode_base64, decode_request_id, digest, is_digest, Obj,
 };
-use super::heads::Head;
+use super::heads::{verify_head, HeadContext};
 use super::ids::{key_id, AccountId};
 use super::members::MemberKind;
-use super::replay::{ReplayKey, ReplayStore, Reservation};
+use super::replay::{ReplayKey, ReplayStore, Reservation, MAX_WINDOW_MS};
 use super::signature::{
     verify_assertion_possession, verify_raw, verify_webauthn, AssertionBytes, OriginRule,
-    RawEnvelope, Strictness,
+    RawEnvelope, SigFailure, Strictness,
 };
-use super::terms::{valid_audience, valid_purpose, Terms, TermsKind};
+use super::terms::{valid_audience, valid_purpose, Terms, TermsKind, Truth};
 use super::{bad_signature, malformed, require, Failure, Reason, Result, Unknown};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The purpose a `recover`-only controller may call (§12.3 step 5, §13.4).
+/// The purpose a `recover`-only (or suspended) controller may call (§12.3 step 5, §13.4).
 pub const HISTORY_READ: &str = "colophon.history.read";
+/// The purposes a home accepts at its own endpoints without configuration (§12.3 step 7).
+pub const HOME_PURPOSES: [&str; 3] = [HISTORY_READ, "colophon.home.read", "colophon.home.write"];
 
-/// A controller's status from pending transitions (§8.7), supplied by the caller.
+/// A controller's status from pending transitions (§8.7), supplied by the history verifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControllerStatus {
     /// No pending change affects it.
     Active,
-    /// A pending transition would add it: not a controller yet.
+    /// A pending transition would add it: not a controller yet (`refused:revoked`).
     PendingAddition,
     /// A pending transition would remove it: it works until activation.
     PendingRemoval,
-    /// Suspended by a `suspend` entry: it signs no call.
+    /// Suspended by a `suspend` entry: it may call only `colophon.history.read`.
     Suspended,
-    /// Added by an activation that is not yet final at this verifier: not counted for calls.
+    /// Added by an activation that is not yet final at this verifier (`refused:revoked`).
+    AddedNotFinal,
+}
+/// A member's status from activations (§8.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberStatus {
+    /// Granted by an immediate entry, or by a final activation.
+    Active,
+    /// Added (for example appointed as a home) by an activation that isn't final yet: its
+    /// calls are `refused:revoked` and, as a home, its heads don't count.
     AddedNotFinal,
 }
 
 /// A controller in the view: its state after each held entry that changed it.
 #[derive(Clone, Debug)]
 pub struct ViewController {
-    /// Controller ID.
-    pub id: String,
-    /// `(seq, state)` in seq order; `None` means removed at that seq.
-    pub versions: Vec<(u64, Option<Controller>)>,
-    /// Status from pending transitions.
-    pub status: ControllerStatus,
+    id: String,
+    versions: Vec<(u64, Option<Controller>)>,
+    status: ControllerStatus,
 }
 impl ViewController {
+    /// `versions` is `(seq, state)` in strictly increasing seq order from 1, `None` meaning
+    /// removed at that seq; every state names the same key. A controller whose addition is
+    /// pending may have no versions (`id` names it).
+    pub fn new(
+        id: String,
+        versions: Vec<(u64, Option<Controller>)>,
+        status: ControllerStatus,
+    ) -> Result<Self> {
+        require(super::ids::is_key_id(&id), "controller ID is not a key ID")?;
+        require(
+            !versions.is_empty() || status == ControllerStatus::PendingAddition,
+            "controller has no versions",
+        )?;
+        require(
+            versions.first().is_none_or(|(_, c)| c.is_some()),
+            "a controller's first version is its addition",
+        )?;
+        require(
+            versions.first().is_none_or(|(s, _)| *s >= 1),
+            "seqs start at 1",
+        )?;
+        require(
+            versions.windows(2).all(|w| w[0].0 < w[1].0),
+            "versions must be in strictly increasing seq order",
+        )?;
+        require(
+            versions
+                .iter()
+                .all(|(_, c)| c.as_ref().is_none_or(|c| c.id() == id)),
+            "a version names another key",
+        )?;
+        Ok(Self {
+            id,
+            versions,
+            status,
+        })
+    }
+    /// The controller ID.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
     fn at(&self, seq: u64) -> Option<&Controller> {
         self.versions
             .iter()
@@ -64,68 +117,195 @@ impl ViewController {
     fn latest(&self) -> Option<&Controller> {
         self.versions.last().and_then(|(_, c)| c.as_ref())
     }
+    fn removed_after(&self, seq: u64) -> bool {
+        self.versions.iter().any(|(s, c)| *s > seq && c.is_none())
+    }
 }
 
 /// A member in the view.
 #[derive(Clone, Debug)]
 pub struct ViewMember {
-    /// Member ID.
-    pub id: String,
-    /// Signing point.
-    pub signing: Vec<u8>,
-    /// Kind.
-    pub kind: MemberKind,
-    /// Granted terms.
-    pub terms: Terms,
-    /// Seq of the grant.
-    pub granted_seq: u64,
-    /// `(seq, new expiry ms)` of each `renew`.
-    pub renewals: Vec<(u64, i64)>,
-    /// Seqs of each `endSessions`.
-    pub end_sessions: Vec<u64>,
-    /// Seq of the revocation.
-    pub revoked_seq: Option<u64>,
+    id: String,
+    signing: Vec<u8>,
+    kind: MemberKind,
+    terms: Terms,
+    granted_seq: u64,
+    renewals: Vec<(u64, i64)>,
+    end_sessions: Vec<u64>,
+    revoked_seq: Option<u64>,
+    status: MemberStatus,
 }
 impl ViewMember {
+    /// A member granted at `granted_seq`, with each `renew` as `(seq, new expiry ms)`, each
+    /// `endSessions` seq and the revocation seq, all after the grant and in increasing order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        signing: Vec<u8>,
+        kind: MemberKind,
+        terms: Terms,
+        granted_seq: u64,
+        renewals: Vec<(u64, i64)>,
+        end_sessions: Vec<u64>,
+        revoked_seq: Option<u64>,
+        status: MemberStatus,
+    ) -> Result<Self> {
+        require(
+            super::descriptor::valid_point(&signing),
+            "member signing point is invalid",
+        )?;
+        require(granted_seq >= 1, "granted_seq must be at least 1")?;
+        require(
+            renewals.iter().all(|(s, _)| *s > granted_seq)
+                && renewals.windows(2).all(|w| w[0].0 < w[1].0),
+            "renewals must follow the grant in increasing seq order",
+        )?;
+        require(
+            end_sessions.iter().all(|s| *s > granted_seq)
+                && end_sessions.windows(2).all(|w| w[0] < w[1]),
+            "endSessions must follow the grant in increasing seq order",
+        )?;
+        require(
+            revoked_seq.is_none_or(|r| r > granted_seq),
+            "revocation must follow the grant",
+        )?;
+        Ok(Self {
+            id: key_id(&signing),
+            signing,
+            kind,
+            terms,
+            granted_seq,
+            renewals,
+            end_sessions,
+            revoked_seq,
+            status,
+        })
+    }
+    /// The member ID.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    /// The member's kind.
+    pub fn kind(&self) -> &MemberKind {
+        &self.kind
+    }
     fn expiry_at(&self, seq: u64) -> Option<i64> {
         self.renewals
             .iter()
             .rev()
             .find(|(s, _)| *s <= seq)
             .map(|(_, e)| *e)
-            .or(self.terms.expires.as_ref().map(|(_, e)| *e))
+            .or(self.terms.expires_ms())
     }
-    /// True when this member is a current home at `now_ms` (for head acceptance).
+    fn max_seq(&self) -> u64 {
+        [
+            Some(self.granted_seq),
+            self.renewals.last().map(|r| r.0),
+            self.end_sessions.last().copied(),
+            self.revoked_seq,
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0)
+    }
+    /// True when this member counts as a home at `now_ms`: `serves` home, final, not revoked,
+    /// not expired (§13.1, §13.3).
     pub fn is_current_home(&self, now_ms: i64) -> bool {
-        self.terms.serves_home
+        self.terms.serves_home()
+            && self.status == MemberStatus::Active
             && self.revoked_seq.is_none()
             && self.expiry_at(u64::MAX).is_none_or(|e| now_ms <= e)
     }
 }
 
-/// The verified view a call is evaluated over.
+/// What the history verifier hands the call pipeline.
 #[derive(Clone, Debug)]
-pub struct AccountView {
+pub struct HistoryVerifierOutput {
     /// The account.
     pub account: AccountId,
     /// Body digests of the held verified history; `history[0]` is seq 1.
     pub history: Vec<String>,
-    /// `(seq, policy in force from seq)`, in seq order, starting at 1.
+    /// `(seq, policy in force from seq)`, strictly increasing, the first at seq 1.
     pub policies: Vec<(u64, Policy)>,
-    /// Every controller ever present.
+    /// Every controller ever present (and any whose addition is pending).
     pub controllers: Vec<ViewController>,
     /// Every member ever granted.
     pub members: Vec<ViewMember>,
-    /// Verified heads (see [`super::heads::verify_head`]).
-    pub heads: Vec<Head>,
-    /// An unresolved vouched fork (§8.6), as classified by the caller.
+    /// Head envelopes as received; verified at each call.
+    pub heads: Vec<Vec<u8>>,
+    /// An unresolved vouched fork (§8.6), as classified by the history verifier.
     pub vouched_fork: bool,
     /// Every principal's point in the held history (§3.3 rule 4).
     pub principal_points: BTreeSet<Vec<u8>>,
 }
+
+/// The verified view a call is evaluated over. Sealed: see the module documentation.
+#[derive(Clone, Debug)]
+pub struct AccountView {
+    v: HistoryVerifierOutput,
+}
+/// Most head envelopes a view holds (more homes than §13.1's 8 can't be current).
+pub const MAX_VIEW_HEADS: usize = 64;
+
 impl AccountView {
+    /// Build a view from the history verifier's output, checking every structural invariant.
+    /// The only production caller is the Step-3 history verifier; anything else passing claims
+    /// it didn't verify is outside this crate's guarantees.
+    pub fn from_history_verifier(v: HistoryVerifierOutput) -> Result<Self> {
+        let held = v.history.len() as u64;
+        require(held >= 1, "a view needs at least the genesis")?;
+        require(
+            v.history.iter().all(|d| is_digest(d)),
+            "history digests must be 64 lowercase hex",
+        )?;
+        require(
+            v.policies.first().is_some_and(|(s, _)| *s == 1),
+            "the first policy is at seq 1",
+        )?;
+        require(
+            v.policies.windows(2).all(|w| w[0].0 < w[1].0),
+            "policies must be in increasing seq order",
+        )?;
+        require(
+            v.policies.iter().all(|(s, _)| *s <= held),
+            "a policy is beyond the held history",
+        )?;
+        let mut ids = BTreeSet::new();
+        for c in &v.controllers {
+            require(ids.insert(c.id.clone()), "duplicate controller in the view")?;
+            require(
+                c.versions.iter().all(|(s, _)| *s <= held),
+                "a controller version is beyond the held history",
+            )?;
+        }
+        let mut mids = BTreeSet::new();
+        for m in &v.members {
+            require(mids.insert(m.id.clone()), "duplicate member in the view")?;
+            require(
+                m.max_seq() <= held,
+                "a member change is beyond the held history",
+            )?;
+        }
+        require(v.heads.len() <= MAX_VIEW_HEADS, "too many head envelopes")?;
+        require(
+            v.heads
+                .iter()
+                .all(|h| h.len() <= bounds::HEAD_BODY * 2 + 4_096),
+            "head envelope exceeds its bound",
+        )?;
+        Ok(Self { v })
+    }
+    /// The account.
+    pub fn account(&self) -> &AccountId {
+        &self.v.account
+    }
+    /// Held history digests.
+    pub fn history(&self) -> &[String] {
+        &self.v.history
+    }
     fn policy_at(&self, seq: u64) -> Option<&Policy> {
-        self.policies
+        self.v
+            .policies
             .iter()
             .rev()
             .find(|(s, _)| *s <= seq)
@@ -133,7 +313,8 @@ impl AccountView {
     }
     /// Current homes at `now_ms`: `(member ID, signing point)`.
     pub fn current_homes(&self, now_ms: i64) -> Vec<(String, Vec<u8>)> {
-        self.members
+        self.v
+            .members
             .iter()
             .filter(|m| m.is_current_home(now_ms))
             .map(|m| (m.id.clone(), m.signing.clone()))
@@ -150,8 +331,12 @@ pub struct CallConfig<'a> {
     pub audiences: &'a [String],
     /// Call-ceremony origins per `rp`.
     pub call_origins: &'a BTreeMap<String, Vec<String>>,
-    /// Purposes allowed for controller calls. A home lists `colophon.history.read`.
+    /// Purposes allowed for controller calls.
     pub controller_purposes: &'a [String],
+    /// This verifier's own home endpoints, when it is a home of the account: there it accepts
+    /// `colophon.history.read`, `colophon.home.read` and `colophon.home.write` without
+    /// configuration, as §13.4 and §14 allow them.
+    pub home_endpoints: &'a [String],
 }
 
 /// Who signed the call.
@@ -243,7 +428,8 @@ fn parse_link(text: &Value, first: bool, unknown: &mut Unknown) -> Result<Link> 
         session.is_some() == first,
         "session is present exactly on the first link",
     )?;
-    let terms = Terms::parse(o.value("terms")?, TermsKind::Link, unknown)?;
+    let terms = Terms::parse(o.value("terms")?, TermsKind::Link)?;
+    unknown.0.extend(terms.unknown().0.iter().cloned());
     let (_, not_before_ms) = o.date("notBefore")?;
     let (_, expires_ms) = o.date("expires")?;
     let _created = o.date("created")?;
@@ -399,14 +585,36 @@ impl Call {
     }
 }
 
-fn window_ok(created_ms: i64, now_ms: i64, seconds: u64) -> bool {
-    (created_ms - now_ms).unsigned_abs() <= seconds.saturating_mul(1_000)
+/// `|a − b| ≤ window`, in checked arithmetic over any `i64` inputs.
+fn within(a_ms: i64, b_ms: i64, window_ms: i128) -> bool {
+    (i128::from(a_ms) - i128::from(b_ms)).abs() <= window_ms
+}
+fn secs(s: u64) -> i128 {
+    i128::from(s) * 1_000
 }
 fn revoked() -> Failure {
     Failure::Refused(Reason::Revoked)
 }
 fn refused(r: Reason) -> Failure {
     Failure::Refused(r)
+}
+fn require_refused(ok: bool, reason: Reason) -> Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(Failure::Refused(reason))
+    }
+}
+fn require_sig(ok: bool, why: &str) -> Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(bad_signature(why))
+    }
+}
+fn index(seq: u64) -> Result<usize> {
+    usize::try_from(seq.checked_sub(1).ok_or_else(|| malformed("seq 0"))?)
+        .map_err(|_| malformed("seq"))
 }
 
 /// Verify a call envelope (§12.3) over `view`. On success the reservation is `Pending` in
@@ -417,6 +625,7 @@ pub fn verify_call(
     cfg: &CallConfig<'_>,
     store: &mut dyn ReplayStore,
 ) -> Result<VerifiedCall> {
+    let v = &view.v;
     // 1. Parse.
     let call = Call::parse(envelope)?;
     // 2. Possession, under `key`, before anything is looked up.
@@ -424,17 +633,21 @@ pub fn verify_call(
         None => verify_raw(&call.key, &call.body, &call.signature)
             .map_err(|e| bad_signature(format!("possession: {e}")))?,
         Some(a) => {
-            verify_assertion_possession(&call.key, &call.body, &call.signature, a)
-                .map_err(|e| bad_signature(format!("possession: {e}")))?;
+            verify_assertion_possession(&call.key, &call.body, &call.signature, a).map_err(
+                |e| match e {
+                    SigFailure::ClientDataBound => malformed("clientData exceeds 8,192 bytes"),
+                    e => bad_signature(format!("possession: {e}")),
+                },
+            )?;
         }
     }
-    // 3. Audience, window, replay (read-only consultation).
+    // 3. Audience, window, read-only replay look-up.
     require_refused(
         cfg.audiences.iter().any(|a| a == &call.audience),
         Reason::Audience,
     )?;
     require_refused(
-        window_ok(call.created_ms, cfg.now_ms, 3_600),
+        within(call.created_ms, cfg.now_ms, i128::from(MAX_WINDOW_MS)),
         Reason::Window,
     )?;
     let replay_key = call.replay_key();
@@ -446,49 +659,51 @@ pub fn verify_call(
         }));
     }
     // 4. History and heads.
-    if call.account != view.account.as_str() {
+    if call.account != v.account.as_str() {
         return Err(Failure::Unavailable(
             "no verified history for this account".into(),
         ));
     }
-    let held = view.history.len() as u64;
+    let held = v.history.len() as u64;
     let (as_of_seq, as_of_digest) = &call.as_of;
     if *as_of_seq > held {
         return Err(Failure::Unavailable(
             "asOf is beyond the held history".into(),
         ));
     }
-    if &view.history[usize::try_from(*as_of_seq - 1).map_err(|_| malformed("asOf"))?]
-        != as_of_digest
-    {
+    if &v.history[index(*as_of_seq)?] != as_of_digest {
         return Err(refused(Reason::Fork));
     }
     let latest_policy = view
         .policy_at(held)
         .ok_or_else(|| Failure::Unavailable("no policy".into()))?;
-    let homes: BTreeSet<String> = view
-        .current_homes(cfg.now_ms)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
-    let mut best: BTreeMap<&str, u64> = BTreeMap::new();
-    for h in &view.heads {
-        if !homes.contains(&h.by) || !h.fresh(cfg.now_ms, latest_policy.head_max_age) {
-            continue;
+    let homes = view.current_homes(cfg.now_ms);
+    let mut best: BTreeMap<String, u64> = BTreeMap::new();
+    for envelope in &v.heads {
+        let ctx = HeadContext {
+            account: &v.account,
+            history: &v.history,
+            homes: &homes,
+            now_ms: cfg.now_ms,
+        };
+        match verify_head(envelope, ctx) {
+            Ok(h) if h.fresh(cfg.now_ms, latest_policy.head_max_age()) => {
+                let e = best.entry(h.by().to_string()).or_insert(0);
+                *e = (*e).max(h.seq());
+            }
+            Ok(_) => {}
+            Err(Failure::Refused(Reason::Fork)) => return Err(refused(Reason::Fork)),
+            Err(Failure::Unavailable(m)) if m.contains("not held") => {
+                return Err(Failure::Unavailable(
+                    "not fetched up to the highest head".into(),
+                ))
+            }
+            // A head that doesn't verify is evidence of nothing and doesn't count.
+            Err(_) => {}
         }
-        if h.seq > held {
-            return Err(Failure::Unavailable(
-                "not fetched up to the highest fresh head".into(),
-            ));
-        }
-        if view.history[usize::try_from(h.seq - 1).map_err(|_| malformed("head"))?] != h.digest {
-            return Err(refused(Reason::Fork));
-        }
-        let e = best.entry(&h.by).or_insert(0);
-        *e = (*e).max(h.seq);
     }
-    let quorum = usize::try_from(latest_policy.head_quorum).unwrap_or(usize::MAX);
-    if homes.is_empty() || best.len() < quorum {
+    let quorum = usize::try_from(latest_policy.head_quorum()).unwrap_or(usize::MAX);
+    if homes.is_empty() || quorum == 0 || best.len() < quorum {
         return Err(Failure::Unavailable(
             "too few fresh heads from current homes".into(),
         ));
@@ -500,100 +715,101 @@ pub fn verify_call(
         .policy_at(s)
         .cloned()
         .ok_or_else(|| Failure::Unavailable("no policy at S".into()))?;
-    for (_, later) in view.policies.iter().filter(|(seq, _)| *seq > s) {
-        policy = policy.restrict(later);
+    for (_, later) in v.policies.iter().filter(|(seq, _)| *seq > s) {
+        policy = policy.restrict_for_calls(later);
     }
     require_refused(
-        window_ok(call.created_ms, cfg.now_ms, policy.call_window),
+        within(call.created_ms, cfg.now_ms, secs(policy.call_window())),
         Reason::Window,
     )?;
-    if view.vouched_fork {
+    if v.vouched_fork {
         return Err(refused(Reason::Fork));
     }
     // 5. Signer at S, with removals beyond S applied.
+    let mut undecidable = false;
     let mut member: Option<&ViewMember> = None;
     match &call.signer {
         CallSigner::Controller(id) => {
-            let vc = view
+            let vc = v
                 .controllers
                 .iter()
                 .find(|c| &c.id == id)
                 .ok_or_else(revoked)?;
             let (at_s, latest) = match (vc.at(s), vc.latest()) {
-                (Some(a), Some(l)) => (a, l),
+                (Some(a), Some(l)) if !vc.removed_after(s) => (a, l),
                 _ => return Err(revoked()),
             };
-            if matches!(
-                vc.status,
-                ControllerStatus::PendingAddition
-                    | ControllerStatus::Suspended
-                    | ControllerStatus::AddedNotFinal
-            ) {
-                return Err(revoked());
+            match vc.status {
+                ControllerStatus::PendingAddition | ControllerStatus::AddedNotFinal => {
+                    return Err(revoked())
+                }
+                ControllerStatus::Suspended if call.purpose != HISTORY_READ => {
+                    return Err(revoked())
+                }
+                _ => {}
             }
             let both = |r: &Role| at_s.has(r) && latest.has(r);
             let sign_ok = both(&Role::Sign)
-                && [at_s, latest].iter().all(|c| {
-                    c.audiences
-                        .as_ref()
-                        .is_some_and(|a| a.contains(&call.audience))
-                });
+                && [at_s, latest]
+                    .iter()
+                    .all(|c| c.audiences().is_some_and(|a| a.contains(&call.audience)));
             let role_ok = both(&Role::Approve)
                 || both(&Role::Control)
                 || sign_ok
                 || (both(&Role::Recover) && call.purpose == HISTORY_READ);
             require_refused(role_ok, Reason::OutOfScope)?;
             require_sig(
-                latest.key.signing == call.key && at_s.key.signing == call.key,
+                latest.key().signing() == call.key.as_slice()
+                    && at_s.key().signing() == call.key.as_slice(),
                 "controller key differs from the call key",
             )?;
-            match (latest.key.webauthn(), call.assertion_bytes()) {
-                (None, None) => {}
-                (Some(_), Some(a)) => {
-                    let mut origin = String::new();
-                    for c in [at_s, latest] {
-                        let w = c
-                            .key
-                            .webauthn()
-                            .ok_or_else(|| bad_signature("controller form changed"))?;
+            // The call must meet both states' form and UV requirements.
+            let uv = at_s.verification() || latest.verification();
+            let mut origin: Option<String> = None;
+            for c in [at_s, latest] {
+                match (c.key().form(), call.assertion_bytes()) {
+                    (KeyForm::Unknown(_), _) => undecidable = true,
+                    (KeyForm::Raw { .. }, None) => {}
+                    (KeyForm::WebAuthn(w), Some(a)) => {
                         let ok = verify_webauthn(
-                            &c.key.signing,
+                            c.key().signing(),
                             w,
                             &call.body,
                             &call.signature,
                             a,
-                            at_s.verification || latest.verification,
+                            uv,
                             OriginRule::General,
                             Strictness::Current,
                         )
-                        .map_err(|e| bad_signature(e.to_string()))?;
-                        origin = ok.origin;
+                        .map_err(|e| match e {
+                            SigFailure::ClientDataBound => {
+                                malformed("clientData exceeds 8,192 bytes")
+                            }
+                            e => bad_signature(e.to_string()),
+                        })?;
+                        origin = Some(ok.origin);
                     }
-                    let rp = &latest
-                        .key
-                        .webauthn()
-                        .map(|w| w.rp.clone())
-                        .unwrap_or_default();
-                    let allowed = cfg
-                        .call_origins
-                        .get(rp)
-                        .is_some_and(|list| list.iter().any(|o| o == &origin));
-                    require_refused(allowed, Reason::Origin)?;
+                    _ => {
+                        return Err(bad_signature(
+                            "the call's form disagrees with the controller's descriptor",
+                        ))
+                    }
                 }
-                _ => {
-                    return Err(bad_signature(
-                        "assertion present if and only if the controller is webauthn",
-                    ))
-                }
+            }
+            if let (Some(origin), Some(w)) = (origin, latest.key().webauthn()) {
+                let allowed = cfg
+                    .call_origins
+                    .get(w.rp())
+                    .is_some_and(|list| list.iter().any(|o| o == &origin));
+                require_refused(allowed, Reason::Origin)?;
             }
         }
         CallSigner::Member(id) => {
-            let m = view
-                .members
-                .iter()
-                .find(|m| &m.id == id)
-                .ok_or_else(revoked)?;
-            if m.granted_seq > s || m.revoked_seq.is_some() {
+            let m = v.members.iter().find(|m| &m.id == id).ok_or_else(revoked)?;
+            if m.granted_seq > s
+                || m.revoked_seq.is_some()
+                || m.status == MemberStatus::AddedNotFinal
+            {
                 return Err(revoked());
             }
             if m.expiry_at(s).is_some_and(|e| cfg.now_ms > e) {
@@ -602,7 +818,7 @@ pub fn verify_call(
             member = Some(m);
         }
     }
-    // 6. Chain.
+    // 6. Chain, link by link.
     if let Some(m) = member {
         let mut prev_key: &[u8] = &m.signing;
         let mut prev_terms: &Terms = &m.terms;
@@ -623,13 +839,11 @@ pub fn verify_call(
             let in_time = l.not_before_ms <= cfg.now_ms
                 && cfg.now_ms <= l.expires_ms
                 && prev_expiry.is_none_or(|e| l.expires_ms <= e)
-                && (l.expires_ms - l.not_before_ms)
-                    <= i64::try_from(policy.link_max_age)
-                        .unwrap_or(i64::MAX)
-                        .saturating_mul(1_000);
+                && i128::from(l.expires_ms) - i128::from(l.not_before_ms)
+                    <= secs(policy.link_max_age());
             require_refused(in_time, Reason::Expired)?;
             require_refused(l.terms.narrows(prev_terms), Reason::NotNarrower)?;
-            if view.principal_points.contains(&l.to) {
+            if v.principal_points.contains(&l.to) {
                 return Err(malformed(
                     "a link's to.signing is a principal's key (§3.3 rule 4)",
                 ));
@@ -643,24 +857,49 @@ pub fn verify_call(
             "the acting key is not the last link's to.signing",
         )?;
     }
-    // 7. Purpose.
+    // 7. Purpose. Conditions are three-valued: false refuses, unknown waits for step 8.
+    let at_home = cfg.home_endpoints.iter().any(|e| e == &call.audience)
+        && HOME_PURPOSES.contains(&call.purpose.as_str());
+    let mut condition_unknown = false;
     match member {
         Some(m) => {
-            let ok = m.terms.allows(&call.audience, &call.purpose)
-                && m.terms.conditions_hold(&call.args)
-                && call.links.iter().all(|l| {
-                    l.terms.allows(&call.audience, &call.purpose)
-                        && l.terms.conditions_hold(&call.args)
-                });
-            require_refused(ok, Reason::OutOfScope)?;
+            let home_read =
+                at_home && call.links.is_empty() && call.purpose != "colophon.home.write";
+            let allowed = home_read
+                || (m.terms.allows(&call.audience, &call.purpose)
+                    && call
+                        .links
+                        .iter()
+                        .all(|l| l.terms.allows(&call.audience, &call.purpose)));
+            require_refused(allowed, Reason::OutOfScope)?;
+            let truth = Truth::all(
+                std::iter::once(m.terms.conditions_on(&call.args))
+                    .chain(call.links.iter().map(|l| l.terms.conditions_on(&call.args))),
+            );
+            require_refused(truth != Truth::False, Reason::OutOfScope)?;
+            condition_unknown = truth == Truth::Unknown;
         }
         None => require_refused(
-            cfg.controller_purposes.iter().any(|p| p == &call.purpose),
+            at_home || cfg.controller_purposes.iter().any(|p| p == &call.purpose),
             Reason::OutOfScope,
         )?,
     }
-    // 8. Extensions.
+    // 8. Extensions: unknown content in the call, links and every terms object used, including
+    // terms supplied by the view; an undecided condition; a key of unknown form.
     call.unknown.check()?;
+    if let Some(m) = member {
+        m.terms.unknown().check()?;
+    }
+    if condition_unknown {
+        return Err(Failure::NewerFormat(
+            "an unknown condition operator decided the call".into(),
+        ));
+    }
+    if undecidable {
+        return Err(Failure::NewerFormat(
+            "the controller's key has an unknown form".into(),
+        ));
+    }
     // Reservation, after every step and before any effect.
     match store.reserve(&replay_key, &call.digest, cfg.now_ms) {
         Reservation::Reserved => {}
@@ -672,18 +911,4 @@ pub fn verify_call(
         evaluated_at: s,
         replay_key,
     })
-}
-fn require_refused(ok: bool, reason: Reason) -> Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(Failure::Refused(reason))
-    }
-}
-fn require_sig(ok: bool, why: &str) -> Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(bad_signature(why))
-    }
 }

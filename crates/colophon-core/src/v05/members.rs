@@ -119,6 +119,8 @@ pub struct Request {
     pub operator: Option<String>,
     /// Service endpoints (iff `terms.serves`).
     pub endpoints: Option<Vec<String>>,
+    /// Unknown content in the request (fields, kind, custody, terms).
+    pub unknown: Unknown,
 }
 impl Request {
     /// The member ID.
@@ -127,8 +129,10 @@ impl Request {
     }
     /// Parse a request envelope (exactly `body` and `signature`), check its shape and verify
     /// its `raw` signature under `member.signing`. With `embedded` (inside a grant), the
-    /// envelope bytes must be canonical too. Unknown content goes to `unknown`.
-    pub fn parse(envelope: &[u8], embedded: bool, unknown: &mut Unknown) -> Result<Self> {
+    /// envelope bytes must be canonical too. Unknown content is kept in `unknown`.
+    pub fn parse(envelope: &[u8], embedded: bool) -> Result<Self> {
+        let mut sink = Unknown::default();
+        let unknown = &mut sink;
         let env = RawEnvelope::parse(envelope, bounds::REQUEST_BODY, embedded)?;
         let mut o = Obj::new(env.value.clone(), "request")?;
         require(
@@ -157,8 +161,9 @@ impl Request {
                 MemberKind::Unknown(other.into())
             }
         };
-        let terms = Terms::parse(o.value("terms")?, TermsKind::Member, unknown)?;
-        require(!terms.import, "requested terms contain import")?;
+        let terms = Terms::parse(o.value("terms")?, TermsKind::Member)?;
+        unknown.0.extend(terms.unknown().0.iter().cloned());
+        require(!terms.import(), "requested terms contain import")?;
         let (_, created_ms) = o.date("created")?;
         let custody = o.opt_string("custody")?.map(|c| match c.as_str() {
             "hardware" => Custody::Hardware,
@@ -201,7 +206,7 @@ impl Request {
             }
         };
         require(
-            endpoints.is_some() == terms.serves_present,
+            endpoints.is_some() == terms.serves_present(),
             "service is present if and only if terms.serves is",
         )?;
         o.finish(unknown);
@@ -219,6 +224,7 @@ impl Request {
             custody,
             operator,
             endpoints,
+            unknown: sink,
         })
     }
 }
@@ -293,6 +299,8 @@ pub struct Grant {
     pub terms: Terms,
     /// The shares.
     pub shares: Vec<EpochSeals>,
+    /// Unknown content (the request's, the terms', the fields').
+    pub unknown: Unknown,
 }
 impl Grant {
     /// The member ID.
@@ -300,14 +308,18 @@ impl Grant {
         self.request.member_id()
     }
     /// Validate the fields of a `grant` entry (`request`, `terms`, `shares`) under §9.2–§9.3.
-    pub fn parse(mut fields: Obj, ctx: GrantContext<'_>, unknown: &mut Unknown) -> Result<Self> {
+    pub fn parse(mut fields: Obj, ctx: GrantContext<'_>) -> Result<Self> {
+        let mut sink = Unknown::default();
+        let unknown = &mut sink;
         let request_bytes = fields.bytes("request", bounds::REQUEST_BODY * 2 + 4_096)?;
-        let request = Request::parse(&request_bytes, true, unknown)?;
+        let request = Request::parse(&request_bytes, true)?;
+        unknown.0.extend(request.unknown.0.iter().cloned());
         require(
             &request.account == ctx.account,
             "request names another account",
         )?;
-        let terms = Terms::parse(fields.value("terms")?, TermsKind::Member, unknown)?;
+        let terms = Terms::parse(fields.value("terms")?, TermsKind::Member)?;
+        unknown.0.extend(terms.unknown().0.iter().cloned());
         let shares = parse_epochs(fields.array("shares")?, "shares", unknown)?;
         fields.finish(unknown);
         require(
@@ -325,7 +337,7 @@ impl Grant {
                 "member key ID already used by a principal (§3.3)",
             )?;
         }
-        if let Some(records) = &terms.records {
+        if let Some(records) = terms.records() {
             for r in records {
                 require(
                     ctx.namespaces.contains(&r.namespace),
@@ -333,14 +345,13 @@ impl Grant {
                 )?;
             }
         }
-        if terms.records.is_none() {
+        if terms.records().is_none() {
             require(shares.is_empty(), "shares must be empty without records")?;
         }
         for s in &shares {
             require(
                 terms
-                    .records
-                    .as_ref()
+                    .records()
                     .is_some_and(|r| r.iter().any(|e| e.namespace == s.namespace)),
                 "share for a namespace not granted",
             )?;
@@ -349,7 +360,7 @@ impl Grant {
                 "share not sealed to the member",
             )?;
         }
-        if let (Some(epochs), Some(records)) = (ctx.epochs, &terms.records) {
+        if let (Some(epochs), Some(records)) = (ctx.epochs, terms.records()) {
             for r in records {
                 let latest = epochs.get(&r.namespace).copied().unwrap_or(0);
                 for e in 1..=latest {
@@ -362,20 +373,19 @@ impl Grant {
                 }
             }
         }
-        if terms.serves_home {
+        if terms.serves_home() {
             require(
                 request.kind != MemberKind::Agent,
                 "serves is never granted to an agent",
             )?;
         }
-        if terms.import {
+        if terms.import() {
             require(
                 matches!(request.kind, MemberKind::Device | MemberKind::App),
                 "import is granted only to a device or app",
             )?;
             let records = terms
-                .records
-                .as_ref()
+                .records()
                 .ok_or_else(|| malformed("import needs records"))?;
             require(
                 records
@@ -384,10 +394,7 @@ impl Grant {
                 "import needs write in every records entry",
             )?;
             require(
-                terms
-                    .expires
-                    .as_ref()
-                    .is_some_and(|(_, e)| *e > ctx.issued_ms),
+                terms.expires_ms().is_some_and(|e| e > ctx.issued_ms),
                 "import needs expires later than issued",
             )?;
         }
@@ -395,6 +402,7 @@ impl Grant {
             request,
             terms,
             shares,
+            unknown: sink,
         })
     }
 }
@@ -408,6 +416,8 @@ pub struct Renew {
     pub expires_ms: i64,
     /// Shares.
     pub shares: Vec<EpochSeals>,
+    /// Unknown content.
+    pub unknown: Unknown,
 }
 impl Renew {
     /// Validate `renew` fields. `current_expiry` is the member's expiry now (`None` for none);
@@ -418,8 +428,9 @@ impl Renew {
         issued_ms: i64,
         is_current: bool,
         current_expiry: Option<i64>,
-        unknown: &mut Unknown,
     ) -> Result<Self> {
+        let mut sink = Unknown::default();
+        let unknown = &mut sink;
         let member = fields.key_id("member")?;
         let (_, expires_ms) = fields.date("expires")?;
         let shares = parse_epochs(fields.array("shares")?, "shares", unknown)?;
@@ -436,6 +447,7 @@ impl Renew {
             member,
             expires_ms,
             shares,
+            unknown: sink,
         })
     }
 }
@@ -459,10 +471,14 @@ pub struct Revoke {
     pub heads: Vec<RevokeHead>,
     /// New epochs.
     pub epochs: Vec<EpochSeals>,
+    /// Unknown content.
+    pub unknown: Unknown,
 }
 impl Revoke {
     /// Validate `revoke` fields (shapes only; the walk is the record layer's).
-    pub fn parse(mut fields: Obj, unknown: &mut Unknown) -> Result<Self> {
+    pub fn parse(mut fields: Obj) -> Result<Self> {
+        let mut sink = Unknown::default();
+        let unknown = &mut sink;
         let member = fields.key_id("member")?;
         let kept = fields
             .array("kept")?
@@ -504,15 +520,18 @@ impl Revoke {
             kept,
             heads,
             epochs,
+            unknown: sink,
         })
     }
 }
 
-/// Validate `endSessions` fields: exactly `member` (§9.6).
-pub fn parse_end_sessions(mut fields: Obj, unknown: &mut Unknown) -> Result<String> {
+/// Validate `endSessions` fields: exactly `member` (§9.6). Returns the member and any
+/// unknown content.
+pub fn parse_end_sessions(mut fields: Obj) -> Result<(String, Unknown)> {
+    let mut unknown = Unknown::default();
     let member = fields.key_id("member")?;
-    fields.finish(unknown);
-    Ok(member)
+    fields.finish(&mut unknown);
+    Ok((member, unknown))
 }
 
 /// The kind of principal a key belongs to (§3.3).
@@ -569,7 +588,7 @@ pub fn check_members_never_controllers(
         uses.push((
             Principal::Controller(c.id()),
             Usage::Signing,
-            c.signing.clone(),
+            c.signing().to_vec(),
         ));
         if let Some(a) = c.agreement() {
             uses.push((Principal::Controller(c.id()), Usage::Agreement, a.to_vec()));
@@ -578,10 +597,10 @@ pub fn check_members_never_controllers(
     for (signing, agreement, kind) in members {
         let id = key_id(signing);
         if controllers.iter().any(|c| {
-            &c.signing == signing
-                || c.agreement() == Some(signing)
-                || c.agreement() == Some(agreement)
-                || &c.signing == agreement
+            c.signing() == signing.as_slice()
+                || c.agreement() == Some(signing.as_slice())
+                || c.agreement() == Some(agreement.as_slice())
+                || c.signing() == agreement.as_slice()
         }) {
             return Err(malformed(format!(
                 "member {id} ({kind:?}) uses a controller key"

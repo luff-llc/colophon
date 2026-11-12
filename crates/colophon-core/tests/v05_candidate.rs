@@ -2,20 +2,23 @@
 //!
 //! Every case is reported as PASS, FAIL or NOT-IMPLEMENTED. Out-of-scope cases (pending
 //! transitions, forks, succession, upgrade, immediate keyring rules, pairing, ...) are never
-//! reported as passing. The test fails on any in-scope FAIL that isn't in `DISPUTED` (vectors
-//! whose expected outcome this implementation believes contradicts the spec; see the
-//! implementation notes), and on any disputed vector that starts passing.
+//! reported as passing. The test fails on any in-scope FAIL that isn't in `DISPUTED`, and on
+//! any disputed vector that starts passing.
 //!
-//! Authority histories are loaded by a **fixture view loader** below. It checks canonical
-//! bytes, shapes and every signature it can attribute, but it is not an authority replayer:
-//! it does not evaluate §8.4 rules or §8.7 (pending transitions, `activate`, `suspend`), whose
-//! effects it applies as given so the call pipeline has a view to run over.
+//! Authority histories are loaded by a **fixture view loader**. It checks canonical bytes,
+//! shapes and every signature it can attribute (with the UV requirement of the rule each
+//! signature is counted under), but it is not an authority replayer: it does not evaluate the
+//! §8.4 rule table or §8.7. It derives the statuses §8.7 would compute from structured vector
+//! data only: a transition object that no `activate` in the records embeds is pending; a
+//! `suspend` entry suspends its key; an activation is provisional until every home current
+//! before it has a fresh head covering it (§8.7 "Finality"). No status comes from a case's
+//! description.
 #![allow(clippy::unwrap_used)]
 use base64::{engine::general_purpose::STANDARD, Engine};
 use colophon_core::v05::{
     calls::{
-        verify_call, AccountView, CallConfig, ControllerStatus, ViewController, ViewMember,
-        HISTORY_READ,
+        verify_call, AccountView, CallConfig, ControllerStatus, HistoryVerifierOutput,
+        MemberStatus, ViewController, ViewMember,
     },
     descriptor::{Controller, Policy},
     encoding::{bounds, canonical_body, digest, parse_date, strict_parse},
@@ -23,9 +26,9 @@ use colophon_core::v05::{
     ids::{key_id, AccountId, Reference},
     members::{AuthorityHeader, Grant, GrantContext, Request, Revoke},
     replay::MemoryReplayStore,
-    signature::{verify_raw, verify_webauthn, AssertionBytes, OriginRule, SigFailure, Strictness},
+    signature::{verify_authority_signature, verify_raw, AssertionBytes, AuthorityRule, Checked},
     terms::{Terms, TermsKind},
-    Failure, Unknown,
+    Failure,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,19 +37,7 @@ use std::path::{Path, PathBuf};
 
 /// In-scope vectors whose expected outcome contradicts the spec text as this implementation
 /// reads it, with the reason. They are reported as FAIL (disputed), not bent to pass.
-const DISPUTED: &[(&str, &str)] = &[
-    (
-        "calls/one-link",
-        "the link's terms carry no conditions while the member's carry {prefix: [args.task, T-]}; \
-         §10.3 says B narrows A only when every predicate of A's conditions equals one of B's, \
-         so §12.3 step 6 gives refused:notNarrower, not ok (generate.py `narrow` omits conditions)",
-    ),
-    (
-        "calls/copied-link",
-        "uses the same link as one-link, which fails §10.3 narrowing at step 6 before the \
-         acting-key comparison that ends step 6; with a narrowing link it would be badSignature",
-    ),
-];
+const DISPUTED: &[(&str, &str)] = &[];
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -64,6 +55,9 @@ fn b64(s: &str) -> Vec<u8> {
 fn ms(s: &str) -> i64 {
     parse_date(s).unwrap()
 }
+fn body_of(env: &Value) -> Value {
+    serde_json::from_slice(&b64(env["body"].as_str().unwrap())).unwrap()
+}
 
 #[derive(Debug, PartialEq)]
 enum Outcome {
@@ -72,55 +66,59 @@ enum Outcome {
     NotImplemented(&'static str),
 }
 
-/// Verify one authority signature (primary or list item) by a known controller.
-fn verify_authority_sig(
+fn assertion_of(v: Option<&Value>) -> Option<(Vec<u8>, Vec<u8>)> {
+    v.map(|a| {
+        (
+            b64(a["authenticatorData"].as_str().unwrap_or("")),
+            b64(a["clientData"].as_str().unwrap_or("")),
+        )
+    })
+}
+/// One authority signature by a known controller, under the rule it is counted for.
+fn check_sig(
     c: &Controller,
     body: &[u8],
-    signature: &[u8],
+    sig: &[u8],
     assertion: Option<&Value>,
-) -> Result<(), SigFailure> {
-    match (c.key.webauthn(), assertion) {
-        (None, None) => verify_raw(&c.key.signing, body, signature),
-        (Some(w), Some(a)) => {
-            let data = b64(a["authenticatorData"].as_str().unwrap_or(""));
-            let client = b64(a["clientData"].as_str().unwrap_or(""));
-            verify_webauthn(
-                &c.key.signing,
-                w,
-                body,
-                signature,
-                AssertionBytes {
-                    authenticator_data: &data,
-                    client_data: &client,
-                },
-                true, // authority signatures need UV (§8.4 control rule; possession with verification)
-                OriginRule::Authority,
-                Strictness::Current,
-            )
-            .map(|_| ())
-        }
-        _ => Err(SigFailure::Form),
-    }
+    rule: AuthorityRule,
+) -> Result<Checked, Failure> {
+    let a = assertion_of(assertion);
+    let bytes = a.as_ref().map(|(d, c)| AssertionBytes {
+        authenticator_data: d,
+        client_data: c,
+    });
+    verify_authority_signature(c, body, sig, bytes, rule)
 }
 
-/// The fixture view loader's result.
-struct Loaded {
-    account: AccountId,
-    history: Vec<String>,
-    policies: Vec<(u64, Policy)>,
-    controllers: BTreeMap<String, ViewController>,
-    members: Vec<ViewMember>,
-    points: BTreeSet<Vec<u8>>,
-    namespaces: Vec<String>,
-}
-
-fn parse_controllers(keyring: &Value, unknown: &mut Unknown) -> Result<Vec<Controller>, Failure> {
+fn parse_controllers(keyring: &Value) -> Result<Vec<Controller>, Failure> {
     keyring["controllers"]
         .as_array()
         .ok_or_else(|| Failure::Malformed("controllers".into()))?
         .iter()
-        .map(|c| Controller::parse(c.clone(), "controller", unknown))
+        .map(|c| Controller::parse(c.clone(), "controller"))
         .collect()
+}
+
+type ControllerFx = (Vec<(u64, Option<Controller>)>, ControllerStatus);
+struct MemberFx {
+    req: Request,
+    terms: Terms,
+    granted: u64,
+    revoked: Option<u64>,
+    provisional: bool,
+}
+/// The fixture loader's result.
+struct Loaded {
+    account: AccountId,
+    history: Vec<String>,
+    policies: Vec<(u64, Policy)>,
+    controllers: BTreeMap<String, ControllerFx>,
+    members: Vec<MemberFx>,
+    points: BTreeSet<Vec<u8>>,
+    namespaces: Vec<String>,
+    /// Embedded transition body digests and the seq of their `activate`.
+    activations: Vec<(String, u64)>,
+    undecidable: bool,
 }
 
 /// Load an authority history from record directories, entry by entry. Returns the seq and
@@ -143,46 +141,58 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, (u64, Failure)> {
         members: Vec::new(),
         points: BTreeSet::new(),
         namespaces: Vec::new(),
+        activations: Vec::new(),
+        undecidable: false,
     };
     for (i, f) in files.iter().enumerate() {
         let seq = i as u64 + 1;
         let fail = |e: Failure| (seq, e);
-        let env_bytes = fs::read(f).unwrap();
-        let env = strict_parse(&env_bytes).map_err(fail)?;
+        let env = strict_parse(&fs::read(f).unwrap()).map_err(fail)?;
         let body = b64(env["body"].as_str().unwrap());
         let value = canonical_body(&body, bounds::AUTHORITY_BODY).map_err(fail)?;
-        let (header, mut fields) = AuthorityHeader::split(value.clone()).map_err(fail)?;
+        let (header, fields) = AuthorityHeader::split(value.clone()).map_err(fail)?;
         if header.seq != seq {
             return Err((seq, Failure::Malformed("seq".into())));
         }
-        let mut unknown = Unknown::default();
-        // The signers known before this entry (genesis: its own keyring).
-        let signer_pool: BTreeMap<String, Controller> = if header.kind == "genesis" {
-            let kr = &value["keyring"];
-            let cs = parse_controllers(kr, &mut unknown).map_err(fail)?;
-            cs.into_iter().map(|c| (c.id(), c)).collect()
+        let current: BTreeMap<String, Controller> = if header.kind == "genesis" {
+            parse_controllers(&value["keyring"])
+                .map_err(fail)?
+                .into_iter()
+                .map(|c| (c.id(), c))
+                .collect()
         } else {
             l.controllers
                 .iter()
-                .filter_map(|(id, vc)| {
-                    vc.versions
-                        .last()
+                .filter_map(|(id, (vs, _))| {
+                    vs.last()
                         .and_then(|(_, c)| c.clone())
                         .map(|c| (id.clone(), c))
                 })
                 .collect()
         };
-        // Signatures this loader can attribute: primary, cosignatures, additions.
+        // The rule each signature is counted under (fixture-level reading of §8.4).
+        let primary_rule = match header.kind.as_str() {
+            "genesis" | "layout" | "migration" => AuthorityRule::Control,
+            "keyring" => AuthorityRule::KeyringEntry,
+            "suspend" => AuthorityRule::Suspend,
+            _ => AuthorityRule::Single,
+        };
         if let Some(sig) = env.get("signature").and_then(Value::as_str) {
-            let by = signer_pool
+            let by = current
                 .get(&header.by)
                 .ok_or_else(|| fail(Failure::BadSignature("by is not a controller".into())))?;
-            verify_authority_sig(by, &body, &b64(sig), env.get("assertion"))
-                .map_err(|e| fail(Failure::BadSignature(e.to_string())))?;
+            if check_sig(by, &body, &b64(sig), env.get("assertion"), primary_rule).map_err(fail)?
+                == Checked::UndecidableForm
+            {
+                l.undecidable = true;
+            }
         } else if header.kind != "activate" && header.kind != "vetoed" {
             return Err(fail(Failure::Malformed("missing signature".into())));
         }
-        for list in ["cosignatures", "additions"] {
+        for (list, rule) in [
+            ("cosignatures", primary_rule),
+            ("additions", AuthorityRule::Possession),
+        ] {
             for item in env
                 .get(list)
                 .and_then(Value::as_array)
@@ -190,55 +200,51 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, (u64, Failure)> {
                 .flatten()
             {
                 let signer = item["signer"].as_str().unwrap();
-                let added: BTreeMap<String, Controller> =
+                let pool: BTreeMap<String, Controller> =
                     if list == "additions" && header.kind == "keyring" {
-                        parse_controllers(&value["keyring"], &mut Unknown::default())
+                        parse_controllers(&value["keyring"])
                             .map_err(fail)?
                             .into_iter()
                             .map(|c| (c.id(), c))
                             .collect()
                     } else {
-                        signer_pool.clone()
+                        current.clone()
                     };
-                let c = added.get(signer).ok_or_else(|| {
+                let c = pool.get(signer).ok_or_else(|| {
                     fail(Failure::BadSignature(format!("{list}: unknown signer")))
                 })?;
-                verify_authority_sig(
+                if check_sig(
                     c,
                     &body,
                     &b64(item["signature"].as_str().unwrap()),
                     item.get("assertion"),
+                    rule,
                 )
-                .map_err(|e| fail(Failure::BadSignature(format!("{list}: {e}"))))?;
+                .map_err(fail)?
+                    == Checked::UndecidableForm
+                {
+                    l.undecidable = true;
+                }
             }
         }
         match header.kind.as_str() {
             "genesis" => {
                 l.account = AccountId::of_genesis(&body);
-                let kr = fields.obj("keyring").map_err(fail)?;
-                let kr_value = value["keyring"].clone();
-                drop(kr);
-                for c in parse_controllers(&kr_value, &mut unknown).map_err(fail)? {
-                    l.points.insert(c.key.signing.clone());
-                    if let Some(a) = c.key.agreement() {
+                let kr = &value["keyring"];
+                for c in parse_controllers(kr).map_err(fail)? {
+                    l.points.insert(c.key().signing().to_vec());
+                    if let Some(a) = c.key().agreement() {
                         l.points.insert(a.to_vec());
                     }
-                    l.controllers.insert(
-                        c.id(),
-                        ViewController {
-                            id: c.id(),
-                            versions: vec![(seq, Some(c))],
-                            status: ControllerStatus::Active,
-                        },
-                    );
+                    l.controllers
+                        .insert(c.id(), (vec![(seq, Some(c))], ControllerStatus::Active));
                 }
                 for k in ["signing", "agreement"] {
-                    l.points.insert(b64(kr_value["vault"][k].as_str().unwrap()));
+                    l.points.insert(b64(kr["vault"][k].as_str().unwrap()));
                 }
                 l.policies.push((
                     seq,
-                    Policy::parse(kr_value["policy"].clone(), "policy", &mut unknown)
-                        .map_err(fail)?,
+                    Policy::parse(kr["policy"].clone(), "policy").map_err(fail)?,
                 ));
                 l.namespaces = value["namespaces"]
                     .as_array()
@@ -255,53 +261,47 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, (u64, Failure)> {
                     known_keys: &l.points,
                     epochs: None,
                 };
-                let g = Grant::parse(fields, ctx, &mut unknown).map_err(fail)?;
-                add_member(&mut l, g.request, g.terms, seq);
+                let g = Grant::parse(fields, ctx).map_err(fail)?;
+                add_member(&mut l, g.request, g.terms, seq, false);
             }
             "revoke" => {
-                let r = Revoke::parse(fields, &mut unknown).map_err(fail)?;
-                if let Some(m) = l.members.iter_mut().find(|m| m.id == r.member) {
-                    m.revoked_seq = Some(seq);
+                let r = Revoke::parse(fields).map_err(fail)?;
+                if let Some(m) = l.members.iter_mut().find(|m| m.req.member_id() == r.member) {
+                    m.revoked = Some(seq);
                 }
             }
             "activate" => {
                 // §8.7 is out of scope: the embedded transition's change is applied as given.
-                let t_env =
-                    strict_parse(&b64(value["transition"].as_str().unwrap())).map_err(fail)?;
-                let t: Value =
-                    serde_json::from_slice(&b64(t_env["body"].as_str().unwrap())).unwrap();
+                let t_bytes = b64(value["transition"].as_str().unwrap());
+                let t_env = strict_parse(&t_bytes).map_err(fail)?;
+                let t_body = b64(t_env["body"].as_str().unwrap());
+                l.activations.push((digest(&t_body), seq));
+                let t: Value = serde_json::from_slice(&t_body).unwrap();
                 let change = &t["change"];
                 for a in change["homes"]["appoint"].as_array().into_iter().flatten() {
                     let req =
-                        Request::parse(&b64(a["request"].as_str().unwrap()), true, &mut unknown)
-                            .map_err(fail)?;
-                    let terms = Terms::parse(a["terms"].clone(), TermsKind::Member, &mut unknown)
-                        .map_err(fail)?;
-                    add_member(&mut l, req, terms, seq);
+                        Request::parse(&b64(a["request"].as_str().unwrap()), true).map_err(fail)?;
+                    let terms =
+                        Terms::parse(a["terms"].clone(), TermsKind::Member).map_err(fail)?;
+                    add_member(&mut l, req, terms, seq, true);
                 }
                 for c in change["keyring"]["add"].as_array().into_iter().flatten() {
-                    let c =
-                        Controller::parse(c.clone(), "controller", &mut unknown).map_err(fail)?;
+                    let c = Controller::parse(c.clone(), "controller").map_err(fail)?;
                     l.controllers.insert(
                         c.id(),
-                        ViewController {
-                            id: c.id(),
-                            versions: vec![(seq, Some(c))],
-                            status: ControllerStatus::Active,
-                        },
+                        (vec![(seq, Some(c))], ControllerStatus::AddedNotFinal),
                     );
                 }
                 for id in change["keyring"]["remove"].as_array().into_iter().flatten() {
-                    if let Some(vc) = l.controllers.get_mut(id.as_str().unwrap()) {
-                        vc.versions.push((seq, None));
+                    if let Some((vs, _)) = l.controllers.get_mut(id.as_str().unwrap()) {
+                        vs.push((seq, None));
                     }
                 }
             }
             "suspend" => {
-                // §8.7 is out of scope: the suspension is applied as given.
                 let key = value["key"].as_str().unwrap();
-                if let Some(vc) = l.controllers.get_mut(key) {
-                    vc.status = ControllerStatus::Suspended;
+                if let Some((_, st)) = l.controllers.get_mut(key) {
+                    *st = ControllerStatus::Suspended;
                 }
             }
             other => {
@@ -315,19 +315,152 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, (u64, Failure)> {
     }
     Ok(l)
 }
-fn add_member(l: &mut Loaded, req: Request, terms: Terms, seq: u64) {
+fn add_member(l: &mut Loaded, req: Request, terms: Terms, seq: u64, provisional: bool) {
     l.points.insert(req.signing.clone());
     l.points.insert(req.agreement.clone());
-    l.members.push(ViewMember {
-        id: req.member_id(),
-        signing: req.signing.clone(),
-        kind: req.kind.clone(),
+    l.members.push(MemberFx {
+        req,
         terms,
-        granted_seq: seq,
-        renewals: Vec::new(),
-        end_sessions: Vec::new(),
-        revoked_seq: None,
+        granted: seq,
+        revoked: None,
+        provisional,
     });
+}
+
+fn head_files(dir: &Path, ver: &Value) -> Vec<PathBuf> {
+    match &ver["heads"] {
+        Value::Array(a) => a.iter().map(|s| repo().join(s.as_str().unwrap())).collect(),
+        _ => {
+            let mut v: Vec<PathBuf> = fs::read_dir(dir.join("objects"))
+                .map(|r| {
+                    r.map(|e| e.unwrap().path())
+                        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("head"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            v.sort();
+            v
+        }
+    }
+}
+
+/// Build the view, resolving finality from the heads (§8.7 "Finality", fixture-level): an
+/// activation is final once every home current before it has a fresh head covering it.
+fn view_of(l: &Loaded, dir: &Path, case: &Value, now: i64) -> Result<AccountView, String> {
+    let heads: Vec<Vec<u8>> = head_files(dir, &case["verifier"])
+        .iter()
+        .map(|p| fs::read(p).unwrap())
+        .collect();
+    let max_age = l.policies.last().unwrap().1.head_max_age();
+    // Heads by the homes that are final so far, resolved activation by activation.
+    let mut final_member: Vec<bool> = l.members.iter().map(|m| !m.provisional).collect();
+    let mut final_seq: BTreeSet<u64> = BTreeSet::new();
+    for (_, aseq) in &l.activations {
+        let homes_before: Vec<(String, Vec<u8>)> = l
+            .members
+            .iter()
+            .zip(&final_member)
+            .filter(|(m, f)| {
+                **f && m.granted < *aseq && m.terms.serves_home() && m.revoked.is_none()
+            })
+            .map(|(m, _)| (m.req.member_id(), m.req.signing.clone()))
+            .collect();
+        let covered = homes_before.iter().all(|(id, _)| {
+            heads.iter().any(|h| {
+                let ctx = HeadContext {
+                    account: &l.account,
+                    history: &l.history,
+                    homes: &homes_before,
+                    now_ms: now,
+                };
+                verify_head(h, ctx)
+                    .is_ok_and(|h| h.by() == id && h.seq() >= *aseq && h.fresh(now, max_age))
+            })
+        });
+        if covered {
+            final_seq.insert(*aseq);
+            for (m, f) in l.members.iter().zip(final_member.iter_mut()) {
+                if m.granted == *aseq {
+                    *f = true;
+                }
+            }
+        }
+    }
+    let mut controllers = l.controllers.clone();
+    for (vs, st) in controllers.values_mut() {
+        if *st == ControllerStatus::AddedNotFinal
+            && vs.first().is_some_and(|(s, _)| final_seq.contains(s))
+        {
+            *st = ControllerStatus::Active;
+        }
+    }
+    // Pending transitions: a transition object no `activate` embeds.
+    if dir.join("objects/transition.json").exists() {
+        let t = json(&dir.join("objects/transition.json"));
+        let t_digest = digest(&b64(t["body"].as_str().unwrap()));
+        if !l.activations.iter().any(|(d, _)| d == &t_digest) {
+            let body = body_of(&t);
+            for id in body["change"]["keyring"]["remove"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if let Some((_, st)) = controllers.get_mut(id.as_str().unwrap()) {
+                    if *st == ControllerStatus::Active {
+                        *st = ControllerStatus::PendingRemoval;
+                    }
+                }
+            }
+            for c in body["change"]["keyring"]["add"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let id = key_id(&b64(c["key"]["signing"].as_str().unwrap()));
+                controllers
+                    .entry(id)
+                    .or_insert((Vec::new(), ControllerStatus::PendingAddition));
+            }
+        }
+    }
+    let members = l
+        .members
+        .iter()
+        .zip(&final_member)
+        .map(|(m, f)| {
+            ViewMember::new(
+                m.req.signing.clone(),
+                m.req.kind.clone(),
+                m.terms.clone(),
+                m.granted,
+                Vec::new(),
+                Vec::new(),
+                m.revoked,
+                if *f {
+                    MemberStatus::Active
+                } else {
+                    MemberStatus::AddedNotFinal
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let controllers = controllers
+        .into_iter()
+        .map(|(id, (vs, st))| ViewController::new(id, vs, st))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    AccountView::from_history_verifier(HistoryVerifierOutput {
+        account: l.account.clone(),
+        history: l.history.clone(),
+        policies: l.policies.clone(),
+        controllers,
+        members,
+        heads,
+        vouched_fork: false,
+        principal_points: l.points.clone(),
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn expected_of(case: &Value, key: &str) -> String {
@@ -349,85 +482,27 @@ fn run_call(dir: &Path, case: &Value) -> Outcome {
         Err((seq, e)) => return Outcome::Fail(format!("fixture history failed at seq {seq}: {e}")),
     };
     let now = ms(ver["now"].as_str().unwrap());
-    let mut controllers = loaded.controllers.clone();
-    // Pending statuses are inputs (§8.7 out of scope): read them from the case's transition.
-    let applied = loaded.history.len();
-    if dir.join("objects/transition.json").exists()
-        && case["description"]
-            .as_str()
-            .is_some_and(|d| !d.contains("suspended"))
-    {
-        let t = json(&dir.join("objects/transition.json"));
-        let body: Value = serde_json::from_slice(&b64(t["body"].as_str().unwrap())).unwrap();
-        for id in body["change"]["keyring"]["remove"]
-            .as_array()
-            .into_iter()
-            .flatten()
-        {
-            if let Some(vc) = controllers.get_mut(id.as_str().unwrap()) {
-                vc.status = ControllerStatus::PendingRemoval;
-            }
-        }
-        for c in body["change"]["keyring"]["add"]
-            .as_array()
-            .into_iter()
-            .flatten()
-        {
-            let id = key_id(&b64(c["key"]["signing"].as_str().unwrap()));
-            controllers
-                .entry(id.clone())
-                .or_insert(ViewController {
-                    id,
-                    versions: Vec::new(),
-                    status: ControllerStatus::PendingAddition,
-                })
-                .status = ControllerStatus::PendingAddition;
-        }
-    }
-    let _ = applied;
-    let head_paths: Vec<PathBuf> = match &ver["heads"] {
-        Value::Array(a) => a.iter().map(|s| repo().join(s.as_str().unwrap())).collect(),
-        _ => vec![dir.join("objects/head.json")],
+    let view = match view_of(&loaded, dir, case, now) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(format!("view refused: {e}")),
     };
-    let mut view = AccountView {
-        account: loaded.account.clone(),
-        history: loaded.history.clone(),
-        policies: loaded.policies.clone(),
-        controllers: controllers.into_values().collect(),
-        members: loaded.members.clone(),
-        heads: Vec::new(),
-        vouched_fork: false,
-        principal_points: loaded.points.clone(),
-    };
-    let homes = view.current_homes(now);
-    for p in head_paths {
-        let ctx = HeadContext {
-            account: &view.account,
-            history: &view.history,
-            homes: &homes,
-            now_ms: now,
-        };
-        match verify_head(&fs::read(&p).unwrap(), ctx) {
-            Ok(h) => view.heads.push(h),
-            Err(e) => return Outcome::Fail(format!("head {} refused: {e}", p.display())),
-        }
-    }
     let audiences: Vec<String> = ver["audiences"]
         .as_array()
         .unwrap()
         .iter()
         .map(|s| s.as_str().unwrap().into())
         .collect();
-    let mut purposes: Vec<String> = ver["controllerPurposes"]
+    let purposes: Vec<String> = ver["controllerPurposes"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|s| s.as_str().unwrap().into())
         .collect();
-    if ver["role"] == "home" {
-        // A home configures colophon.history.read as a controller-call purpose (§13.4).
-        purposes.push(HISTORY_READ.into());
-    }
+    let home_endpoints: Vec<String> = if ver["role"] == "home" {
+        audiences.clone()
+    } else {
+        Vec::new()
+    };
     let origins: BTreeMap<String, Vec<String>> = ver["callOrigins"]
         .as_object()
         .map(|m| {
@@ -450,6 +525,7 @@ fn run_call(dir: &Path, case: &Value) -> Outcome {
         audiences: &audiences,
         call_origins: &origins,
         controller_purposes: &purposes,
+        home_endpoints: &home_endpoints,
     };
     let mut store = MemoryReplayStore::new();
     for prior in ver["replay"].as_array().into_iter().flatten() {
@@ -481,23 +557,18 @@ fn run_call(dir: &Path, case: &Value) -> Outcome {
 
 fn run_head(dir: &Path, case: &Value) -> Outcome {
     let ver = &case["verifier"];
-    let loaded = load(&[repo().join(ver["history"].as_str().unwrap())])
+    let l = load(&[repo().join(ver["history"].as_str().unwrap())])
         .unwrap_or_else(|(s, e)| panic!("{s}: {e}"));
     let now = ms(ver["now"].as_str().unwrap());
-    let homes: Vec<(String, Vec<u8>)> = loaded
-        .members
-        .iter()
-        .filter(|m| m.is_current_home(now))
-        .map(|m| (m.id.clone(), m.signing.clone()))
-        .collect();
+    let homes = view_of(&l, dir, case, now).unwrap().current_homes(now);
     let ctx = HeadContext {
-        account: &loaded.account,
-        history: &loaded.history,
+        account: &l.account,
+        history: &l.history,
         homes: &homes,
         now_ms: now,
     };
     let got = match verify_head(&fs::read(dir.join("head.json")).unwrap(), ctx) {
-        Ok(h) if h.fresh(now, loaded.policies[0].1.head_max_age) => "ok".into(),
+        Ok(h) if h.fresh(now, l.policies[0].1.head_max_age()) => "ok".into(),
         Ok(_) => "ok (accepted, not fresh)".into(),
         Err(e) => e.code(),
     };
@@ -509,12 +580,13 @@ fn run_head(dir: &Path, case: &Value) -> Outcome {
     }
 }
 
-/// Entry-level checks this crate implements: canonical bytes, shapes, controller and policy
-/// parsing, grants, and every attributable signature. Not the §8.4 rules.
+/// Entry-level checks: canonical bytes, shapes, controller and policy parsing, grants, and
+/// every attributable signature under its rule's UV requirement. Not the §8.4 rule table.
 fn run_entries(dir: &Path, case: &Value) -> Outcome {
     let want_result = case["expected"]["result"].as_str().unwrap();
     let want_seq = case["expected"]["seq"].as_u64().unwrap();
     let got = match load(&[dir.join("records")]) {
+        Ok(l) if l.undecidable => (l.history.len() as u64, "newerFormat".to_string()),
         Ok(l) => (l.history.len() as u64, "ok".to_string()),
         Err((seq, e)) => (seq, e.code()),
     };
@@ -541,16 +613,24 @@ fn run_malleated(dir: &Path) -> Outcome {
         b64(b["body"].as_str().unwrap()),
     );
     let v = canonical_body(&ba, bounds::AUTHORITY_BODY).unwrap();
-    let mut u = Unknown::default();
-    let cs: Vec<Controller> = parse_controllers(&v["keyring"], &mut u).unwrap();
+    let cs = parse_controllers(&v["keyring"]).unwrap();
     let by = cs
         .iter()
         .find(|c| c.id() == v["by"].as_str().unwrap())
         .unwrap();
-    let ok_a = verify_raw(&by.key.signing, &ba, &b64(a["signature"].as_str().unwrap())).is_ok();
-    let ok_b = verify_raw(&by.key.signing, &bb, &b64(b["signature"].as_str().unwrap())).is_ok();
-    let sigs_differ = a["signature"] != b["signature"];
-    if ok_a && ok_b && sigs_differ && ba == bb {
+    let ok_a = verify_raw(
+        by.key().signing(),
+        &ba,
+        &b64(a["signature"].as_str().unwrap()),
+    )
+    .is_ok();
+    let ok_b = verify_raw(
+        by.key().signing(),
+        &bb,
+        &b64(b["signature"].as_str().unwrap()),
+    )
+    .is_ok();
+    if ok_a && ok_b && a["signature"] != b["signature"] && ba == bb {
         Outcome::Pass(
             "both verify (high-S valid); equal by body bytes (relay half not exercised)".into(),
         )
@@ -562,25 +642,29 @@ fn run_malleated(dir: &Path) -> Outcome {
 fn run_veto_sig(dir: &Path, case: &Value) -> Outcome {
     // The passkey's descriptor is the pinned passkey of the `origin-subdomain-pinned` genesis.
     let g = json(&cand().join("rules/origin-subdomain-pinned/records/authority/00000001.json"));
-    let gv: Value = serde_json::from_slice(&b64(g["body"].as_str().unwrap())).unwrap();
-    let cs = parse_controllers(&gv["keyring"], &mut Unknown::default()).unwrap();
+    let cs = parse_controllers(&body_of(&g)["keyring"]).unwrap();
     let veto = json(&dir.join("veto.json"));
     let body = b64(veto["body"].as_str().unwrap());
     let v = canonical_body(&body, bounds::RECEIPT_BODY).unwrap();
     let Some(signer) = cs.iter().find(|c| c.id() == v["by"].as_str().unwrap()) else {
         return Outcome::Fail("veto signer is not the fixture passkey".into());
     };
-    let got = verify_authority_sig(
+    let got = check_sig(
         signer,
         &body,
         &b64(veto["signature"].as_str().unwrap()),
         veto.get("assertion"),
+        AuthorityRule::Veto,
     );
     let want = case["expected"]["vetoSignature"].as_str().unwrap();
+    let detail = |e: &Result<Checked, Failure>| match e {
+        Err(f) => f.detail().to_string(),
+        Ok(c) => format!("{c:?}"),
+    };
     let ok = match want {
-        "valid signature" => got.is_ok(),
-        "invalid: no UV" => got == Err(SigFailure::UserVerification),
-        "invalid: not an authority origin" => got == Err(SigFailure::Origin),
+        "valid signature" => got == Ok(Checked::Verified),
+        "invalid: no UV" => detail(&got).contains("UserVerification"),
+        "invalid: not an authority origin" => detail(&got).contains("Origin"),
         _ => false,
     };
     if ok {
@@ -588,7 +672,7 @@ fn run_veto_sig(dir: &Path, case: &Value) -> Outcome {
             "{want} (signature layer only; veto validity is §8.7)"
         ))
     } else {
-        Outcome::Fail(format!("expected {want}, got {got:?}"))
+        Outcome::Fail(format!("expected {want}, got {}", detail(&got)))
     }
 }
 
@@ -614,7 +698,7 @@ fn run_identifiers() -> Vec<(String, Outcome)> {
         ));
     }
     for (i, r) in d["references"].as_array().unwrap().iter().enumerate() {
-        let got = match Reference::parse(r["reference"].clone(), &mut Unknown::default()) {
+        let got = match Reference::parse(r["reference"].clone()) {
             Ok(_) => "ok".to_string(),
             Err(e) => e.code(),
         };

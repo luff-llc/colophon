@@ -27,7 +27,7 @@ pub fn valid_purpose(s: &str) -> bool {
 /// host follows the `rp` grammar, with an optional path and no port, query, fragment or user
 /// information, or a `urn:` URI.
 pub fn valid_audience(s: &str) -> bool {
-    if !byte_len_in(s, 1, 512) || !s.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+    if !byte_len_in(s, 1, 512) || !super::descriptor::is_printable(s) {
         return false;
     }
     if let Some(rest) = s.strip_prefix("https://") {
@@ -111,6 +111,68 @@ impl CondPath {
         self.0
             .iter()
             .try_fold(root, |v, seg| v.as_object()?.get(seg))
+    }
+}
+
+/// A three-valued condition result (§10.4, revision 6). `False` is `refused:outOfScope` at
+/// §12.3 step 7; `Unknown` (an unknown operator decided the result) passes step 7 and is
+/// `newerFormat` at step 8. It is the return value of evaluation, so no caller can drop it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Truth {
+    /// Holds.
+    True,
+    /// Doesn't hold.
+    False,
+    /// Undecidable by this reader: an unknown operator.
+    Unknown,
+}
+impl Truth {
+    fn of(b: bool) -> Self {
+        if b {
+            Self::True
+        } else {
+            Self::False
+        }
+    }
+    fn not(self) -> Self {
+        match self {
+            Self::True => Self::False,
+            Self::False => Self::True,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+    /// `all`: false if any is false, else unknown if any is, else true.
+    pub fn all(items: impl IntoIterator<Item = Truth>) -> Self {
+        let mut unknown = false;
+        for t in items {
+            match t {
+                Self::False => return Self::False,
+                Self::Unknown => unknown = true,
+                Self::True => {}
+            }
+        }
+        if unknown {
+            Self::Unknown
+        } else {
+            Self::True
+        }
+    }
+    /// `any`: true if any is true, else unknown if any is, else false.
+    pub fn any(items: impl IntoIterator<Item = Truth>) -> Self {
+        let mut unknown = false;
+        for t in items {
+            match t {
+                Self::True => return Self::True,
+                Self::Unknown => unknown = true,
+                Self::False => {}
+            }
+        }
+        if unknown {
+            Self::Unknown
+        } else {
+            Self::False
+        }
     }
 }
 
@@ -214,29 +276,30 @@ impl Predicate {
             }
         })
     }
-    /// Evaluate on `args` (a call's) or a record's `payload`. An unknown operator evaluates
-    /// as true: the object then always ends in `newerFormat`, never `ok`.
-    pub fn eval(&self, root: &Value) -> bool {
+    /// Evaluate on `args` (a call's) or a record's `payload`, in three-valued logic.
+    pub fn eval(&self, root: &Value) -> Truth {
         match self {
-            Self::Eq(p, v) => p
-                .lookup(root)
-                .and_then(|x| canonical(x).ok())
-                .is_some_and(|x| &x == v),
-            Self::In(p, vs) => p
-                .lookup(root)
-                .and_then(|x| canonical(x).ok())
-                .is_some_and(|x| vs.contains(&x)),
-            Self::Prefix(p, s) => {
-                matches!(p.lookup(root), Some(Value::String(x)) if x.starts_with(s.as_str()))
-            }
-            Self::Lte(p, n) => matches!(p.lookup(root), Some(Value::Number(x))
-                if matches!(compare_numbers(x, n), Some(Ordering::Less | Ordering::Equal))),
-            Self::Gte(p, n) => matches!(p.lookup(root), Some(Value::Number(x))
-                if matches!(compare_numbers(x, n), Some(Ordering::Greater | Ordering::Equal))),
-            Self::All(items) => items.iter().all(|i| i.eval(root)),
-            Self::Any(items) => items.iter().any(|i| i.eval(root)),
-            Self::Not(inner) => !inner.eval(root),
-            Self::Unknown(_) => true,
+            Self::Eq(p, v) => Truth::of(
+                p.lookup(root)
+                    .and_then(|x| canonical(x).ok())
+                    .is_some_and(|x| &x == v),
+            ),
+            Self::In(p, vs) => Truth::of(
+                p.lookup(root)
+                    .and_then(|x| canonical(x).ok())
+                    .is_some_and(|x| vs.contains(&x)),
+            ),
+            Self::Prefix(p, s) => Truth::of(
+                matches!(p.lookup(root), Some(Value::String(x)) if x.starts_with(s.as_str())),
+            ),
+            Self::Lte(p, n) => Truth::of(matches!(p.lookup(root), Some(Value::Number(x))
+                if matches!(compare_numbers(x, n), Some(Ordering::Less | Ordering::Equal)))),
+            Self::Gte(p, n) => Truth::of(matches!(p.lookup(root), Some(Value::Number(x))
+                if matches!(compare_numbers(x, n), Some(Ordering::Greater | Ordering::Equal)))),
+            Self::All(items) => Truth::all(items.iter().map(|i| i.eval(root))),
+            Self::Any(items) => Truth::any(items.iter().map(|i| i.eval(root))),
+            Self::Not(inner) => inner.eval(root).not(),
+            Self::Unknown(_) => Truth::Unknown,
         }
     }
 }
@@ -273,35 +336,25 @@ impl Conditions {
             canonical,
         })
     }
-    /// True when every predicate holds.
-    pub fn hold(&self, root: &Value) -> bool {
-        self.predicates.iter().all(|p| p.eval(root))
+    /// Every predicate, as `all` (§10.4).
+    pub fn eval(&self, root: &Value) -> Truth {
+        Truth::all(self.predicates.iter().map(|p| p.eval(root)))
     }
 }
 
 /// Terms (§10.1).
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Terms {
-    /// `records` entries.
-    pub records: Option<Vec<RecordsEntry>>,
-    /// `services` entries.
-    pub services: Option<Vec<ServicesEntry>>,
-    /// Inclusive last moment, in ms, and its spelling.
-    pub expires: Option<(String, i64)>,
-    /// Most admitted records.
-    pub writes: Option<u64>,
-    /// Links that may follow (0–4); absent is 0.
-    pub depth: u64,
-    /// Whether `depth` was present.
-    pub depth_present: bool,
-    /// Predicates that must all hold.
-    pub conditions: Option<Conditions>,
-    /// `serves` contains `"home"`.
-    pub serves_home: bool,
-    /// `serves` is present (with known or unknown values).
-    pub serves_present: bool,
-    /// `import: true`.
-    pub import: bool,
+    records: Option<Vec<RecordsEntry>>,
+    services: Option<Vec<ServicesEntry>>,
+    expires: Option<(String, i64)>,
+    writes: Option<u64>,
+    depth: u64,
+    conditions: Option<Conditions>,
+    serves_home: bool,
+    serves_present: bool,
+    import: bool,
+    unknown: Unknown,
 }
 
 /// Where a terms object appears; link terms are restricted (§10.1).
@@ -314,15 +367,29 @@ pub enum TermsKind {
 }
 
 impl Terms {
-    /// Parse terms. Unknown terms and values go to `unknown`.
-    pub fn parse(value: Value, kind: TermsKind, unknown: &mut Unknown) -> Result<Self> {
+    /// Parse terms. Unknown terms, values and condition operators are kept in the value
+    /// ([`Terms::unknown`]).
+    pub fn parse(value: Value, kind: TermsKind) -> Result<Self> {
+        let mut sink = Unknown::default();
+        let unknown = &mut sink;
         let mut o = Obj::new(value, "terms")?;
         if kind == TermsKind::Link {
             for f in ["records", "expires", "writes", "serves", "import"] {
                 require(!o.has(f), &format!("link terms contain {f}"))?;
             }
         }
-        let mut t = Terms::default();
+        let mut t = Terms {
+            records: None,
+            services: None,
+            expires: None,
+            writes: None,
+            depth: 0,
+            conditions: None,
+            serves_home: false,
+            serves_present: false,
+            import: false,
+            unknown: Unknown::default(),
+        };
         if let Some(items) = o.opt_value("records")? {
             let Value::Array(items) = items else {
                 return Err(malformed("records must be an array"));
@@ -429,7 +496,6 @@ impl Terms {
         if let Some(d) = o.opt_uint("depth")? {
             require(d <= 4, "depth must be 0–4")?;
             t.depth = d;
-            t.depth_present = true;
         }
         if let Some(c) = o.opt_value("conditions")? {
             t.conditions = Some(Conditions::parse(c, unknown)?);
@@ -467,6 +533,7 @@ impl Terms {
             )?,
             TermsKind::Link => require(t.services.is_some(), "link terms need services")?,
         }
+        t.unknown = sink;
         Ok(t)
     }
 
@@ -481,9 +548,51 @@ impl Terms {
     pub fn allows(&self, audience: &str, purpose: &str) -> bool {
         self.service(audience).is_some_and(|s| s.allows(purpose))
     }
-    /// True when every condition holds on `root` (absent: true).
-    pub fn conditions_hold(&self, root: &Value) -> bool {
-        self.conditions.as_ref().is_none_or(|c| c.hold(root))
+    /// The conditions on `root` (absent: true), three-valued.
+    pub fn conditions_on(&self, root: &Value) -> Truth {
+        self.conditions
+            .as_ref()
+            .map_or(Truth::True, |c| c.eval(root))
+    }
+    /// `records` entries.
+    pub fn records(&self) -> Option<&[RecordsEntry]> {
+        self.records.as_deref()
+    }
+    /// `services` entries.
+    pub fn services(&self) -> Option<&[ServicesEntry]> {
+        self.services.as_deref()
+    }
+    /// `expires`, in ms.
+    pub fn expires_ms(&self) -> Option<i64> {
+        self.expires.as_ref().map(|(_, e)| *e)
+    }
+    /// `writes`.
+    pub fn writes(&self) -> Option<u64> {
+        self.writes
+    }
+    /// `depth` (absent: 0).
+    pub fn depth(&self) -> u64 {
+        self.depth
+    }
+    /// `conditions`.
+    pub fn conditions(&self) -> Option<&Conditions> {
+        self.conditions.as_ref()
+    }
+    /// `serves` contains `"home"`.
+    pub fn serves_home(&self) -> bool {
+        self.serves_home
+    }
+    /// `serves` is present.
+    pub fn serves_present(&self) -> bool {
+        self.serves_present
+    }
+    /// `import: true`.
+    pub fn import(&self) -> bool {
+        self.import
+    }
+    /// Unknown terms, values and condition operators in these terms.
+    pub fn unknown(&self) -> &Unknown {
+        &self.unknown
     }
     /// §10.3: these (link) terms narrow `parent`: every services entry has one in the parent
     /// for the same audience covering its purposes; `depth` is less than the parent's; and
@@ -537,15 +646,20 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn member(v: Value) -> Terms {
-        let mut u = Unknown::default();
-        let t = Terms::parse(v, TermsKind::Member, &mut u).unwrap();
-        assert!(u.is_empty());
+        let t = Terms::parse(v, TermsKind::Member).unwrap();
+        assert!(t.unknown().is_empty());
         t
     }
     fn link(v: Value) -> Result<Terms> {
-        Terms::parse(v, TermsKind::Link, &mut Unknown::default())
+        Terms::parse(v, TermsKind::Link)
     }
     const AUD: &str = "https://projects.example/scopes/7";
+    fn with_conditions(c: Value) -> Result<Terms> {
+        Terms::parse(
+            json!({"services":[{"audience":AUD,"purposes":["x"]}],"conditions":c}),
+            TermsKind::Member,
+        )
+    }
 
     #[test]
     fn grammar() {
@@ -559,6 +673,7 @@ mod tests {
             "https://A",
             "urn:",
             "https://u@a",
+            "urn:a b",
         ] {
             assert!(!valid_audience(bad), "{bad}");
         }
@@ -574,7 +689,6 @@ mod tests {
 
     #[test]
     fn parse_rules() {
-        let mut u = Unknown::default();
         for bad in [
             json!({}),
             json!({"records":[]}),
@@ -587,9 +701,10 @@ mod tests {
             json!({"services":[{"audience":AUD,"purposes":["x"]}],"import":false}),
             json!({"services":[{"audience":AUD,"purposes":["x"]}],"writes":1.0}),
             json!({"services":[{"audience":AUD,"purposes":["x"]}],"expires":null}),
+            json!({"serves":["home","home"]}),
         ] {
             assert!(
-                Terms::parse(bad.clone(), TermsKind::Member, &mut u).is_err(),
+                Terms::parse(bad.clone(), TermsKind::Member).is_err(),
                 "{bad}"
             );
         }
@@ -597,68 +712,92 @@ mod tests {
             json!({"services":[{"audience":AUD,"purposes":["x"]}],"expires":"2026-01-01T00:00:00Z"})
         )
         .is_err());
-        let mut u = Unknown::default();
-        Terms::parse(
-            json!({"services":[{"audience":AUD,"purposes":["x"]}],"future":1}),
-            TermsKind::Link,
-            &mut u,
-        )
-        .unwrap();
-        assert_eq!(u.0, vec!["terms.future"]);
+        let t = link(json!({"services":[{"audience":AUD,"purposes":["x"]}],"future":1})).unwrap();
+        assert_eq!(t.unknown().0, vec!["terms.future"]);
+        let t = Terms::parse(json!({"serves":["relay"]}), TermsKind::Member).unwrap();
+        assert!(!t.unknown().is_empty() && !t.serves_home());
     }
 
     #[test]
-    fn condition_bounds_and_evaluation() {
-        let t = member(json!({"services":[{"audience":AUD,"purposes":["x"]}],
-            "conditions":[{"lte":["args.amount",5000]},{"prefix":["task","T-"]},{"not":{"eq":["flag",true]}},
-                          {"any":[]},{"in":["k",[1,"a"]]}]}));
-        let c = t.conditions.as_ref().unwrap();
-        assert!(
-            !c.hold(&json!({"amount":10,"task":"T-1","k":1})),
-            "empty any is false"
+    fn condition_bounds_and_three_valued_evaluation() {
+        let c = member(json!({"services":[{"audience":AUD,"purposes":["x"]}],
+            "conditions":[{"lte":["args.amount",5000]},{"prefix":["task","T-"]},{"not":{"eq":["flag",true]}},{"all":[]},{"in":["k",[1,"a",null]]}]}));
+        assert_eq!(
+            c.conditions_on(&json!({"amount":5000,"task":"T-1","k":"a"})),
+            Truth::True
         );
-        let c2 = member(json!({"services":[{"audience":AUD,"purposes":["x"]}],
-            "conditions":[{"lte":["args.amount",5000]},{"prefix":["task","T-"]},{"not":{"eq":["flag",true]}},{"all":[]},{"in":["k",[1,"a"]]}]}));
-        let c2 = c2.conditions.unwrap();
-        assert!(c2.hold(&json!({"amount":5000,"task":"T-1","k":"a"})));
-        assert!(!c2.hold(&json!({"amount":5000.5,"task":"T-1","k":"a"})));
-        assert!(
-            !c2.hold(&json!({"task":"T-1","k":"a"})),
+        assert_eq!(
+            c.conditions_on(&json!({"amount":5000,"task":"T-1","k":null})),
+            Truth::True
+        );
+        assert_eq!(
+            c.conditions_on(&json!({"amount":5000.5,"task":"T-1","k":"a"})),
+            Truth::False
+        );
+        assert_eq!(
+            c.conditions_on(&json!({"task":"T-1","k":"a"})),
+            Truth::False,
             "missing path: leaf false"
         );
-        assert!(
-            !c2.hold(&json!({"amount":"5","task":"T-1","k":"a"})),
-            "string is not a number"
+        assert_eq!(
+            c.conditions_on(&json!({"amount":"5","task":"T-1","k":"a"})),
+            Truth::False
         );
-        assert!(!c2.hold(&json!({"amount":1,"task":"T-1","k":"a","flag":true})));
-        assert!(c2.hold(&json!({"amount":1,"task":"T-1","k":"a","flag":false})));
-        // Bounds: 32 predicates including logical ones, depth 4.
+        assert_eq!(
+            c.conditions_on(&json!({"amount":1,"task":"T-1","k":"a","flag":true})),
+            Truth::False
+        );
+        assert_eq!(
+            member(
+                json!({"services":[{"audience":AUD,"purposes":["x"]}],"conditions":[{"any":[]}]})
+            )
+            .conditions_on(&json!({})),
+            Truth::False
+        );
+        // Unknown operators: not of unknown is unknown; all/any follow Kleene logic.
+        let u = |c: Value| with_conditions(c).unwrap();
+        let t = u(json!([{"future":["a",1]}]));
+        assert!(!t.unknown().is_empty());
+        assert_eq!(t.conditions_on(&json!({})), Truth::Unknown);
+        assert_eq!(
+            u(json!([{"not":{"future":1}}])).conditions_on(&json!({})),
+            Truth::Unknown
+        );
+        assert_eq!(
+            u(json!([{"all":[{"future":1},{"eq":["a",1]}]}])).conditions_on(&json!({"a":2})),
+            Truth::False
+        );
+        assert_eq!(
+            u(json!([{"all":[{"future":1},{"eq":["a",1]}]}])).conditions_on(&json!({"a":1})),
+            Truth::Unknown
+        );
+        assert_eq!(
+            u(json!([{"any":[{"future":1},{"eq":["a",1]}]}])).conditions_on(&json!({"a":1})),
+            Truth::True
+        );
+        assert_eq!(
+            u(json!([{"any":[{"future":1},{"eq":["a",1]}]}])).conditions_on(&json!({"a":2})),
+            Truth::Unknown
+        );
+        assert_eq!(
+            u(json!([{"future":1},{"eq":["a",1]}])).conditions_on(&json!({"a":2})),
+            Truth::False
+        );
+        // Bounds: 32 predicates including logical ones, depth 4, 8 path segments with `args`.
         let leaf = json!({"eq":["a",1]});
-        let ok32: Vec<Value> = (0..32).map(|_| leaf.clone()).collect();
-        member(json!({"services":[{"audience":AUD,"purposes":["x"]}],"conditions":ok32}));
-        let bad = json!([{"all":(0..32).map(|_| leaf.clone()).collect::<Vec<_>>()}]);
-        assert!(Terms::parse(
-            json!({"services":[{"audience":AUD,"purposes":["x"]}],"conditions":bad}),
-            TermsKind::Member,
-            &mut Unknown::default()
+        with_conditions(json!((0..32).map(|_| leaf.clone()).collect::<Vec<_>>())).unwrap();
+        assert!(with_conditions(
+            json!([{"all":(0..32).map(|_| leaf.clone()).collect::<Vec<_>>()}])
         )
         .is_err());
-        let d4 = json!([{"not":{"not":{"not":leaf.clone()}}}]);
-        member(json!({"services":[{"audience":AUD,"purposes":["x"]}],"conditions":d4}));
-        let d5 = json!([{"not":{"not":{"not":{"not":leaf.clone()}}}}]);
-        assert!(Terms::parse(
-            json!({"services":[{"audience":AUD,"purposes":["x"]}],"conditions":d5}),
-            TermsKind::Member,
-            &mut Unknown::default()
-        )
-        .is_err());
-        let path9 = json!([{"eq":["a.b.c.d.e.f.g.h.i",1]}]);
-        assert!(Terms::parse(
-            json!({"services":[{"audience":AUD,"purposes":["x"]}],"conditions":path9}),
-            TermsKind::Member,
-            &mut Unknown::default()
-        )
-        .is_err());
+        with_conditions(json!([{"not":{"not":{"not":leaf.clone()}}}])).unwrap();
+        assert!(with_conditions(json!([{"not":{"not":{"not":{"not":leaf.clone()}}}}])).is_err());
+        assert!(with_conditions(json!([{"eq":["a.b.c.d.e.f.g.h.i",1]}])).is_err());
+        assert!(
+            with_conditions(json!([{"eq":["args.b.c.d.e.f.g.h.i",1]}])).is_err(),
+            "args counts"
+        );
+        with_conditions(json!([{"eq":["args.b.c.d.e.f.g.h",1]}])).unwrap();
     }
 
     #[test]
@@ -667,22 +806,17 @@ mod tests {
             json!({"services":[{"audience":AUD,"purposes":["task.propose","task.read"]}],"depth":1,
             "conditions":[{"prefix":["args.task","T-"]}]}),
         );
-        let narrow = link(
-            json!({"services":[{"audience":AUD,"purposes":["task.read"]}],
-            "conditions":[{"prefix":["args.task","T-"]}]}),
-        )
-        .unwrap();
+        let narrow = link(json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"conditions":[{"prefix":["args.task","T-"]}]})).unwrap();
         assert!(narrow.narrows(&parent));
-        let dropped =
-            link(json!({"services":[{"audience":AUD,"purposes":["task.read"]}]})).unwrap();
-        assert!(!dropped.narrows(&parent), "parent predicate dropped");
-        let wide = link(json!({"services":[{"audience":AUD,"purposes":["*"]}],"conditions":[{"prefix":["args.task","T-"]}]})).unwrap();
-        assert!(!wide.narrows(&parent));
-        let deep = link(json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"depth":1,"conditions":[{"prefix":["args.task","T-"]}]})).unwrap();
-        assert!(!deep.narrows(&parent));
+        assert!(
+            !link(json!({"services":[{"audience":AUD,"purposes":["task.read"]}]}))
+                .unwrap()
+                .narrows(&parent)
+        );
+        assert!(!link(json!({"services":[{"audience":AUD,"purposes":["*"]}],"conditions":[{"prefix":["args.task","T-"]}]})).unwrap().narrows(&parent));
+        assert!(!link(json!({"services":[{"audience":AUD,"purposes":["task.read"]}],"depth":1,"conditions":[{"prefix":["args.task","T-"]}]})).unwrap().narrows(&parent));
         let requested = member(
-            json!({"records":[{"namespace":"notes","access":"propose","kinds":["a","b"]}],
-            "services":[{"audience":AUD,"purposes":["*"]}]}),
+            json!({"records":[{"namespace":"notes","access":"propose","kinds":["a","b"]}],"services":[{"audience":AUD,"purposes":["*"]}]}),
         );
         assert!(
             member(json!({"records":[{"namespace":"notes","access":"read","kinds":["a"]}]}))

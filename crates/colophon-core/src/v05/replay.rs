@@ -9,8 +9,23 @@
 //! effect. Refusals before the reservation leave no trace.
 use std::collections::BTreeMap;
 
-/// Reservations are kept this long, whatever the account's policy (§12.4).
-pub const RETENTION_MS: i64 = 7_200_000;
+/// Reservations are kept this long, whatever the account's policy (§12.4). The spec says
+/// 7,200 s; this is 7,260 s so that the boundary can't reopen a key (see [`retained`]).
+pub const RETENTION_MS: i64 = 2 * MAX_WINDOW_MS + SKEW_MS;
+/// The widest window in which a call can pass §12.3 step 3: `|created − now| ≤ 3,600 s`.
+pub const MAX_WINDOW_MS: i64 = 3_600_000;
+/// Margin for clock skew between the instances sharing a store.
+pub const SKEW_MS: i64 = 60_000;
+// The invariant that makes a replay at the retention boundary impossible by construction: a
+// call is accepted only while |created − now| ≤ MAX_WINDOW_MS, so from its reservation at
+// time `at` it can be presented again at most until `at + 2 × MAX_WINDOW_MS`. An entry is kept
+// while `now − at ≤ RETENTION_MS`, strictly longer than that.
+const _: () = assert!(RETENTION_MS > 2 * MAX_WINDOW_MS);
+
+/// True while a reservation made at `at_ms` is retained at `now_ms` (inclusive, checked).
+pub fn retained(at_ms: i64, now_ms: i64) -> bool {
+    i128::from(now_ms) - i128::from(at_ms) <= i128::from(RETENTION_MS)
+}
 
 /// The reservation key `(account, audience, acting key ID, purpose, requestId)`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -133,8 +148,7 @@ impl MemoryReplayStore {
     }
     /// Drop reservations older than [`RETENTION_MS`].
     pub fn purge(&mut self, now_ms: i64) {
-        self.entries
-            .retain(|_, (at, _)| now_ms - *at < RETENTION_MS);
+        self.entries.retain(|_, (at, _)| retained(*at, now_ms));
     }
     /// Number of live entries (including expired ones not yet purged).
     pub fn len(&self) -> usize {
@@ -156,7 +170,7 @@ impl ReplayStore for MemoryReplayStore {
     fn lookup(&self, key: &ReplayKey, now_ms: i64) -> Option<ReplayState> {
         self.entries
             .get(key)
-            .filter(|(at, _)| now_ms - *at < RETENTION_MS)
+            .filter(|(at, _)| retained(*at, now_ms))
             .map(|(_, s)| s.clone())
     }
     fn reserve(&mut self, key: &ReplayKey, digest: &str, now_ms: i64) -> Reservation {
@@ -291,7 +305,12 @@ mod tests {
         ));
         assert_eq!(s.complete(&key("4"), "ok", None), Err(ReplayError::Missing));
         // Retention.
-        assert_eq!(s.reserve(&k, "d9", RETENTION_MS), Reservation::Reserved);
+        assert_eq!(
+            s.reserve(&k, "d1", RETENTION_MS),
+            Reservation::Replay,
+            "still retained at the boundary"
+        );
+        assert_eq!(s.reserve(&k, "d9", RETENTION_MS + 1), Reservation::Reserved);
         s.purge(RETENTION_MS * 3);
         assert!(s.is_empty());
     }

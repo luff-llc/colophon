@@ -2,7 +2,7 @@
 //!
 //! The core does no I/O and keeps no clock budget, so it can't impose the floor itself. A
 //! caller that verifies an account counts what it verifies with a [`FloorCounter`]: every
-//! authority entry, every pending object (transition, veto, receipt), every envelope byte and
+//! authority entry, every pending object (transitions, vetoes and receipts held outside the history; copies embedded in entries count only as those entries), every envelope byte and
 //! every signature verification (authority entries, transitions, vetoes, receipts, heads,
 //! `handover`, `additions`, embedded requests). Exceeding a limit is `unavailable` (history
 //! incomplete), never partial validity.
@@ -41,14 +41,10 @@ impl FloorLimits {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FloorCounter {
     limits: FloorLimits,
-    /// Authority entries counted.
-    pub entries: u64,
-    /// Pending objects counted.
-    pub pending_objects: u64,
-    /// Envelope bytes counted.
-    pub bytes: u64,
-    /// Signature verifications counted.
-    pub signatures: u64,
+    entries: u64,
+    pending_objects: u64,
+    bytes: u64,
+    signatures: u64,
 }
 impl FloorCounter {
     /// A counter enforcing `limits`. Limits below the floor are raised to it.
@@ -66,6 +62,15 @@ impl FloorCounter {
             bytes: 0,
             signatures: 0,
         }
+    }
+    /// Counts so far: `(entries, pending objects, bytes, signatures)`, each saturating.
+    pub fn counts(&self) -> (u64, u64, u64, u64) {
+        (
+            self.entries,
+            self.pending_objects,
+            self.bytes,
+            self.signatures,
+        )
     }
     /// The limits in force.
     pub fn limits(&self) -> FloorLimits {
@@ -106,10 +111,10 @@ impl FloorCounter {
     }
     /// True once any count passes half the floor: hosts MUST then warn the owner (§2.4).
     pub fn past_half_floor(&self) -> bool {
-        self.entries * 2 > FLOOR.entries
-            || self.pending_objects * 2 > FLOOR.pending_objects
-            || self.bytes * 2 > FLOOR.bytes
-            || self.signatures * 2 > FLOOR.signatures
+        self.entries.saturating_mul(2) > FLOOR.entries
+            || self.pending_objects.saturating_mul(2) > FLOOR.pending_objects
+            || self.bytes.saturating_mul(2) > FLOOR.bytes
+            || self.signatures.saturating_mul(2) > FLOOR.signatures
     }
 }
 

@@ -3,7 +3,9 @@
 //!
 //! Verification never changes stored bytes. High-S signatures are valid: `s` is normalized to
 //! `min(s, n − s)` only *after* every grammar check, and only for the verifying library.
-use super::descriptor::{general_origin_allowed, KeyDescriptor, WebAuthnKey};
+use super::descriptor::{
+    general_origin_allowed, Controller, KeyDescriptor, KeyForm, Role, WebAuthnKey,
+};
 use super::encoding::{bounds, encode_base64url};
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -25,6 +27,10 @@ pub enum SigFailure {
     /// `clientData` is over 8,192 bytes, not strict JSON, has a duplicate member or is not an
     /// object.
     ClientData,
+    /// `clientData` exceeds 8,192 bytes: `malformed` in every envelope (§2.4, revision 6).
+    ClientDataBound,
+    /// The key's descriptor has an unknown `form`: the signature can't be decided.
+    UnknownForm,
     /// `type` is not `"webauthn.get"`.
     Type,
     /// `challenge` is not the unpadded base64url of SHA-256(body).
@@ -128,9 +134,9 @@ fn der_integer(bytes: &[u8], at: &mut usize) -> Result<[u8; 32], SigFailure> {
 /// The origin rule a WebAuthn signature is checked under.
 #[derive(Clone, Copy, Debug)]
 pub enum OriginRule<'a> {
-    /// Authority signatures (§4.3 "Authority origins", revision 5): authority entries,
-    /// transitions, vetoes, `additions` and `handover` items. The caller sets this flag for
-    /// each of them; this module does not implement transitions or vetoes.
+    /// Authority signatures (§4.3 "Authority origins"): authority entries, transitions,
+    /// vetoes, `additions` and `handover` items. Prefer [`verify_authority_signature`], which
+    /// also applies each rule's UV requirement.
     Authority,
     /// The general rule only (`origins`, `https://<rp>` and its subdomains).
     General,
@@ -183,7 +189,7 @@ struct Client {
 /// §4.3 step 1 without the origin rule: strict parse, `type`, `challenge`, `crossOrigin`.
 fn check_client(body: &[u8], client_data: &[u8]) -> Result<Client, SigFailure> {
     if client_data.len() > bounds::CLIENT_DATA {
-        return Err(SigFailure::ClientData);
+        return Err(SigFailure::ClientDataBound);
     }
     let value = crate::keys::strict_json::parse(client_data).map_err(|_| SigFailure::ClientData)?;
     let map = value.as_object().ok_or(SigFailure::ClientData)?;
@@ -234,11 +240,11 @@ pub fn verify_webauthn(
 ) -> Result<WebAuthnOk, SigFailure> {
     let client = check_client(body, assertion.client_data)?;
     let origin_ok = match strictness {
-        Strictness::SwiftPredecessor => general_origin_allowed(&client.origin, &key.rp, &[]),
+        Strictness::SwiftPredecessor => general_origin_allowed(&client.origin, key.rp(), &[]),
         Strictness::Current => match rule {
             OriginRule::Authority => key.authority_origin_allowed(&client.origin),
             OriginRule::General | OriginRule::Call(_) => {
-                general_origin_allowed(&client.origin, &key.rp, key.origins())
+                general_origin_allowed(&client.origin, key.rp(), key.origins())
             }
         },
     };
@@ -246,7 +252,7 @@ pub fn verify_webauthn(
         return Err(SigFailure::Origin);
     }
     let data = assertion.authenticator_data;
-    if data.len() < 37 || data[..32] != Sha256::digest(key.rp.as_bytes())[..] {
+    if data.len() < 37 || data[..32] != Sha256::digest(key.rp().as_bytes())[..] {
         return Err(SigFailure::RelyingParty);
     }
     let flags = data[32];
@@ -294,9 +300,12 @@ pub fn webauthn_check(
     uv_required: bool,
     rule: OriginRule<'_>,
 ) -> Result<WebAuthnOk, SigFailure> {
+    if descriptor.is_unknown_form() {
+        return Err(SigFailure::UnknownForm);
+    }
     let key = descriptor.webauthn().ok_or(SigFailure::Form)?;
     verify_webauthn(
-        &descriptor.signing,
+        descriptor.signing(),
         key,
         body,
         der_signature,
@@ -305,6 +314,103 @@ pub fn webauthn_check(
         rule,
         Strictness::Current,
     )
+}
+
+/// The authority rule a signature is checked for. It fixes the origin rule and whether UV is
+/// required, so a caller can't pick a weaker rule by mistake (§4.3, §8.4, §8.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorityRule {
+    /// A signer counted under the control rule (UV on every WebAuthn signature).
+    Control,
+    /// A signer counted under the recovery rule (UV).
+    Recovery,
+    /// A `keyring` entry signer (`addThreshold` units holding `control`, with UV).
+    KeyringEntry,
+    /// A signer of a transition (authority origin, UV).
+    Transition,
+    /// A signer of a veto (authority origin, UV).
+    Veto,
+    /// A `handover` item (authority origin of the genesis descriptor, UV).
+    Handover,
+    /// The single rule (one `approve` signer): UV only with `verification`.
+    Single,
+    /// A `suspend` entry's signer: UV only with `verification`.
+    Suspend,
+    /// A possession proof in `additions`: UV only with `verification`; a `sign` controller's
+    /// proof may come from any origin its descriptor allows.
+    Possession,
+}
+impl AuthorityRule {
+    /// True when the rule marks its signatures "with UV".
+    pub fn requires_uv(self) -> bool {
+        matches!(
+            self,
+            Self::Control
+                | Self::Recovery
+                | Self::KeyringEntry
+                | Self::Transition
+                | Self::Veto
+                | Self::Handover
+        )
+    }
+}
+
+/// The outcome of a signature check that may be undecidable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Checked {
+    /// The signature verified.
+    Verified,
+    /// The signer's descriptor has an unknown `form`. Report `newerFormat`, but only after
+    /// every other check of the object has passed (§1).
+    UndecidableForm,
+}
+
+/// Verify one authority signature (an entry's primary or list item, a transition, a veto) by
+/// `controller` under `rule`: the authority origin rule and the rule's UV requirement are
+/// applied here. A `clientData` over 8,192 bytes is `malformed`; every other failure is
+/// `badSignature`; an unknown key form is [`Checked::UndecidableForm`].
+pub fn verify_authority_signature(
+    controller: &Controller,
+    body: &[u8],
+    signature: &[u8],
+    assertion: Option<AssertionBytes<'_>>,
+    rule: AuthorityRule,
+) -> super::Result<Checked> {
+    let key = controller.key();
+    let fail = |e: SigFailure| match e {
+        SigFailure::ClientDataBound => super::malformed("clientData exceeds 8,192 bytes"),
+        other => super::bad_signature(other.to_string()),
+    };
+    match (key.form(), assertion) {
+        (KeyForm::Unknown(_), _) => Ok(Checked::UndecidableForm),
+        (KeyForm::Raw { .. }, None) => verify_raw(key.signing(), body, signature)
+            .map(|_| Checked::Verified)
+            .map_err(fail),
+        (KeyForm::WebAuthn(w), Some(a)) => {
+            let origin_rule = if rule == AuthorityRule::Possession && controller.has(&Role::Sign) {
+                OriginRule::General
+            } else {
+                OriginRule::Authority
+            };
+            let uv = controller.verification() || rule.requires_uv();
+            verify_webauthn(
+                key.signing(),
+                w,
+                body,
+                signature,
+                a,
+                uv,
+                origin_rule,
+                Strictness::Current,
+            )
+            .map(|_| Checked::Verified)
+            .map_err(fail)
+        }
+        _ => Err(super::bad_signature(
+            "assertion present if and only if the signer is webauthn",
+        )),
+    }
 }
 
 /// An envelope that carries exactly `body` and `signature` (§4.1: requests, links, heads,

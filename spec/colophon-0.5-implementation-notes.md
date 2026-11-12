@@ -1,73 +1,78 @@
 # Colophon 0.5: implementation notes
 
 **Status:** running list kept while building `colophon_core::v05` (plan Steps 0, 1 and 4, and
-the call pipeline of Step 5) against [colophon-0.5.md](colophon-0.5.md) revision 5 (`a1decc6`).
-Each item names the section, the readings, and the one chosen. None of these choices is
-normative; each is a question for the next spec revision.
+the call pipeline of Step 5) against [colophon-0.5.md](colophon-0.5.md) revision 6 (`281e7c4`).
+Revision 6 made most of the earlier list into text (dates 0001–9999, printable ASCII, §1's single
+verification order, unknown `form`, renew without expiry, `revoke.heads`, the epoch shape,
+coverage, `serves`, `null` in `eq`/`in`, condition paths, three-valued conditions, the call
+policy rules, link-by-link checks, the replay look-up and reservation, home purposes). Those
+items are gone from this list. What remains is open.
 
 ## Scope decisions
 
 1. **"Step 0" is not a heading of the plan.** [changes §D](colophon-0.5-changes.md) calls the
    draft-1 move "implementation step 0"; the plan has it as the last bullet of Step V1. Done as
-   written there (vectors to `conformance/0.5/legacy-draft-1/`, the test reads them there, a
-   README says they aren't 0.5), and the module that replays them moved with them
-   (`colophon_core::v5` → `colophon_core::legacy_draft1`), byte-identical vectors.
-2. **Plan Step 1 names 0.4 files** (`keys/strict_json.rs`, `keys/descriptor.rs`,
-   `keys/webauthn.rs`, `keys/envelope.rs`, `crypto.rs`). Changing them would change 0.4. The
-   0.5 code is a new module beside 0.4 (`v05::*`); only `keys::strict_json::parse` is reused,
-   unchanged.
-3. **Out of scope, not implemented:** authority replay (§8.5), the §8.4 rule table, pending
-   transitions (§8.7), conflicts and forks (§8.6), upgrade (§16.1), succession (§15, §16),
-   slots and vault (§7), pairing (§7.3), the high-water mark, equivocation evidence, the
-   revocation walk (its outcome is an input to admission), proposals (§11.6), epochs.
+   written there, and the module that replays the vectors moved with them
+   (`colophon_core::v5` → `colophon_core::legacy_draft1`). The vectors are byte-identical.
+2. **Plan Step 1 names 0.4 files.** Changing them would change 0.4, so the 0.5 code is a new
+   module beside 0.4 (`v05::*`). Only `keys::strict_json::parse` is reused, unchanged.
+3. **Out of scope, not implemented:**
+   - authority replay (§8.5), the §8.4 rule table, pending transitions (§8.7), forks (§8.6);
+   - upgrade (§16.1), succession (§15, §16);
+   - slots and vault (§7), pairing (§7.3), epochs;
+   - the high-water mark, equivocation evidence, the revocation walk, proposals (§11.6).
 
-## Ambiguities and contradictions
+   §8.7's outcomes enter as inputs: `ControllerStatus` (pending addition or removal,
+   suspended, added-but-not-final) and `MemberStatus` (added-but-not-final, including homes),
+   and `AuthorView::provisional` for records.
+4. **The view is sealed.** `AccountView::from_history_verifier` is the only constructor. It
+   checks every structural invariant and returns an error, never a panic. Its only production
+   caller will be the Step-3 history verifier. Heads enter only as envelopes, and `verify_call`
+   verifies each one with `verify_head` at the call's clock. Controllers, members, policies and
+   terms are sealed types built by `parse` or by validating constructors. Unknown content is
+   part of each value (`unknown()`), never an out-parameter.
 
-| # | Section | Reading A | Reading B | Chosen |
-| --- | --- | --- | --- | --- |
-| 1 | §12.3 step 3, §12.4 (rev 5) | Step 3 "consults" the store, so a replay is refused at step 3 | The reservation is "after step 7 and before any effect", so nothing is looked at before | Both: a read-only look-up at step 3 (refuses replay/conflict early, writes nothing), and the compare-and-swap after **step 8**. "After step 7" also allows after 8; reserving after 8 means a `newerFormat` call reserves nothing, matching rev 5's "refusals no longer reserve". |
-| 2 | §1, §8.5 vs §12.3 | Unknown content (`newerFormat`, §8.5 step 4) is decided **before** schema violations (`malformed`, step 5) | §12.3 decides well-formedness at step 1 and unknown content at step 8 | Parsers return `malformed` eagerly and collect unknown content separately (`Unknown`). Right for calls. An authority replayer (step 3) needs an unknown-content pre-scan before the typed schema, or an entry with both gets `malformed` where §8.5 says `newerFormat`. |
-| 3 | §1, §3.1 | An unknown key `form` is unknown content, so `newerFormat` after authentication | The key can't verify anything, so no authentication is possible and the result is `badSignature` | `newerFormat` immediately: the object is of a known protocol and the reader can't proceed. |
-| 4 | §10.4, §12.3 steps 7–8 | An unknown predicate operator makes step 7 undecidable | — | It evaluates as true and is recorded as unknown, so a call can never be `ok` with it: it ends `newerFormat` at step 8, or `outOfScope` if a known predicate fails first. |
-| 5 | §10.4 | "1–8 dotted member names" counts the leading `args.` segment | Counts after dropping it | Counted as written (so `args.` plus 8 names is refused). |
-| 6 | §3.1 `origins`, §10.1 audiences | "Printable ASCII" includes space (0x20) | Excludes it | 0x21–0x7E, as the 0.4 engine. |
-| 7 | §2.2 dates | Year 0000 exists (ISO 8601 proleptic) | It doesn't | Refused; years 0001–9999. |
-| 8 | §2.4 vs §19 | `clientData` over 8,192 bytes is `malformed` (bounds) | Inside an envelope any failure of an attached signature is `badSignature` | In a call envelope the bound is checked at parse (step 1, `malformed`). The WebAuthn primitive itself reports `ClientData`, which an authority caller maps to `badSignature`. |
-| 9 | §12.1 | `notBefore` ≤ `expires` ≤ `notBefore` + `linkMaxAge` is a shape rule (`malformed`) | It is a validity rule (`refused:expired`) | `notBefore` ≤ `expires` is `malformed` at step 1 (no policy needed); exceeding `linkMaxAge` is `refused:expired` at step 6 (policy at S). |
-| 10 | §3.3 rule 4 | A link `to.signing` equal to a principal's point is `malformed` | `badSignature` or a refusal | `malformed`: a repeat within the call at step 1; a principal's point at step 6 (needs the history). |
-| 11 | §4.1, §12.3 | An assertion on a member call, or on a raw controller's call, is `malformed` | `badSignature` | Member + assertion: `malformed` at step 1 (knowable from the body). Controller form/assertion mismatch: `badSignature` at step 5 (needs the keyring). |
-| 12 | §12.3 step 4 | A call naming an account the verifier doesn't hold | — | `unavailable` (no verified history). |
-| 13 | §12.3 steps 4–5 | Freshness and `headQuorum` are read from the policy at S | S isn't known until freshness is | Freshness and quorum use the latest held policy; `callWindow` and `linkMaxAge` use the policy at S made field-wise stricter by every later held policy ("policy changes that shorten or restrict ... apply at once"). |
-| 14 | §12.3 step 5 | A demotion or descriptor tightening after S applies; a loosening doesn't | — | The controller must pass under **both** its state at S and its latest held state: roles are intersected, `verification` from either, and the assertion is verified under both descriptors. |
-| 15 | §12.3 step 5 | Member expiry compared with the call's `created` | With the verifier's clock | The verifier's clock, inclusive (`expires` is the last valid moment). |
-| 16 | §13.3 | A head more than 60 s ahead is refused how? | — | `unavailable` (not acceptable yet), not `malformed`. |
-| 17 | §9.4 | `renew` of a member with no expiry is valid (anything is "later") | Nothing is later than "never" | `malformed`: renew only extends, and there is nothing to extend. |
-| 18 | §9.5 | `heads` is a list of digests | A list of `{namespace, digest}` ("sorted by namespace then digest") | `{namespace, digest}` objects, sorted, at most 16 per namespace. The shape is not written down anywhere. |
-| 19 | §9.2, §9.4, §9.5 | `shares` and `epochs` have a 0.5 shape | — | Not restated in 0.5. Used the 0.3/0.4 epoch shape `{namespace, epoch, seals: {recipientID: {enc, ciphertext}}}` (§11.1). |
-| 20 | §9.2 coverage | "equal or higher access" means the granted entry's | The requested entry's | The requested access is equal or higher than the granted (granted ⊆ requested). |
-| 21 | §10.1 `serves` | Only `["home"]` is valid | Other values are unknown values | An unknown value is unknown content (`newerFormat`); duplicates are `malformed`. |
-| 22 | §10.4 | `eq`/`in` values may be `null` | `null` only where a rule allows | Allowed: they are compared as canonical bytes. |
-| 23 | §12.3 step 7, §13.4 | A recover-only controller's `colophon.history.read` call needs the purpose configured | A home has it implicitly | Configuration: a verifier lists it in its controller purposes. The vector `rules/call-recover-history-read` gives no `controllerPurposes` but `"role":"home"`; the runner treats a home as configuring it. The spec should say so. |
-| 24 | §16.3, §4.3 | "Lenient" predecessor verification relaxes DER | Rev 4/5: §16.3 uses §4.3 step 5 unchanged | No lenient DER exists in the text. The `Strictness::SwiftPredecessor` parameter only changes the origin rule (general rule, no `origins`/`authorityOrigins`). Whether CryptoKit's `rawRepresentation` accepted r or s = 0 is unknown; refused. |
-| 25 | §8.4 possession at genesis | The primary signer of a genesis also needs an `additions` item | Its primary signature is its possession proof | Not implemented (§8.4), but the `origin-*` vectors use reading B. |
-| 26 | §12.3 step 6 | Per-link checks run link by link, the acting-key check last | Each check across all links | Link by link, in the sentence's order (signature/account/from, session, time, narrowing), then the acting key. |
-| 27 | §6.1, rev 5 statuses | "Suspended" and "added by a non-final activation" | — | Inputs of the view (`ControllerStatus`), both `refused:revoked`; pending addition also `refused:revoked`; pending removal works. Members appointed by a non-final activation (homes) have no status in the view; §12.3 speaks only of controllers. |
-| 28 | §2.4 rev 5 | The core enforces the portability floor | The floor is a service obligation | `v05::floor::FloorCounter`: counters the caller increments for entries, pending objects, bytes and signatures; limits never below the floor; `unavailable` beyond them; `past_half_floor` for the owner warning. |
+## Still open
+
+| # | Section | Question | What this implementation does |
+| --- | --- | --- | --- |
+| 1 | §12.4 retention | Retention of 7,200 s with `\|created − now\| ≤ 3,600 s`, compared with `<`, lets a call created at T + 3,600 be accepted at T and again at exactly T + 7,200 | Keeps reservations 7,260 s (2 × 3,600 s + 60 s skew), compared inclusively: retained while `now − reservedAt ≤ 7,260 s`. A compile-time assertion states the invariant, and a test checks the boundary values. **Proposed §12.4 sentence:** "A reservation is kept while `now − reservedAt ≤ 7,260 s` (more than twice the 3,600 s window of §12.3 step 3, plus 60 s of clock skew), so no call it guards can be accepted again." |
+| 2 | §4.3 general rule | Any prefix without `/ : ? # @ \`, empty labels or edge dots is allowed (uppercase, `%`, spaces, non-ASCII) | Safe reading: the whole host must follow the `rp` label grammar. This refuses `https://A.id.example`, `https://%2e.id.example`, `https://a b.id.example` and `https://évil.id.example`. Divergence risk: a verifier on the literal rule would accept those origins. |
+| 3 | §2.1 numbers | Two shortest decimals that both round-trip | Ryū's tie-breaking (ties to even, like ECMAScript); the ported attack test `number_forms_exhaustive` checks it against an independent model. The spec should say "ties to even". |
+| 4 | §2.3 strings | Lone surrogates (`\ud800`) | Refused everywhere, including inside members a reader ignores and in `clientData`. JavaScript's `JSON.parse` accepts them, so a TypeScript port must refuse them explicitly. |
+| 5 | §2.3 nesting | No nesting bound | serde_json's recursion limit: 127 levels parse, 128 or more don't. The spec should state a bound. |
+| 6 | §1, §8.5 | The unknown-content scan for authority entries | `v05::prescan::authority_fields` reports unknown content without failing on malformed known fields, so a replayer can decide step 4 (`newerFormat`) before step 5 (`malformed`). It covers genesis keyrings, policies, controllers, descriptors, grant, renew, revoke and endSessions fields, terms and epoch objects. |
+| 7 | §4.3, §8.4 | Which signatures are "with UV" | `AuthorityRule` fixes the rule: UV for control, recovery, `keyring`, transition, veto and `handover` signatures. Single-rule, `suspend` and possession signatures need UV only with `verification`. A `sign` controller's possession proof uses the general origin rule. `handover` needing UV is this implementation's reading (§16.3 marks UV for predecessor keys). |
+| 8 | §12.3 step 7 | Members at a home: `colophon.history.read` and `colophon.home.read` are allowed to "any current member" (§13.4, §14) | Allowed for a member calling with its own key (no links) at the home's own endpoint. `colophon.home.write` and linked calls still need terms granting the purpose. The rule for links is not written. |
+| 9 | §12.3 step 5 | A controller removed after S and re-added after S | Refused (`refused:revoked`): the removal after S applies, and an addition after S doesn't count. |
+| 10 | §12.3 step 5 | A controller whose key form differs between S and the latest state (for example WebAuthn with `verification` at S, raw later) | The call must meet both forms; since a call can't, it's `badSignature`. |
+| 11 | §1 unknown `form` | When is `newerFormat` reported for a call by a controller with an unknown key form? | After possession (step 2), authorization (roles, purpose) and extensions: it is the last result before `ok`, and it reserves nothing. Authority signatures return `Checked::UndecidableForm` for the caller to defer. |
+| 12 | §16.3 | A lenient predecessor DER form | None exists in the text. `Strictness::SwiftPredecessor` changes only the origin rule (general rule, no `origins`). Whether CryptoKit's `rawRepresentation` accepts r or s = 0 is unknown; refused. |
+| 13 | §8.4 possession at genesis | Does the primary signer also need an `additions` item? | Not implemented (§8.4); the `origin-*` vectors use "no". |
+| 14 | §11.5 after opening | An unknown condition operator deciding a record's admission | `Admission::NewerFormat`. §11.5 has no `newerFormat` row. |
+| 15 | §13.3 | A head more than 60 s ahead | `unavailable`, as revision 6 now says; it doesn't count for quorum. |
+
+## What the vectors should carry
+
+The runner derives §8.7 statuses from structured data, never from descriptions:
+- a transition object that no `activate` in the records embeds is pending;
+- a `suspend` entry suspends its key;
+- an activation is final once every home current before it has a fresh head covering it.
+
+The last one is a fixture-level reading of §8.7 "Finality". Vectors that depend on a status
+should state it, so that no implementation has to compute §8.7 to read them, for example:
+
+```json
+"verifier": {"statuses": {"controllers": {"<id>": "pendingAddition|pendingRemoval|suspended|addedNotFinal"},
+                          "members": {"<id>": "addedNotFinal"}}}
+```
+
+Needed by: `rules/call-by-pending-addition`, `call-by-pending-removal`,
+`call-by-provisional-addition`, `call-by-suspended` and `call-suspended-history-read`. The home
+appointments in `account/` and every `rules/` base history need `members` statuses too (final).
 
 ## Vectors that look wrong
 
-- **`calls/one-link`** expects `ok`. The member's terms carry
-  `conditions: [{"prefix": ["args.task", "T-"]}]`; the link's terms carry none. §10.3: B narrows
-  A only when "every predicate of A's `conditions` equals, by canonical JSON, some predicate of
-  B's". So step 6 is `refused:notNarrower`. `generate.py`'s `narrow` omits the condition. The
-  engine's own test builds the same call with the condition copied into the link: `ok`.
-- **`calls/copied-link`** expects `badSignature`. It reuses the same link, which fails
-  narrowing at step 6 before the acting-key comparison that ends step 6. With a narrowing link
-  the engine returns `badSignature` (own test).
-- **`account/` and every vector built on it (all of `calls/*`, `heads/*`, `rules/replay-*`,
-  `rules/removal-after-heads`)** appoint the home by an ordinary `grant` entry at seq 3. Rev 5
-  §8.4 lists `grant` as immediate only "not homes, not `import`", and home appointment as a
-  pending transition. Under rev 5 that history is `malformed` at seq 3. The runner's fixture
-  loader doesn't evaluate §8.4, so these vectors still run; a replayer would refuse them.
-- **`calls/outside-window`**'s description cites step 3; 660 s is inside step 3's 3,600 s and
-  is refused at step 4 by `callWindow`. Same outcome.
+None at revision 6. The four flagged at revision 5 (`calls/one-link`, `calls/copied-link`,
+`account/`, `calls/outside-window`) are fixed in the revision-6 corpus, and every in-scope vector
+passes.

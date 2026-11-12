@@ -1,4 +1,4 @@
-//! Colophon 0.5 (candidate, revision 4): the foundation layers.
+//! Colophon 0.5 (candidate, revision 6): the foundation layers.
 //!
 //! **Not released, not frozen.** This module implements the parts of
 //! `spec/colophon-0.5.md` that the reviewers consider stable: canonical encoding (§2),
@@ -21,6 +21,7 @@ pub mod floor;
 pub mod heads;
 pub mod ids;
 pub mod members;
+pub mod prescan;
 pub mod records;
 pub mod replay;
 pub mod signature;
@@ -63,6 +64,8 @@ pub enum Reason {
     BudgetSpent,
     /// §11.5: the header is fenced out by format.
     WrongFormat,
+    /// §11.5, 0.3 §5: the payload doesn't authenticate or doesn't match its header.
+    InvalidPayload,
 }
 impl Reason {
     /// The reason's protocol spelling, without the `refused:` prefix.
@@ -85,6 +88,7 @@ impl Reason {
             Self::ClockJump => "clockJump",
             Self::BudgetSpent => "budgetSpent",
             Self::WrongFormat => "wrongFormat",
+            Self::InvalidPayload => "invalidPayload",
         }
     }
 }
