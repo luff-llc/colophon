@@ -1,6 +1,8 @@
 //! Links and calls (§12.1–§12.3) as a pure function over a **given** verified view.
 //!
-//! The view ([`AccountView`]) is built only by [`AccountView::from_history_verifier`], which
+//! The view ([`AccountView`]) is built from the history verifier's verdict by
+//! [`AccountView::from_history_verifier`]; [`AccountView::from_parts_unverified`] assembles one
+//! from parts the caller vouches for (tests and tools only). Both check every invariant and
 //! validates every structural invariant and returns an error instead of panicking. Its only
 //! production caller is the history verifier of plan Step 3 (§17.2); this crate does not
 //! verify authority histories yet, so the controllers, members and policies it is given are
@@ -248,10 +250,131 @@ pub struct AccountView {
 pub const MAX_VIEW_HEADS: usize = 64;
 
 impl AccountView {
-    /// Build a view from the history verifier's output, checking every structural invariant.
-    /// The only production caller is the Step-3 history verifier; anything else passing claims
-    /// it didn't verify is outside this crate's guarantees.
-    pub fn from_history_verifier(v: HistoryVerifierOutput) -> Result<Self> {
+    /// Build a view from the history verifier's verdict over `objects` (§8, §17.2), at the
+    /// verifier's clock. Statuses come from the verdict: controllers added by an activation with
+    /// no finality are `AddedNotFinal`; outstanding suspensions (until their transition's due
+    /// time + 7 days) are `Suspended`; held transitions that are valid against the state and not
+    /// recorded make the keys they add `PendingAddition` and the keys they remove
+    /// `PendingRemoval`. An unresolved fork makes every call `refused:fork`.
+    pub fn from_history_verifier(
+        verdict: &crate::v05::history::Verdict,
+        objects: &crate::v05::history::Objects,
+        now_ms: i64,
+    ) -> Result<Self> {
+        use crate::v05::history::{check_pending_transition, HomeStatus, Stop};
+        let st = verdict
+            .state
+            .as_ref()
+            .ok_or_else(|| Failure::Unavailable("no verified history".into()))?;
+        let mut statuses: BTreeMap<String, ControllerStatus> = BTreeMap::new();
+        for id in st.keyring().controllers.keys() {
+            if st.controller_provisional(id).is_some() {
+                statuses.insert(id.clone(), ControllerStatus::AddedNotFinal);
+            }
+        }
+        for sp in &st.suspensions {
+            if now_ms <= sp.ends_ms() {
+                statuses.insert(sp.key.clone(), ControllerStatus::Suspended);
+            }
+        }
+        let mut pending_add: Vec<String> = Vec::new();
+        for o in &objects.pending {
+            let Ok(env) = crate::v05::history::envelope::AuthEnvelope::parse(
+                o,
+                bounds::TRANSITION_ENVELOPE,
+                bounds::TRANSITION_ENVELOPE,
+                false,
+            ) else {
+                continue;
+            };
+            if env.value.get("protocol").and_then(Value::as_str) != Some("colophon/transition/5")
+                || st.recorded.contains(&env.digest)
+                || check_pending_transition(st, o).is_err()
+            {
+                continue;
+            }
+            let kc = env.value.get("change").and_then(|c| c.get("keyring"));
+            for id in kc
+                .and_then(|k| k.get("remove"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(id) = id.as_str() {
+                    statuses
+                        .entry(id.to_string())
+                        .or_insert(ControllerStatus::PendingRemoval);
+                }
+            }
+            for c in kc
+                .and_then(|k| k.get("add"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(c) = Controller::parse(c.clone(), "add") {
+                    if !st.keyring().controllers.contains_key(&c.id()) {
+                        pending_add.push(c.id());
+                    }
+                }
+            }
+        }
+        let mut controllers = Vec::new();
+        for (id, versions) in &st.ever {
+            let status = statuses
+                .get(id)
+                .copied()
+                .unwrap_or(ControllerStatus::Active);
+            controllers.push(ViewController::new(id.clone(), versions.clone(), status)?);
+        }
+        for id in pending_add {
+            if !st.ever.contains_key(&id) {
+                controllers.push(ViewController::new(
+                    id,
+                    Vec::new(),
+                    ControllerStatus::PendingAddition,
+                )?);
+            }
+        }
+        let mut members = Vec::new();
+        for m in st.members() {
+            let status = if m.provisional.is_some() {
+                MemberStatus::AddedNotFinal
+            } else {
+                MemberStatus::Active
+            };
+            let _ = HomeStatus::Home;
+            members.push(ViewMember::new(
+                m.request.signing.clone(),
+                m.request.kind.clone(),
+                m.terms.clone(),
+                m.granted_seq,
+                m.renewals.clone(),
+                m.end_sessions.clone(),
+                m.revoked_seq,
+                status,
+            )?);
+        }
+        Self::from_parts_unverified(HistoryVerifierOutput {
+            account: st.account().clone(),
+            history: st.history().to_vec(),
+            policies: st.policies.clone(),
+            controllers,
+            members,
+            heads: objects.heads.clone(),
+            vouched_fork: matches!(verdict.stop, Some(Stop::Fork { .. })),
+            principal_points: st
+                .points
+                .iter()
+                .filter(|p| p.len() == 65)
+                .cloned()
+                .collect(),
+        })
+    }
+    /// Assemble a view from parts the caller vouches for, checking every structural invariant.
+    /// Production code builds views with [`AccountView::from_history_verifier`]; this is for
+    /// tests and tools, and anything it is given is outside this crate's guarantees.
+    pub fn from_parts_unverified(v: HistoryVerifierOutput) -> Result<Self> {
         let held = v.history.len() as u64;
         require(held >= 1, "a view needs at least the genesis")?;
         require(
@@ -298,6 +421,14 @@ impl AccountView {
     /// The account.
     pub fn account(&self) -> &AccountId {
         &self.v.account
+    }
+    /// The status of controller `id` in this view.
+    pub fn controller_status(&self, id: &str) -> Option<ControllerStatus> {
+        self.v
+            .controllers
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.status)
     }
     /// Held history digests.
     pub fn history(&self) -> &[String] {

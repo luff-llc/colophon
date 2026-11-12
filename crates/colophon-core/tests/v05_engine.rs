@@ -770,7 +770,7 @@ fn build(fx: &Fx, p: &Parts) -> AccountView {
     ]
     .into_iter()
     .collect();
-    AccountView::from_history_verifier(HistoryVerifierOutput {
+    AccountView::from_parts_unverified(HistoryVerifierOutput {
         account: p.account.clone(),
         history: p.history.clone(),
         policies: p.policies.clone(),
@@ -1154,7 +1154,7 @@ fn sealed_view_refuses_invalid_input_and_never_panics() {
         vouched_fork: false,
         principal_points: BTreeSet::new(),
     };
-    assert!(AccountView::from_history_verifier(ok()).is_ok());
+    assert!(AccountView::from_parts_unverified(ok()).is_ok());
     for bad in [
         HistoryVerifierOutput {
             history: vec![],
@@ -1181,7 +1181,7 @@ fn sealed_view_refuses_invalid_input_and_never_panics() {
             ..ok()
         },
     ] {
-        assert!(AccountView::from_history_verifier(bad).is_err());
+        assert!(AccountView::from_parts_unverified(bad).is_err());
     }
     let pc = passkey_ctrl(&fx.passkey);
     assert!(ViewController::new(
@@ -1266,7 +1266,7 @@ fn sealed_view_refuses_invalid_input_and_never_panics() {
     )
     .unwrap();
     assert!(
-        AccountView::from_history_verifier(HistoryVerifierOutput {
+        AccountView::from_parts_unverified(HistoryVerifierOutput {
             members: vec![m],
             ..ok()
         })
