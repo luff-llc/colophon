@@ -1,1 +1,1 @@
-{"description":"K1 (current at head) vetoes; the successor home records it as `vetoed`.","expected":{"succession":"unverified"},"sections":["15.1","16.3"]}
+{"description":"K1 (current at head) vetoes; the successor home records a successionVetoed entry.","expected":{"seq3":"successionVetoed ok","succession":"unverified"},"sections":["15.1","16.3"]}

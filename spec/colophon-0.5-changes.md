@@ -1,18 +1,21 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 5, 2026-11-12. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 6, 2026-11-12. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
 "Codex N" and "H/M/L N" are the two reviews of revision 1 (152d991), mapped in §G.1–§G.3.
 "Opus R/M" and "Codex2 H/M" are the two reviews of revision 2 (9e90470), mapped in §G.4–§G.5.
 "Codex3" and "Opus3" are the third reviews (of 365f52b), mapped in §G.7. "Opus4" and "Codex4" are the
-fourth reviews (of 4032d44), mapped in §G.8. The worked theft and loss scenarios moved from the spec
+fourth reviews (of 4032d44), mapped in §G.8. "Opus5" and "Codex5" are the fifth reviews (of
+a1decc6) and "Builder N" the engine builder's implementation notes (`engine-0.5-foundation`,
+04c0eef), mapped in §G.9. The worked theft and loss scenarios moved from the spec
 to §H. Revision 4 replaces the
 revision-2 and revision-3 recovery machinery (provisional keys, cancel, attempt 2,
 counter-recovery, full recovery, the primary yield, the no-home digest tie-break) with one
-mechanism: **pending transitions with veto** (spec §8.7). Rows of §A, §F and §G below that name
-the removed machinery are kept as history and marked superseded by §G.7.
+mechanism: **pending transitions with veto** (spec §8.7). Rows of §A and §G below that name the
+removed machinery are kept as history and marked superseded by §G.7; §F lists only the decisions
+now in force.
 
 ## What existing keyrings actually are
 
@@ -113,6 +116,24 @@ clocks and admission.
 | 50 | Succession: receipt window from the appointing entry; vetoers bounded; vetoes recorded as `vetoed` in the successor; competing attempts and premature freezes; root alone signs a root library's hand-over | Opus4 H10, M6; Codex4 Medium 4 |
 | 51 | Replay reservation after step 7; `abandoned` terminal state; external-object limits and an all-signature budget in the floor | Opus4 M10; Codex4 Mediums 5, 6 |
 
+### A.3 Revision 6
+
+| # | Change | Why |
+| --- | --- | --- |
+| 52 | Recording entries are once only per transition, carry every object they rely on (`vetoed` also `transitionReceipts`), have exact schemas, and are `malformed` when not determined, out of time (7 days, checkable) or carrying invalid receipts; v(u) counts distinct transitions | Opus5 H1, M4, M8 |
+| 53 | Due time = `issued` + 300 s + delay once `headQuorum` receipts exist; veto deadline 300 s earlier; receipts forwarded between homes and chosen by lowest home ID; two recordings that differ only in receipts ordered by digest; displaced signed entries go back to their signers | Opus5 H3; Codex5 Medium 7 |
+| 54 | Finality judged against the homes current before the activation, in order; a full set against the homes after it; a final activation is never displaced (a later `vetoed` is evidence); whatever a provisional activation adds counts for nothing; rollback removes the suffix only; the recovery rule may change homes, so a gone home can be revoked by one full set | Opus5 H2; Codex5 High 1, High 2, Medium 6 |
+| 55 | `suspend` carries its transition and receipts; it ends computably; a void transition can't be receipted or cited; one per unit; suspended keys read the history; §12.3 applies suspensions after S | Opus5 H4 |
+| 56 | `policy.rate`, checked by every verifier; planted keys charged to their adder; four controllers per addition; revocations outside the account limit | Opus5 H5; Codex5 Medium 8 |
+| 57 | `keep` | Opus5 M1 |
+| 58 | Homes store an `activate` they didn't receipt only if they saw it within its window (or were down) | Opus5 M2 |
+| 59 | Vault change carries `previousVault` in the transition; its `activate` is determined; a `rekey` follows; slots dropped by rebasing rebuilt by the host that holds the new seed | Opus5 M3; Codex5 High 3 |
+| 60 | Composite rule: one rule for every component | Opus5 M6; Codex5 Medium 5 |
+| 61 | Succession: deterministic window and due time; vetoers within the delay before the genesis; `successionVetoed`; no tie; any layout above 2 freezes | Opus5 M5; Codex5 High 4 |
+| 62 | Roles carry over exactly on upgrade; reference setup for new accounts separate; a phone-only person gets a security key with `control` + `recover`; a paragraph hosts can show | The architect's reference-setup decision; Opus5 Q3 |
+| 63 | One verification order (§1); the builder's 28 ambiguities settled (§G.9) | Builder |
+| 64 | Rationale, warning wording, host interface, not-in-version and the review log moved to the non-normative guide; persisted verifier state (§17.2) | Opus5 Q9; Codex5 Medium 7 |
+
 ## B. Galley's requirements
 
 ### B.1 Contract §13 (R1–R13, revision 1 of the contract)
@@ -206,6 +227,17 @@ Revision 5 adds:
 | 21 | §11.2 | Handover by the current root alone (root library); the successor's homes receipt the genesis within 300 s of their own appointment; vetoes become `vetoed` entries in the successor |
 | 22 | Reference deployment | Two homes for people (different operators); the identity service may be one of them |
 
+Revision 6 adds:
+
+| # | Contract | 0.5 revision 6 |
+| --- | --- | --- |
+| 23 | Galley's home | Forward every transition, veto and receipt to the other homes; sign at most one receipt per object; append recording entries with exactly the chosen receipts (`vetoed` carries `transitionReceipts`); store an `activate` it didn't receipt only if it saw the transition within 300 s of its `issued`; refuse entries over `policy.rate`; never store an `activate` after holding a valid veto |
+| 24 | Countdowns in the approval card | Due = transition `issued` + 300 s + delay; veto deadline = `issued` + delay |
+| 25 | Using a newly added controller or home | Count it for nothing (no signatures, no receipts, no heads, no calls) until its activation is final against the homes current before it |
+| 26 | Policy parsing | `policy.rate` is a required field |
+| 27 | §11.2 and the Taupe/Marginalia upgrade | Roles carry over exactly; the reference roles are an offered pending transition, never applied by the tool. Succession window from the first entry with `headQuorum` homes; vetoes become `successionVetoed` entries; any key current within the delay before the genesis may veto |
+| 28 | Phone-only people | Offer one security key with `control` + `recover` |
+
 Two further points the contract needs:
 
 - **Accounts as controllers** (contract 0.1, 1.4, 7.1) aren't in 0.5 (§C). A company's controllers
@@ -278,30 +310,32 @@ Two further points the contract needs:
 
 ## F. Design forks decided
 
+The decisions in force at revision 6. Superseded forks (cancel, attempt 2, provisional keys,
+"what a delay blocks", full recovery, the no-home digest tie-break) are in §G.1–§G.7 as history.
+
 | Fork | Chosen | Rejected, and why |
 | --- | --- | --- |
 | 0.4 → 0.5 | In place | Clean copy: loses members and IDs for nothing. |
-| Swift → 0.5 | Clean copy with a frozen predecessor, a verified hand-over and a migration entry | Teaching every 0.5 verifier to read Swift content forever. Only the authority part of §16.3 is needed, and only for succession. |
-| Succession anchor | The predecessor's single final entry, at `head.seq + 1` | The reviewer's text puts the final entry at `head`. That is a cycle: the final entry names the genesis's digest, and the genesis would name the final entry's. The one-entry offset gives the same uniqueness and freshness. |
-| Recovery default | Any one recovery key, plus a 72 h delay, receipts and a one-key cancel | Codex 2's `max(2, threshold)` recovery signers. It overrides the owner's stated default; the delay makes one-key recovery safe instead. |
-| What a delay blocks | Every signature by the recovery-added key until the delay ends | H2's narrower list (only weakening entries). The narrow list means home-side judgement about which entries weaken; the broad rule is deterministic. A recovery key with `approve` (the reference default) still admits apps during the delay. |
-| Who attests time | Any current home's receipt | Only the primary (one point of failure for recovery), or `issued` alone (backdatable). |
-| `issued` at homes | Refused more than 60 s ahead; recovery entries refused more than 300 s either way | H2's 60 s in both directions for every entry. That would refuse honest entries signed offline and uploaded later. |
-| Below-threshold additions | Provisional: approve only, no slot, `until` ≤ 30 days | Codex 1's "no role at all". That makes the one-approval add useless; approve-only with an expiry bounds it. |
-| Fork resolution | `resolve` under the control and recovery-set rules of the pre-fork keyring | First-seen wins. That diverges forever across verifiers. |
-| PRF exposure | Stated, plus deployment rules, plus combined slots as a setting | Codex 3's mandatory combined slot or `vaultOrigins` allowlist. Browsers, not the account, decide which origins get PRF; an allowlist in the account can't be enforced. |
-| Freshness | Primary home plus `headQuorum`, stated limits | Codex 5's pinned witness or checkpoint. It is a new trust root; left as an extension. |
-| Pairing | Commit-then-reveal SAS, or QR | A PAKE: no allowlisted implementation, and SAS has the same one-in-a-million bound per attempt. |
-| Epoch and slot labels | Unchanged | `/5` labels: no gain, double code. |
-| Recovery without a home | Allowed, with no delay, and a MUST warning; the reference setup appoints a home before adding any recovery key | Codex2 H1's "two recovery holders when no witness". It would override the owner's one-key default. The owner can still choose `recoverThreshold` 2 |
-| Delay witness | Receipts from `headQuorum` homes, latest counts; any home stores recovery and cancel entries | Codex2 H1's mandatory two independent homes. `headQuorum` 2 gives exactly that as a setting; companies default to it |
-| Repeated cancel | Attempt 2: twice the delay, cancellable only with a counter-recovery; attempt-2 additions removable only under the recovery-set rule | Codex2 M1's "solo cancel once per epoch, then final after a dispute period". Attempt 2 is the same idea with a deterministic trigger. The full-quorum override the architect suggested is kept as "full recovery" for the homes-gone case |
-| Fork classification | Evidence when heads cover one branch; recovery at a non-primary home yields to the primary; vouched forks need `resolve`; no-home conflicts by rule strength, then digest | Codex2 H2's "finality certificate from a home quorum" for every account. This needs homes for everyone; rule 4 covers accounts without homes and can never freeze |
-| Succession finality | Publication at named places (the predecessor's homes; the successor's homes for Swift), persistence, refusal for recovery-added signers | Codex2 H3's fixed multi-home finality proof with a fresh challenge. It is a new protocol; `headQuorum` ≥ 2 on the predecessor gives the multi-home property as a setting, and the limit at quorum 1 is stated |
-| Holders | Labels attested by the controllers; the key co-signs its own label; recovery-set rule for recover keys | Codex2 M4's "cryptographically bound stable principal". 0.5 has no identity layer for people, and inventing one would be a second account system |
-| Provisional authority | Calls and services-only grants; bound to sponsors; one at a time; `until` never extended | Codex2 M3's "no grants at all before confirmation". Services-only grants keep the one-approval new-platform case useful; records grants are refused |
-| History bound | Portability floor 65,536 entries and 256 MiB; services MAY set higher limits and answer `unavailable` beyond them | Codex2 M6's "resumable from an authenticated checkpoint". Resumption is from the verifier's own persisted state; a signed checkpoint is still refused (R4) |
-| Swift DER leniency | Exactly what CryptoKit accepted on macOS 27, probed; duplicate `clientData` refused, with the preflight to find any | Strict §4.3 grammar for predecessors, which could make real libraries unmigratable (Opus M-f) |
+| Swift → 0.5 | Clean copy with a frozen predecessor, a verified hand-over and a migration entry; roles carried over exactly | Teaching every verifier to read Swift content forever; guessing the owner's intended roles. |
+| Succession anchor | The predecessor's single final entry, at `head.seq + 1` | The final entry at `head`: a cycle with the genesis digest. |
+| Recovery | One mechanism: any change that isn't immediate is a pending transition, due at `issued` + 300 s + delay, vetoable until 300 s before that by as many non-signing units, with escalation | Special recovery entries, cancels and attempts (revisions 2–3); `max(2, threshold)` recovery signers, which overrides the owner's one-key default. |
+| Immediate class | Member grants, approve and sign additions (four per entry), relabels and self-tightening, bounded by a rate limit every verifier checks and charged to the planting key | Everything pending: a new browser couldn't sign in with one approval; a rate limit enforced only by the primary, which a thief could use to block revocations. |
+| Suspension | An explicit entry by a signer of a valid pending removal, ending computably | Automatic suspension: one recovery key could cut off every owner key for the delay. |
+| Time witness | Receipts from `headQuorum` homes within 300 s of `issued`; the due time doesn't depend on which receipts a home holds | Due time from the receipts held (homes disagree); `issued` alone (backdatable). |
+| Finality | Every home current before the activation covers it, in order; a full set needs the homes after it; final activations are never displaced | Homes after the activation for every transition: a thief who revokes the honest home finalizes with the hostile one alone (Opus5 H2's text, see §G.9). |
+| Rollback | Removes the provisional activation and its suffix; nothing it added has signed | Re-verifying the suffix at new positions: signed entries can't move. |
+| Gone home | One full-set transition revokes it (the recovery rule may change homes) | No exit (additions stuck for ever); a separate override entry. |
+| Vault change | `previousVault` in the transition, a determined `activate`, then a `rekey` | Resealing every epoch inside a signed `activate`: overflows 1 MiB in long-lived accounts and needs one device. |
+| Fork resolution | `resolve` under the pre-fork keyring | First-seen wins: diverges across verifiers. |
+| PRF exposure | Stated, with deployment rules and combined slots as a setting | A mandatory combined slot or an origin allowlist the account can't enforce. |
+| Freshness | Primary home plus `headQuorum`, stated limits | A pinned witness or signed checkpoint: a new trust root. |
+| Pairing | Commit-then-reveal SAS, or QR | A PAKE: no allowlisted implementation, same bound per attempt. |
+| Epoch and slot labels | Unchanged `/3` and `/4` labels | New labels: no gain, double code. |
+| No home | Allowed, with a MUST warning: no delay, no veto, no theft safety | Mandatory homes: would override the owner's choice. |
+| Holders | Labels attested by the controllers; counting units everywhere | A bound person identity: a second account system. |
+| History bound | Portability floor; services answer `unavailable` beyond their limits | A signed checkpoint (R4). |
+| Swift DER | §4.3 step 5 exactly (CryptoKit on macOS 27 accepts the same set); duplicate `clientData` refused | A lenient form nobody needs. |
+| Root library hand-over | The root alone; the veto window protects the owner | Root and kit together: friction without stopping either thief. |
 
 ## G. Changes after review
 
@@ -514,7 +548,7 @@ the machinery it makes redundant.
 | Opus4 M9 headroom wording, slots | §6.2 |
 | Opus4 M10 replay reservation | §12.4 |
 | Opus4 M11 members of a removed key | §17.5 |
-| Opus4 lows | 7-day bound by home clock (§13.1); relabel display (§6.1); full-set rationale (§8.7); root-only hand-over (§15.1); premature freeze (§15.1, §16.2); `until` gone from the plan; floor and background verification (§2.4); approve key with its slot in one entry (§8.4); 300 s at quorum 2 (§17.1 note below) |
+| Opus4 lows | 7-day bound by home clock (§13.1); relabel display (§6.1); full-set rationale (§8.7); root-only hand-over (§15.1); premature freeze (§15.1, §16.2); `until` gone from the plan; floor and background verification (§2.4); approve key with its slot in one entry (§8.4); 300 s at quorum 2 (spec §17.5 "Quorum 2", added in revision 6) |
 | Opus4 §E 17 guesses | evaluation state; re-checks; due-time receipts; signer set; ordering; rule-1 condition; full set; delta semantics; slot rebasing; "who can't propose" (removed: a removed signer voids at activation); mutual removal tie (equal due time to the second voids both, via §8.6 rule 1 ordering then void); 7-day bound; veto signer currency (state before the `vetoed` entry); v(u) after re-add (kept); headroom; Swift veto recording; losing-branch anchor (void). All in §8.6–§8.7, §6.2, §15.1 |
 | Opus4 cuts | Who-wins table moved here (§H); probe narrative cut; §17.2, §15.3, §15.4, §16.2 shortened. The spec is 1,724 lines (from 1,771). `countBy: holders` kept: the owner's company case needs it, and counting units make it uniform |
 | Codex4 High 1 immediate takeover | §8.4. Approve and sign additions and member grants stay immediate (the architect's earlier decision); one key's worst use of each is tabulated with its bound |
@@ -525,31 +559,100 @@ the machinery it makes redundant.
 | Codex4 Mediums | counting units (§6.1); conditional bounds (§H); succession attempts (§15.1); external-object limits and the all-signature floor (§2.4, §8.7); replay `abandoned` (§12.4) |
 | Codex4 low: auto-suspension | Rejected as automatic. Suspension is an explicit entry by a signer of a pending removal, and costs one veto if abused |
 
+### G.9 Fifth reviews (of a1decc6) and the engine builder's notes
+
+| Finding | Settled in |
+| --- | --- |
+| Opus5 H1 replayable `activate`/`vetoed`; uncheckable timeliness | §8.7 "Recording entries" (once only, `transitionReceipts`, 7-day bound against the due time), v(u) over distinct transitions |
+| Opus5 H2 final not final | §8.7 "Finality": never displaced, evidence against the intersecting home, provisional additions count for nothing, rollback removes the suffix. **Changed:** finality uses the homes current *before* the activation (Codex5's snapshot), not after: with the "after" set, a thief holding M and K1 at quorum 1 revokes the honest home, which holds the owner's valid veto, and the hostile home alone makes the activation final. A full set, which can't be vetoed, uses the homes after it. **Liveness corrected:** with one of two homes gone for good, removals still take effect at D + 300 s; additions need one full-set transition revoking the gone home (both security keys at the reference), final as soon as the remaining home covers it. For that, the recovery rule may now change homes (§8.4) |
+| Opus5 H3 due time depends on receipts held | §8.7 "Receipts and due time" (`issued` + 300 s + delay; forwarding; receipt choice by lowest home ID); §8.6 rule 1 (same-transition recordings; signed entries go back to their signers). **Added:** the veto deadline is 300 s before the due time, so homes can exchange veto receipts before anyone appends |
+| Opus5 H4 suspension | §8.7 "Suspension"; §12.3 step 5; §13.4; homes don't receipt a void transition |
+| Opus5 H5 rate limit | §6.3 `rate`, §13.1 "Rate", §8.4 four per addition. `suspend` counts toward the signer limit only (not exempt), so it can't be used to flood |
+| Opus5 M1 `keep` | §8.7 delta semantics; vector `t-keep-removes-unknown-key` |
+| Opus5 M2 storage after D | §13.1 "Transitions"; row 13 restated |
+| Opus5 M3 vault-change `activate` | §8.3: `previousVault` moved into the transition and the `activate` made determined, which also closes Codex5 High 3; epochs come from a `rekey` the seed holder appends |
+| Opus5 M4 schemas, sizes | §8.2, §2.4. The reviewer's 917,504-byte transition body doesn't fit once base64-embedded (×4/3), so the envelopes are bounded instead: transition 655,360, veto 98,304, receipt 2,048 |
+| Opus5 M5 succession | §15.1 steps 2–5; "Competing attempts"; §16.3 |
+| Opus5 M6 composite | §8.7 "Composite rule" |
+| Opus5 M7 table | §H rows 4, 5, 9, 10, 12, 13 corrected; rows 17–21 added; vectors fixed (rows 2, 9, 10 change the vault; row 13 uses the determined bytes; `t-suspend` family cites a valid transition; `t-anchor-before-first-home` discriminates; `t-activate-identical-bytes` has both byte sets) |
+| Opus5 M8 never-due `activate` | §8.5 step 3 |
+| Opus5 lows | §15.4 JSON; §F rewritten; plan steps 2, 8, 9; §17.5 "Quorum 2"; removal follow-up lists planted controllers; slot rebuilding (§8.3); full set carries no receipts (§8.7); rate as a policy field |
+| Opus5 Q3 reference | §18 split into new accounts and upgrades; the host paragraph; phone-only offer; §16.2 roles carried over |
+| Opus5 Q6 disclosure before the window | §15.3 one sentence |
+| Opus5 Q8 engine-free statements | 33 new or rewritten vectors (README) |
+| Opus5 Q9 cuts | Guide: §8.4 worst-use column, §6.4 wording, §3.2 explanation, §17.1–§17.2, §18 "what this protects", §20 list, §22 log (about 110 lines). The spec still grew, to 1,855 lines, because of the text above |
+| Codex5 High 1 finality | As Opus5 H2, using Codex5's snapshot; the full set is the "unvetoable override" |
+| Codex5 High 2 rollback | §8.7: additions sign nothing until final, so rollback is the suffix only |
+| Codex5 High 3 vault payload | §8.3 (payload in the transition) |
+| Codex5 High 4 Swift veto recording | §15.1 step 4: `successionVetoed` with its own schema, descriptor lookup, origin and UV rule, receipt choice, ordering and coverage |
+| Codex5 Medium 5 composite | §8.7 |
+| Codex5 Medium 6 provisional additions | §8.7 "Until final"; §12.3 step 5 for members and homes |
+| Codex5 Medium 7 receipt choice, persisted state | §8.7 "Choosing receipts"; §17.2 |
+| Codex5 Medium 8 rate | §13.1 |
+| Codex5 Medium 9 replay retention 7,200 vs 7,201 s | **Not changed this round:** outside the coordinator's list and inside the replay store the engine builder is implementing. Recommended for the next revision: retain 7,201 s |
+| Codex5 Medium 10 pending-object paths | **Deferred:** §14 still defines no paths for transitions, vetoes and receipts outside the history; §17.5 polling needs them. Next revision |
+| Codex5 extra losing row | §H row 21 |
+| Builder 1 replay timing | §12.3 step 3 (read-only look-up), §12.4 (reservation after step 8): the builder's reading |
+| Builder 2 error order | §1: one order, fields checked when a step reads them |
+| Builder 3 unknown key form | §1: `newerFormat` (the builder's reading), with the reason |
+| Builder 4 unknown condition operator | §10.4: three-valued (unknown, `not` unknown is unknown); the builder's "true" would make `not` of it false |
+| Builder 5 path segments | §10.4: count includes `args` (the builder's reading) |
+| Builder 6 printable | §2.2: 0x21–0x7E |
+| Builder 7 year 0000 | §2.2: refused |
+| Builder 8 oversized `clientData` | §2.4: `malformed` everywhere |
+| Builder 9 link times | §12.1, §12.3 steps 1 and 6 (the builder's reading) |
+| Builder 10 link to a principal | §12.3 steps 1 and 6: `malformed` |
+| Builder 11 assertion mismatch | §12.2 (the builder's reading) |
+| Builder 12 unknown account | §12.3 step 4: `unavailable` |
+| Builder 13 which policy | §12.3 steps 4–5 (the builder's reading) |
+| Builder 14 controller at S and latest | §12.3 step 5: both (the builder's reading) |
+| Builder 15 member expiry | §12.3 step 5: verifier's clock, inclusive |
+| Builder 16 future head | §13.3: `unavailable` |
+| Builder 17 renew without expiry | §9.4: `malformed` |
+| Builder 18 `revoke.heads` | §9.5: `{namespace, digest}` objects |
+| Builder 19 `shares`, `epochs` | §8.2: §11.1 epoch objects |
+| Builder 20 coverage direction | §9.2: granted ⊆ requested |
+| Builder 21 `serves` values | §10.1 |
+| Builder 22 `null` in `eq`/`in` | §10.4: allowed |
+| Builder 23 home and history reads | §12.3 step 7: a home always accepts its `colophon.*` purposes |
+| Builder 24 Swift leniency | §16.3: none; zero `r`/`s` refused |
+| Builder 25 genesis possession | §8.4: the primary signature is the proof |
+| Builder 26 per-link order | §12.3 step 6 (the builder's reading) |
+| Builder 27 homes and members not final | §8.7 "Until final"; §12.3 step 5; §13.1 |
+| Builder 28 floor | §2.4: binds services; a core MAY count |
+| Builder vectors | `calls/one-link` now carries the condition (`ok`); `copied-link` then reaches the acting-key check (`badSignature`); `account/` appoints its home by a transition and its determined `activate`; `outside-window` names step 4 |
+| Builder plan | Plan: Step 0 heading; Step 1 is a new module beside 0.4 |
+
 ## H. Theft and loss, worked through
 
 **Reference person:** a Mac device key M, a phone device key Ph and a synced passkey P (all
 `control`), two security keys K1 and K2 (`recover` only, kept apart), two homes at `headQuorum` 1,
 D = 72 h.
 - A "unit" is a key.
-- Times run from the first receipt.
+- A transition is due D + 300 s after its `issued`; vetoes count until D after it.
 - Every bound assumes at least one honest, reachable home, and hosts that poll as §17.5 requires.
 - With a hostile or unavailable required home, no bound exists.
 
 | # | Scenario | What happens | Outcome |
 | --- | --- | --- | --- |
-| 1 | Owner lost one key | The owner proposes removing it with all remaining keys (two or more units, so a single thief key can't veto), with a vault change if it had a slot. | Owner wins after D |
-| 2 | Thief has the Mac key M | The owner vetoes each thief proposal with one key; then M can't propose alone. The owner proposes removing M with Ph and P and suspends M. | Owner wins after D; suspended M can't call meanwhile |
+| 1 | Owner lost one key | The owner proposes removing it with all remaining keys (two or more units, so a single thief key can't veto), with a vault change if it had a slot. | Owner wins after D + 300 s |
+| 2 | Thief has the Mac key M | The owner vetoes each thief proposal with one key; then M can't propose alone. The owner proposes removing M with Ph and P, with a vault change (M holds a slot), and suspends M. | Owner wins after D + 300 s; suspended M can't call meanwhile |
 | 3 | Thief suspends an owner key first | M proposes removing Ph and suspends Ph. Ph vetoes its own removal (one against one), ending the suspension. M can't propose alone again. | Owner wins |
-| 4 | Thief has the phone (Ph and P) | The thief's two-unit proposals are vetoed by M and a security key. After two vetoes he needs three units. The owner's removal of Ph and P signed by M, K1 and K2 can't be vetoed by two. | Owner wins after D |
-| 5 | Phone-only owner (no M), phone stolen | Ph and P are every control key, so the thief completes control-only full-set changes at once (adding his own control keys), but nothing that needs consent. The owner with both security keys makes a full recovery set, which is immediate and removes every non-recover key. With one security key at hand, the owner's proposal is vetoed by the thief. | Owner wins at once with both security keys; otherwise stall until the second is retrieved. Hence "a control key not on the phone" (§18) |
-| 6 | Thief has one recovery key K1 | The owner vetoes; K1 can't propose alone again. The owner removes K1 with a control key and K2. | Owner wins after D; the thief reads the vault at once if K1 has a slot and he has its PIN |
-| 7 | Thief has one control and one recovery key (M and K1); owner has Ph, P and K2 | The owner signs the removal with three units, which two can't veto. | Owner wins after D |
-| 8 | Equal units (a bare one control plus one recovery on each side) | Neither completes a transition. Both keep immediate powers, subject to suspension and rate limits. | Stall until one side obtains another key |
-| 9 | Owner has both recovery keys and no device | K1 or K2 reads the history (`colophon.history.read`). K1 and K2 sign a recovery transition adding a new device key and removing M, Ph and P: a full recovery set. | Back in at once |
+| 4 | Thief has the phone (Ph and P) | K1 and K2 are the full recovery set: with `keep: [M]` they remove every other non-recover key at once. | Owner wins at once |
+| 5 | Phone-only owner (no M), phone stolen | Ph and P are every control key: the thief can add his own control keys at once, but nothing needing consent. Both security keys, with `keep`, remove every non-recover key the owner doesn't name, including keys added after the owner looked. | Owner wins at once with both security keys; with one, stall until the second is retrieved. Hence §18's offer of a security key with `control` |
+| 6 | Thief has one recovery key K1 | The owner vetoes; K1 can't propose alone again. The owner removes K1 with a control key and K2. | Owner wins after D + 300 s; the thief reads the vault at once if K1 has a slot and he has its PIN |
+| 7 | Thief has M and K1; owner has Ph, P and K2 | The owner signs the removal with three units, which two can't veto. | Owner wins after D + 300 s |
+| 8 | Equal units (one control plus one recovery on each side) | Neither completes a transition. Both keep immediate powers, subject to suspension and the rate limit. | Stall until one side obtains another key |
+| 9 | Owner has both recovery keys and no device | K1 or K2 reads the history. K1 and K2 sign a full recovery set: `keep: []`, a new device key, a new vault. | Back in at once; old data is reachable only if a recovery key had a slot |
 | 10 | Burglar takes both recovery keys | The same, by the burglar. | Burglar wins at once. Closed by keeping the keys apart, or `recoverThreshold` 2 with three keys |
 | 11 | Honest mistake | The found phone vetoes. | Nothing changes |
-| 12 | One home down | The other home receipts and vetoes: transitions fall due. Activations stay provisional (additions unusable for calls) until the down home returns or its revocation activates (a removal, so it applies at once). | Pending changes proceed; new keys wait |
-| 13 | One hostile home (quorum 1) and one stolen key | It receipts a backdated transition and appends `activate`. The honest home refuses to store it (not receipted there, not seen a delay earlier). | At verifiers following the hostile home the thief's removals apply; elsewhere it's a vouched fork, which the owner resolves with a `resolve` signed with more units. **Not safe at quorum 1.** Closed by three homes at quorum 2 |
-| 14 | Hostile sole home and one control or recovery key | The home receipts the thief's transitions and hides vetoes. | **Thief wins.** Closed by more homes (§6.4 warns) |
+| 12 | One home down | The other home receipts and vetoes; transitions fall due; removals apply. Additions stay provisional until the down home covers them. If it is gone for good, one full-set transition (K1 and K2) revokes it and adds keys, final once the remaining home covers it. | Removals proceed; new keys wait, or a full set revokes the gone home |
+| 13 | One hostile home (quorum 1) and one stolen key | It receipts a backdated transition and appends the determined `activate`. The honest home never saw it within 300 s of its `issued` and refuses it for ever. | A fork the owner must `resolve`; verifiers that follow only the hostile home apply the thief's removals. **Not safe at quorum 1.** Closed by three homes at quorum 2 |
+| 14 | Hostile sole home and one control or recovery key | The home receipts the thief's transitions and hides vetoes. | **Thief wins** |
 | 15 | Sole device stolen, no other control key | As row 5. The owner learns of the thief's transitions the next time a recovery key is used with any host (§17.5). | As row 5 |
-| 16 | No home | Nothing waits. | Whoever holds a key with the right role wins at once |
+| 16 | No home | Nothing waits. | Whoever holds keys meeting the rule, consent and thresholds wins at once |
+| 17 | Thief has the phone and one security key (Ph, P, K1) | Three units against the owner's two (M, K2): the owner's veto is too few. | **Thief wins after D + 300 s** |
+| 18 | Burglary of the place holding M, the phone and K1 | Four units against one. | **Thief wins after D + 300 s** |
+| 19 | Thief has M and the phone (every control key) | He makes control-only changes at once (adding keys), nothing needing consent. Both security keys with `keep` remove all of it at once. | Owner wins at once with both security keys |
+| 20 | Owner doesn't look within the delay | Nobody vetoes. | **A thief with one key wins after D + 300 s.** Every other row assumes hosts poll (§17.5) |
+| 21 | Two homes at quorum 1; the honest one is down for the whole delay; the reachable one is hostile; the thief has one key | The hostile home receipts the thief's transition and drops the owner's veto. | **Thief wins** (rows 12–14 combined) |

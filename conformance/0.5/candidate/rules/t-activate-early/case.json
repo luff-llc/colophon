@@ -1,1 +1,1 @@
-{"description":"The same entry while the verifier's clock is before the due time.","expected":{"result":"held","seq":3},"sections":["8.5","8.7"],"verifier":{"now":"2026-11-14T08:59:01Z"}}
+{"description":"The same entry while the verifier's clock is before the due time.","expected":{"result":"held","seq":3},"sections":["8.5","8.7"],"verifier":{"now":"2026-11-14T09:04:00Z"}}

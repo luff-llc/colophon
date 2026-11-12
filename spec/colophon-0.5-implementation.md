@@ -1,7 +1,10 @@
 # Colophon 0.5: implementation plan
 
-**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 5, 2026-11-12. Steps 1 and 4 are stable and may start; the §8.7 state machine (step 2's transition part and step 3's conflict rules) should wait for review of revision 5. No engine code
-has been changed for it. Steps are in order. The vectors come first, because §21 says the
+**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 6, 2026-11-12. Steps 0, 1 and 4
+are under way on `engine-0.5-foundation` (luff-llc/colophon#4); revision 6's effect on them is
+listed under each step. The §8.7 state machine (step 2's transition part and step 3's conflict
+rules) may start from revision 6, whose §17.2 lists the state it persists. No engine code has
+been changed by the spec work. Steps are in order. The vectors come first, because §21 says the
 spec can't freeze without them, and every verifier step is then tested against them.
 
 Rules carried over from `docs/handoff-keys-04.md`:
@@ -38,10 +41,13 @@ verifier.
   4. Seed transfer under the pairing scheme.
   5. Calls with two homes and one stale head; additions after S ignored.
   6. `/5` succession with fresh predecessor heads; the migration entry with real view digests.
-  7. Revision-4 transition cases not yet built:
-     - two homes with `headQuorum` 2; late, early and non-home transition receipts;
+  7. Transition cases not yet built:
+     - two homes with `headQuorum` 2; late, early and non-home transition receipts; receipt
+       forwarding; a home that missed the window;
      - mutual removal by two transitions;
-     - a vault-changing transition;
+     - a vault-changing transition with real HPKE slots and `previousVault`, in an account with
+       namespaces, and its `rekey`;
+     - rollback of a provisional activation with a suffix; finality in order;
      - a `/5` `successor` transition.
      Revision-3 items not yet built:
      - a future `issued` held;
@@ -53,14 +59,22 @@ verifier.
      - every DER and raw form, run through both the released Swift verifier and the §16.3
        verifier, on macOS, iOS and visionOS;
      - duplicate and missing `clientData` members.
-- **Also:** move the draft-1 vectors (`conformance/0.5/speaks-for`, `conformance/0.5/terms`) to
-  `conformance/0.5/legacy-draft-1/`, update `tests/v5_conformance.rs` to read them there, and say
-  in a README that they aren't 0.5.
+
+## Step 0. Move the draft-1 vectors
+
+Move the draft-1 vectors (`conformance/0.5/speaks-for`, `conformance/0.5/terms`) to
+`conformance/0.5/legacy-draft-1/`, with the module that replays them, update the test to read them
+there, and say in a README that they aren't 0.5. (Done on `engine-0.5-foundation`.)
 
 ## Step 1. Encoding, keys and origins
 
-Files: `keys/strict_json.rs`, `keys/descriptor.rs`, `keys/webauthn.rs`, `keys/envelope.rs`,
-`crypto.rs`.
+A new 0.5 module beside 0.4 (`colophon_core::v05`), so that 0.4 behaviour can't change; it may
+reuse 0.4 code unchanged (`keys::strict_json::parse`), and changes no 0.4 file.
+
+- **Revision 6 changes here:** envelope bounds for transitions (655,360), vetoes (98,304) and
+  receipts (2,048) in §2.4; an oversized `clientData` is `malformed` in every envelope; dates are
+  years 0001–9999; printable ASCII is 0x21–0x7E; one verification order (§1), with an unknown
+  key `form` `newerFormat`.
 
 - Canonical re-encoding check for `/5` bodies; canonical base64 including padding bits; strict
   calendar dates with exactly three fraction digits; bounds before allocation (§2).
@@ -81,25 +95,32 @@ Files: `authority.rs`, `slots.rs`, `vault.rs`.
 - **Pending transitions (§8.7).** This is the core state machine, and it should be built and
   reviewed on its own before anything that depends on it:
   - transition, veto and receipt objects;
-  - due-time computation (the latest of `headQuorum` receipts);
-  - veto validity (signer count, eligibility, receipt before due);
+  - due time `issued` + 300 s + delay once `headQuorum` receipts exist; the veto deadline; receipt
+    choice by lowest home ID;
+  - veto validity (signer count, disjoint units, eligibility, receipts before the deadline);
   - the escalation counters v(K) computed from `vetoed` entries;
   - the full-set check;
   - delta application at `activate`, with the void cases;
   - the 7-day bound;
   - composite changes and vault rotation with slot rebasing (§8.3);
   - evaluation against the state before `activate`;
-  - determined `activate` and `vetoed` bodies (unsigned except vault changes);
-  - finality, and rollback on a later veto;
-  - suspension;
+  - determined, once-only recording entries (`activate`, `vetoed`, `successionVetoed`), all
+    unsigned, with `malformed` for invalid receipts, non-determined fields and the 7-day bound;
+  - `keep`; `previousVault` and the `rekey` that follows a vault change;
+  - finality against the homes before the activation (full sets: after), in order; additions
+    counting for nothing until final; rollback of the suffix;
+  - suspension carrying its transition, with its computable end;
+  - the rate limit (§13.1), charged signers included;
+  - the persisted state of §17.2;
   - external-object limits.
 - The §8.4 classification as data: every change kind is immediate or pending, and the default
   for unknown changes is pending.
-- Headroom: immediate entries stop at 56 controllers.
+- Headroom: a `keyring` entry may not leave more than 56 controllers or 224 slots, and adds at
+  most four controllers; only `activate` uses the rest.
 - Holder labelling with the key's co-signature.
 - Rotation only for controllers some slot ever named (§8.3). Re-adding a removed controller.
 - Seed transfer (§7.4) and pairing (§7.3): `begin_pairing`, `reveal`, `pairing_code`.
-- The restricted vault HPKE open (§17.2).
+- The restricted vault HPKE open (§17.1).
 
 ## Step 3. Authority `/5`, forks, upgrade and succession
 
@@ -133,6 +154,10 @@ Files: `authority.rs`, `library.rs`, `model.rs`, `records.rs`, `imports.rs`, `do
   intermediate; `wrongFormat` fences.
 - Proposals (§11.6) with the clock rule.
 - Live stamps use `account`. Bump the engine cache and reducer versions.
+- **Revision 6 changes here:** `renew` of a member with no expiry is `malformed`; `revoke.heads`
+  are `{namespace, digest}` objects; `shares` and `epochs` are §11.1 epoch objects; coverage is
+  granted ⊆ requested; an unknown `serves` value is unknown content; a member added by an
+  activation that isn't final has its records held (`authorityBehind`); `policy` gains `rate`.
 
 ## Step 5. Calls, links, heads and homes
 
@@ -141,12 +166,18 @@ Files: `v5/speaks.rs` (rewritten as `calls.rs`), `v5/terms.rs`, new `heads.rs`.
 - `verify_call`, in exactly the order of §12.3:
   - evaluation at S, with held removals applied;
   - controller-call origin and purpose configuration;
-  - the replay store interface (§12.4): an atomic record-before-effect, keyed with the acting
-    key, retained 7,200 s.
+  - the replay store interface (§12.4): a read-only look-up at step 3, then an atomic
+    reservation after step 8 and before any effect, keyed with the acting key, retained 7,200 s.
+- **Revision 6 changes here (the builder's readings, now text):** policy for freshness and quorum
+  is the latest held, `callWindow` and `linkMaxAge` the stricter of S and later; a controller must
+  pass at S and at its latest state; member expiry against the verifier's clock; link checks link
+  by link; three-valued conditions; a suspended controller may call `colophon.history.read`; a
+  home accepts its own `colophon.*` purposes; members and homes added by a provisional activation
+  are `refused:revoked`.
 - Heads: high-water mark, quorum by ancestry, the primary home, equivocation evidence.
 - Incremental verification from persisted state.
 - Remove `Verdict::Ok { unguarded }` and `Refusal::Stale`; add the reasons in §19.
-- The R1/R-A5 history verifier output (§17.2).
+- The R1/R-A5 history verifier output (guide §4) and persisted state (§17.2).
 
 ## Step 6. FFI, WASM and SDKs
 
@@ -174,8 +205,10 @@ Files: `relay/relay.js`, `relay/server.js`, `relay/README.md`.
 - `GET {base}` with `home`.
 - `GET`/`POST {base}/authority` with receipts, and 409 and 421 answers.
 - Primary-home ordering, and storage only of entries covered by a primary head.
-- The ±60 s and ±300 s clock rules.
-- Signing receipts and notices.
+- The 60 s clock rule; the 300 s receipt window.
+- Signing receipts (one per object) and notices; forwarding transitions, vetoes and receipts to
+  the other homes; storing an unreceipted `activate` only if seen within its window.
+- The rate limit, refused as `malformed`.
 - `Authorization: Colophon` with the `colophon.home.*` rules.
 - §13.4 applies to `records/authority/*`.
 
@@ -189,16 +222,19 @@ from Marginalia `origin/main` first: the reference copy lacks the `layout` kind)
   and signs `upgrade`.
 - Swift to 0.5. Follow §15.3 and §16.2 in order:
   - preflight under §16.3 (the strict §4.3 DER grammar);
-  - appoint a home, publish the predecessor at `{base}/predecessor/`, and collect the homes'
-    genesis receipts;
+  - appoint the homes, publish the predecessor at `{base}/predecessor/`, and collect the homes'
+    genesis receipts within the succession window;
   - wait out the veto window, telling every device that holds an old key;
-  - write F only after the window and with no veto;
+  - write F only after the due time and with no `successionVetoed`;
   - drain for the window; then write `migration` with `drain`.
 - Swift to 0.5, details:
   - build the genesis from the old public keys, collecting possession proofs only for keys
     that aren't carried over;
-  - collect `handover` (the recovery identity for a root library; recover signers when the
-    recovery threshold is lowered);
+  - carry roles over exactly (a root library's root to `approve` + `control`, its recovery
+    identity to `recover`), and offer §18's reference only as a later transition;
+  - collect `handover` (the current root alone for a root library; the control threshold, plus
+    recover signers when the recover set changes or its threshold is lowered, for a keyring
+    library; every other key at `head` the host can obtain);
   - write the freezing `layout` entry through the Swift `ColophonAuthority`;
   - rebuild a slot for every slotted controller, or stop;
   - map roles, custody, operator and caveats, or stop;
@@ -209,7 +245,7 @@ from Marginalia `origin/main` first: the reference copy lacks the `layout` kind)
 
 ## Step 9. Review and freeze
 
-- Two independent spec reviews of revision 2.
+- Independent spec reviews of the final revision (rounds one to five reviewed revisions 1–5).
 - An implementation security review.
 - Replay of every §21 vector in Rust and in a second language (the TypeScript verifier counts
   as one).

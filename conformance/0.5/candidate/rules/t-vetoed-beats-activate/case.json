@@ -1,1 +1,1 @@
-{"description":"vetoed and activate of one transition at seq 3: the veto stands.","expected":{"result":"ok","seq":3},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"vetoed and a provisional activate of one transition at seq 3: the veto stands.","expected":{"result":"ok","seq":3},"sections":["8.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -174,7 +174,8 @@ write("identifiers.json", {
 # ---------------------------------------------------------------------------------------
 # 2. Upgrade from 0.4 in place (spec §16.1), on the published seq-two-rekey chain.
 DEFAULT_POLICY = {"callWindow": 300, "headMaxAge": 300, "headQuorum": 1, "history": "members", "linkMaxAge": 86400,
-                  "memberRule": "single", "recoveryDelay": 259200}
+                  "memberRule": "single", "recoveryDelay": 259200,
+                  "rate": {"account": {"bytes": 16777216, "entries": 256}, "signer": {"bytes": 4194304, "entries": 64}}}
 
 
 def load_chain(case: str):
@@ -323,10 +324,16 @@ home_request = {"protocol": "colophon/request/5", "account": account,
                 "member": {"agreement": b64(home_agree.point), "signing": b64(home_sign.point)},
                 "label": "Test home", "kind": "server", "terms": {"serves": ["home"]},
                 "created": "2026-11-11T08:00:00Z", "service": {"endpoints": [HOME]}}
-grant_home = {"protocol": "colophon/authority/5", "seq": 3, "previous": sha(body_of(ga_env)), "issued": "2026-11-11T08:00:02Z",
-              "by": controller.id, "kind": "grant", "request": b64(env_bytes(envelope(home_request, home_sign))),
-              "terms": {"serves": ["home"]}, "shares": []}
-gh_env = envelope(grant_home, controller)
+# Homes are appointed by a pending transition (§8.4); with no home before it, it is due when
+# issued and its `activate` is the determined, unsigned seq 3 (§8.7, §13.1 "First upload").
+home_transition = {"protocol": "colophon/transition/5", "account": account, "anchor": {"seq": 2, "digest": sha(body_of(ga_env))},
+                   "issued": "2026-11-11T08:00:02Z", "by": controller.id, "signers": [controller.id],
+                   "change": {"homes": {"appoint": [{"request": b64(env_bytes(envelope(home_request, home_sign))),
+                                                     "terms": {"serves": ["home"]}}]}}}
+ht_env = envelope(home_transition, controller)
+activate_home = {"protocol": "colophon/authority/5", "seq": 3, "previous": sha(body_of(ga_env)), "issued": "2026-11-11T08:00:02Z",
+                 "by": controller.id, "kind": "activate", "transition": b64(env_bytes(ht_env)), "receipts": []}
+gh_env = {"body": b64(canonical(activate_home))}
 history = [g_env, ga_env, gh_env]
 for i, e in enumerate(history):
     write_raw(f"account/records/authority/{i + 1:08d}.json", env_bytes(e))
@@ -339,7 +346,7 @@ write("account/head.json", head_env)
 NOW = "2026-11-11T09:01:00Z"
 AS_OF = {"seq": 3, "digest": sha(body_of(gh_env))}
 write("account/case.json", {
-    "description": "Identity-only 0.5 account (no namespaces): genesis, an agent grant under the single rule, a home grant under the control rule.",
+    "description": "Identity-only 0.5 account (no namespaces): genesis, an agent grant under the single rule, and the activation of a transition appointing a home (due when issued: no home before it).",
     "sections": ["6.2", "8.2", "8.4", "9.1", "9.2", "13.1"],
     "accountID": account,
     "expected": {"history": "ok", "head": "ok at now; stale after 2026-11-11T09:05:00Z (headMaxAge 300)"},
@@ -366,13 +373,13 @@ def call(acting: Key, links=None, audience=AUD, purpose="task.read", args=None, 
     return envelope(body, signer or acting)
 
 
-narrow = {"services": [{"audience": AUD, "purposes": ["task.read"]}]}
+narrow = {"services": [{"audience": AUD, "purposes": ["task.read"]}], "conditions": [{"prefix": ["args.task", "T-"]}]}
 wide = {"services": [{"audience": AUD, "purposes": ["*"]}]}
 l_ok = link(agent_sign, session1, narrow, session=0)
 
 calls = {
     "member-no-links": (call(agent_sign), "ok", "The member's own key acts."),
-    "one-link": (call(session1, [l_ok], rid_seed="2"), "ok", "A session key acts through one link with narrower terms."),
+    "one-link": (call(session1, [l_ok], rid_seed="2"), "ok", "A session key acts through one link with narrower terms (the member's condition is carried, §10.3)."),
     "copied-link": (call(attacker, [l_ok], rid_seed="3"), "badSignature",
                     "An attacker signs its own call with a copied link: the acting key is not the link's `to` key (step 6)."),
     "invalid-call-signature": (dict(call(agent_sign, rid_seed="4"), signature=b64(attacker.sign(b"x"))), "badSignature",
@@ -380,7 +387,7 @@ calls = {
     "wrong-audience": (call(agent_sign, audience="https://other.example", rid_seed="5"), "refused:audience",
                        "Audience is not one of the verifier's (step 3)."),
     "outside-window": (call(agent_sign, created="2026-11-11T08:50:00Z", rid_seed="6"), "refused:window",
-                       "Created 660 s before now; callWindow is 300 (step 3)."),
+                       "Created 660 s before now: inside step 3's 3,600 s, refused by callWindow 300 at step 4."),
     "widening-link": (call(session1, [link(agent_sign, session1, wide, session=0)], purpose="task.delete", rid_seed="7"),
                       "refused:notNarrower", "The link asks for every purpose; the member has two (step 6)."),
     "ended-session": (call(session1, [link(agent_sign, session1, narrow, session=1)], rid_seed="8"), "refused:ended",
@@ -389,7 +396,7 @@ calls = {
                              "The member's terms don't grant task.delete (step 7)."),
     "condition-fails": (call(agent_sign, args={"task": "X-1"}, rid_seed="10"), "refused:outOfScope",
                         "The member's condition requires args.task to start with T- (step 7)."),
-    "depth-exceeded": (call(session2, [l_ok, link(session1, session2, {"services": [{"audience": AUD, "purposes": ["task.read"]}]})],
+    "depth-exceeded": (call(session2, [l_ok, link(session1, session2, narrow)],
                             rid_seed="11"), "refused:notNarrower",
                        "Member depth 1 allows one link; the second link's parent depth is 0 (step 6)."),
     "link-expired": (call(session1, [link(agent_sign, session1, narrow, session=0, nb="2026-11-11T08:00:00Z",

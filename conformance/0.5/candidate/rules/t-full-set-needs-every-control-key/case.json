@@ -1,1 +1,1 @@
-{"description":"The phone's two keys are not every control key while the Mac key exists.","expected":{"result":"held","seq":3,"why":"A (Mac) didn't sign"},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"The phone's two keys are not every control key while the Mac key exists.","expected":{"result":"malformed","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

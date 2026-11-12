@@ -1,1 +1,1 @@
-{"description":"A consent change signed by every control key and one of two recover keys.","expected":{"result":"held","seq":3,"why":"needs consent: K2 didn't sign, so not a full set"},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"A consent change signed by every control key and one of two recover keys is not a full set, so `receipts: []` is invalid.","expected":{"result":"malformed","seq":3},"sections":["8.5","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

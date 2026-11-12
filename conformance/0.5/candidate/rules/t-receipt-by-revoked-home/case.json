@@ -1,1 +1,1 @@
-{"description":"Receipted only by the revoked home.","expected":{"result":"held","seq":4,"why":"H2 isn't a current home before the activate"},"sections":["8.7","13.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
+{"description":"Receipted only by a home revoked before it: it can never be due.","expected":{"result":"malformed","seq":4},"sections":["8.5","8.7","13.5"],"verifier":{"now":"2026-11-17T09:13:00Z"}}

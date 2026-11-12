@@ -1,0 +1,1 @@
+{"description":"NEW's addition activated, but H2's head doesn't cover it: provisional, so NEW can't call.","expected":{"call":"refused:revoked"},"sections":["8.7","12.3"],"verifier":{"audiences":["https://service.example"],"controllerPurposes":["sign-in"],"now":"2026-11-14T09:08:20Z"}}

@@ -1,1 +1,1 @@
-{"description":"A home asked to store the activation 8 days after due.","expected":{"home":"refuses to store (more than 7 days after due by its clock)"},"sections":["8.7","13.1"],"verifier":{"now":"2026-11-22T09:00:01Z","role":"home"}}
+{"description":"Its determined issued would be 8 days after the due time.","expected":{"result":"malformed","seq":4},"sections":["8.7"],"verifier":{"now":"2026-11-23T09:05:00Z"}}

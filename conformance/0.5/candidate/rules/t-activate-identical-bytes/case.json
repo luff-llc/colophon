@@ -1,1 +1,1 @@
-{"description":"Two homes build the activation independently: identical bytes.","expected":{"identical":true},"sections":["8.7"]}
+{"description":"Two homes holding both receipts build the activation independently.","expected":{"identical":true},"sections":["8.7"]}
