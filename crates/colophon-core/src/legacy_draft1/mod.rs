@@ -1,4 +1,8 @@
-//! Colophon 0.5 speaks-for primitives. This is deliberately independent of 0.4 replay.
+//! Draft-1 speaks-for primitives (Galley draft 1, 2026-11-10). **This is not Colophon 0.5.**
+//!
+//! It was published as `colophon_core::v5` before the 0.5 candidate existed and contradicts it
+//! (changes §D, finding L1). It is kept unchanged, as history, so that its vectors under
+//! `conformance/0.5/legacy-draft-1/` keep replaying. New code uses [`crate::v05`].
 //! The host supplies authenticated history, its clock, nonce observations and private-key work.
 
 pub mod speaks;

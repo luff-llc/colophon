@@ -126,7 +126,7 @@ impl Terms {
             .iter()
             .map(Scope::from_value)
             .collect::<Result<Vec<_>, _>>()?;
-        let expires = o.get("expires").map(|v| date(v)).transpose()?;
+        let expires = o.get("expires").map(date).transpose()?;
         let depth = o.get("depth").map(unsigned).transpose()?.unwrap_or(0);
         let writes = o.get("writes").map(unsigned).transpose()?;
         let requires = o
@@ -349,10 +349,8 @@ fn validate_condition(v: &Value, depth: usize, count: &mut usize) -> Result<(), 
                 "prefix" => {
                     string(&parts[1])?;
                 }
-                "lte" | "gte" => {
-                    if !parts[1].is_number() {
-                        return Err(Verdict::Malformed);
-                    }
+                "lte" | "gte" if !parts[1].is_number() => {
+                    return Err(Verdict::Malformed);
                 }
                 _ => {}
             }
@@ -467,6 +465,7 @@ fn compare_int_float(integer: i128, float: f64) -> Option<std::cmp::Ordering> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     #[test]
