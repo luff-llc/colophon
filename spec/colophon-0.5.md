@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 7, for review, 2026-11-12.** Not frozen, not
+**Status: final candidate, revision 8, for review, 2026-11-12.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -8,7 +8,9 @@ transitions with veto (§8.7); revision 5 answers two reviews of revision 4 (403
 that mechanism's state model; revision 6 answers two reviews of revision 5 (a1decc6) and the
 first engine builder's questions, making that state model checkable by every verifier;
 revision 7 answers two reviews of revision 6 (281e7c4) and the engine attack, recording finality
-in the history and stating §8.7 as a state table. The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
+in the history and stating §8.7 as a state table; revision 8 answers the second review of revision 7
+(0a25988): removals, revoked homes, recovery that restores control, and verdicts that depend on
+the object set only. The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
 [colophon-0.5-guide.md](colophon-0.5-guide.md).
@@ -574,8 +576,12 @@ that a slot or part of the current vault names, or change its `agreement`, by it
 one recovery key can start it. At its activation every slot naming that controller is dropped
 (an account may then have no slot), and the vault is **retiring**: the removed key may still know
 its seed. While the vault is retiring:
-- The host of any current controller holding `approve`, `control` or `recover` that holds the seed
-  MUST at once append a **`vault` entry**: `vault` (a fresh identity, §7.1), `slots` (one naming
+- **Keys the removed key planted go too.** At the activation of a transition that removes a
+  controller K, every controller K added by immediate entries after the transition's anchor is also
+  removed, unless the transition's `keep` names it.
+- The host of a controller holding the seed that was current at the anchor of the removal that
+  made the vault retire, is still current, and holds `control` or `recover`, MUST at once append a
+  **`vault` entry**: `vault` (a fresh identity, §7.1), `slots` (one naming
   its signer, and every other remaining controller's slot that this host can build: every
   `sealed` slot, and `prf` or `combined` slots whose credentials are present) and
   `previousVault` (below). One such signer suffices. It ends the retirement.
@@ -623,7 +629,7 @@ and its bound, is in [colophon-0.5-guide.md](colophon-0.5-guide.md) §1.
 | `rekey` | Single rule, or one `control` or `recover` signer; control rule when `memberRule` is `control` |
 | `endSessions` | Single rule, or the member rule; control rule when `memberRule` is `control` |
 | `keyring` | `addThreshold` units holding `control`, with UV, plus possession. It may only: add at most four controllers, each with roles `["approve"]` or `["sign"]` (with slots for them in the same entry); add slots for existing non-`sign` controllers; change labels; and tighten the **signing controller's own** authentication or policy (§6.3 lowering only). **Self-slot:** an entry whose only change adds slots to the current vault naming only its signer may be signed by that one non-`sign` controller. |
-| `vault` | One controller holding `approve`, `control` or `recover`, only while the vault is retiring (§8.3) |
+| `vault` | One controller holding `control` or `recover`, current at the anchor of the removal that made the vault retire and still current, only while the vault is retiring (§8.3). An `approve`-only key never rotates a seed. |
 | `suspend` | One signer of the pending transition it carries (§8.7) |
 | Recording entries | §8.7, §15.1 |
 | `upgrade` (`/4`) | 0.4 control rule (§16.1) |
@@ -633,11 +639,11 @@ doubt. Each needs the control rule unless stated:
 
 | Change | Also |
 | --- | --- |
-| Remove or demote a controller; add `control` or `recover`; `keep` | The recovery rule may also propose these, removing only controllers without `recover`, and adding only `approve` when `recoverThreshold` < `threshold`. `keep` needs the recovery rule. |
+| Remove or demote a controller; add `control` or `recover`; `keep` | **Recovery.** The recovery rule may also remove any controllers and add replacement controllers with `approve` and `control` (never `recover`); signed by every current `recover` controller it is a full set (immediate), and by fewer it is pending with the delay and veto. `keep` needs the recovery rule. The result must still have a `control` controller (§6.2). |
 | `threshold`, `addThreshold`, `recoverThreshold`, `countBy` | Count the larger of old and new `threshold` |
 | Another controller's descriptor, `verification`, `origins`, `authorityOrigins` or `holder`, in either direction | The labelled key signs a holder change |
 | Delete or change a slot; change the vault | The recovery rule may also propose a vault change with its own removals |
-| Revoke a home | The recovery rule may also propose it |
+| Revoke a home | The recovery rule may also propose it; who must witness it is in §8.7 "Revoking a home" |
 | Appoint or renew a home; `primaryHome`, `headQuorum` | The recovery rule may also propose these when `recoverThreshold ≥ threshold`, or in a full set |
 | A grant with `import`; `recoveryDelay`; raising `rate` | — |
 | Raise `headMaxAge`, `callWindow`, `linkMaxAge`; `memberRule` to `single`; `history` to `public` | — |
@@ -699,8 +705,11 @@ lenient than this section for authority entries. **Every failure has exactly one
 | Bounds, parse, header, canonical bytes, an oversized `clientData` | `malformed` |
 | `by` not as step 1 requires; a signature that fails or is foreign | `badSignature` |
 | A rule, consent, threshold, possession or escalation not met — by the entry, or by a transition it embeds; a signer (of the entry or of an embedded transition) not current with the role it signed with, suspended, or added by an activation with no `final` | `badSignature` |
-| Every other failure of an embedded object: receipts (missing, invalid, wrong homes, wrong count or choice), anchor, veto unit count, disjointness, vetoer role or currency, deadline, determined fields, once only, the 7-day bound, heads in `final`, one suspension per unit, a void delta | `malformed` |
+| An embedded receipt, head or veto signature that fails | `badSignature` |
+| A transition or veto whose `signers` doesn't match its envelope (checked before its rule) | `malformed` |
+| Every other failure of an embedded object: receipts (missing, wrong homes, wrong count or choice, outside their window), anchor, veto unit count, disjointness, vetoer role or currency, deadline, determined fields, once only, the 7-day bound, heads in `final`, one suspension per unit, a void delta | `malformed` |
 | Unknown content after steps 1–3 pass | `newerFormat` |
+| A transition that revokes a home and adds anything; a `final` with no heads | `malformed` |
 | Schema, §6 and §8.3 violations, the rate limit | `malformed` |
 | `issued` ahead; an `activate` whose objects are all valid and whose due time is after the clock | *held* |
 
@@ -708,32 +717,35 @@ lenient than this section for authority entries. **Every failure has exactly one
 
 Entries are equal when their bodies are equal. Two **conflicting** entries are valid entries with
 the same `seq` and `previous` and different bodies. A verifier classifies a conflict between X and
-Y, using only the objects it holds, so the same objects give the same answer in any order:
+Y using only the objects it holds — entries, transitions, vetoes, receipts and heads — so every
+verifier holding the same objects reaches the same verdict, in any order. What it held before
+never selects a branch (§13.3).
+
+Every recording entry has a **due time**: an `activate`'s or `vetoed`'s is its transition's; a
+`final`'s is its activation's transition's; a `successionVetoed`'s is the succession's.
 
 1. **Activation order.**
    - If X is a recording entry and Y is not, **Y stands only if** the verifier holds a head of the
      primary home (in the state before seq n) covering Y, Y's `issued` is not later than X's due
-     time (for `vetoed`, its transition's), and no `final` follows X; otherwise X stands. Homes
-     refuse immediate entries dated more than 300 s before their clock (§13.1), so an honest
-     primary covers no backdated Y.
+     time, and no `final` covers X's activation; otherwise X stands. Homes refuse immediate entries
+     dated more than 300 s before their clock (§13.1), so an honest primary covers no backdated Y.
    - Between an `activate` and a `vetoed` of one transition, the `vetoed` stands if its veto is
-     valid, unless a `final` follows the `activate` (§8.7).
-   - Between recording entries for different transitions, the earlier due time stands, then the
-     lower transition-body digest.
-   - Between two recording entries of one kind for one transition, the lower body digest stands
-     and the other is **dropped**: it records the same effect and is never rebuilt.
+     valid, unless a `final` covers the `activate` (§8.7).
+   - Between other recording entries the order is total: earlier due time, then lower
+     transition-body digest, then kind (`activate` or `vetoed`, then `final`), then lower body
+     digest. Two recording entries of one kind for one transition differ only in receipts or heads:
+     the one that loses is **dropped**, never rebuilt.
    A recording entry that loses to an entry of another transition is rebuilt after the head by any
    home. A signed entry that loses is not re-appended by anyone else: its signer's host is told
    (409, §14) and MUST offer to sign it again at the new head.
-2. **Equivocation.** Otherwise, if X is covered by heads of `headQuorum` current homes or by the
-   verifier's high-water mark, and no current home's head covers Y, Y is equivocation evidence
-   against its signers (§13.3).
-3. **Fork.** Otherwise (including any conflict in an account without homes), the verifier answers
+2. **Equivocation.** Otherwise, if X is covered by heads of `headQuorum` current homes and no
+   current home's head covers Y, Y is equivocation evidence against its signers (§13.3).
+3. **Fork.** Otherwise — no head evidence for either, heads for both, or an account without homes
+   — both entries are equivocation evidence against their signers, and every verifier answers
    `refused:fork` for everything that depends on either branch until a `resolve` transition
    activates on one branch. A transition anchored on a losing branch is void.
 
-The high-water mark moves to another branch only by rule 1 or an activated `resolve`. Records
-citing a seq at or after an unresolved fork are held.
+Records citing a seq at or after an unresolved fork are held.
 
 ### 8.7 Pending transitions
 
@@ -798,27 +810,48 @@ units and either (a) meets the recovery rule and every current `recover` control
 consent, every current `recover` controller too. "Current" includes every key T removes. Whoever
 holds every recovery key is treated as the owner.
 
-**Finality is a recorded fact.** An activation's **witnesses** are the homes current in the state
-before it; for a full set, those of them that remain after it. It is **final** when a `final`
-entry for it is on the branch, or when its witness set is empty, or when a later full set's anchor
-follows it. A verifier judges finality only from the history, never from heads it has seen.
-- Until final, whatever an activation adds — controller, home, member — counts for nothing: it
-  signs no entry, transition, veto, `suspend` or call (`refused:revoked`); counts toward no rule,
-  unit, quorum, full set or escalation; and its receipts and heads don't count. Removals and
-  restrictions apply at once (fail-safe). Records by a member it added are held
-  (`authorityBehind`).
+**Removal-only transitions.** A transition is **removal-only** when every component only
+removes or demotes controllers (including by `keep`), revokes homes, raises a threshold or tightens
+policy: it adds no controller, role, home, member or slot, lowers no threshold, loosens no policy
+and has no `vault`, `grant`, `layout`, `migration`, `successor` or `resolve` component. A
+transition that revokes a home and also adds anything is `malformed`.
+
+**Revoking a home.** A transition that revokes homes under the control rule keeps them as
+witnesses of its activation (below), so each must sign a head covering it, having seen it. Only
+the **stronger authority** — a full set, or the recovery rule where recovery controllers exist —
+revokes a home without that: its activation's witnesses leave out the homes it revokes. An
+account with no recovery controllers and a dead home needs every control key (full set (b)) to
+drop it.
+
+**Finality is a recorded fact.** A verifier judges finality only from the objects it holds, never
+from heads it has seen or the order it saw things in.
+- An activation's **witnesses** are the homes current in the state before it, plus the homes
+  revoked by earlier activations that are not yet final (a home is excused only once a *final*
+  removal has revoked it), less the homes it revokes itself under the stronger authority. For a
+  full set they are those of them that remain after it.
+- An activation is **final** when its witness set is empty, or a `final` entry for it is on the
+  branch, or a later `final` on the branch carries a head from every one of its witnesses covering
+  it, or a later full set's anchor follows it.
+- **Order.** An activation that is not removal-only gets a `final` only when every earlier
+  activation that is not removal-only is final. Removal-only activations are outside this order:
+  they never wait for an earlier provisional activation, and none waits for them.
+- **Until final, whatever an activation adds counts for nothing.** An added controller, home or
+  member signs no entry, transition, veto, `suspend` or call (`refused:revoked`), counts toward no
+  rule, unit, quorum, full set or escalation, and its receipts and heads don't count; records by an
+  added member are held (`authorityBehind`). Removals and restrictions apply at once (fail-safe),
+  final or not.
 - **A final activation is never displaced.** A `vetoed` for its transition changes no state; it is
   equivocation evidence against every witness that receipted the veto (§13.3).
-- **Revoked witnesses.** Homes that the activation itself revokes need not sign heads for its
-  `final`. Such an activation is final against everything except a valid `vetoed` whose veto
-  receipts are all by homes it revoked; that `vetoed` still stands. So a dead or hostile home can
-  be revoked by an ordinary transition, while an honest home that holds a veto can't be revoked
-  past it.
-- **Rollback** of an activation with no `final` removes it and every later entry on its branch,
-  and nothing else; nothing it added has signed. Transitions anchored on a removed entry are void;
+- **A provisional activation, removal-only or not, is displaced by a valid `vetoed` of its own
+  transition** (§8.6 rule 1). A verifier holding the `activate` and not the `vetoed` applies the
+  activation as provisional; when it receives the `vetoed`, the same rule displaces the activation,
+  whatever order the objects came in. Once a `final` covers the activation, the `vetoed` changes
+  nothing.
+- **Rollback** of a provisional activation removes it and every later entry on its branch, and
+  nothing else; nothing it added has signed. Transitions anchored on a removed entry are void;
   recording entries are rebuilt by the homes; displaced signed entries go back to their signers'
-  hosts; escalation counts, suspensions and the high-water mark are recomputed. Services MUST NOT
-  take irreversible effects on entries after an activation with no `final`.
+  hosts; escalation counts and suspensions are recomputed. Services MUST NOT take irreversible
+  effects on entries after a provisional activation.
 
 **Suspension** is an explicit `suspend` by a signer of a pending removal. While it lasts the key
 signs no immediate entry and no call except `colophon.history.read`; it may sign vetoes and
@@ -832,22 +865,25 @@ no theft safety.**
 
 #### The state machine
 
-This table is normative; the prose above defines its terms. State is §17.2's. "S" is the state
-immediately before the entry; every check fails with the result shown, and an entry that fails
-changes nothing. Every recording entry has `issued` determined as shown; another value is
-`malformed`.
+This table is normative; the prose above defines its terms. State is §17.2's. The events
+partition the entries: each entry matches exactly one row (`suspend`, `vault` and full-set
+activations only their own). "S" is the state immediately before the entry; every check fails
+with the result shown, and an entry that fails changes nothing. Every recording entry has
+`issued` determined as shown; another value is `malformed`.
 
 | Event | Checks, in order | Effects |
 | --- | --- | --- |
-| **Immediate entry E** | §8.5 steps 1–2; signer current, not suspended, not added without `final` (`badSignature`); §8.4 rule (`badSignature`); rate (§13.1, `malformed`); kind rules (`malformed`) | Apply. A suspension whose transition E makes invalid, or whose due time + 7 days is before E's `issued`, ends. |
-| **`suspend` (key K, T, receipts)** | Signer is a signer of T (`badSignature`); T valid at E; T not recorded on the branch; T removes or demotes K; T's delta not void; the signer's unit has no outstanding suspension (`malformed`) | K suspended until the earliest of: T's `activate` or `vetoed`; the first entry after which T is no longer valid at a hypothetical `activate`; the first entry, or the verifier's clock, past T's due time + 7 days. |
-| **`activate` (T, receipts)** | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); due after the clock: *held*; delta not void (`malformed`) | Apply the delta (with `keep` and §8.3's slot drops and retiring); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set. |
+| **`genesis`** | §8.5 steps 1–5 against its own keyring; §15.1 for a predecessor | The initial state. |
+| **Immediate entry E** (every kind except `genesis`, `suspend`, `vault` and recording entries) | §8.5 steps 1–2; signer current, not suspended, not added by a provisional activation (`badSignature`); §8.4 rule (`badSignature`); rate (§13.1, `malformed`); kind rules (`malformed`) | Apply. A suspension whose transition E makes invalid, or whose due time + 7 days is before E's `issued`, ends. |
+| **`vault`** | As an immediate entry; the vault is retiring and the signer was current at the anchor of the removal that made it retire, is still current, and holds `control` or `recover` (`badSignature`); a slot names the signer, `previousVault` present (`malformed`) | New vault; not retiring. |
+| **`suspend` (key K, T, receipts)** | §8.5 steps 1–2; signer is a signer of T (`badSignature`); T valid at E; T not recorded on the branch; T removes or demotes K; T's delta not void; the signer's unit has no outstanding suspension (`malformed`) | K suspended until the earliest of: T's `activate` or `vetoed`; the first entry after which T is no longer valid at a hypothetical `activate`; the first entry, or the verifier's clock, past T's due time + 7 days. |
+| **`activate` (T, receipts)**, T not a full set | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); delta not void (`malformed`) | Apply the delta (with `keep`, §8.3's slot drops, retiring, and the drop of keys the removed key added); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set, or final if that set is empty. |
+| **Full-set `activate`** | As `activate`, with the full set's due time; no veto | As `activate`; every activation before T's anchor becomes final. |
 | **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts chosen, each within 300 s of V's `issued` and before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
-| **`final` (activation A, heads)** | A is an `activate` on the branch with no `final` and not yet final; every earlier activation is final; `heads` has exactly one head per witness of A (revoked witnesses excepted), each signed by that home's key in the state before A, covering A on this branch (not necessarily fresh); `by` = A's `by`; `issued` = max(latest head's `issued`, previous `issued`) (`malformed`) | A is final; what it added counts. |
+| **`final` (activation A, heads)** | A is an `activate` on the branch, not yet final; if A is not removal-only, every earlier activation that is not removal-only is final; `heads` is non-empty and has exactly one head per witness of A, each signed by that home's key in the state before A, covering A on this branch (not necessarily fresh); `by` = A's `by`; `issued` = max(latest head's `issued`, previous `issued`) (`malformed`) | A is final, and so is every earlier activation whose witnesses all have a head here covering it; what they added counts. A removal-only A that revoked homes excuses them from every other activation's witnesses. |
 | **`successionVetoed`** | §15.1 step 4 (`malformed`; a veto signature by an ineligible key `badSignature`) | The succession is never verified. |
 | **Conflict at one seq** | §8.6 | The standing entry is on the branch; rollback as above. |
-| **Clock** | — | A *held* `activate` is decided when its due time passes; a suspension ends at its due time + 7 days. |
-| **Full set's activation** | As `activate`, with its own due time; no veto | As `activate`, and every activation before its anchor becomes final. |
+| **Clock** | — | A held entry of any kind is decided when its `issued` is no more than 60 s ahead; a held `activate`, when its due time passes; a suspension ends at its due time + 7 days. |
 
 ## 9. Members
 
@@ -1280,9 +1316,21 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   it before its deadline; a late transition with a valid veto is vetoed like any other. A home
   persists, per object, when it first saw it, its own serving intervals over the object's window,
   and its decision, and reuses that decision after a restart.
-- **Clock.** A home refuses an entry more than 60 s ahead of its clock, an immediate entry more
-  than 300 s behind it, and a full set whose `issued` is more than 300 s behind it. So at an
-  honest primary an immediate entry's `issued` is its admission time to within 300 s.
+- **Clock.** A home refuses an entry more than 60 s ahead of its clock (`refused:early`), and an
+  immediate entry or a full set whose `issued` is more than 300 s behind it (`refused:late`). So at
+  an honest primary an immediate entry's `issued` is its admission time to within 300 s.
+- **Admitting pending objects.** A home receipts a transition when, against its latest state, the
+  transition meets §8.7's validity except receipts, its delta is not void, and its clock is between
+  the transition's `issued` and 300 s after it. Admission is deterministic, in this order, and a
+  full home refuses; it never evicts:
+  1. each `control` or `recover` unit may have at most 2 pending transitions it proposed
+     (`refused:proposerFull`);
+  2. the account may have at most 2 pending transitions per such unit, so no set of proposers can
+     take another unit's share (`refused:pendingFull`);
+  3. a transition may have at most 8 vetoes, at most one per vetoing unit (`refused:vetoFull`).
+  A hostile home at `headQuorum` 1 can still receipt a transition, hide it from its listing, and
+  reveal it only in its `activate` after the deadline; then nobody can veto it. That is why quorum
+  1 doesn't resist a hostile home (§18).
 - **Rate.** For each immediate entry E (every kind except `genesis`, `upgrade` and recording
   entries), its **charged signer** is its `by`, or, when `by` was added by an immediate `keyring`
   entry, that entry's charged signer. Over E and the immediate entries **preceding E in the
@@ -1293,7 +1341,7 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   exceeding either as `malformed` (§8.5). A verifier checks the window over `issued`; only a home
   can check that `issued` is the admission time (the clock rule), which is what stops a dormant
   account's history being filled in one sitting. A hostile primary can still admit backdated
-  entries (changes §H). Transitions and vetoes are bounded by §8.7's pending caps.
+  entries (changes §H). Transitions and vetoes are bounded by the admission caps above.
 - **Honest bulk work** fits the defaults: a first import is records, not authority entries;
   onboarding twenty people is twenty grants. A clean copy with more than 64 members to re-admit
   needs a second approver or a day's pause (§15.3), or a transition raising `rate`.
@@ -1324,8 +1372,10 @@ is not fresh is never used as evidence of the current state. Heads embedded in a
 verified as §8.7 says (the home's key in the state before the activation, freshness not needed).
 
 - **High-water mark.** A verifier persists per account its highest accepted `(seq, digest)` and
-  the folded state there, and accepts later only histories that extend it (`refused:rollback`
-  otherwise), moving across a conflict only as §8.6 allows.
+  the folded state there. It only detects rollback: a history that stops before that seq, or a
+  head behind it, is `refused:rollback`. It never selects a branch: a conflict is decided by §8.6
+  from the objects held, including the entries the verifier keeps, so a verifier that saw one
+  branch first reaches the same verdict as one that saw the other.
 - **Incremental verification.** A verifier MAY resume from its persisted state: it fetches entries
   after its high-water seq, checks the first one's `previous` against its persisted digest, and
   verifies each under §8. A verifier with no persisted state MUST fetch and verify the complete
@@ -1386,14 +1436,14 @@ A home is a relay (0.3 §8) whose `GET {base}` response adds `"home":{"member":"
 | `POST {base}/authority` | `{"from":<seq>,"entries":[…],"receipts":[…]}`, 1–64 contiguous entries. 200 `{"head":…,"receipts":[…]}`; 409 with the current head if `from` overlaps different bytes or leaves a gap; 422 with the §1 result; a non-primary home answers 421 with the primary's endpoints for an entry no primary head covers. No other authorization is needed. |
 | `GET {base}/pending?after={cursor}&limit={n}` | 200 `{"objects":[{"seq":<cursor>,"digest","kind","envelope"}…],"more":bool}`: 1–64 pending objects in the order the home first stored them, after `cursor` (0 to start). `kind` is `transition`, `veto` or `receipt` (a receipt by any current home). Cursors are the home's own increasing integers and never reused. Under §13.4. |
 | `GET {base}/pending/{digest}` | 200 `{"envelope","receipts":[…]}` for a pending transition or veto with every receipt the home holds for it; 404 otherwise. Under §13.4. |
-| `POST {base}/pending` | `{"objects":[…]}`, 1–16 transition, veto or receipt envelopes. 200 `{"receipts":[…]}` with this home's receipts for those it receipted; 422 with the §1 result for each it refused. No other authorization is needed. |
+| `POST {base}/pending` | `{"objects":[…]}`, 1–16 transition, veto or receipt envelopes. 200 `{"receipts":[…]}` with this home's receipts for those it receipted; 422 with one result per refused object: the §8.5 result, or `refused:early`, `refused:late`, `refused:proposerFull`, `refused:pendingFull` or `refused:vetoFull` (§13.1). No other authorization is needed. |
 
 **Pending objects.** A home lists every transition and veto it stores that has no recording entry
 on its branch, and every receipt of them, until 7 days after the transition's due time; then it
 MAY drop them. One object appears once in a listing; a listing from cursor 0 until `more` is false
-is complete for the moment it ends. A home holds at most 32 pending transitions per account (2 per
-proposer), 8 vetoes per transition and one receipt per home per object, so a listing is at most
-about 2,600 objects. Hosts poll with `after` set to the last cursor they saw (§17.5). Reading
+is complete for the moment it ends. The admission caps (§13.1) bound a listing at 128 transitions
+(2 for each of at most 64 units), 8 vetoes each and one receipt per home per object: at most
+10,368 objects. Hosts poll with `after` set to the last cursor they saw (§17.5). Reading
 follows §13.4, which includes recover-only and suspended controllers.
 
 A home that is a successor's home also serves `GET {base}/predecessor/authority/<8 digits>.json`
@@ -1661,11 +1711,12 @@ seed or a raw ECDH output. The host interface and the history verifier's report 
 A verifier that resumes (§13.3) MUST persist, per account, atomically and with a format version.
 Every item is a function of the history and the objects held, recomputed identically by replay
 from seq 1, so two verifiers that persist it reach the same verdicts:
-- the high-water `(seq, digest)` and the folded state there: keyring, members (terms, expiry,
+- the high-water `(seq, digest)` (rollback detection only, §13.3) and the folded state there: keyring, members (terms, expiry,
   session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
   is retiring;
 - the digests of transitions with an `activate` or `vetoed` on the branch;
-- each activation with no `final` yet, with its witness set; the `final` entries;
+- each activation not yet final, with its witness set and whether it is removal-only; the
+  `final` entries; the homes excused by final removals;
 - v(u) per unit and, per unit, the seq of its last compliant activation;
 - each outstanding suspension: key, suspending unit, the transition with its chosen receipts, and
   its due time;
@@ -1770,9 +1821,11 @@ set.
 **Upgraded accounts** keep their roles exactly (§16.1, §16.2). Hosts SHOULD show the reference
 and offer the role change as an ordinary pending transition.
 
-A paragraph a host can show the person, and what the reference protects, are in the guide §5. At
-`headQuorum` 1, one hostile home with one stolen key can still win; three homes at `headQuorum` 2
-close that.
+A paragraph a host can show the person, and what the reference protects, are in the guide §5.
+**Two homes at `headQuorum` 1 keep working with one down but don't resist a hostile home:** it can
+hide a transition until its deadline has passed (§13.1), and with one stolen key it can win. They
+are the person reference for availability only. The setup that resists one hostile home is three
+homes at `headQuorum` 2, the company reference; hosts SHOULD offer it to people too.
 
 ## 19. Results and reasons
 

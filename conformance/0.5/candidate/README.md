@@ -1,7 +1,7 @@
 # Colophon 0.5 candidate vectors
 
 **Status: hand-built for review, not replayed by any 0.5 implementation.** These files go with
-[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 7. No 0.5 verifier exists yet,
+[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 8. No 0.5 verifier exists yet,
 so every `expected` outcome for 0.5 is the spec author's reading of the text. The bytes are
 real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256 (raw, or
 WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except
@@ -18,7 +18,7 @@ python3 -I conformance/0.5/candidate/generate.py          # write
 python3 -I conformance/0.5/candidate/generate.py --check  # compare with the files here
 ```
 
-`generate.py` runs `rules.py` (shared helpers and the cases that still hold), which runs `rules_v7.py` (pending transitions, who-wins rows, succession). It needs Python 3 and `cryptography`
+`generate.py` runs `rules.py` (shared helpers and the cases that still hold), which runs `rules_v8.py` (pending transitions, who-wins rows, succession). It needs Python 3 and `cryptography`
 (Apache-2.0 OR BSD-3-Clause; checked with 50.0.2), for tooling only. Signatures are
 deterministic (RFC 6979), so regeneration is byte-identical. The generator also re-encodes all
 267 published 0.4 authority bodies without duplicate names, and checks that its canonical encoder
@@ -35,6 +35,7 @@ reproduces them byte for byte.
 | `rules/call-*` | §12.3, §13.4 | Pending addition, provisional addition, after `final`, pending removal, suspended, suspended history read, a suspension expired by the clock, recover-only history read. Each carries `verifier.statuses` |
 | `rules/veto-webauthn-*` | §4.3, §8.7 | A veto signature with and without UV, and from a call origin |
 | `rules/row-*` | changes §H | Event sequences: rows 2, 3, 4, 8, 9, 10, 11, 12 (and a gone home revoked by one recovery key), 13 (the honest home serves the transition; the owner's veto stands), 17 |
+| `rules/t-conflict-no-evidence`, `t-quorum2-veto-beats-removal`, `row-13-quorum1-hidden-transition`, `t-removal-unblocks-addition`, `t-revoke-home-*`, `t-planted-key-dropped`, `t-vault-by-approve-only`, `t-recovery-*` | §8.3, §8.4, §8.6, §8.7 | Revision 8: one per High of the second review of revision 7 |
 | `encoding/number-ties.json` | §2.1 | Doubles with two equally near shortest decimals: the even last digit is canonical |
 | `calls/link-unknown-operator-*` | §10.4, §12.3 | `any:[true, unknown]` is `ok`; `any:[false, unknown]` is `newerFormat` |
 | `rules/origin-*`, `rules/replay-*`, `rules/removal-after-heads`, `rules/equivocation`, `rules/rollback`, `rules/malleated-envelope`, `rules/non-canonical-*`, `rules/invalid-expires-date` | §2, §4.3, §12, §13 | Unchanged from revision 3, rebuilt on the new account |
@@ -44,10 +45,10 @@ reproduces them byte for byte.
 
 ## What was run
 
-- `generate.py --check`: 958 generated files match. The directory holds 964 files: those 958 plus
-  six sources (`README.md`, `generate.py`, `rules.py`, `rules_v7.py`, and the probe's
+- `generate.py --check`: 1,016 generated files match. The directory holds 1,022 files: those plus
+  six sources (`README.md`, `generate.py`, `rules.py`, `rules_v8.py`, and the probe's
   `Package.swift` and `main.swift`).
-- The fifth reviewer's signature checker (`sigcheck5.py`): 2,036 signatures, including heads in
+- The fifth reviewer's signature checker (`sigcheck5.py`): 2,185 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
   intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).
 - **0.4 engine** on `upgrade/*`: `newerFormat` everywhere except `foreign-signer` (`badSignature`).

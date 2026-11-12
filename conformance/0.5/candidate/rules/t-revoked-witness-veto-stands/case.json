@@ -1,1 +1,0 @@
-{"description":"Against an activation finalized without the home it revokes, a valid vetoed whose veto receipts are all by that home stands.","expected":{"result":"ok","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:08:20Z"}}

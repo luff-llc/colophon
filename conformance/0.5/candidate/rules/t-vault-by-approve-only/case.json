@@ -1,0 +1,1 @@
+{"description":"An approve-only key current at the anchor still can't rotate a retiring vault.","expected":{"result":"badSignature","seq":5},"sections":["8.3","8.4"],"verifier":{"now":"2026-11-14T09:08:20Z"}}

@@ -1,0 +1,1 @@
+{"description":"Removing every control key without a replacement breaks §6.2.","expected":{"result":"malformed","seq":3},"sections":["6.2","8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

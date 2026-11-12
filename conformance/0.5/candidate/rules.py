@@ -451,4 +451,4 @@ write("rules/malleated-envelope/case.json", {"description": "The same body with 
                                              "sections": ["2.2", "8.6", "14"], "expected": {"equal": True, "home": "200, keeps the first"}})
 
 
-exec(compile((HERE / "rules_v7.py").read_text(), str(HERE / "rules_v7.py"), "exec"))
+exec(compile((HERE / "rules_v8.py").read_text(), str(HERE / "rules_v8.py"), "exec"))

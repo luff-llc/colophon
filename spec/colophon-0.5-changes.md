@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 7, 2026-11-12. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 8, 2026-11-12. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -10,7 +10,8 @@ Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` 
 fourth reviews (of 4032d44), mapped in §G.8. "Opus5" and "Codex5" are the fifth reviews (of
 a1decc6) and "Builder N" the engine builder's implementation notes (`engine-0.5-foundation`,
 04c0eef), mapped in §G.9. "Opus6", "Codex6" and "Attack N" are the sixth reviews (of 281e7c4) and
-the engine attack's gaps (colophon#4), mapped in §G.10. The worked theft and loss scenarios moved from the spec
+the engine attack's gaps (colophon#4), mapped in §G.10. "Codex7" is the second review of
+revision 7 (0a25988), mapped in §G.11. The worked theft and loss scenarios moved from the spec
 to §H. Revision 4 replaces the
 revision-2 and revision-3 recovery machinery (provisional keys, cancel, attempt 2,
 counter-recovery, full recovery, the primary yield, the no-home digest tie-break) with one
@@ -157,6 +158,17 @@ clocks and admission.
 | 80 | Encoding: ties to even, lone surrogates, nesting 64, origin prefix labels; §12.3 step 6 bindings first; `any:[true, unknown]` is true | Attack 2–6, 9; the engine's re-check |
 | 81 | State table for §8.6–§8.7; overview, freshness rationale, host paragraph, required-vector list moved out | Opus6 Q9; the architect's decision 10 |
 
+### A.5 Revision 8
+
+| # | Change | Why |
+| --- | --- | --- |
+| 82 | Conflicts decided from the object set only; the high-water mark detects rollback and never selects a branch; with no head evidence both entries are evidence and the verdict is `refused:fork` | Codex7 High 1 |
+| 83 | Removal-only transitions: outside the finality order, displaceable by their own valid `vetoed` until final; a transition may not revoke a home and add anything; revoking a home without it as a witness needs the stronger authority; witnesses include homes revoked by activations not yet final | Codex7 High 2, 3; the architect's 2a′, 2b, 2c |
+| 84 | Retiring vault: only a `control` or `recover` key current at the removal's anchor rotates it; keys the removed key planted after the anchor are dropped at activation | Codex7 High 4 |
+| 85 | Recovery restores control: the recovery rule may remove any controllers and install replacement control keys; all recover keys together act at once, fewer after the delay | Codex7 High 5 |
+| 86 | A total order over recording entries (`final` inherits its activation's due time); a partitioned state table; one result per check, named home refusals; deterministic pending admission (2 per unit) | Codex7 Mediums 6–9 |
+| 87 | Row 13 and the quorum-1 statement; `final` never has empty heads | Codex7 Lows 10, 11 |
+
 ## B. Galley's requirements
 
 ### B.1 Contract §13 (R1–R13, revision 1 of the contract)
@@ -270,6 +282,14 @@ Revision 7 adds:
 | 31 | Removal of a stolen key | One recovery key starts it; no vault change; rotate the vault with a `vault` entry from the first device holding the seed; self-slots for the others |
 | 32 | Notices | Two delivery routes at setup; show missed activations at next use; submit transitions and vetoes to every home |
 | 33 | Replay store | Retain 7,260 s, inclusive |
+
+Revision 8 adds:
+
+| # | Contract | 0.5 revision 8 |
+| --- | --- | --- |
+| 34 | Recovery screens | Both security keys install a new control key at once; one does it after the delay |
+| 35 | Galley's home | Admission caps 2 per unit, refuse when full with the named results; refuse a transition that revokes a home and adds anything |
+| 36 | Verifier | Never choose a branch by what it saw first; `refused:fork` with no head evidence |
 
 Two further points the contract needs:
 
@@ -695,42 +715,60 @@ the machinery it makes redundant.
 | Engine re-check (b) | §2.1; tie vectors |
 | Opus6 Q9 length | Moved: §0, §13.3's freshness rationale, §15.1's root rationale, §16.3's probe sentence, §18's host paragraph and closing paragraph, §19's repeated rows, §21's required-vector list (to the conformance README, normative from there). The state table added about 40 lines, the new rules more; the spec is 1,828 lines (from 1,855) |
 
+### G.11 Second review of revision 7 (0a25988)
+
+| Finding | Settled in |
+| --- | --- |
+| Codex7 High 1 arrival order | §8.6 (object set only; rule 3 for no evidence), §13.3, §17.2; `t-conflict-no-evidence` with two high-water variants |
+| Codex7 High 2 deadlock | §8.7: removal-only activations are outside the order; witnesses excused only by a final removal; `t-removal-unblocks-addition` |
+| Codex7 High 3 revoke and add | §8.7 "Removal-only transitions", "Revoking a home"; `t-revoke-home-and-add`, `t-revoke-home-control-rule-needs-its-head`. **The architect's 2a was departed from, by agreement:** removal-only activations are not final at activation (that let one hostile home beat a valid veto at quorum 2); they stay displaceable until a `final` covers them (2a′). `t-quorum2-veto-beats-removal`, `row-13-quorum1-hidden-transition`. Also: witnesses include homes revoked by activations not yet final, so an addition after a provisional revocation still needs the revoked home |
+| Codex7 High 4 planted key seizes the vault | §8.3, §8.4 `vault`; `t-planted-key-dropped`, `t-vault-by-approve-only` |
+| Codex7 High 5 recovery can't restore control | §8.4 pending table "Recovery"; `t-recovery-installs-control-pending`, `t-recovery-adds-recover-refused`, `t-recovery-leaves-no-control`; §H re-derived row by row |
+| Codex7 Medium 6 | §8.6 due times of recording entries and the total order |
+| Codex7 Medium 7 | §8.7 table partitioned; `genesis`, `vault`, full-set rows; Clock covers every held entry |
+| Codex7 Medium 8 | §8.5 table (embedded signatures `badSignature`, `signers` mismatch `malformed`); §13.1 and §14 named refusals |
+| Codex7 Medium 9 | §13.1 admission; §14 bounds (10,368 objects); the quorum-1 hiding statement in §13.1 and §18. The person reference stays two homes at quorum 1, stated as availability-only; three homes at quorum 2 is offered |
+| Codex7 Low 10 | §8.5: a `final` with no heads is `malformed`; an empty witness set is final without one |
+| Codex7 Low 11 | §H row 13 |
+| 2b's form | The revoked home's "own receipt" is implemented as "it stays a witness of its own revocation" under the control rule, so its head is needed; receipts carried need no new rule |
+
 ## H. Theft and loss, worked through
 
-**Reference person:** a Mac device key M, a phone device key Ph and a synced passkey P (all
-`control`), two security keys K1 and K2 (`recover` only, kept apart), two homes at `headQuorum` 1,
-D = 72 h.
-- A "unit" is a key.
-- A transition is due D + 300 s after its `issued`; vetoes count until D after it.
-- Every bound assumes at least one honest, reachable home, and hosts that poll as §17.5 requires.
-- With a hostile or unavailable required home, no bound exists.
+**Reference person:** a Mac device key M (with the vault slot), a phone device key Ph and a synced
+passkey P (all `approve` + `control`), two security keys K1 and K2 (`recover` only, kept apart),
+thresholds 1, `recoverThreshold` 1, two homes at `headQuorum` 1, D = 72 h.
+- A "unit" is a key. A pending transition is due D + 300 s after its `issued`; vetoes count until D.
+- "Full recovery" is K1 and K2 together: a full set under the recovery rule, due at its receipt,
+  which may remove any controllers and install replacement control keys (§8.4).
+- Every bound assumes hosts that poll (§17.5). Each row was re-derived from the revision-8 text;
+  none is marked underivable.
 
-| # | Scenario | What happens | Outcome |
+| # | Scenario | What the text gives | Outcome |
 | --- | --- | --- | --- |
-| 1 | Owner lost one key | The owner proposes removing it with all remaining keys (two or more units, so a single thief key can't veto), with a vault change if it had a slot. | Owner wins after D + 300 s |
-| 2 | Thief has the Mac key M | The owner vetoes each thief proposal with one key; then M can't propose alone. The owner proposes removing M, and by default every key M planted, and suspends M; any one recovery key could start it. The vault retires and the first device holding the seed rotates it. | Owner wins after D + 300 s; suspended M can't call meanwhile; M keeps what it already read |
-| 3 | Thief suspends an owner key first | M proposes removing Ph and suspends Ph. Ph vetoes its own removal (one against one), ending the suspension. M can't propose alone again. | Owner wins |
-| 4 | Thief has the phone (Ph and P) | K1 and K2 are the full recovery set: with `keep: [M]` they remove every other non-recover key at once. | Owner wins at once |
-| 5 | Phone-only owner (no M), phone stolen | Ph and P are every control key: the thief can add his own control keys at once, but nothing needing consent. Both security keys, with `keep`, remove every non-recover key the owner doesn't name, including keys added after the owner looked. | Owner wins at once with both security keys; with one, stall until the second is retrieved. Hence §18's offer of a security key with `control` |
-| 6 | Thief has one recovery key K1 | The owner vetoes; K1 can't propose alone again. The owner removes K1 with a control key and K2. | Owner wins after D + 300 s; the thief reads the vault at once if K1 has a slot and he has its PIN |
-| 7 | Thief has M and K1; owner has Ph, P and K2 | The owner signs the removal with three units, which two can't veto. | Owner wins after D + 300 s |
-| 8 | Equal units (one control plus one recovery on each side) | Neither completes a transition. Both keep immediate powers, subject to suspension and the rate limit. | Stall until one side obtains another key |
-| 9 | Owner has both recovery keys and no device | K1 or K2 reads the history. K1 and K2 sign a full recovery set: `keep: []`, a new device key, a new vault. | Back in at once; old data is reachable only if a recovery key had a slot |
-| 10 | Burglar takes both recovery keys | The same, by the burglar. | Burglar wins at once. Closed by keeping the keys apart, or `recoverThreshold` 2 with three keys |
-| 11 | Honest mistake | The found phone vetoes. | Nothing changes |
-| 12 | One home down | The other home receipts and vetoes; transitions fall due; removals apply. Additions stay provisional until the down home's head is in a `final`. If it is gone for good, an ordinary transition (one recovery key) revokes it; its `final` needs no head from it. | Removals proceed; new keys wait, or at most D + 300 s after revoking the gone home |
-| 13 | One hostile home (quorum 1) and one stolen key | It receipts a backdated transition and appends the determined `activate`. The honest home refuses the `activate` for ever but stores and serves the transition, so the owner can veto it at the honest home before the deadline; the `activate` never gets a `final`, so the `vetoed` stands everywhere. | Owner wins if they veto before the deadline; otherwise the thief's removal applies at every verifier that hears from the hostile home. **Not safe at quorum 1.** Closed by three homes at quorum 2 |
-| 14 | Hostile sole home and one control or recovery key | The home receipts the thief's transitions and hides vetoes. | **Thief wins** |
-| 15 | Sole device stolen, no other control key | As row 5. The owner learns of the thief's transitions the next time a recovery key is used with any host (§17.5). | As row 5 |
-| 16 | No home | Nothing waits; competing branches are an unresolved fork. | Whoever holds keys meeting the rule, consent and thresholds wins at once |
-| 17 | Thief has the phone and one security key (Ph, P, K1) | Three units against the owner's two (M, K2): the owner's veto is too few. | **Thief wins after D + 300 s** |
-| 18 | Burglary of the place holding M, the phone and K1 | Four units against one. | **Thief wins after D + 300 s** |
-| 19 | Thief has M and the phone (every control key) | He makes control-only changes at once (adding keys), nothing needing consent. Both security keys with `keep` remove all of it at once. | Owner wins at once with both security keys |
-| 20 | Owner doesn't look within the delay | Nobody vetoes. | **A thief with one key wins after D + 300 s.** Every other row assumes hosts poll (§17.5) |
-| 21 | Two homes at quorum 1; the honest one is down for the whole delay; the reachable one is hostile; the thief has one key | The hostile home receipts the thief's transition and drops the owner's veto. | **Thief wins** (rows 12–14 combined) |
-| 22 | A removed key signs a backdated entry later | No primary head covers it and the activation has a `final`. | Closed (was a loss in revision 6) |
-| 23 | One hostile home at quorum 1, no stolen key | It withholds its heads, so nothing it witnesses gets a `final`. An ordinary transition revokes it. | Additions wait D + 300 s; then the owner wins |
-| 24 | Company, three homes at quorum 2, one dead | As row 23: one recovery transition revokes it. | Additions wait D + 300 s (revision 6 needed every founder's recovery keys) |
-| 25 | Owner holds one security key, the other is away | One recovery key removes the stolen slotted device; the vault rotates from any device holding the seed. | Owner wins after D + 300 s (revision 6 needed both keys present) |
-| 26 | Swift root library, root device stolen, library quiet for longer than D | The thief rotates the kit and dates the rotations before the window. | **Thief wins** unless `handover` names more keys than he holds, or the person spots the dates in the preflight |
-| 27 | Hostile primary home and a stolen key on a dormant account | It admits backdated entries that fit each day's rate. | History flooding up to the portability floor; honest homes still refuse them (closed by an honest primary) |
+| 1 | Owner lost one key | Full recovery removes it at once; or any two units remove it after D + 300 s (one thief key can't veto two). | Owner wins at once with both security keys, otherwise after D + 300 s |
+| 2 | Thief has the Mac key M | Full recovery (`keep: [Ph, P]`) at once; or Ph + P after D + 300 s, M's veto too few; M suspended meanwhile. Keys M planted after the anchor go too. The vault retires; Ph, P, K1 or K2 rotates it. | Owner wins at once with both security keys, otherwise after D + 300 s; M keeps what it already read |
+| 3 | Thief suspends an owner key first | M proposes removing Ph and suspends it; Ph vetoes (one against one, disjoint); the suspension ends; v(M) = 1. | Owner wins; then as row 2 |
+| 4 | Thief has the phone (Ph, P) | Full recovery with `keep: [M]`. | Owner wins at once |
+| 5 | Phone-only owner (no M), phone stolen | The thief has every control key and can make control-only changes at once. Full recovery with `keep: []` installs a new control key and removes Ph, P and anything the thief added. With K1 alone: pending, and Ph + P veto it (two against one), then escalation. | Owner wins at once with both security keys; with one, stall until the second |
+| 6 | Thief has one recovery key K1 | The owner vetoes K1's proposals (any one key); then K1 can't propose alone. M + K2 remove K1 (consent from K2), pending; K1's veto too few. Full recovery is impossible without K1. | Owner wins after D + 300 s; the thief reads the vault at once if K1 has a slot and he has its PIN |
+| 7 | Thief has M and K1; owner Ph, P, K2 | Ph, P, K2 remove M and K1 (three units, consent K2); two can't veto. | Owner wins after D + 300 s |
+| 8 | One control and one recovery key on each side (four-key account) | Each side's proposals are vetoed by the other; escalation then needs three units. | Stall until one side gets another key |
+| 9 | Owner has K1 and K2, no device | K1 or K2 reads the history; full recovery installs a new device key with `control` and removes M, Ph, P. | Back at once; old data only if a recovery key holds a slot |
+| 10 | Burglar takes K1 and K2 | The same, by the burglar. | Burglar wins at once. Closed by keeping the keys apart, or `recoverThreshold` 2 with three keys |
+| 11 | Honest mistake | K1 proposes a recovery (pending); the found phone vetoes. | Nothing changes |
+| 12 | One home down | Transitions fall due on the other home's receipt; removals apply at once. Additions need the down home's head. If it is gone: one recovery key revokes it (stronger authority, removal-only, pending), final with the other home's head; or full recovery does it at once. | Removals proceed; additions after D + 300 s plus their own delay with one recovery key, at once with both |
+| 13 | One hostile home (quorum 1) and one stolen key | It receipts the thief's transition and hides it. The owner can veto only if the honest home received the transition before the deadline. With a stolen control key the thief's removals apply but his additions never get a `final` (the honest home's head is needed); full recovery restores control at once. With a stolen recovery key the thief revokes the honest home by the recovery rule, and then his additions are final. | Control key: owner wins at once with both security keys. Recovery key: **thief wins** unless the owner vetoes at the honest home in time. **Not safe at quorum 1** |
+| 14 | Hostile sole home and one control or recovery key | It hides vetoes and refuses the owner's receipts, so even full recovery (which needs a receipt) can't run. | **Thief wins** |
+| 15 | Sole device stolen, no other control key | As row 5. | As row 5 |
+| 16 | No home | Nothing waits; one recovery key's recovery is immediate too; competing branches are an unresolved fork. | Whoever holds keys meeting the rule wins at once |
+| 17 | Thief has Ph, P and K1; owner M and K2 | Three units against two; full recovery needs K1. | **Thief wins after D + 300 s** |
+| 18 | Burglary of M, Ph, P and K1 | Four against one; control-only changes at once. | **Thief wins** (at once for control-only changes, after D + 300 s for the rest) |
+| 19 | Thief has M, Ph and P (every control key) | Control-only changes at once; full recovery with `keep: []` removes them and his additions and installs a new control key. | Owner wins at once with both security keys |
+| 20 | Owner doesn't look within the delay | A stolen control or recovery key's transition isn't vetoed. An approve or sign key can't propose. | **Thief with a control or recovery key wins after D + 300 s** |
+| 21 | Honest home down for the whole delay; the other hostile; thief has one key | Control key: removals apply, additions can't be final without the honest home; full recovery waits for a receipt from the honest home. Recovery key: as row 13. | Control key: owner wins with both security keys once the honest home returns. Recovery key: **thief wins** |
+| 22 | A removed key signs a backdated entry later | No primary head covers it; a `final` covers the removal. | Closed |
+| 23 | One hostile home at quorum 1, no stolen key | It withholds its heads, so additions wait. One recovery key revokes it (pending; the honest home receipts and witnesses), or full recovery at once. | Additions resume after D + 300 s, or at once with both security keys |
+| 24 | Company: three homes at quorum 2, one dead | `recoverThreshold` 2 of the founders' recovery keys revoke it (pending, receipted by the two live homes); full recovery needs every founder. | Additions resume after D + 300 s |
+| 25 | Owner holds one security key, the other is away; M stolen | K1 alone starts the removal of M, but M's veto (one against one) is valid. K1 with any other owner key (two units) can't be vetoed by M. | Owner wins after D + 300 s with K1 and one more key |
+| 26 | Swift root library, root stolen, library quiet for longer than D | The thief dates his kit rotations before the window. | **Thief wins** unless `handover` names more keys or the person spots the dates |
+| 27 | Hostile primary and a stolen key on a dormant account | It admits backdated entries that fit each day's rate. | History flooding up to the floor; honest homes refuse them |

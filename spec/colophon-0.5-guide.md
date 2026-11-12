@@ -40,7 +40,7 @@ out the others?
 | --- | --- |
 | `grant`, `renew`, `revoke` | Admit or revoke members: bounded by the rate limit, charged to the key (§13.1), and by suspension; members a removed key admitted are listed for one-action revocation (§17.5). Revocations don't count toward the account limit, so a thief can't use the limit to stop the owner revoking. |
 | `rekey`, `endSessions` | Churn epochs or sessions: the signer's rate limit; one epoch per namespace per entry. |
-| `vault` | Only while the vault is retiring, by a key that holds the seed. A thief who still holds a current key already reads the vault; his worst is a new vault without the owner's slots, which costs the owner a vault-change transition. |
+| `vault` | Only while the vault is retiring, by a `control` or `recover` key current at the removal's anchor; keys the removed key planted are dropped. A thief who still holds such a key already reads the vault; his worst is a new vault without the owner's slots, which costs the owner a vault-change transition. |
 | `keyring` | Plant approve or sign keys: at most four per entry, each charged to the planting key's budget, and the 56/224 headroom; they never count, propose or veto. |
 | `suspend` | Suspend one owner key: costs a veto, after which escalation stops repeats; one per unit at a time; it ends when the transition can no longer activate. |
 
@@ -194,3 +194,4 @@ without stopping either thief. What protects the owner is the veto window.
 | 2026-11-12 | Opus and Codex, fourth reviews of revision 4 | H1–H10, M1–M11; 5 High, 5 Medium | Revision 5; changes §G.8 |
 | 2026-11-12 | Opus and Codex, fifth reviews of revision 5; engine builder (28 questions) | H1–H5, M1–M8, lows; 4 High, 6 Medium; 28 ambiguities, 4 vectors | Revision 6; changes §G.9 |
 | 2026-11-12 | Opus and Codex, sixth reviews of revision 6; engine attack (12 gaps) | H1–H6, M1–M11, lows; 3 High, 5 Medium; 12 gaps | Revision 7; changes §G.10 |
+| 2026-11-12 | Codex, second review of revision 7 | 5 High, 4 Medium, 2 Low | Revision 8; changes §G.11 |
