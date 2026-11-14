@@ -1,0 +1,1 @@
+{"description":"Entries by a key A planted count against A: the addition, 59 grants by A, then the planted key's 5th grant is A's 65th.","expected":{"result":"malformed","seq":67},"sections":["13.1"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

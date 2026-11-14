@@ -1,0 +1,1 @@
+{"description":"Each branch activates a `resolve` that keeps its own entry. Nothing orders two resolves keeping different entries, so neither resolves the fork: no candidate is dropped.","expected":{"result":"refused:fork","seq":3},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

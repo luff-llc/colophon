@@ -1,0 +1,1 @@
+{"description":"One recovery key K1 against a stolen sole control key A: A vetoes K1's recovery once (one against one); v(K1) = 1, so K1 alone can't propose again. Stall.","expected":{"result":"badSignature","seq":4},"sections":["8.7","changes §H"],"verifier":{"now":"2026-11-14T09:21:00Z"}}

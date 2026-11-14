@@ -1,0 +1,1 @@
+{"description":"The same resolve signed by the security key alone, which holds `recover` only: the control rule is not met and `resolve` has no recovery rule (§8.4), so its activation is `badSignature` on its branch and the fork stands.","expected":{"result":"refused:fork","seq":3},"sections":["8.4","8.6","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

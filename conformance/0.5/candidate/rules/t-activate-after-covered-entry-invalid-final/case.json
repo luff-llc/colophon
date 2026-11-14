@@ -1,0 +1,1 @@
+{"description":"As t-activate-after-covered-entry, with a `final` after the activate on its branch that lacks H2's head. An invalid `final` covers nothing: the covered entry keeps seq 3.","expected":{"result":"ok","seq":4},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

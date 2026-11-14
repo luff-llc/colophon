@@ -1,0 +1,1 @@
+{"description":"Only the greatest-digest candidate has a quorum head. It beats each other candidate even though their mutual comparison is undecided.","expected":{"standsAtSeq3":"ffe44e4ea1bd23001996291e6ab9efc7f6a3b490cc20691909598208183dfb34"},"sections":["8.6"],"verifier":{"now":"2026-11-11T09:01:00Z"}}

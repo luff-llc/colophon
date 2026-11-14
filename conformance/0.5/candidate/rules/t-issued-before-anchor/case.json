@@ -1,0 +1,1 @@
+{"description":"issued is earlier than the anchor's.","expected":{"transition":"malformed"},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -1,0 +1,1 @@
+{"description":"No pin: a subdomain may not sign authority.","expected":{"result":"badSignature","seq":1},"sections":["4.3"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

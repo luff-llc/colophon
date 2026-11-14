@@ -1,0 +1,1 @@
+{"description":"Checks only the veto's signature rule (§4.3, §8.7).","expected":{"vetoSignature":"invalid: not an authority origin"},"sections":["4.3","8.7"]}

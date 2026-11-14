@@ -1,0 +1,1 @@
+{"description":"The genesis lists the predecessor's kit and carries no `handover`: the kit's possession proof is missing, so the genesis is `badSignature`.","expected":{"genesis":"badSignature","succession":"unverified"},"sections":["15.1","16.3"]}

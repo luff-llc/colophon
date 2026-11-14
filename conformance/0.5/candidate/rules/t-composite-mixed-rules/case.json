@@ -1,0 +1,1 @@
+{"description":"K1 meets the recovery rule for the removal, but raising callWindow allows only the control rule: one rule must serve all components.","expected":{"result":"badSignature","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

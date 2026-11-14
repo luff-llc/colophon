@@ -1,0 +1,158 @@
+# Colophon 0.5 candidate vectors
+
+**Status: hand-built for review; replayed by the Rust engine, not by the Swift source.** These files go with
+[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 13. The Rust history verifier replays them (`crates/colophon-core/tests/v05_candidate.rs`); no
+Swift implementation has. Every `expected` outcome is the spec author's reading of the text. The bytes are
+real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256 (raw, or
+WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except
+where a case says a signature is invalid on purpose. Spec §21 says which vectors must exist
+before freeze. This directory holds those that could be built without an engine.
+
+All keys are public test secrets (`keys.json`, `succession/keys.json`, `../../0.4/keys/keys.json`).
+Never use them for real data.
+
+## Regenerate and check
+
+One Rust generator, `crates/colophon-core/tests/v5_candidate.rs` (helpers in
+`crates/colophon-core/tests/v5_candidate/`), builds every generated file here. It is opt-in
+(both tests are `#[ignore]`) and uses only the core's own dependencies (`p256`, `aes-gcm`, `hkdf`,
+`sha2`, `serde`, `serde_json`, `base64`). It does not call the 0.5 verifier: canonical JSON, signing and
+entry building are written out again in the test, so the vectors stay independent of the code they
+test.
+
+```sh
+# compare the files here with what the generator builds
+cargo test -p colophon-core --test v5_candidate -- --ignored v5_generator_check
+# rewrite them
+COLOPHON_WRITE_V5_VECTORS=1 cargo test -p colophon-core --test v5_candidate -- --ignored v5_generator_write
+```
+
+Signatures are deterministic (RFC 6979 over SHA-256), so regeneration is byte-identical. The
+generator also re-encodes all 267 published 0.4 authority bodies without duplicate names and
+checks that its canonical encoder reproduces them byte for byte, and checks that every envelope's
+body is canonical JSON and every honest call and link signature verifies. It replaces the Python
+generator (`generate.py`, `rules.py`, `rules_v8.py`, which needed `cryptography`), which produced
+the same 1,078 files.
+
+## Contents
+
+| Path | Spec | What |
+| --- | --- | --- |
+| `identifiers.json`, `upgrade/*` | §5.1, §16.1 | Identifiers; the 0.4 in-place upgrade |
+| `account/`, `calls/*`, `heads/*` | §9, §12, §13 | Identity account (its home appointed by a transition and its determined `activate`), calls and heads. `calls/one-link` carries the member's condition (`ok`); `copied-link` then reaches the acting-key check |
+| `rules/t-*` | §8.3, §8.6, §8.7 | Due time and deadline; held; the 7-day bound; identical and differing bytes; once only; evaluation before `activate`; vetoes (target, too few, sharing a unit, approve-only, after the deadline, 22 signers); ordering (a primary-covered entry before due keeps its seq; a backdated uncovered one doesn't; a `final` is never displaced); **finality as a recorded fact** (`final` with every witness, missing a witness, a non-witness head, out of order; a provisional addition signs nothing, a final one does; a full set finalizes earlier activations; finality survives a home rotation; a revoked witness and the veto that still stands); escalation; full sets with receipts and due from the receipt; consent and composites; `keep`; a recovery-rule home appointment refused below `threshold`; vault: removal of a slotted key without a vault change (retiring), by one recovery key, rotation by a `vault` entry, a `vault` entry when not retiring or without its own slot, a self-slot, `rekey` by a recover key; suspension |
+| `rules/i-*` | §8.4, §13.1 | Immediate entries; the rate limit (verifier), planted keys, revocations outside the account limit, and the dormant-account burst a home refuses |
+| `rules/call-*` | §12.3, §13.4 | Pending addition, provisional addition, after `final`, pending removal, suspended, suspended history read, a suspension expired by the clock, recover-only history read. Each carries `verifier.statuses` |
+| `rules/veto-webauthn-*` | §4.3, §8.7 | A veto signature with and without UV, and from a call origin |
+| `rules/row-*` | changes §H | Event sequences: rows 2, 3, 4, 8, 9, 10, 11, 12 (and a gone home revoked by one recovery key), 13 (the honest home serves the transition; the owner's veto stands), 17 |
+| `rules/t-excusal-final-not-displaced-by-vetoed`, `t-cascade-final-not-displaced-by-vetoed`, `t-full-set-final-not-displaced-by-vetoed`, `t-vetoed-displaces-activation-and-later-revocation`, `t-order-guard-keeps-later-addition-provisional` | §8.6, §8.7 | Revision 12 (M1, H1, M-a): an activation that is final by excusal, by the cascade or by a full set is never displaced by a `vetoed`; a `vetoed` that displaces a provisional one takes the later revocations with it; Order keeps a later addition provisional behind an earlier one when a non-removal-only revocation does not excuse its home |
+| `rules/t-rekey-slotted-drops-slot`, `i-rekey-slotted-as-immediate` | §8.3, §8.4 | Revision 12 engine correction: re-keying the slotted controller drops its slot and retires the vault; the same change as an immediate entry is `malformed` |
+| `rules/t-conflict-no-evidence`, `t-quorum2-veto-beats-removal`, `row-13-quorum1-hidden-transition`, `t-removal-unblocks-addition`, `t-revoke-home-*`, `t-planted-key-dropped`, `t-vault-by-approve-only`, `t-recovery-*` | §8.3, §8.4, §8.6, §8.7 | Revision 8: one per High of the second review of revision 7 |
+| `encoding/number-ties.json` | §2.1 | Doubles with two equally near shortest decimals: the even last digit is canonical |
+| `calls/link-unknown-operator-*` | §10.4, §12.3 | `any:[true, unknown]` is `ok`; `any:[false, unknown]` is `newerFormat` |
+| `rules/origin-*`, `rules/replay-*`, `rules/removal-after-heads`, `rules/rollback`, `rules/malleated-envelope`, `rules/non-canonical-*`, `rules/invalid-expires-date` | §2, §4.3, §12, §13 | Unchanged from revision 3, rebuilt on the new account |
+| `rules/equivocation`, `rules/equivocation-displaced` | §8.6, §13.3 | Heads evidence judged against held history: each ships the account's history and the ordinary grant held beside the seq 3 activation (`branch-ordinary/`). An earlier head over the activation that stands and a later one over the grant that lost to it convict; an earlier head over the grant and a later one over the activation that displaced it (§8.6 rule 1) do not. Rebuilt after revision 12 (the first form's second head covered no held entry) |
+| `records/*` | §7.1, §9.2, §9.4, §9.5, §10.1, §11, §16.1 | Namespace vectors (28 cases). Each ships its authority history (`records/authority`), the held headers (`ops/`), `holders` (members whose public test agreement scalar opens the seals addressed to them) and `expected` outcomes per header. `shares-and-epochs` (rekey and grant shares, the epoch current at the cited seq, grant start, access levels, a future claim); `header-aad`, `missing-key`; `author-chain`; `revoke-kept-heads`, `revoke-walk-refused-header`, `revoke-missing-intermediate`, `revoke-missing-head`, `revoke-fork-heads`, `revoke-fork-one-head`, `revoke-16-heads`, `revoke-17-heads` (malformed at the entry); `renew-shares`; `same-id-two-bodies` (the lowest body digest wins one operation ID, in any order), `one-body-two-envelopes` (a high-S twin is the same object), `revoke-while-retiring` (empty `epochs`, no epoch introduced), `rekey-while-retiring` and `revoke-epochs-while-retiring` (malformed: §8.3); `proposal-*` (accept, decline, resolution clock equal and lower, two resolutions, a resolver that may not write the kind, a missing proposal); `upgraded-fence`, `upgraded-revoked-after`, `upgraded-revoked-before` (the `/3` records of an in-place upgraded account) |
+| `pairing/pairing.json` | §7.3 | Commitment and code |
+| `rules/t-resolve-fork`, `t-resolve-two`, `t-resolve-below-rule`, `t-resolve-three-candidates`, `t-resolve-no-losing-branch`, `t-resolve-second-fork` | §8.4, §8.6, §8.7 | Revision 13 (`resolve` keeps one entry): a fork resolved by a `resolve` activation on one branch (that branch stands); a `resolve` on each branch keeping its own entry (the fork stands); a `resolve` signed by a recover-only key (no control rule: the fork stands); three candidates settled by one `resolve`; the resolved branch and the owner's next entry with no trace of the loser; a second fork later on the same branch settled the same way |
+| `rules/t-resolve-late-fork-witnessed`, `t-resolve-homeless-late-fork` | §8.6, §13.1, §18 | Revision 13 fix round: with homes, a late fork by a former controller and its `resolve` do not discard a branch whose later activation homes witnessed (`refused:fork`); **the stated limit**: with no home the same late fork wins for a new verifier (`ok`), because nothing in the objects tells the histories apart |
+| `rules/t-vetoed-choice-right`, `t-vetoed-late-receipt-skipped`, `t-vetoed-other-valid-receipt-accepted` | §8.7 | Revision 13: the lowest home's timely receipt is what a recorder chooses; a lower home's receipt after the veto deadline is skipped and does not block the entry; an entry carrying another valid receipt is accepted (a verifier judges what an entry carries) |
+| `rules/t-final-head-choice-right`, `t-final-head-other-valid-head-accepted`, `t-final-head-ahead-ignored` | §8.7, §13.3 | Revision 13: of two heads one home signed over the activation a recorder carries the lower body digest; an entry carrying the other valid head is accepted; a head dated after the `final`'s `issued` is not usable |
+| `rules/t-slot-wrong-length-genesis`, `i-slot-add-valid`, `i-slot-add-wrong-length` | §7.2, §8.5 | Revision 13: a sealed slot box of 47 bytes is `malformed` at replay in a genesis and in a `keyring` entry; the same entry with a 48-byte box is `ok` |
+| `rules/rollback` | §13.3 | Now run (revision 13): `verifier.history` names the account's records; the head over seq 2 is `refused:rollback` against the home's mark at seq 3, and accepted without it |
+| `succession/swift-*` | §13.5, §15.1, §16.3 | Receipt 60 s into the succession window (verified), 400 s (late, unverified); F before the due time; veto recorded as `successionVetoed`; a key removed before the last removal and before the delay can't veto, the last-removed key can, and so can a key removed within the delay before the genesis; a hand-over with an extra key needs two vetoers; root library signed by the root alone, and vetoed by the kit; WebAuthn and recover-set swaps; a premature thief freeze followed by the owner's verified layout-4 freeze; an entry after a verified F |
+| `succession/authority5-chain` | §15.1 | A to B to C, each a `/5` successor: C verifies B through B's own predecessor |
+| `succession/authority5-successor-*` | §8.4, §8.7, §15.1 | Revision 12 (M2, H2, M-b, M-c): a predecessor with homes. F provisional (not verified; the genesis lacking possession proofs is held); F made final by a `final` (verified, the same genesis `ok`); F displaced by a `vetoed` (not verified, the predecessor continues; without proofs the genesis is `badSignature`, with proofs it is valid); a dead witness home revoked after F, which excuses it (verified); a `final` of an earlier removal-only activation refused after F |
+| `succession/authority5-chain-16`, `authority5-chain-17` | §2.4, §15.1 | Revision 12 (H3): a real chain of 16 predecessor accounts verifies, one of 17 is `malformed` |
+| `succession/swift-no-handover-needs-possession`, `swift-handover-below-rule-needs-possession` | §8.4, §15.1 | Revision 12 (M4): a genesis listing the predecessor's kit with no `handover`, or one below the rule that may write F: the kit's possession is required, `badSignature` at seq 1 |
+| `probes/swift-der/` | §16.3 | CryptoKit probe |
+
+## What was run
+
+- `v5_generator_check` (the Rust generator), revision 13: 1,454 generated files match, byte for
+  byte, including the revision 13 vector directories. The directory holds 1,457 files: those plus three sources (`README.md` and the probe's
+  `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each , a seven-file chained succession, a nine-file Swift layout case and a thirteen-file cutoff case).
+- The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
+  `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
+  intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).
+- **`v05_candidate` (the 0.5 history verifier), revision 13:** 319 in scope, 319 pass, 0 fail,
+  0 not implemented (before: 301 / 301 / 0 / 1). No vector of revision 13 was replayed by the Swift
+  source.
+- **0.4 engine** on `upgrade/*`: `newerFormat` everywhere except `foreign-signer` (`badSignature`).
+- **Swift verifier** (Marginalia `c8280332`, unmodified): every full predecessor stops at its first
+  freeze with `unsupportedStorageLayout(3)`.
+- **CryptoKit DER probe** (macOS 27.0.1, 200 random keys): minimal DER and high-S accepted, every
+  other form tested refused, including `r` or `s` of zero. iOS and visionOS were not probed.
+- New-vault slots and `previousVault` seals are structurally valid synthetic bytes, not openable.
+- No valid transition approaches the 622,592-byte envelope bound, so the quorum-8 size
+  composition (§2.4) is checked by arithmetic, not by a vector.
+
+## Required for freeze
+
+Normative for spec §21 condition 1.
+
+- **Keys, encoding and upgrade:**
+  - every 0.4 key case as `/5`;
+  - authority origins for entries, transitions and vetoes;
+  - controller calls from call and authority origins;
+  - non-canonical JSON and base64; malleated envelopes; invalid dates;
+  - the 0.4 upgrade with every refusal.
+- **Immediate entries:**
+  - each §8.4 row accepted, and the same change refused as immediate;
+  - tightening another key's authentication refused;
+  - `layout` and `migration` as immediate refused;
+  - two epochs for one namespace in a `rekey` refused;
+  - the rate limit at every verifier, keys planted by an addition charged to their adder, revocations
+    outside the account limit; at most four controllers per addition; headroom at 56 controllers
+    and 224 slots.
+- **Transitions:**
+  - composite removal with a vault change and `previousVault`, slot rebasing at activation, and
+    the `rekey` that follows; composite rules mixing components;
+  - `keep`, including keys added after the anchor;
+  - evaluation before `activate`: an anchor before the first home, an anchor at a lower past
+    delay, a receipt by a revoked home (`malformed`), an anchor off the branch;
+  - due time as `issued` + 300 s + delay; the veto deadline; receipt choice;
+  - `signers` not matching the envelope;
+  - determined recording entries from two homes, and two that differ only in receipts;
+  - once only: a duplicate `vetoed`, a re-appended `activate`; the 7-day bound;
+  - an `activate` that doesn't displace covered entries;
+  - veto validity: count, disjoint units, eligibility, UV, origin, quorum, the deadline;
+  - escalation at receipt and before activation, its reset, distinct transitions;
+  - the full set (a) and (b), with removed keys counted and no receipts;
+  - suspension: carried objects, its end, a void transition, one per unit, history reads,
+    calls and immediate entries;
+  - delta void cases;
+  - mutual removal and the tie;
+  - finality: the home set before, full sets, a `vetoed` after finality as evidence; rollback of a
+    provisional activation and what it removes;
+  - every row of changes §H.
+- **Conflicts:** evidence; a fork with and without homes; `resolve`; a transition anchored on a
+  losing branch.
+- **Members and records:**
+  - request coverage; pairing; `serves` and import;
+  - renew; revoke with `kept` and up to 16 `heads`; `endSessions`;
+  - `/5` headers; proposals.
+- **Calls:** every §12.3 refusal; replay states (replay, conflict, abandoned); quorum; S.
+- **Heads:** valid, stale, non-home, fork, rollback, equivocation.
+- **Succession:**
+  - `/5` and Swift (root and keyring, WebAuthn, `rotateRecovery`);
+  - the genesis receipt window from the appointing entry;
+  - the veto window: in time, too few, by a key no longer current, by a key current within the
+    delay before the genesis, recorded as `successionVetoed`;
+  - a premature freeze followed by a verified attempt;
+  - an entry after the final one; two attempts.
+- **Seed transfer:** the HPKE label, wrong nonces.
+- **Finality:** `final` entries, revoked witnesses, a full set finalizing earlier activations, rule-1 conflicts with and without a primary head.
+- **Vault:** retiring, rotation, self-slots, `rekey` by a recover key.
+- **Exchange:** the pending listing (§14) and its cursors, against a simulated home.
+
+## Still missing: these need an engine (implementation plan, step V1)
+
+- Every 0.4 key case as `/5`; slots and rotation with real HPKE; slot rebasing with a slot added
+  after the anchor; a vault change in an account with namespaces and its `rekey`.
+- Namespaces: rekey (including two epochs for one namespace), shares, `/5` headers, author chains,
+  revocation walks, proposals.
+- `headQuorum` 2 with three homes, receipt forwarding, finality in order and rollback of a suffix,
+  mutual removal, external-object limits, the replay states, the rate limit's byte budgets.
+- `/5` succession, the migration entry with real digests, seed transfer.
+- The Swift corpus on iOS and visionOS, and the dry run on a real library.

@@ -26,9 +26,13 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Validate formatting of new Rust code
         run: |
-          rustfmt --edition 2021 --check crates/colophon-core/src/v5/mod.rs crates/colophon-core/src/v5/terms.rs crates/colophon-core/src/v5/speaks.rs crates/colophon-core/tests/v5_conformance.rs
+          rustfmt --edition 2021 --check crates/colophon-core/src/legacy_draft1/mod.rs crates/colophon-core/src/legacy_draft1/terms.rs crates/colophon-core/src/legacy_draft1/speaks.rs crates/colophon-core/tests/legacy_draft1_conformance.rs
       - name: Replay committed synthetic vectors and check deterministic regeneration
-        run: cargo test -p colophon-core --test v5_conformance
+        run: cargo test -p colophon-core --test legacy_draft1_conformance
+      - name: Colophon 0.5 candidate engine (v05) and conformance runner
+        run: cargo test -p colophon-core --test v05_engine --test v05_candidate -- --nocapture
+      - name: Candidate vector generator check (byte for byte, no stray files)
+        run: cargo test -p colophon-core --test v5_candidate -- --ignored v5_generator_check
       - name: Full native workspace suite
         run: cargo test --workspace
       - name: Build wasm target of consuming crate

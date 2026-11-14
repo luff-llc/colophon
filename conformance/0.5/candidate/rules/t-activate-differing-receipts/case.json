@@ -1,0 +1,1 @@
+{"description":"Each home held only its own receipt: two activations of one transition at seq 3. The lower body digest stands.","expected":{"other":"rebuilt or dropped; effects identical","standsAtSeq3":"b39f2c91648d37176bb2ef713b8bacdd8ec8b6bb8b310b2181948b8374ac5e26"},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

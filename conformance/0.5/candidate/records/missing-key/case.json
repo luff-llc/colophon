@@ -1,0 +1,1 @@
+{"description":"A header that passes admission steps 1-8 whose epoch key the reader cannot open is held unavailable (§11.5).","expected":{"history":"ok","opened":[],"records":{"ops/f1222f496b53478dd63e6e760ef183aa/notes/000000000001-c8a28bd1f851fd4c6dc2b092adddbd40.json":"held:unavailable"}},"holders":[],"sections":["11.5"],"verifier":{"now":"2026-11-11T16:20:00Z"}}

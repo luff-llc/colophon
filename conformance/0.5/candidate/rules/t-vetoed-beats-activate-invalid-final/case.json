@@ -1,0 +1,1 @@
+{"description":"As t-vetoed-beats-activate, with a `final` after the activate on its branch that lacks H2's head. An invalid `final` covers nothing: the veto still stands.","expected":{"result":"ok","seq":3},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

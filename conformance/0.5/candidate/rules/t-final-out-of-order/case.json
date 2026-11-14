@@ -1,0 +1,1 @@
+{"description":"A `final` for seq 4 while seq 3 has none: activations become final in order.","expected":{"result":"malformed","seq":5},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:08:20Z"}}
