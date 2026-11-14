@@ -16,8 +16,7 @@ use crate::v05::history::envelope::AuthEnvelope;
 use crate::v05::history::{verify_history, MemberRecord, Objects, Persisted, Verdict};
 use crate::v05::members::MemberKind;
 use crate::v05::records::{
-    judge_records, EpochKeys, HeldRecord, Judgement, Level, Outcome, ProposalState,
-    RecordAuthority,
+    judge_records, EpochKeys, HeldRecord, Judgement, Level, Outcome, ProposalState, RecordAuthority,
 };
 use crate::v05::terms::Access;
 use crate::v05::{malformed, Failure, Result};
@@ -34,6 +33,15 @@ pub(super) struct Inputs<'a> {
     pub me: &'a Identity,
     pub scope: &'a Option<BTreeSet<String>>,
 }
+
+/// One admitted record on its way into a fold: its position `(clock, author, id, digest)`, its
+/// view, its author's kind and its header digest.
+type FoldItem = (
+    (u64, String, String, String),
+    OperationView,
+    MemberKind,
+    String,
+);
 
 /// One namespace's fold.
 pub(super) struct Folded {
@@ -175,8 +183,7 @@ impl Derived {
             if latest == 0 || self.keys.get(&account, &ns, latest).is_none() {
                 continue;
             }
-            let mut ops: Vec<((u64, String, String, String), OperationView, MemberKind, String)> =
-                Vec::new();
+            let mut ops: Vec<FoldItem> = Vec::new();
             let accepted: BTreeMap<(String, String), (u64, String, String)> = self
                 .judgement
                 .proposals
@@ -203,7 +210,10 @@ impl Derived {
                 if !j.folded {
                     continue;
                 }
-                let kind = plain.get("kind").and_then(Value::as_str).unwrap_or_default();
+                let kind = plain
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 if kind == "colophon.accept" || kind == "colophon.decline" {
                     continue;
                 }
@@ -226,8 +236,16 @@ impl Derived {
                         kind: kind.to_string(),
                         author: author.clone(),
                         author_label: label,
-                        origin: if mk == MemberKind::Agent { "ai" } else { "person" }.into(),
-                        clock: plain.get("clock").and_then(Value::as_u64).unwrap_or(j.clock),
+                        origin: if mk == MemberKind::Agent {
+                            "ai"
+                        } else {
+                            "person"
+                        }
+                        .into(),
+                        clock: plain
+                            .get("clock")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(j.clock),
                         created: plain
                             .get("created")
                             .and_then(Value::as_str)
@@ -241,7 +259,10 @@ impl Derived {
             }
             ops.sort_by(|a, b| a.0.cmp(&b.0));
             let mut fold = Namespace::new(&ns);
-            let policy = CheckpointPolicy { every: 0, retain: 0 };
+            let policy = CheckpointPolicy {
+                every: 0,
+                retain: 0,
+            };
             let mut admitted = Vec::new();
             for (_, view, mk, dg) in &ops {
                 let ctx = self.auth.member(&view.author).map(|m| AuthorContext {
@@ -256,7 +277,7 @@ impl Derived {
             let revision = match before {
                 None => u64::from(!ops.is_empty()),
                 Some(b) if b.fold.order == fold.order => b.revision,
-                Some(b) => b.revision + 1,
+                Some(b) => b.revision.saturating_add(1),
             };
             self.folded.insert(
                 ns,

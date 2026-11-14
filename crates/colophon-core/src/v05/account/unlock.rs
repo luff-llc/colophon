@@ -29,9 +29,6 @@ impl SeedRing {
     pub(super) fn iter(&self) -> impl Iterator<Item = &VaultSeed> {
         self.seeds.iter()
     }
-    pub(super) fn is_empty(&self) -> bool {
-        self.seeds.is_empty()
-    }
     pub(super) fn len(&self) -> usize {
         self.seeds.len()
     }
@@ -149,13 +146,23 @@ pub(super) fn vault_chain(
         let v = &env.value;
         match v.get("kind").and_then(Value::as_str) {
             Some("genesis") => {
-                if let Some(p) = v.get("keyring").and_then(|k| k.get("vault")).and_then(public_of) {
+                if let Some(p) = v
+                    .get("keyring")
+                    .and_then(|k| k.get("vault"))
+                    .and_then(public_of)
+                {
                     if !publics.contains(&p) {
                         publics.push(p);
                     }
                 }
             }
-            Some("vault") => take(&mut publics, &mut boxes, v, v.get("previousVault"), &public_of),
+            Some("vault") => take(
+                &mut publics,
+                &mut boxes,
+                v,
+                v.get("previousVault"),
+                &public_of,
+            ),
             Some("activate") => {
                 let Some(t) = v.get("transition").and_then(Value::as_str) else {
                     continue;
@@ -172,7 +179,13 @@ pub(super) fn vault_chain(
                     continue;
                 };
                 if let Some(vc) = te.value.get("change").and_then(|c| c.get("vault")) {
-                    take(&mut publics, &mut boxes, vc, vc.get("previousVault"), &public_of);
+                    take(
+                        &mut publics,
+                        &mut boxes,
+                        vc,
+                        vc.get("previousVault"),
+                        &public_of,
+                    );
                 }
             }
             _ => {}

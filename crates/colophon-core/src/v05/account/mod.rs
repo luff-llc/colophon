@@ -30,6 +30,26 @@
 //! for new epochs, new vaults and slots (it can recompute what they make), and with the ECDH
 //! results and PRF outputs it passes in. Hosts MUST pass a fresh seed per action.
 //!
+//! No accessor reaches the seed, the epoch keys or what a prepared action will sign:
+//!
+//! ```compile_fail
+//! fn read(a: &colophon_core::v05::account::Account) {
+//!     let _ = &a.seeds; // private: there is no accessor of any visibility for the seed
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn read(a: &colophon_core::v05::account::Account) {
+//!     let _ = &a.d.keys; // private: the epoch keys never leave the account
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn read(a: &mut colophon_core::v05::account::PendingAction) {
+//!     a.steps()[0].body_mut(); // a step's body cannot be changed between prepare and finish
+//! }
+//! ```
+//!
 //! # Prepare, then finish
 //!
 //! Every action is `Account::begin_*`, which returns a [`PendingAction`], and
@@ -76,7 +96,7 @@
 //! | `begin_keyring`, `begin_thresholds` | [`Account::begin_keyring`] (immediate additive entries), [`Account::begin_transition`] with [`Change`] (thresholds, policy, homes, vault) |
 //! | `begin_add_controller`, `begin_recovery_add`, `begin_add_passkey` | [`Account::begin_add_controller`] (immediate `approve`/`sign`, or a transition for `control`/`recover`), with [`Account::transfer_seed`] and [`Account::accept_seed_transfer`] for §7.4 |
 //! | `begin_remove_controller` | [`Account::begin_remove_controller`] (`plan_rotation`, the `vault` component) and [`Account::begin_rotate_vault`] (the `vault` entry) |
-//! | `select_controller`, `eligible_signers`, `prepare_authority` | gone in 0.5: the caller names the signers (controller IDs) and the write side checks the rule of §8.4 and refuses a set that does not meet it. [`Account::eligible_signers`] lists who could sign what |
+//! | `select_controller`, `eligible_signers`, `prepare_authority` | gone in 0.5: the caller names the signers (controller IDs) and the write side checks the rule of §8.4 and refuses a set that does not meet it. [`Account::suggest_signers`] picks a set that meets a rule from the keys a host can sign with |
 //! | `begin_import_grant`, `begin_import`, `import_*`, `reconcile_import_prefix` | `import` is a `terms` field in 0.5 (§9.3, §10.1): [`Account::begin_approve`] carries it; import batches belong to E6 |
 //! | `begin_write`, `written_operation*`, `live_generation` | [`Account::begin_write`] (a `/5` operation); live stamps and live generations belong to E6 |
 //! | `begin_layout` | gone in 0.5: a `/5` account is at layout 2 from genesis (§11.8) |
@@ -87,7 +107,7 @@
 //! | `NativeEngine::*`, `RecordSource`, `verify_batch`, `records_at`, `update_versions` | E6 (the storage engine) |
 //! | `NativeCheckpoint*` | E6 |
 //! | `vault_public`, `webauthn_prf_input`, `parse_registration` | already in `v05::vault`, `v05::slots` and `keys` |
-//! | (new) pending transitions | [`Account::pending`], [`Account::begin_transition`], [`Account::begin_veto`], [`Account::begin_suspend`], [`Account::begin_record_due`], [`Account::begin_resolve`] |
+//! | (new) pending transitions | [`Account::pending`], [`Account::begin_transition`], [`Account::begin_veto`], [`Account::begin_suspend`], [`Account::record_due`] (the determined `activate`, `vetoed` and `final`), [`Account::begin_resolve`] and [`Account::fork_candidates`] |
 //! | (new) notices (§17.5) | [`Account::pending`], [`Account::notices`] |
 //! | (new) shares owed | [`Account::owed_shares`], [`Account::begin_renew`] |
 //! | (new) proposals (§11.6) | [`Account::proposals`], [`Account::begin_propose`], [`Account::begin_resolution`] |
@@ -98,12 +118,14 @@ mod read;
 mod unlock;
 
 pub use action::{
-    ActionInfo, AddController, Change, Finished, PendingAction, RevokeKeep, SignerChoice,
+    ActionInfo, AddController, AddMode, CallTarget, Change, Finished, KeyringEdit, PendingAction,
+    RevokeKeep, SignerChoice,
 };
 pub use create::{default_policy, CreateParams, CreateProgress, Creation};
+pub use read::Standing;
 pub use read::{
-    ControllerInfo, HomeInfo, LedgerLine, MemberInfo, Notices, PendingTransition, Policy,
-    OwedInfo, ProposalInfo, SeenActivation,
+    ControllerInfo, HomeInfo, LedgerLine, MemberInfo, Notices, OwedInfo, PendingTransition, Policy,
+    ProposalInfo, SeenActivation,
 };
 pub use unlock::{EpochAgreement, EpochSecret, SlotOption};
 
@@ -217,7 +239,8 @@ impl Changes {
     pub fn is_empty(&self) -> bool {
         self.authority == AuthorityChanges::default()
             && self.namespaces.is_empty()
-            && self.pending == PendingChanges::default()
+            && self.pending.added.is_empty()
+            && self.pending.gone.is_empty()
             && self.heads == HeadChanges::default()
             && self.foreign == 0
     }
@@ -251,6 +274,8 @@ pub struct PendingChanges {
     pub added: Vec<String>,
     /// Transitions no longer pending (recorded, or not held).
     pub gone: Vec<String>,
+    /// Every transition pending now: body digests.
+    pub now: Vec<String>,
 }
 /// What changed in the heads.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,13 +319,15 @@ fn check_identity(me: &Identity) -> Result<()> {
 
 /// Bounds on an incoming set, before any copy is made.
 fn check_bounds(held: &Objects, records: &[HeldRecord], more: &Incoming) -> Result<()> {
-    let count = |o: &Objects| {
-        o.entries.len() + o.pending.len() + o.heads.len() + o.predecessor.len()
-    };
+    let count =
+        |o: &Objects| o.entries.len() + o.pending.len() + o.heads.len() + o.predecessor.len();
     let incoming = count(&more.objects) + more.records.len();
     require(
         incoming <= MAX_OBJECTS
-            && count(held).saturating_add(records.len()).saturating_add(incoming) <= MAX_OBJECTS * 2,
+            && count(held)
+                .saturating_add(records.len())
+                .saturating_add(incoming)
+                <= MAX_OBJECTS * 2,
         "too many objects",
     )?;
     let mut total = 0usize;
@@ -316,7 +343,10 @@ fn check_bounds(held: &Objects, records: &[HeldRecord], more: &Incoming) -> Resu
         }
     }
     for r in &more.records {
-        require(r.bytes.len() <= MAX_RECORD_BYTES, "a record exceeds its bound")?;
+        require(
+            r.bytes.len() <= MAX_RECORD_BYTES,
+            "a record exceeds its bound",
+        )?;
         require(r.path.len() <= 512, "a record path exceeds its bound")?;
         total = total.saturating_add(r.bytes.len());
     }
@@ -332,6 +362,10 @@ fn check_bounds(held: &Objects, records: &[HeldRecord], more: &Incoming) -> Resu
     )
 }
 
+/// Hold `from` with `into`, as a set, in one canonical order (by bytes). The verifier takes the
+/// first of several envelopes over one body (§8.6: equality is body bytes), so the order the
+/// objects are held in decides which it takes; a canonical order makes that a function of the
+/// set and not of the order they arrived in.
 fn union(into: &mut Objects, from: &Objects) -> bool {
     let mut grew = false;
     for (dst, src) in [
@@ -347,6 +381,7 @@ fn union(into: &mut Objects, from: &Objects) -> bool {
                 grew = true;
             }
         }
+        dst.sort();
     }
     grew
 }
@@ -360,6 +395,7 @@ fn union_records(into: &mut Vec<HeldRecord>, from: &[HeldRecord]) {
             into.push(r.clone());
         }
     }
+    into.sort_by(|a, b| (&a.path, &a.bytes).cmp(&(&b.path, &b.bytes)));
 }
 
 impl Account {
@@ -378,12 +414,20 @@ impl Account {
         check_identity(&me)?;
         crate::v05::write::check_issued(now_ms)?;
         let persisted = persisted.unwrap_or_default();
-        let given = Incoming {
-            objects,
-            records,
-        };
+        let given = Incoming { objects, records };
         check_bounds(&Objects::default(), &[], &given)?;
-        let mut all = persisted.objects().cloned().unwrap_or_default();
+        let mut all = Objects::default();
+        if let Some(p) = persisted.objects() {
+            check_bounds(
+                &Objects::default(),
+                &[],
+                &Incoming {
+                    objects: p.clone(),
+                    records: Vec::new(),
+                },
+            )?;
+            union(&mut all, p);
+        }
         union(&mut all, &given.objects);
         let mut held = Vec::new();
         union_records(&mut held, &given.records);
@@ -542,7 +586,10 @@ impl Account {
                 .map(|m| m.request.member_id())
                 .collect()
         };
-        c.authority.members_added = ids(ns, false).difference(&ids(os, false)).cloned().collect();
+        c.authority.members_added = ids(ns, false)
+            .difference(&ids(os, false))
+            .cloned()
+            .collect();
         c.authority.members_revoked = ids(ns, true).difference(&ids(os, true)).cloned().collect();
         let ctl = |s: &crate::v05::history::State| -> BTreeSet<String> {
             s.keyring().controllers.keys().cloned().collect()
@@ -564,6 +611,7 @@ impl Account {
             .collect();
         c.pending.added = now.difference(&was).cloned().collect();
         c.pending.gone = was.difference(&now).cloned().collect();
+        c.pending.now = now.iter().cloned().collect();
         c
     }
 
@@ -581,6 +629,16 @@ impl Account {
     /// The clock the account was last advanced to, in ms.
     pub fn now_ms(&self) -> i64 {
         self.now_ms
+    }
+    /// The body digest of the genesis (seq 1): the account's identity is derived from it.
+    pub fn objects_first(&self) -> String {
+        self.d.verdict.branch.first().cloned().unwrap_or_default()
+    }
+    /// The head of the verified history: its seq and body digest. A home's head names it
+    /// (§13.2); a call's `asOf` is at most it (§12.2).
+    pub fn head(&self) -> (u64, String) {
+        let h = &self.d.verdict.branch;
+        (h.len() as u64, h.last().cloned().unwrap_or_default())
     }
     /// Where the verifier stands.
     pub fn status(&self) -> Status {
@@ -607,7 +665,7 @@ impl Account {
                 "invalid namespace in the read scope",
             )?;
         }
-        let old = std::mem::replace(&mut self.scope, Some(namespaces.into_iter().collect()));
+        let old = self.scope.replace(namespaces.into_iter().collect());
         match self.rebuild_in_place() {
             Ok(c) => Ok(c),
             Err(e) => {
@@ -688,10 +746,9 @@ impl Account {
                 };
                 match persisted.accept_head(h, ctx) {
                     Ok(head) => heads.accepted.push(head.by().to_string()),
-                    Err(e) => heads.refused.push((
-                        crate::v05::heads::head_by(h).unwrap_or_default(),
-                        e.code(),
-                    )),
+                    Err(e) => heads
+                        .refused
+                        .push((crate::v05::heads::head_by(h).unwrap_or_default(), e.code())),
                 }
             }
         }

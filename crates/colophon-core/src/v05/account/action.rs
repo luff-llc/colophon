@@ -35,9 +35,7 @@ use crate::v05::write::records::{
     prepare_grant, prepare_operation, prepare_rekey, prepare_renew, prepare_resolution,
     prepare_revoke, Keep, OperationSpec, PreparedOperation,
 };
-use crate::v05::write::{
-    format_date, KeptHead, Kind, SignatureResult, SigningStep,
-};
+use crate::v05::write::{format_date, KeptHead, Kind, SignatureResult, SigningStep};
 use crate::v05::{malformed, require, Failure, Reason, Result};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -400,7 +398,9 @@ impl Account {
             SignerChoice::KeyringAdd => pick(&Role::Control, k.add_threshold, &[]),
             SignerChoice::Veto => pick(&Role::Control, 1, &[Role::Recover]),
         };
-        found.ok_or_else(|| Failure::BadSignature("no set of the available keys meets the rule".into()))
+        found.ok_or_else(|| {
+            Failure::BadSignature("no set of the available keys meets the rule".into())
+        })
     }
 
     // -----------------------------------------------------------------------------------------
@@ -560,7 +560,10 @@ impl Account {
     // -----------------------------------------------------------------------------------------
     // The keyring.
 
-    fn raw_keyring_edit(&self, edit: impl FnOnce(&mut Map<String, Value>) -> Result<()>) -> Result<Value> {
+    fn raw_keyring_edit(
+        &self,
+        edit: impl FnOnce(&mut Map<String, Value>) -> Result<()>,
+    ) -> Result<Value> {
         let mut v = self.d.auth.state().keyring().raw.clone();
         let m = v
             .as_object_mut()
@@ -582,11 +585,7 @@ impl Account {
     /// An immediate `keyring` entry (§8.4): add a controller (`approve` or `sign` only), append
     /// slots, tighten policy. `edit` names the changes; the verifier judges that they only add
     /// or tighten.
-    pub fn begin_keyring(
-        &self,
-        edit: &KeyringEdit,
-        signers: &[String],
-    ) -> Result<PendingAction> {
+    pub fn begin_keyring(&self, edit: &KeyringEdit, signers: &[String]) -> Result<PendingAction> {
         self.require_writable()?;
         let new = self.raw_keyring_edit(|m| {
             if !edit.add_controllers.is_empty() {
@@ -1040,7 +1039,12 @@ impl Account {
     }
 
     /// Suspend `key` while the held transition that removes it is pending (§8.7).
-    pub fn begin_suspend(&self, key: &str, transition: &str, signer: &str) -> Result<PendingAction> {
+    pub fn begin_suspend(
+        &self,
+        key: &str,
+        transition: &str,
+        signer: &str,
+    ) -> Result<PendingAction> {
         self.require_writable()?;
         let batch = prepare_suspend(
             &self.objects,
@@ -1187,7 +1191,10 @@ impl Account {
                 true,
             ) {
                 if e.value.get("protocol").and_then(Value::as_str) == Some("colophon/transition/5")
-                    && e.value.get("change").and_then(|c| c.get("resolve")).is_some()
+                    && e.value
+                        .get("change")
+                        .and_then(|c| c.get("resolve"))
+                        .is_some()
                 {
                     transitions.push((e, b.clone()));
                 }
@@ -1341,7 +1348,13 @@ impl Account {
             }
         }
         let latest = self.d.auth.latest_epoch(namespace);
-        if latest == 0 || self.d.keys.get(self.d.auth.account(), namespace, latest).is_none() {
+        if latest == 0
+            || self
+                .d
+                .keys
+                .get(self.d.auth.account(), namespace, latest)
+                .is_none()
+        {
             return Ok(Err(crate::model::Denial {
                 reason: "unavailable".into(),
                 detail: "Unlock the namespace epoch before writing".into(),
@@ -1422,6 +1435,8 @@ impl Account {
         expires_ms: i64,
     ) -> Result<PendingAction> {
         let me = self.me_member()?;
+        crate::v05::write::check_issued(not_before_ms)?;
+        crate::v05::write::check_issued(expires_ms)?;
         let view = self.call_view()?;
         let m = self
             .d
@@ -1507,7 +1522,11 @@ impl Account {
         if target.audiences.is_empty() {
             target.audiences = vec![audience.to_string()];
         }
-        Ok(self.pending_for("call", Work::Call(Box::new(prepared), Box::new(target)), steps))
+        Ok(self.pending_for(
+            "call",
+            Work::Call(Box::new(prepared), Box::new(target)),
+            steps,
+        ))
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1551,7 +1570,12 @@ impl Account {
             }
             Work::Operation(op) => {
                 require(signatures.len() == 1, "one signature per step")?;
-                let done = op.finish(signatures.into_iter().next().ok_or_else(|| malformed("signature"))?)?;
+                let done = op.finish(
+                    signatures
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| malformed("signature"))?,
+                )?;
                 let rec = HeldRecord {
                     path: done.path,
                     bytes: done.envelope,
@@ -1562,14 +1586,20 @@ impl Account {
             Work::Link(l) => {
                 require(signatures.len() == 1, "one signature per step")?;
                 let view = self.call_view()?;
-                let sig = signatures.into_iter().next().ok_or_else(|| malformed("signature"))?;
+                let sig = signatures
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| malformed("signature"))?;
                 finished.artifact = Some(finish_link(&l, &sig, &view, self.now_ms)?);
                 return Ok(finished);
             }
             Work::Call(c, target) => {
                 require(signatures.len() == 1, "one signature per step")?;
                 let view = self.call_view()?;
-                let sig = signatures.into_iter().next().ok_or_else(|| malformed("signature"))?;
+                let sig = signatures
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| malformed("signature"))?;
                 let cfg = CallConfig {
                     now_ms: self.now_ms,
                     audiences: &target.audiences,
@@ -1597,7 +1627,13 @@ impl Account {
         let mut records = self.records.clone();
         super::union(&mut objects, &extra.objects);
         super::union_records(&mut records, &extra.records);
-        let d = self.candidate_with(&objects, &records, &self.persisted, self.now_ms, Some(&keys))?;
+        let d = self.candidate_with(
+            &objects,
+            &records,
+            &self.persisted,
+            self.now_ms,
+            Some(&keys),
+        )?;
         let before_clean = self.d.verdict.stop.is_none();
         match &d.verdict.stop {
             None | Some(Stop::Held { .. }) => {}
@@ -1651,4 +1687,3 @@ pub struct KeyringEdit {
     /// Policy fields to set (lowering windows, tightening `history` or `memberRule`).
     pub policy: Option<Value>,
 }
-

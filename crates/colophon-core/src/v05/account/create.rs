@@ -22,9 +22,9 @@ use crate::v05::{malformed, require, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-/// What to create. Everything here is public except the two entropy seeds, which the host
-/// draws fresh for this one action.
-#[derive(Clone, Debug)]
+/// What to create. Everything here is public except the vault seed and the two entropy seeds,
+/// which the host draws fresh for this one action; `Debug` prints none of them.
+#[derive(Clone)]
 pub struct CreateParams {
     /// 1–200 bytes.
     pub label: String,
@@ -54,6 +54,18 @@ pub struct CreateParams {
     pub entropy: [u8; 32],
     /// Fresh entropy for the first epochs (§11.1).
     pub epoch_seed: [u8; 32],
+}
+
+impl std::fmt::Debug for CreateParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CreateParams({:?}, {} controllers, {} slots, ..)",
+            self.label,
+            self.controllers.len(),
+            self.slots.len()
+        )
+    }
 }
 
 /// The §18 person policy defaults, as protocol JSON.
@@ -124,7 +136,18 @@ impl Creation {
             (1..=200).contains(&params.label.len()),
             "the label is 1 to 200 bytes",
         )?;
-        require(!params.slots.is_empty(), "an account is created with a slot")?;
+        require(
+            !params.slots.is_empty(),
+            "an account is created with a slot",
+        )?;
+        require(
+            params.controllers.len() <= 64
+                && params.slots.len() <= 256
+                && params.namespaces.len() <= 256
+                && params.signers.len() <= 64
+                && params.rekey_signers.len() <= 64,
+            "more controllers, slots, namespaces or signers than §6.2 allows",
+        )?;
         require(
             params.namespaces.windows(2).all(|w| w[0] < w[1])
                 && params

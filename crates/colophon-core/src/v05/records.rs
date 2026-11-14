@@ -684,7 +684,10 @@ impl RecordAuthority {
     /// A verdict that holds no genesis is refused. One that stopped with a failure after its
     /// genesis gives the view of the verified prefix, which reads but never writes:
     /// [`RecordAuthority::require_clean`] returns the failure.
-    pub(crate) fn from_verdict(objects: &Objects, verdict: super::history::Verdict) -> Result<Self> {
+    pub(crate) fn from_verdict(
+        objects: &Objects,
+        verdict: super::history::Verdict,
+    ) -> Result<Self> {
         let state = verdict
             .state
             .clone()

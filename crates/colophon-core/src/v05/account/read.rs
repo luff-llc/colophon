@@ -4,18 +4,12 @@
 use super::derived::{entry_digest, grant_of, model_kind, readable};
 use super::{Account, Identity};
 use crate::domain::{self, Spec};
-use crate::model::{
-    Access as ModelAccess, Denial, LedgerEntry, Member, NamespaceView, Outcome, Rejection,
-};
+use crate::model::{Denial, LedgerEntry, Member, NamespaceView, Outcome, Rejection};
 use crate::v05::descriptor::Role;
 use crate::v05::encoding::{bounds, decode_base64};
 use crate::v05::history::envelope::AuthEnvelope;
-use crate::v05::history::{
-    transition_timing, HomeStatus, Objects, State,
-};
-use crate::v05::records::{
-    EpochKeys, Level, Outcome as Admission, OwedShare, ProposalState,
-};
+use crate::v05::history::{transition_timing, HomeStatus, Objects, State};
+use crate::v05::records::{Level, Outcome as Admission, OwedShare, ProposalState};
 use crate::v05::slots::Slot;
 use crate::v05::terms::Access;
 use crate::v05::write::authority::choose_receipts;
@@ -634,7 +628,8 @@ impl Account {
                 .map(|a| {
                     a.iter()
                         .filter_map(|r| {
-                            let raw = decode_base64(r.as_str()?, bounds::RECEIPT_ENVELOPE * 2).ok()?;
+                            let raw =
+                                decode_base64(r.as_str()?, bounds::RECEIPT_ENVELOPE * 2).ok()?;
                             let re = crate::v05::signature::RawEnvelope::parse_bounded(
                                 &raw,
                                 bounds::RECEIPT_BODY,
@@ -690,9 +685,6 @@ impl Account {
         if !self.d.auth.namespaces().iter().any(|n| n == namespace) {
             return deny("notGranted", "The account declares no such namespace");
         }
-        if let Some(f) = self.d.auth.fork_seq() {
-            let _ = f;
-        }
         match &self.me {
             Identity::Controller(id) => {
                 if !self.d.auth.state().keyring().controllers.contains_key(id) {
@@ -717,10 +709,10 @@ impl Account {
                 if m.provisional.is_some() {
                     return deny("notGranted", "This member's admission is not final yet");
                 }
-                let ok = m
-                    .terms
-                    .records()
-                    .is_some_and(|r| r.iter().any(|e| e.namespace == namespace && e.access >= need));
+                let ok = m.terms.records().is_some_and(|r| {
+                    r.iter()
+                        .any(|e| e.namespace == namespace && e.access >= need)
+                });
                 if ok {
                     None
                 } else {
@@ -773,7 +765,9 @@ impl Account {
                 Admission::Held(w) if ns_ok => view.held.push(rej((*w).to_string())),
                 Admission::Refused(r) if ns_ok => view.refused.push(rej((*r).to_string())),
                 Admission::NewerFormat if ns_ok => view.held.push(rej("newerFormat".into())),
-                Admission::Invalid(c) if j.namespace.is_none() && j.path.contains(&format!("/{namespace}/")) => {
+                Admission::Invalid(c)
+                    if j.namespace.is_none() && j.path.contains(&format!("/{namespace}/")) =>
+                {
                     view.refused.push(rej(c.clone()))
                 }
                 _ => {}
@@ -894,9 +888,17 @@ impl Account {
             let seq = i as u64 + 1;
             let Some(e) = by_digest.get(d) else { continue };
             let v = &e.value;
-            let actor = v.get("by").and_then(Value::as_str).unwrap_or_default().to_string();
+            let actor = v
+                .get("by")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             let who = label_of(&actor);
-            let at = v.get("issued").and_then(Value::as_str).unwrap_or_default().to_string();
+            let at = v
+                .get("issued")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             let kind = kinds.get(d).map(String::as_str).unwrap_or("unknown");
             let subject = v.get("member").and_then(Value::as_str).map(str::to_string);
             let (event, text) = match kind {
@@ -994,7 +996,9 @@ impl Account {
                     ("wrote", format!("{who} {phrase}."))
                 }
                 Admission::Held(w) => ("held", format!("A record by {who} is held: {w}.")),
-                Admission::Refused(r) => ("refused", format!("A record by {who} was refused: {r}.")),
+                Admission::Refused(r) => {
+                    ("refused", format!("A record by {who} was refused: {r}."))
+                }
                 _ => continue,
             };
             lines.push((
@@ -1035,14 +1039,10 @@ impl Account {
         self.d.folded.contains_key(namespace)
     }
 
-    /// The account's epoch keys for the actions in this module: private to the crate.
-    pub(super) fn keys(&self) -> &EpochKeys {
-        &self.d.keys
-    }
-
     /// Whether this session's identity may read `namespace` at all (not whether it holds keys).
     pub fn may_read(&self, namespace: &str) -> bool {
-        readable(&self.d.auth, &self.me, namespace) && self.authorize(namespace, Access::Read).is_none()
+        readable(&self.d.auth, &self.me, namespace)
+            && self.authorize(namespace, Access::Read).is_none()
     }
 
     /// The write access a member needs for `level` of `namespace`.
@@ -1077,6 +1077,3 @@ pub enum Standing {
     /// Not in the verified history (a prospective identity).
     Unknown(String),
 }
-
-#[allow(dead_code)]
-fn _unused(_: ModelAccess) {}
