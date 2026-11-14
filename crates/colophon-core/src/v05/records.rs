@@ -1136,6 +1136,14 @@ pub struct Judged {
     /// The header passed §11.5 steps 1–8 and so reserved a budget slot and counted its clock,
     /// whatever opening then found.
     pub reserved: bool,
+    /// The author-chain predecessor named by the header (`None` for the first, and for `/3`).
+    pub previous: Option<String>,
+    /// The header carries a live stamp (a retained copy of a replaceable revision).
+    pub live: bool,
+    /// The epoch the header cites.
+    pub epoch: u64,
+    /// The header's nonce.
+    pub nonce: Vec<u8>,
 }
 impl Judged {
     fn invalid(path: &str, why: Failure) -> Self {
@@ -1152,6 +1160,10 @@ impl Judged {
             plaintext: None,
             folded: false,
             reserved: false,
+            previous: None,
+            live: false,
+            epoch: 0,
+            nonce: Vec::new(),
         }
     }
 }
@@ -1584,6 +1596,10 @@ fn judge_candidate(
         plaintext: None,
         folded: false,
         reserved: false,
+        previous: hd.previous.clone(),
+        live: hd.live.is_some(),
+        epoch: hd.epoch,
+        nonce: hd.nonce.clone(),
     };
     if early {
         j.outcome = Outcome::Refused("notGranted");

@@ -810,3 +810,58 @@ fn the_path_grammar_accepts_the_store_and_nothing_else() {
         assert!(classify(p).is_none(), "{p}");
     }
 }
+
+#[test]
+fn one_write_does_a_constant_number_of_signature_checks_whatever_is_held() {
+    for n in [10usize, 60] {
+        let mut w = world(n);
+        let mut e = open(&w, &w.src, w.src.listing(), None);
+        let before = e.stats();
+        let mut host = std::mem::replace(&mut w.f.host, Host::new());
+        host.counter = 5_000;
+        let src = w.src.clone();
+        engine_write(&mut e, &mut host, &src, "notes", "createNotebook", json!({"id": "extra", "title": "Extra"}));
+        let after = e.stats();
+        assert!(
+            after.signatures_verified - before.signatures_verified <= 2,
+            "held {n}: {} signature checks for one write",
+            after.signatures_verified - before.signatures_verified
+        );
+        assert!(after.payloads_decrypted - before.payloads_decrypted <= 2);
+        // And what it wrote is what a cold judgement of everything says.
+        w.f.host = host;
+        let cold = open(&w, &src, src.listing(), None);
+        assert_eq!(view(&e), view(&cold));
+        assert_eq!(cold.stats().signatures_verified as usize, n + 1);
+    }
+}
+
+#[test]
+fn a_write_over_budget_or_clock_is_refused_at_prepare_as_the_full_judgement_refuses_it() {
+    let mut f = create(&["notes"]);
+    let id = f.host.identity(31);
+    let capped = json!({"records": [{"namespace": "notes", "access": "write"}], "writes": 2});
+    admit(&mut f, &id, "Capped", "device", terms("write"), capped);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let host_keys = std::mem::replace(&mut f.host, Host::new());
+    let mut host = host_keys;
+    let mut e = member_engine(&f, &host, &src, &id, f.account.now_ms());
+    for i in 0..2 {
+        engine_write(&mut e, &mut host, &src, "notes", "createNotebook", json!({"id": format!("n{i}"), "title": "T"}));
+    }
+    let seed = host.fresh();
+    let third = e.begin_write("notes", "createNotebook", json!({"id": "n2", "title": "T"}), Level::Write, seed);
+    let reason = match third {
+        Err(f) => f.code(),
+        Ok(Err(d)) => d.reason,
+        Ok(Ok(_)) => panic!("a third write under a budget of two was prepared"),
+    };
+    assert!(reason.contains("budgetSpent"), "{reason}");
+    // The cold open of the same records admits exactly the two.
+    let cold = member_engine(&f, &host, &src, &id, f.account.now_ms());
+    match cold.view("notes").unwrap() {
+        Outcome::Success { value, .. } => assert_eq!(value.admitted.len(), 2),
+        o => panic!("{o:?}"),
+    }
+}

@@ -63,7 +63,7 @@ pub struct EngineOptions {
     checkpoint_key: [u8; 32],
     /// Namespaces this replica reads. Empty means every namespace.
     pub namespaces: Vec<String>,
-    /// Records read and merged per batch (1..=4096).
+    /// Records read and merged per batch (1..=65,536): one judgement per batch.
     pub batch: usize,
 }
 impl EngineOptions {
@@ -73,7 +73,7 @@ impl EngineOptions {
             account: account.to_string(),
             checkpoint_key,
             namespaces: Vec::new(),
-            batch: 512,
+            batch: 16_384,
         }
     }
 }
@@ -390,7 +390,10 @@ impl<S: RecordSource> Engine<S> {
             crate::v05::encoding::is_lower_hex(&options.account, 64),
             "the account ID is 64 lowercase hex",
         )?;
-        require((1..=4_096).contains(&options.batch), "batch is 1 to 4096")?;
+        require(
+            (1..=65_536).contains(&options.batch),
+            "batch is 1 to 65536",
+        )?;
         for n in &options.namespaces {
             require(
                 crate::v05::terms::valid_namespace(n),

@@ -32,7 +32,7 @@ use crate::v05::write::calls::{
     PreparedCall, PreparedLink,
 };
 use crate::v05::write::records::{
-    prepare_grant, prepare_operation, prepare_rekey, prepare_renew, prepare_resolution,
+    prepare_grant, prepare_rekey, prepare_renew, prepare_resolution,
     prepare_revoke, Keep, OperationSpec, PreparedOperation,
 };
 use crate::v05::write::{format_date, KeptHead, Kind, SignatureResult, SigningStep};
@@ -1400,9 +1400,18 @@ impl Account {
                 detail: "Unlock the namespace epoch before writing".into(),
             }));
         }
-        let prepared = prepare_operation(
-            &self.d.effective,
-            &self.records,
+        // Constant work: the clock, the chain tip, the budget and the nonces come from the
+        // judgement the account already holds, not from a pass over the held records.
+        let w = &self.d.windex;
+        let tips = w
+            .tips
+            .get(&(me.clone(), namespace.to_string()))
+            .map_or(&[][..], Vec::as_slice);
+        let used = |ns: &str, e: u64, n: &[u8]| {
+            w.nonces.contains(&(ns.to_string(), e, n.to_vec()))
+        };
+        let prepared = crate::v05::write::records::prepare_operation_fast(
+            &self.d.auth,
             &self.d.keys,
             self.now_ms,
             &OperationSpec {
@@ -1414,6 +1423,12 @@ impl Account {
                 clock: None,
             },
             seed,
+            &crate::v05::write::records::WriteBasis {
+                highest: w.highest.get(namespace).copied().unwrap_or(0),
+                tips,
+                reserved: w.reserved.get(&me).copied().unwrap_or(0),
+                nonce_used: &used,
+            },
         )?;
         let steps = vec![prepared.step().clone()];
         Ok(Ok(self.pending_for(

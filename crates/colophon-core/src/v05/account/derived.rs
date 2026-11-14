@@ -64,6 +64,7 @@ pub(super) struct Derived {
     pub auth: RecordAuthority,
     pub keys: EpochKeys,
     pub judgement: Judgement,
+    pub windex: WriteIndex,
     /// Position of each held record's judgement, by path.
     pub judged_at: BTreeMap<String, usize>,
     /// The judgement of the live-state candidates held (0.3 §5.1).
@@ -77,6 +78,69 @@ pub(super) struct Derived {
     pub cache: Arc<Mutex<JudgeCache>>,
     /// Operations applied to a namespace fold by the latest build (the rest were reused).
     pub fold_applied: u64,
+}
+
+/// What a write needs of the judged records, found once per derivation so that preparing and
+/// finishing one operation does not pass over the held records (§11.2, §11.4, §11.5).
+#[derive(Default)]
+pub(super) struct WriteIndex {
+    /// Highest clock among records that reserved a slot, by namespace.
+    pub highest: BTreeMap<String, u64>,
+    /// Distinct `(author, id)` pairs that reserved a budget slot, by author.
+    pub reserved: BTreeMap<String, u64>,
+    /// Maximal heads of each author's `/5` chain in a namespace (live-stamped copies and
+    /// headers that were never records are outside it).
+    pub tips: BTreeMap<(String, String), Vec<String>>,
+    /// `(namespace, epoch, nonce)` of every held header: a nonce is never used twice under a key.
+    pub nonces: BTreeSet<(String, u64, Vec<u8>)>,
+}
+impl WriteIndex {
+    fn of(j: &Judgement) -> Self {
+        use crate::v05::records::HeaderFormat;
+        let mut w = Self::default();
+        let mut ids: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut named: BTreeSet<&str> = BTreeSet::new();
+        let mut chain: Vec<&crate::v05::records::Judged> = Vec::new();
+        for r in &j.records {
+            let (Some(ns), Some(a)) = (r.namespace.as_deref(), r.author.as_deref()) else {
+                continue;
+            };
+            w.nonces.insert((ns.to_string(), r.epoch, r.nonce.clone()));
+            if r.reserved {
+                let h = w.highest.entry(ns.to_string()).or_default();
+                *h = (*h).max(r.clock);
+                if let Some(id) = r.id.as_deref() {
+                    if ids.insert((a, id)) {
+                        *w.reserved.entry(a.to_string()).or_default() += 1;
+                    }
+                }
+            }
+            if r.format == Some(HeaderFormat::V5) && !r.live && r.digest.is_some() {
+                if let Some(p) = r.previous.as_deref() {
+                    named.insert(p);
+                }
+                chain.push(r);
+            }
+        }
+        for r in chain {
+            let (Some(ns), Some(a), Some(d)) =
+                (r.namespace.as_ref(), r.author.as_ref(), r.digest.as_ref())
+            else {
+                continue;
+            };
+            if !named.contains(d.as_str()) {
+                w.tips
+                    .entry((a.clone(), ns.clone()))
+                    .or_default()
+                    .push(d.clone());
+            }
+        }
+        for v in w.tips.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        w
+    }
 }
 
 /// A hash of everything the judgement of records reads from the verified state besides the
@@ -219,6 +283,7 @@ impl Derived {
             verdict,
             auth,
             keys,
+            windex: WriteIndex::of(&judgement),
             judged_at: {
                 // Several held byte strings can sit at one path (a garbage twin beside the
                 // real record): the one that is a record at all stands for the path.
