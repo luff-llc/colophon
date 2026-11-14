@@ -2277,18 +2277,15 @@ pub fn part3(o: &mut Out) {
     // An import grant is for a device or app, with write in every records entry and an expiry
     // later than `issued`; an `activate` that embeds one that is not is not a valid entry, and
     // verification stops before it.
+    let kr_ig = keyring(vec![ct(&a, AC, "Mac")], Kr::default());
     let mut ig = Chain::new();
     genesis(
         &mut ig,
-        &kr5,
+        &kr_ig,
         sg![a],
         Gen {
             label: "Import",
             namespaces: vec!["notes"],
-            opt: Opt {
-                adds: sg![ph, b, k1, k2],
-                ..Opt::default()
-            },
             ..Gen::default()
         },
     );
