@@ -104,6 +104,14 @@ impl Change {
             json!({"add": controllers}),
         )]))
     }
+    /// Replace controllers by their changed protocol JSON, for example one with fewer roles
+    /// (a demotion, §8.3: a slot naming a demoted controller is dropped at activation).
+    pub fn update_controllers(controllers: Vec<Value>) -> Self {
+        Self(Map::from_iter([(
+            "keyring".to_string(),
+            json!({"update": controllers}),
+        )]))
+    }
     /// Remove controllers, optionally keeping some a removed key planted (§8.3).
     pub fn remove_controllers(ids: Vec<String>, keep: Vec<String>) -> Self {
         let mut k = Map::new();
@@ -1046,6 +1054,29 @@ impl Account {
         signer: &str,
     ) -> Result<PendingAction> {
         self.require_writable()?;
+        // §8.7: T removes or demotes K. Refused here when it certainly does not.
+        let bytes = self.pending_bytes(transition)?;
+        let env = AuthEnvelope::parse(
+            &bytes,
+            bounds::TRANSITION_ENVELOPE,
+            bounds::TRANSITION_ENVELOPE,
+            true,
+        )?;
+        let kc = env.value.get("change").and_then(|c| c.get("keyring"));
+        let named = |field: &str| -> bool {
+            kc.and_then(|k| k.get(field))
+                .and_then(Value::as_array)
+                .is_some_and(|l| {
+                    l.iter().any(|x| {
+                        x.as_str() == Some(key)
+                            || Controller::parse(x.clone(), field).is_ok_and(|c| c.id() == key)
+                    })
+                })
+        };
+        require(
+            named("remove") || named("update"),
+            "the transition does not remove or demote that key",
+        )?;
         let batch = prepare_suspend(
             &self.objects,
             self.now_ms,

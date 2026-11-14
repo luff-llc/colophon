@@ -2495,15 +2495,13 @@ fn policy_tightens_at_once_and_thresholds_change_by_a_transition() {
     assert_eq!(f.account.policy().call_window, 120);
     // Loosening it again is not: the verifier refuses at finish, and nothing changes.
     let before = f.account.status();
-    let action = f
-        .account
-        .begin_keyring(
-            &KeyringEdit {
-                policy: Some(json!({"callWindow": 600})),
-                ..Default::default()
-            },
-            &[f.d.clone()],
-        );
+    let action = f.account.begin_keyring(
+        &KeyringEdit {
+            policy: Some(json!({"callWindow": 600})),
+            ..Default::default()
+        },
+        &[f.d.clone()],
+    );
     match action {
         Err(e) => assert_eq!(e.code(), "malformed", "{e}"),
         Ok(a) => {
@@ -2549,11 +2547,24 @@ fn policy_tightens_at_once_and_thresholds_change_by_a_transition() {
 fn a_write_prepared_before_the_member_was_revoked_is_not_returned() {
     let mut f = create(&["notes"]);
     let agent = f.host.identity(30);
-    admit(&mut f, &agent, "Claude", "agent", agent_terms("write"), agent_terms("write"));
+    admit(
+        &mut f,
+        &agent,
+        "Claude",
+        "agent",
+        agent_terms("write"),
+        agent_terms("write"),
+    );
     let mut a = member_session(&f, &agent);
     let seed = f.host.fresh();
     let action = a
-        .begin_write("notes", "createNotebook", json!({"id": "b", "title": "T"}), Level::Write, seed)
+        .begin_write(
+            "notes",
+            "createNotebook",
+            json!({"id": "b", "title": "T"}),
+            Level::Write,
+            seed,
+        )
         .unwrap()
         .unwrap();
     let sigs = f.host.sign(action.steps());
@@ -2571,4 +2582,145 @@ fn a_write_prepared_before_the_member_was_revoked_is_not_returned() {
     assert_eq!(e.code(), "unavailable", "{e}");
     assert!(e.detail().contains("revokedBackdated"), "{e}");
     assert_eq!(a.records().len(), before, "nothing was held");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Renew and its shares, demotion, suspension.
+
+#[test]
+fn renew_carries_the_shares_of_epochs_made_while_a_member_was_expired() {
+    let mut f = create(&["notes"]);
+    let agent = f.host.identity(30);
+    let t = json!({"records": [{"namespace": "notes", "access": "write"}],
+                   "expires": colophon_core::v05::write::format_date(T0 + 2 * HOUR)});
+    admit(&mut f, &agent, "Claude", "agent", t.clone(), t);
+    // After it expired, a new epoch is introduced: the expired member is not sealed to it.
+    f.account.advance(T0 + 3 * HOUR).unwrap();
+    let seed = f.host.fresh();
+    let action = f
+        .account
+        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    let owed = f.account.owed_shares();
+    assert_eq!(owed.len(), 1);
+    assert_eq!(
+        (owed[0].member.as_str(), owed[0].epoch),
+        (agent.as_str(), 2)
+    );
+    assert_eq!(f.account.notices(0, &BTreeSet::new(), &[]).owed.len(), 1);
+    // The renewal carries it (§9.4).
+    let seed = f.host.fresh();
+    let action = f
+        .account
+        .begin_renew(&agent, T0 + 48 * HOUR, &[f.d.clone()], seed)
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    assert!(f.account.owed_shares().is_empty());
+    let m = f.account.members();
+    assert_eq!(m[0].expires_ms, Some(T0 + 48 * HOUR));
+    // The member, once it holds the renewal, opens epoch 2 with its own key.
+    let mut a = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Member(agent.clone()),
+        T0 + 3 * HOUR,
+    )
+    .unwrap();
+    let steps = a.begin_unlock_epochs();
+    assert_eq!(steps.len(), 2, "epochs 1 and 2");
+    a.finish_unlock_epochs(f.host.answer_epochs(&agent, steps))
+        .unwrap();
+    assert!(matches!(
+        a.view("notes").unwrap(),
+        colophon_core::model::Outcome::Success { .. }
+    ));
+}
+
+#[test]
+fn a_demotion_drops_the_slot_and_retires_the_vault() {
+    let mut f = create(&["notes"]);
+    // The passkey loses `control` and `recover`: the recovery set consents (the kit signs).
+    let demoted = f.host.passkey_controller("Passkey", &["approve"]);
+    let action = f
+        .account
+        .begin_transition(
+            &Change::update_controllers(vec![demoted]),
+            &[f.d.clone(), f.k.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    let rec = f.account.record_due().unwrap();
+    assert_eq!(rec.len(), 1);
+    let p = f
+        .account
+        .controllers()
+        .into_iter()
+        .find(|c| c.id == f.p)
+        .unwrap();
+    assert_eq!(p.roles, ["approve"]);
+    assert!(!p.has_slot, "its slots are dropped at activation");
+    let n = f.account.notices(0, &BTreeSet::new(), &[]);
+    assert!(n.vault_retiring, "the demoted key may still know the seed");
+}
+
+#[test]
+fn a_key_a_pending_removal_would_remove_is_suspended_by_a_signer_of_it() {
+    let mut f = create(&["notes"]);
+    let d2 = add_second_device(&mut f, &["approve"]);
+    let h = appoint_home(&mut f);
+    let now = f.account.now_ms();
+    let acct = f.account.id().as_str().to_string();
+    let action = f
+        .account
+        .begin_remove_controller(
+            &[d2.clone()],
+            &[],
+            &[f.d.clone()],
+            TransitionRule::Control,
+            None,
+        )
+        .unwrap();
+    let done = run(&mut f.account, &f.host, action);
+    let t = pending_digest(&done.pending[0]);
+    hold_pending(
+        &mut f.account,
+        vec![receipt(&acct, &f.host, &h, &t, now + 10 * SEC)],
+    );
+    assert!(
+        !f.account
+            .controllers()
+            .iter()
+            .find(|c| c.id == d2)
+            .unwrap()
+            .suspended
+    );
+    // A suspension is by a signer of the transition, of a key the transition removes.
+    let e = f.account.begin_suspend(&f.p, &t, &f.d).unwrap_err();
+    assert_eq!(e.code(), "malformed", "{e}");
+    let action = f.account.begin_suspend(&d2, &t, &f.d).unwrap();
+    run(&mut f.account, &f.host, action);
+    assert!(
+        f.account
+            .controllers()
+            .iter()
+            .find(|c| c.id == d2)
+            .unwrap()
+            .suspended
+    );
+    // A suspended key's own signature is refused by prepare.
+    let seed = f.host.fresh();
+    assert!(f
+        .account
+        .begin_keyring(
+            &KeyringEdit {
+                policy: Some(json!({"callWindow": 100})),
+                ..Default::default()
+            },
+            &[d2.clone()],
+        )
+        .is_err());
+    let _ = seed;
 }
