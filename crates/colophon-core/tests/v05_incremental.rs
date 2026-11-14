@@ -14,6 +14,7 @@ use serde_json::json;
 use support::*;
 
 const NS: &str = "notes";
+const NS2: &str = "scratch";
 
 struct Rng(u64);
 impl Rng {
@@ -43,7 +44,7 @@ fn deliver(f: &mut Fixture, records: Vec<HeldRecord>) {
 
 fn journey(seed: u64, steps: usize) {
     let mut rng = Rng(seed);
-    let mut f = create(&[NS]);
+    let mut f = create(&[NS, NS2]);
     let mut members: Vec<String> = Vec::new();
     let mut revoked: Vec<String> = Vec::new();
     // Records written and not yet delivered to the controller's account (they arrive late).
@@ -63,14 +64,8 @@ fn journey(seed: u64, steps: usize) {
             0 | 1 if next_member < 120 => {
                 let id = f.host.identity(next_member);
                 next_member += 1;
-                admit(
-                    &mut f,
-                    &id,
-                    "Device",
-                    "device",
-                    terms("write"),
-                    terms("write"),
-                );
+                let both = terms_for(&[(NS, "write"), (NS2, "write")]);
+                admit(&mut f, &id, "Device", "device", both.clone(), both);
                 members.push(id);
             }
             // Writes by one member, delivered in shuffled batches, some held back.
@@ -84,9 +79,10 @@ fn journey(seed: u64, steps: usize) {
                 for _ in 0..1 + rng.below(3) {
                     counter += 1;
                     let seed = f.host.fresh();
+                    let ns = if rng.below(3) == 0 { NS2 } else { NS };
                     let action = s
                         .begin_write(
-                            NS,
+                            ns,
                             "createNotebook",
                             json!({"id": format!("n{counter}"), "title": format!("T{counter}")}),
                             Level::Write,
@@ -142,7 +138,7 @@ fn journey(seed: u64, steps: usize) {
                 let seed = f.host.fresh();
                 let action = f
                     .account
-                    .begin_rekey(&[NS.to_string()], &[f.d.clone()], seed)
+                    .begin_rekey(&[NS.to_string(), NS2.to_string()], &[f.d.clone()], seed)
                     .unwrap();
                 run(&mut f.account, &f.host, action);
             }

@@ -2179,3 +2179,270 @@ fn the_engine_pulls_and_pushes_predecessor_history() {
         "every predecessor entry held when the pass was planned is published to a home that does not list it"
     );
 }
+
+// ---- the independent check of E9 (2026-11-14), ported ----
+
+/// Drive one pass with a home that answers predecessor GETs from `serve` (path -> bytes) and
+/// every other request as an empty honest home. Returns (pulled predecessor paths, PUT paths
+/// with their bodies, stored paths).
+#[allow(clippy::type_complexity)]
+fn pass(
+    e: &mut colophon_core::v05::engine::Engine<colophon_core::model::Records>,
+    home: &str,
+    serve: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> (Vec<String>, Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
+    use colophon_core::v05::engine::exchange::{Method, Response, Step};
+    let mut pulled = Vec::new();
+    let mut puts = Vec::new();
+    let mut stored = Vec::new();
+    for _ in 0..400 {
+        match e.exchange_next(home).unwrap() {
+            Step::Done => break,
+            Step::Request(r) => {
+                let path = r.url.split(".example").nth(1).unwrap_or("").to_string();
+                if r.method == Method::Put && path.starts_with("/predecessor/") {
+                    puts.push((path.clone(), r.body.clone()));
+                }
+                let (status, body) = if r.method == Method::Get && path.starts_with("/predecessor/")
+                {
+                    pulled.push(path.clone());
+                    match serve.get(&path) {
+                        Some(b) => (200, b.clone()),
+                        None => (404, b"{}".to_vec()),
+                    }
+                } else if path.starts_with("/authority") && r.method == Method::Get {
+                    (
+                        200,
+                        serde_json::to_vec(&json!({"entries": [], "receipts": [], "more": false}))
+                            .unwrap(),
+                    )
+                } else if path.starts_with("/pending") && r.method == Method::Get {
+                    (
+                        200,
+                        serde_json::to_vec(&json!({"objects": [], "more": false})).unwrap(),
+                    )
+                } else if path.starts_with("/changes") {
+                    (
+                        200,
+                        serde_json::to_vec(&json!({"entries": [], "cursor": "0", "more": false}))
+                            .unwrap(),
+                    )
+                } else if path == "/head" {
+                    (404, b"{}".to_vec())
+                } else if path.starts_with("/predecessor/") && r.method == Method::Put {
+                    (201, b"{}".to_vec())
+                } else {
+                    (200, serde_json::to_vec(&json!({"receipts": []})).unwrap())
+                };
+                match e.exchange_answer(
+                    home,
+                    r.ticket,
+                    Response {
+                        status,
+                        headers: vec![],
+                        body,
+                    },
+                ) {
+                    Ok(rep) => stored.extend(rep.store),
+                    Err(err) => {
+                        println!("exchange_answer for {path} returned Err: {err:?}");
+                        stored.push((format!("ERR {path}"), Vec::new()));
+                    }
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    (pulled, puts, stored)
+}
+
+/// A home answers the predecessor entry the device lacks with a forgery: the real entry's
+/// envelope with one field of its body changed (the seq kept), the signature kept. The device
+/// must not hold it, store it, stop asking for the real entry, or publish it to a home.
+#[test]
+fn a_forged_predecessor_entry_from_a_home_is_not_held_or_forwarded() {
+    use colophon_core::model::Records;
+    use colophon_core::v05::engine::{Engine, EngineOptions};
+    let (j, _keys, _f, _fz) = through_f(false);
+    let predecessor: Vec<Vec<u8>> = j.acct.objects().predecessor.clone();
+    let by_path: std::collections::BTreeMap<String, Vec<u8>> = predecessor
+        .iter()
+        .map(|b| {
+            let v: Value = serde_json::from_slice(b).unwrap();
+            let body: Value =
+                serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap())
+                    .unwrap();
+            (
+                format!(
+                    "/predecessor/authority/{:08}.json",
+                    body["seq"].as_u64().unwrap()
+                ),
+                b.clone(),
+            )
+        })
+        .collect();
+    let missing = by_path.keys().last().unwrap().clone();
+    let real = by_path[&missing].clone();
+    let forged = {
+        let mut v: Value = serde_json::from_slice(&real).unwrap();
+        let mut body: Value =
+            serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+        body["issued"] = json!("2026-01-01T00:00:00Z");
+        v["body"] = json!(STANDARD.encode(canonical(&body).unwrap()));
+        canonical(&v).unwrap()
+    };
+    let mut files = Records::new();
+    for (i, e) in j.acct.objects().entries.iter().enumerate() {
+        files.insert(format!("authority/{:08}.json", i + 1), e.clone());
+    }
+    for (path, b) in &by_path {
+        if *path != missing {
+            files.insert(path.trim_start_matches('/').to_string(), b.clone());
+        }
+    }
+    let listing: Vec<String> = files.keys().cloned().collect();
+    let mut e = Engine::open(
+        files,
+        listing,
+        Identity::Controller(j.ctl.clone()),
+        EngineOptions::new(j.acct.id().as_str(), [7; 32]),
+        None,
+        j.now,
+    )
+    .unwrap();
+    e.load().unwrap();
+    let home = e.exchange_homes()[0].id.clone();
+    let held0 = e.account().objects().predecessor.len();
+    // Pass 1: the hostile answer.
+    let mut hostile = by_path.clone();
+    hostile.insert(missing.clone(), forged.clone());
+    let (p1, puts1, st1) = pass(&mut e, &home, &hostile);
+    let held_forged = e.account().objects().predecessor.contains(&forged);
+    let stored_forged = st1.iter().any(|(_, b)| *b == forged);
+    // Pass 2: an honest home.
+    let (p2, puts2, _st2) = pass(&mut e, &home, &by_path);
+    let held_real = e.account().objects().predecessor.contains(&real);
+    let put_forged = puts2.iter().any(|(_, b)| *b == forged);
+    println!(
+        "held before {held0}; pass 1 pulled {p1:?}; held forged {held_forged}; stored forged {stored_forged}; pass 2 pulled {p2:?}; held real {held_real}; forged PUT in pass 2 {put_forged}; puts1 {} puts2 {}",
+        puts1.len(), puts2.len()
+    );
+    assert!(
+        !st1.iter().any(|(p, _)| p.starts_with("ERR ")),
+        "a home's forgery is a fault, never an error of the engine"
+    );
+    assert!(!held_forged, "a forged predecessor entry is not held");
+    assert!(
+        !stored_forged,
+        "a forged predecessor entry is not handed to the host to store"
+    );
+    assert!(
+        !put_forged,
+        "a forged predecessor entry is not published to a home"
+    );
+    assert!(
+        held_real,
+        "the real entry is pulled once an honest answer comes"
+    );
+}
+
+/// A forged succession veto (a veto body naming the successor's genesis, signed by nobody)
+/// that reached the device's pending set is not submitted to the home: only a veto that
+/// verifies is.
+#[test]
+fn a_forged_succession_veto_is_not_submitted() {
+    use colophon_core::model::Records;
+    use colophon_core::v05::engine::exchange::{Method, Response, Step};
+    use colophon_core::v05::engine::{Engine, EngineOptions};
+    let (j, _keys) = start(false);
+    let veto_at = j.now;
+    let pending = j
+        .acct
+        .begin_swift_veto(&SwiftVetoParams {
+            issued_ms: veto_at,
+            signers: vec![j.f.passkey_id.clone()],
+        })
+        .unwrap();
+    let sigs = passkey_sign(&j.f.passkey_key, pending.steps(), &j.host);
+    let veto = pending.finish(sigs).unwrap();
+    // The forgery: the veto's body with `issued` one second later, the old signature.
+    let forged = {
+        let mut v: Value = serde_json::from_slice(&veto).unwrap();
+        let mut body: Value =
+            serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+        body["issued"] = json!(format_date(veto_at + SEC));
+        v["body"] = json!(STANDARD.encode(canonical(&body).unwrap()));
+        canonical(&v).unwrap()
+    };
+    let fbody = {
+        let v: Value = serde_json::from_slice(&forged).unwrap();
+        STANDARD.decode(v["body"].as_str().unwrap()).unwrap()
+    };
+    let fdigest = digest(&fbody);
+    let mut files = Records::new();
+    for (i, e) in j.acct.objects().entries.iter().enumerate() {
+        files.insert(format!("authority/{:08}.json", i + 1), e.clone());
+    }
+    for (i, e) in j.acct.objects().predecessor.iter().enumerate() {
+        files.insert(
+            format!("predecessor/authority/{:08}.json", i + 1),
+            e.clone(),
+        );
+    }
+    files.insert(format!("vetoes/{fdigest}.json"), forged.clone());
+    let listing: Vec<String> = files.keys().cloned().collect();
+    let mut e = Engine::open(
+        files,
+        listing,
+        Identity::Controller(j.ctl.clone()),
+        EngineOptions::new(j.acct.id().as_str(), [7; 32]),
+        None,
+        veto_at + SEC,
+    )
+    .unwrap();
+    e.load().unwrap();
+    let holds = e.account().objects().pending.contains(&forged);
+    let home = e.exchange_homes()[0].id.clone();
+    let mut posts: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        match e.exchange_next(&home).unwrap() {
+            Step::Done => break,
+            Step::Request(r) => {
+                let path = r.url.split(".example").nth(1).unwrap_or("").to_string();
+                if r.method == Method::Post && path.starts_with("/pending") {
+                    posts.push(String::from_utf8_lossy(&r.body).to_string());
+                }
+                let body = if path.starts_with("/authority") && r.method == Method::Get {
+                    json!({"entries": [], "receipts": [], "more": false})
+                } else if path.starts_with("/pending") && r.method == Method::Get {
+                    json!({"objects": [], "more": false})
+                } else if path.starts_with("/changes") {
+                    json!({"entries": [], "cursor": "0", "more": false})
+                } else {
+                    json!({"receipts": []})
+                };
+                let status = if path == "/head" { 404 } else { 200 };
+                e.exchange_answer(
+                    &home,
+                    r.ticket,
+                    Response {
+                        status,
+                        headers: vec![],
+                        body: serde_json::to_vec(&body).unwrap(),
+                    },
+                )
+                .unwrap();
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    let sent = posts.iter().any(|b| b.contains(&STANDARD.encode(&fbody)));
+    println!(
+        "engine holds the forged veto as an object: {holds}; POSTs {}; forged sent {sent}",
+        posts.len()
+    );
+    assert!(
+        !sent,
+        "a veto that does not verify is not submitted to a home"
+    );
+}

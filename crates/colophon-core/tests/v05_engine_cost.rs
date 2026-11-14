@@ -217,6 +217,107 @@ fn live(slots: usize) {
     row("one live write", &before, &e.stats(), t);
 }
 
+/// What real sessions do besides one write in the busiest namespace: a write in a second
+/// namespace (a lower clock), a record merged from another device (it sorts before the last
+/// one), an immutable write once a live slot is held, and a live position update.
+fn sessions(n: usize) {
+    const SCRATCH: &str = "scratch";
+    const LISTEN: &str = "listening.podcasts";
+    println!("N = {n} (sessions)");
+    let mut f = create(&[LISTEN, NS, SCRATCH]);
+    let both = terms_for(&[(NS, "write"), (SCRATCH, "write"), (LISTEN, "write")]);
+    let a = f.host.identity(31);
+    let b = f.host.identity(32);
+    admit(&mut f, &a, "A", "device", both.clone(), both.clone());
+    admit(&mut f, &b, "B", "device", both.clone(), both);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut ea = member_engine(&f, &host, &src, &a, NOW);
+    let mut eb = member_engine(&f, &host, &src, &b, NOW);
+    for i in 0..n {
+        engine_write(
+            &mut ea,
+            &mut host,
+            &src,
+            NS,
+            "createNotebook",
+            json!({"id": format!("n{i}"), "title": format!("Notebook {i}")}),
+        );
+    }
+    let before = ea.stats();
+    let t = Instant::now();
+    engine_write(
+        &mut ea,
+        &mut host,
+        &src,
+        SCRATCH,
+        "createNotebook",
+        json!({"id": "s1", "title": "S"}),
+    );
+    row("write in a second namespace", &before, &ea.stats(), t);
+    // Another device wrote at a low clock; this one merges it.
+    engine_write(
+        &mut eb,
+        &mut host,
+        &src,
+        NS,
+        "createNotebook",
+        json!({"id": "b1", "title": "B"}),
+    );
+    let before = ea.stats();
+    let t = Instant::now();
+    ea.refresh(src.listing()).unwrap();
+    row("concurrent record merged", &before, &ea.stats(), t);
+    // A live slot is held.
+    engine_write(
+        &mut ea,
+        &mut host,
+        &src,
+        LISTEN,
+        "follow",
+        json!({"id": "show", "url": "https://example.org/f", "title": "T"}),
+    );
+    engine_live(
+        &mut ea,
+        &mut host,
+        &src,
+        json!({"id": "ep0", "show": "show", "seconds": 1.0}),
+    );
+    let before = ea.stats();
+    let t = Instant::now();
+    engine_write(
+        &mut ea,
+        &mut host,
+        &src,
+        NS,
+        "createNotebook",
+        json!({"id": "after", "title": "A"}),
+    );
+    row("immutable write, live slot held", &before, &ea.stats(), t);
+    let before = ea.stats();
+    let t = Instant::now();
+    engine_live(
+        &mut ea,
+        &mut host,
+        &src,
+        json!({"id": "ep0", "show": "show", "seconds": 2.0}),
+    );
+    row("live position update", &before, &ea.stats(), t);
+}
+
+#[test]
+#[ignore]
+fn cost_of_what_real_sessions_do() {
+    let sizes: Vec<usize> = std::env::var("COST_SIZES")
+        .unwrap_or_else(|_| "1000,10000".into())
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    for n in sizes {
+        sessions(n);
+    }
+}
 #[test]
 #[ignore]
 fn cost_of_open_resume_write_refresh_sync_for_the_sizes_asked() {
