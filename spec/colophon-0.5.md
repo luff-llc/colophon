@@ -840,8 +840,10 @@ receipts, due time and veto as §8.7 says; it has no veto deadline of its own be
   **Choosing receipts:** an entry carries exactly `headQuorum` receipts for an object, from the
   homes with the lowest member IDs whose valid receipts it holds, for each home its receipt with
   the lowest body digest, sorted by home ID. For a veto, the receipts that may be chosen are those
-  valid under §13.5 **and received at or before the transition's veto deadline**: a later receipt
-  is skipped, never chosen, and never blocks the entry. A verifier enforces the choice over the
+  valid under §13.5, **received at or before the transition's veto deadline** and not dated after
+  the `vetoed`'s own `issued` (which is at least the latest receipt a recorder chose, so a
+  receipt that reached the recorder later cannot make its entry fail at another verifier): a later
+  receipt is skipped, never chosen, and never blocks the entry. A verifier enforces the choice over the
   receipts it holds together with the entry's own: a `vetoed` whose receipts are not the choice
   among those is `malformed`. A receipt the verifier lacks cannot make a correct entry fail, since
   the entry carries the ones it chose.
@@ -923,15 +925,16 @@ from heads it has seen or the order it saw things in.
   of "final" in §8.6, §8.7 and §15.
 - **Choosing heads.** A `final` carries, for each witness, one head: among the heads valid for it
   (signed by that home's key in the state before the activation, covering the activation on this
-  branch, not necessarily fresh) and **usable** (not dated more than 60 s after the `final`'s own
-  `issued`, §13.3), the one with the lowest body digest. A head dated further ahead is skipped,
-  never chosen, and never blocks the entry. A verifier enforces the choice over the heads it holds
-  together with the entry's: a `final` whose head for a witness is not the lowest among those is
-  `malformed`. A head the verifier lacks cannot make a correct entry fail, since the entry carries
-  the ones it chose. (Usability is measured against the entry's `issued`, not the verifier's
-  clock, so a recorded `final` never changes verdict as time passes; a recorder building at its
-  own clock takes the same head except when a lower-digest head dated between its `issued` and its
-  clock exists, in which case the two entries differ only in heads and §8.6 drops the loser.)
+  branch, not necessarily fresh) and **usable** (not dated after the `final`'s own `issued`), the
+  one with the lowest body digest. A head dated later is skipped, never chosen, and never blocks
+  the entry. A verifier enforces the choice over the heads it holds together with the entry's: a
+  `final` whose head for a witness is not the lowest among those is `malformed`. A head the
+  verifier lacks cannot make a correct entry fail, since the entry carries the ones it chose.
+  A recorder takes the lowest digest among the heads usable at its clock (not dated more than 60 s
+  ahead, §13.3) and sets `issued` to the latest it chose, so for an entry it built the two
+  measures agree; measuring against `issued` keeps a recorded `final` from changing verdict as
+  the verifier's clock moves, and from failing because a later `final` embeds a lower-digest head
+  dated after it.
 - **Order.** An activation that is not removal-only gets a `final`, or becomes final by excusal,
   only when every earlier activation that is not removal-only is final. Removal-only activations
   are outside this order: they never wait for an earlier provisional activation, and none waits

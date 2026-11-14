@@ -2099,6 +2099,7 @@ fn veto_choice_is_determined(
     veto: &AuthEnvelope,
     v_issued: i64,
     deadline_ms: i64,
+    entry_issued: i64,
     chosen: &[Vec<u8>],
     quorum: usize,
 ) -> bool {
@@ -2110,7 +2111,9 @@ fn veto_choice_is_determined(
         let Ok((_, received)) = check_receipt(s, bytes, &veto.digest, v_issued) else {
             return;
         };
-        if received > deadline_ms {
+        // A receipt dated after the entry cannot have been in the recorder's hand: the entry's
+        // `issued` is at least the latest receipt it chose (the same measure as for heads).
+        if received > deadline_ms || received > entry_issued {
             return;
         }
         match best.get(&by) {
@@ -2180,6 +2183,7 @@ fn vetoed(s: &State, e: &Entry, pending: &Pending) -> Step<State> {
         &veto,
         v_issued,
         t.deadline_ms,
+        e.issued,
         &receipts,
         quorum,
     ) {
@@ -2288,9 +2292,11 @@ fn final_entry(s: &State, e: &Entry, all: &[&Entry], held_heads: &HeadSet) -> St
         return Err(malformed("final: heads are not exactly one per witness").into());
     }
     // §8.7 "Choosing heads": per witness, the lowest body digest among the covering heads that
-    // are usable: not dated more than 60 s after the entry's own `issued`. The recorder's clock
-    // is not visible to a verifier, and judging against the verifier's clock would turn a
-    // correct entry into a refused one as time passes, so the entry's `issued` stands in for it.
+    // are usable: not dated after the entry's own `issued`. The recorder's clock is not visible to a
+    // verifier, and judging against the verifier's clock would turn a correct entry into a
+    // refused one as time passes. A recorder's `issued` is at least that of every head it chose,
+    // so a head it could use and that sorted lower would have been chosen and raised `issued`:
+    // for an entry a builder made, "not after `issued`" and "not ahead of the clock" agree.
     // Judged over the heads this verifier holds together with the entry's own, so a head the
     // recorder held and this verifier does not cannot make a correct entry fail.
     for home in &required {
@@ -2305,7 +2311,7 @@ fn final_entry(s: &State, e: &Entry, all: &[&Entry], held_heads: &HeadSet) -> St
                 &h.by == home
                     && h.seq >= a.seq
                     && s.on_branch(h.seq, &h.digest)
-                    && h.issued <= e.issued.saturating_add(60 * SEC)
+                    && h.issued <= e.issued
                     && h.env.verify(&key).is_ok()
             })
             .map(|h| crate::v05::encoding::digest(&h.env.body))

@@ -430,13 +430,14 @@ test of revision 13 was replayed by the Swift source.**
   Text item D (admission at the home's current head) is in §8.7 with this item.
 - **`final` with several covering heads per witness (§8.7).** Text and enforcement as for the
   veto receipts: per witness the lowest body digest among the covering, usable heads, judged over
-  the heads held plus the entry's own. **Decision to confirm (the brief said stop on a
-  conflict):** the write side ignores a head dated more than 60 s ahead of *its clock*. Taken
-  literally at the verifier, usability would depend on the verifier's clock, and a correct `final`
-  would become `malformed` once the clock passed a lower-digest head's date (I ran that: the
-  first version of `v05_final_choice.rs` showed it). I measured usability against the entry's own
-  `issued` instead (the heads a correct entry could have used), so verdicts do not change with
-  time. The write side (`prepare_final`, not edited) uses the clock; the two differ only when a
-  lower-digest head dated between the entry's `issued` and the builder's clock exists, and then
-  the entries differ in heads only and §8.6 drops one. Vectors `t-final-head-choice-right`,
+  the heads held plus the entry's own. **Reading chosen, with the conflict that forced it:** the write side
+  ignores a head dated more than 60 s ahead of *its clock*. Taken literally at the verifier,
+  usability would depend on the verifier's clock, so a correct `final` would turn `malformed` once
+  the clock passed a lower-digest head's date (first version of `v05_final_choice.rs`); and a
+  verifier holding a later `final`'s embedded head (dated after the earlier one) would refuse the
+  earlier `final` of `t-removal-unblocks-addition` (the state-aware builder replay in
+  `v05_write_authority.rs` showed it with a 60 s slack). Usability is therefore measured against
+  the entry's own `issued`: for an entry a builder made the two agree (a usable lower head would
+  have been chosen and raised `issued`), and no existing vector changes. `prepare_final` (not
+  edited) is unchanged. Vectors `t-final-head-choice-right`,
   `-choice-wrong`, `-ahead-ignored`; tests in `v05_final_choice.rs`.
