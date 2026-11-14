@@ -2156,3 +2156,55 @@ fn rebuilt_epochs_equal_the_verifiers_folded_epochs_on_every_vector() {
     }
     assert!(n >= 20, "{n}");
 }
+
+/// §8.3 in the verifier: a `rekey`, or a `revoke` that introduces an epoch, is refused while
+/// the vault is retiring, even when a host forges the entry around the builders' refusal.
+#[test]
+fn the_verifier_refuses_an_epoch_introduced_while_the_vault_is_retiring() {
+    use colophon_core::v05::write::authority::prepare_signed;
+    use colophon_core::v05::write::Kind;
+    let (mut w, d) = world_two(T0 + 3_600 * SEC);
+    let m = person(30);
+    w.grant(&m, "device", terms("write"));
+    retire(&mut w, &d);
+    // An epoch object copied from epoch 1 with its number raised: the verifier only needs its
+    // shape; the point is that it is introduced at all.
+    let auth = w.auth();
+    let seal = auth
+        .epoch_seal_request("notes", 1, &auth.vault().id())
+        .unwrap();
+    let _ = seal;
+    let e1: Value = {
+        let env: Value = serde_json::from_slice(&w.objects.entries[1]).unwrap();
+        let body: Value =
+            serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
+                .unwrap();
+        let mut e = body["epochs"][1].clone();
+        e["epoch"] = json!(2);
+        e
+    };
+    assert_eq!(e1["namespace"], "notes");
+    let issued = w.issued();
+    for kind in [
+        Kind::Rekey {
+            epochs: vec![e1.clone()],
+        },
+        Kind::Revoke {
+            member: m.sign.id.clone(),
+            kept: vec![],
+            heads: vec![],
+            epochs: vec![e1.clone()],
+        },
+    ] {
+        let batch = prepare_signed(&w.objects, w.now, kind, issued, &w.cids()).unwrap();
+        let sigs: Vec<SignatureResult> = batch
+            .steps()
+            .iter()
+            .map(|s| signature_of(&w.c.sign, s))
+            .collect();
+        match batch.finish(sigs) {
+            Err(Failure::Malformed(m)) => assert!(m.contains("retiring"), "{m}"),
+            other => panic!("expected the retiring refusal, got {:?}", other.map(|_| ())),
+        }
+    }
+}

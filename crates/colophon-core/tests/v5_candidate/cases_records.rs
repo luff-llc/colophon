@@ -1342,16 +1342,16 @@ fn duplicates(out: &mut Out) {
     a.write_case(out, "one-body-two-envelopes", "One header body under two envelopes: the signature and its high-S twin, both valid (§4.3). Two envelopes over one body are the same object (§2.2): the record is admitted, reported under each envelope, and never refused as a duplicateID of itself.", &["2.2", "11.5"], json!({}));
 }
 
-/// A revoke while the vault is retiring carries empty `epochs` (§8.3): no epoch is introduced.
-fn retiring(out: &mut Out) {
-    let w = member("w");
+/// The account at seq 4: the slotted controller removed by a full-set transition, the vault
+/// retiring; the second controller is `k`.
+fn retiring_chain(label: &str, w: &Member) -> (Ra, Key, Out1) {
     let k = derived("rec/second/signing");
     let a_key = A.clone();
-    let mut a = Ra::build("retiring", Some(k.clone()));
+    let mut a = Ra::build(label, Some(k.clone()));
     a.rekey(10, 1, &[]); // 2
-    a.grant(20, &w, "device", w_terms(), &[1]); // 3
-    a.holder(&w);
-    let d1 = a.op(Op::new(&w, 1, 3, "d1"));
+    a.grant(20, w, "device", w_terms(), &[1]); // 3
+    a.holder(w);
+    let d1 = a.op(Op::new(w, 1, 3, "d1"));
     // A full set (both control controllers sign, no home): due at its `issued`. It removes the
     // slotted controller A, so the vault is retiring when it is activated.
     let mut ids = vec![a_key.id.clone(), k.id.clone()];
@@ -1371,17 +1371,51 @@ fn retiring(out: &mut Out) {
         "issued": ts(100), "by": a_key.id, "kind": "activate",
         "transition": b64(&env_bytes(&tenv)), "receipts": []});
     a.chain.envs.push(json!({"body": b64(&canonical(&abody))}));
-    // seq 5: the second controller revokes the writer; the vault is retiring, so `epochs` is [].
-    let second = k.clone();
+    (a, k, d1)
+}
+
+/// §8.3: no epoch while the vault is retiring. A revoke MAY carry empty `epochs`; a `rekey`,
+/// or a revoke that introduces an epoch, is refused (the removed key reads the retiring vault).
+fn retiring(out: &mut Out) {
+    let w = member("w");
+    // seq 5: the second controller revokes the writer; `epochs` is [].
+    let (mut a, k, d1) = retiring_chain("retiring", &w);
     a.chain.add(
         "revoke",
-        &second,
+        &k,
         &ts(200),
-        &second,
+        &k,
         Opt::default(),
         json!({"member": w.sign.id, "kept": [d1.digest], "heads": [], "epochs": []}),
     );
     a.expect_opened(&d1);
-    let _ = &a.second;
     a.write_case(out, "revoke-while-retiring", "The slotted controller is removed by a full-set transition (activated at seq 4): the vault is retiring (§8.3). The remaining controller then revokes the writer. §8.3: hosts MUST NOT introduce epochs while the vault is retiring and a `revoke` MAY carry empty `epochs`, so the revoke is ok with `epochs: []` and no epoch 2 exists; the removed key's retiring vault therefore opens nothing made after. The kept record is admitted.", &["8.3", "9.5", "7.1"], json!({"vaultRetiring": true, "latestEpoch": {"notes": 1}}));
+
+    // seq 5 refused: a rekey sealed to the retiring vault.
+    let (mut a, k, _d1) = retiring_chain("retiring-rekey", &w);
+    let (vid, vag) = (a.vault_id.clone(), a.vault_agree.clone());
+    let e2 = a.epoch_obj(NS, 2, &[(vid.as_str(), vag)]);
+    a.chain.add(
+        "rekey",
+        &k,
+        &ts(200),
+        &k,
+        Opt::default(),
+        json!({"epochs": [e2]}),
+    );
+    a.write_case(out, "rekey-while-retiring", "As revoke-while-retiring, but the second controller signs a `rekey` introducing epoch 2 sealed to the retiring vault. §8.3: hosts MUST NOT introduce epochs while the vault is retiring, and the removed key may hold the retiring seed: the entry at seq 5 is malformed.", &["8.3"], json!({"history": {"result": "malformed", "seq": 5}, "records": {}, "opened": []}));
+
+    // seq 5 refused: a revoke that introduces an epoch while retiring.
+    let (mut a, k, _d1) = retiring_chain("retiring-revoke-epochs", &w);
+    let (vid, vag) = (a.vault_id.clone(), a.vault_agree.clone());
+    let e2 = a.epoch_obj(NS, 2, &[(vid.as_str(), vag)]);
+    a.chain.add(
+        "revoke",
+        &k,
+        &ts(200),
+        &k,
+        Opt::default(),
+        json!({"member": w.sign.id, "kept": [], "heads": [], "epochs": [e2]}),
+    );
+    a.write_case(out, "revoke-epochs-while-retiring", "As revoke-while-retiring, but the revoke carries a new epoch 2 sealed to the retiring vault. A `revoke` MAY carry empty `epochs` while retiring; one that introduces an epoch is malformed (§8.3).", &["8.3", "9.5"], json!({"history": {"result": "malformed", "seq": 5}, "records": {}, "opened": []}));
 }

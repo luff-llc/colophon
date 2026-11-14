@@ -2613,6 +2613,13 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
             super::prescan("revoke", v).check()?;
             let (_, fields) = AuthorityHeader::split(v.clone())?;
             let r = Revoke::parse(fields)?;
+            // §8.3: while the vault is retiring hosts MUST NOT introduce epochs; a `revoke`
+            // MAY carry empty `epochs`. A new epoch would be readable by the removed key.
+            crate::v05::require(
+                s.retiring.is_none() || r.epochs.is_empty(),
+                "revoke: no epoch may be introduced while the vault is retiring",
+            )
+            .map_err(Outcome::from)?;
             let m = s
                 .members
                 .iter()
@@ -2658,6 +2665,12 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 .ok_or_else(|| malformed("rekey: epochs"))?;
             crate::v05::require(!epochs.is_empty(), "rekey: epochs must not be empty")
                 .map_err(Outcome::from)?;
+            // §8.3: no epoch while the vault is retiring.
+            crate::v05::require(
+                s.retiring.is_none(),
+                "rekey: no epoch may be introduced while the vault is retiring",
+            )
+            .map_err(Outcome::from)?;
             let mut seen = BTreeSet::new();
             for ep in epochs {
                 let ns = ep
