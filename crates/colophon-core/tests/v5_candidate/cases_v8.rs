@@ -1262,6 +1262,52 @@ pub fn part3(o: &mut Out) {
     activate(&mut c, &t_nv, &[rec(&cx, &t_nv)]);
     case_v(o, "t-removal-slotted-without-vault", &c, json!({"result": "ok", "seq": 3, "vault": "retiring", "slots": 0}),
            "Removing the slotted Mac key needs no vault change: its slot is dropped and the vault is retiring.", &["8.3", "8.7"], Some(ver(DUE0 + 60)));
+    // Revision 12, engine correction (§8.3): changing a controller's `agreement` drops every slot
+    // naming it and retires the vault, like a removal or demotion. The re-keyed Mac key names the
+    // only slot.
+    let rekeyed_mac = |ctrls: &Value| -> Vec<Value> {
+        let mut v: Vec<Value> = ctrls.as_array().unwrap().clone();
+        for c_ in v.iter_mut() {
+            if cid(c_) == a.id {
+                c_["key"]["agreement"] = json!(b64(&derived("r12/rekey/agreement").point));
+            }
+        }
+        v
+    };
+    let upd: Vec<Value> = rekeyed_mac(&kr5["controllers"])
+        .into_iter()
+        .filter(|c_| cid(c_) == a.id)
+        .collect();
+    let t_rk = p(&cx, json!({"keyring": {"update": upd}}), sg![a, k1]);
+    let mut c_rk = base.clone();
+    activate(&mut c_rk, &t_rk, &[rec(&cx, &t_rk)]);
+    case_v(
+        o,
+        "t-rekey-slotted-drops-slot",
+        &c_rk,
+        json!({"result": "ok", "seq": 3, "vault": "retiring", "slots": 0}),
+        "A transition re-keys the slotted Mac key (a new `agreement` point). At its activation the slot naming it is dropped and the vault is retiring, as for a removal or demotion; the key's other fields and its place in the keyring stay.",
+        &["8.3", "8.7"],
+        Some(ver(DUE0 + 60)),
+    );
+    let mut c_rk_imm = base.clone();
+    c_rk_imm.add(
+        "keyring",
+        &a,
+        &ts(R0),
+        &a,
+        Opt::default(),
+        json!({"keyring": kr_with_ctrls(&kr5, rekeyed_mac(&kr5["controllers"]))}),
+    );
+    case_v(
+        o,
+        "i-rekey-slotted-as-immediate",
+        &c_rk_imm,
+        bad("malformed", 3),
+        "The same re-keying written as an immediate `keyring` entry that keeps the slot: immediate entries only add or tighten (§8.4), so it is refused.",
+        &["8.3", "8.4"],
+        None,
+    );
     let t_k1 = p(&cx, rm(&a.id), sg![k1]);
     let mut c_k1 = base.clone();
     activate(&mut c_k1, &t_k1, &[rec(&cx, &t_k1)]);

@@ -569,3 +569,23 @@ fn a_format_2_checkpoint_is_refused_and_the_account_is_rebuilt_from_its_objects(
         ("ok".to_string(), 7)
     );
 }
+
+// ---- Engine correction: an agreement change drops slots (§8.3) -------------------------------
+
+#[test]
+fn rekeying_the_slotted_controller_drops_its_slot_and_retires_the_vault() {
+    let (objects, now) = rules("t-rekey-slotted-drops-slot");
+    let v = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!((v.code(), v.branch.len()), ("ok".to_string(), 3));
+    let s = v.state.unwrap();
+    assert_eq!(
+        s.keyring().slots.len(),
+        0,
+        "the slot naming the re-keyed key is gone"
+    );
+    assert!(s.vault_retiring(), "the vault is retiring");
+    // The same change as an immediate entry that keeps the slot is refused.
+    let (objects, now) = rules("i-rekey-slotted-as-immediate");
+    let v = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!((v.code(), v.seq()), ("malformed".to_string(), 3));
+}

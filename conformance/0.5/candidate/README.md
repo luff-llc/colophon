@@ -46,6 +46,7 @@ the same 1,078 files.
 | `rules/veto-webauthn-*` | §4.3, §8.7 | A veto signature with and without UV, and from a call origin |
 | `rules/row-*` | changes §H | Event sequences: rows 2, 3, 4, 8, 9, 10, 11, 12 (and a gone home revoked by one recovery key), 13 (the honest home serves the transition; the owner's veto stands), 17 |
 | `rules/t-excusal-final-not-displaced-by-vetoed`, `t-cascade-final-not-displaced-by-vetoed`, `t-full-set-final-not-displaced-by-vetoed`, `t-vetoed-displaces-activation-and-later-revocation`, `t-order-guard-keeps-later-addition-provisional` | §8.6, §8.7 | Revision 12 (M1, H1, M-a): an activation that is final by excusal, by the cascade or by a full set is never displaced by a `vetoed`; a `vetoed` that displaces a provisional one takes the later revocations with it; Order keeps a later addition provisional behind an earlier one when a non-removal-only revocation does not excuse its home |
+| `rules/t-rekey-slotted-drops-slot`, `i-rekey-slotted-as-immediate` | §8.3, §8.4 | Revision 12 engine correction: re-keying the slotted controller drops its slot and retires the vault; the same change as an immediate entry is `malformed` |
 | `rules/t-conflict-no-evidence`, `t-quorum2-veto-beats-removal`, `row-13-quorum1-hidden-transition`, `t-removal-unblocks-addition`, `t-revoke-home-*`, `t-planted-key-dropped`, `t-vault-by-approve-only`, `t-recovery-*` | §8.3, §8.4, §8.6, §8.7 | Revision 8: one per High of the second review of revision 7 |
 | `encoding/number-ties.json` | §2.1 | Doubles with two equally near shortest decimals: the even last digit is canonical |
 | `calls/link-unknown-operator-*` | §10.4, §12.3 | `any:[true, unknown]` is `ok`; `any:[false, unknown]` is `newerFormat` |
@@ -60,8 +61,8 @@ the same 1,078 files.
 
 ## What was run
 
-- `v5_generator_check` (the Rust generator): 1,306 generated files match, byte for byte. The
-  directory holds 1,309 files: those plus three sources (`README.md` and the probe's
+- `v5_generator_check` (the Rust generator): 1,314 generated files match, byte for byte. The
+  directory holds 1,317 files: those plus three sources (`README.md` and the probe's
   `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each , a seven-file chained succession, a nine-file Swift layout case and a thirteen-file cutoff case).
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all

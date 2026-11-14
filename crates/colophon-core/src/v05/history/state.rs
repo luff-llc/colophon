@@ -1213,6 +1213,8 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     let mut changed = false;
     let mut removed: Vec<String> = Vec::new();
     let mut demoted: Vec<String> = Vec::new();
+    // Controllers whose `agreement` changes: their slots drop like a demotion's (§8.3).
+    let mut rekeyed: Vec<String> = Vec::new();
     let mut added: Vec<String> = Vec::new();
     let anchor = t.anchor_seq;
     if let Some(kc) = t.change.get("keyring").and_then(Value::as_object) {
@@ -1246,6 +1248,9 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
                 .ok_or_else(|| malformed("void: update of an absent key"))?;
             if old.roles().iter().any(|r| !c.has(r)) {
                 demoted.push(c.id());
+            }
+            if old.key().agreement() != c.key().agreement() {
+                rekeyed.push(c.id());
             }
             if raw.get(&c.id()) != Some(x) {
                 changed = true;
@@ -1333,7 +1338,11 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     let mut slots: Vec<Value> = k.slots.clone();
     let gone: BTreeSet<&String> = removed.iter().chain(&demoted).collect();
     let before = slots.len();
-    slots.retain(|sl| !Keyring::slot_ids(sl).iter().any(|id| gone.contains(id)));
+    slots.retain(|sl| {
+        !Keyring::slot_ids(sl)
+            .iter()
+            .any(|id| gone.contains(id) || rekeyed.contains(id))
+    });
     let dropped = slots.len() != before;
     if let Some(vc) = t.change.get("vault").and_then(Value::as_object) {
         overrides.insert(
@@ -1596,7 +1605,8 @@ fn recorded_issued(prev: i64, at: i64) -> i64 {
 /// - a `final` of an earlier activation that is not removal-only, which Order may need first;
 /// - a `final` of a later removal-only home revocation (see below);
 /// - an `activate` of a removal-only home revocation, checked in `apply` once applied;
-/// and nothing else. A `vetoed` that displaces F is a candidate at F's seq, not a later entry.
+///
+/// Nothing else is admitted. A `vetoed` that displaces F is a candidate at F's seq, not a later entry.
 /// A `final` of an earlier removal-only activation is `malformed` evidence.
 fn admit_after_provisional_f(s: &State, e: &Entry) -> Result<()> {
     match e.kind.as_str() {

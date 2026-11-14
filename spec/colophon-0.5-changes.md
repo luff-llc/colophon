@@ -198,6 +198,7 @@ clocks and admission.
 | 100 | §16.3 states how a Swift quorum `handover` differs: Swift ignores extra, duplicate, mislabelled or non-steward signatures; a 0.5 verifier refuses them; the shipped apps never write one | M-e |
 | 101 | §8.7 says a revocation of a home that is not removal-only revokes it once final without excusing it, and that a later full set's anchor may be the activation itself | M-a, L3 of the check of revision 12 |
 | 102 | Checkpoint format 3 | L1 of the check of revision 12 |
+| 103 | Engine correction, no text change (§8.3 already says it): a keyring `update` that changes a controller's `agreement` drops every slot naming it and retires the vault, as a removal or demotion does. `t-rekey-slotted-drops-slot`, `i-rekey-slotted-as-immediate` | Found by the independent check of another package: the verifier kept the slot and left `retiring` false, so the holder of the old agreement key could still open the vault |
 
 ## B. Galley's requirements
 
