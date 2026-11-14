@@ -526,3 +526,23 @@ fn shuffled_pending_objects_converge_after_unavailable_dependencies_are_retried(
         }
     }
 }
+
+#[test]
+fn early_sighting_of_a_transition_does_not_poison_a_later_in_window_receipt() {
+    // §13.1: a transition refused as early is not "first seen" there. A receipt forwarded
+    // inside the window afterwards still makes the activation timely.
+    let t = fixture("t-remove-after-delay", "objects/transition.json");
+    let r = fixture("t-remove-after-delay", "objects/receipt.json");
+    let entry = fixture("t-remove-after-delay", "records/authority/00000003.json");
+    let at = time(&t);
+    let due = time(&entry);
+    let home = setup("t-remove-after-delay", true, always(), at);
+    let early = admit(&home, &t, &stamp(at - 1));
+    assert_eq!(early.result, Err(Refusal::Early));
+    let unseen = admit(&restore(&early.state), &r, &stamp(at + 1));
+    assert_eq!(unseen.result.as_ref().unwrap_err().code(), "unavailable");
+    let late_t = admit(&restore(&unseen.state), &t, &stamp(due));
+    assert_eq!(late_t.result, Err(Refusal::Late));
+    let activation = admit(&restore(&late_t.state), &entry, &stamp(due));
+    assert_eq!(activation.result, Ok(()));
+}

@@ -464,6 +464,10 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                 )?;
                 let t = state::admission_transition(&st, incoming)?;
                 let at = issued.ok_or_else(|| malformed("issued"))?;
+                // First sight is recorded for a transition this home takes in, not one it
+                // refuses as early (§13.1): a later in-window receipt must not be judged
+                // against a sighting before the transition's own `issued`.
+                let first_sight = !next.facts.contains_key(&t.digest);
                 next.facts.entry(t.digest.clone()).or_insert(Fact {
                     first_seen_ms: now_ms,
                     serving: home.serving.clone(),
@@ -494,6 +498,9 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                     return Err(Refusal::PendingFull);
                 }
                 if now_ms < at {
+                    if first_sight {
+                        next.facts.remove(&t.digest);
+                    }
                     return Err(Refusal::Early);
                 }
                 // Late valid transitions are retained and served, but do not get a receipt.
