@@ -225,6 +225,11 @@ impl State {
         Ok(())
     }
 
+    /// Whether the verified branch holds `digest` at `seq`.
+    pub(super) fn on_branch_digest(&self, seq: u64, digest: &str) -> bool {
+        self.on_branch(seq, digest)
+    }
+
     /// The `(seq, digest)` of each entry a `resolve` activation on this branch discarded.
     pub fn resolved_forks(&self) -> &[(u64, String)] {
         &self.resolved

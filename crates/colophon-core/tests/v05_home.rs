@@ -690,3 +690,83 @@ fn a_late_veto_is_stored_with_an_in_window_receipt_from_another_home_and_signs_n
     assert_eq!(on_time.result, Ok(()));
     assert_eq!(on_time.receipts.len(), 1);
 }
+
+#[test]
+fn a_home_signs_one_head_per_seq_unless_the_first_was_displaced_under_rule_1() {
+    // §13.3 (revision 13), guard before signing. `t-activate-after-covered-entry`: an ordinary
+    // grant Y at seq 3 that the primary's head covers stands over the activation X that is also
+    // held at seq 3 (`branch-activate-first`): rule 1 displaces X.
+    let dir = root().join("conformance/0.5/candidate/rules/t-activate-after-covered-entry");
+    let read = |p: PathBuf| fs::read(p).unwrap();
+    let rec = |n: usize| read(dir.join(format!("records/authority/{n:08}.json")));
+    let x_env = read(dir.join("branch-activate-first/authority/00000003.json"));
+    let dg = |env: &[u8]| {
+        digest(
+            &STANDARD
+                .decode(
+                    serde_json::from_slice::<Value>(env).unwrap()["body"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap(),
+        )
+    };
+    let (y, x) = (dg(&rec(3)), dg(&x_env));
+    let case: Value = serde_json::from_slice(&read(dir.join("case.json"))).unwrap();
+    let clock = case["verifier"]["now"].as_str().unwrap().to_string();
+    let now = parse_date(&clock).unwrap();
+    let head = read(dir.join("objects/head-H1-primary.json"));
+    let entries = |extra: Vec<Vec<u8>>| {
+        let mut e: Vec<Vec<u8>> = vec![rec(1), rec(2)];
+        e.extend(extra);
+        e
+    };
+    let before = Objects {
+        entries: entries(vec![x_env.clone()]),
+        ..Default::default()
+    };
+    let after = Objects {
+        entries: entries(vec![rec(3), rec(4), x_env.clone()]),
+        heads: vec![head],
+        ..Default::default()
+    };
+    let st = verify_history(&after, &Persisted::default(), now);
+    assert_eq!(st.code(), "ok");
+    assert_eq!(st.branch[2], y, "the covered grant stands");
+    let id = st.state.unwrap().current_homes()[0].request.member_id();
+    let (t1, t2, t3) = (
+        "2026-11-14T09:00:00Z",
+        "2026-11-14T09:00:10Z",
+        "2026-11-14T09:00:20Z",
+    );
+    // On its own branch X may be signed once; the same head again is a retry.
+    let a = HomeState::new(id.clone(), &before, always(), now).unwrap();
+    let a = a.guard_head(3, &x, t1, &clock).unwrap();
+    assert!(a.guard_head(3, &x, t1, &clock).is_ok());
+    // The home now holds Y and its head too, with the earlier signing kept.
+    let mut b: Value = serde_json::from_slice(
+        &HomeState::new(id.clone(), &after, always(), now)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    let a_json: Value = serde_json::from_slice(&a.to_bytes().unwrap()).unwrap();
+    b["signed_heads"] = a_json["signed_heads"].clone();
+    let b = HomeState::from_bytes(&serde_json::to_vec(&b).unwrap()).unwrap();
+    // X is no longer on the home's branch: no head over it.
+    assert!(b.guard_head(3, &x, t2, &clock).is_err());
+    // Y displaced X under rule 1: a second head at seq 3 is allowed, once `issued` increases.
+    assert!(
+        b.guard_head(3, &y, t1, &clock).is_err(),
+        "issued must increase"
+    );
+    let b2 = b.guard_head(3, &y, t2, &clock).unwrap();
+    // Having signed over Y, a head over anything else at seq 3 is refused.
+    assert!(b2.guard_head(3, &x, t3, &clock).is_err());
+    // Without displacement: signed over Y first, a different digest is refused outright.
+    let c = HomeState::new(id, &after, always(), now).unwrap();
+    let c = c.guard_head(3, &y, t1, &clock).unwrap();
+    assert!(c.guard_head(3, &"ab".repeat(32), t2, &clock).is_err());
+    assert!(c.guard_head(3, &x, t2, &clock).is_err());
+}

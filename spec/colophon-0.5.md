@@ -1520,7 +1520,12 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   the history from any source, verifies it from seq 1, asks every home the history names, and
   applies §12.3 step 4.
 - A home SHOULD sign a new head at least every `policy.headMaxAge` / 2 and MUST NOT sign a head for
-  an entry it hasn't verified.
+  an entry it hasn't verified. It MUST give its heads strictly increasing `issued`, and MUST NOT
+  sign a head for a second digest at a seq unless its own verdict shows the first displaced under
+  §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
+  second head's side). The guard belongs to home admission, which holds the history: the host
+  that drafts a home's head calls the home's guard first (`HomeState::guard_head` in the
+  reference core) and signs only what it passes.
 
 ### 13.4 Who may read the history
 

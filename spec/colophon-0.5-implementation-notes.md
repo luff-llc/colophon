@@ -448,3 +448,13 @@ test of revision 13 was replayed by the Swift source.**
   as before; a receipt forwarded afterwards stays unmatched until the veto is sent again. Test
   `a_late_veto_is_stored_with_an_in_window_receipt_from_another_home_and_signs_none`; no vector
   (the runner's admission case takes one object, and this needs a receipt held first).
+- **Two heads for one seq (§13.3; E3).** The home module never drafts heads; the host does, with
+  `write::calls::prepare_head`, which knows no history. The guard is `HomeState::guard_head(seq,
+  digest, issued, now)`: the host MUST call it before preparing a head and persist the state it
+  returns (the draft counts as signed). It refuses a head for an entry not on the home's verified
+  branch, non-increasing `issued`, and a second digest at a seq unless following both entries
+  back to where their branches first differ lands on a conflict the home's verdict decided for
+  this head's side with a recording entry on one side (`displaced_by_rule_1`). `signed_heads` is a
+  new `#[serde(default)]` field of `HomeState` (version unchanged). `prepare_head` is not edited:
+  nothing in the write module enforces that a host calls the guard. Test
+  `a_home_signs_one_head_per_seq_unless_the_first_was_displaced_under_rule_1`.
