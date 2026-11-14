@@ -41,10 +41,12 @@ field; `u64` and `i64` are `bigint`; `optional<T>` is `undefined`.
 | `AccountCreation` | Creation before any store exists: PRF, genesis, first `rekey`; the result is the account ID and the stores. |
 | `AccountRequest` | A device's membership request before it is a member (public values only). |
 | `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | The pairing ceremony (§7.3). |
-| `AccountMove` | A prepared move step: the 0.4 upgrade, a Swift veto, F, a copier's shares. |
+| `AccountMove` | A prepared move step: the 0.4 upgrade, a Swift veto, F, a copier's shares, the migration. |
+| `SwiftSource`, `SwiftCopyPlan`, `SwiftCopyDestination`, `SwiftCopyResult`, `AccountCopyWrite` | The Swift record copy: the predecessor library with its vault and keys, the plan with the host's translator, the import writes, the finished copy. |
 | `AccountBlobWriter`, `AccountLiveWrite` | A streaming blob upload; a prepared live write. |
 | free `account_*` | The standalone verifiers and helpers. |
 | `HostSource` | The host callback: `read(path)`, `read_blob(path)`. |
+| `SwiftTranslator` | The host callback of the copy: `translate(SwiftOpInfo) -> SwiftBatch`. |
 | `AccountError` | The error of every call. |
 
 ### Prepare, sign, finish
@@ -91,8 +93,11 @@ finish_unlock_slot(index, list<UnlockSecret>) finish_unlock_epochs(list<EpochAns
 live_verdicts missing_covered budget_scope_unavailable rejudged save(nonce_seed) verify_batch(limit)`. Blobs:
 `begin_blob open_blob_chunk blob_chunk read_blob blob_availability required_blob_fetches`. Live: `begin_live_write
 finish_live_write`. Exchange: `exchange_homes exchange_set_bearer exchange_next(home) exchange_provide_call
-exchange_answer(home, ticket, HttpAnswer) exchange_want_blob receipted_by`. Move: `swift_succession
-swift_predecessor begin_swift_veto begin_swift_freeze begin_swift_copier_shares`.
+exchange_answer(home, ticket, HttpAnswer) exchange_want_blob receipted_by`. Session: `record_due set_read_scope lock is_locked
+transfer_seed accept_seed_transfer accept_predecessor_entry exchange_abort source_faults version_paths
+begin_link begin_call` (a link or call's envelope is `Written.artifact`). Move: `swift_succession
+swift_predecessor begin_swift_veto begin_swift_freeze begin_swift_copier_shares begin_swift_migration
+finish_move swift_copy_destination begin_swift_copy_write finish_swift_copy_write finish_swift_copy`.
 
 The exchange: `exchange_next` returns an `ExchangeStep`: `Request` (with `request: HttpRequest`: ticket, home,
 method, url, headers, body), `NeedCall` (with `need: CallNeed`: ticket, home, audience, purpose, method, url;
@@ -223,7 +228,7 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `NamespaceRevision` | `namespace: String`, `revision: u64` | A namespace whose fold changed, with its new revision. |
 | `RefusedHead` | `home: String`, `code: String` | A head a home sent that was refused. |
 | `Changes` | `authority_from_seq: u64`, `authority_to_seq: u64`, `entries: list<EntryChange>`, `members_added: list<String>`, `members_revoked: list<String>`, `controllers_added: list<String>`, `controllers_removed: list<String>`, `vault_changed: bool`, `policy_changed: bool`, `reorganized: bool`, `namespaces: list<NamespaceRevision>`, `pending_added: list<String>`, `pending_gone: list<String>`, `pending_now: list<String>`, `heads_accepted: list<String>`, `heads_refused: list<RefusedHead>`, `foreign: u64`, `status: optional<Status>` | What a call changed in the account. |
-| `Written` | `stores: list<Store>`, `changes: Changes` | What a finished action produced: store these bytes at these paths, in order. |
+| `Written` | `stores: list<Store>`, `changes: Changes`, `artifact: optional<bytes>` | What a finished action produced: store these bytes at these paths, in order. `artifact` is the envelope of a link or a call (§12), which is not stored: for the host to use. |
 | `Controller` | `id: String`, `label: String`, `roles: list<String>`, `form: SignForm`, `verification: bool`, `holder: optional<String>`, `has_slot: bool`, `provisional: bool`, `suspended: bool` | A controller of the verified keyring. |
 | `AccountGrant` | `namespaces: list<String>`, `access: list<AccessKind>`, `expires: optional<String>`, `write_budget: optional<u64>`, `import: bool` | What a grant allows (the 0.4 shape). |
 | `AccountMember` | `id: String`, `label: String`, `kind: AccountMemberKind`, `grant: optional<AccountGrant>`, `since: u64`, `revoked_at: optional<u64>`, `writes: u64`, `expires_ms: optional<i64>`, `provisional: bool`, `home: bool`, `session: u64` | A member with its standing. |
@@ -276,37 +281,102 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `PairingReveal` | `e: bytes`, `nb: bytes` | The pairing reveal a joiner sends: its ephemeral point and nonce. |
 | `SuccessionTiming` | `window_start_ms: i64`, `window_end_ms: i64`, `recovery_delay_s: u64`, `veto_deadline_ms: i64`, `due_ms: i64`, `quorum: u64`, `homes: list<String>`, `vetoers: list<String>`, `keys_needed: u64` | The succession window and the times derived from it. |
 | `SwiftSuccession` | `stage: MoveStage`, `format: String`, `predecessor: String`, `head_seq: u64`, `head_digest: String`, `genesis_digest: String`, `handover_count: u64`, `authorized: bool`, `vetoed: bool`, `verified_seq: optional<u64>`, `verified_digest: optional<String>`, `timing: optional<SuccessionTiming>` | The Swift succession an account claims (§15.1). |
-| `MoveResult` | `stores: list<Store>`, `veto: optional<bytes>`, `frozen_entry: optional<bytes>`, `frozen_seq: optional<u64>`, `succession_verified: bool` | What a finished step of a move produced: bytes to store, and for F the exact Swift entry (`frozen_entry`) the host appends to the predecessor. |
+| `MoveResult` | `stores: list<Store>`, `veto: optional<bytes>`, `frozen_entry: optional<bytes>`, `frozen_seq: optional<u64>`, `succession_verified: bool`, `changes: optional<Changes>` | What a finished step of a move produced: bytes to store, and for F the exact Swift entry (`frozen_entry`) the host appends to the predecessor. |
+| `SealedSeed` | `enc: bytes`, `ciphertext: bytes` | A sealed seed (an HPKE box): public, only the paired device can open it. |
+| `SourceFault` | `path: String`, `what: String` | A fault of the record source the host must show: it changed bytes it must never change. |
+| `CallOrigin` | `rp: String`, `origins: list<String>` | The origins a call-ceremony `rp` may use. |
+| `CallTarget` | `audiences: list<String>`, `call_origins: list<CallOrigin>`, `controller_purposes: list<String>`, `home_endpoints: list<String>` | What the verifier of a call is configured with (§12.3). |
+| `SwiftSlotInfo` | `index: u64`, `kind: String`, `label: String`, `controller: optional<String>`, `problem: optional<String>` | One slot of a Swift keyring. `controller` is the one it names, `problem` why it cannot be read. |
+| `SwiftEpoch` | `namespace: String`, `epoch: u64`, `seq: u64` | An epoch of a Swift namespace and the seq of the entry that introduced it. |
+| `SwiftMemberInfo` | `id: String`, `label: String`, `role: optional<String>`, `revoked: bool`, `budget: bool` | A Swift predecessor member as the fold has it at the head. |
+| `SwiftOpInfo` | `source_library: String`, `author_id: String`, `author_label: String`, `operation_id: String`, `signed_body_digest: String`, `kind: String`, `version: u64`, `payload_json: String`, `admitted_order: u64` | A Swift operation as the source reader judged it, for the host's translator. |
+| `SwiftChild` | `key: String`, `kind: String`, `payload_json: String`, `baseline: bool` | An output of a translated record: a destination module operation and its clean payload. `baseline` is a trusted importer receipt, never inferred from a payload. |
+| `SwiftIdentity` | `source_key: String`, `category: String`, `destination_id: String` | A source occurrence key reserved as `(category, destination id)`. |
+| `SwiftBatch` | `children: list<SwiftChild>`, `alternatives_json: list<String>`, `identities: list<SwiftIdentity>`, `blobs_json: list<String>`, `outcome: String`, `evidence_json: String` | What the host's translator says about one admitted Swift operation: everything an import batch can carry. The core adds the batch key and the evidence binding it to its source; a translator can change the representation, never add a record or drop one silently. |
+| `SwiftOmission` | `namespace: String`, `source_digest: String`, `reason: String` | A source record the plan omitted, with the reason. |
+| `NamespaceCount` | `namespace: String`, `count: u64` | How many source records a namespace holds. |
+| `CopyItem` | `namespace: String`, `source_digest: String`, `key: String`, `payload_json: String` | An import write of a copy plan, to be signed by the copying member. |
+| `MigratedNamespace` | `namespace: String`, `source: u64`, `copied: list<String>`, `omitted: u64` | One namespace of a migration (§15.4). |
+| `Omitted` | `source_digest: String`, `reason: String` | A source record not copied. |
+| `CopyOutcome` | `namespaces: list<MigratedNamespace>`, `omitted: list<Omitted>`, `blobs_not_copied: list<String>` | What a finished copy holds. |
+| `MigratedMemberInput` | `id: String`, `label: String`, `kind: AccountMemberKind`, `dropped: optional<String>` | A predecessor member's fate in a migration: `dropped` empty means it rejoins. |
 
-## 7. `todo` until the core's engine forwards them
+### Faults
 
-The coordinator's engine branch `engine-0.5-e9` adds these to `v05::engine::Engine`. They are **not** routed
-through a second object; the exports wait for the merge:
+The exchange's `ExchangeFault.kind`: `More` carries `feed`: `authority`, `pending`, `remote`, `records`,
+`live` or `predecessor` (a page the pass did not finish: the rest is for the next pass). `SourceFault`
+(`AccountEngine.source_faults`) names a path the record source changed bytes at that it must never change.
 
-| Export (planned) | Needs |
+## 7. The Swift move through one object
+
+```text
+SwiftSource.read(entries) -> slots() -> begin_open_slot / finish_open_slot (host ECDH or PRF)
+  -> open_namespace_keys()                         (keys stay inside)
+AccountEngine.swift_succession() -> begin_swift_veto (during the wait) | begin_swift_freeze (when due)
+  -> AccountMove.steps() -> host signs -> AccountEngine.finish_move() -> MoveResult.frozen_entry
+  -> the host appends F to the predecessor; accept_predecessor_entry(entry) when it comes back
+AccountEngine.swift_copy_destination(library) -> SwiftCopyPlan.read(source, files, translator, destination)
+  loop: plan.next_batch(n) -> begin_swift_copy_write(plan, item, entropy) -> sign -> finish_swift_copy_write
+  -> finish_swift_copy(plan) -> SwiftCopyResult
+  -> begin_swift_copier_shares / begin_swift_migration(copy, members, drain..., signers) -> finish_move
+```
+
+The translator mirrors `swift_copy::Batch`: `SwiftBatch` has `children` (`SwiftChild`: key, kind,
+`payload_json`, `baseline`), `alternatives_json`, `identities` (`SwiftIdentity`), `blobs_json`, `outcome` and
+`evidence_json`; the core adds the batch key and the evidence binding it to its source and validates every
+result against the destination's cumulative projection. A translator that errors omits the record with its
+message.
+
+## 8. The 0.4 calls and their 0.5 exports
+
+The 0.4 exports stay (an in-place upgrade reads a 0.4 library with them first). Each, with its 0.5 answer:
+
+| 0.4 export | 0.5 |
 | --- | --- |
-| `AccountEngine.record_due`, `set_read_scope`, `lock`, `is_locked` | `Engine::record_due`, `set_read_scope`, `lock`, `is_locked` |
-| `AccountEngine.transfer_seed`, `accept_seed_transfer` (the end of the pairing flow) | `Engine::transfer_seed`, `accept_seed_transfer` |
-| `AccountEngine.accept_predecessor_entry` (taking F in at once) | `Engine::accept_predecessor_entry` |
-| `begin_link`, `begin_call` and the artifact on `Written` | `Written.artifact` |
-| the Swift copy: `begin_swift_copy_write`, `finish_swift_copy_write`, `swift_copy_destination`, `finish_swift_copy`, `begin_swift_migration`, `finish_move`; `CopyPlan` and the typed translator callback | the same forwards |
-| batched versions through `refresh_batched`, `version_paths`; `Engine::source_faults` | (the binding already batches versions itself) |
-| the device key wiped when the engine drops | `EngineOptions` wipe on drop |
+| `BindingError` | `AccountError` |
+| `KeyProvider` (`signing_public_key`, `agreement_public_key`, `sign`, `agree`) and `ControllerProvider` | none: the core never calls a key provider; the host reads `AccountSigningStep` and signs |
+| `HostAction::signing_steps`, `finish`, `record_paths`, `sign_with` | `AccountAction.steps`, `AccountEngine.finish` (returns `Written.stores`); `sign_with`: none |
+| `HostAction::advance_create`, `begin_create`, `begin_create_with` | `AccountCreation` |
+| `NativeLibrary::open`, `NativeEngine::open`, `open_inventory` | `AccountEngine.open` (the listing carries versions) |
+| `set_read_scope`, `id`, `revision`, `revisions`, `me`, `members`, `ledger`, `query`, `view`, `access` | `set_read_scope`, `id`, `revision`, `revisions`, `me`, `members`, `ledger_json`, `query_json`, `view_json`, `access` |
+| `records`, `records_at` | none: the host owns the store; `stores` of every action and report say what to persist |
+| `merge`, `merge_observed`, `commit`, `update_versions`, `set_source` | `apply_paths`, `refresh`, `finish`, `AccountEngine.open(listing)` |
+| `begin_unlock`, `finish_unlock`, `finish_unlock_many`, `ready_with` | `begin_unlock_epochs`, `finish_unlock_epochs` |
+| `begin_unlock_slots`, `finish_unlock_slot`, `keyring`, `select_controller`, `eligible_signers`, `prepare_authority`, `finish_authority`, `sign_controller_with` | `slots`, `begin_unlock_slot`, `finish_unlock_slot`; the caller names signers; `suggest_signers` |
+| `build_sealed_slot`, `begin_prf_slot`, `finish_prf_slot`, `begin_combined_slot`, `finish_combined_slot`, `PrfAction`, `CombinedSlotAction`, `CombinedSlotPart` | `begin_add_slot` with `prf_requests` and `provide_prf` |
+| `begin_approve`, `begin_revoke`, `begin_rekey`, `begin_write`, `begin_call` | the same names, typed |
+| `begin_layout` | none: a 0.5 account is at layout 2 from genesis |
+| `begin_add_controller`, `begin_recovery_add`, `begin_add_passkey` | `begin_add_controller`, `AccountPairing`, `transfer_seed`, `accept_seed_transfer` |
+| `begin_remove_controller`, `begin_keyring` | `begin_remove_controller`, `begin_rotate_vault`, `begin_keyring`, `begin_transition` |
+| `begin_import_grant`, `begin_import`, `import_output_id`, `import_occurrence_id`, `import_identity_category`, `reconcile_import_prefix` | `begin_approve` with `terms_json` carrying `import`; `begin_import` |
+| `live_generation`, `written_operation`, `written_operation_json`, `operation_at` | `record_verdict`, `operation_at_json`, `live_heads`, `begin_live_write` |
+| `tools` | `tools_json` |
+| `begin_request`, `request_info`, `AccessRequest`, `PublicKeys` | `AccountRequest`, `account_request_info` |
+| `NativeEngine::checkpoint`, `NativeCheckpointKey`, `NativeCheckpointPreparation`, `NativeCheckpointOpening` | `save` and `open(saved)`; sealed under the device key (no member-signed ticket) |
+| `work`, `EngineWork`, `verify_batch` | `stats`, `open_info`, `verify_batch` |
+| `begin_blob`, `open_blob_chunk`, `read_blob_chunk`, `NativeBlobWriter`, `BlobChunkWrite`, `BlobSource`, `BlobWriteOutcome`, `BlobReadOutcome` | `begin_blob`, `AccountBlobWriter`, `open_blob_chunk`, `blob_chunk`, `read_blob` (errors are typed: `Unavailable`, `Denied`) |
+| `EngineRecordSource` | `HostSource` |
+| `parse_registration` | unchanged 0.4 export, still right for 0.5 |
+| `vault_public`, `webauthn_prf_input` | `account_vault_public`, `account_webauthn_prf_input` |
+| `import_legacy_batch`, `bind_legacy_import_state`, `LegacyImport*` | none: upgrade tooling, not the account |
+| `UnlockResult`, `AgreementStep`, `SlotOption`, `SlotInput`, `SlotSecret`, `SigningStep`, `SignatureResult`, `WebauthnResult`, `KeyForm`, `Records`, `ChangeSummary`, `Member`, `Grant`, `Denial` and the other 0.4 records | `UnlockInput`, `UnlockSecret`, `SlotInfo`, `AccountSigningStep`, `Signature`, `SignForm`, `Store`, `Changes`, `AccountMember`, `AccountGrant`, `AccountDenial` |
+| (0.5 only) | the §15 `/5` succession (`begin_successor`) is not built in the core |
 
-Until then a move can be prepared and signed through the exports (`begin_upgrade`, `begin_swift_veto`,
-`begin_swift_freeze`, `begin_swift_copier_shares` finish to bytes the host stores), but F is not taken into
-the account and the copy and the migration are not exported.
+## 9. What was run
 
-## 8. What was run
-
-Native (UniFFI crate): `v05_journeys` (5 tests: create with a passkey-like controller and a device key and
-unlock; approve a member; write and read; the pairing ceremony; two engines synced through an in-memory home
-built from the exchange values; saved-state resume; the 0.4 in-place upgrade then old records and a new
-write; a prepared action cannot be altered, replayed or finished elsewhere; a hostile source: garbage, a
-throwing callback, a re-entering callback, a second thread; a record changed under the engine is `Integrity`),
-`v05_secrets` (3), name tests. The home and record_due setup of journey one go through the core, because the
-engine forward is `todo`. Swift and Kotlin: `tests/smoke/` (see its README), both pass on generated sources.
+Native (UniFFI crate): `v05_journeys` (5 tests, only the exports: create with a passkey-like controller and a
+device key; the controller's engine appoints a home and records its activation (`record_due`); approves a
+member; adds a laptop; the pairing ceremony then `transfer_seed` and `accept_seed_transfer`, the laptop
+builds its own slot and unlocks by it; the member writes and reads; two engines synced through an in-memory
+home built from the exchange values; read scope, `lock`, `exchange_abort`, `version_paths`, saved-state
+resume; the 0.4 in-place upgrade then old records and a new write; a prepared action cannot be altered,
+replayed or finished elsewhere; a hostile source: garbage, a throwing callback, a re-entering callback, a
+second thread; a record changed under the engine is `Integrity`), `v05_swift` (1: a real Swift keyring library
+opened through `SwiftSource`, planned through `SwiftCopyPlan` with a typed translator, omissions with the host's
+reason), `v05_secrets` (3), name tests. **Not run:** the steps of the Swift move that need a verified 0.5
+successor (the succession window, veto, F, the import writes, the migration): they are exported and compile,
+but no successor-account fixture exists in this crate (the core's `v05_swift_journey` builds one). Swift and
+Kotlin: `tests/smoke/`, both pass on generated sources, covering `lock`, seed transfer and `record_due`.
 Web: the wasm build compiles for `wasm32-unknown-unknown` and its exports were read from the module; nothing
-was executed through the wasm-bindgen glue, because the installed CLI (0.2.127) refuses the crate (0.2.130)
-and nothing was installed. The web test that runs natively covers everything that needs no JS host
-(creation with PRF, the verifier, a request, pairing, typed errors).
+was executed through the wasm-bindgen glue because the installed CLI does not match the crate's wasm-bindgen
+(see the PR). The web test that runs natively covers everything that needs no JS host.

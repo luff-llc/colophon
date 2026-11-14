@@ -58,16 +58,19 @@ fn scan_macros(text: &str, out: &mut BTreeSet<String>) {
     let mut record: Option<String> = None;
     for line in text.lines() {
         let t = line.trim_start();
-        if t.starts_with("begin_methods! {") {
+        if t.starts_with("begin_methods! {")
+            || t.starts_with("object_methods! {")
+            || t.starts_with("object_returning! {")
+        {
             in_begin = true;
             continue;
         }
         if in_begin {
             if line == "}" {
                 in_begin = false;
-            } else if let Some(r) = line.strip_prefix("    fn begin_") {
+            } else if let Some(r) = line.strip_prefix("    fn ") {
                 let n = r.split('(').next().unwrap();
-                out.insert(format!("AccountEngine.begin_{n}"));
+                out.insert(format!("AccountEngine.{n}"));
             }
             continue;
         }
@@ -199,6 +202,7 @@ pub fn scan(feature: &str, glue: Option<&Path>) -> BTreeSet<String> {
         for m in ["read", "read_blob"] {
             out.insert(format!("callback:HostSource.{m}"));
         }
+        out.insert("callback:SwiftTranslator.translate".to_string());
     } else if let Some(g) = glue {
         let text = std::fs::read_to_string(g).unwrap();
         let mut glue_names = BTreeSet::new();
@@ -213,6 +217,9 @@ pub fn scan(feature: &str, glue: Option<&Path>) -> BTreeSet<String> {
             if t.starts_with("fn ") && t.contains("this: &JsSource") {
                 let n = t["fn ".len()..].split('(').next().unwrap();
                 out.insert(format!("callback:HostSource.{n}"));
+            }
+            if t.starts_with("fn translate(this: &JsTranslator") {
+                out.insert("callback:SwiftTranslator.translate".to_string());
             }
         }
     }

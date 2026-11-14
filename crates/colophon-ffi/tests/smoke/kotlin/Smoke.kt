@@ -80,6 +80,28 @@ fun main() {
     check(written.stores.isNotEmpty() && written.changes.controllersAdded == listOf(lapId), "typed stores and changes")
     try { engine.finish(action, sigs); check(false, "replay") } catch (e: AccountException.Consumed) { check(e.code == "consumed", "replay is Consumed") }
 
+    // The calls the engine forwards: a due-transition pass, then pairing, seed transfer and lock.
+    val files2 = files.toMutableMap().also { m -> written.stores.forEach { m[it.path] = it.bytes } }
+    check(engine.recordDue().isEmpty(), "recordDue: nothing is due")
+    val listing2 = files2.keys.sorted().map { ListedPath(it, "") }
+    val engine2 = AccountEngine.open(Mem(files2), listing2, "controller:$lapId", created.account, listOf(), 0u, empty, fresh(32), now)
+    val tkey = PairingTransferKey.create(fresh(32))
+    val joiner = AccountPairing.join(created.account, tkey.public(), fresh(32))
+    val limiter = PairingFailureLimiter.fromState("")
+    val existing = AccountPairing.existingReceiveCommitment(created.account, joiner.commitment(), limiter, now)
+    val na = existing.sendNonce(fresh(32))
+    val reveal = joiner.receiveNonce(na)!!
+    val digits = existing.receiveReveal(reveal.e, reveal.nb, limiter, now)
+    check(digits == joiner.digits(), "both devices show the same six digits")
+    existing.confirm(); joiner.confirm()
+    val sealed = engine.transferSeed(existing, fresh(32))
+    check(!engine2.isUnlocked(), "the second device holds no seed yet")
+    engine2.acceptSeedTransfer(tkey, joiner, sealed)
+    check(engine2.isUnlocked(), "the seed transferred through the exports unlocks the second engine")
+    engine.lock()
+    check(engine.isLocked(), "lock: the engine reports it is locked")
+    try { engine.save(fresh(32)); check(false, "a locked engine saves") } catch (e: AccountException) { check(true, "a locked engine refuses to save (typed AccountException)") }
+
     try { AccountEngine.open(Throwing(), listing, "controller:$id", created.account, listOf(), 0u, empty, fresh(32), now); check(false, "throwing source") }
     catch (e: AccountException) { println("  throwing source -> $e"); check(e is AccountException.Host, "a foreign Kotlin exception from the callback arrives as Host") }
     try { AccountEngine.open(Mem(mapOf()), listing, "controller:$id", created.account, listOf(), 0u, empty, fresh(32), now); check(false, "missing") }

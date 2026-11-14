@@ -7,15 +7,10 @@
 //!    through an in-memory home.
 //! 2. Upgrade a 0.4 library in place, read its old records, write a new one.
 //!
-//! The one step done through the core instead of the exports is appointing a home and recording
-//! its activation (`record_due`): the engine has no forward for it yet (`todo`, see
-//! `docs/bindings-05.md`).
+//! Both use only the exports: the home is appointed and its activation recorded through the
+//! engine, and the second device receives the seed by pairing and seed transfer.
 #![allow(clippy::unwrap_used, clippy::too_many_arguments)]
 mod v05_support;
-use colophon_core::v05::account::{Account, Change, Identity};
-use colophon_core::v05::slots::{OpeningInput, OpeningSecret};
-use colophon_core::v05::vault::{EcdhOutput, PrfOutput};
-use colophon_core::v05::write::authority::TransitionRule;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use v05_support::*;
@@ -121,8 +116,8 @@ fn notes(engine: &AccountEngine) -> Vec<Value> {
     assert_eq!(v["ok"], true, "{v}");
     v["value"]["admitted"].as_array().unwrap().clone()
 }
-fn create_params(host: &Host, ids: &[&str; 4], policy: Option<String>) -> CreateParams {
-    let [d, p, k, d2] = ids;
+fn create_params(host: &Host, ids: &[&str; 3], policy: Option<String>) -> CreateParams {
+    let [d, p, k] = ids;
     CreateParams {
         label: "Test account".into(),
         namespaces: vec!["notes".into()],
@@ -130,7 +125,6 @@ fn create_params(host: &Host, ids: &[&str; 4], policy: Option<String>) -> Create
             host.raw_controller(d, "Mac", &["approve", "control"]),
             host.passkey_controller("Passkey", &["approve", "control", "recover"]),
             host.raw_controller(k, "Kit", &["recover"]),
-            host.raw_controller(d2, "Laptop", &["approve"]),
         ],
         slots: vec![
             SlotPlan {
@@ -149,10 +143,6 @@ fn create_params(host: &Host, ids: &[&str; 4], policy: Option<String>) -> Create
                 controllers: vec![d.to_string(), p.to_string()],
                 label: "Mac and passkey".into(),
             },
-            SlotPlan {
-                controllers: vec![d2.to_string()],
-                label: "Laptop".into(),
-            },
         ],
         threshold: None,
         recover_threshold: None,
@@ -163,87 +153,6 @@ fn create_params(host: &Host, ids: &[&str; 4], policy: Option<String>) -> Create
         rekey_signers: vec![d.to_string()],
     }
 }
-/// Appoint a home and record its activation, through the core: the engine's forward is `todo`.
-fn appoint_home(
-    host: &mut Host,
-    d: &str,
-    k: &str,
-    account: &str,
-    stores: &[Store],
-) -> (String, Vec<Store>) {
-    let home = host.identity(70);
-    let req = request(
-        host,
-        account,
-        &home,
-        "Home",
-        AccountMemberKind::Server,
-        json!({"serves": ["home"]}),
-        vec!["https://home.example/".into()],
-    );
-    let (o, r) = objects_of(stores);
-    let mut a = Account::open(o, r, None, Identity::Controller(d.into()), NOW).unwrap();
-    let slot = a
-        .slots()
-        .unwrap()
-        .into_iter()
-        .find(|s| s.controllers.len() == 1 && s.controllers[0].0 == d)
-        .unwrap();
-    let inputs = a.begin_unlock_slot(slot.index).unwrap();
-    let secrets: Vec<OpeningSecret> = inputs
-        .iter()
-        .map(|i| match i {
-            OpeningInput::Ecdh { controller, enc } => OpeningSecret::Ecdh(
-                EcdhOutput::from_host(&host.keys[controller].agree(enc).unwrap()).unwrap(),
-            ),
-            OpeningInput::Prf { salt, .. } => {
-                OpeningSecret::Prf(PrfOutput::from_host(&host.prf(salt)).unwrap())
-            }
-        })
-        .collect();
-    a.finish_unlock_slot(slot.index, &secrets).unwrap();
-    let change = Change::homes(
-        json!({"appoint": [{"request": colophon_core::v05::encoding::encode_base64(&req.raw), "terms": {"serves": ["home"]}}]}),
-    );
-    let action = a
-        .begin_transition(
-            &change,
-            &[d.to_string(), k.to_string()],
-            TransitionRule::Control,
-        )
-        .unwrap();
-    let sigs = action
-        .steps()
-        .iter()
-        .map(|s| {
-            let x = host.sign_one(s.body(), s.signer(), s.challenge().is_some());
-            colophon_core::v05::write::SignatureResult {
-                signature: x.signature,
-                assertion: None,
-            }
-        })
-        .collect();
-    let mut out: Vec<Store> = Vec::new();
-    let f = a.finish(action, sigs).unwrap();
-    let mut finished = vec![f];
-    finished.extend(a.record_due().unwrap());
-    assert_eq!(finished.len(), 2, "the transition and its activation");
-    for f in &finished {
-        let paths = f.record_paths();
-        let mut bytes: Vec<Vec<u8>> = f.entries.iter().map(|(_, b)| b.clone()).collect();
-        bytes.extend(f.pending.iter().cloned());
-        bytes.extend(f.records.iter().map(|r| r.bytes.clone()));
-        assert_eq!(paths.len(), bytes.len());
-        out.extend(
-            paths
-                .into_iter()
-                .zip(bytes)
-                .map(|(path, bytes)| Store { path, bytes }),
-        );
-    }
-    (home, out)
-}
-
 #[test]
 fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let mut host = Host::new();
@@ -252,11 +161,12 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let p = host.passkey();
     let d2 = host.identity(11);
     let m1 = host.identity(31);
+    let home = host.identity(70);
 
-    // --- Create: a device key, a passkey, a kit and a laptop; five slots (sealed x3, prf, combined).
+    // --- Create: a device key, a passkey and a kit; four slots (sealed x2, prf, combined).
     let mut policy: Value = serde_json::from_str(&account_default_policy().unwrap()).unwrap();
     policy["recoveryDelay"] = json!(3600);
-    let params = create_params(&host, &[&d, &p, &k, &d2], Some(policy.to_string()));
+    let params = create_params(&host, &[&d, &p, &k], Some(policy.to_string()));
     let creation =
         AccountCreation::begin(params, format!("controller:{d}"), T0, host.fresh(96)).unwrap();
     assert_eq!(creation.stage().unwrap(), CreateStage::Prf);
@@ -277,20 +187,40 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
         ("ok", Some(account.as_str()))
     );
 
-    // --- A home is appointed (through the core, see the file header).
-    let (home, more) = appoint_home(&mut host, &d, &k, &account, &created.stores);
     let auth = MemSource::new();
     auth.store(&created.stores);
-    auth.store(&more);
 
-    // --- The controller's engine approves a member who may write notes.
+    // --- The controller's engine appoints a home, records its activation, approves a member
+    // who may write notes, and adds the laptop as a controller.
     let ctl = open_engine(&auth, &format!("controller:{d}"), &account);
     assert!(!ctl.is_unlocked().unwrap());
     unlock_slot(&ctl, &host, &d);
     assert!(ctl.is_unlocked().unwrap());
     assert_eq!(ctl.status().unwrap().code, "ok");
+    let home_req = request(
+        &host,
+        &account,
+        &home,
+        "Home",
+        AccountMemberKind::Server,
+        json!({"serves": ["home"]}),
+        vec!["https://home.example/".into()],
+    );
+    let change = json!({"homes": {"appoint": [{"request": colophon_core::v05::encoding::encode_base64(&home_req.raw), "terms": {"serves": ["home"]}}]}});
+    let a = ctl
+        .begin_transition(
+            change.to_string(),
+            vec![d.clone(), k.clone()],
+            RuleKind::Control,
+            vec![],
+        )
+        .unwrap();
+    auth.store(&finish(&ctl, &host, a).stores);
+    let due = ctl.record_due().unwrap();
+    assert_eq!(due.len(), 1, "the activation is recorded");
+    auth.store(&due[0].stores);
     assert_eq!(ctl.homes().unwrap().len(), 1);
-    assert_eq!(ctl.controllers().unwrap().len(), 4);
+    assert_eq!(ctl.controllers().unwrap().len(), 3);
     let terms = json!({"records": [{"namespace": "notes", "access": "write"}]});
     let r1 = request(
         &host,
@@ -309,11 +239,28 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let w = finish(&ctl, &host, approve);
     assert!(!w.stores.is_empty() && w.changes.members_added.len() == 1);
     auth.store(&w.stores);
-    let members = ctl.members().unwrap();
-    assert!(members.iter().any(|m| m.label == "Phone" && !m.provisional));
+    assert!(ctl
+        .members()
+        .unwrap()
+        .iter()
+        .any(|m| m.label == "Phone" && !m.provisional));
     assert_eq!(ctl.me().unwrap().kind, StandingKind::Controller);
+    let laptop = host.raw_controller(&d2, "Laptop", &["approve"]);
+    let a = ctl
+        .begin_add_controller(
+            laptop,
+            AddMode::Immediate,
+            vec![d.clone()],
+            RuleKind::Control,
+            vec![],
+        )
+        .unwrap();
+    auth.store(&finish(&ctl, &host, a).stores);
 
-    // --- The pairing ceremony for the second device (the seed transfer is `todo`).
+    // --- The second device: the pairing ceremony, then the seed travels sealed to it.
+    let sb = auth.copy_of();
+    let eb = open_engine(&sb, &format!("controller:{d2}"), &account);
+    assert!(!eb.is_unlocked().unwrap());
     let tk = PairingTransferKey::create(host.fresh(32)).unwrap();
     let joiner = AccountPairing::join(account.clone(), tk.public(), host.fresh(32)).unwrap();
     assert_eq!(joiner.stage().unwrap(), PairingStage::Joiner);
@@ -337,7 +284,6 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     );
     existing.confirm().unwrap();
     joiner.confirm().unwrap();
-    assert_eq!(existing.stage().unwrap(), PairingStage::Confirmed);
     assert!(existing.confirm().is_err(), "a step consumes its state");
     assert_eq!(
         existing.stage().unwrap(),
@@ -345,9 +291,42 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
         "a wrong-stage call consumes nothing"
     );
     assert!(limiter.to_state().unwrap().len() < 200);
+    let sealed = ctl.transfer_seed(existing.clone(), host.fresh(32)).unwrap();
+    // A seed sealed to another pairing's key is refused.
+    let other = PairingTransferKey::create(host.fresh(32)).unwrap();
+    assert!(eb
+        .accept_seed_transfer(
+            other,
+            joiner.clone(),
+            SealedSeed {
+                enc: sealed.enc.clone(),
+                ciphertext: sealed.ciphertext.clone()
+            }
+        )
+        .is_err());
+    assert!(!eb.is_unlocked().unwrap());
+    eb.accept_seed_transfer(tk, joiner, sealed).unwrap();
+    eb.load().unwrap();
+    assert!(eb.is_unlocked().unwrap(), "the new device holds the seed");
+    // It builds its own slot, so it unlocks without its peer from now on.
+    let a = eb
+        .begin_add_slot(
+            d2.clone(),
+            SlotPlan {
+                controllers: vec![d2.clone()],
+                label: "Laptop".into(),
+            },
+            host.fresh(32),
+        )
+        .unwrap();
+    let w = finish(&eb, &host, a);
+    sb.store(&w.stores);
+    auth.store(&w.stores);
+    let eb = open_engine(&sb, &format!("controller:{d2}"), &account);
+    unlock_slot(&eb, &host, &d2);
 
     // --- Engines over host stores: the member writes, the second device reads after a sync.
-    let (sa, sb) = (auth.copy_of(), auth.copy_of());
+    let sa = auth.copy_of();
     let ea = open_engine(&sa, &format!("member:{m1}"), &account);
     unlock_member(&ea, &host, &m1);
     assert!(
@@ -397,8 +376,6 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     assert_eq!(hist["value"]["items"].as_array().unwrap().len(), 2);
     assert!(ea.stats().unwrap().signatures_verified > 0);
 
-    let eb = open_engine(&sb, &format!("controller:{d2}"), &account);
-    unlock_slot(&eb, &host, &d2);
     assert_eq!(notes(&eb).len(), 0, "nothing synced yet");
 
     let (o, _) = objects_of(
@@ -435,7 +412,42 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     );
     assert_eq!(notes(&ea), notes(&eb));
 
+    // --- The rest of the session: read scope, batched versions, faults, abort, lock.
+    assert!(eb.set_read_scope(vec!["notes".into()]).is_ok());
+    assert_eq!(notes(&eb).len(), 2, "still readable in scope");
+    assert!(eb.source_faults().unwrap().is_empty());
+    let want = eb.version_paths(vec!["ops/x".into()]).unwrap();
+    assert!(
+        want.contains(&"ops/x".to_string()) && want.iter().any(|p| p.starts_with("authority/"))
+    );
+    let aborted = eb.exchange_abort(home_id.clone()).unwrap();
+    assert!(aborted.faults.is_empty());
+    assert!(!ea.is_locked().unwrap());
+    let locked = ea.lock().unwrap();
+    assert!(ea.is_locked().unwrap());
+    let _ = locked;
+    let v: Value = serde_json::from_str(
+        &ea.view_json("notes".into())
+            .unwrap_or_else(|_| "{\"ok\":false}".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        v["ok"], false,
+        "a locked engine shows no record content: {v}"
+    );
+    assert!(
+        ea.save(host.fresh(32)).is_err(),
+        "a locked engine cannot save"
+    );
+    assert!(
+        ea.finish_unlock_epochs(host.answer_epochs(&m1, &[]))
+            .is_err(),
+        "a locked engine does not unlock again"
+    );
+
     // --- Saved state resumes: a sealed checkpoint, then a cheap open.
+    let ea = open_engine(&sa, &format!("member:{m1}"), &account);
+    unlock_member(&ea, &host, &m1);
     let saved = ea.save(host.fresh(32)).unwrap();
     assert!(!saved.verifier.is_empty() && !saved.parts.is_empty());
     assert!(

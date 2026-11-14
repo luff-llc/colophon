@@ -1,6 +1,6 @@
 //! Pairing (§7.3). Public values only cross: the account ID, points, nonces, a commitment and
-//! a code. Moving the seed to the paired device (`transfer_seed`, `accept_seed_transfer`) is
-//! `todo` until the core's engine forwards `accept_seed_transfer` (branch `engine-0.5-e9`).
+//! a code. Moving the seed to the paired device is `AccountEngine.transfer_seed` and
+//! `accept_seed_transfer`.
 use super::fault::AccountError;
 use super::types::*;
 use super::{guard, Cell};
@@ -98,7 +98,6 @@ enum Stage {
     AwaitingReveal(ExistingAwaitingReveal),
     Code(PairingCode),
     Scanned(ScannedQr),
-    #[allow(dead_code)] // opened by `transfer_seed`, which is `todo` (see the module doc)
     Confirmed(ConfirmedPairing),
     Spent,
 }
@@ -193,6 +192,13 @@ impl AccountPairing {
                 }
             }
         })
+    }
+    /// Run `f` on the confirmed pairing, or refuse.
+    pub(crate) fn with_confirmed<T>(&self, f: impl FnOnce(&ConfirmedPairing) -> R<T>) -> R<T> {
+        match &*self.st.lock()? {
+            Stage::Confirmed(c) => f(c),
+            _ => Err(AccountError::consumed("this pairing is not confirmed")),
+        }
     }
     fn reveal_inner(
         &self,
@@ -422,7 +428,7 @@ impl AccountPairing {
 #[cfg_attr(feature = "native05", derive(uniffi::Object))]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 pub struct PairingTransferKey {
-    k: TransferKey,
+    pub(crate) k: TransferKey,
 }
 impl PairingTransferKey {
     fn new_inner(entropy: Vec<u8>) -> R<Self> {

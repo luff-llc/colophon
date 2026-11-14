@@ -26,6 +26,7 @@ mod engine;
 mod fault;
 mod moving;
 mod pairing;
+mod session;
 mod types;
 mod verify;
 
@@ -35,6 +36,10 @@ pub use engine::{AccountBlobWriter, AccountEngine, AccountLiveWrite};
 pub use fault::{AccountError, REFUSAL_REASONS};
 pub use moving::AccountMove;
 pub use pairing::{AccountPairing, PairingFailureLimiter, PairingTransferKey};
+pub use session::{
+    AccountCopyWrite, SwiftCopyDestination, SwiftCopyPlan, SwiftCopyResult, SwiftSource,
+    SwiftTranslator,
+};
 pub use types::*;
 pub use verify::*;
 

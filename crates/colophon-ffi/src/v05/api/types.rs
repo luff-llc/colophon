@@ -307,8 +307,13 @@ record! {
     }
 }
 record! {
-    /// What a finished action produced: store these bytes at these paths, in order.
-    pub struct Written { pub stores: Vec<Store>, pub changes: Changes }
+    /// What a finished action produced: store these bytes at these paths, in order. `artifact`
+    /// is the envelope of a link or a call (§12), which is not stored: for the host to use.
+    pub struct Written {
+        pub stores: Vec<Store>,
+        pub changes: Changes,
+        pub artifact: Option<Vec<u8>>,
+    }
 }
 record! {
     /// A controller of the verified keyring.
@@ -779,6 +784,126 @@ record! {
         pub frozen_entry: Option<Vec<u8>>,
         pub frozen_seq: Option<u64>,
         pub succession_verified: bool,
+        pub changes: Option<Changes>,
+    }
+}
+
+record! {
+    /// A sealed seed (an HPKE box): public, only the paired device can open it.
+    pub struct SealedSeed { pub enc: Vec<u8>, pub ciphertext: Vec<u8> }
+}
+record! {
+    /// A fault of the record source the host must show: it changed bytes it must never change.
+    pub struct SourceFault { pub path: String, pub what: String }
+}
+record! {
+    /// The origins a call-ceremony `rp` may use.
+    pub struct CallOrigin { pub rp: String, pub origins: Vec<String> }
+}
+record! {
+    /// What the verifier of a call is configured with (§12.3).
+    pub struct CallTarget {
+        pub audiences: Vec<String>,
+        pub call_origins: Vec<CallOrigin>,
+        pub controller_purposes: Vec<String>,
+        pub home_endpoints: Vec<String>,
+    }
+}
+record! {
+    /// One slot of a Swift keyring. `controller` is the one it names, `problem` why it cannot be read.
+    pub struct SwiftSlotInfo {
+        pub index: u64,
+        pub kind: String,
+        pub label: String,
+        pub controller: Option<String>,
+        pub problem: Option<String>,
+    }
+}
+record! {
+    /// An epoch of a Swift namespace and the seq of the entry that introduced it.
+    pub struct SwiftEpoch { pub namespace: String, pub epoch: u64, pub seq: u64 }
+}
+record! {
+    /// A Swift predecessor member as the fold has it at the head.
+    pub struct SwiftMemberInfo {
+        pub id: String,
+        pub label: String,
+        pub role: Option<String>,
+        pub revoked: bool,
+        pub budget: bool,
+    }
+}
+record! {
+    /// A Swift operation as the source reader judged it, for the host's translator.
+    pub struct SwiftOpInfo {
+        pub source_library: String,
+        pub author_id: String,
+        pub author_label: String,
+        pub operation_id: String,
+        pub signed_body_digest: String,
+        pub kind: String,
+        pub version: u64,
+        pub payload_json: String,
+        pub admitted_order: u64,
+    }
+}
+record! {
+    /// An output of a translated record: a destination module operation and its clean payload.
+    /// `baseline` is a trusted importer receipt, never inferred from a payload.
+    pub struct SwiftChild { pub key: String, pub kind: String, pub payload_json: String, pub baseline: bool }
+}
+record! {
+    /// A source occurrence key reserved as `(category, destination id)`.
+    pub struct SwiftIdentity { pub source_key: String, pub category: String, pub destination_id: String }
+}
+record! {
+    /// What the host's translator says about one admitted Swift operation: everything an import
+    /// batch can carry. The core adds the batch key and the evidence binding it to its source;
+    /// a translator can change the representation, never add a record or drop one silently.
+    pub struct SwiftBatch {
+        pub children: Vec<SwiftChild>,
+        pub alternatives_json: Vec<String>,
+        pub identities: Vec<SwiftIdentity>,
+        pub blobs_json: Vec<String>,
+        pub outcome: String,
+        pub evidence_json: String,
+    }
+}
+record! {
+    /// A source record the plan omitted, with the reason.
+    pub struct SwiftOmission { pub namespace: String, pub source_digest: String, pub reason: String }
+}
+record! {
+    /// How many source records a namespace holds.
+    pub struct NamespaceCount { pub namespace: String, pub count: u64 }
+}
+record! {
+    /// An import write of a copy plan, to be signed by the copying member.
+    pub struct CopyItem { pub namespace: String, pub source_digest: String, pub key: String, pub payload_json: String }
+}
+record! {
+    /// One namespace of a migration (§15.4).
+    pub struct MigratedNamespace { pub namespace: String, pub source: u64, pub copied: Vec<String>, pub omitted: u64 }
+}
+record! {
+    /// A source record not copied.
+    pub struct Omitted { pub source_digest: String, pub reason: String }
+}
+record! {
+    /// What a finished copy holds.
+    pub struct CopyOutcome {
+        pub namespaces: Vec<MigratedNamespace>,
+        pub omitted: Vec<Omitted>,
+        pub blobs_not_copied: Vec<String>,
+    }
+}
+record! {
+    /// A predecessor member's fate in a migration: `dropped` empty means it rejoins.
+    pub struct MigratedMemberInput {
+        pub id: String,
+        pub label: String,
+        pub kind: AccountMemberKind,
+        pub dropped: Option<String>,
     }
 }
 

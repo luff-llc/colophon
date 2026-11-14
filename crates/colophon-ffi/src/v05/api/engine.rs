@@ -66,7 +66,7 @@ fn method(m: Method) -> HttpMethod {
         Method::Put => HttpMethod::Put,
     }
 }
-fn fault(f: &Fault) -> ExchangeFault {
+pub(crate) fn fault_of(f: &Fault) -> ExchangeFault {
     let mut o = ExchangeFault {
         kind: ExchangeFaultKind::Status,
         home: String::new(),
@@ -168,7 +168,7 @@ fn report(r: &CoreReport) -> Report {
     Report {
         store: cv::store_list(&r.store),
         changes: cv::changes(&r.changes),
-        faults: r.faults.iter().map(fault).collect(),
+        faults: r.faults.iter().map(fault_of).collect(),
     }
 }
 fn headers(h: &[(String, String)]) -> Vec<Header> {
@@ -341,7 +341,7 @@ impl AccountEngine {
         wipe(&mut key);
         r
     }
-    fn prepare(
+    pub(crate) fn prepare(
         &self,
         kind: &str,
         mut entropy: Vec<u8>,
@@ -370,6 +370,7 @@ impl AccountEngine {
             Ok(Written {
                 stores: cv::store_list(&w.stores),
                 changes: cv::changes(&w.changes),
+                artifact: w.artifact,
             })
         })
     }
@@ -823,7 +824,17 @@ impl AccountEngine {
                 paths.push(l.path);
             }
         }
-        self.run(|e| Ok(cv::changes(&e.refresh(paths)?)))
+        let hint: std::collections::BTreeMap<String, Option<String>> = {
+            let v = self
+                .versions
+                .lock()
+                .map_err(|_| AccountError::internal("versions"))?;
+            paths
+                .iter()
+                .map(|p| (p.clone(), v.get(p).cloned()))
+                .collect()
+        };
+        self.run(|e| Ok(cv::changes(&e.refresh_batched(paths, hint)?)))
     }
     /// The host stored these paths itself: read and judge them (with their versions).
     pub fn apply_paths(&self, paths: Vec<ListedPath>) -> Result<Changes, AccountError> {

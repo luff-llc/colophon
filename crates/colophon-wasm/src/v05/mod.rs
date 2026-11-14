@@ -44,6 +44,35 @@ extern "C" {
     fn message_of(e: &JsValue) -> String;
 }
 
+#[wasm_bindgen]
+extern "C" {
+    /// A JavaScript object that translates one Swift operation: `translate(op: SwiftOpInfo) ->
+    /// SwiftBatch` (a thrown error omits the record with its message).
+    pub type JsTranslator;
+    #[wasm_bindgen(method, catch)]
+    fn translate(this: &JsTranslator, op: SwiftOpInfo) -> Result<SwiftBatch, JsValue>;
+}
+struct JsTr(JsTranslator);
+impl SwiftTranslator for JsTr {
+    fn translate(&self, op: SwiftOpInfo) -> Result<SwiftBatch, AccountError> {
+        self.0.translate(op).map_err(thrown)
+    }
+}
+#[wasm_bindgen]
+impl SwiftCopyPlan {
+    /// Read the predecessor's files and plan the copy, translating each admitted Swift operation
+    /// with the host's translator (none: the original kind and payload verbatim).
+    pub fn read(
+        source: &SwiftSource,
+        files: Vec<Store>,
+        translator: Option<JsTranslator>,
+        destination: &SwiftCopyDestination,
+    ) -> Result<SwiftCopyPlan, AccountError> {
+        let t = translator.map(|t| Box::new(JsTr(t)) as Box<dyn SwiftTranslator>);
+        Self::read_inner(source, files, t, destination)
+    }
+}
+
 struct JsHost(JsSource);
 fn thrown(e: JsValue) -> AccountError {
     AccountError::host(message_of(&e))

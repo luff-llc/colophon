@@ -100,6 +100,33 @@ do {
     check(code == "consumed", "replay is AccountError.Consumed")
 }
 
+// 4b. The calls the engine forwards: a due-transition pass, then pairing, seed transfer and lock.
+for st in written.stores { src.files[st.path] = st.bytes }
+check(try engine.recordDue().isEmpty, "recordDue: nothing is due")
+let src2 = MemSource()
+src2.files = src.files
+let listing2 = src2.files.keys.sorted().map { ListedPath(path: $0, version: "") }
+let engine2 = try AccountEngine.open(source: src2, listing: listing2, identity: "controller:\(secondId)", account: created.account,
+    namespaces: [], batch: 0, saved: empty, key: fresh(32), nowMs: now)
+let tkey = try PairingTransferKey.create(entropy: fresh(32))
+let joiner = try AccountPairing.join(account: created.account, e: tkey.public(), nb: fresh(32))
+let limiter = try PairingFailureLimiter.fromState(state: "")
+let existing = try AccountPairing.existingReceiveCommitment(account: created.account, commitment: try joiner.commitment(), limiter: limiter, nowMs: now)
+let na = try existing.sendNonce(na: fresh(32))
+let reveal = try joiner.receiveNonce(na: na)!
+let digits = try existing.receiveReveal(e: reveal.e, nb: reveal.nb, limiter: limiter, nowMs: now)
+check(digits == (try joiner.digits()), "both devices show the same six digits")
+try existing.confirm()
+try joiner.confirm()
+let sealed = try engine.transferSeed(pairing: existing, entropy: fresh(32))
+check(!(try engine2.isUnlocked()), "the second device holds no seed yet")
+_ = try engine2.acceptSeedTransfer(key: tkey, pairing: joiner, sealed: sealed)
+check(try engine2.isUnlocked(), "the seed transferred through the exports unlocks the second engine")
+_ = try engine.lock()
+check(try engine.isLocked(), "lock: the engine reports it is locked")
+do { _ = try engine.save(nonceSeed: fresh(32)); check(false, "a locked engine saves") }
+catch is AccountError { check(true, "a locked engine refuses to save (typed AccountError)") }
+
 // 5. A callback that throws a non-AccountError, and one that throws an AccountError with a message.
 do {
     _ = try AccountEngine.open(source: ThrowingSource(), listing: listing, identity: "controller:\(id)", account: created.account,
