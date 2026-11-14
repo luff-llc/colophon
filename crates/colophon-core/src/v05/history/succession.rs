@@ -43,14 +43,21 @@ impl Succession {
             if self.claim["format"] == "colophon/authority/5" {
                 return old.key() == c.key();
             }
-            old.key().signing() == c.key().signing()
-                && match (old.key().webauthn(), c.key().webauthn()) {
-                    (Some(a), Some(b)) => a.rp() == b.rp() && a.credential() == b.credential(),
-                    (None, None) => true,
-                    _ => false,
-                }
+            same_swift_key(old, c)
         })
     }
+}
+
+/// A Swift predecessor controller and a controller of the genesis are the same key (§8.4
+/// "Possession", §16.2): the same signing point and, for WebAuthn, the same `rp` and credential.
+/// Origins and the agreement point may differ (a successor adds `authorityOrigins`).
+pub(crate) fn same_swift_key(old: &Controller, c: &Controller) -> bool {
+    old.key().signing() == c.key().signing()
+        && match (old.key().webauthn(), c.key().webauthn()) {
+            (Some(a), Some(b)) => a.rp() == b.rp() && a.credential() == b.credential(),
+            (None, None) => true,
+            _ => false,
+        }
 }
 
 /// Most accounts a verifier follows along `predecessor` references from the claimed account: the
@@ -124,6 +131,42 @@ fn split_chain(predecessor: &[Vec<u8>], account: &str) -> Result<Option<ChainSpl
         }
     }
     Ok(Some((mine, rest)))
+}
+
+/// Whether the handover signers `ids` (current Swift controller IDs at `head`) are the keys that
+/// may write F at `head` under §16.3, for a genesis with keyring `k` (§15.1 step 1): for a root
+/// library the current root; for a keyring library the control threshold, plus `recoverThreshold`
+/// recover signers when the genesis changes the recover set or lowers that threshold. The one
+/// definition: [`prepare`] applies it to a genesis's verified handover and the write side applies
+/// it before it asks a host to sign.
+pub(crate) fn handover_authorized(
+    s: &swift::Snapshot,
+    k: &super::keyring::Keyring,
+    ids: &BTreeSet<String>,
+) -> bool {
+    let recover_set: BTreeSet<String> = s
+        .controllers
+        .iter()
+        .filter(|(_, c)| c.has(&Role::Recover))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let new_set: BTreeSet<String> = k
+        .controllers
+        .iter()
+        .filter(|(_, c)| c.has(&Role::Recover))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let consent = recover_set == new_set && k.recover_threshold >= s.recover_threshold
+        || ids.intersection(&recover_set).count() as u64 >= s.recover_threshold;
+    if s.adopted {
+        ids.iter()
+            .filter(|id| s.controllers.get(*id).is_some_and(|c| c.has(&Role::Control)))
+            .count() as u64
+            >= s.threshold
+            && consent
+    } else {
+        ids.contains(&s.root)
+    }
 }
 
 pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Option<Succession>> {
@@ -208,29 +251,7 @@ pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Op
                 let _ = old;
                 ids.insert(item.signer.clone());
             }
-            let recover_set: BTreeSet<String> = s
-                .controllers
-                .iter()
-                .filter(|(_, c)| c.has(&Role::Recover))
-                .map(|(id, _)| id.clone())
-                .collect();
-            let new_set: BTreeSet<String> = k
-                .controllers
-                .iter()
-                .filter(|(_, c)| c.has(&Role::Recover))
-                .map(|(id, _)| id.clone())
-                .collect();
-            let consent = recover_set == new_set && k.recover_threshold >= s.recover_threshold
-                || ids.intersection(&recover_set).count() as u64 >= s.recover_threshold;
-            p.authorized = if s.adopted {
-                ids.iter()
-                    .filter(|id| s.controllers[*id].has(&Role::Control))
-                    .count() as u64
-                    >= s.threshold
-                    && consent
-            } else {
-                ids.contains(&s.root)
-            };
+            p.authorized = handover_authorized(s, &k, &ids);
             p.swift = Some(history);
         }
         "colophon/authority/5" => {
@@ -688,4 +709,176 @@ pub(super) fn migration(s: &mut State, value: &Value) -> Result<()> {
 
     s.migration = Some(value.clone());
     Ok(())
+}
+
+/// What a verified state says about the succession its genesis claims (§15.1), for a host that
+/// tells the person when the succession is due and who may still veto it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccessionStatus {
+    /// `colophon/swift-keyring/2` or `colophon/authority/5`.
+    pub format: String,
+    /// The predecessor's account (the 32-hex Swift library ID, or the 64-hex `/5` account).
+    pub predecessor: String,
+    /// The predecessor's `head.seq`: F is the entry at this seq plus one.
+    pub head_seq: u64,
+    /// The predecessor's `head.digest`.
+    pub head_digest: String,
+    /// The genesis body digest: the object the homes receipt and a veto names.
+    pub genesis_digest: String,
+    /// How many keys signed `handover`.
+    pub handover_count: usize,
+    /// For Swift, the handover meets the rule that may write F; for `/5`, F is final.
+    pub authorized: bool,
+    /// The state holds a valid `successionVetoed`.
+    pub vetoed: bool,
+    /// `(seq of F, digest of F)` when the succession is verified.
+    pub verified: Option<(u64, String)>,
+    /// The window and the times derived from it; `None` until a successor entry leaves the
+    /// account with `headQuorum` current homes (Swift only).
+    pub timing: Option<SuccessionTiming>,
+}
+
+/// §15.1 steps 2 and 3: the succession window, the due time, the veto deadline and the keys
+/// that may veto.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccessionTiming {
+    /// W0: the `issued` of the entry that opened the window, in ms.
+    pub window_start_ms: i64,
+    /// The window's end: W0 plus 300 s. The homes receipt the genesis before it.
+    pub window_end_ms: i64,
+    /// The `recoveryDelay` in force at that entry, in seconds.
+    pub recovery_delay_s: u64,
+    /// The last instant a veto may be issued before: W0 plus the delay (300 s before due).
+    pub veto_deadline_ms: i64,
+    /// The succession is due at the window's end plus the delay.
+    pub due_ms: i64,
+    /// How many homes must receipt the genesis.
+    pub quorum: usize,
+    /// The homes current at the window's entry (member IDs).
+    pub homes: Vec<String>,
+    /// The Swift controller IDs that may veto (§15.1 step 3).
+    pub vetoers: BTreeSet<String>,
+    /// How many distinct keys a veto needs: as many as `handover` has signers.
+    pub keys_needed: usize,
+}
+
+/// The succession a verified state claims, with its timing; `None` when the account has no
+/// predecessor.
+pub fn succession_status(s: &State) -> Option<SuccessionStatus> {
+    let p = s.succession.as_ref()?;
+    let timing = p.window.as_ref().filter(|_| p.swift.is_some()).map(|w| {
+        let veto_deadline_ms = w
+            .start
+            .saturating_add((w.delay as i64).saturating_mul(1000));
+        SuccessionTiming {
+            window_start_ms: w.start,
+            window_end_ms: w.start.saturating_add(300_000),
+            recovery_delay_s: w.delay,
+            veto_deadline_ms,
+            due_ms: veto_deadline_ms.saturating_add(300_000),
+            quorum: w.quorum,
+            homes: w.homes.keys().cloned().collect(),
+            vetoers: eligible(p, w).into_keys().collect(),
+            keys_needed: p.handover_count,
+        }
+    });
+    Some(SuccessionStatus {
+        format: p.claim["format"].as_str().unwrap_or_default().to_string(),
+        predecessor: p.claim["account"].as_str().unwrap_or_default().to_string(),
+        head_seq: p.head_seq,
+        head_digest: p.claim["head"]["digest"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        genesis_digest: p.genesis_digest.clone(),
+        handover_count: p.handover_count,
+        authorized: p.authorized,
+        vetoed: p.vetoed,
+        verified: p.verified.clone(),
+        timing,
+    })
+}
+
+/// Choose the receipts a succession object carries (§15.1 step 4): exactly the window's
+/// `headQuorum`, from the homes with the lowest member IDs that hold a valid receipt, taking each
+/// home's receipt with the lowest body digest. Validity is the verifier's own check
+/// (`receipts`, with a quorum of one): a window home, signed by its key, naming `object`,
+/// received within 300 s of `issued` and before `deadline_ms` (exclusive). Too few: `unavailable`.
+pub(crate) fn choose_succession_receipts(
+    s: &State,
+    held: &[Vec<u8>],
+    object: &str,
+    issued_ms: i64,
+    deadline_ms: i64,
+) -> Result<Vec<Vec<u8>>> {
+    let w = s
+        .succession
+        .as_ref()
+        .and_then(|p| p.window.as_ref())
+        .ok_or_else(|| Failure::Unavailable("the succession window has not opened".into()))?;
+    let one = Window {
+        quorum: 1,
+        ..w.clone()
+    };
+    let mut best: BTreeMap<String, (String, Vec<u8>)> = BTreeMap::new();
+    for bytes in held {
+        let Ok(parsed) = crate::v05::encoding::strict_parse(bytes) else {
+            continue;
+        };
+        let Ok(canon) = crate::v05::encoding::canonical(&parsed) else {
+            continue;
+        };
+        let item = Value::String(crate::v05::encoding::encode_base64(&canon));
+        if receipts(
+            s,
+            &one,
+            std::slice::from_ref(&item),
+            object,
+            issued_ms,
+            deadline_ms,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let Ok(env) = RawEnvelope::parse(&canon, bounds::RECEIPT_BODY, false) else {
+            continue;
+        };
+        let Some(by) = env.value["by"].as_str().map(str::to_string) else {
+            continue;
+        };
+        let d = crate::v05::encoding::digest(&env.body);
+        match best.get(&by) {
+            Some((old, _)) if *old <= d => {}
+            _ => {
+                best.insert(by, (d, canon));
+            }
+        }
+    }
+    if best.len() < w.quorum {
+        return Err(Failure::Unavailable(
+            "fewer succession homes have receipted the object than headQuorum".into(),
+        ));
+    }
+    Ok(best.into_values().take(w.quorum).map(|(_, b)| b).collect())
+}
+
+/// Whether one receipt is valid for `object` under the succession window (§15.1, §13.5): the
+/// verifier's `receipts` check with a quorum of one.
+pub(crate) fn receipt_is_valid(
+    s: &State,
+    held: &[u8],
+    object: &str,
+    issued_ms: i64,
+    deadline_ms: i64,
+) -> bool {
+    let Some(w) = s.succession.as_ref().and_then(|p| p.window.as_ref()) else {
+        return false;
+    };
+    let one = Window {
+        quorum: 1,
+        ..w.clone()
+    };
+    let item = Value::String(crate::v05::encoding::encode_base64(held));
+    receipts(s, &one, std::slice::from_ref(&item), object, issued_ms, deadline_ms).is_ok()
 }

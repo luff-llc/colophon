@@ -572,6 +572,8 @@ pub enum StepRole {
     Cosignature,
     /// A possession proof by a controller the entry adds (`additions`, §8.4).
     Possession,
+    /// A `handover` signature by a key of a Swift predecessor over a successor genesis (§15.1).
+    Handover,
 }
 
 /// One exact body and signer for a host signature. Cosignatures and possession proofs share

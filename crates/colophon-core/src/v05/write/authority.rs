@@ -89,6 +89,9 @@ impl PendingBatch {
                 StepRole::Primary => primary = Some(s),
                 StepRole::Cosignature => cosigs.push(s),
                 StepRole::Possession => adds.push(s),
+                StepRole::Handover => {
+                    return Err(malformed("a handover step belongs to a successor genesis"))
+                }
             }
         }
         match &self.plan {
@@ -144,7 +147,7 @@ impl PendingBatch {
 }
 
 /// The verified state at the head of the held objects. Any stop of the verifier is the error.
-fn head_state(objects: &Objects, now_ms: i64) -> Result<State> {
+pub(crate) fn head_state(objects: &Objects, now_ms: i64) -> Result<State> {
     let verdict = verify_history(objects, &Persisted::default(), now_ms);
     stop_to_error(&verdict.stop)?;
     verdict
@@ -180,7 +183,7 @@ fn verify_appended(
     )
 }
 
-fn step(
+pub(crate) fn step(
     path: &str,
     body: &[u8],
     c: &Controller,
@@ -216,7 +219,7 @@ pub(crate) fn step_with_uv(
     )
 }
 
-fn authority_path(seq: u64) -> String {
+pub(crate) fn authority_path(seq: u64) -> String {
     format!("authority/{seq:08}.json")
 }
 
@@ -233,7 +236,7 @@ fn units(k: &Keyring, ids: &[String], role: Option<&Role>) -> BTreeSet<String> {
 
 /// The control rule: every signer holds `control` or `recover`, and `control` units reach
 /// `need` (§8.4).
-fn control_rule(k: &Keyring, signers: &[String], need: u64) -> bool {
+pub(crate) fn control_rule(k: &Keyring, signers: &[String], need: u64) -> bool {
     signers.iter().all(|i| {
         k.controllers
             .get(i)
@@ -468,7 +471,7 @@ pub fn prepare_genesis(p: &GenesisParams, now_ms: i64) -> Result<PendingBatch> {
 // ---------------------------------------------------------------------------------------------
 // Signed entries.
 
-fn next_header(state: &State, issued_ms: i64, by: &str) -> Result<Header> {
+pub(crate) fn next_header(state: &State, issued_ms: i64, by: &str) -> Result<Header> {
     super::check_issued(issued_ms)?;
     require(
         issued_ms >= state.last_issued_ms(),
@@ -706,7 +709,7 @@ fn receipt_received(state: &State, bytes: &[u8]) -> Result<i64> {
 }
 
 /// The held transition or veto envelope whose body digest is `want`.
-fn find_pending<'a>(objects: &'a Objects, want: &str, protocol: &str) -> Result<&'a Vec<u8>> {
+pub(crate) fn find_pending<'a>(objects: &'a Objects, want: &str, protocol: &str) -> Result<&'a Vec<u8>> {
     objects
         .pending
         .iter()
@@ -1177,7 +1180,7 @@ pub fn prepare_suspend(
 // ---------------------------------------------------------------------------------------------
 // The determined recording entries (§8.6, §8.7): a body only, one possible value.
 
-fn recording_batch(
+pub(crate) fn recording_batch(
     objects: &Objects,
     state: &State,
     now_ms: i64,
