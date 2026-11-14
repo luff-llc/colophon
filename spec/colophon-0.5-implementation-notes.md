@@ -45,6 +45,7 @@ Those items are gone from this list.
 | # | Section | Question | What this implementation does |
 | --- | --- | --- | --- |
 | 1 | §16.3 | A lenient predecessor DER form | None exists in the text; the predecessor check differs only in its origin rule. Whether CryptoKit's `rawRepresentation` accepts r or s = 0 is unknown, so it is refused. |
+| 2 | §15.1 "Competing attempts" | Two successors of one Swift predecessor | A verifier of a later successor holds only that successor's objects. It does not look for a freezing entry before `head` and cannot tell whether an earlier freezing entry's succession verified, so two successors can each verify, for different verifiers. **Undecided in the text and the verifier.** The builders refuse a later attempt unless every earlier attempt's objects are supplied and none verifies (`check_earlier_attempts`); the spec states that as a host rule (revision 14). A verifier-side rule needs the owner's decision. |
 
 ## Step 2: the authority history verifier (§8)
 

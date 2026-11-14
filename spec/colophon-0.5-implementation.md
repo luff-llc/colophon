@@ -249,7 +249,12 @@ from Marginalia `origin/main` first: the reference copy lacks the `layout` kind)
   - collect `handover` (the current root alone for a root library; the control threshold, plus
     recover signers when the recover set changes or its threshold is lowered, for a keyring
     library; every other key at `head` the host can obtain);
-  - write the freezing `layout` entry through the Swift `ColophonAuthority`;
+  - write the freezing `layout` entry through the Swift `ColophonAuthority` (**blocked until a
+    new Apple app version exists**: the shipped Swift code cannot write F; the list of what the
+    version must add is in the guide §4 "Writing F from an Apple app", from
+    `docs/handoff-engine-05-write.md`: a `successor` member, layout 3 or more, a raw-record append
+    or explicit `issued`, a reader rule that F is final for the app that wrote it, and the
+    update-required path for old versions);
   - rebuild a slot for every slotted controller, or stop;
   - map roles, custody, operator and caveats, or stop;
   - copy the records;

@@ -1744,7 +1744,10 @@ library upgrades in place instead.
      descriptor (§16.3: `rpID` as `rp`, the general origin rule, UV). An account has at most one
      such entry; it is ordered by §8.6 rule 1 with the succession's due time and bounded in time
      like a `vetoed`. After it the succession is never verified and no `migration` activates.
-  5. **Write F.** F is written only after the due time.
+  5. **Write F.** F is written only after the due time, and **not while a valid veto is held**,
+     whether or not a `successionVetoed` entry records it yet: a tool that holds one records it
+     (step 4) first. A home that signs a clean head while holding a valid veto misbehaves (§13.3),
+     so F written then freezes the library with a succession that can never verify.
   - A root library's hand-over is signed by the root alone (rationale: guide §7).
 - **Published** at the predecessor's own homes (`/5`), or at the successor's homes under
   `{base}/predecessor/` (Swift).
@@ -1770,7 +1773,20 @@ never change the verdict.
 succession is verified. A freezing entry whose succession isn't verified (premature, vetoed or
 never due) doesn't end the predecessor: the owner may make a new attempt and write a later freezing
 entry (a higher layout) after it. The predecessor's sequence orders freezing entries, so there is
-no tie. A verifier that has persisted a verified succession keeps it. Any entry after the final
+no tie. A verifier that has persisted a verified succession keeps it.
+
+**Starting a later attempt.** A host MUST NOT start a successor on a predecessor that already
+holds a freezing entry unless it has every earlier attempt's successor objects (genesis, entries,
+receipts and heads) and none of them verifies (§15.1 "Verified"); with any earlier attempt missing,
+or verified, the predecessor is not open to a new one. A verifier of the later successor cannot
+check this for the host: it holds only that successor's objects. **What a verifier does today:**
+for a Swift predecessor it verifies the predecessor entries through F, reads F as the entry after
+`head` (a `layout` above 2 whose `successor` names this account, issued after the due time) and
+checks the rest of §15.1 "Verified" against the successor's own objects. It does not look for a
+freezing entry before `head`, and it cannot tell whether an earlier freezing entry's succession
+verified, because that succession's objects are not in its set. Whether two successors of one
+predecessor can each verify, for different verifiers, is **not decided** by this text or the
+verifier (open item 2 in the implementation notes). Any entry after the final
 entry is `malformed` evidence. A predecessor confers nothing: no member, grant or key comes from
 it.
 
@@ -1816,7 +1832,7 @@ whose genesis has `predecessor`:
 
 | Field | Rule |
 | --- | --- |
-| `drain` | The drain window (§15.3). |
+| `drain` | The drain window (§15.3): at most 30 days, starting after F. The entry is issued after the window ends. A tool refuses to build one that does not meet both; **a verifier checks neither**, only that `until` is not before `from` and the window is at most 30 days (§15.3 step 5 is a tool rule). |
 | `namespaces` | Every predecessor namespace. `view` is the SHA-256 of the sorted, newline-joined lowercase hex body digests of the destination records copied into the namespace. |
 | `omitted` | Up to 4,096 source records not copied, each by body digest with a reason. More than that: the tool stops. |
 | `controllers` | Every predecessor controller, with whether it has a slot here. |
@@ -1873,7 +1889,9 @@ on each `webauthn` controller. **No new account at any service and no new passke
 - Each passkey or security key with PRF needs one assertion to build its new `prf` slot; sealed
   slots need none.
 - Members rejoin. Swift roles map `device`→`device`, `app`→`app`, `web`→`app`, `agent`→`agent`
-  and `service`→`server`.
+  and `service`→`server`. The shipped apps' Swift code always writes a `role` and a `label` on a
+  grant (both are optional fields of the format), and the `migration` builder refuses a current
+  member whose grant has no `role`, because its kind is then not decided by this document.
 - `custody` and `keyOperator` map to the request's `custody` and `operator`.
 - Caveats: `kinds` maps to `records.kinds`, and `ceiling` to an `lte` condition. A `budget` caveat
   has no 0.5 form, so the tool stops unless the person drops that member.
@@ -1954,6 +1972,12 @@ never write a quorum `handover`, so no existing library is affected.
 after). Released Swift readers verify it and then stop with `unsupportedStorageLayout` (those
 that predate `layout` stop with `newerAuthority`); they never write after it. A verifier of a
 predecessor reads `successor` from F's body.
+
+**The shipped Swift code cannot write F.** `AuthorityEntry` has no `successor` member, its writers
+only ever write layout 2, and its entries are stamped with the Swift clock when numbered, so the
+bytes a 0.5 builder returns for F cannot pass through it. A new app version must add what the
+guide §4 lists; until it exists, §15.1's Swift path has a verifier and a builder but no way to
+append F to a shipped library.
 
 ## 17. Host interface
 

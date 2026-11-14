@@ -129,6 +129,34 @@ The host alone may open a non-`colophon/` HPKE seal to the vault for its own reg
 The history verifier also returns, per transition, its due time and veto deadline; per activation,
 whether it is final and which homes it still needs; and per unit, v(u).
 
+### Writing F from an Apple app (§16.3, §15.1)
+
+The 0.5 builders return F as exact Swift-format record bytes, and no shipped app can write them.
+Paths are Marginalia `packages/Colophon/Sources/` at `origin/main` `c8280332`. A new Apple app
+version must:
+
+1. **Add a `successor` member to the entry type.** `ColophonAuthority/AuthorityEntry.swift:32-80`
+   lists the stored members and has none; `numbered(_:after:)` (`:93-123`) copies a fixed list
+   and would drop it.
+2. **Support a layout of 3 or more.** `AuthorityState.swift:56` (`supportedStorageLayout = 2`) and
+   `:120-121` (a `layout` above it throws); the writer guard at `AuthorityHolder.swift:50-54`. The
+   only layout writers, `AuthorityHolder.swift:35-40` and `KeyringHolder.swift:29-34`, write 2.
+3. **Append the exact record bytes the builder returns.** `AuthorityEntry.swift:82-88` sets
+   `issued` to `.now` and `numbered` (`:94`) calls that initializer again, so a draft re-stamps
+   `issued` and the signatures made over the builder's body no longer match. The app needs a
+   raw-record append on `AuthorityLog`, or an explicit `issued` on the draft.
+4. **Make F final for that app.** Once a `layout` entry carries `successor`, the version that
+   writes F must stop writing to that library; with item 2 alone it would keep writing after F,
+   which §15.1 calls `malformed` evidence.
+5. **Old versions stop with `unsupportedStorageLayout`**, shown as update required (the throw at
+   `AuthorityState.swift:120-121`, the message at `ColophonCore/ColophonError.swift:43`, mapped to
+   `.updateRequired` at `apps/apple/App/Sync/SharedLibraryDiagnostics.swift:58`); versions that
+   predate `layout` stop with `newerAuthority`. The message tells the person to update the app,
+   which will not help for this library: send them to the successor.
+
+A Swift grant carries a role and a label in everything the shipped apps write; the `migration`
+builder refuses a member whose grant has no role.
+
 ## 5. What to tell people, and what this protects (§17.5, §18)
 
 - When an account is set up with one device: "If this device is stolen, nothing can veto what the
