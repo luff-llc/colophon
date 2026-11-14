@@ -78,6 +78,8 @@ impl<S: RecordSource> Engine<S> {
     pub fn blob_manifest(&self, namespace: &str, digest: &str) -> Result<Outcome<BlobManifest>> {
         match self.query(namespace, "blob", json!({"digest": digest}))? {
             Outcome::Success { value, .. } => {
+                // A domain query answers `{"value": …}`; the common ones may answer bare.
+                let value = value.get("value").cloned().unwrap_or(value);
                 if value["manifest"].is_null() {
                     return Ok(Outcome::failure(denial(
                         "unavailable".into(),
@@ -246,10 +248,10 @@ impl<S: RecordSource> Engine<S> {
                 None => json!({"required": true, "limit": 1000}),
             };
             let page = match self.query(namespace, "blobs", args)? {
-                Outcome::Success { value, .. } => value,
+                Outcome::Success { value, .. } => value.get("value").cloned().unwrap_or(value),
                 Outcome::Failure { .. } => return Ok(missing),
             };
-            let items = page["items"].as_array().cloned().unwrap_or_default();
+            let items = page["blobs"].as_array().cloned().unwrap_or_default();
             for it in &items {
                 let Some(d) = it["digest"].as_str() else {
                     continue;

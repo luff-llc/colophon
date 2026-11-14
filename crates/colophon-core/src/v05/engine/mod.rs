@@ -441,6 +441,7 @@ impl<S: RecordSource> Engine<S> {
         let mut restored = BTreeMap::new();
         let mut restored_revisions = None;
         let mut live_witness = BTreeMap::new();
+        let mut saved_exchange = BTreeMap::new();
         if let Some(b) = body {
             // A changed provider token drops that path's memo (0.3 §7.1): the work is done
             // again even for identical bytes.
@@ -461,6 +462,7 @@ impl<S: RecordSource> Engine<S> {
             restored = b.index.into_iter().map(|i| (i.path.clone(), i)).collect();
             restored_revisions = Some(b.revisions);
             live_witness = b.live_witness;
+            saved_exchange = b.exchange;
         }
         // What the checkpoint covered and the listing no longer names is unavailable, not
         // gone (0.3 §7.1).
@@ -487,6 +489,8 @@ impl<S: RecordSource> Engine<S> {
             verify_cursor: 0,
             exchange: exchange::State::default(),
         };
+        let verified = e.account.head().0;
+        e.exchange.import(saved_exchange, verified);
         e.refresh_stats();
         Ok(e)
     }
@@ -1064,6 +1068,7 @@ impl<S: RecordSource> Engine<S> {
             memo: self.account.export_judge_memo(),
             revisions: self.revisions(),
             live_witness: self.live_witness.clone(),
+            exchange: self.exchange.export(),
         };
         let plain = serde_json::to_vec(&body).map_err(|e| malformed(e.to_string()))?;
         let mut h = Sha256::new();

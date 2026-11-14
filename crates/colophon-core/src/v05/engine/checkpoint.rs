@@ -47,4 +47,7 @@ pub struct Body {
     pub revisions: BTreeMap<String, u64>,
     /// Per live path `(generation, body digest)`.
     pub live_witness: BTreeMap<String, (u64, String)>,
+    /// Per home, its cursors and remembered remote set.
+    #[serde(default)]
+    pub exchange: BTreeMap<String, super::exchange::SavedHome>,
 }

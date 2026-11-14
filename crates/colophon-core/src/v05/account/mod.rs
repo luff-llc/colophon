@@ -705,6 +705,10 @@ impl Account {
     pub fn status(&self) -> Status {
         Status::of(&self.d.verdict)
     }
+    /// The body digests of the verified branch, in seq order (seq 1 first).
+    pub fn branch_digests(&self) -> &[String] {
+        &self.d.verdict.branch
+    }
     /// The held authority-side objects: public bytes an engine stores.
     pub fn objects(&self) -> &Objects {
         &self.objects
