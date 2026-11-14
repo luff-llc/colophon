@@ -50,7 +50,8 @@ the same 1,078 files.
 | `rules/t-conflict-no-evidence`, `t-quorum2-veto-beats-removal`, `row-13-quorum1-hidden-transition`, `t-removal-unblocks-addition`, `t-revoke-home-*`, `t-planted-key-dropped`, `t-vault-by-approve-only`, `t-recovery-*` | §8.3, §8.4, §8.6, §8.7 | Revision 8: one per High of the second review of revision 7 |
 | `encoding/number-ties.json` | §2.1 | Doubles with two equally near shortest decimals: the even last digit is canonical |
 | `calls/link-unknown-operator-*` | §10.4, §12.3 | `any:[true, unknown]` is `ok`; `any:[false, unknown]` is `newerFormat` |
-| `rules/origin-*`, `rules/replay-*`, `rules/removal-after-heads`, `rules/equivocation`, `rules/rollback`, `rules/malleated-envelope`, `rules/non-canonical-*`, `rules/invalid-expires-date` | §2, §4.3, §12, §13 | Unchanged from revision 3, rebuilt on the new account |
+| `rules/origin-*`, `rules/replay-*`, `rules/removal-after-heads`, `rules/rollback`, `rules/malleated-envelope`, `rules/non-canonical-*`, `rules/invalid-expires-date` | §2, §4.3, §12, §13 | Unchanged from revision 3, rebuilt on the new account |
+| `rules/equivocation`, `rules/equivocation-displaced` | §8.6, §13.3 | Heads evidence judged against held history: each ships the account's history and the ordinary grant held beside the seq 3 activation (`branch-ordinary/`). An earlier head over the activation that stands and a later one over the grant that lost to it convict; an earlier head over the grant and a later one over the activation that displaced it (§8.6 rule 1) do not. Rebuilt after revision 12 (the first form's second head covered no held entry) |
 | `pairing/pairing.json` | §7.3 | Commitment and code |
 | `succession/swift-*` | §13.5, §15.1, §16.3 | Receipt 60 s into the succession window (verified), 400 s (late, unverified); F before the due time; veto recorded as `successionVetoed`; a key removed before the last removal and before the delay can't veto, the last-removed key can, and so can a key removed within the delay before the genesis; a hand-over with an extra key needs two vetoers; root library signed by the root alone, and vetoed by the kit; WebAuthn and recover-set swaps; a premature thief freeze followed by the owner's verified layout-4 freeze; an entry after a verified F |
 | `succession/authority5-chain` | §15.1 | A to B to C, each a `/5` successor: C verifies B through B's own predecessor |
@@ -61,8 +62,8 @@ the same 1,078 files.
 
 ## What was run
 
-- `v5_generator_check` (the Rust generator): 1,314 generated files match, byte for byte. The
-  directory holds 1,317 files: those plus three sources (`README.md` and the probe's
+- `v5_generator_check` (the Rust generator): 1,318 generated files match, byte for byte. The
+  directory holds 1,321 files: those plus three sources (`README.md` and the probe's
   `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each , a seven-file chained succession, a nine-file Swift layout case and a thirteen-file cutoff case).
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all

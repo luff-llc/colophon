@@ -795,12 +795,47 @@ fn part2(o: &mut Out, p1: &P1, _attacker: &Key) {
                      "heads": ["conformance/0.5/candidate/account/head.json"]}}),
     );
 
-    // Heads: equivocation evidence, rollback (§13.3).
-    let mut fake_h = p1.head.clone();
-    fake_h["authority"] = json!({"seq": 3, "digest": "2".repeat(64)});
-    let fake = envelope(&fake_h, &p1.home_sign);
-    let mut pair = [p1.head_env.clone(), fake];
-    pair.sort_by_key(|e| sha(&body_of(e)));
+    // Heads: equivocation evidence, rollback (§13.3). The history the heads cover ships with
+    // the vector: the account's three entries (the activation at seq 3 stands) and an ordinary
+    // grant Y at seq 3 on the same predecessor, which §8.6 rule 1 orders after the activation
+    // (no primary head covered it before the home existed).
+    let y_sign = derived("equivocation/agent/signing");
+    let y_agree = derived("equivocation/agent/agreement");
+    let y_request = json!({"protocol": "colophon/request/5", "account": p1.account,
+        "member": {"agreement": b64(&y_agree.point), "signing": b64(&y_sign.point)},
+        "label": "Second agent", "kind": "agent",
+        "terms": {"services": [{"audience": AUD, "purposes": ["task.read"]}], "depth": 1},
+        "created": "2026-11-11T08:00:00Z"});
+    let y_grant = json!({"protocol": "colophon/authority/5", "seq": 3, "previous": sha(&body_of(&p1.ga_env)),
+        "issued": "2026-11-11T08:00:03Z", "by": p1.controller.id, "kind": "grant",
+        "request": b64(&env_bytes(&envelope(&y_request, &y_sign))),
+        "terms": {"services": [{"audience": AUD, "purposes": ["task.read"]}], "depth": 1,
+                  "expires": "2026-11-18T08:00:00Z"}, "shares": []});
+    let y_env = envelope(&y_grant, &p1.controller);
+    for dir in ["equivocation", "equivocation-displaced"] {
+        write_raw(
+            o,
+            &format!("rules/{dir}/branch-ordinary/authority/00000003.json"),
+            env_bytes(&y_env),
+        );
+    }
+    let head_over = |digest: String, issued: &str| {
+        let mut h = p1.head.clone();
+        h["authority"] = json!({"seq": 3, "digest": digest});
+        h["issued"] = json!(issued);
+        envelope(&h, &p1.home_sign)
+    };
+    let sorted = |a: Value, b: Value| {
+        let mut pair = [a, b];
+        pair.sort_by_key(|e| sha(&body_of(e)));
+        pair
+    };
+    // The home signs over the activation that stands (09:00:00) and then, later, over the grant
+    // that lost to it: it went back to an entry it had passed over, so this convicts.
+    let pair = sorted(
+        p1.head_env.clone(),
+        head_over(sha(&body_of(&y_env)), "2026-11-11T09:00:30Z"),
+    );
     write(
         o,
         "rules/equivocation/evidence.json",
@@ -810,8 +845,26 @@ fn part2(o: &mut Out, p1: &P1, _attacker: &Key) {
     write(
         o,
         "rules/equivocation/case.json",
-        &json!({"description": "Two heads by one home at seq 3 with different digests.",
-        "sections": ["13.3"], "expected": {"evidence": "ok", "home": "not counted"}}),
+        &json!({"description": "Two heads by one home at seq 3 with different digests: the earlier over the activation that stands, the later over the ordinary grant held beside it, which lost to it (§8.6 rule 1). The home went back to what it had passed over, so the heads convict. The history both heads cover ships with the vector.",
+        "sections": ["8.6", "13.3"], "expected": {"evidence": "ok", "home": "not counted"}}),
+    );
+    // An honest home: a head over the grant, then (later) over the activation that displaced
+    // it under §8.6 rule 1. The later head's entry stands, so this is not equivocation.
+    let pair = sorted(
+        head_over(sha(&body_of(&y_env)), "2026-11-11T08:30:00Z"),
+        p1.head_env.clone(),
+    );
+    write(
+        o,
+        "rules/equivocation-displaced/evidence.json",
+        &json!({"protocol": "colophon/equivocation/5", "account": p1.account,
+        "heads": pair.iter().map(emb).collect::<Vec<_>>()}),
+    );
+    write(
+        o,
+        "rules/equivocation-displaced/case.json",
+        &json!({"description": "Two heads by one home at seq 3: the earlier over an ordinary grant, the later over the activation that displaced it (§8.6 rule 1). The home signed over each in turn as it learned of them; the evidence does not convict.",
+        "sections": ["8.6", "13.3"], "expected": {"evidence": "refused: not equivocation (§8.6 rule 1)", "home": "counted"}}),
     );
     let mut old_h = p1.head.clone();
     old_h["authority"] = json!({"seq": 2, "digest": sha(&body_of(&p1.ga_env))});

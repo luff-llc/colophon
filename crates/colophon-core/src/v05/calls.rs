@@ -485,7 +485,7 @@ pub struct Link {
     env: RawEnvelope,
     account: String,
     from: String,
-    to: Vec<u8>,
+    pub(crate) to: Vec<u8>,
     session: Option<u64>,
     terms: Terms,
     not_before_ms: i64,
@@ -533,7 +533,7 @@ pub struct VerifiedCall {
     pub replay_key: ReplayKey,
 }
 
-fn parse_link(text: &Value, first: bool, unknown: &mut Unknown) -> Result<Link> {
+pub(crate) fn parse_link(text: &Value, first: bool, unknown: &mut Unknown) -> Result<Link> {
     let Value::String(text) = text else {
         return Err(malformed("links entries must be strings"));
     };
@@ -750,6 +750,214 @@ fn index(seq: u64) -> Result<usize> {
         .map_err(|_| malformed("seq"))
 }
 
+/// §12.3 step 4: S, the highest seq covered by `headQuorum` fresh heads of current homes, and
+/// the policy at S made stricter by every later held policy.
+fn evaluate_at_s(view: &AccountView, now_ms: i64) -> Result<(u64, Policy)> {
+    let v = &view.v;
+    let held = v.history.len() as u64;
+    let latest_policy = view
+        .policy_at(held)
+        .ok_or_else(|| Failure::Unavailable("no policy".into()))?;
+    let homes = view.current_homes(now_ms);
+    let mut best: BTreeMap<String, u64> = BTreeMap::new();
+    for envelope in &v.heads {
+        let ctx = HeadContext {
+            account: &v.account,
+            history: &v.history,
+            homes: &homes,
+            now_ms,
+        };
+        match verify_head(envelope, ctx) {
+            Ok(h) if h.fresh(now_ms, latest_policy.head_max_age()) => {
+                let e = best.entry(h.by().to_string()).or_insert(0);
+                *e = (*e).max(h.seq());
+            }
+            Ok(_) => {}
+            Err(Failure::Refused(Reason::Fork)) => return Err(refused(Reason::Fork)),
+            Err(Failure::Unavailable(m)) if m.contains("not held") => {
+                return Err(Failure::Unavailable(
+                    "not fetched up to the highest head".into(),
+                ))
+            }
+            // A head that doesn't verify is evidence of nothing and doesn't count.
+            Err(_) => {}
+        }
+    }
+    let quorum = usize::try_from(latest_policy.head_quorum()).unwrap_or(usize::MAX);
+    if homes.is_empty() || quorum == 0 || best.len() < quorum {
+        return Err(Failure::Unavailable(
+            "too few fresh heads from current homes".into(),
+        ));
+    }
+    let mut seqs: Vec<u64> = best.values().copied().collect();
+    seqs.sort_unstable_by(|a, b| b.cmp(a));
+    let s = seqs[quorum - 1];
+    let mut policy = view
+        .policy_at(s)
+        .cloned()
+        .ok_or_else(|| Failure::Unavailable("no policy at S".into()))?;
+    for (_, later) in v.policies.iter().filter(|(seq, _)| *seq > s) {
+        policy = policy.restrict_for_calls(later);
+    }
+    Ok((s, policy))
+}
+
+/// §12.3 step 5 for a member: present, not revoked, not added without finality, not expired.
+fn member_at_s<'a>(view: &'a AccountView, id: &str, s: u64, now_ms: i64) -> Result<&'a ViewMember> {
+    let m = view
+        .v
+        .members
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(revoked)?;
+    if m.granted_seq > s || m.revoked_seq.is_some() || m.status == MemberStatus::AddedNotFinal {
+        return Err(revoked());
+    }
+    if m.expiry_at(s).is_some_and(|e| now_ms > e) {
+        return Err(refused(Reason::Expired));
+    }
+    Ok(m)
+}
+
+/// What a chain is judged at.
+struct ChainAt<'a> {
+    s: u64,
+    now_ms: i64,
+    policy: &'a Policy,
+    principals: &'a BTreeSet<Vec<u8>>,
+    /// Allow `notBefore` after the clock (a link built ahead of its use).
+    future_not_before: bool,
+}
+
+/// §12.3 step 6: every binding, the acting key when there is one, then link by link.
+fn check_chain(
+    m: &ViewMember,
+    links: &[Link],
+    account: &str,
+    acting: Option<&[u8]>,
+    at: ChainAt<'_>,
+) -> Result<()> {
+    let mut prev_key: &[u8] = &m.signing;
+    for l in links {
+        require_sig(
+            l.env.verify(prev_key).is_ok() && l.account == account && l.from == key_id(prev_key),
+            "link does not verify under the previous key, or names another account or from",
+        )?;
+        prev_key = &l.to;
+    }
+    if let Some(key) = acting {
+        require_sig(
+            key == prev_key,
+            "the acting key is not the last link's to.signing",
+        )?;
+    }
+    let mut prev_terms: &Terms = &m.terms;
+    let mut prev_expiry: Option<i64> = m.expiry_at(at.s);
+    for (i, l) in links.iter().enumerate() {
+        if i == 0 {
+            require_refused(
+                l.session == Some(m.end_sessions.len() as u64),
+                Reason::Ended,
+            )?;
+        }
+        let in_time = (at.future_not_before || l.not_before_ms <= at.now_ms)
+            && at.now_ms <= l.expires_ms
+            && prev_expiry.is_none_or(|e| l.expires_ms <= e)
+            && i128::from(l.expires_ms) - i128::from(l.not_before_ms)
+                <= secs(at.policy.link_max_age());
+        require_refused(in_time, Reason::Expired)?;
+        require_refused(l.terms.narrows(prev_terms), Reason::NotNarrower)?;
+        if at.principals.contains(&l.to) {
+            return Err(malformed(
+                "a link's to.signing is a principal's key (§3.3 rule 4)",
+            ));
+        }
+        prev_terms = &l.terms;
+        prev_expiry = Some(l.expires_ms);
+    }
+    Ok(())
+}
+
+/// A parsed, checked link chain for the write side: the member's signing point and the
+/// current expiry are read from the view, never supplied.
+pub(crate) struct ChainParent {
+    pub(crate) signing: Vec<u8>,
+    pub(crate) first: bool,
+}
+
+/// The key that signs the next link of `member`'s chain after `prior` (the member's key, or
+/// the last prior link's `to.signing`).
+pub(crate) fn chain_parent(
+    view: &AccountView,
+    member: &str,
+    prior: &[Vec<u8>],
+) -> Result<ChainParent> {
+    let m = view
+        .v
+        .members
+        .iter()
+        .find(|m| m.id == member)
+        .ok_or_else(revoked)?;
+    let mut signing = m.signing.clone();
+    let mut unknown = Unknown::default();
+    for (i, bytes) in prior.iter().enumerate() {
+        let link = parse_link(
+            &Value::String(super::encoding::encode_base64(bytes)),
+            i == 0,
+            &mut unknown,
+        )?;
+        signing = link.to;
+    }
+    Ok(ChainParent {
+        signing,
+        first: prior.is_empty(),
+    })
+}
+
+/// The verifier's own judgement of `prior` followed by `link` for `member` over `view`: §12.3
+/// steps 4, 5 and 6 with the verifier's code. A link whose `notBefore` is still in the future
+/// passes (it may be built ahead of its use); every other rule is the call verifier's.
+pub(crate) fn check_link_chain(
+    view: &AccountView,
+    member: &str,
+    prior: &[Vec<u8>],
+    link: &[u8],
+    now_ms: i64,
+) -> Result<()> {
+    let (s, policy) = evaluate_at_s(view, now_ms)?;
+    let m = member_at_s(view, member, s, now_ms)?;
+    let mut unknown = Unknown::default();
+    let mut links = Vec::new();
+    for (i, bytes) in prior.iter().map(Vec::as_slice).chain([link]).enumerate() {
+        links.push(parse_link(
+            &Value::String(super::encoding::encode_base64(bytes)),
+            i == 0,
+            &mut unknown,
+        )?);
+    }
+    let mut seen = BTreeSet::new();
+    for l in &links {
+        require(
+            seen.insert(l.to.clone()),
+            "a link to.signing repeats within the chain (§3.3 rule 4)",
+        )?;
+    }
+    unknown.check()?;
+    check_chain(
+        m,
+        &links,
+        view.v.account.as_str(),
+        None,
+        ChainAt {
+            s,
+            now_ms,
+            policy: &policy,
+            principals: &view.v.principal_points,
+            future_not_before: true,
+        },
+    )
+}
+
 /// Verify a call envelope (§12.3) over `view`. On success the reservation is `Pending` in
 /// `store`; the service MUST complete or abandon it (§12.4).
 pub fn verify_call(
@@ -807,50 +1015,7 @@ pub fn verify_call(
     if &v.history[index(*as_of_seq)?] != as_of_digest {
         return Err(refused(Reason::Fork));
     }
-    let latest_policy = view
-        .policy_at(held)
-        .ok_or_else(|| Failure::Unavailable("no policy".into()))?;
-    let homes = view.current_homes(cfg.now_ms);
-    let mut best: BTreeMap<String, u64> = BTreeMap::new();
-    for envelope in &v.heads {
-        let ctx = HeadContext {
-            account: &v.account,
-            history: &v.history,
-            homes: &homes,
-            now_ms: cfg.now_ms,
-        };
-        match verify_head(envelope, ctx) {
-            Ok(h) if h.fresh(cfg.now_ms, latest_policy.head_max_age()) => {
-                let e = best.entry(h.by().to_string()).or_insert(0);
-                *e = (*e).max(h.seq());
-            }
-            Ok(_) => {}
-            Err(Failure::Refused(Reason::Fork)) => return Err(refused(Reason::Fork)),
-            Err(Failure::Unavailable(m)) if m.contains("not held") => {
-                return Err(Failure::Unavailable(
-                    "not fetched up to the highest head".into(),
-                ))
-            }
-            // A head that doesn't verify is evidence of nothing and doesn't count.
-            Err(_) => {}
-        }
-    }
-    let quorum = usize::try_from(latest_policy.head_quorum()).unwrap_or(usize::MAX);
-    if homes.is_empty() || quorum == 0 || best.len() < quorum {
-        return Err(Failure::Unavailable(
-            "too few fresh heads from current homes".into(),
-        ));
-    }
-    let mut seqs: Vec<u64> = best.values().copied().collect();
-    seqs.sort_unstable_by(|a, b| b.cmp(a));
-    let s = seqs[quorum - 1];
-    let mut policy = view
-        .policy_at(s)
-        .cloned()
-        .ok_or_else(|| Failure::Unavailable("no policy at S".into()))?;
-    for (_, later) in v.policies.iter().filter(|(seq, _)| *seq > s) {
-        policy = policy.restrict_for_calls(later);
-    }
+    let (s, policy) = evaluate_at_s(view, cfg.now_ms)?;
     require_refused(
         within(call.created_ms, cfg.now_ms, secs(policy.call_window())),
         Reason::Window,
@@ -938,59 +1103,25 @@ pub fn verify_call(
             }
         }
         CallSigner::Member(id) => {
-            let m = v.members.iter().find(|m| &m.id == id).ok_or_else(revoked)?;
-            if m.granted_seq > s
-                || m.revoked_seq.is_some()
-                || m.status == MemberStatus::AddedNotFinal
-            {
-                return Err(revoked());
-            }
-            if m.expiry_at(s).is_some_and(|e| cfg.now_ms > e) {
-                return Err(refused(Reason::Expired));
-            }
+            let m = member_at_s(view, id, s, cfg.now_ms)?;
             member = Some(m);
         }
     }
     // 6. Chain: first every binding and the acting key (badSignature), then link by link.
     if let Some(m) = member {
-        let mut prev_key: &[u8] = &m.signing;
-        for l in &call.links {
-            require_sig(
-                l.env.verify(prev_key).is_ok()
-                    && l.account == call.account
-                    && l.from == key_id(prev_key),
-                "link does not verify under the previous key, or names another account or from",
-            )?;
-            prev_key = &l.to;
-        }
-        require_sig(
-            call.key == prev_key,
-            "the acting key is not the last link's to.signing",
+        check_chain(
+            m,
+            &call.links,
+            &call.account,
+            Some(&call.key),
+            ChainAt {
+                s,
+                now_ms: cfg.now_ms,
+                policy: &policy,
+                principals: &v.principal_points,
+                future_not_before: false,
+            },
         )?;
-        let mut prev_terms: &Terms = &m.terms;
-        let mut prev_expiry: Option<i64> = m.expiry_at(s);
-        for (i, l) in call.links.iter().enumerate() {
-            if i == 0 {
-                require_refused(
-                    l.session == Some(m.end_sessions.len() as u64),
-                    Reason::Ended,
-                )?;
-            }
-            let in_time = l.not_before_ms <= cfg.now_ms
-                && cfg.now_ms <= l.expires_ms
-                && prev_expiry.is_none_or(|e| l.expires_ms <= e)
-                && i128::from(l.expires_ms) - i128::from(l.not_before_ms)
-                    <= secs(policy.link_max_age());
-            require_refused(in_time, Reason::Expired)?;
-            require_refused(l.terms.narrows(prev_terms), Reason::NotNarrower)?;
-            if v.principal_points.contains(&l.to) {
-                return Err(malformed(
-                    "a link's to.signing is a principal's key (§3.3 rule 4)",
-                ));
-            }
-            prev_terms = &l.terms;
-            prev_expiry = Some(l.expires_ms);
-        }
     }
     // 7. Purpose. Conditions are three-valued: false refuses, unknown waits for step 8.
     let at_home = cfg.home_endpoints.iter().any(|e| e == &call.audience)

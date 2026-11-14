@@ -22,11 +22,16 @@ pub mod heads;
 pub mod history;
 pub mod ids;
 pub mod members;
+pub mod pairing;
 pub mod prescan;
 pub mod records;
 pub mod replay;
 pub mod signature;
+pub mod slots;
 pub mod terms;
+pub mod vault;
+/// Builders for 0.5 objects: prepare the exact bytes a host signs, then finish under the verifier.
+pub mod write;
 
 /// A refusal reason (§19). The protocol spelling is `refused:<reason>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,6 +72,9 @@ pub enum Reason {
     WrongFormat,
     /// §11.5, 0.3 §5: the payload doesn't authenticate or doesn't match its header.
     InvalidPayload,
+    /// §7.1, §7.2, §19: a slot's secret is wrong or missing, or an opened seed does not
+    /// derive the keyring's vault.
+    VaultLocked,
 }
 impl Reason {
     /// The reason's protocol spelling, without the `refused:` prefix.
@@ -90,6 +98,7 @@ impl Reason {
             Self::BudgetSpent => "budgetSpent",
             Self::WrongFormat => "wrongFormat",
             Self::InvalidPayload => "invalidPayload",
+            Self::VaultLocked => "vaultLocked",
         }
     }
 }

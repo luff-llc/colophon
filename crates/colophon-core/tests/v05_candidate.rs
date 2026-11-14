@@ -742,6 +742,101 @@ fn run_identifiers() -> Vec<(String, Outcome)> {
     out
 }
 
+fn trimmed(path: &Path) -> Vec<u8> {
+    let mut b = fs::read(path).unwrap();
+    while b.last() == Some(&b'\n') {
+        b.pop();
+    }
+    b
+}
+
+/// §13.3: two heads by one home at one seq with different digests are evidence when the held
+/// history holds the entry each covers and §8.6 rule 1 does not explain the pair. The vector
+/// ships the account's history and the second entry under `branch-ordinary/`. `rules/equivocation`
+/// convicts; `rules/equivocation-displaced` is an honest home whose later head covers the entry
+/// that displaced the earlier head's, and does not.
+fn run_equivocation(dir: &Path) -> Outcome {
+    use colophon_core::v05::write::authority::{verify_evidence, Evidence, EvidenceContext};
+    let mut objects = objects_of(&cand().join("account"));
+    let account_entries = objects.entries.len();
+    objects
+        .entries
+        .extend(files_in(&dir.join("branch-ordinary/authority")));
+    if objects.entries.len() == account_entries {
+        return Outcome::Fail("the vector ships no entries for its heads".into());
+    }
+    let now_ms = ms("2026-11-11T09:01:00Z");
+    let verdict = verify_history(&objects, &Persisted::default(), now_ms);
+    let Some(st) = verdict.state else {
+        return Outcome::Fail(format!(
+            "the held history does not verify: {:?}",
+            verdict.stop
+        ));
+    };
+    if verdict.stop.is_some() || verdict.branch.len() != 3 {
+        return Outcome::Fail("the held history should stand at seq 3 with no fork".into());
+    }
+    let ev = trimmed(&dir.join("evidence.json"));
+    let ctx = EvidenceContext {
+        objects: &objects,
+        now_ms,
+    };
+    let displaced = dir.ends_with("equivocation-displaced");
+    match (verify_evidence(&ev, st.account().as_str(), &ctx), displaced) {
+        (Ok(Evidence::Heads { home, seq }), false) => {
+            Outcome::Pass(format!("evidence ok: home {home} at seq {seq}"))
+        }
+        (Err(Failure::Malformed(m)), true) if m.contains("rule 1") => {
+            Outcome::Pass(format!("not equivocation: {m}"))
+        }
+        (other, _) => Outcome::Fail(format!("{other:?}")),
+    }
+}
+
+/// §8.7: two homes holding both receipts build the activation independently. The vector
+/// directory holds only the two entries (no history), so `prepare_activate` cannot run from
+/// state here: the entry is rebuilt through `Kind::body` from its own fields, which checks
+/// the encoding only. The state-derived choice is tested in `v05_write_authority`.
+fn run_identical_activation(dir: &Path) -> Outcome {
+    use colophon_core::v05::write::{envelope, Header, Kind};
+    let (a, b) = (
+        trimmed(&dir.join("home-1.json")),
+        trimmed(&dir.join("home-2.json")),
+    );
+    if a != b {
+        return Outcome::Fail("the two homes' bytes differ".into());
+    }
+    let env: Value = serde_json::from_slice(&a).unwrap();
+    let body = b64(env["body"].as_str().unwrap());
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let list = |f: &str| -> Vec<Vec<u8>> {
+        v[f].as_array()
+            .unwrap()
+            .iter()
+            .map(|x| b64(x.as_str().unwrap()))
+            .collect()
+    };
+    let kind = Kind::Activate {
+        transition: b64(v["transition"].as_str().unwrap()),
+        receipts: list("receipts"),
+    };
+    let header = Header {
+        seq: v["seq"].as_u64().unwrap(),
+        previous: v["previous"].as_str().map(str::to_string),
+        issued: v["issued"].as_str().unwrap().to_string(),
+        by: v["by"].as_str().unwrap().to_string(),
+    };
+    let rebuilt = kind
+        .body(&header)
+        .and_then(|bd| envelope(&bd, None, &[], &[], &[]));
+    match rebuilt {
+        Ok(r) if r == a => Outcome::Pass(
+            "identical bytes; the vector ships no history, so only the encoder is exercised".into(),
+        ),
+        other => Outcome::Fail(format!("builder differs: {:?}", other.map(|r| r.len()))),
+    }
+}
+
 fn classify(rel: &str) -> Option<&'static str> {
     let _ = rel;
     None
@@ -755,6 +850,7 @@ fn is_history_case(rel: &str) -> bool {
                 || name.starts_with("i-")
                 || name.starts_with("row-")
                 || name == "equivocation"
+                || name == "equivocation-displaced"
                 || name == "rollback"))
 }
 
@@ -823,6 +919,10 @@ fn candidate_conformance() {
             } else {
                 Outcome::Fail(format!("{} at {}", v.code(), v.seq()))
             }
+        } else if rel == "rules/equivocation" || rel == "rules/equivocation-displaced" {
+            run_equivocation(&dir)
+        } else if rel == "rules/t-activate-identical-bytes" {
+            run_identical_activation(&dir)
         } else if is_history_case(&rel) {
             run_history(&dir, &case)
         } else if rel.starts_with("calls/")
@@ -847,10 +947,7 @@ fn candidate_conformance() {
         };
         results.push((rel, outcome));
     }
-    results.push((
-        "pairing/pairing.json".into(),
-        Outcome::NotImplemented("pairing (§7.3, plan step 2): out of scope"),
-    ));
+    results.push(("pairing/pairing.json".into(), run_pairing()));
 
     let (mut pass, mut fail, mut ni) = (0, 0, 0);
     let mut unexpected = Vec::new();
@@ -876,6 +973,81 @@ fn candidate_conformance() {
         pass + fail
     );
     assert!(unexpected.is_empty(), "unexpected failures: {unexpected:?}");
+}
+
+/// `pairing/pairing.json` (§7.3): the commitment and the six-digit code from the published
+/// bytes, through both sides of the state machine, and each `refuse` row as an abort.
+fn run_pairing() -> Outcome {
+    use colophon_core::v05::pairing::{code, commitment, ExistingWaiting, Joiner, PairingAbort};
+    let v = json(&cand().join("pairing/pairing.json"));
+    let hex_of = |k: &str| -> Vec<u8> {
+        let s = v[k].as_str().unwrap();
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    };
+    let n32 = |bytes: Vec<u8>| -> [u8; 32] { bytes.try_into().unwrap() };
+    let mut limiter = colophon_core::v05::pairing::FailureLimiter::new();
+    let account = AccountId::parse(v["account"].as_str().unwrap()).unwrap();
+    let (e, na, nb) = (hex_of("E"), n32(hex_of("nA")), n32(hex_of("nB")));
+    let want_c = hex_of("commitment");
+    let fail = |why: String| Outcome::Fail(why);
+    // The published commitment and code.
+    match commitment(&account, &e, &nb) {
+        Ok(c) if c.to_vec() == want_c => {}
+        other => return fail(format!("commitment: {other:?}")),
+    }
+    match code(&account, &e, &na, &nb) {
+        Ok(c) if c == v["code"].as_str().unwrap() => {}
+        other => return fail(format!("code: {other:?}")),
+    }
+    // Both sides of the protocol reach it: J commits, H sends nA only afterwards, J reveals.
+    let Ok((joiner, c)) = Joiner::begin(&account, &e, nb) else {
+        return fail("joiner refused the published E".into());
+    };
+    if c.to_vec() != want_c {
+        return fail("joiner commitment differs".into());
+    }
+    let (awaiting, sent) =
+        ExistingWaiting::receive_commitment(&account, c, limiter.permit(0).unwrap()).send_nonce(na);
+    let Ok((reveal, j)) = joiner.reveal(sent) else {
+        return fail("joiner reveal".into());
+    };
+    match awaiting.finish(&reveal.e, &reveal.nb) {
+        Ok(h) if h.digits() == v["code"].as_str().unwrap() && j.digits() == h.digits() => {}
+        other => return fail(format!("existing side: {other:?}")),
+    }
+    // Each refuse row aborts with a commitment mismatch.
+    for row in v["refuse"].as_array().unwrap() {
+        let e2 = hex_row(row["E"].as_str().unwrap());
+        let nb2 = n32(hex_row(row["nB"].as_str().unwrap()));
+        let r = ExistingWaiting::receive_commitment(
+            &account,
+            n32(want_c.clone()),
+            limiter.permit(0).unwrap(),
+        )
+        .send_nonce(na)
+        .0
+        .finish(&e2, &nb2);
+        let expected = row["expected"].as_str().unwrap();
+        match r {
+            Err(PairingAbort::CommitmentMismatch)
+                if expected == PairingAbort::CommitmentMismatch.to_string() => {}
+            other => return fail(format!("{}: want {expected}, got {other:?}", row["case"])),
+        }
+    }
+    Outcome::Pass(format!(
+        "commitment and code {} from the published bytes; {} refuse rows abort",
+        v["code"].as_str().unwrap(),
+        v["refuse"].as_array().unwrap().len()
+    ))
+}
+fn hex_row(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 fn run_succession(dir: &Path, case: &Value) -> Outcome {
