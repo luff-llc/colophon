@@ -140,6 +140,10 @@ verified as their own version required.
 Exceeding a bound is `malformed`, wherever the object is, including a `clientData` inside any
 envelope. A verifier MUST NOT allocate in proportion to a claimed length before checking it.
 
+**Predecessor chain.** A predecessor chain, the predecessor and each predecessor of a predecessor,
+holds at most 16 accounts. A predecessor object set with more than 16 genesis entries is
+`malformed` (§15.1).
+
 **The bounds compose.** The largest recording entry is a `vetoed` at `headQuorum` 8: base64 (4⌈n/3⌉)
 of a transition envelope (622,592 → 830,124), a veto envelope (131,072 → 174,764) and 16 receipt
 envelopes (1,024 → 1,368 each, 21,888), plus at most 2,048 bytes of header, field names and
@@ -1566,6 +1570,10 @@ library upgrades in place instead.
   - A root library's hand-over is signed by the root alone (rationale: guide §7).
 - **Published** at the predecessor's own homes (`/5`), or at the successor's homes under
   `{base}/predecessor/` (Swift).
+
+**Chain bound.** A `/5` predecessor may itself be a successor, so a verifier follows the chain
+through each genesis. The chain holds at most 16 accounts, not counting the successor being
+verified: a predecessor object set with more than 16 genesis entries is `malformed` (§2.4).
 
 **Verified** when:
 - the verifier holds the predecessor history through F;

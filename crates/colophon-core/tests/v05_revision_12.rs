@@ -211,3 +211,44 @@ fn m4_carried_keys_need_possession_unless_the_handover_meets_the_rule() {
         assert!(v.seq() >= 1, "{name}");
     }
 }
+
+// ---- The chain bound (§2.4, §15.1) ----------------------------------------------------------
+
+#[test]
+fn a_predecessor_chain_of_sixteen_accounts_is_accepted_and_seventeen_is_malformed() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let (base, now) = succession("authority5-chain");
+    let genesis = base
+        .predecessor
+        .iter()
+        .find(|b| {
+            let env: Value = serde_json::from_slice(b).unwrap();
+            let body: Value =
+                serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
+                    .unwrap();
+            body["kind"] == "genesis"
+        })
+        .unwrap()
+        .clone();
+    let env: Value = serde_json::from_slice(&genesis).unwrap();
+    let body: Value =
+        serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap()).unwrap();
+    let held = |n: usize| {
+        let mut o = base.clone();
+        for i in 0..n {
+            let mut b = body.clone();
+            b["issued"] = serde_json::json!(format!("2026-11-13T09:{:02}:00Z", i));
+            let bytes = colophon_core::v05::encoding::canonical(&b).unwrap();
+            o.predecessor.push(
+                serde_json::to_vec(&serde_json::json!({"body": STANDARD.encode(bytes)})).unwrap(),
+            );
+        }
+        verify_history(&o, &Persisted::default(), now)
+    };
+    // The chain holds A and B: two genesis entries. Fourteen more make sixteen.
+    let sixteen = held(14);
+    assert_eq!(sixteen.code(), "ok", "{:?}", sixteen.stop);
+    let seventeen = held(15);
+    assert_eq!(seventeen.code(), "malformed");
+    assert!(format!("{:?}", seventeen.stop).contains("longer than 16"));
+}

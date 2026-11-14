@@ -50,8 +50,7 @@ impl Succession {
 }
 
 /// Most distinct accounts a predecessor object set may hold: the chain A to B to C to ... that a
-/// verifier follows through one genesis. The 0.5 text names no bound for the length of a chain,
-/// so this is the implementation's (a spec question); a longer set is `malformed`.
+/// verifier follows through one genesis (§15.1 "Chain bound", §2.4). A longer set is `malformed`.
 pub(super) const MAX_PREDECESSOR_ACCOUNTS: usize = 16;
 
 /// An account's own entries, and the rest of the predecessor set.
