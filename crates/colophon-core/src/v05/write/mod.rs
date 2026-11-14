@@ -12,8 +12,9 @@
 //!   and runs `v05::history::verify_history` over the account's objects plus the new one. It
 //!   returns [`Records`] only when the verifier says `ok`. Nothing is returned on failure.
 //!
-//! Other packages add `pub mod calls;` here (links, calls, heads, receipts) at merge.
+//! `calls` holds the link, call, head and receipt builders.
 pub mod authority;
+pub mod calls;
 
 use crate::v05::encoding::{bounds, canonical, encode_base64};
 use crate::v05::{malformed, Failure, Result};
