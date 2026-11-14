@@ -1497,13 +1497,23 @@ fn make_final(n: &mut State, seq: u64) {
 }
 
 /// Excusals can make other activations final, including removals that excuse more homes.
-/// Reach the least fixed point after an entry; no empty `final` object is needed.
+/// Reach the least fixed point after an entry; no empty `final` object is needed. Finality this
+/// way obeys Order (§8.7): an activation that is not removal-only becomes final only when every
+/// earlier activation that is not removal-only is final.
 fn finalize_empty_witnesses(n: &mut State) {
     loop {
         let ready: Vec<u64> = n
             .activations
             .iter()
-            .filter(|a| !a.final_ && a.witnesses.iter().all(|h| n.excused.contains(h)))
+            .filter(|a| {
+                !a.final_
+                    && a.witnesses.iter().all(|h| n.excused.contains(h))
+                    && (a.removal_only
+                        || !n
+                            .activations
+                            .iter()
+                            .any(|b| b.seq < a.seq && !b.removal_only && !b.final_))
+            })
             .map(|a| a.seq)
             .collect();
         if ready.is_empty() {
@@ -1698,9 +1708,8 @@ fn activate(s: &State, e: &Entry, now_ms: i64) -> Step<State> {
             })
             .unwrap_or_default(),
     });
-    if witnesses.is_empty() {
-        make_final(&mut n, e.seq);
-    }
+    // An activation with no witnesses is final by the fixed point, which `apply` reaches
+    // after this entry and which obeys Order (§8.7).
     if t.full_set {
         let earlier: Vec<u64> = n
             .activations
@@ -2784,52 +2793,66 @@ struct Ctx<'a> {
     now_ms: i64,
 }
 /// Whether a `final` covers the activate `act`, whose state after it is `after` (§8.6 rule 1,
-/// §8.7). Only a `final` that is a valid entry on the activate's own branch counts: a chain of
-/// `previous` links runs from `act` to it, and every entry on that chain applies in turn. A
-/// parsed object that no branch contains, or one that fails its checks, covers nothing.
+/// §8.7). Two things cover it, both on the activate's own branch:
+/// - a `final` entry for it that is a valid entry: a chain of `previous` links runs from `act` to
+///   it and every entry on that chain applies in turn;
+/// - finality by the fixed point (every witness excused, Order met) in `after`, or in the state
+///   after any valid entry that follows `act` on its branch, such as the final removal-only
+///   revocation that excuses its last witness.
+///
+/// A parsed object that no branch contains, or one that fails its checks, covers nothing. When a
+/// `vetoed` displaces the activation instead, the entries after it leave with it (§8.7 rollback),
+/// including the revocations that would have excused its witnesses.
 fn final_covers(ctx: &Ctx, act: &Entry, after: &State) -> bool {
-    let by_digest: BTreeMap<&str, &Entry> = ctx
+    let fixed_point_final = |st: &State| {
+        st.activations.iter().any(|a| {
+            a.seq == act.seq
+                && a.digest == act.env.digest
+                && a.final_
+                && a.witnesses.iter().all(|h| st.excused.contains(h))
+        })
+    };
+    if fixed_point_final(after) {
+        return true;
+    }
+    // Entries after `act`, in seq order, each applied to the state of its `previous`. Every step
+    // raises seq, so the walk is bounded by the entries held.
+    let mut later: Vec<&Entry> = ctx
         .all
         .iter()
-        .map(|e| (e.env.digest.as_str(), *e))
+        .copied()
+        .filter(|e| e.seq > act.seq)
         .collect();
-    ctx.all.iter().any(|f| {
-        if f.kind != "final"
-            || f.env
+    later.sort_by(|x, y| (x.seq, &x.env.digest).cmp(&(y.seq, &y.env.digest)));
+    let mut states: BTreeMap<&str, State> = BTreeMap::new();
+    states.insert(act.env.digest.as_str(), after.clone());
+    for f in later {
+        let Some(prev) = f.previous.as_deref().and_then(|p| states.get(p)) else {
+            continue;
+        };
+        let Ok(next) = apply(
+            prev,
+            f,
+            ctx.pending,
+            ctx.heads,
+            ctx.all.to_vec(),
+            ctx.now_ms,
+        ) else {
+            continue;
+        };
+        let is_final_for_act = f.kind == "final"
+            && f.env
                 .value
                 .get("activation")
                 .and_then(|a| a.get("digest"))
                 .and_then(Value::as_str)
-                != Some(act.env.digest.as_str())
-        {
-            return false;
+                == Some(act.env.digest.as_str());
+        if is_final_for_act || fixed_point_final(&next) {
+            return true;
         }
-        // Walk back to the activate. Each step lowers seq, so the walk is bounded.
-        let mut chain: Vec<&Entry> = vec![f];
-        let mut cur: &Entry = f;
-        while cur.previous.as_deref() != Some(act.env.digest.as_str()) {
-            let Some(next) = cur
-                .previous
-                .as_deref()
-                .and_then(|p| by_digest.get(p).copied())
-            else {
-                return false;
-            };
-            if next.seq >= cur.seq || next.seq <= act.seq {
-                return false;
-            }
-            chain.push(next);
-            cur = next;
-        }
-        let mut st = after.clone();
-        for e in chain.into_iter().rev() {
-            match apply(&st, e, ctx.pending, ctx.heads, ctx.all.to_vec(), ctx.now_ms) {
-                Ok(n) => st = n,
-                Err(_) => return false,
-            }
-        }
-        true
-    })
+        states.insert(f.env.digest.as_str(), next);
+    }
+    false
 }
 pub(super) fn covered_by_home_head(
     s: &State,

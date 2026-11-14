@@ -3661,6 +3661,48 @@ pub fn part3(o: &mut Out) {
            "Both original witnesses are finally revoked by recovery transitions. The earlier addition becomes final without an empty final, so NEW may sign.",
            &["8.7"], Some(ver(exc_due2 + 120)));
 
+    // Revision 12, M1 (§8.6 rule 1, §8.7): finality by the fixed point counts as "a `final`
+    // covers", and a `vetoed` that displaces an activation takes the later revocations with it.
+    let v_addc = veto(&acct, &t_addc, sg![b], &ts(R0 + 600));
+    let rv_addc = rec_at(&cx, &v_addc, R0 + 601);
+    let mut addc_vetoed = base.clone();
+    record_veto(
+        &mut addc_vetoed,
+        &t_addc,
+        &[rec(&cx, &t_addc)],
+        &v_addc,
+        std::slice::from_ref(&rv_addc),
+    );
+    case(
+        o,
+        "t-excusal-final-not-displaced-by-vetoed",
+        &exc,
+        json!({"result": "ok", "seq": 7, "finality": {"3": "final", "4": "final", "6": "final"}}),
+        "As t-all-witnesses-excused, with a valid `vetoed` of the addition at seq 3 held too. The addition is final by the fixed point on its own branch (both witnesses finally revoked), which counts as a `final` that covers it: it is not displaced, and NEW may sign.",
+        &["8.6", "8.7"],
+        vec![("veto", v_addc.clone()), ("veto-receipt", rv_addc.clone())],
+        Some(ver(exc_due2 + 120)),
+        vec![("vetoed", vec![(3, addc_vetoed.envs[2].clone())])],
+    );
+    case(
+        o,
+        "t-vetoed-displaces-activation-and-later-revocation",
+        &addc_vetoed,
+        ok_at(3),
+        "A valid `vetoed` and a provisional activation of one addition at seq 3. On the activation's branch H1's revocation is final (seq 4, 5) but H2 still witnesses the addition, so no `final` covers it: the `vetoed` stands, the activation and the later revocation leave with the branch, and H1 and H2 stay current homes.",
+        &["8.6", "8.7"],
+        vec![("veto", v_addc.clone()), ("veto-receipt", rv_addc.clone())],
+        Some(ver(exc_due2 + 120)),
+        vec![(
+            "activate",
+            vec![
+                (3, exc.envs[2].clone()),
+                (4, exc.envs[3].clone()),
+                (5, exc.envs[4].clone()),
+            ],
+        )],
+    );
+
     // Two activations of T with different receipts, with a final covering only the higher digest.
     let cy_t = p(&cx, rm(&b.id), sg![a]);
     let cy_r1 = rec(&cx, &cy_t);

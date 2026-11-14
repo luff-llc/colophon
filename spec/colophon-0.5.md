@@ -735,6 +735,14 @@ not be transitive, and MUST NOT be folded into a running winner.
 Every recording entry has a **due time**: an `activate`'s or `vetoed`'s is its transition's; a
 `final`'s is its activation's transition's; a `successionVetoed`'s is the succession's.
 
+"A `final` covers" an `activate` when, on the activate's own branch, a valid `final` entry names
+it, or it is final by the fixed point (§8.7: every remaining witness excused, Order met), in the
+state after it or after any valid entry that follows it. An object that no valid branch contains
+covers nothing. A `vetoed` that displaces an activation removes every later entry on that branch
+(§8.7 Rollback), including the revocations that would have excused its witnesses, so the two
+rules cannot disagree: either an activation is final on its branch and no `vetoed` displaces it,
+or it is not and the `vetoed` takes the branch with it.
+
 1. **Activation order.**
    - If X is a recording entry and Y is not, **Y stands only if** the verifier holds a head of the
      primary home (in the state before seq n) covering Y, Y's `issued` is not later than X's due
@@ -859,10 +867,13 @@ from heads it has seen or the order it saw things in.
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering
   it, or a later full set's anchor follows it.
   After each entry, excuse homes whose removal-only revocation is final and make every activation
-  with no remaining witnesses final without a `final` entry; repeat until no more become final.
-- **Order.** An activation that is not removal-only gets a `final` only when every earlier
-  activation that is not removal-only is final. Removal-only activations are outside this order:
-  they never wait for an earlier provisional activation, and none waits for them.
+  with no remaining witnesses final without a `final` entry, in Order; repeat until no more
+  become final. Finality reached this way is final in every rule that says "a `final` covers"
+  (§8.6 rule 1).
+- **Order.** An activation that is not removal-only gets a `final`, or becomes final by excusal,
+  only when every earlier activation that is not removal-only is final. Removal-only activations
+  are outside this order: they never wait for an earlier provisional activation, and none waits
+  for them.
 - **Until final, whatever an activation adds counts for nothing.** An added controller, home or
   member signs no entry, transition, veto, `suspend` or call (`refused:revoked`), counts toward no
   rule, unit, quorum, full set or escalation, and its receipts and heads don't count; records by an
@@ -873,8 +884,8 @@ from heads it has seen or the order it saw things in.
 - **A provisional activation, removal-only or not, is displaced by a valid `vetoed` of its own
   transition** (§8.6 rule 1). A verifier holding the `activate` and not the `vetoed` applies the
   activation as provisional; when it receives the `vetoed`, the same rule displaces the activation,
-  whatever order the objects came in. Once a `final` covers the activation, the `vetoed` changes
-  nothing.
+  whatever order the objects came in. Once a `final` covers the activation, whether it is a
+  `final` entry or finality by excusal, the `vetoed` changes nothing.
 - **Rollback** of a provisional activation removes it and every later entry on its branch, and
   nothing else; nothing it added has signed. Transitions anchored on a removed entry are void;
   recording entries are rebuilt by the homes; displaced signed entries go back to their signers'
@@ -906,7 +917,7 @@ with the result shown, and an entry that fails changes nothing. Every recording 
 | **Immediate entry E** (every kind except `genesis`, `suspend`, `vault` and recording entries) | §8.5 steps 1–2; signer current, not suspended, not added by a provisional activation (`badSignature`); §8.4 rule (`badSignature`); rate (§13.1, `malformed`); kind rules (`malformed`) | Apply. A suspension whose transition E makes invalid, or whose due time + 7 days is before E's `issued`, ends. |
 | **`vault`** | As an immediate entry; the vault is retiring and the signer was current at the anchor of the removal that made it retire, is still current, and holds `control` or `recover` (`badSignature`); a slot names the signer, `previousVault` present (`malformed`) | New vault; not retiring. |
 | **`suspend` (key K, T, receipts)** | §8.5 steps 1–2; signer is a signer of T (`badSignature`); T valid at E; T not recorded on the branch; T removes or demotes K; T's delta not void; the signer's unit has no outstanding suspension (`malformed`) | K suspended until the earliest of: T's `activate` or `vetoed`; the first entry after which T is no longer valid at a hypothetical `activate`; the first entry, or the verifier's clock, past T's due time + 7 days. |
-| **`activate` (T, receipts)**, T not a full set | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); delta not void (`malformed`) | Apply the delta (with `keep`, §8.3's slot drops, retiring, and the drop of keys the removed key added); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set, or final if that set is empty. |
+| **`activate` (T, receipts)**, T not a full set | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); delta not void (`malformed`) | Apply the delta (with `keep`, §8.3's slot drops, retiring, and the drop of keys the removed key added); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set; it becomes final when every witness is excused, in Order (the fixed point). |
 | **Full-set `activate`** | As `activate`, with the full set's due time; no veto | As `activate`; every activation before T's anchor becomes final. |
 | **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts chosen, each within 300 s of V's `issued` and before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
 | **`final` (activation A, heads)** | A is an `activate` on the branch, not yet final; if A is not removal-only, every earlier activation that is not removal-only is final; `heads` is non-empty and has exactly one head per witness of A, each signed by that home's key in the state before A, covering A on this branch (not necessarily fresh); `by` = A's `by`; `issued` = max(latest head's `issued`, previous `issued`) (`malformed`) | A is final, and so is every earlier activation whose witnesses all have a head here covering it; what they added counts. A removal-only A that revoked homes excuses them from every other activation's witnesses. |
