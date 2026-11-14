@@ -3,7 +3,11 @@
 //! root library, moves into a 0.5 account. The same keys control it, each slot is rebuilt with
 //! one assertion, the records are copied and readable, `migration` matches what was copied, and
 //! the succession verifies. The Swift side is the independent fixture of `v05_swift_support`.
-#![allow(clippy::unwrap_used, clippy::cloned_ref_to_slice_refs, clippy::bool_assert_comparison)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::bool_assert_comparison
+)]
 #[path = "v05_e7_support/mod.rs"]
 mod e7;
 #[path = "v05_swift_support/mod.rs"]
