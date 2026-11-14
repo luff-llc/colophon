@@ -13,8 +13,8 @@
 //! Notices (§17.5) are not built: the spec defines no signed notice object, only host
 //! behaviour (push routes, polling, display). See the E3 report.
 //!
-//! The step and signature-result types below are local to this package; a shared
-//! `build/mod.rs` should own them (see the E3 report).
+//! The step and signature-result types are the shared ones in `write/mod.rs`.
+use super::{SignatureResult, SigningStep};
 use crate::v05::calls::{chain_parent, check_link_chain, verify_call, AccountView, CallConfig};
 use crate::v05::encoding::{
     bounds, canonical, date, decode_request_id, encode_base64, encode_base64url,
@@ -32,81 +32,14 @@ use serde_json::{json, Value};
 /// Most links a call carries (§12.2: `depth` allows at most 4).
 pub const MAX_LINKS: usize = 4;
 
-/// What the host must sign: exact bytes, who signs, and the WebAuthn challenge where the
-/// signer is a WebAuthn key. Read-only: the host reads these and signs; it cannot replace them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SigningStep {
-    path: String,
-    body: Vec<u8>,
-    signer: String,
-    signing: Vec<u8>,
-    challenge: Option<String>,
-}
-impl SigningStep {
-    fn new(
-        path: String,
-        body: Vec<u8>,
-        signer: String,
-        signing: Vec<u8>,
-        challenge: Option<String>,
-    ) -> Self {
-        Self {
-            path,
-            body,
-            signer,
-            signing,
-            challenge,
-        }
-    }
-    /// Where the finished object is stored (host label), or a descriptive name for objects
-    /// that are embedded or sent.
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-    /// The exact canonical body bytes to sign.
-    pub fn body(&self) -> &[u8] {
-        &self.body
-    }
-    /// The signer's key ID.
-    pub fn signer(&self) -> &str {
-        &self.signer
-    }
-    /// The signer's signing point (empty for a head or receipt: the home's key is looked up in
-    /// the verifier's homes).
-    pub fn signing(&self) -> &[u8] {
-        &self.signing
-    }
-    /// For a WebAuthn signer: the unpadded base64url of SHA-256(body) that `clientData` must
-    /// carry (§4.3). `None` for a `raw` signer.
-    pub fn challenge(&self) -> Option<&str> {
-        self.challenge.as_deref()
-    }
-}
-
-/// A signature from the host.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SignatureResult {
-    /// `raw`: 64 bytes, `r ‖ s` (§4.2).
-    Raw(Vec<u8>),
-    /// `webauthn`: the DER signature and the assertion's two byte strings (§4.3).
-    WebAuthn {
-        /// The DER-encoded ES256 signature.
-        signature: Vec<u8>,
-        /// `authenticatorData`.
-        authenticator_data: Vec<u8>,
-        /// `clientData`.
-        client_data: Vec<u8>,
-    },
-}
-
 fn raw_signature(sig: &SignatureResult) -> Result<&[u8]> {
-    match sig {
-        SignatureResult::Raw(s) if s.len() == 64 => Ok(s),
-        SignatureResult::Raw(_) => Err(malformed("a raw signature is 64 bytes")),
-        SignatureResult::WebAuthn { .. } => Err(malformed(
+    if sig.assertion.is_some() {
+        return Err(malformed(
             "this object is signed raw, not with an assertion",
-        )),
+        ));
     }
+    require(sig.signature.len() == 64, "a raw signature is 64 bytes")?;
+    Ok(&sig.signature)
 }
 
 /// `{"body","signature"}` as canonical bytes (§4.1, §2.2).
@@ -199,7 +132,7 @@ pub fn prepare_request(spec: &RequestSpec<'_>) -> Result<PreparedRequest> {
     )?;
     let id = key_id(spec.signing);
     Ok(PreparedRequest {
-        step: SigningStep::new(
+        step: SigningStep::for_call(
             format!("requests/{id}.json"),
             bytes,
             id,
@@ -298,7 +231,7 @@ pub fn prepare_link(view: &AccountView, spec: &LinkSpec<'_>) -> Result<PreparedL
         "link body exceeds its bound",
     )?;
     Ok(PreparedLink {
-        step: SigningStep::new(
+        step: SigningStep::for_call(
             "link".into(),
             bytes,
             key_id(&parent.signing),
@@ -446,7 +379,7 @@ pub fn prepare_call(spec: &CallSpec<'_>) -> Result<PreparedCall> {
     )?;
     let challenge = spec.webauthn.then(|| challenge(&bytes));
     Ok(PreparedCall {
-        step: SigningStep::new(
+        step: SigningStep::for_call(
             "call".into(),
             bytes,
             key_id(spec.key),
@@ -466,26 +399,17 @@ pub fn finish_call(
     view: &AccountView,
     cfg: &CallConfig<'_>,
 ) -> Result<Vec<u8>> {
-    let env = match (prepared.webauthn, sig) {
-        (
-            true,
-            SignatureResult::WebAuthn {
-                signature,
-                authenticator_data,
-                client_data,
-            },
-        ) => canonical(&json!({
-            "body": encode_base64(&prepared.step.body),
-            "signature": encode_base64(signature),
+    let env = match (prepared.webauthn, &sig.assertion) {
+        (true, Some((authenticator_data, client_data))) => canonical(&json!({
+            "body": encode_base64(prepared.step.body()),
+            "signature": encode_base64(&sig.signature),
             "assertion": {
                 "authenticatorData": encode_base64(authenticator_data),
                 "clientData": encode_base64(client_data),
             },
         }))?,
-        (true, SignatureResult::Raw(_)) => {
-            return Err(malformed("a WebAuthn signer needs an assertion"))
-        }
-        (false, s) => raw_envelope(&prepared.step.body, raw_signature(s)?)?,
+        (true, None) => return Err(malformed("a WebAuthn signer needs an assertion")),
+        (false, _) => raw_envelope(prepared.step.body(), raw_signature(sig)?)?,
     };
     let mut store = MemoryReplayStore::new();
     verify_call(&env, view, cfg, &mut store)?;
@@ -548,7 +472,7 @@ pub fn prepare_head(spec: &HeadSpec<'_>) -> Result<PreparedHead> {
         "head body exceeds its bound",
     )?;
     Ok(PreparedHead {
-        step: SigningStep::new(
+        step: SigningStep::for_call(
             format!("heads/{}.json", spec.by),
             bytes,
             spec.by.to_string(),
@@ -608,7 +532,7 @@ pub fn prepare_receipt(request: &ReceiptToSign) -> Result<PreparedReceipt> {
         .to_string();
     require(is_key_id(&by), "receipt `by` is not a home member ID")?;
     Ok(PreparedReceipt {
-        step: SigningStep::new(
+        step: SigningStep::for_call(
             format!("{by}.receipt.json"),
             request.body.clone(),
             by,

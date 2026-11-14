@@ -23,8 +23,9 @@ use colophon_core::v05::{
     write::calls::{
         finish_call, finish_head, finish_link, finish_receipt, finish_request, prepare_call,
         prepare_head, prepare_link, prepare_receipt, prepare_request, CallSignerSpec, CallSpec,
-        HeadSpec, LinkSpec, RequestSpec, SignatureResult, SigningStep,
+        HeadSpec, LinkSpec, RequestSpec,
     },
+    write::{SignatureResult, SigningStep},
     Failure,
 };
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
@@ -61,7 +62,10 @@ impl K {
         key_id(&self.point)
     }
     fn sign(&self, body: &[u8]) -> SignatureResult {
-        SignatureResult::Raw(raw_sign(&self.sk, body))
+        SignatureResult {
+            signature: raw_sign(&self.sk, body),
+            assertion: None,
+        }
     }
 }
 fn raw_sign(sk: &SigningKey, body: &[u8]) -> Vec<u8> {
@@ -101,10 +105,8 @@ fn sig_of(env_bytes: &[u8]) -> Vec<u8> {
     unb64(v["signature"].as_str().unwrap())
 }
 fn raw_of(sig: &SignatureResult) -> Vec<u8> {
-    match sig {
-        SignatureResult::Raw(s) => s.clone(),
-        _ => unreachable!(),
-    }
+    assert!(sig.assertion.is_none());
+    sig.signature.clone()
 }
 fn trim(b: &[u8]) -> &[u8] {
     b.trim_ascii_end()
@@ -411,7 +413,10 @@ fn the_14_call_cases_reproduce_and_the_builders_agree_with_each_verdict() {
         );
         assert_eq!(prepared.step().challenge(), None);
         let sig = if c.bad_signature {
-            SignatureResult::Raw(sig_of(&vector))
+            SignatureResult {
+                signature: sig_of(&vector),
+                assertion: None,
+            }
         } else {
             let sig = acting.sign(prepared.step().body());
             assert_eq!(
@@ -537,7 +542,10 @@ fn a_link_chain_of_four_verifies_and_a_fifth_is_refused() {
             break;
         }
         let p = prepare_link(&view, &spec).unwrap();
-        let sig = SignatureResult::Raw(raw_sign(parent_signer, p.step().body()));
+        let sig = SignatureResult {
+            signature: raw_sign(parent_signer, p.step().body()),
+            assertion: None,
+        };
         links.push(finish_link(&p, &sig, &view, now).unwrap());
         parent_signer = &to.sk;
     }
@@ -659,11 +667,19 @@ fn refusals_return_nothing() {
         "badSignature"
     );
     // A short signature, and an assertion where none is allowed, never reach the verifier.
-    assert!(finish_call(&p, &SignatureResult::Raw(vec![0; 63]), &acct.view, &config).is_err());
-    let assertion = SignatureResult::WebAuthn {
+    assert!(finish_call(
+        &p,
+        &SignatureResult {
+            signature: vec![0; 63],
+            assertion: None,
+        },
+        &acct.view,
+        &config
+    )
+    .is_err());
+    let assertion = SignatureResult {
         signature: vec![0x30, 0x06, 2, 1, 1, 2, 1, 1],
-        authenticator_data: vec![0; 37],
-        client_data: b"{}".to_vec(),
+        assertion: Some((vec![0; 37], b"{}".to_vec())),
     };
     assert!(finish_call(&p, &assertion, &acct.view, &config).is_err());
     // prepare refuses shapes that can never verify.
@@ -764,10 +780,9 @@ fn a_webauthn_controller_call_carries_its_challenge_and_verifies() {
         let mut m = auth.clone();
         m.extend_from_slice(&Sha256::digest(&client));
         let s: Signature = controller.sk.sign(&m);
-        SignatureResult::WebAuthn {
+        SignatureResult {
             signature: s.to_der().as_bytes().to_vec(),
-            authenticator_data: auth,
-            client_data: client,
+            assertion: Some((auth, client)),
         }
     };
     let ok = finish_call(&p, &assert("https://id.example", 0x05), &view, &config).unwrap();
@@ -1046,10 +1061,9 @@ fn the_agent_request_reproduces_and_refusals_return_nothing() {
     })
     .is_err());
     // A WebAuthn assertion on a request is not allowed (§4.1).
-    let assertion = SignatureResult::WebAuthn {
+    let assertion = SignatureResult {
         signature: vec![],
-        authenticator_data: vec![],
-        client_data: vec![],
+        assertion: Some((vec![], vec![])),
     };
     assert!(finish_request(&p, &assertion).is_err());
 }

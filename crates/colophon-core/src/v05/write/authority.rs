@@ -74,7 +74,7 @@ impl PendingBatch {
         let mut primary = None;
         let (mut cosigs, mut adds) = (Vec::new(), Vec::new());
         for (step, sig) in self.steps.iter().zip(signatures) {
-            if sig.assertion.is_some() != step.descriptor.webauthn().is_some() {
+            if sig.assertion.is_some() != step.challenge.is_some() {
                 return Err(bad_signature(
                     "an assertion is present if and only if the signer is webauthn",
                 ));

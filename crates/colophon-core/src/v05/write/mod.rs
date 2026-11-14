@@ -574,13 +574,19 @@ pub enum StepRole {
 /// One exact body and signer for a host signature. Cosignatures and possession proofs share
 /// the primary step's body. The fields are private: a host reads them through the accessors
 /// and cannot replace what it was asked to sign.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+///
+/// An authority step ([`SigningStep::new`]) carries the signer's key descriptor. A call-side
+/// step ([`SigningStep::for_call`]: request, link, call, head, receipt) carries only the
+/// signing point (empty for a head or receipt, whose key the verifier looks up in the homes)
+/// and has no descriptor.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SigningStep {
     path: String,
     body: Vec<u8>,
     signer: String,
     role: StepRole,
-    descriptor: crate::v05::descriptor::KeyDescriptor,
+    descriptor: Option<crate::v05::descriptor::KeyDescriptor>,
+    signing: Vec<u8>,
     challenge: Option<String>,
     uv: bool,
 }
@@ -601,9 +607,30 @@ impl SigningStep {
             body,
             signer,
             role,
-            descriptor,
+            signing: descriptor.signing().to_vec(),
+            descriptor: Some(descriptor),
             challenge,
             uv,
+        }
+    }
+    /// A call-side step: a primary signature with no key descriptor and no UV demand. The
+    /// challenge is given by the caller (present for a WebAuthn signer).
+    pub(crate) fn for_call(
+        path: String,
+        body: Vec<u8>,
+        signer: String,
+        signing: Vec<u8>,
+        challenge: Option<String>,
+    ) -> Self {
+        Self {
+            path,
+            body,
+            signer,
+            role: StepRole::Primary,
+            descriptor: None,
+            signing,
+            challenge,
+            uv: false,
         }
     }
     /// Where the object will live: `authority/<seq, 8 digits>.json`, or
@@ -623,9 +650,13 @@ impl SigningStep {
     pub fn role(&self) -> StepRole {
         self.role
     }
-    /// The signer's key descriptor.
-    pub fn descriptor(&self) -> &crate::v05::descriptor::KeyDescriptor {
-        &self.descriptor
+    /// The signer's key descriptor; absent on a call-side step.
+    pub fn descriptor(&self) -> Option<&crate::v05::descriptor::KeyDescriptor> {
+        self.descriptor.as_ref()
+    }
+    /// The signer's signing point. Empty for a head or receipt step.
+    pub fn signing(&self) -> &[u8] {
+        &self.signing
     }
     /// The WebAuthn challenge, unpadded base64url SHA-256 of `body`; absent for a raw key.
     pub fn challenge(&self) -> Option<&str> {
