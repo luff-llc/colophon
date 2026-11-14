@@ -471,7 +471,9 @@ unexpired members with any access to its namespace (§10.2), at the introducing 
 Historical seals stay valid; epochs sealed to an earlier vault are reached through
 `previousVault` (§8.3). Later `shares` add only recipients this document authorizes. A member that
 is provisional (§8.7) or expired when an epoch is made is not sealed to it; it gets its shares by
-a `renew` (§9.4) once its activation is final or it is current again.
+a `renew` (§9.4): once its activation is final, by the shares-only form (the only form for a
+member with no expiry, which leaves its expiry as it is); an expired member extends its expiry in
+the same `renew`.
 
 After opening any slot the core MUST check the plaintext is 32 bytes, derive the identity and
 compare both public keys with the keyring's `vault`; a mismatch is `refused:vaultLocked` and
@@ -1098,11 +1100,18 @@ control rule, and be for a `device` or `app`. Readers compare a parent operation
 
 ### 9.4 Renew
 
-`renew` sets `member`'s expiry to `expires`, which MUST be later than both the entry's `issued`
-and the member's current expiry; to shorten access, revoke. The member MUST be current and have an
-expiry; renewing a member with none is `malformed`.
-`shares` seals every epoch in its `records` scope it lacks, including epochs introduced while it
-was expired. Nothing else changes.
+`renew` has two forms. `member` MUST be current: not revoked and not provisional (§8.7).
+- **With `expires`**, it sets `member`'s expiry to `expires`, which MUST be later than both the
+  entry's `issued` and the member's current expiry; to shorten access, revoke. The member MUST
+  have an expiry: renewing a member with none by this form is `malformed`.
+- **Without `expires`** (the shares-only form), it changes no expiry: the member's expiry stays
+  exactly as it is, none included. `shares` MUST NOT be empty, and the member MUST NOT be expired
+  at the entry's `issued` (extend it with the first form). Each share is for an epoch of the
+  member's `records` scope that exists, that no earlier entry sealed to the member, once, and is
+  sealed to the member; otherwise the entry is `malformed`.
+
+`shares` seals every epoch in the member's `records` scope it lacks, including epochs introduced
+while it was expired or provisional. Nothing else changes.
 
 ### 9.5 Revoke
 
