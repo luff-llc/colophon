@@ -1867,11 +1867,15 @@ impl Account {
         }
         // A record is returned only if the account's current history admits it.
         for r in &finished.records {
-            let j = d
-                .judgement
-                .records
-                .iter()
-                .find(|j| j.path == r.path)
+            // The finished bytes themselves, not whatever else is held at the path (a junk twin
+            // beside it must not fail an honest finish).
+            let j = records
+                .binary_search_by(|h| {
+                    (h.path.as_str(), h.bytes.as_slice())
+                        .cmp(&(r.path.as_str(), r.bytes.as_slice()))
+                })
+                .ok()
+                .and_then(|i| d.judgement.records.get(i))
                 .ok_or_else(|| malformed("the finished record was not judged"))?;
             if j.outcome != crate::v05::records::Outcome::Admitted || j.plaintext.is_none() {
                 return Err(j.outcome.failure().unwrap_or_else(|| {

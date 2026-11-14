@@ -376,10 +376,11 @@ impl PreparedRevoke {
     }
 }
 
-/// `revoke` (§9.5): the member's readable namespaces get a new epoch sealed without it, and
-/// Most digests a `revoke` entry can list in `kept`: each costs 67 bytes of canonical JSON and
-/// the entry body is bounded at [`bounds::AUTHORITY_BODY`]; 16,384 bytes are left for the rest
-/// of the entry (the epoch seals of a rekey and the heads).
+/// Most digests a `revoke` entry can list in `kept`: (1,048,576 − 16,384) / 67 = 15,405. Each
+/// digest costs 67 bytes of canonical JSON (64 hex, quotes and a comma) and the entry body is
+/// bounded at [`bounds::AUTHORITY_BODY`]; 16,384 bytes are left for the rest of the entry. That
+/// margin is a choice: a revocation that also seals epochs to very many members can need more,
+/// and the verifier's own bound on the finished entry still applies.
 pub const MAX_KEPT_DIGESTS: usize = (bounds::AUTHORITY_BODY - 16_384) / 67;
 
 /// A `kept` list that cannot fit in one entry is refused at prepare, naming the bound, instead
@@ -394,6 +395,7 @@ fn check_kept_fits(n: usize) -> Result<()> {
     )
 }
 
+/// `revoke` (§9.5): the member's readable namespaces get a new epoch sealed without it, and
 /// `kept` and `heads` are computed from `held` under `keep`.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_revoke(

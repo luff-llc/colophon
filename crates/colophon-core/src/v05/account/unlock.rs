@@ -355,6 +355,8 @@ impl Account {
             None,
         )?;
         self.fold_seed.clear();
+        // The old derivation's opened plaintext is overwritten before it is freed.
+        self.d.wipe_plaintext();
         let (o, r, p, n) = (
             self.objects.clone(),
             self.records.clone(),

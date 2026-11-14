@@ -77,6 +77,15 @@ impl EngineOptions {
         }
     }
 }
+/// A copy of the device key held on the stack for the length of one call, wiped when it goes
+/// out of scope (on every return, errors included).
+struct KeyCopy([u8; 32]);
+impl Drop for KeyCopy {
+    fn drop(&mut self) {
+        crate::v05::hpke_wiped::wipe(&mut self.0);
+    }
+}
+
 impl EngineOptions {
     /// Erase the device key held here.
     fn wipe_key(&mut self) {
@@ -451,14 +460,14 @@ impl<S: RecordSource> Engine<S> {
             let version = source.content_version(p).unwrap_or(None);
             hold_object(&mut ix, &mut objects, k, p, bytes, version);
         }
-        let key = options.checkpoint_key;
+        let key = KeyCopy(options.checkpoint_key);
         let mut scope = options.namespaces.clone();
         scope.sort();
         scope.dedup();
         let mut mode = OpenMode::Cold;
         let mut body = None;
         if let Some(s) = saved {
-            match seal::open(&s.checkpoint, &options.account, &me, &scope, &key)
+            match seal::open(&s.checkpoint, &options.account, &me, &scope, &key.0)
                 .and_then(|plain| serde_json::from_slice::<checkpoint::Body>(&plain).ok())
             {
                 Some(b) if b.format == checkpoint::FORMAT => {
@@ -479,7 +488,7 @@ impl<S: RecordSource> Engine<S> {
         let mut account = Account::open(
             objects,
             Vec::new(),
-            saved.map(|s| (s.verifier.as_slice(), &key)),
+            saved.map(|s| (s.verifier.as_slice(), &key.0)),
             me.clone(),
             now_ms,
         )?;
@@ -508,7 +517,7 @@ impl<S: RecordSource> Engine<S> {
                 for (ns, bytes) in &sv.parts {
                     let mut ps = scope.clone();
                     ps.push(format!("ns:{ns}"));
-                    let part = seal::open(bytes, &options.account, &me, &ps, &key)
+                    let part = seal::open(bytes, &options.account, &me, &ps, &key.0)
                         .and_then(|p| serde_json::from_slice::<checkpoint::NsPart>(&p).ok())
                         .filter(|p| p.namespace == *ns);
                     let Some(part) = part else {
@@ -619,6 +628,7 @@ impl<S: RecordSource> Engine<S> {
     /// Idempotent.
     pub fn load(&mut self) -> Result<Changes> {
         self.check_usable()?;
+        require(!self.locked, "the engine is locked: open a new one")?;
         let paths: Vec<String> = self.ix.unread.iter().cloned().collect();
         let c = self.ingest(paths)?;
         self.ready = true;
@@ -926,6 +936,7 @@ impl<S: RecordSource> Engine<S> {
         secrets: &[crate::v05::slots::OpeningSecret],
     ) -> Result<Changes> {
         self.check_usable()?;
+        require(!self.locked, "the engine is locked: open a new one")?;
         let mut c = self.account.finish_unlock_slot(index, secrets)?;
         let l = self.load()?;
         absorb(&mut c, l);
@@ -941,6 +952,7 @@ impl<S: RecordSource> Engine<S> {
         results: Vec<crate::v05::account::EpochSecret>,
     ) -> Result<Changes> {
         self.check_usable()?;
+        require(!self.locked, "the engine is locked: open a new one")?;
         let mut c = self.account.finish_unlock_epochs(results)?;
         let l = self.load()?;
         absorb(&mut c, l);
@@ -1380,6 +1392,7 @@ impl<S: RecordSource> Engine<S> {
         pairing: &crate::v05::pairing::ConfirmedPairing,
     ) -> Result<Changes> {
         self.check_usable()?;
+        require(!self.locked, "the engine is locked: open a new one")?;
         let mut c = self.account.accept_seed_transfer(key, sealed, pairing)?;
         if self.ready {
             let more = self.load()?;
@@ -1557,7 +1570,13 @@ impl<S: RecordSource> Engine<S> {
     }
 
     /// Forget the vault seed, every epoch key and the device key (all erased as they are
-    /// dropped) and rebuild what needs no key. The engine stays open for the verified history,
+    /// dropped), overwrite with zeros the opened plaintext the account keeps (its judgement,
+    /// its operation views and the memo of opened payloads), and rebuild what needs no key.
+    ///
+    /// **What cannot be guaranteed:** copies the allocator or the stack may still hold (a buffer
+    /// that grew leaves its old block; a value moved by the compiler leaves its old place), the
+    /// folded domain state of each namespace (a typed value, freed but not overwritten), and
+    /// secrets the host keeps. After `lock` the engine refuses to unlock, load or save again. The engine stays open for the verified history,
     /// its members and pending objects; every namespace is unreadable, and it can no longer
     /// [`Engine::save`], until the host opens a new engine with its device key.
     pub fn lock(&mut self) -> Result<Changes> {
@@ -1639,8 +1658,8 @@ impl<S: RecordSource> Engine<S> {
                     .into(),
             ));
         }
-        let key = self.options.checkpoint_key;
-        let verifier = self.account.export_persisted(&key, nonce_seed)?;
+        let key = KeyCopy(self.options.checkpoint_key);
+        let verifier = self.account.export_persisted(&key.0, nonce_seed)?;
         let mut index: Vec<checkpoint::IndexEntry> = self
             .ix
             .have
@@ -1666,7 +1685,14 @@ impl<S: RecordSource> Engine<S> {
         h.update(b"colophon/engine-checkpoint-nonce");
         let seed2: [u8; 32] = h.finalize().into();
         let scope = self.scope();
-        let checkpoint = seal::seal(&plain, &self.options.account, &self.me, &scope, &key, seed2)?;
+        let checkpoint = seal::seal(
+            &plain,
+            &self.options.account,
+            &self.me,
+            &scope,
+            &key.0,
+            seed2,
+        )?;
         // One sealed part per namespace: the memo of its records and its fold.
         let mut memos: BTreeMap<String, Vec<crate::v05::records::RecordMemo>> = BTreeMap::new();
         for m in self.account.export_judge_memo() {
@@ -1701,7 +1727,7 @@ impl<S: RecordSource> Engine<S> {
                     &self.options.account,
                     &self.me,
                     &ps,
-                    &key,
+                    &key.0,
                     hh.finalize().into(),
                 )?,
             );
