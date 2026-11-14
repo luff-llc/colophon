@@ -2630,6 +2630,27 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
             if m.home != HomeStatus::NotHome {
                 return Err(malformed("revoking a home is a transition").into());
             }
+            // The epochs a revoke introduces are checked like a `rekey`'s (consecutive, one per
+            // declared namespace) and folded into `epochs`, so a later `rekey` and the grant
+            // share-completeness check see them.
+            let mut seen = BTreeSet::new();
+            for ep in &r.epochs {
+                crate::v05::require(
+                    seen.insert(ep.namespace.clone()),
+                    "revoke: at most one epoch per namespace",
+                )
+                .map_err(Outcome::from)?;
+                let cur = s
+                    .epochs
+                    .get(&ep.namespace)
+                    .copied()
+                    .ok_or_else(|| malformed("revoke: undeclared namespace"))?;
+                crate::v05::require(
+                    cur.checked_add(1) == Some(ep.epoch),
+                    "revoke: epochs are consecutive",
+                )
+                .map_err(Outcome::from)?;
+            }
             charge_rate(&mut n, e, false)?;
             if let Some(m) = n
                 .members
@@ -2637,6 +2658,9 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 .find(|m| m.request.member_id() == r.member)
             {
                 m.revoked_seq = Some(e.seq);
+            }
+            for ep in &r.epochs {
+                n.epochs.insert(ep.namespace.clone(), ep.epoch);
             }
         }
         "endSessions" => {
