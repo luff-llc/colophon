@@ -241,17 +241,40 @@ pub struct CallNeed {
 enum Tag {
     Head,
     PullAuthority,
-    PushAuthority { last: u64 },
+    PushAuthority {
+        last: u64,
+    },
     PullPending,
-    PushPending { digests: Vec<String> },
+    PushPending {
+        digests: Vec<String>,
+    },
     Changes,
-    PullRecord { path: String, sha: String },
-    PutRecord { path: String, sha: String },
-    PutBlob { path: String },
-    PullBlob { path: String },
-    PullLive { path: String, sha: String },
-    PutLive { path: String, sha: String, generation: u64 },
-    GenesisCheck { sha: String },
+    PullRecord {
+        path: String,
+        sha: String,
+    },
+    PutRecord {
+        path: String,
+        sha: String,
+    },
+    PutBlob {
+        path: String,
+    },
+    PullBlob {
+        path: String,
+    },
+    PullLive {
+        path: String,
+        sha: String,
+    },
+    PutLive {
+        path: String,
+        sha: String,
+        generation: u64,
+    },
+    GenesisCheck {
+        sha: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -509,7 +532,13 @@ impl<S: RecordSource> Engine<S> {
             if let Some((ticket, item)) = h.awaiting.take() {
                 if h.provided.as_ref().is_some_and(|(t, _)| *t == ticket) {
                     let (_, call) = h.provided.take().unwrap_or_default();
-                    return Ok(Step::Request(self.make_request(home, &endpoint, ticket, item, Some(call))));
+                    return Ok(Step::Request(self.make_request(
+                        home,
+                        &endpoint,
+                        ticket,
+                        item,
+                        Some(call),
+                    )));
                 }
                 let need = CallNeed {
                     ticket,
@@ -538,7 +567,9 @@ impl<S: RecordSource> Engine<S> {
                     h.awaiting = Some((ticket, item));
                     continue;
                 }
-                return Ok(Step::Request(self.make_request(home, &endpoint, ticket, item, None)));
+                return Ok(Step::Request(
+                    self.make_request(home, &endpoint, ticket, item, None),
+                ));
             }
             // The queue is empty: plan the next phase, or finish.
             let phase = h.phase;
@@ -893,7 +924,11 @@ impl<S: RecordSource> Engine<S> {
         };
         if h.live.is_none()
             || &h.account != self.account.id()
-            || path != format!("history/{}/{}/{:012}-{}.json", h.author, h.namespace, h.clock, h.id)
+            || path
+                != format!(
+                    "history/{}/{}/{:012}-{}.json",
+                    h.author, h.namespace, h.clock, h.id
+                )
         {
             return false;
         }
@@ -917,13 +952,10 @@ impl<S: RecordSource> Engine<S> {
                 continue;
             }
             let mut after = String::new();
-            loop {
-                let page = match self.query(&ns, "blobs", json!({"limit": 1000, "after": after}))? {
-                    crate::model::Outcome::Success { value, .. } => {
-                        value.get("value").cloned().unwrap_or(value)
-                    }
-                    crate::model::Outcome::Failure { .. } => break,
-                };
+            while let crate::model::Outcome::Success { value, .. } =
+                self.query(&ns, "blobs", json!({"limit": 1000, "after": after}))?
+            {
+                let page = value.get("value").cloned().unwrap_or(value);
                 let rows = page["blobs"].as_array().cloned().unwrap_or_default();
                 for r in &rows {
                     if let Some(d) = r["digest"].as_str() {
@@ -1206,7 +1238,11 @@ impl<S: RecordSource> Engine<S> {
                 generation,
             } => {
                 if matches!(response.status, 200 | 201) {
-                    let g = self.home_mut(home).home_live.entry(path.clone()).or_default();
+                    let g = self
+                        .home_mut(home)
+                        .home_live
+                        .entry(path.clone())
+                        .or_default();
                     *g = (*g).max(generation);
                 }
                 self.on_put(home, &path, &sha, true, &response, &mut report)
@@ -1286,7 +1322,13 @@ impl<S: RecordSource> Engine<S> {
                     ..Default::default()
                 };
                 self.merge_objects(o, report, home)?;
-                if report.changes.heads.refused.iter().any(|(_, c)| c == "unavailable") {
+                if report
+                    .changes
+                    .heads
+                    .refused
+                    .iter()
+                    .any(|(_, c)| c == "unavailable")
+                {
                     // The head names an entry the pass could not fetch: it is ahead of what
                     // the home serves (§13.3: not wrong, but not to be hidden).
                     report.faults.push(Fault::HeadAhead { home: home.into() });
@@ -1549,7 +1591,8 @@ impl<S: RecordSource> Engine<S> {
         }
         let object = v.get("object").and_then(Value::as_str)?.to_string();
         let by = v.get("by").and_then(Value::as_str)?.to_string();
-        let received = crate::v05::encoding::parse_date(v.get("received").and_then(Value::as_str)?)?;
+        let received =
+            crate::v05::encoding::parse_date(v.get("received").and_then(Value::as_str)?)?;
         let key = self
             .account
             .record_authority()
@@ -1569,7 +1612,12 @@ impl<S: RecordSource> Engine<S> {
             )
             .ok()?;
             (env.digest == object)
-                .then(|| env.value.get("issued").and_then(Value::as_str).and_then(crate::v05::encoding::parse_date))
+                .then(|| {
+                    env.value
+                        .get("issued")
+                        .and_then(Value::as_str)
+                        .and_then(crate::v05::encoding::parse_date)
+                })
                 .flatten()
         })?;
         (received >= issued && received <= issued.saturating_add(300_000)).then_some((object, by))
@@ -1816,9 +1864,9 @@ impl<S: RecordSource> Engine<S> {
         // A cursor must strictly advance: one seen before this pass, or the one we sent, is a
         // replay.
         let h = self.home_mut(home);
-        let repeated = cursor
-            .as_ref()
-            .is_some_and(|c| Some(c) == h.changes_cursor.as_ref() && more || h.seen_cursors.contains(c));
+        let repeated = cursor.as_ref().is_some_and(|c| {
+            Some(c) == h.changes_cursor.as_ref() && more || h.seen_cursors.contains(c)
+        });
         if let Some(c) = &cursor {
             h.seen_cursors.insert(c.clone());
         }
@@ -1847,7 +1895,13 @@ impl<S: RecordSource> Engine<S> {
         Ok(())
     }
 
-    fn on_genesis(&mut self, home: &str, sha: &str, r: &Response, report: &mut Report) -> Result<()> {
+    fn on_genesis(
+        &mut self,
+        home: &str,
+        sha: &str,
+        r: &Response,
+        report: &mut Report,
+    ) -> Result<()> {
         let theirs = crate::v05::history::envelope::AuthEnvelope::parse(
             &r.body,
             crate::v05::encoding::bounds::AUTHORITY_BODY,
@@ -1865,7 +1919,9 @@ impl<S: RecordSource> Engine<S> {
                 h.twins.insert(sha.to_string());
             }
         } else {
-            report.faults.push(Fault::ForeignAccount { home: home.into() });
+            report
+                .faults
+                .push(Fault::ForeignAccount { home: home.into() });
             self.halt(home);
         }
         Ok(())
@@ -1936,7 +1992,10 @@ impl<S: RecordSource> Engine<S> {
         let batch = self.options.batch;
         let h = self.home_mut(home);
         h.pulled.push((path.to_string(), r.body.clone()));
-        let last = !h.queue.iter().any(|q| matches!(q.0, Tag::PullRecord { .. }));
+        let last = !h
+            .queue
+            .iter()
+            .any(|q| matches!(q.0, Tag::PullRecord { .. }));
         if h.pulled.len() >= batch || last {
             self.flush_pulled(home, report)?;
         }

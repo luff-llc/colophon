@@ -1732,15 +1732,16 @@ fn judge_candidate(
                     };
                     match opened {
                         None => j.outcome = Outcome::Refused("invalidPayload"),
-                        Some(pt) if hd.live.as_ref().is_some_and(|st| {
-                            crate::protocol::live_slot(
-                                &hd.namespace,
-                                pt.get("kind").and_then(Value::as_str).unwrap_or_default(),
-                                pt.get("payload").unwrap_or(&Value::Null),
-                            )
-                            .as_deref()
-                                != Some(st.slot.as_str())
-                        }) =>
+                        Some(pt)
+                            if hd.live.as_ref().is_some_and(|st| {
+                                crate::protocol::live_slot(
+                                    &hd.namespace,
+                                    pt.get("kind").and_then(Value::as_str).unwrap_or_default(),
+                                    pt.get("payload").unwrap_or(&Value::Null),
+                                )
+                                .as_deref()
+                                    != Some(st.slot.as_str())
+                            }) =>
                         {
                             j.outcome = Outcome::Refused(Reason::InvalidPayload.as_str());
                         }

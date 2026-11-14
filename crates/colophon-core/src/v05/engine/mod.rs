@@ -396,10 +396,7 @@ impl<S: RecordSource> Engine<S> {
             crate::v05::encoding::is_lower_hex(&options.account, 64),
             "the account ID is 64 lowercase hex",
         )?;
-        require(
-            (1..=65_536).contains(&options.batch),
-            "batch is 1 to 65536",
-        )?;
+        require((1..=65_536).contains(&options.batch), "batch is 1 to 65536")?;
         for n in &options.namespaces {
             require(
                 crate::v05::terms::valid_namespace(n),
@@ -1107,7 +1104,8 @@ impl<S: RecordSource> Engine<S> {
             if h.namespace != namespace || h.slot != slot {
                 continue;
             }
-            let ops = crate::v05::records::operation_path(&h.author, &h.namespace, h.generation, &h.id);
+            let ops =
+                crate::v05::records::operation_path(&h.author, &h.namespace, h.generation, &h.id);
             if self.ix.have.contains_key(&ops)
                 || self.account.records().iter().any(|r| r.path == ops)
             {
@@ -1283,8 +1281,7 @@ impl<S: RecordSource> Engine<S> {
         h.update(b"colophon/engine-checkpoint-nonce");
         let seed2: [u8; 32] = h.finalize().into();
         let scope = self.scope();
-        let checkpoint =
-            seal::seal(&plain, &self.options.account, &self.me, &scope, &key, seed2)?;
+        let checkpoint = seal::seal(&plain, &self.options.account, &self.me, &scope, &key, seed2)?;
         // One sealed part per namespace: the memo of its records and its fold.
         let mut memos: BTreeMap<String, Vec<crate::v05::records::RecordMemo>> = BTreeMap::new();
         for m in self.account.export_judge_memo() {
@@ -1314,7 +1311,14 @@ impl<S: RecordSource> Engine<S> {
             ps.push(format!("ns:{ns}"));
             parts.insert(
                 ns,
-                seal::seal(&plain, &self.options.account, &self.me, &ps, &key, hh.finalize().into())?,
+                seal::seal(
+                    &plain,
+                    &self.options.account,
+                    &self.me,
+                    &ps,
+                    &key,
+                    hh.finalize().into(),
+                )?,
             );
         }
         Ok(Saved {

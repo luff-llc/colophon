@@ -274,7 +274,10 @@ impl Persisted {
             .unwrap_or_default();
         let kept = serde_json::from_slice::<serde_json::Value>(old)
             .ok()
-            .and_then(|v| v.get("succession_verified").and_then(serde_json::Value::as_bool))
+            .and_then(|v| {
+                v.get("succession_verified")
+                    .and_then(serde_json::Value::as_bool)
+            })
             .unwrap_or(false);
         let previous = Self {
             head_marks: marks,

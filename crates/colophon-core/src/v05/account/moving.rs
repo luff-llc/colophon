@@ -28,12 +28,10 @@
 //! secret or keeps a clock: the host signs each step's exact bytes and passes the time.
 use super::{Account, Changes, Finished, Incoming, PendingAction};
 use crate::model::Records as Legacy;
-use crate::v05::encoding::{decode_base64, strict_parse};
 use crate::v05::encoding::digest;
+use crate::v05::encoding::{decode_base64, strict_parse};
 use crate::v05::history::swift;
-use crate::v05::history::{
-    succession_status, Objects, SuccessionStatus,
-};
+use crate::v05::history::{succession_status, Objects, SuccessionStatus};
 use crate::v05::records::{Level, OperationHeader};
 use crate::v05::swift_copy::{CopyItem, CopyPlan, CopyResult, Destination, DestinationBatch};
 use crate::v05::write::authority::PendingBatch;

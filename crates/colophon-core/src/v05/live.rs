@@ -243,6 +243,7 @@ pub(crate) fn judge_live_with(
     // The admitted durable headers, by namespace, in fold order.
     let mut admitted: BTreeMap<String, Vec<(u64, String, String)>> = BTreeMap::new();
     let mut retained: BTreeSet<String> = BTreeSet::new();
+    let mut admitted_ids: BTreeSet<(String, String)> = BTreeSet::new();
     for j in &judgement.records {
         if j.outcome == Outcome::Admitted {
             if let (Some(ns), Some(a), Some(id), Some(d)) = (
@@ -251,6 +252,7 @@ pub(crate) fn judge_live_with(
                 j.id.clone(),
                 j.digest.clone(),
             ) {
+                admitted_ids.insert((a.clone(), id.clone()));
                 admitted.entry(ns).or_default().push((j.clock, a, id));
                 retained.insert(d);
             }
@@ -327,6 +329,10 @@ pub(crate) fn judge_live_with(
                 let v = group[0];
                 if retained.contains(&v.head.digest) {
                     verdicts[v.idx] = Some(LiveVerdict::Retained);
+                } else if admitted_ids.contains(&(v.head.author.clone(), v.head.id.clone())) {
+                    // One author, one operation ID: a live head and an immutable record that
+                    // share it do not both fold (0.3 §5: `duplicateID`).
+                    verdicts[v.idx] = Some(LiveVerdict::Refused("duplicateID"));
                 } else {
                     verdicts[v.idx] = Some(LiveVerdict::Current);
                     heads.push(v.head.clone());

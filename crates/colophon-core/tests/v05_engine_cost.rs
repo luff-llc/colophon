@@ -34,16 +34,31 @@ fn run(n: usize) {
     let mut e = member_engine(&s.f, &host, &src, &writer, NOW);
     let t = Instant::now();
     for i in 0..n {
-        engine_write(&mut e, &mut host, &src, NS, "createNotebook", json!({"id": format!("n{i}"), "title": format!("Notebook {i}")}));
+        engine_write(
+            &mut e,
+            &mut host,
+            &src,
+            NS,
+            "createNotebook",
+            json!({"id": format!("n{i}"), "title": format!("Notebook {i}")}),
+        );
     }
-    println!("  (building {n} records by {n} writes took {:.1} s)", t.elapsed().as_secs_f64());
+    println!(
+        "  (building {n} records by {n} writes took {:.1} s)",
+        t.elapsed().as_secs_f64()
+    );
     let saved = e.save([1; 32]).unwrap();
     let mem = saved.parts.values().map(Vec::len).sum::<usize>() + saved.checkpoint.len();
 
     // Cold open.
     let t = Instant::now();
     let cold = member_engine(&s.f, &host, &src, &writer, NOW);
-    row("cold open + unlock + load", &EngineStats::default(), &cold.stats(), t);
+    row(
+        "cold open + unlock + load",
+        &EngineStats::default(),
+        &cold.stats(),
+        t,
+    );
     // Resumed open, nothing new.
     let t = Instant::now();
     let mut r = Engine::open(
@@ -56,27 +71,50 @@ fn run(n: usize) {
     )
     .unwrap();
     let steps = r.begin_unlock_epochs();
-    r.finish_unlock_epochs(host.answer_epochs(&writer, steps)).unwrap();
-    row("resumed open (nothing new)", &EngineStats::default(), &r.stats(), t);
+    r.finish_unlock_epochs(host.answer_epochs(&writer, steps))
+        .unwrap();
+    row(
+        "resumed open (nothing new)",
+        &EngineStats::default(),
+        &r.stats(),
+        t,
+    );
     assert_eq!(r.stats().signatures_verified, 0);
     assert_eq!(r.stats().folds_applied_last, 0);
     // One write.
     let before = r.stats();
     let t = Instant::now();
-    engine_write(&mut r, &mut host, &src, NS, "createNotebook", json!({"id": "one", "title": "One"}));
+    engine_write(
+        &mut r,
+        &mut host,
+        &src,
+        NS,
+        "createNotebook",
+        json!({"id": "one", "title": "One"}),
+    );
     row("one write (prepare + finish)", &before, &r.stats(), t);
     assert!(r.stats().signatures_verified - before.signatures_verified <= 2);
     // A refresh adding 100 records (written by another session of the same writer's chain).
     let mut other = member_engine(&s.f, &host, &src, &writer, NOW);
     let other_src = src.clone();
     for i in 0..100 {
-        engine_write(&mut other, &mut host, &other_src, NS, "createNotebook", json!({"id": format!("m{i}"), "title": "M"}));
+        engine_write(
+            &mut other,
+            &mut host,
+            &other_src,
+            NS,
+            "createNotebook",
+            json!({"id": format!("m{i}"), "title": "M"}),
+        );
     }
     let before = r.stats();
     let t = Instant::now();
     r.refresh(src.listing()).unwrap();
     row("refresh adding 100 records", &before, &r.stats(), t);
-    assert_eq!(r.stats().signatures_verified - before.signatures_verified, 100);
+    assert_eq!(
+        r.stats().signatures_verified - before.signatures_verified,
+        100
+    );
 
     // First sync from a home that holds everything.
     let mut files = 0;
@@ -92,9 +130,26 @@ fn run(n: usize) {
     let home = s.home.clone();
     let before = fresh.stats();
     let t = Instant::now();
-    let faults = sync_pass(&mut fresh, &fresh_src, &home, &mut s.sim, &host, NOW + 1_000);
-    row(&format!("first sync of {files} records"), &before, &fresh.stats(), t);
-    assert!(faults.iter().all(|f| matches!(f, colophon_core::v05::engine::exchange::Fault::More { .. })), "{faults:?}");
+    let faults = sync_pass(
+        &mut fresh,
+        &fresh_src,
+        &home,
+        &mut s.sim,
+        &host,
+        NOW + 1_000,
+    );
+    row(
+        &format!("first sync of {files} records"),
+        &before,
+        &fresh.stats(),
+        t,
+    );
+    assert!(
+        faults
+            .iter()
+            .all(|f| matches!(f, colophon_core::v05::engine::exchange::Fault::More { .. })),
+        "{faults:?}"
+    );
 
     println!("  sealed checkpoint: {} KiB for {n} records", mem / 1024);
 }
@@ -105,22 +160,45 @@ fn live(slots: usize) {
     let src = device_source(&s);
     let mut host = std::mem::replace(&mut s.f.host, Host::new());
     let mut e = member_engine(&s.f, &host, &src, &id, NOW);
-    engine_write(&mut e, &mut host, &src, "listening.podcasts", "follow", json!({"id": "show", "url": "https://example.org/f", "title": "T"}));
+    engine_write(
+        &mut e,
+        &mut host,
+        &src,
+        "listening.podcasts",
+        "follow",
+        json!({"id": "show", "url": "https://example.org/f", "title": "T"}),
+    );
     let t = Instant::now();
     for i in 0..slots {
-        engine_live(&mut e, &mut host, &src, json!({"id": format!("ep{i}"), "show": "show", "seconds": 1.0}));
+        engine_live(
+            &mut e,
+            &mut host,
+            &src,
+            json!({"id": format!("ep{i}"), "show": "show", "seconds": 1.0}),
+        );
     }
-    println!("L = {slots} live slots (built in {:.1} s)", t.elapsed().as_secs_f64());
+    println!(
+        "L = {slots} live slots (built in {:.1} s)",
+        t.elapsed().as_secs_f64()
+    );
     let before = e.stats();
     let t = Instant::now();
-    engine_live(&mut e, &mut host, &src, json!({"id": "ep0", "show": "show", "seconds": 2.0}));
+    engine_live(
+        &mut e,
+        &mut host,
+        &src,
+        json!({"id": "ep0", "show": "show", "seconds": 2.0}),
+    );
     row("one live write", &before, &e.stats(), t);
 }
 
 #[test]
 #[ignore]
 fn cost_of_open_resume_write_refresh_sync_for_1000_records() {
-    run(1_000);
+    run(std::env::var("COST_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000));
 }
 #[test]
 #[ignore]

@@ -32,8 +32,8 @@ use crate::v05::write::calls::{
     PreparedCall, PreparedLink,
 };
 use crate::v05::write::records::{
-    prepare_grant, prepare_rekey, prepare_renew, prepare_resolution,
-    prepare_revoke, Keep, OperationSpec, PreparedOperation,
+    prepare_grant, prepare_rekey, prepare_renew, prepare_resolution, prepare_revoke, Keep,
+    OperationSpec, PreparedOperation,
 };
 use crate::v05::write::{format_date, KeptHead, Kind, SignatureResult, SigningStep};
 use crate::v05::{malformed, require, Failure, Reason, Result};
@@ -1440,9 +1440,7 @@ impl Account {
             .tips
             .get(&(me.clone(), namespace.to_string()))
             .map_or(&[][..], Vec::as_slice);
-        let used = |ns: &str, e: u64, n: &[u8]| {
-            w.nonces.contains(&(ns.to_string(), e, n.to_vec()))
-        };
+        let used = |ns: &str, e: u64, n: &[u8]| w.nonces.contains(&(ns.to_string(), e, n.to_vec()));
         let prepared = crate::v05::write::records::prepare_operation_fast(
             &self.d.auth,
             &self.d.keys,

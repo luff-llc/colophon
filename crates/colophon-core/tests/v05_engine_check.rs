@@ -8,7 +8,7 @@
 )]
 #[path = "v05_engine_support/mod.rs"]
 mod support;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::engine::general_purpose::STANDARD;
 use colophon_core::model::Outcome;
 use colophon_core::v05::account::{Account, Identity, RevokeKeep};
 use colophon_core::v05::encoding::canonical;
@@ -53,7 +53,14 @@ struct Notes {
 fn notes(n: usize) -> Notes {
     let mut f = create(&[NOTES]);
     let member = f.host.identity(31);
-    admit(&mut f, &member, "Phone", "device", terms("write"), terms("write"));
+    admit(
+        &mut f,
+        &member,
+        "Phone",
+        "device",
+        terms("write"),
+        terms("write"),
+    );
     let src = MemSource::versioned();
     src.store_account(&f.account);
     let writer = member_session(&f, &member);
@@ -139,7 +146,10 @@ fn check_resume_accepts_changed_bytes_at_a_covered_immutable_path() {
     // In a running session: fail closed.
     w.src.put(&victim, twin.clone());
     let in_session = e.refresh(w.src.listing());
-    assert!(in_session.is_err(), "in a session it is equivocation: {in_session:?}");
+    assert!(
+        in_session.is_err(),
+        "in a session it is equivocation: {in_session:?}"
+    );
     // After a restart with the checkpoint: accepted, the record is gone, no fault.
     let mut r = open_notes(&w, &w.src, Some(&saved)).unwrap();
     assert!(
@@ -148,9 +158,16 @@ fn check_resume_accepts_changed_bytes_at_a_covered_immutable_path() {
         r.open_mode()
     );
     assert_eq!(r.rejudged(), [victim.clone()]);
-    assert_eq!(admitted_ids(&r, NOTES).len(), 9, "the changed record is judged again and is no record");
+    assert_eq!(
+        admitted_ids(&r, NOTES).len(),
+        9,
+        "the changed record is judged again and is no record"
+    );
     let audit = r.verify_batch(1_000);
-    assert!(audit.is_err(), "and the integrity audit fails on bytes that do not parse: {audit:?}");
+    assert!(
+        audit.is_err(),
+        "and the integrity audit fails on bytes that do not parse: {audit:?}"
+    );
 }
 
 /// The checkpoint's seal binds account, identity and scope; a truncated, bit-flipped or
@@ -164,7 +181,10 @@ fn check_checkpoint_forgeries_open_cold() {
         let mut s = saved.clone();
         s.checkpoint.truncate(cut);
         let r = open_notes(&w, &w.src, Some(&s)).unwrap();
-        assert!(matches!(r.open_mode(), OpenMode::Invalidated(_)), "cut {cut}");
+        assert!(
+            matches!(r.open_mode(), OpenMode::Invalidated(_)),
+            "cut {cut}"
+        );
         assert_eq!(admitted_ids(&r, NOTES).len(), 4);
     }
     let mut s = saved.clone();
@@ -210,7 +230,14 @@ fn home_world() -> HomeWorld {
         follow(),
     );
     let home = w.s.home.clone();
-    let f = sync_pass(&mut w.phone, &w.phone_src, &home, &mut w.s.sim, &w.host, NOW);
+    let f = sync_pass(
+        &mut w.phone,
+        &w.phone_src,
+        &home,
+        &mut w.s.sim,
+        &w.host,
+        NOW,
+    );
     assert!(f.is_empty(), "{f:?}");
     w
 }
@@ -299,7 +326,9 @@ fn check_genesis_twin_makes_a_pass_that_never_ends() {
     // A second device of the phone's member: no cursor yet, so the feed lists the genesis.
     let src = device_source(&w.s);
     let mut fresh = member_engine(&w.s.f, &w.host, &src, &w.phone_id, NOW);
-    let mut wire = GenesisTwin { inner: &mut w.s.sim };
+    let mut wire = GenesisTwin {
+        inner: &mut w.s.sim,
+    };
     let (sent, done) = bounded_pass(
         &mut fresh,
         &src,
@@ -314,7 +343,10 @@ fn check_genesis_twin_makes_a_pass_that_never_ends() {
         .filter(|r| r.as_str() == "Get /records/authority/00000001.json")
         .count();
     assert!(done, "a twin of the genesis is one object: the pass ends");
-    assert!(checks <= 1, "the same body is checked once and never queued again: {checks}");
+    assert!(
+        checks <= 1,
+        "the same body is checked once and never queued again: {checks}"
+    );
 }
 
 /// A home that answers every change-feed request with the same entry, a fresh cursor and
@@ -359,9 +391,15 @@ fn check_change_feed_has_no_page_bound() {
         NOW + 1_000,
         3_000,
     );
-    let pages = sent.iter().filter(|r| r.starts_with("Get /changes")).count();
+    let pages = sent
+        .iter()
+        .filter(|r| r.starts_with("Get /changes"))
+        .count();
     assert!(done, "no answer from a home keeps a pass going");
-    assert!(pages <= 3, "a repeated entry under a fresh cursor ends the pass: {pages} pages");
+    assert!(
+        pages <= 3,
+        "a repeated entry under a fresh cursor ends the pass: {pages} pages"
+    );
 }
 
 /// F-4 (live, exchange): a device whose local slot is older than the home's PUTs its older
@@ -378,7 +416,14 @@ fn check_live_put_overwrites_a_newer_value_on_the_home() {
         &w.phone_src,
         position("e1", 10.0),
     );
-    let f = sync_pass(&mut w.phone, &w.phone_src, &home, &mut w.s.sim, &w.host, NOW + 1_000);
+    let f = sync_pass(
+        &mut w.phone,
+        &w.phone_src,
+        &home,
+        &mut w.s.sim,
+        &w.host,
+        NOW + 1_000,
+    );
     assert!(f.is_empty(), "{f:?}");
     // The device's store as it was then (a restore, or the provider brought an older copy).
     let old = MemSource::new();
@@ -391,14 +436,31 @@ fn check_live_put_overwrites_a_newer_value_on_the_home() {
         &w.phone_src,
         position("e1", 20.0),
     );
-    let f = sync_pass(&mut w.phone, &w.phone_src, &home, &mut w.s.sim, &w.host, NOW + 2_000);
+    let f = sync_pass(
+        &mut w.phone,
+        &w.phone_src,
+        &home,
+        &mut w.s.sim,
+        &w.host,
+        NOW + 2_000,
+    );
     // (F-7: an honest home already makes this pass report a rollback.)
     assert!(f.is_empty(), "{f:?}");
     let (slot, newer) = second.stores.last().unwrap().clone();
-    assert_eq!(w.s.sim.files[&slot], newer, "the home holds the newer value");
+    assert_eq!(
+        w.s.sim.files[&slot], newer,
+        "the home holds the newer value"
+    );
     // The restored device syncs.
     let mut restored = member_engine(&w.s.f, &w.host, &old, &w.phone_id, NOW + 3_000);
-    let f = sync_pass(&mut restored, &old, &home, &mut w.s.sim, &w.host, NOW + 3_000);
+    let f = sync_pass(
+        &mut restored,
+        &old,
+        &home,
+        &mut w.s.sim,
+        &w.host,
+        NOW + 3_000,
+    );
     // It learns the newer value itself...
     let g_new = restored.account().live_heads()[0].generation;
     assert_eq!(g_new, OperationHeaderClock::of(&newer));
@@ -427,12 +489,39 @@ impl OperationHeaderClock {
 fn check_an_honest_second_live_sample_reports_a_rollback() {
     let mut w = home_world();
     let home = w.s.home.clone();
-    engine_live(&mut w.phone, &mut w.host, &w.phone_src, position("e1", 10.0));
-    let f = sync_pass(&mut w.phone, &w.phone_src, &home, &mut w.s.sim, &w.host, NOW + 1_000);
+    engine_live(
+        &mut w.phone,
+        &mut w.host,
+        &w.phone_src,
+        position("e1", 10.0),
+    );
+    let f = sync_pass(
+        &mut w.phone,
+        &w.phone_src,
+        &home,
+        &mut w.s.sim,
+        &w.host,
+        NOW + 1_000,
+    );
     assert!(f.is_empty(), "{f:?}");
-    engine_live(&mut w.phone, &mut w.host, &w.phone_src, position("e1", 20.0));
-    let f = sync_pass(&mut w.phone, &w.phone_src, &home, &mut w.s.sim, &w.host, NOW + 2_000);
-    assert!(f.is_empty(), "an honest home is not reported as rolling back: {f:?}");
+    engine_live(
+        &mut w.phone,
+        &mut w.host,
+        &w.phone_src,
+        position("e1", 20.0),
+    );
+    let f = sync_pass(
+        &mut w.phone,
+        &w.phone_src,
+        &home,
+        &mut w.s.sim,
+        &w.host,
+        NOW + 2_000,
+    );
+    assert!(
+        f.is_empty(),
+        "an honest home is not reported as rolling back: {f:?}"
+    );
 }
 
 /// A home that lists `n` made-up `ops/` paths and serves garbage at each.
@@ -444,7 +533,10 @@ fn garbage_at(i: usize) -> (String, Vec<u8>) {
     let author = format!("{:032x}", 0xabcdef00u64 + i as u64);
     let id = format!("{:032x}", 0x1234u64 + i as u64);
     let path = format!("ops/{author}/{LISTEN}/{:012}-{id}.json", i + 1);
-    let bytes = canonical(&json!({"body": b64(format!("junk {i}").as_bytes()), "signature": b64(&[1u8; 64])})).unwrap();
+    let bytes = canonical(
+        &json!({"body": b64(format!("junk {i}").as_bytes()), "signature": b64(&[1u8; 64])}),
+    )
+    .unwrap();
     (path, bytes)
 }
 impl Wire for Garbage<'_> {
@@ -504,10 +596,16 @@ fn check_home_garbage_stays_in_the_account() {
     assert!(done);
     let held = w.phone.account().records().len();
     assert!(
-        w.phone_src.listing().iter().all(|p| !p.contains("000000000000000000000000abc")),
+        w.phone_src
+            .listing()
+            .iter()
+            .all(|p| !p.contains("000000000000000000000000abc")),
         "garbage is not stored"
     );
-    assert_eq!(held, before, "garbage is dropped after judgement and never stays in the account");
+    assert_eq!(
+        held, before,
+        "garbage is dropped after judgement and never stays in the account"
+    );
     let (sent2, _) = bounded_pass(
         &mut w.phone,
         &w.phone_src,
@@ -517,10 +615,22 @@ fn check_home_garbage_stays_in_the_account() {
         NOW + 2_000,
         5_000,
     );
-    let pulls = |s: &[String]| s.iter().filter(|r| r.contains("000000000000000000000000abc")).count();
+    let pulls = |s: &[String]| {
+        s.iter()
+            .filter(|r| r.contains("000000000000000000000000abc"))
+            .count()
+    };
     assert_eq!(pulls(&sent1), 300);
-    eprintln!("garbage pulls: pass 1 {}, pass 2 {}", pulls(&sent1), pulls(&sent2));
-    assert_eq!(pulls(&sent2), 0, "and, remembered by digest, not fetched again");
+    eprintln!(
+        "garbage pulls: pass 1 {}, pass 2 {}",
+        pulls(&sent1),
+        pulls(&sent2)
+    );
+    assert_eq!(
+        pulls(&sent2),
+        0,
+        "and, remembered by digest, not fetched again"
+    );
 }
 
 /// Tickets: an answer to a ticket that was never issued, or a second answer, is refused.
@@ -551,10 +661,7 @@ fn check_tickets_cannot_be_forged_or_reused() {
 fn check_random_answers_do_not_panic_or_move_state() {
     let mut w = home_world();
     let home = w.s.home.clone();
-    let want = (
-        w.phone.account().head(),
-        admitted_ids(&w.phone, LISTEN),
-    );
+    let want = (w.phone.account().head(), admitted_ids(&w.phone, LISTEN));
     let mut seed: u64 = 0x9e3779b97f4a7c15;
     let mut rnd = move || {
         seed ^= seed << 13;
@@ -584,7 +691,8 @@ fn check_random_answers_do_not_panic_or_move_state() {
                     let _ = w.phone.exchange_provide_call(&home, n.ticket, b"x");
                 }
                 Step::Request(r) => {
-                    let status = [200u16, 201, 404, 409, 410, 412, 421, 422, 428, 500][(rnd() % 10) as usize];
+                    let status = [200u16, 201, 404, 409, 410, 412, 421, 422, 428, 500]
+                        [(rnd() % 10) as usize];
                     let body = bodies[(rnd() % bodies.len() as u64) as usize].clone();
                     let _ = w.phone.exchange_answer(
                         &home,
@@ -665,7 +773,10 @@ fn check_keep_everything_revocation_loses_retained_live_copies() {
     let reader_id = s.admit(34, terms_for(&[(LISTEN, "read")]));
     let mut r = s.engine(&reader_id);
     r.refresh(s.src.listing()).unwrap();
-    assert_eq!(r.account().record_verdict(&retained).as_deref(), Some("admitted"));
+    assert_eq!(
+        r.account().record_verdict(&retained).as_deref(),
+        Some("admitted")
+    );
     let mut ctl = controller_engine(&s.f, &s.host, &s.src, &ctl_id, NOW);
     let seed = s.host.fresh();
     let action = ctl
@@ -717,7 +828,12 @@ fn check_a_member_cannot_set_another_members_slot() {
     let mut ea = s.engine(&a);
     let mut eb = s.engine(&b);
     let wa = engine_live(&mut ea, &mut s.host, &s.src, position("e1", 10.0));
-    let wb = engine_live(&mut eb, &mut s.host, &MemSource::new(), position("e1", 99.0));
+    let wb = engine_live(
+        &mut eb,
+        &mut s.host,
+        &MemSource::new(),
+        position("e1", 99.0),
+    );
     let (pa, _) = wa.stores.last().unwrap().clone();
     let (_, bb) = wb.stores.last().unwrap().clone();
     let mut r = s.engine(&a);
@@ -745,7 +861,14 @@ fn check_records_before_their_grant_and_revocation_equal_a_cold_open() {
     let mut w = notes(6);
     // A second member, granted later, writes; then the first is revoked keeping nothing.
     let second = w.f.host.identity(41);
-    admit(&mut w.f, &second, "Tablet", "device", terms("write"), terms("write"));
+    admit(
+        &mut w.f,
+        &second,
+        "Tablet",
+        "device",
+        terms("write"),
+        terms("write"),
+    );
     let mut sess = member_session(&w.f, &second);
     for i in 0..4 {
         let seed = w.f.host.fresh();
@@ -764,11 +887,10 @@ fn check_records_before_their_grant_and_revocation_equal_a_cold_open() {
     }
     let d = w.f.d.clone();
     let seed = w.f.host.fresh();
-    let action = w
-        .f
-        .account
-        .begin_revoke(&w.member, &RevokeKeep::Nothing, &[d.clone()], seed)
-        .unwrap();
+    let action =
+        w.f.account
+            .begin_revoke(&w.member, &RevokeKeep::Nothing, &[d.clone()], seed)
+            .unwrap();
     let done = run(&mut w.f.account, &w.f.host, action);
     w.src.publish(&done);
     w.src.store_account(&w.f.account);
@@ -914,7 +1036,12 @@ fn check_cost_of_live_slots() {
     engine_write(&mut e, &mut s.host, &s.src, LISTEN, "follow", follow());
     let t = Instant::now();
     for i in 0..l {
-        engine_live(&mut e, &mut s.host, &s.src, position(&format!("ep{i}"), 1.0));
+        engine_live(
+            &mut e,
+            &mut s.host,
+            &s.src,
+            position(&format!("ep{i}"), 1.0),
+        );
     }
     eprintln!("L={l}: {l} live writes took {:?}", t.elapsed());
     let mut r = s.engine(&id);
@@ -922,10 +1049,20 @@ fn check_cost_of_live_slots() {
     r.refresh(s.src.listing()).unwrap();
     eprintln!("open of a reader with L slots + refresh: {:?}", t.elapsed());
     // One durable record from the writer, then a refresh of the reader.
-    engine_write(&mut e, &mut s.host, &s.src, LISTEN, "queue", json!({"episodes": ["ep0"]}));
+    engine_write(
+        &mut e,
+        &mut s.host,
+        &s.src,
+        LISTEN,
+        "queue",
+        json!({"episodes": ["ep0"]}),
+    );
     let t = Instant::now();
     r.refresh(s.src.listing()).unwrap();
-    eprintln!("refresh +1 durable record with L live slots: {:?}", t.elapsed());
+    eprintln!(
+        "refresh +1 durable record with L live slots: {:?}",
+        t.elapsed()
+    );
     let t = Instant::now();
     engine_live(&mut e, &mut s.host, &s.src, position("ep0", 2.0));
     eprintln!("one live write with L live slots: {:?}", t.elapsed());
@@ -967,7 +1104,10 @@ fn check_the_engine_pushes_a_garbage_twin_it_judged_not_a_record() {
     src.put(&path, twin.clone());
     laptop.refresh(src.listing()).unwrap();
     assert_eq!(
-        laptop.account().record_verdict(&path).map(|c| c.starts_with("refused:") || c.starts_with("held:") || c == "admitted"),
+        laptop
+            .account()
+            .record_verdict(&path)
+            .map(|c| c.starts_with("refused:") || c.starts_with("held:") || c == "admitted"),
         Some(false),
         "the laptop judged it not a record"
     );
@@ -1036,7 +1176,10 @@ fn check_one_call_is_replayed_on_every_request() {
                 assert_eq!(n.audience, "https://home.example");
                 assert!(n.purpose == "colophon.home.read" || n.purpose == "colophon.home.write");
                 // A call for another ticket is refused; for this one it is bound to it.
-                assert!(w.phone.exchange_provide_call(&home, n.ticket + 1, b"x").is_err());
+                assert!(w
+                    .phone
+                    .exchange_provide_call(&home, n.ticket + 1, b"x")
+                    .is_err());
                 needs.push(n.clone());
                 w.phone
                     .exchange_provide_call(&home, n.ticket, format!("call-{}", n.ticket).as_bytes())
@@ -1050,19 +1193,29 @@ fn check_one_call_is_replayed_on_every_request() {
                     || (r.method == Method::Post
                         && (r.url.ends_with("/authority") || r.url.ends_with("/pending")));
                 if public {
-                    assert!(!r.headers.iter().any(|(k, _)| k == "Authorization"), "{}", r.url);
+                    assert!(
+                        !r.headers.iter().any(|(k, _)| k == "Authorization"),
+                        "{}",
+                        r.url
+                    );
                 }
                 let a = wire.call(&w.host, &r, NOW + 1_000);
                 let rep = w.phone.exchange_answer(&home, r.ticket, a).unwrap();
                 assert!(
-                    !rep.faults.iter().any(|f| matches!(f, colophon_core::v05::engine::exchange::Fault::Unauthorized { .. })),
+                    !rep.faults.iter().any(|f| matches!(
+                        f,
+                        colophon_core::v05::engine::exchange::Fault::Unauthorized { .. }
+                    )),
                     "{:?}",
                     rep.faults
                 );
             }
         }
     }
-    assert!(finished, "the pass completes against a home that refuses every replayed call");
+    assert!(
+        finished,
+        "the pass completes against a home that refuses every replayed call"
+    );
     let distinct: std::collections::BTreeSet<_> = auth_headers.iter().collect();
     assert_eq!(distinct.len(), auth_headers.len(), "no call went out twice");
     assert!(!auth_headers.is_empty() && auth_headers.len() == needs.len());
@@ -1093,7 +1246,14 @@ fn check_a_digest_conflict_with_local_garbage_is_silent_and_the_record_never_arr
         .find(|(p, _)| p.starts_with("ops/"))
         .unwrap()
         .clone();
-    let f = sync_pass(&mut w.phone, &w.phone_src, &home, &mut w.s.sim, &w.host, NOW + 1_000);
+    let f = sync_pass(
+        &mut w.phone,
+        &w.phone_src,
+        &home,
+        &mut w.s.sim,
+        &w.host,
+        NOW + 1_000,
+    );
     assert!(f.is_empty(), "{f:?}");
     // A device whose folder holds garbage at that path.
     let src = device_source(&w.s);
@@ -1101,6 +1261,13 @@ fn check_a_digest_conflict_with_local_garbage_is_silent_and_the_record_never_arr
     let mut other = member_engine(&w.s.f, &w.host, &src, &w.phone_id, NOW + 2_000);
     let f = sync_pass(&mut other, &src, &home, &mut w.s.sim, &w.host, NOW + 2_000);
     let _ = f;
-    assert_ne!(src.get(&path), Some(b"{}".to_vec()), "the real record arrives over the garbage");
-    assert_eq!(other.account().record_verdict(&path).as_deref(), Some("admitted"));
+    assert_ne!(
+        src.get(&path),
+        Some(b"{}".to_vec()),
+        "the real record arrives over the garbage"
+    );
+    assert_eq!(
+        other.account().record_verdict(&path).as_deref(),
+        Some("admitted")
+    );
 }

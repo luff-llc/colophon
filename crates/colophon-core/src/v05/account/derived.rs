@@ -283,7 +283,14 @@ impl Derived {
             let mut c = cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            crate::v05::live::judge_live_with(&auth, &keys, &judgement, inputs.live, None, Some(&mut c))
+            crate::v05::live::judge_live_with(
+                &auth,
+                &keys,
+                &judgement,
+                inputs.live,
+                None,
+                Some(&mut c),
+            )
         };
         let (effective, verified_pending) = effective_objects(inputs.objects, auth.state());
         let mut derived = Self {
@@ -471,7 +478,11 @@ impl Derived {
                 });
             // Whichever covers more of the operations.
             let chosen = match (reuse, seeded) {
-                (Some(a), Some(b)) => Some(if b.fold.order.len() > a.fold.order.len() { b } else { a }),
+                (Some(a), Some(b)) => Some(if b.fold.order.len() > a.fold.order.len() {
+                    b
+                } else {
+                    a
+                }),
                 (a, b) => a.or(b),
             };
             let (mut fold, mut admitted, start) = match chosen {
