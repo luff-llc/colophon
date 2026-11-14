@@ -1653,6 +1653,17 @@ pub fn equivocation_of_heads(
     Ok(bytes)
 }
 
+/// Two conflicting entries judged as evidence against their signers (§13.3, §8.6).
+///
+/// Both must be signed entries (a recording entry is unsigned and convicts nobody; a recording
+/// entry against another entry at its seq is §8.6 rule 1, not equivocation), at one seq with
+/// one `previous` and different digests, and each valid in its place with every signature
+/// checked. The convicted set is exactly the signer units present on both entries, counted in
+/// the keyring before them; with none in common there is no equivocation.
+///
+/// §8.6 rule 2 would convict "Y's signers" when heads cover X and none covers Y, and rule 3
+/// both entries' signers when heads cover both or neither. The units on both entries are in
+/// every one of those sets, so this convicts no one the text would not; it asks for no heads.
 fn judge_entries(account: &str, a: &[u8], b: &[u8], ctx: &EvidenceContext<'_>) -> Result<Evidence> {
     let (ea, eb) = (parse_entry_env(a)?, parse_entry_env(b)?);
     let key = |e: &AuthEnvelope| {
@@ -1666,11 +1677,54 @@ fn judge_entries(account: &str, a: &[u8], b: &[u8], ctx: &EvidenceContext<'_>) -
         "the entries are not at one seq and previous",
     )?;
     require(ea.digest != eb.digest, "the entries are equal")?;
+    let recording = |e: &AuthEnvelope| {
+        matches!(
+            e.value.get("kind").and_then(Value::as_str),
+            Some("activate" | "vetoed" | "final" | "successionVetoed")
+        )
+    };
+    require(
+        !recording(&ea) && !recording(&eb),
+        "a recording entry is unsigned: a conflict with it is settled by §8.6 rule 1, not equivocation",
+    )?;
     // Each must be a valid entry in its place: signatures and rules included (§8.5).
     verify_entry_in_place(ctx.objects, account, &ea, a, ctx.now_ms)?;
     verify_entry_in_place(ctx.objects, account, &eb, b, ctx.now_ms)?;
+    let previous = ea
+        .value
+        .get("previous")
+        .and_then(Value::as_str)
+        .ok_or_else(|| malformed("previous"))?;
+    let before = verify_history(
+        &chain_to(ctx.objects, previous)?,
+        &Persisted::default(),
+        ctx.now_ms,
+    )
+    .state
+    .ok_or_else(|| unavailable("the history before the entries is not held"))?;
+    let units_of = |e: &AuthEnvelope| -> BTreeSet<String> {
+        e.signer_ids()
+            .into_iter()
+            .map(|id| {
+                before
+                    .keyring()
+                    .controllers
+                    .get(&id)
+                    .map_or(id, |c| before.keyring().unit_of(c))
+            })
+            .collect()
+    };
+    let convicted: Vec<String> = units_of(&ea)
+        .intersection(&units_of(&eb))
+        .cloned()
+        .collect();
+    require(
+        !convicted.is_empty(),
+        "no signer unit signed both entries: no equivocation",
+    )?;
     Ok(Evidence::Entries {
         seq: ea.value.get("seq").and_then(Value::as_u64).unwrap_or(0),
+        units: convicted,
     })
 }
 
@@ -1848,10 +1902,13 @@ pub enum Evidence {
         /// The seq.
         seq: u64,
     },
-    /// Two conflicting valid entries at `seq`.
+    /// Two conflicting signed entries at `seq`, convicting the signer units on both.
     Entries {
         /// The seq.
         seq: u64,
+        /// The convicted signer units (a controller ID, or `holder:…` under `countBy: holders`),
+        /// sorted: exactly those that signed both entries. Never empty.
+        units: Vec<String>,
     },
     /// A home receipted a valid, timely veto of a transition and then signed a head for the
     /// `final` of its activation.

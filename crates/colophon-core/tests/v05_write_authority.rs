@@ -1152,7 +1152,10 @@ fn entries_evidence_is_built_from_two_valid_conflicting_entries() {
     let ev = equivocation_of_entries(&account, &branches[0], &branches[1], &ctx).unwrap();
     assert_eq!(
         verify_evidence(&ev, &account, &ctx).unwrap(),
-        Evidence::Entries { seq: 2 }
+        Evidence::Entries {
+            seq: 2,
+            units: vec![f.a.id.clone()]
+        }
     );
     assert_eq!(
         ev,
@@ -1672,6 +1675,117 @@ fn heads_evidence_needs_the_history_back_to_the_divergence() {
     };
     let r = equivocation_of_heads(&d.account, &d.head_f4_early, &d.head_e4_late, &ctx);
     assert!(matches!(r, Err(Failure::Unavailable(_))), "{r:?}");
+}
+
+/// The checker's N2: pairs §8.6 rule 1 settles are not equivocation.
+#[test]
+fn entries_evidence_is_not_built_from_pairs_rule_1_settles() {
+    let f = fixture();
+    let (chain, _h, host, t2, v, t2_issued) = vetoable(&f, 30 * SEC, 5 * SEC);
+    let account = chain.account();
+    let act = prepare_activate(&chain.objects, chain.now, &t2)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let vet = prepare_vetoed(&chain.objects, chain.now, &t2, &v)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let b = prepare_signed(
+        &chain.objects,
+        chain.now,
+        grant_kind(&account, 20),
+        t2_issued + 5_000 * SEC,
+        std::slice::from_ref(&f.a.id),
+    )
+    .unwrap();
+    let sigs = host.sign(b.steps());
+    let grant = b.finish(sigs).unwrap();
+    let (x, y, g) = (
+        act.entries[0].1.clone(),
+        vet.entries[0].1.clone(),
+        grant.entries[0].1.clone(),
+    );
+    let mut all = chain.objects.clone();
+    all.entries.extend([x.clone(), y.clone(), g.clone()]);
+    let ctx = EvidenceContext {
+        objects: &all,
+        now_ms: chain.now,
+    };
+    for (p, q) in [(&x, &y), (&y, &x), (&x, &g), (&g, &x), (&y, &g)] {
+        let r = equivocation_of_entries(&account, p, q, &ctx);
+        assert!(
+            matches!(r, Err(Failure::Malformed(ref m)) if m.contains("rule 1")),
+            "{r:?}"
+        );
+    }
+    // Hand-built evidence is refused the same way.
+    let mut pair = [x.clone(), y.clone()];
+    pair.sort_by_key(|e| body_digest_of_env(e));
+    let ev = canonical(
+        &json!({"protocol": "colophon/equivocation/5", "account": account,
+        "entries": [b64(&pair[0]), b64(&pair[1])]}),
+    )
+    .unwrap();
+    assert!(verify_evidence(&ev, &account, &ctx).is_err());
+}
+
+/// Entries evidence convicts exactly the signer units on both entries.
+#[test]
+fn entries_evidence_convicts_only_the_units_on_both_entries() {
+    let f = fixture();
+    let mut chain = Chain::new(T0 + 3_600 * SEC);
+    chain.genesis(
+        &f.host,
+        "Units",
+        &[],
+        keyring(
+            vec![
+                raw_controller(&f.a, &key(2), "A", &["approve", "control", "recover"]),
+                raw_controller(&f.b, &key(4), "B", &["approve", "control"]),
+            ],
+            vec![slot_for(&f.a.id, "A"), slot_for(&f.b.id, "B")],
+            1,
+            1,
+        ),
+        std::slice::from_ref(&f.a.id),
+    );
+    let account = chain.account();
+    let grant_by = |n: u8, signer: &Key| {
+        let b = prepare_signed(
+            &chain.objects,
+            chain.now,
+            grant_kind(&account, n),
+            T0 + SEC,
+            std::slice::from_ref(&signer.id),
+        )
+        .unwrap();
+        let sigs = f.host.sign(b.steps());
+        b.finish(sigs).unwrap().entries[0].1.clone()
+    };
+    let (by_a1, by_a2, by_b) = (grant_by(20, &f.a), grant_by(22, &f.a), grant_by(24, &f.b));
+    let mut objects = chain.objects.clone();
+    objects
+        .entries
+        .extend([by_a1.clone(), by_a2.clone(), by_b.clone()]);
+    let ctx = EvidenceContext {
+        objects: &objects,
+        now_ms: chain.now,
+    };
+    let ev = equivocation_of_entries(&account, &by_a1, &by_a2, &ctx).unwrap();
+    assert_eq!(
+        verify_evidence(&ev, &account, &ctx).unwrap(),
+        Evidence::Entries {
+            seq: 2,
+            units: vec![f.a.id.clone()]
+        }
+    );
+    // A and B each signed one: no unit is on both, so there is no equivocation.
+    let r = equivocation_of_entries(&account, &by_a1, &by_b, &ctx);
+    assert!(
+        matches!(r, Err(Failure::Malformed(ref m)) if m.contains("no signer unit")),
+        "{r:?}"
+    );
 }
 
 #[test]
