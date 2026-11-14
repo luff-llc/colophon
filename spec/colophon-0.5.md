@@ -1770,14 +1770,22 @@ valid when controllers are distinct valid points, `webauthn` ones have `rpID`, a
 and then `threshold ≥ recoverThreshold`, and slots are complete. `layout` must exceed the current
 layout.
 
-**Steward threshold.** `threshold` on a `genesis` or a `stewards` entry is an optional integer in
-the Swift source (`AuthorityEntry.threshold: Int?`). Absent or `null` is 0 (`AuthorityState`:
-`genesis.threshold ?? 0`, `entry.threshold ?? 0`), and a `quorum` `handover` needs `threshold > 0`
-as well as that many distinct steward signatures, so a threshold of 0 (or a negative one) lets no
-quorum hand the root over. A present value that is not an integer (a string, a boolean, an array,
-an object, a number with a fraction or an exponent, or an integer beyond 64 bits) is a decoding
-error there, which makes the history `malformed` here. This reading has not been replayed by the
-Swift source.
+**Steward threshold.** `threshold` is an optional integer field of every Swift entry
+(`AuthorityEntry.threshold: Int?`). On a `genesis` or a `stewards` entry, absent or `null` is 0
+(`AuthorityState`: `genesis.threshold ?? 0`, `entry.threshold ?? 0`), and a `quorum` `handover`
+needs `threshold > 0` as well as that many distinct steward signatures, so a threshold of 0 (or a
+negative one) lets no quorum hand the root over. Swift reads a string, a boolean, an array, an
+object or an integer beyond 64 bits as a decoding error, and its decoder would also accept `2.0`,
+`1e1` or `2E0` as integers. Shipped Swift writers always write plain integers, so a 0.5 verifier
+refuses any other number form for `threshold` in a predecessor, on every entry kind, as
+`malformed`. This reading has not been replayed by the Swift source.
+
+**Quorum handover.** Swift counts the distinct stewards whose key verifies the primary signature
+or any cosignature, and ignores every other signature: extra, duplicate, mislabelled or from a
+non-steward, provided enough stewards verify (`AuthorityState.swift`, the `quorum` case). A 0.5
+verifier refuses a quorum `handover` that carries such a signature: it needs every signature to
+verify under a steward, each steward once, and the primary signer to be one. The shipped apps
+never write a quorum `handover`, so no existing library is affected.
 
 **The freezing entry.** F is a `layout` entry with `layout` greater than 2 and an extra field
 `successor` (the 64-hex 0.5 account ID), signed under the rule in force (root before adoption, the `layout` rule

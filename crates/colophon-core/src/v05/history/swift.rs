@@ -67,10 +67,12 @@ fn num(v: &Value, f: &str) -> Result<u64> {
         .filter(|n| *n < 1 << 53)
         .ok_or_else(|| malformed(format!("Swift {f}")))
 }
-/// A steward `threshold` (§16.3), read as the Swift source reads its `Int?`: absent or `null` is
-/// nil, which `AuthorityState` turns into 0; a present value that is not an integer is a
-/// `DecodingError` there, so the history can't be read (`malformed` here). A negative integer
-/// decodes, and with the quorum rule's `threshold > 0` guard it behaves as 0.
+/// A `threshold` (§16.3), read as the Swift source reads its `Int?`: absent or `null` is nil,
+/// which `AuthorityState` turns into 0; a string, boolean, array, object or integer beyond 64 bits
+/// is a `DecodingError` there, so the history can't be read (`malformed` here). Foundation's
+/// decoder also takes `2.0` or `1e1` as an integer, but shipped Swift writers always write plain
+/// integers, so any other number form is `malformed` here too. A negative integer decodes, and
+/// with the quorum rule's `threshold > 0` guard it behaves as 0.
 fn steward_threshold(v: &Value) -> Result<u64> {
     match v.get("threshold") {
         None | Some(Value::Null) => Ok(0),
@@ -374,6 +376,8 @@ fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
             "Swift previous",
         )?;
     }
+    // `threshold` is one optional field of every entry in Swift, whatever the kind.
+    steward_threshold(v)?;
     let s = current
         .as_ref()
         .ok_or_else(|| malformed("Swift missing genesis"))?;

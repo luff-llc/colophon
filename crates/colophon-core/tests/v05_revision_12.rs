@@ -373,7 +373,7 @@ mod swift_stewards {
     }
 
     #[test]
-    fn a_genesis_threshold_that_is_not_an_integer_is_a_decoding_error() {
+    fn a_genesis_threshold_that_is_not_a_plain_integer_is_malformed() {
         // The engine used to default this to 1.
         for bad in [json!("1"), json!(true), json!([1]), json!(1.5), json!({})] {
             let g = genesis(Some(bad.clone()));
@@ -396,8 +396,39 @@ mod swift_stewards {
         assert_eq!(verdict(vec![g, st, two]), "ok");
     }
 
+    /// A root-signed `rotateRecovery` entry that carries a `threshold` field it does not use.
+    fn rotate_with_threshold(prev: &[u8], threshold: Value) -> Vec<u8> {
+        let body = json!({"by": "root", "issued": "2026-11-01T08:01:00Z", "kind": "rotateRecovery",
+            "previous": digest_of(prev), "recovery": identity("recovery-2"), "seq": 2,
+            "threshold": threshold});
+        record(&body, &["root"])
+    }
+
     #[test]
-    fn a_stewards_entry_threshold_that_is_not_an_integer_is_a_decoding_error() {
+    fn a_threshold_on_any_entry_kind_must_be_a_plain_integer() {
+        let g = genesis(Some(json!(1)));
+        for ok in [json!(3), json!(0), json!(-2), Value::Null] {
+            let e = rotate_with_threshold(&g, ok.clone());
+            assert_eq!(verdict(vec![g.clone(), e]), "ok", "{ok}");
+        }
+        for bad in [
+            json!("3"),
+            json!(true),
+            json!([1]),
+            json!(2.0),
+            json!(1.5),
+            json!(1e1),
+        ] {
+            let e = rotate_with_threshold(&g, bad.clone());
+            assert_eq!(verdict(vec![g.clone(), e]), "malformed", "{bad}");
+        }
+        // An integer beyond 64 bits, written as plain digits.
+        let big = rotate_with_threshold(&g, json!(9223372036854775808u64));
+        assert_eq!(verdict(vec![g, big]), "malformed");
+    }
+
+    #[test]
+    fn a_stewards_entry_threshold_that_is_not_a_plain_integer_is_malformed() {
         let g = genesis(Some(json!(1)));
         for bad in [json!("2"), json!(false), json!(2.5)] {
             let st = stewards_entry(&g, Some(bad.clone()));
