@@ -213,6 +213,7 @@ clocks and admission.
 | 110 | §7.2 slot shape is enforced by the verifier (`malformed` at replay) | Check of the integrated write side |
 | 111 | §13.3 equivocation: the three forms are judged against held history (heads follow both entries back to the divergence; entries convict the signer units on both; the veto form carries the activation); "verifiable from the keys it names alone" removed | E1, coordinator B |
 | 112 | §17.5, §13.1 notices have no signed body or wire format; §12.1 `created` carries no rule; §7.5 one kit derivation; §17.1 the restricted open and the seed guarantee (and §3.4); §7.2 the PRF assertion's origin and UV; §7.3 QR payload bytes; §8.7 admission at a home's current head | The write-side builders' questions |
+| 113 | §8.6 rules 2 and 3 and §13.3: for two conflicting signed entries the convicted are the signer units present on both entries, not all of one entry's signers or all signers of both; a signer of only one may have raced honestly. The code (`judge_entries`) already did this; the text now matches | Coordinator decision |
 
 ## B. Galley's requirements
 

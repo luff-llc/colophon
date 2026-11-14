@@ -792,9 +792,12 @@ either the activation is final on its branch and no `vetoed` displaces it, or it
    home. A signed entry that loses is not re-appended by anyone else: its signer's host is told
    (409, §14) and MUST offer to sign it again at the new head.
 2. **Equivocation.** Otherwise, if X is covered by heads of `headQuorum` current homes and no
-   current home's head covers Y, Y is equivocation evidence against its signers (§13.3).
+   current home's head covers Y, X and Y are equivocation evidence (§13.3) against the signer
+   units present on **both** entries; a signer of only one of them may have raced honestly and
+   is not convicted.
 3. **Fork.** Otherwise — no head evidence for either, heads for both, or an account without homes
-   — both entries are equivocation evidence against their signers, and every verifier answers
+   — both entries are equivocation evidence (§13.3) against the signer units present on both, and
+   every verifier answers
    `refused:fork` for everything that depends on either branch until a `resolve` transition
    activates on one branch. A transition anchored on a losing branch is void.
 
