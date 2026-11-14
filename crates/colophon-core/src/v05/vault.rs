@@ -310,6 +310,25 @@ fn open_dh(sealed: &SealedBox, recipient: &[u8], dh: &EcdhOutput, info: &[u8]) -
         .map_err(|_| locked())
 }
 
+/// Open an HPKE seal addressed to `recipient` under one of the core's own labels (an epoch
+/// key, §11.1), with the host's raw ECDH result. Crate-internal, added for `records.rs`: the
+/// plaintext goes to the caller (an epoch key it wraps at once), never the ECDH bytes. A label
+/// outside `colophon/` is refused, as it is in [`VaultSeed::open_core_seal`].
+pub(crate) fn open_core_seal_with_dh(
+    sealed: &SealedBox,
+    recipient: &[u8],
+    dh: &EcdhOutput,
+    info: &[u8],
+) -> VResult<Vec<u8>> {
+    require(
+        info.starts_with(RESERVED_LABEL),
+        "core open: not a core label",
+    )?;
+    require(valid_point(&sealed.enc), "core open: enc is not a valid point")?;
+    require(sealed.ciphertext.len() == 48, "core open: ciphertext length")?;
+    open_dh(sealed, recipient, dh, info)
+}
+
 /// The AES-256-GCM key of a `prf`, or `combined` slot box (§7.2).
 pub struct BoxKey([u8; 32]);
 impl BoxKey {
@@ -725,7 +744,6 @@ impl VaultSeed {
     }
     /// Open a seal to the vault under one of the core's own labels (an epoch key, §11.1).
     /// Crate-internal: the plaintext is a key the caller needs, never the seed.
-    #[allow(dead_code)] // used by the record and account packages (E4, E5)
     pub(crate) fn open_core_seal(&self, sealed: &SealedBox, info: &[u8]) -> VResult<Vec<u8>> {
         require(
             info.starts_with(RESERVED_LABEL),

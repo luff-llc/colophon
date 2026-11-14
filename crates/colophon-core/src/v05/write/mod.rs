@@ -15,6 +15,7 @@
 //! `calls` holds the link, call, head and receipt builders.
 pub mod authority;
 pub mod calls;
+pub mod records;
 
 use crate::v05::encoding::{bounds, canonical, encode_base64};
 use crate::v05::{malformed, Failure, Result};
