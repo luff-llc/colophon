@@ -173,7 +173,7 @@ impl SealedBox {
             valid_point(recipient),
             "HPKE recipient is not a valid point",
         )?;
-        SealedKey::seal(recipient, plaintext, info, entropy)
+        super::hpke_wiped::seal(recipient, plaintext, info, entropy)
             .map(Self::from_key)
             .map_err(|e| malformed(format!("HPKE seal: {e}")))
     }
@@ -261,7 +261,7 @@ impl PartSecret {
         let secret = entropy
             .take::<32>()
             .map_err(|e| malformed(format!("entropy: {e}")))?;
-        let sealed = SealedKey::seal(recipient, &secret, info, entropy)
+        let sealed = super::hpke_wiped::seal(recipient, &secret, info, entropy)
             .map(SealedBox::from_key)
             .map_err(|e| malformed(format!("HPKE seal: {e}")))?;
         Ok((Self(secret), sealed))
@@ -304,10 +304,7 @@ impl fmt::Debug for PartSecret {
 }
 
 fn open_dh(sealed: &SealedBox, recipient: &[u8], dh: &EcdhOutput, info: &[u8]) -> VResult<Vec<u8>> {
-    sealed
-        .to_key()
-        .finish_open(recipient, &dh.0, info)
-        .map_err(|_| locked())
+    super::hpke_wiped::finish_open(&sealed.to_key(), recipient, &dh.0, info).map_err(|_| locked())
 }
 
 /// Open an HPKE seal addressed to `recipient` under one of the core's own labels (an epoch

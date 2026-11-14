@@ -22,6 +22,7 @@ pub mod engine;
 pub mod floor;
 pub mod heads;
 pub mod history;
+pub(crate) mod hpke_wiped;
 pub mod ids;
 pub mod live;
 pub mod members;
