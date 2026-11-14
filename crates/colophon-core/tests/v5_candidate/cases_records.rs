@@ -79,6 +79,10 @@ struct Op<'a> {
     key_epoch: Option<u64>,
     /// The clock the file is stored under, when it differs from the header's.
     path_clock: Option<u64>,
+    /// Store this envelope under `ops.twin/` (a second body at the same path).
+    twin: bool,
+    /// Also store a high-S twin envelope over the same body under `ops.twin/` (§2.2).
+    high_s: bool,
 }
 impl<'a> Op<'a> {
     fn new(author: &'a Member, clock: u64, authority: u64, nonce: &'a str) -> Self {
@@ -97,6 +101,8 @@ impl<'a> Op<'a> {
             deliver: true,
             key_epoch: None,
             path_clock: None,
+            twin: false,
+            high_s: false,
         }
     }
 }
@@ -121,24 +127,48 @@ struct Ra {
     expected: Map<String, Value>,
     opened: Vec<String>,
     label: String,
+    twins: Vec<(String, Vec<u8>)>,
+    by_digest: Map<String, Value>,
+    second: Option<Key>,
 }
 
 impl Ra {
     fn new(label: &str) -> Ra {
+        Ra::build(label, None)
+    }
+    /// With a second controller (approve, control, recover) that proves possession at genesis.
+    fn build(label: &str, second: Option<Key>) -> Ra {
         let a = A.clone();
-        let kr = keyring(
-            vec![ctrl(
-                &a,
+        let mut ctrls = vec![ctrl(
+            &a,
+            &["approve", "control", "recover"],
+            Some("Mac"),
+            json!({}),
+        )];
+        if let Some(k) = &second {
+            ctrls.push(ctrl(
+                k,
                 &["approve", "control", "recover"],
-                Some("Mac"),
+                Some("Second"),
                 json!({}),
-            )],
+            ));
+        }
+        let kr = keyring(
+            ctrls,
             Kr {
                 rt: 1,
                 ..Kr::default()
             },
         );
         let mut chain = Chain::new();
+        let adds: Vec<Key> = second.iter().cloned().collect();
+        let opt = match adds.first() {
+            Some(k) => Opt {
+                adds: sg![*k],
+                ..Opt::default()
+            },
+            None => Opt::default(),
+        };
         genesis(
             &mut chain,
             &kr,
@@ -146,6 +176,7 @@ impl Ra {
             Gen {
                 label: "Records",
                 namespaces: vec![NS],
+                opt,
                 ..Gen::default()
             },
         );
@@ -165,6 +196,9 @@ impl Ra {
             expected: Map::new(),
             opened: Vec::new(),
             label: label.to_string(),
+            twins: Vec::new(),
+            by_digest: Map::new(),
+            second,
         }
     }
     fn key_for(&mut self, ns: &str, epoch: u64) -> [u8; 32] {
@@ -301,7 +335,21 @@ impl Ra {
             s.path_clock.unwrap_or(s.clock)
         );
         if s.deliver {
-            self.ops.push((path.clone(), canonical(&env)));
+            let list = if s.twin {
+                &mut self.twins
+            } else {
+                &mut self.ops
+            };
+            list.push((path.clone(), canonical(&env)));
+        }
+        if s.high_s {
+            let sig = s.author.sign.sign(&bytes);
+            let mut s_part: [u8; 32] = sig[32..].try_into().unwrap();
+            s_part = sub32(&N, &s_part);
+            let mut twin_sig = sig[..32].to_vec();
+            twin_sig.extend_from_slice(&s_part);
+            let twin = json!({"body": b64(&bytes), "signature": b64(&twin_sig)});
+            self.twins.push((path.clone(), canonical(&twin)));
         }
         Out1 {
             path,
@@ -311,6 +359,9 @@ impl Ra {
     }
     fn expect(&mut self, o: &Out1, outcome: &str) {
         self.expected.insert(o.path.clone(), json!(outcome));
+    }
+    fn expect_digest(&mut self, o: &Out1, outcome: &str) {
+        self.by_digest.insert(o.digest.clone(), json!(outcome));
     }
     fn expect_opened(&mut self, o: &Out1) {
         self.expected.insert(o.path.clone(), json!("admitted"));
@@ -336,11 +387,26 @@ impl Ra {
             d.push(b'\n');
             write_raw(out, &format!("records/{name}/{path}"), d);
         }
+        for (path, bytes) in &self.twins {
+            let mut d = bytes.clone();
+            d.push(b'\n');
+            write_raw(
+                out,
+                &format!(
+                    "records/{name}/ops.twin/{}",
+                    path.trim_start_matches("ops/")
+                ),
+                d,
+            );
+        }
         let mut expected = json!({
             "history": "ok",
             "records": Value::Object(self.expected.clone()),
             "opened": self.opened,
         });
+        if !self.by_digest.is_empty() {
+            expected["byDigest"] = Value::Object(self.by_digest.clone());
+        }
         if let Value::Object(m) = extra {
             for (k, v) in m {
                 expected[k] = v;
@@ -371,6 +437,8 @@ pub fn part(out: &mut Out) {
     missing_key(out);
     author_chain(out);
     revoke_cases(out);
+    duplicates(out);
+    retiring(out);
     renew_shares(out);
     proposals(out);
     legacy(out);
@@ -1228,4 +1296,92 @@ fn legacy(out: &mut Out) {
     l.expect(&m2, "held:revokedBackdated");
     l.expect(&m3, "refused:revoked");
     l.write_case(out, "upgraded-revoked-before", "A member revoked by a 0.4 `revoke` at seq 4 with `kept` [m1], then the upgrade at seq 5. Its `/3` records citing authority 3 are decided by the carried-over revocation: m1 is kept and admitted, m2 is held revokedBackdated, and m3 (citing the revocation seq 4, which is before the upgrade) is refused revoked.", &["9.5", "11.5", "16.1"]);
+}
+
+/// Two bodies by one author with one operation ID and clock at one path (they differ only in
+/// `level`, which is in the AAD but not in the ID), and one body under two envelopes (a high-S
+/// twin, §2.2). The verdict is a function of the set: the lowest body digest wins the ID.
+fn duplicates(out: &mut Out) {
+    let w = member("w");
+    let mut a = Ra::new("same-id");
+    a.rekey(10, 1, &[]);
+    a.grant(20, &w, "device", w_terms(), &[1]);
+    a.holder(&w);
+    let x = a.op(Op::new(&w, 1, 3, "x"));
+    let y = a.op(Op {
+        level: "propose",
+        twin: true,
+        ..Op::new(&w, 1, 3, "x")
+    });
+    assert_eq!(x.path, y.path);
+    let (low, high) = if x.digest < y.digest {
+        (&x, &y)
+    } else {
+        (&y, &x)
+    };
+    a.expect_digest(low, "admitted");
+    a.expect_digest(high, "refused:duplicateID");
+    let proposals = if low.digest == y.digest {
+        json!([{"id": y.id, "proposer": w.sign.id, "kind": "addNote", "state": "pending",
+                "evidence": [], "ignored": []}])
+    } else {
+        json!([])
+    };
+    a.write_case(out, "same-id-two-bodies", "Two header bodies by one author with one operation ID and clock at one path, differing only in `level` (in the AAD, not in the ID). Fold order is (clock, author, id) with the body digest, lowest first, as the last tie-break: the lowest digest is admitted and the other is refused duplicateID, whichever arrives first. Both are admitted at step 8 and reserve one slot (one distinct (author, id)).", &["11.4", "11.5"], json!({"proposals": proposals, "heldResolutions": []}));
+
+    let mut a = Ra::new("one-body-two-envelopes");
+    a.rekey(10, 1, &[]);
+    a.grant(20, &w, "device", w_terms(), &[1]);
+    a.holder(&w);
+    let x = a.op(Op {
+        high_s: true,
+        ..Op::new(&w, 1, 3, "x")
+    });
+    a.expect_digest(&x, "admitted");
+    a.opened.push(x.path.clone());
+    a.write_case(out, "one-body-two-envelopes", "One header body under two envelopes: the signature and its high-S twin, both valid (§4.3). Two envelopes over one body are the same object (§2.2): the record is admitted, reported under each envelope, and never refused as a duplicateID of itself.", &["2.2", "11.5"], json!({}));
+}
+
+/// A revoke while the vault is retiring carries empty `epochs` (§8.3): no epoch is introduced.
+fn retiring(out: &mut Out) {
+    let w = member("w");
+    let k = derived("rec/second/signing");
+    let a_key = A.clone();
+    let mut a = Ra::build("retiring", Some(k.clone()));
+    a.rekey(10, 1, &[]); // 2
+    a.grant(20, &w, "device", w_terms(), &[1]); // 3
+    a.holder(&w);
+    let d1 = a.op(Op::new(&w, 1, 3, "d1"));
+    // A full set (both control controllers sign, no home): due at its `issued`. It removes the
+    // slotted controller A, so the vault is retiring when it is activated.
+    let mut ids = vec![a_key.id.clone(), k.id.clone()];
+    ids.sort();
+    let tbody = json!({"protocol": "colophon/transition/5", "account": a.acct,
+        "anchor": {"seq": 3, "digest": sha(&a.chain.last())}, "issued": ts(100), "by": a_key.id,
+        "signers": ids, "change": {"keyring": {"remove": [a_key.id]}}});
+    let tenv = seal(
+        &tbody,
+        &a_key,
+        Opt {
+            cos: sg![k],
+            ..Opt::default()
+        },
+    );
+    let abody = json!({"protocol": "colophon/authority/5", "seq": 4, "previous": sha(&a.chain.last()),
+        "issued": ts(100), "by": a_key.id, "kind": "activate",
+        "transition": b64(&env_bytes(&tenv)), "receipts": []});
+    a.chain.envs.push(json!({"body": b64(&canonical(&abody))}));
+    // seq 5: the second controller revokes the writer; the vault is retiring, so `epochs` is [].
+    let second = k.clone();
+    a.chain.add(
+        "revoke",
+        &second,
+        &ts(200),
+        &second,
+        Opt::default(),
+        json!({"member": w.sign.id, "kept": [d1.digest], "heads": [], "epochs": []}),
+    );
+    a.expect_opened(&d1);
+    let _ = &a.second;
+    a.write_case(out, "revoke-while-retiring", "The slotted controller is removed by a full-set transition (activated at seq 4): the vault is retiring (§8.3). The remaining controller then revokes the writer. §8.3: hosts MUST NOT introduce epochs while the vault is retiring and a `revoke` MAY carry empty `epochs`, so the revoke is ok with `epochs: []` and no epoch 2 exists; the removed key's retiring vault therefore opens nothing made after. The kept record is admitted.", &["8.3", "9.5", "7.1"], json!({"vaultRetiring": true, "latestEpoch": {"notes": 1}}));
 }

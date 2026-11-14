@@ -1171,26 +1171,32 @@ fn run_records(dir: &Path, case: &Value) -> Outcome {
                 let dh = p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine());
                 let dh = EcdhOutput::from_host(dh.raw_secret_bytes().as_slice()).unwrap();
                 match auth.open_epoch(ns, epoch, id, &dh) {
-                    Ok(k) => keys.insert(k),
+                    Ok(k) => keys.insert(k).unwrap(),
                     Err(f) => return Outcome::Fail(format!("seal {ns}/{epoch} for {id}: {f}")),
                 }
             }
         }
     }
     let mut held = Vec::new();
-    fn walk(base: &Path, dir: &Path, out: &mut Vec<HeldRecord>) {
+    fn walk(base: &Path, dir: &Path, twin: bool, out: &mut Vec<HeldRecord>) {
         let Ok(rd) = fs::read_dir(dir) else { return };
         let mut entries: Vec<PathBuf> = rd.map(|e| e.unwrap().path()).collect();
         entries.sort();
         for p in entries {
             if p.is_dir() {
-                walk(base, &p, out);
+                walk(base, &p, twin, out);
             } else {
                 let rel = p
                     .strip_prefix(base)
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/");
+                // `ops.twin/` holds a second envelope or body for a path under `ops/`.
+                let rel = if twin {
+                    rel.replacen("ops.twin/", "ops/", 1)
+                } else {
+                    rel
+                };
                 out.push(HeldRecord {
                     path: rel,
                     bytes: fs::read(&p).unwrap(),
@@ -1198,18 +1204,25 @@ fn run_records(dir: &Path, case: &Value) -> Outcome {
             }
         }
     }
-    walk(dir, &dir.join("ops"), &mut held);
+    walk(dir, &dir.join("ops"), false, &mut held);
+    walk(dir, &dir.join("ops.twin"), true, &mut held);
     let want = exp["records"].as_object().unwrap();
-    for h in &held {
-        if !want.contains_key(&h.path) {
-            return Outcome::Fail(format!("{}: no expected outcome in the vector", h.path));
-        }
-    }
+    let by_digest = exp["byDigest"].as_object().cloned().unwrap_or_default();
     let j = judge_records(&auth, &keys, &held);
+    let expected_for = |r: &colophon_core::v05::records::Judged| -> Option<String> {
+        r.digest
+            .as_ref()
+            .and_then(|d| by_digest.get(d))
+            .or_else(|| want.get(&r.path))
+            .map(|v| v.as_str().unwrap().to_string())
+    };
     for r in &j.records {
-        let want = want[&r.path].as_str().unwrap();
-        if r.outcome.code() != want {
-            return Outcome::Fail(format!("{}: want {want}, got {}", r.path, r.outcome.code()));
+        match expected_for(r) {
+            None => return Outcome::Fail(format!("{}: no expected outcome in the vector", r.path)),
+            Some(w) if r.outcome.code() != w => {
+                return Outcome::Fail(format!("{}: want {w}, got {}", r.path, r.outcome.code()))
+            }
+            _ => {}
         }
     }
     for p in exp["opened"].as_array().unwrap() {
@@ -1224,16 +1237,60 @@ fn run_records(dir: &Path, case: &Value) -> Outcome {
             ));
         }
     }
-    // The verdict is a function of the set, not of the order records arrive in.
-    let mut rev = held.clone();
-    rev.reverse();
-    let jr = judge_records(&auth, &keys, &rev);
-    for r in &j.records {
-        let other = jr.records.iter().find(|x| x.path == r.path).unwrap();
-        if other.outcome != r.outcome {
-            return Outcome::Fail(format!("{}: depends on arrival order", r.path));
+    if let Some(r) = exp["vaultRetiring"].as_bool() {
+        if auth.vault_retiring() != r {
+            return Outcome::Fail(format!("vault retiring: want {r}"));
         }
     }
+    for (ns, e) in exp["latestEpoch"].as_object().into_iter().flatten() {
+        if auth.latest_epoch(ns) != e.as_u64().unwrap() {
+            return Outcome::Fail(format!(
+                "latest epoch of {ns}: got {}",
+                auth.latest_epoch(ns)
+            ));
+        }
+    }
+    // The verdict is a function of the set, not of the order records arrive in: eight orders
+    // from fixed seeds, and the reverse.
+    let print = |j: &colophon_core::v05::records::Judgement| {
+        let mut v: Vec<(String, String, String)> = j
+            .records
+            .iter()
+            .map(|r| {
+                (
+                    r.path.clone(),
+                    r.digest.clone().unwrap_or_default(),
+                    r.outcome.code(),
+                )
+            })
+            .collect();
+        v.sort();
+        let mut p: Vec<String> = j.proposals.iter().map(|p| format!("{p:?}")).collect();
+        p.sort();
+        (v, p)
+    };
+    let base_print = print(&j);
+    let mut orders: Vec<Vec<HeldRecord>> = Vec::new();
+    let mut rev = held.clone();
+    rev.reverse();
+    orders.push(rev);
+    for seed in 1..=8u64 {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut p = held.clone();
+        for i in (1..p.len()).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            p.swap(i, (x % (i as u64 + 1)) as usize);
+        }
+        orders.push(p);
+    }
+    for o in &orders {
+        if print(&judge_records(&auth, &keys, o)) != base_print {
+            return Outcome::Fail("the verdict depends on arrival order".into());
+        }
+    }
+    let jr = judge_records(&auth, &keys, &orders[0]);
     if let Some(list) = exp["proposals"].as_array() {
         let mut got: Vec<Value> = j
             .proposals
