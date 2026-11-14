@@ -468,14 +468,12 @@ test of revision 13 was replayed by the Swift source.**
   wrong-length case is vectored; the other shapes are covered by the slot module's own tests.
 - **Text-only items (one commit).**
   - *Equivocation evidence (§13.3; item 7 as decided in coordinator item B).* The three forms are
-    judged against held history. Where `v05/write/authority.rs` differs from the decided text
-    (reported, not changed): `judge_heads` compares only heads at one seq whose entries share
-    `previous` (a rule 1 displacement at an earlier divergence, with the heads' entries at a later
-    seq, convicts), treats equal `issued` as conviction even for a rule 1 displacement, and does not
-    require strictly increasing `issued`; `judge_entries` does not compute the signer units present
-    on both entries, and does not refuse a recording entry as a conviction (a recording entry has no
-    signature to verify there, so `verify_entry_in_place` fails it, which is the same outcome
-    by accident); the veto form matches (it carries the activation).
+    judged against held history. Written against `v05/write/authority.rs` as first read; the
+    integrator's commits `e74ed50` (heads: walk back to the divergence, equal `issued`, `unavailable`
+    without the chain) and `884fe26` (entries: the signer units on both, a recording entry convicts
+    nobody) then made the code match this text, and the veto form already carried the activation.
+    Not enforced anywhere: that a home's heads have strictly increasing `issued` is checked at signing
+    by `HomeState::guard_head`, not by evidence verification.
   - *Notices (§17.5, §13.1), link `created` (§12.1), kit derivation (§7.5; `vault::kit_identity` is
     the one derivation), restricted open (§17.1; bounds `HOST_OPEN_MAX_INFO` 1,024 and
     `HOST_OPEN_MAX_CIPHERTEXT` 65,536, the `{enc, ciphertext}` of §11.1, ciphertext at least 16
