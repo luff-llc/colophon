@@ -889,7 +889,9 @@ from heads it has seen or the order it saw things in.
 - **Order.** An activation that is not removal-only gets a `final`, or becomes final by excusal,
   only when every earlier activation that is not removal-only is final. Removal-only activations
   are outside this order: they never wait for an earlier provisional activation, and none waits
-  for them.
+  for them. A revocation of a home that is not removal-only (it also loosens a policy field, say)
+  revokes the home once final but does not excuse it, so activations that list that home as a
+  witness wait for its head.
 - **Until final, whatever an activation adds counts for nothing.** An added controller, home or
   member signs no entry, transition, veto, `suspend` or call (`refused:revoked`), counts toward no
   rule, unit, quorum, full set or escalation, and its receipts and heads don't count; records by an

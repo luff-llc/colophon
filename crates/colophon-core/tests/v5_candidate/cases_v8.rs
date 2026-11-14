@@ -3786,6 +3786,58 @@ pub fn part3(o: &mut Out) {
         vec![("vetoed", vec![(3, addc_vetoed.envs[2].clone())])],
     );
 
+    // Revision 12 fix round, M-a (§8.7 Order): a revocation of a home that also loosens policy is
+    // not removal-only, so once final it revokes the home without excusing it. A later addition
+    // whose witnesses are all excused still waits for the earlier provisional addition.
+    let mut ord = base.clone();
+    let t_rv = p(
+        &cx,
+        json!({"homes": {"revoke": [h2k.id]}, "policy": {"headMaxAge": 600}}),
+        sg![a, k1],
+    );
+    activate(&mut ord, &t_rv, &[rec(&cx, &t_rv)]);
+    activate(&mut ord, &t_addc, &[rec(&cx, &t_addc)]);
+    let hs = vec![
+        head5(&ord, &h1k, DUE0 + 100, Some(4)),
+        head5(&ord, &h2k, DUE0 + 100, Some(4)),
+    ];
+    final_of(&mut ord, 3, hs);
+    let t_a2 = prop(
+        &cx,
+        json!({"keyring": {"add": [ct(&x, AC, "Second addition")]}}),
+        sg![a],
+        Pr {
+            adds: sg![x],
+            ..Pr::default()
+        },
+    );
+    activate(&mut ord, &t_a2, &[rec(&cx, &t_a2)]);
+    let ord_at = DUE0 + 200;
+    let t_r1 = prop(
+        &cx,
+        json!({"homes": {"revoke": [h1k.id]}}),
+        sg![k1],
+        Pr {
+            at: ord_at,
+            chain: Some(&ord),
+            ..Pr::default()
+        },
+    );
+    activate(
+        &mut ord,
+        &t_r1,
+        &[receipt_of(&acct, &t_r1, &h1k, &ts(ord_at + 1))],
+    );
+    case_v(
+        o,
+        "t-order-guard-keeps-later-addition-provisional",
+        &ord,
+        json!({"result": "ok", "seq": 7, "finality": {"3": "final", "4": "provisional", "6": "provisional", "7": "final"}}),
+        "Seq 3 revokes H2 and loosens a policy field (control rule), so it is not removal-only: final at seq 5, it revokes H2 without excusing it. Seq 4 adds a key (witnesses H1 and H2, still provisional); seq 6 adds another (witness H1 only); seq 7 revokes H1 by recovery and is final at once, excusing H1. Every witness of seq 6 is excused, but seq 4 is an earlier provisional addition, so Order keeps seq 6 provisional too.",
+        &["8.7"],
+        Some(ver(ord_at + W + D + 120)),
+    );
+
     // Two activations of T with different receipts, with a final covering only the higher digest.
     let cy_t = p(&cx, rm(&b.id), sg![a]);
     let cy_r1 = rec(&cx, &cy_t);
