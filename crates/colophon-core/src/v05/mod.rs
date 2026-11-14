@@ -30,6 +30,7 @@ pub mod signature;
 pub mod slots;
 pub mod terms;
 pub mod vault;
+pub mod write;
 
 /// A refusal reason (§19). The protocol spelling is `refused:<reason>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

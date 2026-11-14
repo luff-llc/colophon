@@ -742,6 +742,87 @@ fn run_identifiers() -> Vec<(String, Outcome)> {
     out
 }
 
+fn trimmed(path: &Path) -> Vec<u8> {
+    let mut b = fs::read(path).unwrap();
+    while b.last() == Some(&b'\n') {
+        b.pop();
+    }
+    b
+}
+
+/// §13.3: two heads by one home at one seq with different digests are evidence; the evidence
+/// verifies from the home's key in the account's history.
+fn run_equivocation(dir: &Path) -> Outcome {
+    use colophon_core::v05::write::authority::{verify_evidence, Evidence, EvidenceContext};
+    let objects = objects_of(&cand().join("account"));
+    let now_ms = ms("2026-11-11T09:01:00Z");
+    let verdict = verify_history(&objects, &Persisted::default(), now_ms);
+    let Some(st) = verdict.state else {
+        return Outcome::Fail("the account history does not verify".into());
+    };
+    let ev = trimmed(&dir.join("evidence.json"));
+    // The evidence's two heads are at seq 3. Whether they convict depends on §8.6 rule 1, which
+    // needs the entries the heads cover as held objects; the vector ships none, and the
+    // verifier answers `unavailable`, never a conviction.
+    let ctx = EvidenceContext {
+        objects: &objects,
+        now_ms,
+    };
+    match verify_evidence(&ev, st.account().as_str(), &ctx) {
+        Ok(Evidence::Heads { home, seq }) => {
+            Outcome::Pass(format!("evidence ok: home {home} at seq {seq}"))
+        }
+        Err(Failure::Unavailable(_)) => Outcome::NotImplemented(
+            "heads evidence needs the entries the heads cover as held objects; the vector ships none",
+        ),
+        other => Outcome::Fail(format!("{other:?}")),
+    }
+}
+
+/// §8.7: two homes holding both receipts build the activation independently. The vector
+/// directory holds only the two entries (no history), so `prepare_activate` cannot run from
+/// state here: the entry is rebuilt through `Kind::body` from its own fields, which checks
+/// the encoding only. The state-derived choice is tested in `v05_write_authority`.
+fn run_identical_activation(dir: &Path) -> Outcome {
+    use colophon_core::v05::write::{envelope, Header, Kind};
+    let (a, b) = (
+        trimmed(&dir.join("home-1.json")),
+        trimmed(&dir.join("home-2.json")),
+    );
+    if a != b {
+        return Outcome::Fail("the two homes' bytes differ".into());
+    }
+    let env: Value = serde_json::from_slice(&a).unwrap();
+    let body = b64(env["body"].as_str().unwrap());
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let list = |f: &str| -> Vec<Vec<u8>> {
+        v[f].as_array()
+            .unwrap()
+            .iter()
+            .map(|x| b64(x.as_str().unwrap()))
+            .collect()
+    };
+    let kind = Kind::Activate {
+        transition: b64(v["transition"].as_str().unwrap()),
+        receipts: list("receipts"),
+    };
+    let header = Header {
+        seq: v["seq"].as_u64().unwrap(),
+        previous: v["previous"].as_str().map(str::to_string),
+        issued: v["issued"].as_str().unwrap().to_string(),
+        by: v["by"].as_str().unwrap().to_string(),
+    };
+    let rebuilt = kind
+        .body(&header)
+        .and_then(|bd| envelope(&bd, None, &[], &[], &[]));
+    match rebuilt {
+        Ok(r) if r == a => Outcome::Pass(
+            "identical bytes; the vector ships no history, so only the encoder is exercised".into(),
+        ),
+        other => Outcome::Fail(format!("builder differs: {:?}", other.map(|r| r.len()))),
+    }
+}
+
 fn classify(rel: &str) -> Option<&'static str> {
     let _ = rel;
     None
@@ -823,6 +904,10 @@ fn candidate_conformance() {
             } else {
                 Outcome::Fail(format!("{} at {}", v.code(), v.seq()))
             }
+        } else if rel == "rules/equivocation" {
+            run_equivocation(&dir)
+        } else if rel == "rules/t-activate-identical-bytes" {
+            run_identical_activation(&dir)
         } else if is_history_case(&rel) {
             run_history(&dir, &case)
         } else if rel.starts_with("calls/")

@@ -25,6 +25,59 @@ use crate::v05::{Failure, Unknown};
 use envelope::AuthEnvelope;
 use std::collections::BTreeMap;
 
+/// How a transition is timed at a state (§8.7 "Times"), for the builders of recording entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransitionTiming {
+    /// The transition's body digest.
+    pub digest: String,
+    /// The transition's `by`.
+    pub by: String,
+    /// The signer units.
+    pub units: Vec<String>,
+    /// Its due time, in ms.
+    pub due_ms: i64,
+    /// Its veto deadline, in ms.
+    pub deadline_ms: i64,
+    /// A full set: not vetoable, due at its latest receipt.
+    pub full_set: bool,
+    /// Removal-only (§8.7).
+    pub removal_only: bool,
+}
+
+/// Judge `transition` with its chosen `receipts` at state `s` (§8.7 "Validity of T at an
+/// entry E") and report its timing. The same judgement `activate`, `vetoed` and `suspend`
+/// make; any failure is that entry's failure.
+pub fn transition_timing(
+    s: &State,
+    transition: &[u8],
+    receipts: &[Vec<u8>],
+) -> Result<TransitionTiming, Failure> {
+    let t = state::check_transition(s, transition, receipts, true, true)?;
+    Ok(TransitionTiming {
+        digest: t.digest,
+        by: t.by,
+        units: t.units.into_iter().collect(),
+        due_ms: t.due_ms,
+        deadline_ms: t.deadline_ms,
+        full_set: t.full_set,
+        removal_only: t.removal_only,
+    })
+}
+
+/// Check a held transition the way a home does before it receipts it: the transition's own
+/// checks, its unknown content, that it is not already recorded, and that its delta would
+/// apply at the head (a transition that would be void at activation is refused here).
+pub fn check_admissible_transition(s: &State, transition: &[u8]) -> Result<(), Failure> {
+    state::admission_transition(s, transition).map(|_| ())
+}
+
+impl State {
+    /// The `issued` of the last verified entry, in ms.
+    pub fn last_issued_ms(&self) -> i64 {
+        self.last_issued()
+    }
+}
+
 /// What the verifier holds.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Objects {
