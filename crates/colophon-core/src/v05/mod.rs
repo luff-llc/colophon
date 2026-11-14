@@ -159,7 +159,7 @@ pub(crate) fn require(ok: bool, reason: &str) -> Result<()> {
 
 /// Unknown content found while parsing (§2.3). It is reported as `newerFormat` only after the
 /// object has been authenticated and authorized (§1); parsers collect it here instead.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Unknown(pub Vec<String>);
 impl Unknown {
     /// Record one unknown field, kind, form, role, term or value by its path.

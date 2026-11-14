@@ -1,20 +1,24 @@
 //! The authority history verifier (§8), following §8.7's state table.
 //!
 //! Sans-IO: [`verify_history`] takes the object set (entries, pending transitions, vetoes and
-//! receipts, heads), the persisted state of §17.2 (here only the high-water mark, which detects
-//! rollback and never selects a branch) and the verifier's clock. The verdict is a function of
+//! receipts, heads), the versioned folded state and retained objects of §17.2, and the
+//! verifier's clock. The high-water mark detects rollback and never selects a branch. The verdict is a function of
 //! those inputs only: it doesn't depend on the order of the objects (a property test checks
 //! that), and nothing in this module reads a clock or storage.
 //!
-//! Not here (reported as not implemented by callers): succession (`predecessor`,
-//! `successionVetoed`, `successor`), `resolve`, the 0.4 `upgrade` prefix, homes' admission
-//! rules (§13.1 caps and clock) and the pending exchange (§14).
+//! Succession inputs include the predecessor history through its final entry. The caller
+//! supplies all receipts, fresh heads and clocks. No peer checkpoint is trusted.
 pub mod envelope;
+pub mod home;
 pub mod keyring;
 mod state;
+mod succession;
+pub mod swift;
+mod upgrade;
 
 pub use state::{
-    check_pending_transition, Activation, HomeStatus, MemberRecord, State, Suspension,
+    check_pending_transition, check_pending_veto, Activation, HomeStatus, MemberRecord, State,
+    Suspension,
 };
 
 use crate::v05::{Failure, Unknown};
@@ -22,7 +26,7 @@ use envelope::AuthEnvelope;
 use std::collections::BTreeMap;
 
 /// What the verifier holds.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Objects {
     /// Authority entry envelopes, any order, possibly conflicting.
     pub entries: Vec<Vec<u8>>,
@@ -30,14 +34,125 @@ pub struct Objects {
     pub pending: Vec<Vec<u8>>,
     /// Head envelopes.
     pub heads: Vec<Vec<u8>>,
+    /// Predecessor authority envelopes through F, supplied by the caller.
+    #[serde(default)]
+    pub predecessor: Vec<Vec<u8>>,
 }
 
-/// The persisted state a resuming verifier passes in (§17.2). Only the high-water mark is
-/// used, and only to detect rollback (§13.3).
+/// Locally trusted verifier state (§17.2). Persist atomically; never accept a checkpoint
+/// supplied by a peer. The retained objects allow earlier conflicts to be reconsidered.
 #[derive(Clone, Debug, Default)]
 pub struct Persisted {
     /// The highest accepted `(seq, digest)`.
     pub high_water: Option<(u64, String)>,
+    checkpoint: Option<Checkpoint>,
+}
+
+/// Checkpoint format. 2 added `held_until`; a format 1 checkpoint is refused, and the caller
+/// rebuilds it from its retained objects.
+const CHECKPOINT_VERSION: u32 = 2;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Checkpoint {
+    version: u32,
+    now_ms: i64,
+    state: Option<State>,
+    objects: Objects,
+    conflicts: bool,
+    /// Earliest time a candidate held at a decided seq comes due (format 2).
+    held_until: Option<i64>,
+    high_water: Option<(u64, String)>,
+}
+
+impl Persisted {
+    /// A rollback marker without a folded state.
+    pub fn high_water(seq: u64, digest: String) -> Self {
+        Self {
+            high_water: Some((seq, digest)),
+            checkpoint: None,
+        }
+    }
+
+    /// Save a verdict and the exact objects used to obtain it. Verification is repeated here
+    /// so callers cannot accidentally pair a folded state with a different object set.
+    pub fn checkpoint(objects: &Objects, previous: &Self, now_ms: i64) -> Self {
+        let all = merged_objects(objects, previous);
+        let verdict = verify_history(objects, previous, now_ms);
+        let high_water = previous
+            .high_water
+            .clone()
+            .filter(|(seq, _)| *seq >= verdict.branch.len() as u64)
+            .or_else(|| {
+                verdict
+                    .branch
+                    .last()
+                    .map(|d| (verdict.branch.len() as u64, d.clone()))
+            });
+        Self {
+            high_water: high_water.clone(),
+            checkpoint: Some(Checkpoint {
+                version: CHECKPOINT_VERSION,
+                now_ms,
+                state: verdict.state,
+                objects: all,
+                conflicts: !verdict.conflicts.is_empty()
+                    || matches!(verdict.stop, Some(Stop::Fork { .. })),
+                held_until: verdict.held_until,
+                high_water,
+            }),
+        }
+    }
+
+    /// Serialize a locally trusted checkpoint, including its format version.
+    pub fn to_bytes(&self) -> crate::v05::Result<Vec<u8>> {
+        let cp = self
+            .checkpoint
+            .as_ref()
+            .ok_or_else(|| crate::v05::malformed("no folded checkpoint"))?;
+        let mut cp = cp.clone();
+        cp.high_water = self.high_water.clone();
+        serde_json::to_vec(&cp).map_err(|e| crate::v05::malformed(e.to_string()))
+    }
+
+    /// Restore bytes from the caller's trusted storage, never from the network.
+    pub fn from_bytes(bytes: &[u8]) -> crate::v05::Result<Self> {
+        let cp: Checkpoint =
+            serde_json::from_slice(bytes).map_err(|e| crate::v05::malformed(e.to_string()))?;
+        crate::v05::require(
+            cp.version == CHECKPOINT_VERSION,
+            "unknown checkpoint version",
+        )?;
+        if let Some(state) = &cp.state {
+            state.check_checkpoint_shape()?;
+        }
+        Ok(Self {
+            high_water: cp.high_water.clone(),
+            checkpoint: Some(cp),
+        })
+    }
+
+    /// Objects retained for rollback, conflict reconsideration and call-view construction.
+    pub fn objects(&self) -> Option<&Objects> {
+        self.checkpoint.as_ref().map(|cp| &cp.objects)
+    }
+}
+
+fn merged_objects(objects: &Objects, persisted: &Persisted) -> Objects {
+    let mut all = persisted.objects().cloned().unwrap_or_default();
+    for (dst, src) in [
+        (&mut all.entries, &objects.entries),
+        (&mut all.pending, &objects.pending),
+        (&mut all.heads, &objects.heads),
+        (&mut all.predecessor, &objects.predecessor),
+    ] {
+        let mut seen: std::collections::BTreeSet<Vec<u8>> = dst.iter().cloned().collect();
+        for bytes in src {
+            if seen.insert(bytes.clone()) {
+                dst.push(bytes.clone());
+            }
+        }
+    }
+    all
 }
 
 /// Why verification stopped before the end of the branch.
@@ -77,6 +192,9 @@ pub struct Verdict {
     pub rollback: bool,
     /// Conflicts decided by §8.6, as `(seq, standing digest, losing digests)`.
     pub conflicts: Vec<(u64, String, Vec<String>)>,
+    /// The earliest clock time at which a candidate that was held at an already decided seq
+    /// is judged again (§8.1, §17.2). A resumed verifier replays once the clock reaches it.
+    pub held_until: Option<i64>,
 }
 impl Verdict {
     /// The §1 result code of the verification: `ok`, `held`, `refused:fork` or a failure's.
@@ -122,7 +240,7 @@ fn parse_entry(bytes: &[u8]) -> Result<Entry, Failure> {
     let (h, _) = crate::v05::members::AuthorityHeader::split(env.value.clone())?;
     if h.protocol != "colophon/authority/5" {
         return Err(if h.protocol == "colophon/authority/4" {
-            Failure::NewerFormat("0.4 upgrade prefixes are not implemented".into())
+            crate::v05::malformed("a /4 entry outside the upgrade prefix")
         } else {
             crate::v05::malformed("not a colophon/authority/5 entry")
         });
@@ -140,6 +258,9 @@ fn parse_entry(bytes: &[u8]) -> Result<Entry, Failure> {
 
 /// Verify an account's history from its object set, the persisted state and the clock.
 pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> Verdict {
+    let incoming = objects;
+    let all_objects = merged_objects(objects, persisted);
+    let objects = &all_objects;
     // Parse every entry; group candidates by (seq, previous). Unparseable entries are kept as
     // failures at their seq when nothing valid stands there.
     let mut by_seq: BTreeMap<u64, Vec<Result<Entry, Failure>>> = BTreeMap::new();
@@ -181,9 +302,49 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         stop: None,
         rollback: false,
         conflicts: Vec::new(),
+        held_until: None,
     };
     let mut st: Option<State> = None;
     let mut seq = 1u64;
+    if let Some(result) = upgrade::bootstrap(objects, now_ms) {
+        match result {
+            Ok(saved) => {
+                verdict.branch = saved.history().to_vec();
+                seq = verdict.branch.len() as u64 + 1;
+                st = Some(saved);
+            }
+            Err(stop) => {
+                verdict.stop = Some(stop);
+                return verdict;
+            }
+        }
+    }
+    // Fast path: append to the verified folded state. An earlier candidate, new head,
+    // prior conflict, or backwards clock requires replay of the retained objects. In
+    // particular a high-water marker never freezes a provisional branch.
+    if let Some(cp) = &persisted.checkpoint {
+        if let Some(saved) = &cp.state {
+            let retained: std::collections::BTreeSet<&Vec<u8>> =
+                cp.objects.entries.iter().collect();
+            let safe = !cp.conflicts
+                && cp.held_until.is_none_or(|t| now_ms < t)
+                && now_ms >= cp.now_ms
+                && incoming
+                    .predecessor
+                    .iter()
+                    .all(|h| cp.objects.predecessor.contains(h))
+                && incoming.heads.iter().all(|h| cp.objects.heads.contains(h))
+                && incoming.entries.iter().all(|b| {
+                    retained.contains(b)
+                        || parse_entry(b).is_ok_and(|e| e.seq > saved.history().len() as u64)
+                });
+            if safe {
+                verdict.branch = saved.history().to_vec();
+                st = Some(saved.clone());
+                seq = verdict.branch.len() as u64 + 1;
+            }
+        }
+    }
     loop {
         let prev = verdict.branch.last().cloned();
         let candidates: Vec<&Entry> = by_seq
@@ -207,9 +368,10 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         // Judge every candidate against the state before it.
         let mut valid: Vec<(&Entry, State)> = Vec::new();
         let mut first_failure: Option<(Stop, &Entry)> = None;
+        let mut held_at: Option<i64> = None;
         for e in &candidates {
             let r = match &st {
-                None => state::genesis(e, now_ms),
+                None => state::genesis(e, now_ms, &objects.predecessor),
                 Some(s) => state::apply(s, e, &pending, &heads, by_seq_all(&by_seq), now_ms),
             };
             match r {
@@ -220,12 +382,19 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
                     }
                 }
                 Err(state::Outcome::Held(why)) => {
+                    let t = state::release_time(st.as_ref(), e);
+                    held_at = Some(held_at.map_or(t, |h| h.min(t)));
                     if first_failure.is_none()
                         || matches!(first_failure, Some((Stop::Failed { .. }, _)))
                     {
                         first_failure = Some((Stop::Held { seq, why }, e));
                     }
                 }
+            }
+        }
+        if !valid.is_empty() {
+            if let Some(t) = held_at {
+                verdict.held_until = Some(verdict.held_until.map_or(t, |h| h.min(t)));
             }
         }
         let chosen = match valid.len() {
@@ -235,7 +404,14 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
             }
             1 => valid.pop(),
             _ => match &st {
-                Some(s) => match state::resolve_conflict(s, &valid, &heads, by_seq_all(&by_seq)) {
+                Some(s) => match state::resolve_conflict(
+                    s,
+                    &valid,
+                    &heads,
+                    by_seq_all(&by_seq),
+                    &pending,
+                    now_ms,
+                ) {
                     Some(i) => {
                         let losers = valid
                             .iter()
@@ -269,6 +445,11 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
             .ok()
             .and_then(|i| verdict.branch.get(i));
         verdict.rollback = on_branch != Some(hw_digest);
+    }
+    if !matches!(verdict.stop, Some(Stop::Fork { .. })) {
+        if let Some(s) = &mut st {
+            succession::finish(s, objects, now_ms);
+        }
     }
     verdict.state = st;
     verdict

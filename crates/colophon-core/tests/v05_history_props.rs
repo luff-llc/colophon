@@ -153,13 +153,7 @@ fn high_water_detects_rollback_and_never_selects_a_branch() {
                 )
                 .unwrap(),
         );
-        let v = verify_history(
-            &o,
-            &Persisted {
-                high_water: Some((seq, d)),
-            },
-            now,
-        );
+        let v = verify_history(&o, &Persisted::high_water(seq, d), now);
         assert_eq!(
             summary(&v),
             summary(&plain),
@@ -169,9 +163,7 @@ fn high_water_detects_rollback_and_never_selects_a_branch() {
     // A high-water mark past the verified branch is a rollback.
     let ok = verify_history(
         &objects_of(&cand().join("rules/t-remove-after-delay")),
-        &Persisted {
-            high_water: Some((9, "0".repeat(64))),
-        },
+        &Persisted::high_water(9, "0".repeat(64)),
         parse_date("2026-11-14T09:06:00Z").unwrap(),
     );
     assert!(ok.rollback);
@@ -273,13 +265,7 @@ fn no_panics_on_hostile_objects() {
             }
             for clock in [now, i64::MIN, i64::MAX, 0] {
                 let res = catch_unwind(AssertUnwindSafe(|| {
-                    verify_history(
-                        &o,
-                        &Persisted {
-                            high_water: Some((u64::MAX, "z".into())),
-                        },
-                        clock,
-                    )
+                    verify_history(&o, &Persisted::high_water(u64::MAX, "z".into()), clock)
                 }));
                 assert!(res.is_ok(), "panic on {} (clock {clock})", dir.display());
                 runs += 1;
@@ -300,6 +286,7 @@ fn no_panics_on_hostile_objects() {
             entries: garbage(4),
             pending: garbage(3),
             heads: garbage(3),
+            predecessor: garbage(3),
         };
         assert!(catch_unwind(AssertUnwindSafe(|| verify_history(
             &o,
@@ -310,4 +297,220 @@ fn no_panics_on_hostile_objects() {
         runs += 1;
     }
     assert!(runs > 3_000, "{runs}");
+}
+
+fn vector(name: &str) -> (Objects, i64) {
+    let dir = cand().join("rules").join(name);
+    let case: Value = serde_json::from_slice(&fs::read(dir.join("case.json")).unwrap()).unwrap();
+    (
+        objects_of(&dir),
+        parse_date(case["verifier"]["now"].as_str().unwrap()).unwrap(),
+    )
+}
+fn body_digest(env: &[u8]) -> String {
+    let env: Value = serde_json::from_slice(env).unwrap();
+    colophon_core::v05::encoding::digest(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
+}
+
+#[test]
+fn all_witnesses_excused_makes_addition_final_without_empty_final() {
+    let (objects, now) = vector("t-all-witnesses-excused");
+    // Revoking the first home is final, but the addition still needs the other home.
+    let prefix = Objects {
+        entries: objects.entries[..5].to_vec(),
+        ..Default::default()
+    };
+    let v = verify_history(&prefix, &Persisted::default(), now);
+    assert_eq!(v.code(), "ok");
+    assert!(
+        !v.state
+            .unwrap()
+            .activations()
+            .iter()
+            .find(|a| a.seq == 3)
+            .unwrap()
+            .final_
+    );
+    // Revoking the last home makes the addition final; its added key may sign seq 7.
+    let v = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!((v.code(), v.seq()), ("ok".into(), 7));
+    assert!(v.state.unwrap().activations().iter().all(|a| a.final_));
+}
+
+#[test]
+fn three_candidate_comparison_cycle_is_an_unresolved_fork() {
+    let (objects, now) = vector("t-three-candidate-cycle");
+    let dir = cand().join("rules/t-three-candidate-cycle");
+    let low = body_digest(&files(&dir.join("branch-low/authority"))[0]);
+    let high = body_digest(&files(&dir.join("branch-high/authority"))[0]);
+    let vetoed = body_digest(&files(&dir.join("records/authority"))[2]);
+    // Prove the cycle from actual verification of each two-candidate subset.
+    for (excluded, winner) in [(&vetoed, &low), (&low, &high), (&high, &vetoed)] {
+        let mut pair = objects.clone();
+        pair.entries.retain(|e| body_digest(e) != *excluded);
+        let v = verify_history(&pair, &Persisted::default(), now);
+        assert_eq!(v.code(), "ok");
+        assert_eq!(v.branch.get(2), Some(winner));
+    }
+    let v = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!((v.code(), v.seq()), ("refused:fork".into(), 3));
+    assert!(
+        v.conflicts.is_empty(),
+        "no candidate can be dropped in a cycle"
+    );
+}
+
+#[test]
+fn three_candidates_find_winner_despite_undecided_losing_pair() {
+    let (objects, now) = vector("t-three-candidate-winner");
+    let v = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!((v.code(), v.seq()), ("ok".into(), 3));
+    let winner =
+        body_digest(&files(&cand().join("rules/t-three-candidate-winner/branch-2/authority"))[0]);
+    assert_eq!(v.branch.get(2), Some(&winner));
+    assert_eq!(v.conflicts.len(), 1);
+    assert_eq!(v.conflicts[0].2.len(), 2);
+}
+
+#[test]
+fn persisted_folded_state_resumes_suffix_with_replay_equivalent_verdict() {
+    let mut rng = Rng(0x1702_cafe);
+    for (dir, now) in cases() {
+        let all = objects_of(&dir);
+        let replay = verify_history(&all, &Persisted::default(), now);
+        for split in [1, all.entries.len() / 2, all.entries.len()] {
+            let prefix = Objects {
+                entries: all.entries[..split].to_vec(),
+                ..Default::default()
+            };
+            let saved = Persisted::checkpoint(&prefix, &Persisted::default(), now);
+            let saved = Persisted::from_bytes(&saved.to_bytes().unwrap()).unwrap();
+            let mut suffix = Objects {
+                entries: all.entries[split..].to_vec(),
+                pending: all.pending.clone(),
+                heads: all.heads.clone(),
+                predecessor: all.predecessor.clone(),
+            };
+            shuffle(&mut rng, &mut suffix.entries);
+            shuffle(&mut rng, &mut suffix.pending);
+            shuffle(&mut rng, &mut suffix.heads);
+            let resumed = verify_history(&suffix, &saved, now);
+            assert_eq!(
+                summary(&resumed),
+                summary(&replay),
+                "{} split {split}",
+                dir.display()
+            );
+            assert_eq!(
+                serde_json::to_value(&resumed.state).unwrap(),
+                serde_json::to_value(&replay.state).unwrap(),
+                "{} folded state",
+                dir.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn checkpoints_taken_before_held_entries_come_due_resume_like_replay() {
+    // Checkpoint the whole object set at a clock before `now`, so entries dated after it are
+    // held, then resume at `now` with nothing new. The verdict and folded state must equal
+    // full replay at `now` (§17.2).
+    for (dir, now) in cases() {
+        let all = objects_of(&dir);
+        let replay = verify_history(&all, &Persisted::default(), now);
+        for back in [
+            30_000,
+            90_000,
+            600_000,
+            3_600_000,
+            86_400_000,
+            8 * 86_400_000,
+        ] {
+            let at = now - back;
+            let saved = Persisted::checkpoint(&all, &Persisted::default(), at);
+            let saved = Persisted::from_bytes(&saved.to_bytes().unwrap()).unwrap();
+            let resumed = verify_history(&Objects::default(), &saved, now);
+            assert_eq!(
+                summary(&resumed),
+                summary(&replay),
+                "{} checkpoint {back} ms before now",
+                dir.display()
+            );
+            assert_eq!(
+                serde_json::to_value(&resumed.state).unwrap(),
+                serde_json::to_value(&replay.state).unwrap(),
+                "{} folded state, checkpoint {back} ms before now",
+                dir.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn clock_retries_held_activation_and_expires_suspension_after_restart() {
+    let (objects, early) = vector("t-activate-early");
+    let held = verify_history(&objects, &Persisted::default(), early);
+    assert_eq!(held.code(), "held");
+    let saved = Persisted::checkpoint(&objects, &Persisted::default(), early);
+    let saved = Persisted::from_bytes(&saved.to_bytes().unwrap()).unwrap();
+    let late = early + 8 * 86_400_000;
+    let resumed = verify_history(&Objects::default(), &saved, late);
+    let replay = verify_history(&objects, &Persisted::default(), late);
+    assert_eq!(resumed.code(), "ok");
+    assert_eq!(summary(&resumed), summary(&replay));
+
+    let (objects, now) = vector("t-suspend");
+    let v = verify_history(&objects, &Persisted::default(), now);
+    let st = v.state.unwrap();
+    let sp = st.active_suspensions(now)[0];
+    let end = sp.ends_ms();
+    let saved = Persisted::checkpoint(&objects, &Persisted::default(), now);
+    for (clock, expected) in [(end, 1), (end + 1, 0)] {
+        let v = verify_history(&Objects::default(), &saved, clock);
+        assert_eq!(v.state.unwrap().active_suspensions(clock).len(), expected);
+    }
+}
+
+#[test]
+fn checkpoint_rejects_unknown_format_and_malformed_bytes() {
+    assert!(Persisted::from_bytes(b"{}").is_err());
+    let (objects, now) = vector("t-suspend");
+    let cp = Persisted::checkpoint(&objects, &Persisted::default(), now);
+    let mut value: Value = serde_json::from_slice(&cp.to_bytes().unwrap()).unwrap();
+    value["version"] = Value::from(99);
+    assert!(Persisted::from_bytes(&serde_json::to_vec(&value).unwrap()).is_err());
+}
+
+#[test]
+fn clock_retries_future_genesis_and_immediate_entry_at_sixty_second_boundary() {
+    let (objects, _) = vector("i-add-approve");
+    for split in [1, objects.entries.len()] {
+        let subset = Objects {
+            entries: objects.entries[..split].to_vec(),
+            ..Default::default()
+        };
+        let env: Value = serde_json::from_slice(subset.entries.last().unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
+                .unwrap();
+        let issued = parse_date(body["issued"].as_str().unwrap()).unwrap();
+        let early = issued - 60_001;
+        assert_eq!(
+            verify_history(&subset, &Persisted::default(), early).code(),
+            "held"
+        );
+        let saved = Persisted::checkpoint(&subset, &Persisted::default(), early);
+        let saved = Persisted::from_bytes(&saved.to_bytes().unwrap()).unwrap();
+        let resumed = verify_history(&Objects::default(), &saved, issued - 60_000);
+        assert_eq!((resumed.code(), resumed.seq()), ("ok".into(), split as u64));
+        assert_eq!(
+            summary(&resumed),
+            summary(&verify_history(
+                &subset,
+                &Persisted::default(),
+                issued - 60_000
+            ))
+        );
+    }
 }

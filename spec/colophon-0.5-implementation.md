@@ -24,9 +24,12 @@ verifier.
 
 - **Files.** New `crates/colophon-core/tests/v5_candidate.rs`, which writes to
   `conformance/0.5/`, is opt-in, and is deterministic from published seeds. Port the cases in
-  `conformance/0.5/candidate/` (built by `generate.py` and `rules.py`) into it, so one generator
+  `conformance/0.5/candidate/` (then built by the Python `generate.py` and `rules.py`) into it, so one generator
   owns them all. The ported files must come out byte-identical, or the difference becomes a
-  spec question.
+  spec question. **Status: done.** The port is `v5_candidate.rs` with helpers in
+  `tests/v5_candidate/`. Its check mode reproduces all 1,078 files byte for byte, and
+  `generate.py`, `rules.py` and `rules_v8.py` are deleted. The missing vectors below are still to
+  be added to this generator.
 - **Missing vectors to produce** (each listed in §21 and in the candidate README):
   1. Every 0.4 key case as `/5`, including slots, rotation and every WebAuthn refusal.
   2. Namespaces:

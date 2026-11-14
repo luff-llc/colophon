@@ -34,7 +34,7 @@ impl From<Failure> for Outcome {
 type Step<T> = std::result::Result<T, Outcome>;
 
 /// A member (§9) and, for a home, its status.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MemberRecord {
     /// The request it was admitted with.
     pub request: Request,
@@ -56,7 +56,7 @@ pub struct MemberRecord {
     pub home: HomeStatus,
 }
 /// A home's status.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HomeStatus {
     /// Not a home.
     NotHome,
@@ -66,7 +66,7 @@ pub enum HomeStatus {
     RevocationPending(u64),
 }
 /// An activation and its finality (§8.7).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Activation {
     /// Its seq.
     pub seq: u64,
@@ -88,7 +88,7 @@ pub struct Activation {
     pub revokes: Vec<String>,
 }
 /// An outstanding suspension.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Suspension {
     /// The suspended key.
     pub key: String,
@@ -108,7 +108,7 @@ impl Suspension {
         self.due_ms.saturating_add(7 * DAY)
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct CtrlMeta {
     added_seq: u64,
     /// The charged signer of the immediate `keyring` entry that added it.
@@ -116,20 +116,20 @@ struct CtrlMeta {
     /// The activation that added it, while not final.
     provisional: Option<u64>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct RateItem {
     issued: i64,
     charged: String,
     size: usize,
     account: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Retiring {
     current_at_anchor: BTreeSet<String>,
 }
 
 /// The folded state of §17.2 at one entry.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub(crate) account: AccountId,
     pub(crate) digests: Vec<String>,
@@ -152,10 +152,65 @@ pub struct State {
     retiring: Option<Retiring>,
     excused: BTreeSet<String>,
     pub(crate) points: BTreeSet<Vec<u8>>,
+    /// Upgrade sequence, fencing legacy records.
+    #[serde(default)]
+    pub upgrade_seq: Option<u64>,
+    #[serde(default)]
+    pub(super) succession: Option<super::succession::Succession>,
+    #[serde(default)]
+    pub(super) successor: Option<String>,
+    #[serde(default)]
+    /// Owner asserted migration manifest, when recorded.
+    pub migration: Option<Value>,
 }
 
 impl State {
+    pub(super) fn check_checkpoint_shape(&self) -> Result<()> {
+        let len = self.digests.len();
+        crate::v05::require(
+            len > 0
+                && self.issued.len() == len
+                && self.keyring_at.len() == len
+                && self.delay_at.len() == len
+                && self.delay_at.iter().all(|d| *d <= 2_592_000)
+                && self
+                    .epochs
+                    .values()
+                    .chain(self.v.values())
+                    .all(|n| *n < (1u64 << 53))
+                && self.policies.iter().all(|(_, p)| {
+                    p.recovery_delay() <= 2_592_000
+                        && p.call_window() <= 3_600
+                        && p.link_max_age() <= 2_592_000
+                        && p.head_max_age() <= 86_400
+                        && p.head_quorum() <= 8
+                }),
+            "invalid folded checkpoint shape",
+        )?;
+        // This is corruption detection, not authentication of a peer's state.
+        let parsed = Keyring::parse(self.keyring.raw.clone(), 0)?;
+        crate::v05::require(
+            serde_json::to_value(parsed).ok() == serde_json::to_value(&self.keyring).ok(),
+            "checkpoint keyring differs from its validated representation",
+        )
+    }
+
     /// The account.
+    /// Verified predecessor final reference, if established.
+    pub fn verified_succession(&self) -> Option<(u64, &str)> {
+        self.succession
+            .as_ref()?
+            .verified
+            .as_ref()
+            .map(|(n, d)| (*n, d.as_str()))
+    }
+    /// Malformed evidence after the predecessor final entry.
+    pub fn predecessor_evidence(&self) -> &[u64] {
+        self.succession
+            .as_ref()
+            .map_or(&[], |p| p.evidence_after_final.as_slice())
+    }
+    /// Account identifier.
     pub fn account(&self) -> &AccountId {
         &self.account
     }
@@ -179,6 +234,14 @@ impl State {
     pub fn activations(&self) -> &[Activation] {
         &self.activations
     }
+    /// Suspensions that remain in force at the caller's clock (§8.7 Clock).
+    /// Expired records remain in the folded state for checks of historical entries.
+    pub fn active_suspensions(&self, now_ms: i64) -> Vec<&Suspension> {
+        self.suspensions
+            .iter()
+            .filter(|sp| now_ms <= sp.ends_ms())
+            .collect()
+    }
     /// v(u) per unit.
     pub fn veto_counts(&self) -> &BTreeMap<String, u64> {
         &self.v
@@ -187,10 +250,10 @@ impl State {
     pub fn controller_provisional(&self, id: &str) -> Option<u64> {
         self.meta.get(id).and_then(|m| m.provisional)
     }
-    fn seq(&self) -> u64 {
+    pub(super) fn seq(&self) -> u64 {
         self.digests.len() as u64
     }
-    fn last_issued(&self) -> i64 {
+    pub(super) fn last_issued(&self) -> i64 {
         self.issued.last().copied().unwrap_or(i64::MIN)
     }
     /// A controller counts: present and not added by a provisional activation.
@@ -225,13 +288,13 @@ impl State {
             })
             .collect()
     }
-    fn home_key(&self, id: &str) -> Option<Vec<u8>> {
+    pub(super) fn home_key(&self, id: &str) -> Option<Vec<u8>> {
         self.current_homes()
             .into_iter()
             .find(|m| m.request.member_id() == id)
             .map(|m| m.request.signing.clone())
     }
-    fn primary_home(&self) -> Option<String> {
+    pub(super) fn primary_home(&self) -> Option<String> {
         if let Some(p) = self.keyring.policy.primary_home() {
             return Some(p.to_string());
         }
@@ -357,7 +420,7 @@ fn all_units(k: &Keyring, ids: &[String]) -> BTreeSet<String> {
 // ---------------------------------------------------------------------------------------------
 // Genesis.
 
-pub(crate) fn genesis(e: &Entry, now_ms: i64) -> Step<State> {
+pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<State> {
     if e.seq != 1 || e.kind != "genesis" {
         return Err(malformed("seq 1 must be a genesis").into());
     }
@@ -365,11 +428,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64) -> Step<State> {
         return Err(Outcome::Held("issued more than 60 s ahead".into()));
     }
     let v = &e.env.value;
-    if v.get("predecessor").is_some() {
-        return Err(
-            Failure::NewerFormat("succession (predecessor) is not implemented".into()).into(),
-        );
-    }
+    let succession = super::succession::prepare(e, predecessor, now_ms)?;
     // Step 1 reads the keyring's controllers to bind the signer.
     let keyring = Keyring::parse(v.get("keyring").cloned().unwrap_or(Value::Null), 1)?;
     let by = keyring
@@ -426,7 +485,10 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64) -> Step<State> {
         return Err(bad_signature("genesis: control rule not met").into());
     }
     for id in keyring.controllers.keys() {
-        if id != &e.by && !e.env.additions.iter().any(|a| &a.signer == id) {
+        let carried = succession
+            .as_ref()
+            .is_some_and(|p| p.carried(id, &keyring.controllers[id]));
+        if id != &e.by && !carried && !e.env.additions.iter().any(|a| &a.signer == id) {
             return Err(bad_signature("genesis: possession proof missing").into());
         }
     }
@@ -529,6 +591,10 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64) -> Step<State> {
         retiring: None,
         excused: BTreeSet::new(),
         points,
+        upgrade_seq: None,
+        succession,
+        successor: None,
+        migration: None,
     })
 }
 
@@ -1058,7 +1124,7 @@ pub(crate) fn check_transition(
 }
 
 /// A receipt (§13.5): returns the home and `received`.
-fn check_receipt(
+pub(super) fn check_receipt(
     s: &State,
     bytes: &[u8],
     object: &str,
@@ -1104,7 +1170,7 @@ fn embedded_list(v: &Value, field: &str, bound: usize) -> Result<Vec<Vec<u8>>> {
 // ---------------------------------------------------------------------------------------------
 // Applying deltas.
 
-fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> {
+pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> {
     let mut n = s.clone();
     let k = &s.keyring;
     let mut raw = k.raw_controllers();
@@ -1300,8 +1366,18 @@ fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> {
         new_members.push(member_from(s, g, act_seq, false)?);
         changed = true;
     }
-    if t.change.contains_key("migration") {
-        return Err(malformed("migration without a predecessor"));
+    if let Some(m) = t.change.get("migration") {
+        super::succession::migration(&mut n, m)?;
+        changed = true;
+    }
+    if let Some(a) = t.change.get("successor") {
+        let id = a
+            .get("account")
+            .and_then(Value::as_str)
+            .ok_or_else(|| malformed("successor account"))?;
+        AccountId::parse(id)?;
+        n.successor = Some(id.into());
+        changed = true;
     }
     if t.change.contains_key("layout") {
         changed = true;
@@ -1420,6 +1496,25 @@ fn make_final(n: &mut State, seq: u64) {
     }
 }
 
+/// Excusals can make other activations final, including removals that excuse more homes.
+/// Reach the least fixed point after an entry; no empty `final` object is needed.
+fn finalize_empty_witnesses(n: &mut State) {
+    loop {
+        let ready: Vec<u64> = n
+            .activations
+            .iter()
+            .filter(|a| !a.final_ && a.witnesses.iter().all(|h| n.excused.contains(h)))
+            .map(|a| a.seq)
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        for seq in ready {
+            make_final(n, seq);
+        }
+    }
+}
+
 fn witnesses_of(s: &State, t: &TCheck, after: Option<&State>) -> BTreeSet<String> {
     let mut w: BTreeSet<String> = s
         .current_homes()
@@ -1460,6 +1555,9 @@ pub(crate) fn apply(
     now_ms: i64,
 ) -> Step<State> {
     let _ = (pending, heads);
+    if s.successor.is_some() {
+        return Err(malformed("entry after terminal successor").into());
+    }
     // §8.5 step 1: header.
     if e.seq != s.seq() + 1 || e.previous.as_deref() != s.digests.last().map(String::as_str) {
         return Err(malformed("seq or previous doesn't follow").into());
@@ -1477,11 +1575,11 @@ pub(crate) fn apply(
         "suspend" => suspend(s, e)?,
         "vault" => vault_entry(s, e)?,
         "genesis" => return Err(malformed("a second genesis").into()),
-        "successionVetoed" => {
-            return Err(Failure::NewerFormat("succession is not implemented".into()).into())
-        }
+        "successionVetoed" => super::succession::vetoed(s, e)?,
         _ => immediate(s, e)?,
     };
+    finalize_empty_witnesses(&mut n);
+    super::succession::observe_window(&mut n, e);
     // Suspensions end with an entry past their due time + 7 days, or when the entry makes
     // their transition invalid at a hypothetical activate.
     let issued = e.issued;
@@ -1617,36 +1715,14 @@ fn activate(s: &State, e: &Entry, now_ms: i64) -> Step<State> {
     Ok(n)
 }
 
-fn vetoed(s: &State, e: &Entry) -> Step<State> {
-    unsigned(e)?;
-    let v = &e.env.value;
-    let t_bytes = embedded_bytes(
-        v.get("transition").unwrap_or(&Value::Null),
-        "transition",
-        bounds::TRANSITION_ENVELOPE,
-    )?;
-    let t_receipts = embedded_list(v, "transitionReceipts", bounds::RECEIPT_ENVELOPE)?;
-    let veto_bytes = embedded_bytes(
-        v.get("veto").unwrap_or(&Value::Null),
-        "veto",
-        bounds::VETO_ENVELOPE,
-    )?;
-    let receipts = embedded_list(v, "receipts", bounds::RECEIPT_ENVELOPE)?;
-    let veto = AuthEnvelope::parse(&veto_bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)?;
-    // Table order: `by` = V's `by`; T not recorded on the branch; then T valid at E.
-    if veto.value.get("by").and_then(Value::as_str) != Some(e.by.as_str()) {
-        return Err(bad_signature("vetoed: by is not the veto's by").into());
-    }
-    let peek = AuthEnvelope::parse(
-        &t_bytes,
-        bounds::TRANSITION_ENVELOPE,
-        bounds::TRANSITION_ENVELOPE,
-        true,
-    )?;
-    if s.recorded.contains(&peek.digest) {
-        return Err(malformed("the transition is already recorded on this branch").into());
-    }
-    let t = check_transition(s, &t_bytes, &t_receipts, true, true)?;
+/// Validate a veto before or after receipts, sharing the recording-entry checks.
+fn check_veto(
+    s: &State,
+    t: &TCheck,
+    veto: &AuthEnvelope,
+    receipts: &[Vec<u8>],
+    with_receipts: bool,
+) -> Step<(i64, bool)> {
     let mut o = Obj::new(veto.value.clone(), "veto")?;
     crate::v05::require(o.string("protocol")? == "colophon/veto/5", "not a veto")
         .map_err(Outcome::from)?;
@@ -1667,7 +1743,7 @@ fn vetoed(s: &State, e: &Entry) -> Step<State> {
         .into_iter()
         .filter_map(|x| x.as_str().map(str::to_string))
         .collect();
-    if e.by != v_by {
+    if veto.primary.as_ref().is_none_or(|p| p.signer != v_by) {
         return Err(bad_signature("vetoed: by is not the veto's by").into());
     }
     let signers = veto.signer_ids();
@@ -1710,11 +1786,14 @@ fn vetoed(s: &State, e: &Entry) -> Step<State> {
     // The veto's receipts: chosen, within 300 s of its issued, before the deadline.
     let homes = s.current_homes();
     let quorum = (k.policy.head_quorum() as usize).min(homes.len());
-    crate::v05::require(receipts.len() == quorum, "veto receipts: wrong count")
-        .map_err(Outcome::from)?;
+    crate::v05::require(
+        !with_receipts || receipts.len() == quorum,
+        "veto receipts: wrong count",
+    )
+    .map_err(Outcome::from)?;
     let mut latest = i64::MIN;
     let mut last: Option<String> = None;
-    for r in &receipts {
+    for r in receipts {
         let (home, received) = check_receipt(s, r, &veto.digest, v_issued)?;
         crate::v05::require(
             last.as_ref().is_none_or(|l| l < &home),
@@ -1727,6 +1806,43 @@ fn vetoed(s: &State, e: &Entry) -> Step<State> {
         }
         latest = latest.max(received);
     }
+    let mut unknown = crate::v05::Unknown::default();
+    o.finish(&mut unknown);
+    unknown.check()?;
+    Ok((latest, undecidable))
+}
+
+fn vetoed(s: &State, e: &Entry) -> Step<State> {
+    unsigned(e)?;
+    let v = &e.env.value;
+    let t_bytes = embedded_bytes(
+        v.get("transition").unwrap_or(&Value::Null),
+        "transition",
+        bounds::TRANSITION_ENVELOPE,
+    )?;
+    let t_receipts = embedded_list(v, "transitionReceipts", bounds::RECEIPT_ENVELOPE)?;
+    let veto_bytes = embedded_bytes(
+        v.get("veto").unwrap_or(&Value::Null),
+        "veto",
+        bounds::VETO_ENVELOPE,
+    )?;
+    let receipts = embedded_list(v, "receipts", bounds::RECEIPT_ENVELOPE)?;
+    let veto = AuthEnvelope::parse(&veto_bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)?;
+    // Table order: `by` = V's `by`; T not recorded on the branch; then T valid at E.
+    if veto.value.get("by").and_then(Value::as_str) != Some(e.by.as_str()) {
+        return Err(bad_signature("vetoed: by is not the veto's by").into());
+    }
+    let peek = AuthEnvelope::parse(
+        &t_bytes,
+        bounds::TRANSITION_ENVELOPE,
+        bounds::TRANSITION_ENVELOPE,
+        true,
+    )?;
+    if s.recorded.contains(&peek.digest) {
+        return Err(malformed("the transition is already recorded on this branch").into());
+    }
+    let t = check_transition(s, &t_bytes, &t_receipts, true, true)?;
+    let (latest, undecidable) = check_veto(s, &t, &veto, &receipts, true)?;
     let want = recorded_issued(s.last_issued(), latest);
     if e.issued != want || want > latest.saturating_add(7 * DAY) {
         return Err(malformed("vetoed: issued is not determined").into());
@@ -2598,6 +2714,20 @@ fn due_and_object(s: &State, e: &Entry) -> (i64, String) {
                 Err(_) => (i64::MAX, String::new()),
             }
         }
+        "successionVetoed" => s
+            .succession
+            .as_ref()
+            .and_then(|p| {
+                p.window.as_ref().map(|w| {
+                    (
+                        w.start
+                            .saturating_add(300_000)
+                            .saturating_add((w.delay as i64).saturating_mul(1000)),
+                        p.genesis_digest.clone(),
+                    )
+                })
+            })
+            .unwrap_or((i64::MAX, String::new())),
         "final" => {
             let seq = v
                 .get("activation")
@@ -2613,6 +2743,16 @@ fn due_and_object(s: &State, e: &Entry) -> (i64, String) {
         _ => (i64::MAX, String::new()),
     }
 }
+/// The clock time from which a candidate held at `s` can be judged again: the earlier of its
+/// issued-ahead release and (for an `activate`) its due time. A lower bound is safe; it only
+/// brings a replay forward.
+pub(crate) fn release_time(s: Option<&State>, e: &Entry) -> i64 {
+    let ahead = e.issued.saturating_sub(60 * SEC);
+    match (s, e.kind.as_str()) {
+        (Some(s), "activate") => ahead.min(due_and_object(s, e).0),
+        _ => ahead,
+    }
+}
 fn kind_rank(k: &str) -> u8 {
     match k {
         "activate" => 0,
@@ -2622,7 +2762,7 @@ fn kind_rank(k: &str) -> u8 {
     }
 }
 /// Digests of entries reachable from `from` by `previous` links (its descendants and itself).
-fn descendants(all: &[&Entry], from: &str) -> BTreeSet<String> {
+pub(super) fn descendants(all: &[&Entry], from: &str) -> BTreeSet<String> {
     let mut set: BTreeSet<String> = [from.to_string()].into();
     loop {
         let before = set.len();
@@ -2636,18 +2776,68 @@ fn descendants(all: &[&Entry], from: &str) -> BTreeSet<String> {
         }
     }
 }
-fn final_covers(all: &[&Entry], activate_digest: &str) -> bool {
-    all.iter().any(|e| {
-        e.kind == "final"
-            && e.env
+/// What a conflict needs besides the candidates: the held objects and the clock.
+struct Ctx<'a> {
+    heads: &'a HeadSet,
+    all: &'a [&'a Entry],
+    pending: &'a Pending,
+    now_ms: i64,
+}
+/// Whether a `final` covers the activate `act`, whose state after it is `after` (§8.6 rule 1,
+/// §8.7). Only a `final` that is a valid entry on the activate's own branch counts: a chain of
+/// `previous` links runs from `act` to it, and every entry on that chain applies in turn. A
+/// parsed object that no branch contains, or one that fails its checks, covers nothing.
+fn final_covers(ctx: &Ctx, act: &Entry, after: &State) -> bool {
+    let by_digest: BTreeMap<&str, &Entry> = ctx
+        .all
+        .iter()
+        .map(|e| (e.env.digest.as_str(), *e))
+        .collect();
+    ctx.all.iter().any(|f| {
+        if f.kind != "final"
+            || f.env
                 .value
                 .get("activation")
                 .and_then(|a| a.get("digest"))
                 .and_then(Value::as_str)
-                == Some(activate_digest)
+                != Some(act.env.digest.as_str())
+        {
+            return false;
+        }
+        // Walk back to the activate. Each step lowers seq, so the walk is bounded.
+        let mut chain: Vec<&Entry> = vec![f];
+        let mut cur: &Entry = f;
+        while cur.previous.as_deref() != Some(act.env.digest.as_str()) {
+            let Some(next) = cur
+                .previous
+                .as_deref()
+                .and_then(|p| by_digest.get(p).copied())
+            else {
+                return false;
+            };
+            if next.seq >= cur.seq || next.seq <= act.seq {
+                return false;
+            }
+            chain.push(next);
+            cur = next;
+        }
+        let mut st = after.clone();
+        for e in chain.into_iter().rev() {
+            match apply(&st, e, ctx.pending, ctx.heads, ctx.all.to_vec(), ctx.now_ms) {
+                Ok(n) => st = n,
+                Err(_) => return false,
+            }
+        }
+        true
     })
 }
-fn covered_by_home_head(s: &State, heads: &HeadSet, all: &[&Entry], y: &Entry, home: &str) -> bool {
+pub(super) fn covered_by_home_head(
+    s: &State,
+    heads: &HeadSet,
+    all: &[&Entry],
+    y: &Entry,
+    home: &str,
+) -> bool {
     let Some(key) = s.home_key(home) else {
         return false;
     };
@@ -2663,21 +2853,23 @@ pub(crate) fn resolve_conflict(
     valid: &[(&Entry, State)],
     heads: &HeadSet,
     all: Vec<&Entry>,
+    pending: &Pending,
+    now_ms: i64,
 ) -> Option<usize> {
-    let mut winner = 0usize;
-    for j in 1..valid.len() {
-        winner = pair(s, valid, winner, j, heads, &all)?;
-    }
-    Some(winner)
+    let ctx = Ctx {
+        heads,
+        all: &all,
+        pending,
+        now_ms,
+    };
+    // The pairwise rules need not be transitive. A fold can return a loser in a
+    // cycle, or stop at an unresolved pair before reaching a candidate that beats both.
+    // Stand only a candidate that wins against every other valid candidate (§8.6).
+    (0..valid.len())
+        .find(|&i| (0..valid.len()).all(|j| i == j || pair(s, valid, i, j, &ctx) == Some(i)))
 }
-fn pair(
-    s: &State,
-    valid: &[(&Entry, State)],
-    i: usize,
-    j: usize,
-    heads: &HeadSet,
-    all: &[&Entry],
-) -> Option<usize> {
+fn pair(s: &State, valid: &[(&Entry, State)], i: usize, j: usize, ctx: &Ctx) -> Option<usize> {
+    let (heads, all) = (ctx.heads, ctx.all);
     let (x, y) = (valid[i].0, valid[j].0);
     let xr = RECORDING.contains(&x.kind.as_str());
     let yr = RECORDING.contains(&y.kind.as_str());
@@ -2687,7 +2879,8 @@ fn pair(
             let (due, _) = due_and_object(s, rec);
             let primary = s.primary_home();
             let covered = primary.is_some_and(|p| covered_by_home_head(s, heads, all, other, &p));
-            let finalized = rec.kind == "activate" && final_covers(all, &rec.env.digest);
+            let rec_idx = if xr { i } else { j };
+            let finalized = rec.kind == "activate" && final_covers(ctx, rec, &valid[rec_idx].1);
             Some(if covered && other.issued <= due && !finalized {
                 oi
             } else {
@@ -2702,13 +2895,12 @@ fn pair(
                 && ((x.kind == "activate" && y.kind == "vetoed")
                     || (x.kind == "vetoed" && y.kind == "activate"))
             {
-                let (act, vet, ai, vi) = if x.kind == "activate" {
-                    (x, y, i, j)
+                let (act, ai, vi) = if x.kind == "activate" {
+                    (x, i, j)
                 } else {
-                    (y, x, j, i)
+                    (y, j, i)
                 };
-                let _ = vet;
-                return Some(if final_covers(all, &act.env.digest) {
+                return Some(if final_covers(ctx, act, &valid[ai].1) {
                     ai
                 } else {
                     vi
@@ -2746,4 +2938,233 @@ fn pair(
 /// Check a held transition against a state (as a home or verifier would before receipting).
 pub fn check_pending_transition(s: &State, bytes: &[u8]) -> Result<()> {
     check_transition(s, bytes, &[], false, false).map(|_| ())
+}
+
+/// Check a pending veto against the latest verified state, before issuing its receipt.
+/// The transition receipts are required; the veto's own receipts are not yet required.
+pub fn check_pending_veto(
+    s: &State,
+    transition: &[u8],
+    transition_receipts: &[Vec<u8>],
+    bytes: &[u8],
+) -> Result<()> {
+    let t = check_transition(s, transition, transition_receipts, true, false)?;
+    let veto = AuthEnvelope::parse(bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false)?;
+    let (_, undecidable) = check_veto(s, &t, &veto, &[], false).map_err(|o| match o {
+        Outcome::Fail(f) => f,
+        Outcome::Held(why) => malformed(why),
+    })?;
+    t.unknown.check()?;
+    super::prescan("veto", &veto.value).check()?;
+    if undecidable {
+        return Err(Failure::NewerFormat(
+            "a signer's key form is unknown".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn admission_transition(s: &State, bytes: &[u8]) -> Result<TCheck> {
+    let t = check_transition(s, bytes, &[], false, false)?;
+    t.unknown.check()?;
+    if t.undecidable {
+        return Err(Failure::NewerFormat(
+            "a signer's key form is unknown".into(),
+        ));
+    }
+    if s.recorded.contains(&t.digest) {
+        return Err(malformed("transition is already recorded"));
+    }
+    apply_delta(s, &t, s.seq() + 1)?;
+    Ok(t)
+}
+
+pub(super) fn receipted_veto(
+    s: &State,
+    transition: &[u8],
+    transition_receipts: &[Vec<u8>],
+    veto: &[u8],
+    receipts: &[Vec<u8>],
+) -> Result<()> {
+    let t = check_transition(s, transition, transition_receipts, true, false)?;
+    let env = AuthEnvelope::parse(veto, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false)?;
+    check_veto(s, &t, &env, receipts, true).map_err(|o| match o {
+        Outcome::Fail(f) => f,
+        Outcome::Held(why) => malformed(why),
+    })?;
+    Ok(())
+}
+
+/// Translate only after the complete incorporated prefix and upgrade authenticate.
+pub(super) fn from_upgrade(
+    prior: &crate::authority::Authority,
+    keyring: Keyring,
+    records: &crate::model::Records,
+    seq: u64,
+) -> Result<State> {
+    let mut digests = Vec::new();
+    let mut issued = Vec::new();
+    for raw in records.values() {
+        let env =
+            crate::keys::AuthorityEnvelope::from_json(raw).map_err(|e| malformed(e.to_string()))?;
+        let v = env.body_value().map_err(|e| malformed(e.to_string()))?;
+        digests.push(crate::v05::encoding::digest(&env.body));
+        issued.push(
+            crate::v05::encoding::parse_date(
+                v["issued"].as_str().ok_or_else(|| malformed("issued"))?,
+            )
+            .ok_or_else(|| malformed("issued"))?,
+        );
+    }
+    let first = records
+        .values()
+        .next()
+        .ok_or_else(|| malformed("missing genesis"))?;
+    let first =
+        crate::keys::AuthorityEnvelope::from_json(first).map_err(|e| malformed(e.to_string()))?;
+    let account = AccountId::of_genesis(&first.body);
+    let mut members = Vec::new();
+    for old in prior.members.values() {
+        let g = old
+            .member
+            .grant
+            .as_ref()
+            .ok_or_else(|| malformed("missing legacy grant"))?;
+        let access = if g.access.contains(&crate::model::Access::Write) {
+            "write"
+        } else {
+            "read"
+        };
+        let mut terms = serde_json::json!({"records":g.namespaces.iter().map(|n| serde_json::json!({"namespace":n,"access":access})).collect::<Vec<_>>()});
+        for (field, value) in [
+            ("expires", serde_json::to_value(&g.expires)),
+            ("writes", serde_json::to_value(g.write_budget)),
+            ("import", serde_json::to_value(g.import)),
+        ] {
+            let value = value.map_err(|e| malformed(e.to_string()))?;
+            if !value.is_null() {
+                terms[field] = value;
+            }
+        }
+        let terms = Terms::parse(terms, TermsKind::Member)?;
+        let kind = match old.member.kind {
+            crate::model::MemberKind::Device => MemberKind::Device,
+            crate::model::MemberKind::App => MemberKind::App,
+            crate::model::MemberKind::Agent => MemberKind::Agent,
+            crate::model::MemberKind::Server => MemberKind::Server,
+        };
+        members.push(MemberRecord {
+            request: Request {
+                body: Vec::new(),
+                account: account.clone(),
+                signing: old.public.signing.clone(),
+                agreement: old.public.agreement.clone(),
+                label: old.member.label.clone(),
+                kind,
+                terms: terms.clone(),
+                created_ms: issued
+                    .get(old.member.since.saturating_sub(1) as usize)
+                    .copied()
+                    .unwrap_or(0),
+                custody: None,
+                operator: None,
+                endpoints: None,
+                unknown: Default::default(),
+            },
+            expires_ms: terms.expires_ms(),
+            terms,
+            granted_seq: old.member.since,
+            revoked_seq: old.member.revoked_at,
+            renewals: Vec::new(),
+            end_sessions: Vec::new(),
+            provisional: None,
+            home: HomeStatus::NotHome,
+        });
+    }
+    let mut ever: BTreeMap<String, Vec<(u64, Option<Controller>)>> = BTreeMap::new();
+    let mut points = BTreeSet::new();
+    let mut historical_sets = Vec::new();
+    let mut present = BTreeSet::new();
+    // Retain every historical key so the one-principal rule survives the upgrade.
+    for entry in &prior.entries {
+        if let crate::authority::Action::Genesis { keyring: k, .. }
+        | crate::authority::Action::Keyring { keyring: k, .. } = &entry.action
+        {
+            let next: BTreeSet<String> = k.controllers.iter().map(|c| c.id()).collect();
+            for id in present.difference(&next) {
+                ever.entry(id.clone()).or_default().push((entry.seq, None));
+            }
+            present = next;
+            for c in &k.controllers {
+                let raw = serde_json::to_value(c).map_err(|e| malformed(e.to_string()))?;
+                let c = Controller::parse(raw, "legacy controller")?;
+                ever.entry(c.id())
+                    .or_default()
+                    .push((entry.seq, Some(c.clone())));
+                points.insert(c.key().signing().to_vec());
+                points.insert(c.id().into_bytes());
+                if let Some(a) = c.key().agreement() {
+                    points.insert(a.to_vec());
+                    points.insert(key_id(a).into_bytes());
+                }
+            }
+            for p in [&k.vault.signing, &k.vault.agreement] {
+                points.insert(p.clone());
+                points.insert(key_id(p).into_bytes());
+            }
+        }
+        historical_sets.push(present.clone());
+    }
+    historical_sets.push(present);
+    for m in &members {
+        for p in [&m.request.signing, &m.request.agreement] {
+            points.insert(p.clone());
+            points.insert(key_id(p).into_bytes());
+        }
+    }
+    let ids: BTreeSet<String> = keyring.controllers.keys().cloned().collect();
+    let meta = ids
+        .iter()
+        .map(|id| {
+            (
+                id.clone(),
+                CtrlMeta {
+                    added_seq: 1,
+                    planter: None,
+                    provisional: None,
+                },
+            )
+        })
+        .collect();
+    let len = digests.len();
+    Ok(State {
+        account,
+        digests,
+        issued,
+        keyring_at: historical_sets,
+        delay_at: vec![keyring.policy.recovery_delay(); len],
+        policies: vec![(seq, keyring.policy.clone())],
+        keyring,
+        meta,
+        ever,
+        namespaces: prior.namespaces.clone(),
+        epochs: prior
+            .epochs
+            .iter()
+            .filter_map(|(n, es)| es.keys().max().map(|e| (n.clone(), *e)))
+            .collect(),
+        members,
+        recorded: Default::default(),
+        activations: Vec::new(),
+        v: Default::default(),
+        suspensions: Vec::new(),
+        rate: Vec::new(),
+        retiring: None,
+        excused: Default::default(),
+        points,
+        upgrade_seq: Some(seq),
+        succession: None,
+        successor: None,
+        migration: None,
+    })
 }

@@ -727,6 +727,11 @@ Y using only the objects it holds — entries, transitions, vetoes, receipts and
 verifier holding the same objects reaches the same verdict, in any order. What it held before
 never selects a branch (§13.3).
 
+With more than two valid candidates, apply the comparisons below to every pair. A candidate
+stands only if every comparison involving it selects it. If none does (including a cycle), the
+conflict is an unresolved fork under rule 3; no candidate is dropped. Pairwise comparisons need
+not be transitive, and MUST NOT be folded into a running winner.
+
 Every recording entry has a **due time**: an `activate`'s or `vetoed`'s is its transition's; a
 `final`'s is its activation's transition's; a `successionVetoed`'s is the succession's.
 
@@ -850,9 +855,11 @@ from heads it has seen or the order it saw things in.
   whose revocation isn't final yet; a home is excused only once its revocation is final), less the
   homes it revokes itself under the stronger authority. For a
   full set they are those of them that remain after it.
-- An activation is **final** when its witness set is empty, or a `final` entry for it is on the
+- An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering
   it, or a later full set's anchor follows it.
+  After each entry, excuse homes whose removal-only revocation is final and make every activation
+  with no remaining witnesses final without a `final` entry; repeat until no more become final.
 - **Order.** An activation that is not removal-only gets a `final` only when every earlier
   activation that is not removal-only is final. Removal-only activations are outside this order:
   they never wait for an earlier provisional activation, and none waits for them.

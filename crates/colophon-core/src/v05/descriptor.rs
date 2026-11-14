@@ -76,7 +76,7 @@ pub fn general_origin_allowed(origin: &str, rp: &str, origins: &[String]) -> boo
 }
 
 /// WebAuthn descriptor fields (§3.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WebAuthnKey {
     rp: String,
     credential: Vec<u8>,
@@ -164,7 +164,7 @@ impl WebAuthnKey {
 }
 
 /// The form-specific part of a descriptor.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KeyForm {
     /// `raw`: ES256 over the exact body, with an optional agreement point.
     Raw {
@@ -179,7 +179,7 @@ pub enum KeyForm {
 }
 
 /// A validated key descriptor (§3.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyDescriptor {
     signing: Vec<u8>,
     form: KeyForm,
@@ -303,7 +303,9 @@ fn origin_list(o: &mut Obj, field: &str) -> Result<Option<Vec<String>>> {
 }
 
 /// A controller role (§6.1).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Role {
     /// Admit, renew and revoke members, end sessions, introduce epochs.
     Approve,
@@ -329,7 +331,7 @@ impl Role {
 }
 
 /// A controller (§6.1). Its ID is its key ID.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Controller {
     key: KeyDescriptor,
     label: String,
@@ -460,7 +462,7 @@ impl Controller {
 }
 
 /// `policy.history` (§6.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HistoryAccess {
     /// Served to members and authorized callers.
     Members,
@@ -468,7 +470,7 @@ pub enum HistoryAccess {
     Public,
 }
 /// `policy.memberRule` (§6.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemberRule {
     /// One `approve` signer.
     Single,
@@ -476,7 +478,7 @@ pub enum MemberRule {
     Control,
 }
 /// One half of `policy.rate` (§6.3): immediate entries and bytes per 24 hours of `issued`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RateLimit {
     entries: u64,
     bytes: u64,
@@ -494,7 +496,7 @@ impl RateLimit {
 const MIB: u64 = 1024 * 1024;
 
 /// Account policy (§6.3). Every value satisfies the §6.3 ranges.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Policy {
     call_window: u64,
     head_max_age: u64,

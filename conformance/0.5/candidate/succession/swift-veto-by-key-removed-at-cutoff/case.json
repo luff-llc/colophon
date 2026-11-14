@@ -1,0 +1,1 @@
+{"description":"X was removed by an entry dated exactly W0 minus the delay: only the state after that entry is taken at that instant, so X is not eligible.","expected":{"seq3":"successionVetoed malformed","succession":"verified"},"sections":["15.1","16.3"]}

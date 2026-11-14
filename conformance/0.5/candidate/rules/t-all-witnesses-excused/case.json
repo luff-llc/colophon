@@ -1,0 +1,1 @@
+{"description":"Both original witnesses are finally revoked by recovery transitions. The earlier addition becomes final without an empty final, so NEW may sign.","expected":{"finality":{"3":"final","4":"final","6":"final"},"result":"ok","seq":7},"sections":["8.7"],"verifier":{"now":"2026-11-20T09:19:00Z"}}

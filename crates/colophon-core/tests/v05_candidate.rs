@@ -1,21 +1,11 @@
 //! Conformance runner for the Colophon 0.5 candidate vectors (`conformance/0.5/candidate/`).
 //!
-//! Every case is reported as PASS, FAIL or NOT-IMPLEMENTED. Out-of-scope cases (pending
-//! transitions, forks, succession, upgrade, immediate keyring rules, pairing, ...) are never
-//! reported as passing. The test fails on any in-scope FAIL that isn't in `DISPUTED`, and on
-//! any disputed vector that starts passing.
-//!
-//! Authority histories are loaded by a **fixture view loader**. It checks canonical bytes,
-//! shapes and every signature it can attribute (with the UV requirement of the rule each
-//! signature is counted under), but it is not an authority replayer: it does not evaluate the
-//! §8.4 rule table or §8.7. It derives the statuses §8.7 would compute from structured vector
-//! data only: a transition object that no `activate` in the records embeds is pending; a
-//! `suspend` entry suspends its key; an activation is provisional until every home current
-//! before it has a fresh head covering it (§8.7 "Finality"). No status comes from a case's
-//! description.
+//! Each case is PASS, FAIL or NOT-IMPLEMENTED. Only results actually checked by the engine
+//! pass. Authority histories use `verify_history`; event rows check each signed object
+//! against its stated prefix and also check the final folded state. Prose is explanatory.
 #![allow(clippy::unwrap_used)]
 use base64::{engine::general_purpose::STANDARD, Engine};
-use colophon_core::v05::history::{check_pending_transition, Stop};
+use colophon_core::v05::history::{check_pending_transition, check_pending_veto, Stop};
 use colophon_core::v05::{
     calls::{verify_call, AccountView, CallConfig, ControllerStatus},
     descriptor::Controller,
@@ -31,26 +21,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// In-scope vectors whose expected outcome contradicts the spec text as this implementation
-/// reads it, with the reason. They are reported as FAIL (disputed), not bent to pass.
-const DISPUTED: &[(&str, &str)] = &[
-    (
-        "rules/t-receipt-by-revoked-home",
-        "H2's revocation at seq 3 is under the control rule and has no `final`; §8.7 \"Revoking a home\": a revoked home \
-         stays current, for receipts too, until its revocation is final, so its receipt at seq 4 is valid",
-    ),
-    (
-        "rules/t-recovery-rule-appoints-home-low-threshold",
-        "the genesis has threshold 2 and one control signer (Ph signs only `additions`, which never count toward a rule, \
-         §4.1): the genesis fails the control rule at seq 1",
-    ),
-    (
-        "rules/t-veto-22-signers",
-        "the genesis keyring keeps the base slot naming A, who is not a controller of this account (§7.2: slots name \
-         current controllers): the genesis is malformed at seq 1",
-    ),
-];
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -232,6 +202,141 @@ fn now_of(case: &Value) -> i64 {
 
 fn run_history(dir: &Path, case: &Value) -> Outcome {
     let exp = &case["expected"];
+    let admission_checked = if let Some(admission) = exp.get("admission") {
+        use colophon_core::v05::history::home::{admit, HomeState, ServingInterval};
+        let prefix = Objects {
+            entries: files_in(&dir.join("records/authority"))
+                .into_iter()
+                .take(2)
+                .collect(),
+            ..Default::default()
+        };
+        let now = now_of(case);
+        let home = match HomeState::new(
+            admission["home"].as_str().unwrap().into(),
+            &prefix,
+            vec![ServingInterval {
+                from_ms: i64::MIN,
+                through_ms: None,
+            }],
+            now,
+        ) {
+            Ok(h) => h,
+            Err(f) => return Outcome::Fail(format!("home state: {f}")),
+        };
+        let bytes = fs::read(dir.join(admission["object"].as_str().unwrap())).unwrap();
+        let result = admit(&home, &bytes, case["verifier"]["now"].as_str().unwrap());
+        let got = result
+            .result
+            .err()
+            .map_or_else(|| "ok".into(), |r| r.code());
+        if got != admission["result"] {
+            return Outcome::Fail(format!(
+                "admission: expected {}, got {got}",
+                admission["result"]
+            ));
+        }
+        true
+    } else {
+        false
+    };
+    if let Some(checks) = exp["checks"].as_array() {
+        for check in checks {
+            let after = check["after"].as_u64().unwrap() as usize;
+            let mut objs = objects_of(dir);
+            objs.entries.truncate(after);
+            objs.heads = check["heads"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|v| b64(v.as_str().unwrap()))
+                .collect();
+            let bytes = fs::read(
+                dir.join("events")
+                    .join(format!("{}.json", check["object"].as_str().unwrap())),
+            )
+            .unwrap();
+            let env: Value = serde_json::from_slice(&bytes).unwrap();
+            let body = body_of(&env);
+            let mut now = ms(body["issued"]
+                .as_str()
+                .or_else(|| body["created"].as_str())
+                .unwrap());
+            if let Some(last) = objs.entries.last() {
+                let last: Value = serde_json::from_slice(last).unwrap();
+                now = now.max(ms(body_of(&last)["issued"].as_str().unwrap()));
+            }
+            let v = verify_history(&objs, &Persisted::default(), now);
+            if v.code() != "ok" || v.branch.len() != after {
+                return Outcome::Fail(format!("event prefix: {} at {}", v.code(), v.seq()));
+            }
+            let st = v.state.as_ref().unwrap();
+            let result = match body["protocol"].as_str().unwrap() {
+                "colophon/transition/5" => check_pending_transition(st, &bytes),
+                "colophon/veto/5" => {
+                    let target = body["transition"].as_str().unwrap();
+                    let all = objects_of(dir);
+                    let recording = all
+                        .entries
+                        .iter()
+                        .map(|e| serde_json::from_slice::<Value>(e).unwrap())
+                        .map(|e| body_of(&e))
+                        .find(|b| {
+                            b.get("transition")
+                                .and_then(Value::as_str)
+                                .is_some_and(|t| {
+                                    let t: Value = serde_json::from_slice(&b64(t)).unwrap();
+                                    colophon_core::v05::encoding::digest(&b64(t["body"]
+                                        .as_str()
+                                        .unwrap()))
+                                        == target
+                                })
+                        })
+                        .unwrap();
+                    let t = b64(recording["transition"].as_str().unwrap());
+                    let rs = recording
+                        .get("transitionReceipts")
+                        .unwrap_or(&recording["receipts"])
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|r| b64(r.as_str().unwrap()))
+                        .collect::<Vec<_>>();
+                    check_pending_veto(st, &t, &rs, &bytes)
+                }
+                "colophon/authority/5" => {
+                    objs.entries.push(bytes.clone());
+                    let next = verify_history(&objs, &Persisted::default(), now);
+                    if next.code() == "ok" {
+                        Ok(())
+                    } else {
+                        return Outcome::Fail(format!("event entry: {}", next.code()));
+                    }
+                }
+                "colophon/call/5" => {
+                    let view = AccountView::from_history_verifier(&v, &objs, now).unwrap();
+                    let audiences = vec![body["audience"].as_str().unwrap().to_string()];
+                    let origins = BTreeMap::new();
+                    let cfg = CallConfig {
+                        now_ms: now,
+                        audiences: &audiences,
+                        call_origins: &origins,
+                        controller_purposes: &[],
+                        home_endpoints: &audiences,
+                    };
+                    verify_call(&bytes, &view, &cfg, &mut MemoryReplayStore::new()).map(|_| ())
+                }
+                _ => return Outcome::NotImplemented("unknown event protocol"),
+            };
+            let got = result.err().map_or_else(|| "ok".to_string(), |f| f.code());
+            if got != check["result"] {
+                return Outcome::Fail(format!(
+                    "event {} after {after}: expected {}, got {got}",
+                    check["object"], check["result"]
+                ));
+            }
+        }
+    }
     if let Some(want) = exp.get("transition").and_then(Value::as_str) {
         // A held transition judged against the verified state.
         let objs = objects_of(dir);
@@ -254,7 +359,7 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
         let v = verify_history(&objects_of(dir), &Persisted::default(), now_of(case));
         let got = v.branch.get(2).cloned().unwrap_or_default();
         return if got == want {
-            Outcome::Pass("the lower body digest stands".into())
+            Outcome::Pass("the expected conflict winner stands".into())
         } else {
             Outcome::Fail(format!("stands {got} ({})", v.code()))
         };
@@ -263,7 +368,11 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
         exp.get("result").and_then(Value::as_str),
         exp.get("seq").and_then(Value::as_u64),
     ) else {
-        return Outcome::NotImplemented("expectation not machine-checkable in this step (events, home-side or builder properties)");
+        return if admission_checked {
+            Outcome::Pass("home admission matches".into())
+        } else {
+            Outcome::NotImplemented("expectation not machine-checkable in this step (events, home-side or builder properties)")
+        };
     };
     if case["verifier"].get("variants").is_some() {
         // Conflict without evidence: the same verdict for every high-water mark.
@@ -274,13 +383,7 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
                 v["highWater"]["seq"].as_u64().unwrap(),
                 v["highWater"]["digest"].as_str().unwrap().to_string(),
             );
-            let verdict = verify_history(
-                &objs,
-                &Persisted {
-                    high_water: Some(hw),
-                },
-                now_of(case),
-            );
+            let verdict = verify_history(&objs, &Persisted::high_water(hw.0, hw.1), now_of(case));
             codes.push((verdict.code(), verdict.seq()));
         }
         let want = (result.to_string(), seq);
@@ -305,12 +408,19 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
     }
     // Extra structured expectations this verifier can check.
     if let Some(st) = &verdict.state {
-        if let Some(cs) = exp.get("controllers").and_then(Value::as_array) {
+        if let Some(cs) = exp
+            .get("controllers")
+            .or_else(|| exp["final"].get("controllers"))
+            .and_then(Value::as_array)
+        {
             let want: Vec<String> = cs.iter().map(|c| c.as_str().unwrap().to_string()).collect();
             let have: Vec<String> = st.keyring().controllers.keys().cloned().collect();
             if want != have {
                 return Outcome::Fail(format!("controllers: expected {want:?}, got {have:?}"));
             }
+        }
+        if exp["final"]["suspended"].is_array() && !st.active_suspensions(now_of(case)).is_empty() {
+            return Outcome::Fail("suspension remains after veto".into());
         }
         if let Some(v) = exp.get("vault").and_then(Value::as_str) {
             let retiring = st.vault_retiring();
@@ -633,12 +743,7 @@ fn run_identifiers() -> Vec<(String, Outcome)> {
 }
 
 fn classify(rel: &str) -> Option<&'static str> {
-    if rel.starts_with("succession/") {
-        return Some("succession (§15, §16): out of scope");
-    }
-    if rel.starts_with("upgrade/") {
-        return Some("upgrade (§16.1, plan step 3): out of scope");
-    }
+    let _ = rel;
     None
 }
 
@@ -688,6 +793,25 @@ fn candidate_conformance() {
         let name = rel.rsplit('/').next().unwrap().to_string();
         let outcome = if let Some(why) = classify(&rel) {
             Outcome::NotImplemented(why)
+        } else if rel.starts_with("upgrade/") {
+            let v = verify_history(
+                &objects_of(&dir),
+                &Persisted::default(),
+                ms("2026-12-01T00:00:00Z"),
+            );
+            let want = case["expected"]["colophon-0.5"].as_str().unwrap();
+            if v.code() == want {
+                Outcome::Pass(format!("{} at {}", v.code(), v.seq()))
+            } else {
+                Outcome::Fail(format!(
+                    "want {want}, got {} at {}: {:?}",
+                    v.code(),
+                    v.seq(),
+                    v.stop
+                ))
+            }
+        } else if rel.starts_with("succession/") {
+            run_succession(&dir, &case)
         } else if rel == "account" {
             let v = verify_history(
                 &objects_of(&dir),
@@ -730,26 +854,16 @@ fn candidate_conformance() {
 
     let (mut pass, mut fail, mut ni) = (0, 0, 0);
     let mut unexpected = Vec::new();
-    let mut stale_disputes = Vec::new();
     for (rel, o) in &results {
-        let disputed = DISPUTED.iter().find(|(d, _)| d == rel);
         match o {
             Outcome::Pass(s) => {
                 pass += 1;
                 println!("PASS  {rel}: {s}");
-                if disputed.is_some() {
-                    stale_disputes.push(rel.clone());
-                }
             }
             Outcome::Fail(s) => {
                 fail += 1;
-                match disputed {
-                    Some((_, why)) => println!("FAIL  {rel}: {s} [disputed: {why}]"),
-                    None => {
-                        println!("FAIL  {rel}: {s}");
-                        unexpected.push(rel.clone());
-                    }
-                }
+                println!("FAIL  {rel}: {s}");
+                unexpected.push(rel.clone());
             }
             Outcome::NotImplemented(why) => {
                 ni += 1;
@@ -762,8 +876,60 @@ fn candidate_conformance() {
         pass + fail
     );
     assert!(unexpected.is_empty(), "unexpected failures: {unexpected:?}");
-    assert!(
-        stale_disputes.is_empty(),
-        "disputed vectors now pass: {stale_disputes:?}"
-    );
+}
+
+fn run_succession(dir: &Path, case: &Value) -> Outcome {
+    let mut objects = Objects {
+        entries: files_in(&dir.join("successor/authority")),
+        predecessor: files_in(&dir.join("predecessor/authority")),
+        ..Default::default()
+    };
+    if dir.join("genesis-receipt.json").exists() {
+        objects
+            .pending
+            .push(fs::read(dir.join("genesis-receipt.json")).unwrap());
+    }
+    if dir.join("successor-head.json").exists() {
+        objects
+            .heads
+            .push(fs::read(dir.join("successor-head.json")).unwrap());
+    }
+    let now = ms("2026-11-14T10:15:00Z");
+    let v = verify_history(&objects, &Persisted::default(), now);
+    let verified = v
+        .state
+        .as_ref()
+        .is_some_and(|s| s.verified_succession().is_some());
+    let want = case["expected"]["succession"] == "verified";
+    if verified != want {
+        return Outcome::Fail(format!(
+            "succession verified={verified}, want {want}; {} at {}: {:?}",
+            v.code(),
+            v.seq(),
+            v.stop
+        ));
+    }
+    if let Some(code) = case["expected"]["seq3"].as_str() {
+        let wanted = code.rsplit(' ').next().unwrap();
+        if v.code() != wanted {
+            return Outcome::Fail(format!(
+                "seq3 want {wanted}, got {}: {:?}",
+                v.code(),
+                v.stop
+            ));
+        }
+    }
+    if case["expected"].get("evidence").is_some()
+        && v.state
+            .as_ref()
+            .is_none_or(|s| s.predecessor_evidence() != [4])
+    {
+        return Outcome::Fail("missing after-final evidence".into());
+    }
+    Outcome::Pass(format!(
+        "succession {} (history {} at {})",
+        if verified { "verified" } else { "unverified" },
+        v.code(),
+        v.seq()
+    ))
 }
