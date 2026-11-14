@@ -49,7 +49,7 @@ class Source {
   read(path) { const b = files.get(path); if (!b) throw new Error("missing " + path); return b; }
   readBlob(path) { return files.get(path) ?? new Uint8Array(0); }
 }
-const listing = () => [...files.keys()].sort().map((p) => new w.ListedPath(p, ""));
+const listing = () => [...files.keys()].sort().map((p) => new w.ListedPath(p, undefined));
 const empty = () => new w.SavedState(new Uint8Array(0), new Uint8Array(0), []);
 const open = (src, who_ = who()) => w.AccountEngine.open(src, listing(), who_, created.account, [], 0n, empty(), fresh(32), now);
 const engine = open(new Source());

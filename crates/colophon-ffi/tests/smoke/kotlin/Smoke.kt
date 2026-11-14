@@ -68,7 +68,7 @@ fun main() {
     check(created.account.length == 64, "account id")
 
     val files = created.stores.associate { it.path to it.bytes }
-    val listing = files.keys.sorted().map { ListedPath(it, "") }
+    val listing = files.keys.sorted().map { ListedPath(it, null) }
     val engine = AccountEngine.open(Mem(files), listing, ctl(id), created.account, listOf(), 0u, empty, fresh(32), now)
     check(engine.openInfo().mode == OpenMode.COLD, "engine over a Kotlin source (OpenMode enum)")
     val slot = engine.slots()[0]
@@ -90,7 +90,7 @@ fun main() {
     // The calls the engine forwards: a due-transition pass, then pairing, seed transfer and lock.
     val files2 = files.toMutableMap().also { m -> written.stores.forEach { m[it.path] = it.bytes } }
     check(engine.recordDue().isEmpty(), "recordDue: nothing is due")
-    val listing2 = files2.keys.sorted().map { ListedPath(it, "") }
+    val listing2 = files2.keys.sorted().map { ListedPath(it, null) }
     val engine2 = AccountEngine.open(Mem(files2), listing2, ctl(lapId), created.account, listOf(), 0u, empty, fresh(32), now)
     val tkey = PairingTransferKey.create(fresh(32))
     val joiner = AccountPairing.join(created.account, tkey.public(), fresh(32))
@@ -162,10 +162,12 @@ fun main() {
     check(moved.stores.any { it.path == "authority/00000001.json" } && moved.stores.any { it.path.startsWith("predecessor/authority/") },
         "the genesis and the predecessor entries are handed back to store")
     val mfiles = moved.stores.associate { it.path to it.bytes }
-    val mengine = AccountEngine.open(Mem(mfiles), mfiles.keys.sorted().map { ListedPath(it, "") }, ctl(ownerId), moved.account, listOf(), 0u, empty, fresh(32), now)
+    val mengine = AccountEngine.open(Mem(mfiles), mfiles.keys.sorted().map { ListedPath(it, null) }, ctl(ownerId), moved.account, listOf(), 0u, empty, fresh(32), now)
     check(mengine.swiftSuccession().stage == MoveStage.WINDOW_NOT_OPEN, "the successor reports the Swift succession (stage WINDOW_NOT_OPEN)")
     try { mengine.beginSwiftFreeze(listOf(ownerId), now, listOf()); check(false, "F before the due time") }
     catch (e: AccountException) { check(true, "F is refused before the succession is due (a typed AccountException; earlierAttempts is an argument)") }
+    check(accountMapSwiftRole("service") == AccountMemberKind.SERVER && accountMapSwiftRole("robot") == null, "the Swift role to member kind map is exported")
+    check(engine2.controllers()[0].key.signing.size == 65, "a controller carries its key descriptor")
     println(if (failures == 0) "ALL PASS" else "$failures FAILED")
     kotlin.system.exitProcess(if (failures == 0) 0 else 1)
 }

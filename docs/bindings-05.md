@@ -121,9 +121,8 @@ webauthn). A step carries it as `descriptor`; `account_webauthn_check` takes it;
 `ControllerSpec` (`key: KeyDescriptorView`, `label`, `roles: list<ControllerRole>`, `verification`, `holder`,
 `audiences`) in `CreateParams.controllers`, `begin_keyring` and `begin_add_controller`: no SDK writes base64
 protocol JSON. `SignForm.Unknown` is a key of a form a newer writer made (it is shown, never created or
-checked). **Not done:** the `Controller` record (what `controllers()` returns) still carries no key
-descriptor, because the core's `ControllerInfo` does not; an SDK keeps the descriptors of the controllers it
-created.
+checked). The `Controller` record carries its `key: KeyDescriptorView`, so a second device can show a
+passkey's `rp` and build the descriptor `account_webauthn_check` takes.
 
 ### The Swift move: store paths
 
@@ -144,6 +143,21 @@ through the exchange. A reopen over these objects reports the same `swift_succes
 `Frozen`, never `Due`, and a second, different F is refused (by `begin_swift_freeze` in stage `Frozen`, and by
 `finish_move` when another F was held between prepare and finish).
 
+**Every move step refuses a stale or repeated step**, as ordinary actions do. A copier-shares or migration
+step finishes only while the head is still the head it was prepared on: a second one prepared at the same
+head is `Refused` with reason `fork` at `finish_move`, with nothing returned, stored or changed. At prepare:
+a second `begin_swift_copier_shares` once the member owes nothing, a second `begin_swift_migration` while a
+`migration` transition is pending (a twin prepared earlier does not finish either), and a second
+`begin_swift_veto` while a veto of this succession is held, are refused. The successor genesis runs every
+check that does not need the built slots before it asks for a passkey assertion (the signers and the
+handover keys are controllers, no key twice, the dates, `earlier_attempts`): a genesis that cannot succeed
+fails at `begin`.
+
+**`earlier_attempts` and a live attempt.** An earlier freezing entry's successor blocks a new genesis
+unless it can no longer verify: it is **vetoed**, or its F was written before it was due (**premature**).
+An attempt that is merely not yet verified, waiting for a home's head, is live and blocks (`still live`);
+one that has verified makes the predecessor final. The rule sits in `write::succession::check_earlier_attempts`.
+
 ## 3. Errors
 
 Every call returns `AccountError` or succeeds. A host branches on the variant or on `code`; `detail` is for
@@ -152,7 +166,7 @@ logs and never carries key material. `Refused` carries the §19 reason; `Denied`
 | Variant | `code` | Meaning |
 | --- | --- | --- |
 | `Malformed` | `malformed` | A rule is broken; also an argument that is not valid JSON. Pairing aborts: `pairing:commitmentMismatch`, `pairing:invalidPoint`, `pairing:wrongAccount`. |
-| `BadSignature` | `badSignature`; from `account_webauthn_check` `badSignature:<check>` | A signature, assertion, possession proof or key binding failed. Checks: `point rawLength scalar der verify clientData clientDataBound unknownForm type challenge origin crossOrigin relyingParty userPresence userVerification form callOrigin`. |
+| `BadSignature` | `badSignature`; from `account_webauthn_check` `badSignature:<check>`, with `check: SignatureCheck` | A signature, assertion, possession proof or key binding failed. Checks: `point rawLength scalar der verify clientData clientDataBound unknownForm type challenge origin crossOrigin relyingParty userPresence userVerification form callOrigin`. |
 | `NewerFormat` | `newerFormat` | Authenticated content of a newer format. |
 | `Unavailable` | `unavailable` | Something needed could not be obtained. |
 | `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`). |
@@ -182,12 +196,17 @@ What is enforced and what is not:
 
 * A callback that calls the object that is calling it, **on the same thread**, fails at once with
   `Reentered`; nothing is changed.
-* A call from **another thread** waits for the engine (as 0.4's does). If the thread that holds the engine
-  is inside a host callback and stays there for more than 30 seconds (a callback that waits on the thread
-  that is waiting), the waiting call fails with `Reentered` and its detail says why. The 30 seconds is
-  `set_callback_wait_ms` in Rust test builds; there is no host setting. A callback that waits for another
-  thread that calls the engine **does** block that other thread for those 30 seconds and then fails it: the
-  callback itself is the host's bug, and the wait is never a hang of the engine.
+* A call from **another thread** waits for the engine (as 0.4's does), and keeps waiting for as long as
+  the holder makes progress: a long `load` or `refresh` made of many short callbacks never fails a waiter.
+  It fails with `Reentered` (its detail says why) only when **one single host callback of the holder has
+  itself run for more than 30 seconds** while it waited: the clock is the current callback's, not the
+  waiter's total wait. A slow disk read that takes 31 s is such a callback; a thousand reads of 0.1 s are
+  not. The limit is `set_callback_wait_ms` in Rust test builds; there is no host setting. A failed wait
+  changes nothing and **never consumes a prepared action or move step** (`finish`, `finish_move` and
+  `finish_swift_copy_write` take the action only once they hold the engine, in the same step that checks
+  `lock`), so a `Reentered` or `Locked` finish is retryable with the same signatures. On `wasm32` there is
+  no second thread and no clock (`std::time::Instant` does not exist there), so the timed wait is compiled
+  out: a waiter blocks on the lock.
 * What cannot be detected: a callback that waits on something else that waits on the engine (a lock, a
   queue, a main-thread hop). The 30-second bound applies to every call that waits on the engine, but the
   callback's own wait is the host's. On the web there are no threads: a callback that returns a `Promise`
@@ -279,6 +298,13 @@ before the free; and the folded domain state of each namespace (freed, not overw
 freed and the allocator wipes it). With the feature off (see "Cost") the transfer-buffer copy stays in freed
 memory as it does in 0.4.
 
+**Who installs it.** The allocator is the `#[global_allocator]` of the **library crate**, so it applies to
+the cdylib and staticlib the Swift and Kotlin hosts load, and also to the rlib: a Rust binary that depends
+on `colophon-ffi` (or `colophon-wasm`) with default features gets this allocator and cannot define its own
+(a second one is a link error). A Rust user of the rlib that needs its own allocator depends on the crate
+with `default-features = false, features = ["native05"]` (for `colophon-wasm`, `["web05"]`), which also
+turns the wipe off; `zero_alloc::ZeroOnFree<A>` is public so that it can wrap its own allocator instead.
+
 **Cost of the allocator.** One `memset` per free and a copy per `realloc` (no in-place growth). Measured with
 `tests/v05_alloc_bench.rs` (release build, through the exports: a cold open over 1,000 records, 1,000 writes
 and a refresh, the best of three rounds, run with and without the allocator, two runs each):
@@ -314,22 +340,31 @@ scales with it is parsed or allocated.
   most **1 MiB**. The numbers are the protocol's own: a record payload is at most 1 MiB canonical in the core
   (`domains/saved`, `Engine::begin_import`), an import batch at most `MAX_BATCH_BYTES` = 1 MiB, an authority
   body at most 1 MiB (§2.4). The bound was 4 MiB; one 4 MiB item then peaked at 192 MiB.
-* **A document must not be denser than one structural element (an opener or a comma outside a string) per 8
-  bytes, plus 256**: parsed, a `serde_json::Value` costs up to about a hundred bytes per element, so this
-  keeps the parse near a dozen times the text, not the forty-eight times a document of one-byte elements
-  reached. A longer-than-allowed document or a denser one is `Bound`.
+* **A cost budget, never a shape rule.** The text is scanned once with a running cost count (32 bytes
+  per value, a string its bytes, 64 per object entry), abandoned the moment the count passes, and refused
+  `Bound` only when it passes **32 MiB**, which no document within the length bounds can: the costliest 1
+  MiB documents (a million one-digit numbers' worth, `[0,0,...]`, or the densest object) cost about 17 MiB by
+  that count. So a compact array of 600 small numbers (1.2 KB), 100,000 of them, one 1 MiB string and an
+  import batch at the core's own maximum are all accepted; a text with spaces and the same value without
+  are alike. (An earlier rule of one structural element per 8 bytes refused ordinary app values and, in the
+  Swift copy, the core's own re-serialized output; it is gone.) A value the core itself produced and the
+  host passes back (`CopyItem.payload_json`) is checked on length only, never on cost.
 * **A list of JSON documents** (`add_slots_json`, `SwiftBatch.alternatives_json` and `blobs_json`, a batch's
   `children`) is at most 256 items (4,096 for a translated batch) and the items together are at most 1 MiB,
   checked on the raw lengths before any item is parsed. A translated batch's payloads, alternatives, blob
   manifests and evidence together are at most 1 MiB. Controllers are typed, at most 64.
-* **Measured** (`v05_secrets.rs`, debug build; "peak" is bytes live above the call's own arguments):
-  eight 4 MiB items to `begin_keyring` are refused `Bound` with **195 bytes** of peak (the checker measured
-  **1,088 MiB** before the bound; one 4 MiB item **192 MiB**, now 195 bytes too). The worst **accepted**
-  documents, 1,023 KiB each, parsed and then refused by the account because they are not valid:
-  authority array 6.4 times its text (6.5 MiB), authority object of short keys 36.2 times (37 MiB, the
-  account makes further copies of a `change`), domain array 6.4 times, domain object 11.2 times (11 MiB). So
-  the worst call peaks at about **40 MiB** above its arguments, on wasm32 as natively; a 64 MiB argument is
-  refused with **296 bytes** of extra allocation (the JSON-string surface reached 1.07 GiB).
+* **Measured** (`v05_secrets.rs`, debug build; "peak" is the bytes live above the call's own text).
+  Refusals: eight 4 MiB items to `begin_keyring` and one 4 MiB item are `Bound` with **195 bytes** of peak
+  (before the bound: 1,088 MiB and 192 MiB); a 64 MiB argument is refused with **296 bytes**.
+  **Valid 1 MiB writes taken to completion** (prepared, signed, finished; the core validates, canonicalizes
+  and seals the payload, which makes several copies of it): 600 small numbers (1 KiB) 182 KiB; 100,000 small
+  numbers (195 KiB) 24.1 MiB (126 times); one 1,023 KiB string 17.3 MiB (17 times); an array of 6-byte
+  strings 39 MiB (39 times); the densest object of short keys, 1,023 KiB, **82 MiB (82 times its text)**.
+  The binding itself holds the text and one parsed value (at most about 17 MiB by the budget's count);
+  the rest is the core's, whose files this package does not change. **So a 1 MiB write may peak near 85
+  MiB; a host with a smaller cap (an iOS share extension) keeps payloads small, and an authority
+  `change` of 1 MiB peaks at about 37 MiB.** The earlier figure of 40 MiB was measured up to a refusal
+  by the validator, not to completion.
 * Binary argument: 40 MiB (a `ListedPath`, `ByteString`, `Store` list: 262,144 items; the objects of
   `AuthorityObjects` and `earlier_attempts` 40 MiB in all). Name lists (signers, namespaces, slot
   controllers, shown transitions, local keys): 256. Entropy: exactly the 32, 64 or 96 bytes the call says;
@@ -352,12 +387,14 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `ActionKind` | `Approve`, `Renew`, `RenewShares`, `Revoke`, `EndSessions`, `EndMySessions`, `Rekey`, `Keyring`, `AddController`, `AddSlot`, `RotateVault`, `RemoveController`, `Transition`, `Veto`, `Suspend`, `Resolve`, `Write`, `Propose`, `Resolution`, `Import`, `Link`, `Call` | What kind of action a prepared action is (`AccountAction.kind`). |
 | `MoveKind` | `Upgrade`, `SwiftVeto`, `SwiftFreeze`, `SwiftMigration`, `RenewShares`, `Finished` | What step of a move a prepared `AccountMove` is; `Finished` once finished or consumed. |
 | `SlotKind` | `Sealed`, `Prf`, `Combined`, `Unknown` | How a vault slot opens (`SlotInfo.kind`, `SwiftSlotInfo.kind`). |
-| `HomeStatus` | `Home`, `RevocationPending` | Whether a home is serving, or its removal has not activated finally. |
+| `HomeStatus` | `Home`, `RevocationPending`, `Unknown` | Whether a home is serving, or its removal has not activated finally. |
+| `AccountDenialReason` | `NotGranted`, `Revoked`, `Expired`, `BudgetSpent`, `NotReadable`, `Unavailable`, `Unknown` | Why access was refused (§19 access reasons). |
+| `SignatureCheck` | `Point`, `RawLength`, `Scalar`, `Der`, `Verify`, `ClientData`, `ClientDataBound`, `UnknownForm`, `Type`, `Challenge`, `Origin`, `CrossOrigin`, `RelyingParty`, `UserPresence`, `UserVerification`, `Form`, `CallOrigin` | The WebAuthn check of §4.3 that failed: `BadSignature.check`. |
 | `CountBy` | `Keys`, `Holders` | How a threshold counts signers (`UpgradeParams.count_by`). |
 | `AccountIdentityKind` | `Controller`, `Member` | The kind of a session's identity. |
 | `StatusKind` | `Ok`, `Held`, `Refused`, `Malformed`, `BadSignature`, `NewerFormat`, `Unavailable` | The §1 result of a verification without the refusal's reason (`Status.kind`, `HistoryReport.kind`; the reason after `refused:` is `reason`). |
 | `VerdictKind` | `Admitted`, `Held`, `Refused`, `NewerFormat`, `Malformed`, `BadSignature`, `Unavailable` | What the engine judged a record to be (§11.5), without the reason (`RecordVerdict.kind`). |
-| `AccountMemberKind` | `Device`, `App`, `Agent`, `Server` | A member's kind. |
+| `AccountMemberKind` | `Device`, `App`, `Agent`, `Server`, `Unknown` | A member's kind. |
 | `HttpMethod` | `Get`, `Post`, `Put` | An HTTP method. |
 | `OpenMode` | `Cold`, `Resumed`, `Invalidated` | How an engine open treated saved state. |
 | `ExchangeStepKind` | `Request`, `Waiting`, `NeedCall`, `Done` | What the exchange asks the host to do next. |
@@ -381,7 +418,7 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | Record | Fields (name: type) | Meaning |
 | --- | --- | --- |
 | `Store` | `path: String`, `bytes: bytes` | Exact bytes the host stores at a path. |
-| `ListedPath` | `path: String`, `version: String` | A listed path with the provider's content-version token (empty for none). |
+| `ListedPath` | `path: String`, `version: optional<String>` | A listed path with the provider's content-version token (none for none). |
 | `ByteString` | `bytes: bytes` | One byte string (a list of them cannot be a field on every platform). |
 | `AccountIdentity` | `kind: AccountIdentityKind`, `id: String` | Who a session is: a controller or a member with its 32-hex key ID. |
 | `ControllerSpec` | `key: KeyDescriptorView`, `label: String`, `roles: list<ControllerRole>`, `verification: bool`, `holder: optional<String>`, `audiences: list<String>` | A controller to add, typed (§6.1). `verification` only for a `webauthn` key; `audiences` only for a `sign` controller. |
@@ -400,7 +437,7 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `EpochAgreement` | `namespace: String`, `epoch: u64`, `recipient: String`, `recipient_point: bytes`, `peer: bytes` | One ECDH a member's host performs to open a share. |
 | `EpochAnswer` (secret input, wiped) | `namespace: String`, `epoch: u64`, `shared: bytes` | The host's raw ECDH result for one share: a secret, consumed and wiped. |
 | `SlotController` | `id: String`, `label: String` | A controller a slot names. |
-| `SlotInfo` | `index: u64`, `kind: SlotKind`, `label: String`, `controllers: list<SlotController>` | One slot of the current vault, as a chooser shows it. |
+| `SlotInfo` | `index: u64`, `kind: SlotKind`, `kind_raw: optional<String>`, `label: String`, `controllers: list<SlotController>` | One slot of the current vault, as a chooser shows it. |
 | `SlotPlan` | `controllers: list<String>`, `label: String` | What a slot is built for: its controllers and label. |
 | `Status` | `seq: u64`, `code: String`, `kind: StatusKind`, `reason: optional<String>`, `stop_seq: optional<u64>`, `detail: optional<String>`, `rollback: bool` | The verdict on the verified history. |
 | `EntryChange` | `seq: u64`, `kind: String` | An entry that joined the verified branch. |
@@ -408,11 +445,11 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `RefusedHead` | `home: String`, `code: String` | A head a home sent that was refused. |
 | `Changes` | `authority_from_seq: u64`, `authority_to_seq: u64`, `entries: list<EntryChange>`, `members_added: list<String>`, `members_revoked: list<String>`, `controllers_added: list<String>`, `controllers_removed: list<String>`, `vault_changed: bool`, `policy_changed: bool`, `reorganized: bool`, `namespaces: list<NamespaceRevision>`, `pending_added: list<String>`, `pending_gone: list<String>`, `pending_now: list<String>`, `heads_accepted: list<String>`, `heads_refused: list<RefusedHead>`, `foreign: u64`, `status: optional<Status>` | What a call changed in the account. |
 | `Written` | `stores: list<Store>`, `changes: Changes`, `artifact: optional<bytes>` | What a finished action produced: store these bytes at these paths, in order. `artifact` is the envelope of a link or a call (§12), which is not stored: for the host to use. |
-| `Controller` | `id: String`, `label: String`, `roles: list<ControllerRole>`, `form: SignForm`, `verification: bool`, `holder: optional<String>`, `has_slot: bool`, `provisional: bool`, `suspended: bool` | A controller of the verified keyring. |
+| `Controller` | `id: String`, `label: String`, `roles: list<ControllerRole>`, `roles_raw: list<String>`, `key: KeyDescriptorView`, `form: SignForm`, `verification: bool`, `holder: optional<String>`, `has_slot: bool`, `provisional: bool`, `suspended: bool` | A controller of the verified keyring. |
 | `AccountGrant` | `namespaces: list<String>`, `access: list<AccessKind>`, `expires: optional<String>`, `write_budget: optional<u64>`, `import: bool` | What a grant allows (the 0.4 shape). |
-| `AccountMember` | `id: String`, `label: String`, `kind: AccountMemberKind`, `grant: optional<AccountGrant>`, `since: u64`, `revoked_at: optional<u64>`, `writes: u64`, `expires_ms: optional<i64>`, `provisional: bool`, `home: bool`, `session: u64` | A member with its standing. |
+| `AccountMember` | `id: String`, `label: String`, `kind: AccountMemberKind`, `kind_raw: optional<String>`, `grant: optional<AccountGrant>`, `since: u64`, `revoked_at: optional<u64>`, `writes: u64`, `expires_ms: optional<i64>`, `provisional: bool`, `home: bool`, `session: u64` | A member with its standing. |
 | `Standing` | `kind: StandingKind`, `controller: optional<Controller>`, `member: optional<AccountMember>`, `unknown_id: optional<String>` | What this session is. Exactly one of `controller`, `member`, `unknown_id` is set, by `kind`. |
-| `Home` | `id: String`, `label: String`, `status: HomeStatus`, `endpoints: list<String>`, `primary: bool` | A home the account names. |
+| `Home` | `id: String`, `label: String`, `status: HomeStatus`, `status_raw: optional<String>`, `endpoints: list<String>`, `primary: bool` | A home the account names. |
 | `Policy` | `threshold: u64`, `recover_threshold: u64`, `add_threshold: u64`, `count_by_holders: bool`, `call_window: u64`, `head_max_age: u64`, `head_quorum: u64`, `link_max_age: u64`, `member_rule: String`, `recovery_delay: u64`, `primary_home: optional<String>` | The effective policy (§6.3). |
 | `Signer` | `id: String`, `label: String` | A signer with its label. |
 | `Pending` | `digest: String`, `by: String`, `signers: list<Signer>`, `issued_ms: i64`, `anchor_seq: u64`, `first_seen_seq: optional<u64>`, `due_ms: optional<i64>`, `veto_deadline_ms: optional<i64>`, `full_set: optional<bool>`, `components: list<String>`, `removes: list<String>`, `adds: list<String>`, `vetoes: list<String>`, `vetoable: bool` | A pending transition, as §17.5 says it must be shown. |
@@ -420,7 +457,7 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `SeenActivation` | `seq: u64`, `transition: String`, `signers: list<String>`, `components: list<String>`, `receipted: list<Receipted>` | An activation the person has not seen. |
 | `Owed` | `member: String`, `namespace: String`, `epoch: u64`, `provisional: bool` | A share a member is owed (§9.4). |
 | `Notices` | `pending: list<Pending>`, `activations: list<SeenActivation>`, `owed: list<Owed>`, `controllers_without_slot: list<String>`, `vault_retiring: bool`, `no_home: bool` | What the person must be shown (§17.5). |
-| `AccountDenial` | `reason: String`, `detail: String` | A write refused for access reasons: `reason` is one of notGranted, revoked, expired, budgetSpent, notReadable, unavailable. |
+| `AccountDenial` | `reason: AccountDenialReason`, `reason_raw: optional<String>`, `detail: String` | A write refused for access reasons: `reason` is one of notGranted, revoked, expired, budgetSpent, notReadable, unavailable. |
 | `HeadRef` | `namespace: String`, `digest: String` | Facts about a prepared action a host may show or follow up on. |
 | `ActionInfo` | `name: String`, `rekey_owed: bool`, `owed_namespaces: list<String>`, `walk_incomplete: bool`, `kept: list<String>`, `heads: list<HeadRef>` | Facts about a prepared action. |
 | `EngineStats` | `records_read: u64`, `signatures_verified: u64`, `payloads_decrypted: u64`, `walked_last: u64`, `folds_applied_last: u64`, `ignored_paths: u64`, `held_paths: u64`, `unread_paths: u64` | Work the engine did. |
@@ -446,8 +483,8 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `RevokeKeep` | `mode: KeepMode`, `kept: list<String>`, `heads: list<HeadRef>` | Which of a revoked member's records a revocation keeps (§9.5). |
 | `CreateParams` | `label: String`, `namespaces: list<String>`, `controllers: list<ControllerSpec>`, `slots: list<SlotPlan>`, `threshold: optional<u64>`, `recover_threshold: optional<u64>`, `add_threshold: optional<u64>`, `count_by_holders: bool`, `policy_json: String`, `signers: list<String>`, `rekey_signers: list<String>` | What to create. `controllers` are typed (§6.1); `policy_json` the §6.3 policy document (empty: the §18 person default). |
 | `Created` | `account: String`, `stores: list<Store>` | A created account: its ID and everything to store. |
-| `RequestSpec` | `account: String`, `signing: bytes`, `agreement: bytes`, `label: String`, `kind: AccountMemberKind`, `terms_json: String`, `created: String`, `custody: String`, `operator: String`, `endpoints: list<String>` | A member's request (§9.1). `custody` and `operator` are empty for none. |
-| `RequestInfo` | `raw: bytes`, `member: String`, `label: String`, `kind: AccountMemberKind`, `terms_json: String` | A verified request as an approver sees it. |
+| `RequestSpec` | `account: String`, `signing: bytes`, `agreement: bytes`, `label: String`, `kind: AccountMemberKind`, `terms_json: String`, `created: String`, `custody: optional<String>`, `operator: optional<String>`, `endpoints: list<String>` | A member's request (§9.1). |
+| `RequestInfo` | `raw: bytes`, `member: String`, `label: String`, `kind: AccountMemberKind`, `kind_raw: optional<String>`, `terms_json: String` | A verified request as an approver sees it. |
 | `AuthorityObjects` | `entries: list<ByteString>`, `pending: list<ByteString>`, `heads: list<ByteString>`, `predecessor: list<ByteString>` | The authority objects of an account, for the history verifier. |
 | `Conflict` | `seq: u64`, `standing: String`, `losing: list<String>` | A conflict the verifier decided (§8.6). |
 | `HistoryReport` | `code: String`, `kind: StatusKind`, `reason: optional<String>`, `seq: u64`, `detail: optional<String>`, `rollback: bool`, `account: optional<String>`, `branch: list<String>`, `conflicts: list<Conflict>`, `held_until_ms: optional<i64>` | The history verifier's verdict, with no host identity. |
@@ -465,7 +502,7 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `SourceFault` | `path: String`, `what: String` | A fault of the record source the host must show: it changed bytes it must never change. |
 | `CallOrigin` | `rp: String`, `origins: list<String>` | The origins a call-ceremony `rp` may use. |
 | `CallTarget` | `audiences: list<String>`, `call_origins: list<CallOrigin>`, `controller_purposes: list<String>`, `home_endpoints: list<String>` | What the verifier of a call is configured with (§12.3). |
-| `SwiftSlotInfo` | `index: u64`, `kind: SlotKind`, `label: String`, `controller: optional<String>`, `problem: optional<String>` | One slot of a Swift keyring. `controller` is the one it names, `problem` why it cannot be read. |
+| `SwiftSlotInfo` | `index: u64`, `kind: SlotKind`, `kind_raw: optional<String>`, `label: String`, `controller: optional<String>`, `problem: optional<String>` | One slot of a Swift keyring. `controller` is the one it names, `problem` why it cannot be read. |
 | `SwiftEpoch` | `namespace: String`, `epoch: u64`, `seq: u64` | An epoch of a Swift namespace and the seq of the entry that introduced it. |
 | `SwiftMemberInfo` | `id: String`, `label: String`, `role: optional<String>`, `revoked: bool`, `budget: bool` | A Swift predecessor member as the fold has it at the head. |
 | `SwiftOpInfo` | `source_library: String`, `author_id: String`, `author_label: String`, `operation_id: String`, `signed_body_digest: String`, `kind: String`, `version: u64`, `payload_json: String`, `admitted_order: u64` | A Swift operation as the source reader judged it, for the host's translator. |
@@ -596,13 +633,33 @@ through the wasm-bindgen glue because the installed CLI (0.2.127) does not match
 consumed-by-value behaviour of §3b; the zero-on-free allocator on a wasm32 heap; and `smoke.mjs`. Also not
 run: Android/AAR/XCFramework builds, Kotlin on a JDK other than 17.
 
-**Known gaps** (named so an SDK does not assume them): the `Controller` record carries no key descriptor
-(the core's `ControllerInfo` does not); a creation leaves the session locked, so the host opens an engine and
-unlocks by a slot, which for a passkey slot is a second gesture (the core's engine cannot be built over a
-created `Account`); `BlobAvailability` for `Complete` reports `present: 0, total: 0` (the core gives no
-counts); `suggest_signers` has no `SignerNeed` for a pending transition's recovery-set consent; an unknown
-member kind reads as `Device`; the failed WebAuthn check is still named only inside `BadSignature.code`
-(`badSignature:<check>`); `u64` counters inside `*_json` results lose precision above 2^53 under
-`JSON.parse`, and a negative `bigint` passed for a `u64` wraps (typed fields cross exactly as `bigint`); the
-web secret records' getters copy `output`, `secret` and `shared` back out to JS (the records are consumed and
-wiped by the call, a copy the host reads is the host's).
+**Known gaps** (named so an SDK does not assume them). Two are for the next round and each needs one
+thing:
+
+* **A creation leaves the session locked**, so a passkey user is asked twice at first run (the creation's own
+  assertion, then the unlock by a slot) and again for the successor genesis. It needs an engine constructor
+  over a created `Account` (`Engine::from_account`, in `v05/engine/`, which another builder owns). Adding it
+  later changes no existing signature.
+* **The web build is unproven** (see above). It needs a `wasm-bindgen` CLI of exactly the crate's version,
+  0.2.130, to generate the glue, then `smoke.mjs` and a run of the shims in a browser.
+
+And these, shippable: `BlobAvailability` for `Complete` reports `present: 0, total: 0` (the core gives no
+counts); `suggest_signers` has no `SignerNeed` for a pending transition's recovery-set consent;
+`EntryChange.kind` is still a string; `u64` counters inside `*_json` results lose precision above 2^53
+under `JSON.parse`, and on the web a negative `bigint` passed for a `u64` wraps (wasm-bindgen's own conversion); the web secret records' getters copy `output`, `secret` and `shared` back out to JS
+(the records are consumed and wiped by the call, a copy the host reads is the host's); an earlier
+succession attempt is judged live unless it is vetoed or premature (an attempt whose window never opened
+stays live: whether such an attempt is "never due" is the spec's to say); a handover that does not meet
+the rule that may write F, and the control rule, are still checked after the passkey ceremony because
+they need the built keyring (every other check runs before it).
+
+**Open sets.** A C-like enum cannot carry data on both platforms, so each enum that mirrors an open
+protocol set has an `Unknown` variant and the raw text beside it in the record that holds it:
+`AccountMember.kind_raw` and `RequestInfo.kind_raw` (`AccountMemberKind.Unknown`), `Controller.roles_raw`
+(`ControllerRole.Unknown` in `roles`), `SlotInfo.kind_raw` and `SwiftSlotInfo.kind_raw`,
+`Home.status_raw`, `AccountDenial.reason_raw`. A newer account does not crash an older SDK; an `Unknown`
+is never accepted as input. `ListedPath.version`, `RequestSpec.custody` and `RequestSpec.operator` are
+optionals. `AccountDenial.reason` and `AccountError.Denied.reason` are `AccountDenialReason`;
+`AccountError.BadSignature.check` is the failed WebAuthn check (`SignatureCheck`) beside the code.
+`Controller.key` is the key descriptor. `account_map_swift_role(role)` is the core's role-to-kind map
+for the migration.

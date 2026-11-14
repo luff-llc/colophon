@@ -74,7 +74,7 @@ check(created.account.count == 64, "account id is 64 hex")
 // 3. An engine over a Swift record source; the typed error of a callback that throws something else.
 let src = MemSource()
 for s in created.stores { src.files[s.path] = s.bytes }
-let listing = src.files.keys.sorted().map { ListedPath(path: $0, version: "") }
+let listing = src.files.keys.sorted().map { ListedPath(path: $0, version: nil) }
 let engine = try AccountEngine.open(source: src, listing: listing, identity: AccountIdentity(kind: .controller, id: id), account: created.account,
     namespaces: [], batch: 0, saved: empty, key: fresh(32), nowMs: now)
 check(try engine.openInfo().mode == .cold, "engine opens over a Swift source (OpenMode enum)")
@@ -113,7 +113,7 @@ for st in written.stores { src.files[st.path] = st.bytes }
 check(try engine.recordDue().isEmpty, "recordDue: nothing is due")
 let src2 = MemSource()
 src2.files = src.files
-let listing2 = src2.files.keys.sorted().map { ListedPath(path: $0, version: "") }
+let listing2 = src2.files.keys.sorted().map { ListedPath(path: $0, version: nil) }
 let engine2 = try AccountEngine.open(source: src2, listing: listing2, identity: AccountIdentity(kind: .controller, id: secondId), account: created.account,
     namespaces: [], batch: 0, saved: empty, key: fresh(32), nowMs: now)
 let tkey = try PairingTransferKey.create(entropy: fresh(32))
@@ -213,11 +213,14 @@ check(moved.stores.contains { $0.path == "authority/00000001.json" } && moved.st
       "the genesis and the predecessor entries are handed back to store")
 let moveSrc = MemSource()
 for s in moved.stores { moveSrc.files[s.path] = s.bytes }
-let moveEngine = try AccountEngine.open(source: moveSrc, listing: moveSrc.files.keys.sorted().map { ListedPath(path: $0, version: "") },
+let moveEngine = try AccountEngine.open(source: moveSrc, listing: moveSrc.files.keys.sorted().map { ListedPath(path: $0, version: nil) },
     identity: AccountIdentity(kind: .controller, id: who["owner"]!), account: moved.account, namespaces: [], batch: 0, saved: empty,
     key: fresh(32), nowMs: now)
 check(try moveEngine.swiftSuccession().stage == .windowNotOpen, "the successor reports the Swift succession (stage WindowNotOpen)")
 do { _ = try moveEngine.beginSwiftFreeze(signers: [who["owner"]!], issuedMs: now, earlierAttempts: []); check(false, "F before the due time") }
 catch is AccountError { check(true, "F is refused before the succession is due (a typed AccountError; earlierAttempts is an argument)") }
+check(accountMapSwiftRole(role: "service") == .server && accountMapSwiftRole(role: "web") == .app && accountMapSwiftRole(role: "robot") == nil,
+      "the Swift role to member kind map is exported")
+check(try engine2.controllers()[0].key.signing.count == 65, "a controller carries its key descriptor")
 print(failures == 0 ? "ALL PASS" : "\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)
