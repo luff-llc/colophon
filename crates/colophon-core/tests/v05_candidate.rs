@@ -888,6 +888,7 @@ fn run_pairing() -> Outcome {
             .collect()
     };
     let n32 = |bytes: Vec<u8>| -> [u8; 32] { bytes.try_into().unwrap() };
+    let mut limiter = colophon_core::v05::pairing::FailureLimiter::new();
     let account = AccountId::parse(v["account"].as_str().unwrap()).unwrap();
     let (e, na, nb) = (hex_of("E"), n32(hex_of("nA")), n32(hex_of("nB")));
     let want_c = hex_of("commitment");
@@ -908,7 +909,8 @@ fn run_pairing() -> Outcome {
     if c.to_vec() != want_c {
         return fail("joiner commitment differs".into());
     }
-    let (awaiting, sent) = ExistingWaiting::receive_commitment(&account, c).send_nonce(na);
+    let (awaiting, sent) =
+        ExistingWaiting::receive_commitment(&account, c, limiter.permit(0).unwrap()).send_nonce(na);
     let Ok((reveal, j)) = joiner.reveal(sent) else {
         return fail("joiner reveal".into());
     };
@@ -920,10 +922,14 @@ fn run_pairing() -> Outcome {
     for row in v["refuse"].as_array().unwrap() {
         let e2 = hex_row(row["E"].as_str().unwrap());
         let nb2 = n32(hex_row(row["nB"].as_str().unwrap()));
-        let r = ExistingWaiting::receive_commitment(&account, n32(want_c.clone()))
-            .send_nonce(na)
-            .0
-            .finish(&e2, &nb2);
+        let r = ExistingWaiting::receive_commitment(
+            &account,
+            n32(want_c.clone()),
+            limiter.permit(0).unwrap(),
+        )
+        .send_nonce(na)
+        .0
+        .finish(&e2, &nb2);
         let expected = row["expected"].as_str().unwrap();
         match r {
             Err(PairingAbort::CommitmentMismatch)

@@ -9,20 +9,20 @@ use colophon_core::crypto::{Entropy, SoftwareKeys};
 use colophon_core::hpke::SealedKey;
 use colophon_core::v05::descriptor::Controller;
 use colophon_core::v05::history::keyring::Keyring;
+use colophon_core::v05::history::{verify_history, Objects, Persisted, State};
 use colophon_core::v05::ids::AccountId;
 use colophon_core::v05::pairing::{
     code, commitment, seal_seed_for_transfer, ConfirmedPairing, ExistingWaiting, FailureLimiter,
-    Joiner, PairingAbort, TransferKey,
+    Joiner, LimitReached, PairingAbort, Permit, QrJoiner, ScannedQr, TransferKey,
 };
 use colophon_core::v05::signature::verify_raw;
 use colophon_core::v05::slots::{
     answer_with_identity, part_info, plan_rotation, slot_info, validate_self_slot, validate_slots,
     validate_vault_entry_slots, webauthn_prf_input, OpeningInput, OpeningSecret, Part,
-    PrfAssertion, PrfInput, PrfResult, Slot, SlotBuild, SlotPlan,
+    PrfAssertion, PrfInput, PrfResult, Slot, SlotBuild, SlotPlan, SlotTarget,
 };
 use colophon_core::v05::vault::{
-    kit_identity, legacy_kit_identity, EcdhOutput, PrfOutput, SoftwareIdentity, VaultError,
-    VaultPublic, VaultSeed, VaultSession,
+    kit_identity, EcdhOutput, PrfOutput, SoftwareIdentity, VaultPublic, VaultSeed, VaultSession,
 };
 use colophon_core::v05::{Failure, Reason};
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
@@ -128,14 +128,11 @@ impl Authenticator {
 fn prf(n: u8) -> PrfOutput {
     PrfOutput::from_host(&[n; 32]).unwrap()
 }
-fn locked<T: std::fmt::Debug>(r: Result<T, VaultError>) {
-    assert_eq!(r.unwrap_err(), VaultError::Locked);
+fn locked<T: std::fmt::Debug>(r: Result<T, Failure>) {
+    assert_eq!(r.unwrap_err(), Failure::Refused(Reason::VaultLocked));
 }
-fn failed<T: std::fmt::Debug>(r: Result<T, VaultError>) -> Failure {
-    match r.unwrap_err() {
-        VaultError::Failed(f) => f,
-        VaultError::Locked => panic!("expected a 0.5 failure, got vaultLocked"),
-    }
+fn failed<T: std::fmt::Debug>(r: Result<T, Failure>) -> Failure {
+    r.unwrap_err()
 }
 /// Open a slot completely: kit/device software identities answer ECDH, `prf_n` answers PRF.
 fn open(
@@ -144,7 +141,7 @@ fn open(
     controllers: &BTreeMap<String, Controller>,
     identities: &[&SoftwareIdentity],
     prf_n: u8,
-) -> Result<VaultSeed, VaultError> {
+) -> Result<VaultSeed, Failure> {
     let secrets: Vec<OpeningSecret> = slot
         .begin_open(controllers)?
         .iter()
@@ -236,12 +233,15 @@ fn the_seed_check_is_vault_locked_and_leaves_the_session_alone() {
     // A failed open does not replace or clear the unlocked seed.
     assert_eq!(
         session.install(VaultSeed::check(&[71; 32], &vault)),
-        Err(VaultError::Locked)
+        Err(Failure::Refused(Reason::VaultLocked))
     );
     assert_eq!(session.seed().unwrap().public().unwrap(), vault);
     session.lock();
     assert!(!session.is_unlocked());
-    assert_eq!(VaultError::Locked.code(), "refused:vaultLocked");
+    assert_eq!(
+        Failure::Refused(Reason::VaultLocked).code(),
+        "refused:vaultLocked"
+    );
 }
 
 #[test]
@@ -263,28 +263,37 @@ fn secrets_are_redacted_and_cannot_be_read() {
 // §7.5 Software identities and kits.
 
 #[test]
-fn kits_are_software_identities_and_the_legacy_derivation_is_kept_apart() {
+fn a_kit_has_the_one_0_4_derivation() {
     let kit = kit_identity(&[33; 32]).unwrap();
-    // §7.5 literal: the kit is the software identity of its 32 bytes.
-    assert_eq!(kit.public(), soft(33).public());
-    // 0.3 and 0.4 kits applied the recovery pre-step; the published 0.4 kit is that one.
-    let legacy = legacy_kit_identity(&[33; 32]).unwrap();
+    // One derivation: the 0.3 and 0.4 recovery pre-step, so a 0.4 kit keeps its keys.
     let keys: Value = serde_json::from_slice(
         &std::fs::read(repo().join("conformance/0.4/keys/keys.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(
-        b64(&legacy.public().signing),
+        b64(&kit.public().signing),
         keys["kit"]["public"]["signing"].as_str().unwrap()
     );
     assert_eq!(
-        b64(&legacy.public().agreement),
+        b64(&kit.public().agreement),
         keys["kit"]["public"]["agreement"].as_str().unwrap()
     );
     let recovery = SoftwareKeys::recovery([33; 32]).unwrap().public();
-    assert_eq!(legacy.public().signing, recovery.signing);
-    assert_eq!(legacy.public().agreement, recovery.agreement);
-    assert_ne!(kit.public(), legacy.public());
+    assert_eq!(kit.public().signing, recovery.signing);
+    assert_eq!(kit.public().agreement, recovery.agreement);
+    // Not the plain software identity of the same bytes.
+    assert_ne!(kit.public(), soft(33).public());
+    // No 0.5 candidate vector uses a kit key under either derivation, so nothing there
+    // constrains the choice.
+    let bodies = collect_candidate_text();
+    for k in [kit.public(), soft(33).public()] {
+        for point in [&k.signing, &k.agreement] {
+            assert!(
+                !bodies.contains(&b64(point)),
+                "a candidate vector contains a kit key"
+            );
+        }
+    }
     // A kit is a `raw` controller with `agreement`, usually `recover` only.
     let controller = raw_controller(&kit, &["recover"], "Recovery kit");
     assert_eq!(
@@ -315,7 +324,7 @@ fn the_candidate_genesis_sealed_slot_is_reproduced_and_opens() {
         controllers: vec![controller.id()],
         label: "raw 11".into(),
     };
-    let build = SlotBuild::begin(&plan, &vault, &controllers, [9; 32]).unwrap();
+    let build = SlotBuild::begin(&plan, &gen(70, &controllers), [9; 32]).unwrap();
     assert!(build.prf_requests().is_empty());
     let slot = build.finish(&seed(70), &[]).unwrap();
     assert_eq!(&slot.to_value().unwrap(), published);
@@ -375,7 +384,7 @@ fn the_0_4_prf_and_combined_slots_open_and_are_reproduced_under_0_5() {
         salt: [6; 32],
         challenge: [0x5a; 32],
     };
-    let build = SlotBuild::begin_with(&plan, &vault, &controllers, &[input], [8; 32]).unwrap();
+    let build = SlotBuild::begin_with(&plan, &gen(70, &controllers), &[input], [8; 32]).unwrap();
     let requests = build.prf_requests().to_vec();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].salt, [6; 32]);
@@ -396,7 +405,7 @@ fn the_0_4_prf_and_combined_slots_open_and_are_reproduced_under_0_5() {
         controllers: vec![device_id, pk_id],
         label: "Kit and passkey".into(),
     };
-    let build = SlotBuild::begin_with(&plan, &vault, &controllers, &[input], [90; 32]).unwrap();
+    let build = SlotBuild::begin_with(&plan, &gen(70, &controllers), &[input], [90; 32]).unwrap();
     let result = PrfResult {
         assertion: passkey.assert(&build.prf_requests()[0].challenge),
         output: prf(7),
@@ -438,6 +447,52 @@ fn the_info_strings_are_the_slot_labels() {
     );
 }
 
+fn collect_candidate_text() -> String {
+    fn walk(dir: &std::path::Path, out: &mut String) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if let Ok(t) = std::fs::read_to_string(&p) {
+                out.push_str(&t);
+                // Bodies are base64 inside the envelopes: decode them too.
+                if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                    if let Some(b) = v["body"].as_str().and_then(|b| STANDARD.decode(b).ok()) {
+                        out.push_str(&String::from_utf8_lossy(&b));
+                    }
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(&repo().join("conformance/0.5/candidate"), &mut out);
+    out
+}
+
+/// The slot target for a genesis of the new seed `n`.
+fn gen(n: u8, controllers: &BTreeMap<String, Controller>) -> SlotTarget {
+    SlotTarget::genesis(&seed(n), controllers).unwrap()
+}
+
+/// The verifier's state of the candidate `account` vector: vault seed [70;32] and one raw
+/// controller (key seed 11).
+fn account_state() -> State {
+    let dir = repo().join("conformance/0.5/candidate/account/records/authority");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    files.sort();
+    let objects = Objects {
+        entries: files.iter().map(|p| std::fs::read(p).unwrap()).collect(),
+        ..Default::default()
+    };
+    let now = colophon_core::v05::encoding::parse_date("2026-11-11T09:01:00Z").unwrap();
+    let verdict = verify_history(&objects, &Persisted::default(), now);
+    assert_eq!(verdict.code(), "ok");
+    verdict.state.unwrap()
+}
+
 /// A passkey, a device key and a kit, for the build and refusal tests.
 struct Fixture {
     passkey: Authenticator,
@@ -464,12 +519,12 @@ fn fixture() -> Fixture {
         vault: vault_of(70),
     }
 }
-fn build(f: &Fixture, ids: &[&str], salt_seed: u8) -> Result<Slot, VaultError> {
+fn build(f: &Fixture, ids: &[&str], salt_seed: u8) -> Result<Slot, Failure> {
     let plan = SlotPlan {
         controllers: ids.iter().map(|s| s.to_string()).collect(),
         label: "slot".into(),
     };
-    let b = SlotBuild::begin(&plan, &f.vault, &f.controllers, [salt_seed; 32])?;
+    let b = SlotBuild::begin(&plan, &gen(70, &f.controllers), [salt_seed; 32])?;
     let results: Vec<PrfResult> = b
         .prf_requests()
         .iter()
@@ -568,7 +623,7 @@ fn a_combined_slot_needs_every_part_in_order() {
     // The kit cannot answer the device's route.
     assert_eq!(
         answer_with_identity(&f.kit, &inputs[0]).unwrap_err(),
-        VaultError::Locked
+        Failure::Refused(Reason::VaultLocked)
     );
     // Nor a PRF input.
     assert!(answer_with_identity(&f.device, &inputs[2]).is_err());
@@ -585,14 +640,10 @@ fn a_slot_opening_to_another_seed_or_vault_is_vault_locked() {
         controllers: vec![f.ids[1].clone()],
         label: "x".into(),
     };
-    let b = SlotBuild::begin(&plan, &f.vault, &f.controllers, [5; 32]).unwrap();
+    let b = SlotBuild::begin(&plan, &gen(70, &f.controllers), [5; 32]).unwrap();
     locked(b.finish(&seed(71), &[]));
-    // The vault check: a slot built over a vault claim whose public keys another seed derives.
-    let claim = VaultPublic {
-        signing: vault_of(71).signing,
-        agreement: f.vault.agreement.clone(),
-    };
-    let b = SlotBuild::begin(&plan, &claim, &f.controllers, [5; 32]).unwrap();
+    // ... and a target for another seed's vault never takes this seed.
+    let b = SlotBuild::begin(&plan, &gen(71, &f.controllers), [5; 32]).unwrap();
     locked(b.finish(&seed(70), &[]));
 }
 
@@ -806,14 +857,14 @@ fn a_new_prf_route_needs_a_verified_assertion_over_the_core_challenge() {
         controllers: vec![f.ids[0].clone()],
         label: "Passkey".into(),
     };
-    let begin = || SlotBuild::begin(&plan, &f.vault, &f.controllers, [5; 32]).unwrap();
+    let begin = || SlotBuild::begin(&plan, &gen(70, &f.controllers), [5; 32]).unwrap();
     let req = begin().prf_requests()[0].clone();
     assert_eq!(req.controller, f.ids[0]);
     assert_eq!(req.rp, RP);
     assert_eq!(req.credential, vec![1]);
     // The salt and challenge come from the entropy seed: stable per seed, fresh per seed.
     assert_eq!(begin().prf_requests()[0], req);
-    let other = SlotBuild::begin(&plan, &f.vault, &f.controllers, [6; 32]).unwrap();
+    let other = SlotBuild::begin(&plan, &gen(70, &f.controllers), [6; 32]).unwrap();
     assert_ne!(other.prf_requests()[0].salt, req.salt);
     assert_ne!(other.prf_requests()[0].challenge, req.challenge);
     assert_ne!(req.salt, req.challenge);
@@ -916,13 +967,12 @@ fn uv_is_required_when_the_controller_has_verification() {
     let passkey = Authenticator::new(1);
     let strict = passkey.controller(&["approve", "control"], true);
     let controllers = map_of(&[&strict]);
-    let vault = vault_of(70);
     let plan = SlotPlan {
         controllers: vec![strict.id()],
         label: "Passkey".into(),
     };
     let run = |flags: u8| {
-        let b = SlotBuild::begin(&plan, &vault, &controllers, [5; 32]).unwrap();
+        let b = SlotBuild::begin(&plan, &gen(70, &controllers), [5; 32]).unwrap();
         let c =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b.prf_requests()[0].challenge);
         let a = passkey.assert_with(&c, "https://id.luff.works", flags, "webauthn.get", RP);
@@ -961,7 +1011,7 @@ fn the_builder_refuses_what_a_slot_cannot_name() {
             label: "x".into(),
         };
         assert_eq!(
-            failed(SlotBuild::begin(&plan, &f.vault, &controllers, [1; 32])).code(),
+            failed(SlotBuild::begin(&plan, &gen(70, &controllers), [1; 32])).code(),
             "malformed"
         );
     }
@@ -970,7 +1020,7 @@ fn the_builder_refuses_what_a_slot_cannot_name() {
         label: String::new(),
     };
     assert_eq!(
-        failed(SlotBuild::begin(&plan, &f.vault, &controllers, [1; 32])).code(),
+        failed(SlotBuild::begin(&plan, &gen(70, &controllers), [1; 32])).code(),
         "malformed"
     );
     // The wrong number of PRF inputs for `begin_with`.
@@ -982,7 +1032,7 @@ fn the_builder_refuses_what_a_slot_cannot_name() {
         salt: [1; 32],
         challenge: [2; 32],
     };
-    assert!(SlotBuild::begin_with(&plan, &f.vault, &controllers, &[one], [1; 32]).is_err());
+    assert!(SlotBuild::begin_with(&plan, &gen(70, &controllers), &[one], [1; 32]).is_err());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1031,7 +1081,7 @@ fn sealed_for(c: &Controller, vault_seed: u8, entropy: u8) -> Slot {
         controllers: vec![c.id()],
         label: format!("slot {}", &c.id()[..4]),
     };
-    SlotBuild::begin(&plan, &vault_of(vault_seed), &controllers, [entropy; 32])
+    SlotBuild::begin(&plan, &gen(vault_seed, &controllers), [entropy; 32])
         .unwrap()
         .finish(&seed(vault_seed), &[])
         .unwrap()
@@ -1066,7 +1116,7 @@ fn removing_a_never_slotted_controller_needs_no_vault_change() {
     let r = rot();
     let before = ring(&[&r.a, &r.b, &r.c], &[&r.sa, &r.sb], &r.vault);
     let after = ring(&[&r.a, &r.b], &[&r.sa, &r.sb], &r.vault);
-    let plan = plan_rotation(&before, &after).unwrap();
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
     assert!(!plan.retiring && !plan.vault_changed);
     assert!(plan.lost.is_empty() && plan.dropped.is_empty() && plan.rebuild.is_empty());
     assert!(plan.without_slot.is_empty() && plan.vault_signers.is_empty());
@@ -1078,7 +1128,7 @@ fn removing_a_slotted_controller_retires_the_vault_and_names_the_rebuild() {
     let before = ring(&[&r.a, &r.b, &r.c], &[&r.sa, &r.sb, &r.sc], &r.vault);
     // Removal drops the slot naming C; the vault is unchanged and retiring.
     let after = ring(&[&r.a, &r.b], &[&r.sa, &r.sb], &r.vault);
-    let plan = plan_rotation(&before, &after).unwrap();
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
     assert!(plan.retiring && !plan.vault_changed);
     assert_eq!(plan.lost, vec![r.c.id()]);
     assert_eq!(plan.dropped, vec![r.sc.clone()]);
@@ -1093,7 +1143,7 @@ fn removing_a_slotted_controller_retires_the_vault_and_names_the_rebuild() {
     let d = raw_controller(&soft(14), &["approve", "control", "recover"], "D");
     let before = ring(&[&r.a, &d], &[&r.sa], &r.vault);
     let after = ring(&[&d], &[], &r.vault);
-    let plan = plan_rotation(&before, &after).unwrap();
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
     assert!(plan.retiring);
     assert!(plan.vault_signers.is_empty());
 }
@@ -1105,12 +1155,15 @@ fn demotion_and_agreement_change_drop_slots_too() {
     // Demote B (loses `recover`): its slot is dropped.
     let b2 = raw_controller(&soft(12), &["approve", "control"], "B");
     let after = ring(&[&r.a, &b2], &[&r.sa], &r.vault);
-    let plan = plan_rotation(&before, &after).unwrap();
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
     assert!(plan.retiring);
     assert_eq!(plan.lost, vec![r.b.id()]);
     // The slot kept anyway is refused: "every slot naming that controller is dropped".
     let kept = ring(&[&r.a, &b2], &[&r.sa, &r.sb], &r.vault);
-    assert_eq!(failed(plan_rotation(&before, &kept)).code(), "malformed");
+    assert_eq!(
+        failed(plan_rotation(&before, &kept, &[])).code(),
+        "malformed"
+    );
     // A changed agreement key: same signing key, new agreement.
     let b3 = Controller::parse(
         json!({"key": {"form": "raw", "signing": b64(r.b.key().signing()),
@@ -1121,7 +1174,7 @@ fn demotion_and_agreement_change_drop_slots_too() {
     .unwrap();
     assert_eq!(b3.id(), r.b.id());
     let after = ring(&[&r.a, &b3], &[&r.sa], &r.vault);
-    let plan = plan_rotation(&before, &after).unwrap();
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
     assert!(plan.retiring);
     assert_eq!(plan.lost, vec![r.b.id()]);
 }
@@ -1135,7 +1188,7 @@ fn a_rotation_names_the_slots_it_still_has_to_build() {
     // and not now, so they are reported and still need the seed by §7.4.
     let new_a = sealed_for(&r.a, 71, 4);
     let after = ring(&[&r.a, &r.b, &r.c], &[&new_a], &new_vault);
-    let plan = plan_rotation(&before, &after).unwrap();
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
     assert!(plan.vault_changed && !plan.retiring);
     let mut warn = vec![r.b.id(), r.c.id()];
     warn.sort();
@@ -1160,7 +1213,7 @@ fn a_rotation_names_the_slots_it_still_has_to_build() {
         &[&new_a, &sealed_for(&r.b, 71, 5)],
         &new_vault,
     );
-    let plan = plan_rotation(&before, &after).unwrap();
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
     assert!(plan.vault_changed && !plan.retiring);
     assert_eq!(plan.lost, vec![r.c.id()]);
     assert!(plan.without_slot.is_empty() && plan.rebuild.is_empty());
@@ -1172,28 +1225,37 @@ fn a_result_that_deletes_or_changes_a_slot_without_a_vault_change_is_refused() {
     let before = ring(&[&r.a, &r.b], &[&r.sa, &r.sb], &r.vault);
     // Deleted.
     let deleted = ring(&[&r.a, &r.b], &[&r.sa], &r.vault);
-    assert_eq!(failed(plan_rotation(&before, &deleted)).code(), "malformed");
+    assert_eq!(
+        failed(plan_rotation(&before, &deleted, &[])).code(),
+        "malformed"
+    );
     // Changed (same controller, other ciphertext).
     let changed = ring(&[&r.a, &r.b], &[&r.sa, &sealed_for(&r.b, 70, 9)], &r.vault);
-    assert_eq!(failed(plan_rotation(&before, &changed)).code(), "malformed");
+    assert_eq!(
+        failed(plan_rotation(&before, &changed, &[])).code(),
+        "malformed"
+    );
     // Duplicate-aware: a multiset, not a set.
     let twice = ring(&[&r.a, &r.b], &[&r.sa, &r.sa, &r.sb], &r.vault);
-    plan_rotation(&before, &twice).unwrap();
+    plan_rotation(&before, &twice, &[]).unwrap();
     let before2 = ring(&[&r.a, &r.b], &[&r.sa, &r.sa, &r.sb], &r.vault);
-    assert_eq!(failed(plan_rotation(&before2, &before)).code(), "malformed");
+    assert_eq!(
+        failed(plan_rotation(&before2, &before, &[])).code(),
+        "malformed"
+    );
     // Labels and order may change; slots for existing controllers may be added.
     let mut relabelled = r.sb.to_value().unwrap();
     relabelled["label"] = json!("renamed");
     let relabelled = Slot::from_value(&relabelled).unwrap();
     let ok = ring(&[&r.a, &r.b], &[&relabelled, &r.sa], &r.vault);
-    let plan = plan_rotation(&before, &ok).unwrap();
+    let plan = plan_rotation(&before, &ok, &[]).unwrap();
     assert!(!plan.retiring && plan.rebuild.is_empty());
     let extra = ring(
         &[&r.a, &r.b],
         &[&r.sa, &r.sb, &sealed_for(&r.a, 70, 6)],
         &r.vault,
     );
-    plan_rotation(&before, &extra).unwrap();
+    plan_rotation(&before, &extra, &[]).unwrap();
 }
 
 #[test]
@@ -1245,9 +1307,7 @@ fn vault_entries_and_self_slots_are_checked() {
 fn previous_vault_is_sealed_to_the_new_vault_under_its_label() {
     let (old, new) = (seed(70), seed(71));
     let (old_pub, new_pub) = (old.public().unwrap(), new.public().unwrap());
-    let sealed = old
-        .seal_previous(&new_pub, &mut Entropy::new([3; 32]))
-        .unwrap();
+    let sealed = old.seal_previous(&new, &mut Entropy::new([3; 32])).unwrap();
     // Whoever opens the new vault opens this.
     let reached = new.open_previous(&sealed, &old_pub).unwrap();
     assert_eq!(reached.public().unwrap(), old_pub);
@@ -1289,21 +1349,26 @@ fn previous_vault_is_sealed_to_the_new_vault_under_its_label() {
     // Chains: opening the new vault reaches the old, then the one before.
     let older = seed(69);
     let hop = older
-        .seal_previous(&old_pub, &mut Entropy::new([4; 32]))
+        .seal_previous(&old, &mut Entropy::new([4; 32]))
         .unwrap();
     let step2 = reached
         .open_previous(&hop, &older.public().unwrap())
         .unwrap();
     assert_eq!(step2.public().unwrap(), older.public().unwrap());
-    // A malformed new vault is refused.
-    let bad = VaultPublic {
-        signing: vec![4; 65],
-        agreement: new_pub.agreement.clone(),
-    };
+    // H1 (the checker's first way in): the target is a seed the core holds, never a bare
+    // public vault, and an opened seed is refused as a target. `reached` and `step2` are
+    // opened seeds.
+    let probe = seed(0x42);
     assert_eq!(
-        failed(old.seal_previous(&bad, &mut Entropy::new([3; 32]))).code(),
+        failed(probe.seal_previous(&reached, &mut Entropy::new([3; 32]))).code(),
         "malformed"
     );
+    assert!(!reached.is_new() && !step2.is_new() && new.is_new());
+    // An opened seed can still be the *old* seed being sealed forward.
+    let fresh = seed(0x77);
+    reached
+        .seal_previous(&fresh, &mut Entropy::new([5; 32]))
+        .unwrap();
 }
 
 #[test]
@@ -1383,16 +1448,25 @@ fn account(n: u8) -> AccountId {
     AccountId::parse(&format!("{n:064x}")).unwrap()
 }
 
+/// A confirmed pairing by the QR path, as both devices would hold it.
+fn confirmed(acct: &AccountId, e: &[u8], nb: [u8; 32], na: [u8; 32]) -> ConfirmedPairing {
+    QrJoiner::begin(acct, e, nb).unwrap().receive_nonce(na)
+}
+fn permit(limiter: &mut FailureLimiter) -> Permit {
+    limiter.permit(1_000).unwrap()
+}
+
 #[test]
 fn pairing_commit_then_reveal_both_sides() {
     let acct = account(1);
     let t = TransferKey::new([21; 32]).unwrap();
     let e = t.public();
     let (nb, na) = ([0xb1; 32], [0xa1; 32]);
+    let mut limiter = FailureLimiter::new();
     // J commits first and reveals once; H sends nA only after the commitment.
     let (joiner, c) = Joiner::begin(&acct, &e, nb).unwrap();
     assert_eq!(c, commitment(&acct, &e, &nb).unwrap());
-    let waiting = ExistingWaiting::receive_commitment(&acct, c);
+    let waiting = ExistingWaiting::receive_commitment(&acct, c, permit(&mut limiter));
     let (awaiting, sent) = waiting.send_nonce(na);
     assert_eq!(sent, na);
     let (reveal, j_code) = joiner.reveal(na).unwrap();
@@ -1409,14 +1483,15 @@ fn pairing_commit_then_reveal_both_sides() {
 }
 
 #[test]
-fn pairing_aborts_on_a_substituted_key_or_nonce_and_is_rate_limited() {
+fn pairing_aborts_on_a_substituted_key_or_nonce() {
     let acct = account(1);
     let e = TransferKey::new([21; 32]).unwrap().public();
     let attacker = TransferKey::new([22; 32]).unwrap().public();
     let (nb, na) = ([0xb1; 32], [0xa1; 32]);
     let (_, c) = Joiner::begin(&acct, &e, nb).unwrap();
-    let go = |e2: &[u8], nb2: &[u8; 32], other: &AccountId| {
-        ExistingWaiting::receive_commitment(other, c)
+    let mut limiter = FailureLimiter::new();
+    let mut go = |e2: &[u8], nb2: &[u8; 32], other: &AccountId| {
+        ExistingWaiting::receive_commitment(other, c, permit(&mut limiter))
             .send_nonce(na)
             .0
             .finish(e2, nb2)
@@ -1442,61 +1517,97 @@ fn pairing_aborts_on_a_substituted_key_or_nonce_and_is_rate_limited() {
         PairingAbort::CommitmentMismatch.to_string(),
         "abort: commitment mismatch"
     );
-    // The code differs for another nonce, key or account.
     let base = code(&acct, &e, &na, &nb).unwrap();
     assert_ne!(base, code(&acct, &e, &[0xa2; 32], &nb).unwrap());
-    // No more than 5 failed sessions per hour; time is an argument.
-    let mut limiter = FailureLimiter::new();
-    let t0 = 1_000_000_000_i64;
-    for i in 0..4 {
-        assert!(limiter.may_start(t0 + i));
-        let r = ExistingWaiting::receive_commitment(&acct, c)
-            .send_nonce(na)
-            .0
-            .finish_limited(&attacker, &nb, &mut limiter, t0 + i);
-        assert!(r.is_err());
-    }
-    assert!(limiter.may_start(t0 + 10));
-    limiter.record_failure(t0 + 11);
-    assert!(!limiter.may_start(t0 + 12));
-    assert!(!limiter.may_start(t0 + 3_599_000));
-    assert!(limiter.may_start(t0 + 3_600_011 + 1_000));
-    // A success is not recorded.
-    let mut other = FailureLimiter::new();
-    ExistingWaiting::receive_commitment(&acct, c)
-        .send_nonce(na)
-        .0
-        .finish_limited(&e, &nb, &mut other, t0)
-        .unwrap();
-    assert!(other.may_start(t0));
-    assert_eq!(other, FailureLimiter::new());
-    // The ledger is plain data the host persists.
-    let json = serde_json::to_string(&limiter).unwrap();
-    assert_eq!(
-        serde_json::from_str::<FailureLimiter>(&json).unwrap(),
-        limiter
-    );
 }
 
+/// M2: the limiter enforces. Before: no session step consulted it, a rejected code was not
+/// recordable, and a clock moved back reopened the budget.
 #[test]
-fn the_qr_alternative_has_both_nonces_and_no_code() {
+fn the_failure_limiter_gates_sessions_and_records_every_failure() {
+    let acct = account(1);
+    let e = TransferKey::new([21; 32]).unwrap().public();
+    let (nb, na) = ([0xb1; 32], [0xa1; 32]);
+    let t0 = 1_000_000_000_i64;
+    let mut limiter = FailureLimiter::new();
+    // A substituted-E relay commits honestly: the person rejects the code, which records.
+    for i in 0..5 {
+        let permit = limiter.permit(t0 + i).unwrap();
+        let em = TransferKey::new([30 + i as u8; 32]).unwrap().public();
+        let (j, c) = Joiner::begin(&acct, &em, [i as u8; 32]).unwrap();
+        let (h, sent) = ExistingWaiting::receive_commitment(&acct, c, permit).send_nonce(na);
+        let (r, _) = j.reveal(sent).unwrap();
+        let code = h.finish(&r.e, &r.nb).unwrap();
+        code.reject(&mut limiter, t0 + i);
+    }
+    // The sixth session cannot start: no permit, so no session step is reachable.
+    assert_eq!(limiter.permit(t0 + 10).unwrap_err(), LimitReached);
+    assert!(!limiter.may_start(t0 + 10));
+    // A clock moved back an hour does not reopen the budget.
+    assert!(!limiter.may_start(t0 - 3_600_000));
+    assert_eq!(limiter.permit(t0 - 7_200_000).unwrap_err(), LimitReached);
+    // An abandoned session (a timeout) records too.
+    let mut other = FailureLimiter::new();
+    for i in 0..5 {
+        other.permit(t0 + i).unwrap().abandon(&mut other, t0 + i);
+    }
+    assert!(other.permit(t0 + 6).is_err());
+    // A mismatch records through `finish_limited`; a success does not.
+    let mut third = FailureLimiter::new();
+    let attacker = TransferKey::new([22; 32]).unwrap().public();
+    let (_, c) = Joiner::begin(&acct, &e, nb).unwrap();
+    let p = third.permit(t0).unwrap();
+    let r = ExistingWaiting::receive_commitment(&acct, c, p)
+        .send_nonce(na)
+        .0
+        .finish_limited(&attacker, &nb, &mut third, t0);
+    assert!(r.is_err());
+    let p = third.permit(t0).unwrap();
+    ExistingWaiting::receive_commitment(&acct, c, p)
+        .send_nonce(na)
+        .0
+        .finish_limited(&e, &nb, &mut third, t0)
+        .unwrap();
+    // One failure only; failures expire after an hour.
+    for i in 1..5 {
+        third.record_failure(t0 + i);
+    }
+    assert!(!third.may_start(t0 + 5));
+    assert!(third.may_start(t0 + 3_600_005));
+    // The ledger, with its latest time, is plain data the host persists.
+    let json = serde_json::to_string(&limiter).unwrap();
+    let back: FailureLimiter = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, limiter);
+    assert!(!back.may_start(t0 - 3_600_000));
+}
+
+/// M1: the QR path and the code path are different session types. A code-flow `Joiner` has no
+/// way to show its `nB`, so a relay cannot learn it before the commit-reveal order allows.
+#[test]
+fn the_qr_alternative_is_a_separate_session_with_both_nonces_and_no_code() {
     let acct = account(1);
     let t = TransferKey::new([21; 32]).unwrap();
     let (nb, na) = ([0xb1; 32], [0xa1; 32]);
-    let (joiner, _) = Joiner::begin(&acct, &t.public(), nb).unwrap();
-    let qr = joiner.qr_payload();
-    let h = ConfirmedPairing::from_qr(&acct, &qr, na).unwrap();
-    let j = ConfirmedPairing::joiner_qr(&acct, &t.public(), nb, na).unwrap();
-    assert_eq!(h, j);
+    let mut limiter = FailureLimiter::new();
+    let j = QrJoiner::begin(&acct, &t.public(), nb).unwrap();
+    let qr = j.payload();
+    let scanned = ScannedQr::scan(&acct, &qr, permit(&mut limiter)).unwrap();
+    let (h, sent) = scanned.send_nonce(na);
+    let jp = j.receive_nonce(sent);
+    assert_eq!(h, jp);
     // Another account's QR is refused; so is a QR with an invalid point.
     assert_eq!(
-        ConfirmedPairing::from_qr(&account(2), &qr, na).unwrap_err(),
+        ScannedQr::scan(&account(2), &qr, permit(&mut limiter)).unwrap_err(),
         PairingAbort::WrongAccount
     );
     let mut bad = qr.clone();
     bad.e = vec![4; 65];
     assert_eq!(
-        ConfirmedPairing::from_qr(&acct, &bad, na).unwrap_err(),
+        ScannedQr::scan(&acct, &bad, permit(&mut limiter)).unwrap_err(),
+        PairingAbort::InvalidPoint
+    );
+    assert_eq!(
+        QrJoiner::begin(&acct, &[4; 65], nb).unwrap_err(),
         PairingAbort::InvalidPoint
     );
 }
@@ -1508,7 +1619,7 @@ fn the_seed_moves_to_a_new_device_under_the_transfer_label() {
     let device = TransferKey::new([21; 32]).unwrap();
     let e = device.public();
     let (nb, na) = ([0xb1; 32], [0xa1; 32]);
-    let pairing = ConfirmedPairing::joiner_qr(&acct, &e, nb, na).unwrap();
+    let pairing = confirmed(&acct, &e, nb, na);
     // The exact info and AAD of §7.4.
     let expected = format!(
         "colophon/vault-transfer/5\n{}\n{}\n{}{}",
@@ -1538,25 +1649,17 @@ fn the_seed_moves_to_a_new_device_under_the_transfer_label() {
     assert_eq!(plain, vec![70; 32]);
     // Wrong nonces, another key, another account, another vault: vaultLocked.
     for (name, other) in [
-        (
-            "na",
-            ConfirmedPairing::joiner_qr(&acct, &e, nb, [0xa2; 32]).unwrap(),
-        ),
-        (
-            "nb",
-            ConfirmedPairing::joiner_qr(&acct, &e, [0xb2; 32], na).unwrap(),
-        ),
-        (
-            "account",
-            ConfirmedPairing::joiner_qr(&account(2), &e, nb, na).unwrap(),
-        ),
-        (
-            "swapped nonces",
-            ConfirmedPairing::joiner_qr(&acct, &e, na, nb).unwrap(),
-        ),
+        ("na", confirmed(&acct, &e, nb, [0xa2; 32])),
+        ("nb", confirmed(&acct, &e, [0xb2; 32], na)),
+        ("account", confirmed(&account(2), &e, nb, na)),
+        ("swapped nonces", confirmed(&acct, &e, na, nb)),
     ] {
         let r = device.open_seed(&sealed, &other, &vault);
-        assert_eq!(r.unwrap_err(), VaultError::Locked, "{name}");
+        assert_eq!(
+            r.unwrap_err(),
+            Failure::Refused(Reason::VaultLocked),
+            "{name}"
+        );
     }
     locked(device.open_seed(&sealed, &pairing, &vault_of(71)));
     // A transfer key that is not E cannot use this pairing.
@@ -1568,44 +1671,238 @@ fn the_seed_moves_to_a_new_device_under_the_transfer_label() {
     // A seal for another seed is vaultLocked against this vault.
     let wrong = seal_seed_for_transfer(&seed(71), &pairing, &mut Entropy::new([30; 32])).unwrap();
     locked(device.open_seed(&wrong, &pairing, &vault));
-    // The new device then builds its slot: a `sealed` slot for a raw controller, opened with
-    // its own key. (It never needed the seed bytes.)
-    let me = soft(40);
-    let controller = raw_controller(&me, &["approve", "control"], "New phone");
-    let controllers = map_of(&[&controller]);
+    // The new device then builds a slot with the opened seed, for a controller of the
+    // verified keyring (here the account vector's device), and opens it with that key.
+    let state = account_state();
+    let device_key = soft(11);
+    let cid = device_key.id();
     let plan = SlotPlan {
-        controllers: vec![controller.id()],
-        label: "New phone".into(),
+        controllers: vec![cid.clone()],
+        label: "Mac".into(),
     };
-    let slot = SlotBuild::begin(&plan, &vault, &controllers, [31; 32])
+    let slot = SlotBuild::begin(&plan, &SlotTarget::verified(&state), [31; 32])
         .unwrap()
         .finish(&got, &[])
         .unwrap();
-    open(&slot, &vault, &controllers, &[&me], 0).unwrap();
+    open(
+        &slot,
+        &vault,
+        &state.keyring().controllers,
+        &[&device_key],
+        0,
+    )
+    .unwrap();
 }
 
+/// H1, the checker's second way in. Before: `SlotBuild` took the caller's controller map, so a
+/// `sealed` slot for a caller's raw key gave the caller the seed. Now an opened seed is only
+/// sealed to controllers of the verifier's state.
 #[test]
-fn pairing_labels_are_the_published_strings() {
-    // The commitment and code hash the 64 ASCII characters of the account ID, not bytes.
-    let acct = account(1);
-    let e = TransferKey::new([21; 32]).unwrap().public();
-    let (na, nb) = ([1u8; 32], [2u8; 32]);
-    let mut h = Sha256::new();
-    h.update(b"colophon/pair/5");
-    h.update(acct.as_str().as_bytes());
-    h.update(&e);
-    h.update(nb);
+fn an_opened_seed_is_only_sealed_to_controllers_of_the_verified_keyring() {
+    let state = account_state();
+    let verified = SlotTarget::verified(&state);
+    // An opened seed: unlock the account's own slot with the device key.
+    let device = soft(11);
+    let slot = Slot::from_value(&state.keyring().slots[0]).unwrap();
+    let opened = open(
+        &slot,
+        &VaultPublic::from_pair(&state.keyring().vault),
+        &state.keyring().controllers,
+        &[&device],
+        0,
+    )
+    .unwrap();
+    assert!(!opened.is_new());
+    // The attacker's raw key is not in the verified keyring: refused at `begin`.
+    let mine = soft(0x99);
+    let attacker = raw_controller(&mine, &["approve"], "mine");
+    let plan = SlotPlan {
+        controllers: vec![attacker.id()],
+        label: "x".into(),
+    };
     assert_eq!(
-        commitment(&acct, &e, &nb).unwrap().to_vec(),
-        h.finalize().to_vec()
+        failed(SlotBuild::begin(&plan, &verified, [3; 32])).code(),
+        "malformed"
     );
-    let mut h = Sha256::new();
-    h.update(b"colophon/pair-code/5");
-    h.update(acct.as_str().as_bytes());
-    h.update(&e);
-    h.update(na);
-    h.update(nb);
-    let d = h.finalize();
-    let n = u32::from_be_bytes([d[0], d[1], d[2], d[3]]) % 1_000_000;
-    assert_eq!(code(&acct, &e, &na, &nb).unwrap(), format!("{n:06}"));
+    // The genesis route takes the caller's controllers but only a new seed: the opened seed is
+    // refused at `finish`, and the caller cannot make the opened seed new.
+    let map = map_of(&[&attacker]);
+    let genesis = SlotTarget::genesis(&seed(70), &map).unwrap();
+    let b = SlotBuild::begin(&plan, &genesis, [3; 32]).unwrap();
+    assert_eq!(failed(b.finish(&opened, &[])).code(), "malformed");
+    assert_eq!(
+        failed(SlotTarget::genesis(&opened, &map)).code(),
+        "malformed"
+    );
+    // The rotation route likewise needs the new seed, and keeps the verified controllers.
+    assert_eq!(
+        failed(SlotTarget::rotation(&state, &opened)).code(),
+        "malformed"
+    );
+    let new_seed = seed(71);
+    let rotation = SlotTarget::rotation(&state, &new_seed).unwrap();
+    assert_eq!(
+        failed(SlotBuild::begin(&plan, &rotation, [3; 32])).code(),
+        "malformed"
+    );
+    let ok = SlotPlan {
+        controllers: vec![device.id()],
+        label: "Mac".into(),
+    };
+    let b = SlotBuild::begin(&ok, &rotation, [3; 32]).unwrap();
+    // The opened seed is of the old vault, not the rotation's new one.
+    locked(b.finish(&opened, &[]));
+    SlotBuild::begin(&ok, &rotation, [3; 32])
+        .unwrap()
+        .finish(&new_seed, &[])
+        .unwrap();
+    // A verified-target build for the verified controller works with the opened seed.
+    let ok_plan = SlotPlan {
+        controllers: vec![device.id()],
+        label: "Mac".into(),
+    };
+    SlotBuild::begin(&ok_plan, &verified, [4; 32])
+        .unwrap()
+        .finish(&opened, &[])
+        .unwrap();
+}
+
+/// Entropy handling: a build resumes the entropy after the draws `begin` made, so building a
+/// PRF slot twice from the same seed is reproducible.
+#[test]
+fn slot_builds_are_reproducible_from_their_entropy_seed() {
+    let f = fixture();
+    let a = build(&f, &[&f.ids[1], &f.ids[0]], 5).unwrap();
+    let b = build(&f, &[&f.ids[1], &f.ids[0]], 5).unwrap();
+    assert_eq!(a, b);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix round: M3, L2, L3.
+
+/// M3 (the checker's probe): a controller that remains but was demoted or re-keyed, and had a
+/// slot, is reported in `without_slot`, and still after the `vault` entry when the host carries
+/// the list.
+#[test]
+fn a_remaining_demoted_or_rekeyed_controller_is_reported_without_a_slot() {
+    let r = rot();
+    let before = ring(&[&r.a, &r.b], &[&r.sa, &r.sb], &r.vault);
+    // Demoted: B loses `recover` and its slot.
+    let b_demoted = raw_controller(&soft(12), &["approve", "control"], "B");
+    let after = ring(&[&r.a, &b_demoted], &[&r.sa], &r.vault);
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
+    assert!(plan.retiring);
+    assert!(plan.without_slot.contains(&r.b.id()), "B is warned");
+    // The vault entry (A's slot only): B still has none, carried from the earlier step.
+    let new_seed = seed(71);
+    let new_a = {
+        let controllers = map_of(&[&r.a]);
+        SlotBuild::begin(
+            &SlotPlan {
+                controllers: vec![r.a.id()],
+                label: "A".into(),
+            },
+            &SlotTarget::genesis(&new_seed, &controllers).unwrap(),
+            [3; 32],
+        )
+        .unwrap()
+        .finish(&new_seed, &[])
+        .unwrap()
+    };
+    let after2 = ring(&[&r.a, &b_demoted], &[&new_a], &new_seed.public().unwrap());
+    let plan2 = plan_rotation(&after, &after2, &plan.without_slot).unwrap();
+    assert!(plan2.vault_changed);
+    assert!(
+        plan2.without_slot.contains(&r.b.id()),
+        "still warned after the rotation"
+    );
+    // Once B has a slot in the new vault it is no longer reported.
+    let b_slot = {
+        let controllers = map_of(&[&b_demoted]);
+        SlotBuild::begin(
+            &SlotPlan {
+                controllers: vec![b_demoted.id()],
+                label: "B".into(),
+            },
+            &SlotTarget::genesis(&new_seed, &controllers).unwrap(),
+            [4; 32],
+        )
+        .unwrap()
+        .finish(&new_seed, &[])
+        .unwrap()
+    };
+    let after3 = ring(
+        &[&r.a, &b_demoted],
+        &[&new_a, &b_slot],
+        &new_seed.public().unwrap(),
+    );
+    let plan3 = plan_rotation(&after2, &after3, &plan2.without_slot).unwrap();
+    assert!(plan3.without_slot.is_empty());
+    // Re-keyed (agreement changed) behaves the same.
+    let b_rekeyed = Controller::parse(
+        json!({"key": {"form": "raw", "signing": b64(r.b.key().signing()),
+                       "agreement": b64(&soft(77).public().agreement)},
+               "label": "B", "roles": ["approve", "control", "recover"]}),
+        "c",
+    )
+    .unwrap();
+    let after = ring(&[&r.a, &b_rekeyed], &[&r.sa], &r.vault);
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
+    assert!(plan.without_slot.contains(&r.b.id()));
+}
+
+/// L2: a controller that appears only inside a combined slot cannot build a `vault` entry
+/// alone, so it is not a candidate signer.
+#[test]
+fn vault_signers_exclude_controllers_that_are_only_in_a_combined_slot() {
+    let all = ["approve", "control", "recover"];
+    let a = raw_controller(&soft(11), &all, "A");
+    let d = raw_controller(&soft(14), &all, "D");
+    let b = raw_controller(&soft(12), &all, "B");
+    let c = raw_controller(&soft(13), &all, "C");
+    let ctrls = map_of(&[&a, &b, &c, &d]);
+    let new_seed = seed(70);
+    let target = SlotTarget::genesis(&new_seed, &ctrls).unwrap();
+    let one = |id: &Controller, e: u8| {
+        SlotBuild::begin(
+            &SlotPlan {
+                controllers: vec![id.id()],
+                label: "s".into(),
+            },
+            &target,
+            [e; 32],
+        )
+        .unwrap()
+        .finish(&new_seed, &[])
+        .unwrap()
+    };
+    let combined = SlotBuild::begin(
+        &SlotPlan {
+            controllers: vec![b.id(), c.id()],
+            label: "BC".into(),
+        },
+        &target,
+        [9; 32],
+    )
+    .unwrap()
+    .finish(&new_seed, &[])
+    .unwrap();
+    let (sa, sd) = (one(&a, 1), one(&d, 2));
+    let vault = vault_of(70);
+    let before = ring(&[&a, &b, &c, &d], &[&sa, &sd, &combined], &vault);
+    // D is removed: its slot drops and the vault retires.
+    let after = ring(&[&a, &b, &c], &[&sa, &combined], &vault);
+    let plan = plan_rotation(&before, &after, &[]).unwrap();
+    assert!(plan.retiring);
+    assert_eq!(plan.vault_signers, vec![a.id()]);
+}
+
+/// L3: `refused:vaultLocked` is a `Reason`, so callers matching on `Failure` see it.
+#[test]
+fn vault_locked_is_a_reason() {
+    let f = Failure::Refused(Reason::VaultLocked);
+    assert_eq!(f.code(), "refused:vaultLocked");
+    assert_eq!(Reason::VaultLocked.as_str(), "vaultLocked");
+    let err = VaultSeed::check(&[1; 31], &vault_of(70)).unwrap_err();
+    assert_eq!(err, f);
 }

@@ -70,6 +70,9 @@ pub enum Reason {
     WrongFormat,
     /// §11.5, 0.3 §5: the payload doesn't authenticate or doesn't match its header.
     InvalidPayload,
+    /// §7.1, §7.2, §19: a slot's secret is wrong or missing, or an opened seed does not
+    /// derive the keyring's vault.
+    VaultLocked,
 }
 impl Reason {
     /// The reason's protocol spelling, without the `refused:` prefix.
@@ -93,6 +96,7 @@ impl Reason {
             Self::BudgetSpent => "budgetSpent",
             Self::WrongFormat => "wrongFormat",
             Self::InvalidPayload => "invalidPayload",
+            Self::VaultLocked => "vaultLocked",
         }
     }
 }

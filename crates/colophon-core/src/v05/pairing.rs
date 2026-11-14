@@ -7,6 +7,14 @@
 //! [`AgreementKey`] of [`super::vault`] and is never exposed; the result is a [`VaultSeed`]
 //! handle, checked against the keyring's vault. No raw ECDH result is formed here.
 //!
+//! **Sessions are typed.** The code path (`Joiner`, `ExistingWaiting`, `PairingCode`) and the QR
+//! path (`QrJoiner`, `ScannedQr`) are different types: a commitment-bearing `Joiner` cannot show
+//! `nB`, and each step consumes its state. A `ConfirmedPairing`, which a seed transfer needs, has
+//! no public constructor: it comes only from a compared code or the QR path. On the QR path what
+//! authenticates `E` is the scan of the joining device's screen (§7.3); the core cannot see a
+//! scan, so the host attests it by calling `ScannedQr::scan`. Starting a session on H takes a
+//! `Permit` from the `FailureLimiter`.
+//!
 //! The core has no clock and no RNG: nonces, the ephemeral key's seed and the time of every
 //! failure come in as arguments. The state machine consumes itself at each step, so a
 //! commitment permits exactly one reveal (§7.3).
@@ -113,7 +121,9 @@ impl PairingCode {
     pub fn digits(&self) -> &str {
         &self.digits
     }
-    /// The person confirmed that the codes match: a pairing that §7.4 may use.
+    /// The person confirmed that the codes match: a pairing that §7.4 may use. This and
+    /// [`ScannedQr::send_nonce`] / [`QrJoiner::receive_nonce`] are the only ways to obtain a
+    /// [`ConfirmedPairing`].
     pub fn confirm(self) -> ConfirmedPairing {
         ConfirmedPairing {
             account: self.account,
@@ -122,10 +132,23 @@ impl PairingCode {
             nb: self.nb,
         }
     }
+    /// The person rejected the code (or abandoned the comparison): a failed session, recorded
+    /// in `limiter` at `now_ms` (§7.3). Consumes the code.
+    pub fn reject(self, limiter: &mut FailureLimiter, now_ms: i64) {
+        limiter.record_failure(now_ms);
+    }
 }
 
-/// A pairing the person confirmed (or a QR pairing): the only thing from which a seed transfer
-/// can be sealed or opened (§7.4). It carries both nonces for the transfer label.
+/// A pairing the person confirmed: the only thing from which a seed transfer can be sealed or
+/// opened (§7.4). It carries both nonces for the transfer label. It has no public constructor:
+/// it exists only after (a) a compared six-digit code ([`PairingCode::confirm`]), or (b) the
+/// QR path of §7.3 ([`ScannedQr`], [`QrJoiner`]).
+///
+/// ```compile_fail
+/// use colophon_core::v05::pairing::{ConfirmedPairing, QrPayload};
+/// // There is no way to build a confirmed pairing from a payload the caller made.
+/// let _ = ConfirmedPairing::from_qr;
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfirmedPairing {
     account: AccountId,
@@ -134,40 +157,6 @@ pub struct ConfirmedPairing {
     nb: [u8; 32],
 }
 impl ConfirmedPairing {
-    /// The QR alternative (§7.3): H scans `accountID`, `E` and `nB` from J's screen and checks
-    /// `E` directly; H still sends `nA` to J so both sides have both nonces. No code is
-    /// compared. `expected` is the account the scanning side means to pair for.
-    pub fn from_qr(
-        expected: &AccountId,
-        payload: &QrPayload,
-        na: [u8; 32],
-    ) -> Result<Self, PairingAbort> {
-        if payload.account != *expected {
-            return Err(PairingAbort::WrongAccount);
-        }
-        check_point(&payload.e)?;
-        Ok(Self {
-            account: payload.account.clone(),
-            e: payload.e.clone(),
-            na,
-            nb: payload.nb,
-        })
-    }
-    /// The joining side of a QR pairing: it displayed the QR and now has H's `nA`.
-    pub fn joiner_qr(
-        account: &AccountId,
-        e: &[u8],
-        nb: [u8; 32],
-        na: [u8; 32],
-    ) -> Result<Self, PairingAbort> {
-        check_point(e)?;
-        Ok(Self {
-            account: account.clone(),
-            e: e.to_vec(),
-            na,
-            nb,
-        })
-    }
     /// The joining key `E`.
     pub fn e(&self) -> &[u8] {
         &self.e
@@ -248,12 +237,41 @@ impl Joiner {
             },
         ))
     }
-    /// The QR payload for the QR alternative: J shows `accountID`, `E` and `nB` instead of
-    /// sending a commitment.
-    pub fn qr_payload(&self) -> QrPayload {
+}
+
+/// J in the QR alternative (§7.3): a different session type from [`Joiner`]. It never sends
+/// a commitment, and a code-flow `Joiner` can never produce a payload, so `nB` is not
+/// obtainable except by choosing this path at the start.
+#[derive(Debug)]
+pub struct QrJoiner {
+    account: AccountId,
+    e: Vec<u8>,
+    nb: [u8; 32],
+}
+impl QrJoiner {
+    /// J holds `E` and chose `nb`; it will show `accountID`, `E` and `nB` as a QR code.
+    pub fn begin(account: &AccountId, e: &[u8], nb: [u8; 32]) -> Result<Self, PairingAbort> {
+        check_point(e)?;
+        Ok(Self {
+            account: account.clone(),
+            e: e.to_vec(),
+            nb,
+        })
+    }
+    /// What J shows on its screen.
+    pub fn payload(&self) -> QrPayload {
         QrPayload {
             account: self.account.clone(),
             e: self.e.clone(),
+            nb: self.nb,
+        }
+    }
+    /// H sent `nA` after scanning: J now has both nonces. No code is compared. Consumes J.
+    pub fn receive_nonce(self, na: [u8; 32]) -> ConfirmedPairing {
+        ConfirmedPairing {
+            account: self.account,
+            e: self.e,
+            na,
             nb: self.nb,
         }
     }
@@ -269,8 +287,9 @@ pub struct ExistingWaiting {
     commitment: [u8; 32],
 }
 impl ExistingWaiting {
-    /// H received `C` for `account`.
-    pub fn receive_commitment(account: &AccountId, commitment: [u8; 32]) -> Self {
+    /// H received `C` for `account`. A session needs a [`Permit`] from the failure limiter
+    /// (§7.3: no more than 5 failed sessions per hour); there is no way to start one without it.
+    pub fn receive_commitment(account: &AccountId, commitment: [u8; 32], _permit: Permit) -> Self {
         Self {
             account: account.clone(),
             commitment,
@@ -331,33 +350,111 @@ impl ExistingAwaitingReveal {
     }
 }
 
+/// H scanned J's QR code (§7.3 QR alternative). What authenticates `E` here is the scan itself:
+/// `accountID`, `E` and `nB` come from J's screen over a channel the person controls, so `E`
+/// is checked directly and no code is compared. The core cannot verify that a scan happened:
+/// the host calls [`ScannedQr::scan`] only with a payload it read from J's screen. H still
+/// sends `nA`, so that §7.4's label has both nonces.
+#[derive(Debug)]
+pub struct ScannedQr {
+    payload: QrPayload,
+}
+impl ScannedQr {
+    /// H scanned `payload` while pairing for `expected`. A payload for another account or with
+    /// an invalid `E` aborts. A [`Permit`] from the limiter is required, as for a code session.
+    pub fn scan(
+        expected: &AccountId,
+        payload: &QrPayload,
+        _permit: Permit,
+    ) -> Result<Self, PairingAbort> {
+        if payload.account != *expected {
+            return Err(PairingAbort::WrongAccount);
+        }
+        check_point(&payload.e)?;
+        Ok(Self {
+            payload: payload.clone(),
+        })
+    }
+    /// H chose `nA` and sends it to J. Consumes the scan.
+    pub fn send_nonce(self, na: [u8; 32]) -> (ConfirmedPairing, [u8; 32]) {
+        (
+            ConfirmedPairing {
+                account: self.payload.account,
+                e: self.payload.e,
+                na,
+                nb: self.payload.nb,
+            },
+            na,
+        )
+    }
+}
+
 /// The failed-session limit of H (§7.3): no more than 5 failed sessions per hour. A mismatch,
 /// abort or timeout is a failure; the host records it with the time it observed. The ledger is
 /// plain data the host persists.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureLimiter {
     failures_ms: Vec<i64>,
+    /// The latest time this ledger has seen: a clock moved backwards never reopens the budget.
+    #[serde(default)]
+    latest_ms: i64,
 }
+
+/// Permission to start one pairing session, taken from the limiter. It cannot be made any
+/// other way, and every session start ([`ExistingWaiting::receive_commitment`],
+/// [`ScannedQr::scan`]) consumes one.
+#[derive(Debug)]
+pub struct Permit(());
+impl Permit {
+    /// The session was abandoned or timed out: a failure, recorded at `now_ms` (§7.3).
+    pub fn abandon(self, limiter: &mut FailureLimiter, now_ms: i64) {
+        limiter.record_failure(now_ms);
+    }
+}
+
+/// The limit is reached: 5 failed sessions in the last hour (§7.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LimitReached;
+impl std::fmt::Display for LimitReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("pairing: 5 failed sessions in the last hour")
+    }
+}
+impl std::error::Error for LimitReached {}
+
 impl FailureLimiter {
     /// An empty ledger.
     pub fn new() -> Self {
         Self::default()
     }
-    /// Record a failed session (mismatch, abort or timeout) at `now_ms`.
-    pub fn record_failure(&mut self, now_ms: i64) {
-        self.prune(now_ms);
-        self.failures_ms.push(now_ms);
+    fn effective(&self, now_ms: i64) -> i64 {
+        now_ms.max(self.latest_ms)
     }
-    /// True when a new session may start: fewer than 5 failures in the last hour.
+    /// Record a failed session (mismatch, abort, rejected code or timeout) at `now_ms`.
+    pub fn record_failure(&mut self, now_ms: i64) {
+        let now = self.effective(now_ms);
+        self.latest_ms = now;
+        self.failures_ms.retain(|t| *t > now - 3_600_000);
+        self.failures_ms.push(now);
+    }
+    /// True when a new session may start: fewer than 5 failures in the last hour, measured at
+    /// the latest time the ledger has seen (a clock moved backwards does not help).
     pub fn may_start(&self, now_ms: i64) -> bool {
+        let now = self.effective(now_ms);
         self.failures_ms
             .iter()
-            .filter(|t| **t > now_ms - 3_600_000 && **t <= now_ms)
+            .filter(|t| **t > now - 3_600_000)
             .count()
             < MAX_FAILED_PER_HOUR
     }
-    fn prune(&mut self, now_ms: i64) {
-        self.failures_ms.retain(|t| *t > now_ms - 3_600_000);
+    /// Start a session: a [`Permit`], or [`LimitReached`]. Sessions cannot start without one.
+    pub fn permit(&mut self, now_ms: i64) -> Result<Permit, LimitReached> {
+        self.latest_ms = self.effective(now_ms);
+        if self.may_start(now_ms) {
+            Ok(Permit(()))
+        } else {
+            Err(LimitReached)
+        }
     }
 }
 

@@ -9,9 +9,36 @@
 //! file*; the `pub(super)` ones take and return only other opaque secrets, ciphertext or
 //! public points. Nothing returns the seed, a raw ECDH result, a PRF output, a part secret or a
 //! derived key. Secrets enter only through `from_host_*` constructors (the host's inputs) and
-//! leave only sealed. Memory is overwritten on drop on a best-effort basis (the crate forbids
-//! `unsafe` and has no zeroizing dependency, so the optimizer is only discouraged from
-//! removing the write).
+//! leave only sealed.
+//!
+//! **Where the seed can be sealed to, and why each target is bounded.** The core hands out
+//! ciphertext of the seed, so "never exported" holds only if the *targets* are bounded. A seed
+//! is **new** (made from host entropy in this session: a genesis, or the new vault of a
+//! rotation) or **opened** (obtained by unlocking a slot, a transfer or `previousVault`).
+//! The only paths that seal a seed are:
+//! 1. `slots::SlotBuild` to controllers of a verified `v05::history::State` (an opened or new
+//!    seed). A controller the verifier has not seen is refused; `pub(crate)` additions are for
+//!    the account layer, which builds them from the transition it is preparing (§17.3).
+//! 2. `slots::SlotBuild` for a genesis or a rotation: only a **new** seed, to the controllers
+//!    of the genesis being prepared, or of the verified state for a rotation.
+//! 3. [`VaultSeed::seal_previous`]: the old seed (any) to the **new seed** the core holds
+//!    (new only), never to a bare public vault.
+//! 4. `pairing::seal_seed_for_transfer` to the ephemeral `E` of a [`ConfirmedPairing`], which
+//!    exists only after a compared six-digit code or a QR scanned from the joining device's
+//!    screen (§7.3). This is the one path that seals an opened seed to a key the host named, and
+//!    §7.4 requires it; it is bounded by the person's confirmation, which the core cannot
+//!    check beyond the commit-then-reveal order and the single reveal.
+//!
+//! A host that can call the API with an unlocked session is trusted with what the person
+//! trusts it with: it can start path 4 and the person confirms or not. The core still never
+//! returns the seed's bytes.
+//!
+//! **Erasure is best effort.** The crate forbids `unsafe` and has no zeroizing dependency, so
+//! overwriting uses ordinary writes that `std::hint::black_box` only discourages the
+//! optimizer from removing; there are no volatile writes. Seed, ECDH, PRF, part-secret and
+//! box-key buffers, and opened plaintexts, are overwritten on drop. The 0.4 `Entropy` type
+//! (`crypto.rs`) keeps its seed without erasing it, and so do HPKE intermediates in `hpke.rs`;
+//! `slots::SlotBuild` erases its own copy of the entropy seed. p256 key types zeroize on drop.
 //!
 //! The 0.4 labels `colophon/vault/4`, `colophon/entropy/3` and the slot labels are kept on
 //! purpose (§7.1: "unchanged in 0.5").
@@ -39,8 +66,8 @@ use std::fmt;
 pub const VAULT_SALT: &[u8] = b"colophon/vault/4";
 /// HKDF salt of the software-identity expansion (§7.5).
 pub const ENTROPY_SALT: &[u8] = b"colophon/entropy/3";
-/// HKDF salt of the 0.3 and 0.4 recovery-kit pre-step (see [`legacy_kit_identity`]).
-pub const LEGACY_KIT_SALT: &[u8] = b"colophon/recovery/3";
+/// HKDF salt of the recovery-kit pre-step (§7.5, decision: the 0.4 derivation is the only one).
+pub const KIT_SALT: &[u8] = b"colophon/recovery/3";
 /// Prefix of every label the core reserves; the host may not open a seal under one (§17.1).
 pub const RESERVED_LABEL: &[u8] = b"colophon/";
 /// Largest `info` the restricted open accepts.
@@ -48,47 +75,20 @@ pub const HOST_OPEN_MAX_INFO: usize = 1_024;
 /// Largest ciphertext the restricted open accepts.
 pub const HOST_OPEN_MAX_CIPHERTEXT: usize = 65_536;
 
-/// A failure of a vault or slot operation: `refused:vaultLocked` (§7.1, §7.2, §19), or one of
-/// the 0.5 results of §1.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum VaultError {
-    /// `refused:vaultLocked`: a wrong or missing secret, or a seed that does not derive the
-    /// keyring's vault.
-    Locked,
-    /// Any other 0.5 result.
-    Failed(Failure),
-}
-impl VaultError {
-    /// The exact protocol result code.
-    pub fn code(&self) -> String {
-        match self {
-            Self::Locked => "refused:vaultLocked".into(),
-            Self::Failed(f) => f.code(),
-        }
-    }
-}
-impl fmt::Display for VaultError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Locked => f.write_str("refused:vaultLocked"),
-            Self::Failed(x) => x.fmt(f),
-        }
-    }
-}
-impl std::error::Error for VaultError {}
-impl From<Failure> for VaultError {
-    fn from(f: Failure) -> Self {
-        Self::Failed(f)
-    }
-}
-/// The result of a vault or slot operation.
-pub type VResult<T> = std::result::Result<T, VaultError>;
+/// The result of a vault or slot operation: a 0.5 [`Failure`], including
+/// `refused:vaultLocked` ([`Reason::VaultLocked`], §19).
+pub type VResult<T> = std::result::Result<T, Failure>;
 
-pub(crate) fn malformed(reason: impl Into<String>) -> VaultError {
-    VaultError::Failed(Failure::Malformed(reason.into()))
+/// `refused:vaultLocked`: a wrong or missing secret, or a seed that does not derive the
+/// keyring's vault (§7.1, §7.2).
+pub fn locked() -> Failure {
+    Failure::Refused(Reason::VaultLocked)
 }
-pub(crate) fn bad_signature(reason: impl Into<String>) -> VaultError {
-    VaultError::Failed(Failure::BadSignature(reason.into()))
+pub(crate) fn malformed(reason: impl Into<String>) -> Failure {
+    Failure::Malformed(reason.into())
+}
+pub(crate) fn bad_signature(reason: impl Into<String>) -> Failure {
+    Failure::BadSignature(reason.into())
 }
 pub(crate) fn require(ok: bool, reason: &str) -> VResult<()> {
     if ok {
@@ -188,7 +188,7 @@ impl EcdhOutput {
     /// The host's ECDH result. Not 32 bytes is `refused:vaultLocked` (a missing secret).
     pub fn from_host(bytes: &[u8]) -> VResult<Self> {
         if bytes.len() != 32 {
-            return Err(VaultError::Locked);
+            return Err(locked());
         }
         Ok(Self(bytes.to_vec()))
     }
@@ -211,7 +211,7 @@ impl PrfOutput {
     /// (§7.2), and the result is `refused:vaultLocked`.
     pub fn from_host(bytes: &[u8]) -> VResult<Self> {
         if bytes.len() != 32 {
-            return Err(VaultError::Locked);
+            return Err(locked());
         }
         Ok(Self(bytes.to_vec()))
     }
@@ -274,7 +274,7 @@ impl PartSecret {
         let plain = open_dh(sealed, recipient, dh, info)?;
         <[u8; 32]>::try_from(plain.as_slice())
             .map(Self)
-            .map_err(|_| VaultError::Locked)
+            .map_err(|_| locked())
     }
     /// The combined key: `HKDF-SHA256(IKM = S0 ‖ … ‖ Sn−1, salt empty, info I, 32)` (§7.2).
     pub(super) fn combine(parts: &[PartSecret], info: &[u8]) -> VResult<BoxKey> {
@@ -304,7 +304,7 @@ fn open_dh(sealed: &SealedBox, recipient: &[u8], dh: &EcdhOutput, info: &[u8]) -
     sealed
         .to_key()
         .finish_open(recipient, &dh.0, info)
-        .map_err(|_| VaultError::Locked)
+        .map_err(|_| locked())
 }
 
 /// The AES-256-GCM key of a `prf`, or `combined` slot box (§7.2).
@@ -325,7 +325,7 @@ impl BoxKey {
             .encrypt(
                 Nonce::from_slice(&nonce),
                 Payload {
-                    msg: &seed.0,
+                    msg: &seed.seed,
                     aad: info,
                 },
             )
@@ -352,8 +352,8 @@ impl BoxKey {
                     aad: info,
                 },
             )
-            .map_err(|_| VaultError::Locked)?;
-        VaultSeed::check(&plain, expected)
+            .map_err(|_| locked())?;
+        VaultSeed::check_owned(plain, expected)
     }
 }
 impl Drop for BoxKey {
@@ -406,7 +406,7 @@ impl AgreementKey {
         info: &[u8],
         expected: &VaultPublic,
     ) -> VResult<VaultSeed> {
-        let dh = self.agree(&sealed.enc).map_err(|_| VaultError::Locked)?;
+        let dh = self.agree(&sealed.enc).map_err(|_| locked())?;
         VaultSeed::open_sealed(sealed, &self.public(), &dh, info, expected)
     }
     /// Open an HPKE seal addressed to this key. The plaintext is returned; the ECDH result
@@ -520,7 +520,7 @@ impl SoftwareIdentity {
     /// A `raw` controller descriptor for this identity: `signing` and `agreement` (§3.1).
     pub fn descriptor(&self) -> VResult<KeyDescriptor> {
         let p = self.public();
-        KeyDescriptor::new_raw(p.signing, Some(p.agreement)).map_err(VaultError::from)
+        KeyDescriptor::new_raw(p.signing, Some(p.agreement))
     }
 }
 impl fmt::Debug for SoftwareIdentity {
@@ -529,23 +529,13 @@ impl fmt::Debug for SoftwareIdentity {
     }
 }
 
-/// A recovery kit (§7.5): "a software identity from 32 secret bytes the host prints or
-/// stores". This is the literal text: [`SoftwareIdentity::from_seed`] on the secret.
-///
-/// **Open spec question (§7.5 against 0.3 §2 and 0.4):** a 0.3 and 0.4 kit first applied
-/// `HKDF-SHA256(salt = "colophon/recovery/3", info = "identity")`. The 0.5 text does not say
-/// that step is dropped or kept. See [`legacy_kit_identity`].
+/// A recovery kit (§7.5): 32 secret bytes the host prints or stores. There is exactly one
+/// derivation, the 0.3 and 0.4 one: `s' = HKDF-SHA256(IKM = kit, salt = "colophon/recovery/3",
+/// info = "identity", 32)`, then the software-identity expansion of `s'`. A kit made under
+/// 0.4 therefore keeps its keys after an in-place upgrade (§16.1). (Spec owner's decision; the
+/// §7.5 text says only "a software identity from 32 secret bytes".)
 pub fn kit_identity(secret: &[u8; 32]) -> VResult<SoftwareIdentity> {
-    SoftwareIdentity::from_seed(secret)
-}
-
-/// The 0.3 §2 and 0.4 recovery-kit derivation: `s' = HKDF-SHA256(IKM = kit, salt =
-/// "colophon/recovery/3", info = "identity", 32)`, then the software-identity expansion of `s'`.
-/// This is how the kits that exist in 0.4 accounts derive their published keys. A host
-/// re-entering a printed 0.4 kit needs it. Which of the two a 0.5 kit uses is a spec question
-/// (§7.5); the core does not choose.
-pub fn legacy_kit_identity(secret: &[u8; 32]) -> VResult<SoftwareIdentity> {
-    let mut s = hkdf32(secret, LEGACY_KIT_SALT, b"identity")?;
+    let mut s = hkdf32(secret, KIT_SALT, b"identity")?;
     let id = SoftwareIdentity::from_seed(&s);
     erase(&mut s);
     id
@@ -565,11 +555,25 @@ pub fn legacy_kit_identity(secret: &[u8; 32]) -> VResult<SoftwareIdentity> {
 /// let s = colophon_core::v05::vault::VaultSeed::from_host_random([1; 32]);
 /// let _copy = s.clone(); // no Clone
 /// ```
-pub struct VaultSeed([u8; 32]);
+pub struct VaultSeed {
+    seed: [u8; 32],
+    new: bool,
+}
 impl VaultSeed {
     /// A fresh vault seed: 32 random bytes from the host (§7.1).
+    ///
+    /// This is a **new** seed ([`VaultSeed::is_new`]): made from host entropy in this session,
+    /// for a genesis or the new vault of a rotation. A seed obtained by unlocking a slot or a
+    /// transfer is an **opened** seed and is not new.
     pub fn from_host_random(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self {
+            seed: bytes,
+            new: true,
+        }
+    }
+    /// True for a seed made from host entropy in this session, false for an opened one.
+    pub fn is_new(&self) -> bool {
+        self.new
     }
     /// The vault's public identity: `s' = HKDF-SHA256(IKM = seed, salt = "colophon/vault/4",
     /// info = "identity", 32)`, then §7.5 on `s'` (§7.1).
@@ -577,7 +581,7 @@ impl VaultSeed {
         Ok(self.identity()?.public())
     }
     fn identity(&self) -> VResult<SoftwareIdentity> {
-        let mut s = hkdf32(&self.0, VAULT_SALT, b"identity")?;
+        let mut s = hkdf32(&self.seed, VAULT_SALT, b"identity")?;
         let id = SoftwareIdentity::from_seed(&s);
         erase(&mut s);
         id
@@ -585,14 +589,23 @@ impl VaultSeed {
     /// After opening any slot (§7.1): the plaintext must be 32 bytes and derive both public
     /// keys of the keyring's `vault`. Anything else is `refused:vaultLocked`. The caller
     /// replaces its session seed only on `Ok`.
+    ///
+    /// The result is an **opened** seed ([`VaultSeed::is_new`] is false).
     pub fn check(plaintext: &[u8], expected: &VaultPublic) -> VResult<Self> {
-        let seed = <[u8; 32]>::try_from(plaintext).map_err(|_| VaultError::Locked)?;
-        let this = Self(seed);
-        let public = this.public().map_err(|_| VaultError::Locked)?;
+        let seed = <[u8; 32]>::try_from(plaintext).map_err(|_| locked())?;
+        let this = Self { seed, new: false };
+        let public = this.public().map_err(|_| locked())?;
         if public != *expected {
-            return Err(VaultError::Locked);
+            return Err(locked());
         }
         Ok(this)
+    }
+    /// [`VaultSeed::check`] on a plaintext buffer the core owns: the buffer is overwritten
+    /// before it is dropped (best effort, see the file header).
+    pub(super) fn check_owned(mut plain: Vec<u8>, expected: &VaultPublic) -> VResult<Self> {
+        let r = Self::check(&plain, expected);
+        erase(&mut plain);
+        r
     }
     /// Open a `sealed` slot (or a transfer seal) with the host's ECDH result for the
     /// recipient's agreement key, then check the plaintext against the vault (§7.1).
@@ -603,8 +616,7 @@ impl VaultSeed {
         info: &[u8],
         expected: &VaultPublic,
     ) -> VResult<Self> {
-        let plain = open_dh(sealed, recipient, dh, info)?;
-        Self::check(&plain, expected)
+        Self::check_owned(open_dh(sealed, recipient, dh, info)?, expected)
     }
     /// Seal this seed to a raw controller's agreement point (a `sealed` slot) or to a transfer
     /// key (§7.4). `info` is both the HPKE `info` and the AAD.
@@ -614,16 +626,30 @@ impl VaultSeed {
         info: &[u8],
         entropy: &mut Entropy,
     ) -> VResult<SealedBox> {
-        SealedBox::seal_public(recipient, &self.0, info, entropy)
+        SealedBox::seal_public(recipient, &self.seed, info, entropy)
     }
     /// Seal the seed of the *previous* vault to the new vault (§8.3 `previousVault`): HPKE to
     /// the new vault's agreement key with `info` and AAD
     /// `"colophon/vault-previous/5\n" ‖ newVaultID ‖ "\n" ‖ oldVaultID`. `self` is the old seed.
-    pub fn seal_previous(
-        &self,
-        new_vault: &VaultPublic,
-        entropy: &mut Entropy,
-    ) -> VResult<SealedBox> {
+    ///
+    /// The target is the **new seed itself**, which must be a new seed ([`VaultSeed::is_new`]):
+    /// one the core's host made from entropy in this session for this rotation. A caller
+    /// cannot name a bare public vault, and an opened seed is refused as a target, so the old
+    /// seed is only ever sealed to a vault whose seed the core holds.
+    ///
+    /// ```compile_fail
+    /// use colophon_core::{crypto::Entropy, v05::vault::VaultSeed};
+    /// let old = VaultSeed::from_host_random([1; 32]);
+    /// let public = VaultSeed::from_host_random([2; 32]).public().unwrap();
+    /// // A bare public vault is not an accepted target.
+    /// let _ = old.seal_previous(&public, &mut Entropy::new([3; 32]));
+    /// ```
+    pub fn seal_previous(&self, new_seed: &VaultSeed, entropy: &mut Entropy) -> VResult<SealedBox> {
+        require(
+            new_seed.is_new(),
+            "previousVault: the target must be the new seed made this session",
+        )?;
+        let new_vault = new_seed.public()?;
         new_vault.validate()?;
         let old = self.public()?;
         let info = previous_info(&new_vault.id(), &old.id());
@@ -640,7 +666,7 @@ impl VaultSeed {
         let new = self.public()?;
         let info = previous_info(&new.id(), &old_vault.id());
         let plain = self.identity()?.agreement.open_hpke(previous, &info)?;
-        Self::check(&plain, old_vault)
+        Self::check_owned(plain, old_vault)
     }
     /// Open an HPKE seal to the vault for a format the **host** registered (§17.1). The seal's
     /// `info` (also its AAD) is the host's label. A label beginning with `colophon/` is
@@ -653,7 +679,7 @@ impl VaultSeed {
     /// question).
     pub fn open_host_format(&self, sealed: &SealedBox, info: &[u8]) -> VResult<Vec<u8>> {
         if info.starts_with(RESERVED_LABEL) {
-            return Err(VaultError::Failed(Failure::Refused(Reason::OutOfScope)));
+            return Err(Failure::Refused(Reason::OutOfScope));
         }
         require(info.len() <= HOST_OPEN_MAX_INFO, "host open: info too long")?;
         require(
@@ -679,7 +705,7 @@ impl VaultSeed {
 }
 impl Drop for VaultSeed {
     fn drop(&mut self) {
-        erase(&mut self.0);
+        erase(&mut self.seed);
     }
 }
 impl fmt::Debug for VaultSeed {

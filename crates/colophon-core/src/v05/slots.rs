@@ -15,11 +15,12 @@
 use super::descriptor::{general_origin_allowed, Controller, KeyForm, Role};
 use super::encoding::{bounds, encode_base64url, is_lower_hex, strict_parse};
 use super::history::keyring::Keyring;
+use super::history::State;
 use super::signature::parse_der;
 pub use super::vault::SealedBox;
 use super::vault::{
-    b64, bad_signature, malformed, require, EcdhOutput, PartSecret, PrfOutput, SoftwareIdentity,
-    VResult, VaultError, VaultPublic, VaultSeed,
+    b64, bad_signature, locked, malformed, require, EcdhOutput, PartSecret, PrfOutput,
+    SoftwareIdentity, VResult, VaultPublic, VaultSeed,
 };
 use crate::crypto::Entropy;
 use p256::ecdsa::{signature::Verifier, VerifyingKey};
@@ -292,7 +293,7 @@ impl Slot {
         self.validate(controllers)?;
         vault.validate()?;
         if secrets.len() != self.controllers().len() {
-            return Err(VaultError::Locked);
+            return Err(locked());
         }
         let vault_id = vault.id();
         let info = slot_info(&vault_id, self.kind(), self.controllers());
@@ -304,7 +305,7 @@ impl Slot {
             } => {
                 let agreement = agreement_of(controllers, &ids[0])?;
                 let OpeningSecret::Ecdh(dh) = &secrets[0] else {
-                    return Err(VaultError::Locked);
+                    return Err(locked());
                 };
                 VaultSeed::open_sealed(sealed, agreement, dh, &info, vault)
             }
@@ -312,7 +313,7 @@ impl Slot {
                 salt, box_bytes, ..
             } => {
                 let OpeningSecret::Prf(p) = &secrets[0] else {
-                    return Err(VaultError::Locked);
+                    return Err(locked());
                 };
                 p.derive(salt, &info)?
                     .into_box_key()
@@ -333,7 +334,7 @@ impl Slot {
                             PartSecret::open_sealed(sealed, agreement, dh, &pinfo)?
                         }
                         (Part::Prf { salt }, OpeningSecret::Prf(p)) => p.derive(salt, &pinfo)?,
-                        _ => return Err(VaultError::Locked),
+                        _ => return Err(locked()),
                     });
                 }
                 PartSecret::combine(&secrets_of_parts, &info)?.open_seed(box_bytes, &info, vault)
@@ -389,7 +390,7 @@ pub fn answer_with_identity(
         OpeningInput::Ecdh { controller, enc } if *controller == identity.id() => {
             identity.agree(enc).map(OpeningSecret::Ecdh)
         }
-        _ => Err(VaultError::Locked),
+        _ => Err(locked()),
     }
 }
 
@@ -470,10 +471,85 @@ pub struct PrfResult {
 pub struct SlotBuild {
     vault: VaultPublic,
     controllers: BTreeMap<String, Controller>,
+    needs_new_seed: bool,
     ids: Vec<String>,
     label: String,
     requests: Vec<PrfRequest>,
-    entropy: Entropy,
+    entropy_seed: [u8; 32],
+    draws: u64,
+}
+impl Drop for SlotBuild {
+    fn drop(&mut self) {
+        // Best effort (see the header of `vault.rs`).
+        self.entropy_seed = [0; 32];
+        std::hint::black_box(&self.entropy_seed);
+    }
+}
+
+/// Where a built slot may seal the seed to: the controllers it may name and the vault it is
+/// for, together with the kind of seed allowed. A seed that already protects an account is
+/// only sealed to controllers taken from the **verifier's state** ([`SlotTarget::verified`]),
+/// never to a list the caller made. The other constructors take a **new** seed, made from host
+/// entropy in this session ([`VaultSeed::is_new`]), whose targets are the genesis being
+/// prepared or the controllers of the verified state under a new vault.
+#[derive(Clone, Debug)]
+pub struct SlotTarget {
+    vault: VaultPublic,
+    controllers: BTreeMap<String, Controller>,
+    needs_new_seed: bool,
+}
+impl SlotTarget {
+    /// A slot of the account's current vault for a controller of its verified keyring
+    /// (`v05::history::State`, from `verify_history`). Any seed that opens that vault may be
+    /// sealed to it, opened or new.
+    pub fn verified(state: &State) -> Self {
+        Self {
+            vault: VaultPublic::from_pair(&state.keyring().vault),
+            controllers: state.keyring().controllers.clone(),
+            needs_new_seed: false,
+        }
+    }
+    /// The slots of a genesis being prepared: no verified state exists yet, so the controllers
+    /// are those of the genesis. Only the **new** seed of that genesis can be sealed this way;
+    /// [`SlotBuild::finish`] refuses an opened seed.
+    pub fn genesis(
+        new_seed: &VaultSeed,
+        controllers: &BTreeMap<String, Controller>,
+    ) -> VResult<Self> {
+        require(new_seed.is_new(), "genesis slots need the new seed")?;
+        Ok(Self {
+            vault: new_seed.public()?,
+            controllers: controllers.clone(),
+            needs_new_seed: true,
+        })
+    }
+    /// The slots of a rotation (a `vault` entry, or a vault change in a transition): the
+    /// controllers of the verified state under the **new** seed's vault. Only that new seed can
+    /// be sealed this way.
+    pub fn rotation(state: &State, new_seed: &VaultSeed) -> VResult<Self> {
+        require(new_seed.is_new(), "a rotation's slots need the new seed")?;
+        Ok(Self {
+            vault: new_seed.public()?,
+            controllers: state.keyring().controllers.clone(),
+            needs_new_seed: true,
+        })
+    }
+    /// The current vault's slot for a controller that a transition or entry now being
+    /// prepared adds (§17.3: the new device builds its slot before the controller is in the
+    /// verified keyring). The account layer builds `added` from that body; hosts cannot call
+    /// this.
+    #[allow(dead_code)] // constructed by the account layer (E1, E5)
+    pub(crate) fn with_additions(state: &State, added: &[Controller]) -> Self {
+        let mut controllers = state.keyring().controllers.clone();
+        for c in added {
+            controllers.insert(c.id(), c.clone());
+        }
+        Self {
+            vault: VaultPublic::from_pair(&state.keyring().vault),
+            controllers,
+            needs_new_seed: false,
+        }
+    }
 }
 impl std::fmt::Debug for SlotBuild {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -487,14 +563,9 @@ impl SlotBuild {
     /// of every new PRF route (in controller order), then the ephemeral keys, part secrets and
     /// nonces of [`SlotBuild::finish`].
     ///
-    /// `controllers` are the keyring's current controllers.
-    pub fn begin(
-        plan: &SlotPlan,
-        vault: &VaultPublic,
-        controllers: &BTreeMap<String, Controller>,
-        entropy_seed: [u8; 32],
-    ) -> VResult<Self> {
-        Self::begin_inner(plan, vault, controllers, entropy_seed, None)
+    /// `target` says which controllers and vault the slot is for ([`SlotTarget`]).
+    pub fn begin(plan: &SlotPlan, target: &SlotTarget, entropy_seed: [u8; 32]) -> VResult<Self> {
+        Self::begin_inner(plan, target, entropy_seed, None)
     }
 
     /// [`SlotBuild::begin`] with the salt and challenge of each new PRF route supplied by the
@@ -503,21 +574,20 @@ impl SlotBuild {
     /// the ephemeral keys, part secrets and nonces of [`SlotBuild::finish`].
     pub fn begin_with(
         plan: &SlotPlan,
-        vault: &VaultPublic,
-        controllers: &BTreeMap<String, Controller>,
+        target: &SlotTarget,
         inputs: &[PrfInput],
         entropy_seed: [u8; 32],
     ) -> VResult<Self> {
-        Self::begin_inner(plan, vault, controllers, entropy_seed, Some(inputs))
+        Self::begin_inner(plan, target, entropy_seed, Some(inputs))
     }
 
     fn begin_inner(
         plan: &SlotPlan,
-        vault: &VaultPublic,
-        controllers: &BTreeMap<String, Controller>,
+        target: &SlotTarget,
         entropy_seed: [u8; 32],
         inputs: Option<&[PrfInput]>,
     ) -> VResult<Self> {
+        let (vault, controllers) = (&target.vault, &target.controllers);
         vault.validate()?;
         require(
             (1..=200).contains(&plan.label.len()),
@@ -529,6 +599,7 @@ impl SlotBuild {
             "slot names a controller twice",
         )?;
         let mut entropy = Entropy::new(entropy_seed);
+        let mut draws = 0u64;
         let mut requests: Vec<PrfRequest> = Vec::new();
         for id in &plan.controllers {
             let c = controllers
@@ -545,14 +616,17 @@ impl SlotBuild {
                                 .ok_or_else(|| malformed("a salt and challenge per PRF route"))?;
                             (i.salt, i.challenge)
                         }
-                        None => (
-                            entropy
-                                .take::<32>()
-                                .map_err(|e| malformed(format!("entropy: {e}")))?,
-                            entropy
-                                .take::<32>()
-                                .map_err(|e| malformed(format!("entropy: {e}")))?,
-                        ),
+                        None => {
+                            draws += 2;
+                            (
+                                entropy
+                                    .take::<32>()
+                                    .map_err(|e| malformed(format!("entropy: {e}")))?,
+                                entropy
+                                    .take::<32>()
+                                    .map_err(|e| malformed(format!("entropy: {e}")))?,
+                            )
+                        }
                     };
                     requests.push(PrfRequest {
                         controller: id.clone(),
@@ -578,10 +652,12 @@ impl SlotBuild {
         Ok(Self {
             vault: vault.clone(),
             controllers: controllers.clone(),
+            needs_new_seed: target.needs_new_seed,
             ids: plan.controllers.clone(),
             label: plan.label.clone(),
             requests,
-            entropy,
+            entropy_seed,
+            draws,
         })
     }
 
@@ -594,9 +670,20 @@ impl SlotBuild {
     /// open it again with the same outputs and compare the plaintext with the vault, and
     /// return it. `seed` must be the unlocked seed of this build's vault (`refused:vaultLocked`
     /// otherwise).
-    pub fn finish(mut self, seed: &VaultSeed, results: &[PrfResult]) -> VResult<Slot> {
+    pub fn finish(self, seed: &VaultSeed, results: &[PrfResult]) -> VResult<Slot> {
         if seed.public()? != self.vault {
-            return Err(VaultError::Locked);
+            return Err(locked());
+        }
+        require(
+            seed.is_new() || !self.needs_new_seed,
+            "an opened seed is sealed only to the controllers of the verified keyring",
+        )?;
+        // Resume the entropy after the draws `begin` made.
+        let mut entropy = Entropy::new(self.entropy_seed);
+        for _ in 0..self.draws {
+            entropy
+                .take::<1>()
+                .map_err(|e| malformed(format!("entropy: {e}")))?;
         }
         require(
             results.len() == self.requests.len(),
@@ -617,7 +704,7 @@ impl SlotBuild {
                 KeyForm::Raw { agreement: Some(a) } => {
                     let info = slot_info(&vault_id, "sealed", &self.ids);
                     Slot::Sealed {
-                        sealed: seed.seal_to(a, &info, &mut self.entropy)?,
+                        sealed: seed.seal_to(a, &info, &mut entropy)?,
                         controllers: self.ids.clone(),
                         label: self.label.clone(),
                     }
@@ -627,7 +714,7 @@ impl SlotBuild {
                     let req = &self.requests[0];
                     let out = &results[0].output;
                     let key = out.derive(&req.salt, &info)?.into_box_key();
-                    let box_bytes = key.seal_seed(seed, &info, &mut self.entropy)?;
+                    let box_bytes = key.seal_seed(seed, &info, &mut entropy)?;
                     // Open it again with the same output and check the vault.
                     out.derive(&req.salt, &info)?.into_box_key().open_seed(
                         &box_bytes,
@@ -650,8 +737,7 @@ impl SlotBuild {
                 match self.controllers[id].key().form() {
                     KeyForm::Raw { agreement: Some(a) } => {
                         let pinfo = part_info(&vault_id, index, "sealed", id);
-                        let (secret, sealed) =
-                            PartSecret::fresh_sealed(a, &pinfo, &mut self.entropy)?;
+                        let (secret, sealed) = PartSecret::fresh_sealed(a, &pinfo, &mut entropy)?;
                         secrets.push(secret);
                         parts.push(Part::Sealed { sealed });
                     }
@@ -667,7 +753,7 @@ impl SlotBuild {
                 }
             }
             let box_bytes =
-                PartSecret::combine(&secrets, &info)?.seal_seed(seed, &info, &mut self.entropy)?;
+                PartSecret::combine(&secrets, &info)?.seal_seed(seed, &info, &mut entropy)?;
             // Open it again from the same part secrets and check the vault.
             PartSecret::combine(&secrets, &info)?.open_seed(&box_bytes, &info, &self.vault)?;
             Slot::Combined {
@@ -870,9 +956,19 @@ pub struct RotationPlan {
 /// - a slot naming a removed, demoted or re-keyed controller does not survive;
 /// - every slot of `after` is valid against `after`'s controllers (§7.2).
 ///
+/// `carried` is the `without_slot` of the previous plan the host kept: controllers that lost
+/// their slot in an earlier step and still have none, so that after the `vault` entry (when
+/// `before` no longer shows their old slot) they are still reported until they have one
+/// (§8.3: the old seed retires only once every remaining controller that had an old slot has a
+/// new one). Pass `&[]` for the first step.
+///
 /// A removed controller that no slot ever named leaves the vault as it is and the plan neither
 /// retiring nor rebuilding anything.
-pub fn plan_rotation(before: &Keyring, after: &Keyring) -> VResult<RotationPlan> {
+pub fn plan_rotation(
+    before: &Keyring,
+    after: &Keyring,
+    carried: &[String],
+) -> VResult<RotationPlan> {
     let before_slots = before
         .slots
         .iter()
@@ -947,20 +1043,30 @@ pub fn plan_rotation(before: &Keyring, after: &Keyring) -> VResult<RotationPlan>
         }
     }
     let after_named: BTreeSet<&String> = after_slots.iter().flat_map(|s| s.controllers()).collect();
-    let without_slot: Vec<String> = slotted
-        .iter()
+    // Remaining controllers that had a slot (this step, or carried from an earlier one) and
+    // have none now: removed ones are gone, but demoted or re-keyed ones remain and need the
+    // seed by §7.4 (§8.3, §6.4).
+    let mut candidates: BTreeSet<String> = slotted.iter().map(|id| (*id).clone()).collect();
+    candidates.extend(carried.iter().cloned());
+    let without_slot: Vec<String> = candidates
+        .into_iter()
         .filter(|id| {
-            !lost.contains(**id)
-                && after
-                    .controllers
-                    .get(**id)
-                    .is_some_and(|c| !c.has(&Role::Sign))
-                && !after_named.contains(**id)
+            after
+                .controllers
+                .get(id)
+                .is_some_and(|c| !c.has(&Role::Sign))
+                && !after_named.contains(id)
         })
-        .map(|id| (**id).clone())
+        .collect();
+    // Only a controller named by a single-controller slot opens the seed alone; one that
+    // appears only inside a combined slot cannot build a `vault` entry by itself.
+    let alone: BTreeSet<&String> = before_slots
+        .iter()
+        .filter(|s| !matches!(s, Slot::Combined { .. }))
+        .flat_map(|s| s.controllers())
         .collect();
     let vault_signers = if retiring {
-        slotted
+        alone
             .iter()
             .filter(|id| {
                 let holds = |k: &Keyring| {
