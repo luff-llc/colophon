@@ -489,6 +489,29 @@ impl Account {
         Ok(self.batch_action("renew", batch))
     }
 
+    /// The shares-only form of `renew` (§9.4, revision 14: `expires` is optional): seal the
+    /// epochs a member is owed (an import grant is a transition and carries none; a member that
+    /// was provisional or expired when an epoch was made lacks it) and leave its expiry exactly
+    /// as it is.
+    pub fn begin_renew_shares(
+        &self,
+        member: &str,
+        signers: &[String],
+        seed: [u8; 32],
+    ) -> Result<PendingAction> {
+        self.require_writable()?;
+        let batch = crate::v05::write::records::prepare_renew_shares(
+            &self.d.effective,
+            self.now_ms,
+            signers,
+            self.now_ms,
+            member,
+            &self.d.keys,
+            seed,
+        )?;
+        Ok(self.batch_action("renew", batch))
+    }
+
     /// End a member (§9.5): `kept` and `heads` from the headers this account holds, and, unless
     /// the vault is retiring, a new epoch sealed without the member. While the vault is
     /// retiring the entry carries no epochs and the action's [`ActionInfo`] says a `rekey` is

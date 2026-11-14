@@ -1749,3 +1749,40 @@ fn a_verified_succession_is_a_stored_fact_and_does_not_lapse_when_heads_age() {
     let bytes = j.acct.export_persisted(&[7; 32], [1; 32]).unwrap();
     assert!(!bytes.is_empty());
 }
+
+#[test]
+fn begin_renew_shares_seals_what_a_member_is_owed_and_leaves_its_expiry() {
+    let (mut j, _keys, _issued, _frozen) = through_f(false);
+    let now = j.now + 5 * SEC;
+    let head = head_of(&j, now);
+    give(
+        &mut j,
+        Objects {
+            heads: vec![head],
+            ..Objects::default()
+        },
+        now,
+    );
+    j.acct.record_due().unwrap();
+    let owed = j.acct.owed_shares();
+    assert!(!owed.is_empty(), "the copier is owed its shares");
+    let before = j.acct.members().into_iter().find(|m| m.member.id == j.copier).unwrap().expires_ms;
+    let action = j
+        .acct
+        .begin_renew_shares(&j.copier, &[j.ctl.clone()], [0x54; 32])
+        .unwrap();
+    let sigs = sign(&j.host, action.steps());
+    j.acct.finish(action, sigs).unwrap();
+    assert!(j.acct.owed_shares().is_empty());
+    let after = j.acct.members().into_iter().find(|m| m.member.id == j.copier).unwrap().expires_ms;
+    assert_eq!(before, after, "no `expires` in the entry: the expiry is untouched");
+    // A member owed nothing is refused.
+    assert!(j
+        .acct
+        .begin_renew_shares(&j.copier, &[j.ctl.clone()], [0x55; 32])
+        .and_then(|a| {
+            let s = sign(&j.host, a.steps());
+            j.acct.finish(a, s)
+        })
+        .is_err());
+}
