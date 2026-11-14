@@ -376,6 +376,17 @@ fn check_earlier_attempts(
                 state.verified_succession().is_none(),
                 "an earlier freezing entry's succession is verified: the predecessor is final",
             )?;
+            // An attempt that is merely not yet verified (waiting for a head) is still live and
+            // blocks a new one. Only an attempt that can no longer verify frees the way: one
+            // that is vetoed, or whose F was written before it was due (premature).
+            let status = succession_status(&state);
+            let dead = status.as_ref().is_some_and(|st| {
+                st.vetoed || st.timing.as_ref().is_some_and(|t| rec.issued_ms < t.due_ms)
+            });
+            require(
+                dead,
+                "an earlier succession attempt is still live (not yet verified): it blocks a new one unless it is vetoed or premature",
+            )?;
         }
         require(
             known,
@@ -554,6 +565,46 @@ fn new_genesis_steps(
         }
     }
     steps
+}
+
+/// Every check of [`prepare_swift_genesis`] that does not need the rebuilt slots, so that a
+/// genesis that cannot succeed is refused before the person is asked for a passkey assertion.
+/// `carried` are the controllers of the new keyring (the host's `swift_carried_controllers`).
+fn preflight_swift_genesis(
+    p: &SwiftSuccessorParams,
+    carried: &[Value],
+    predecessor: &[Vec<u8>],
+    now_ms: i64,
+) -> Result<()> {
+    super::check_issued(p.issued_ms)?;
+    let head = SwiftHead::read(predecessor)?;
+    let snap = head.snapshot()?;
+    require(
+        p.issued_ms >= head.issued_ms,
+        "genesis issued before the predecessor's head",
+    )?;
+    check_earlier_attempts(predecessor, &head.history, &p.earlier_attempts, now_ms)?;
+    let ids: BTreeSet<String> = carried
+        .iter()
+        .filter_map(|v| Controller::parse(v.clone(), "carried").ok())
+        .map(|c| c.id())
+        .collect();
+    require(!p.signers.is_empty(), "genesis needs a signer")?;
+    let distinct: BTreeSet<&String> = p.signers.iter().collect();
+    require(distinct.len() == p.signers.len(), "a signer appears twice")?;
+    require(
+        p.signers.iter().all(|s| ids.contains(s)),
+        "a genesis signer is not a controller of its keyring",
+    )?;
+    let hd: BTreeSet<&String> = p.handover.iter().collect();
+    require(hd.len() == p.handover.len(), "a handover key appears twice")?;
+    for id in &p.handover {
+        require(
+            snap.controllers.contains_key(id),
+            "a handover key is not a controller of the predecessor at head",
+        )?;
+    }
+    Ok(())
 }
 
 fn check_new_keyring(keyring: &Value, signers: &[String]) -> Result<Keyring> {
@@ -1535,6 +1586,7 @@ impl SwiftSuccessor {
         now_ms: i64,
     ) -> Result<Self> {
         let carried = swift_carried_controllers(&predecessor, &params.carry)?;
+        preflight_swift_genesis(&params, &carried, &predecessor, now_ms)?;
         let seed = VaultSeed::from_host_random(vault_seed);
         let controllers: BTreeMap<String, Controller> = carried
             .iter()

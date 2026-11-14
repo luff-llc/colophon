@@ -87,16 +87,23 @@ pub enum PendingMove {
     /// F, the freezing `layout` entry of the Swift predecessor.
     Freeze(PendingFreeze),
     /// The `migration` transition on the successor.
-    Migration(PendingBatch),
+    Migration(Stamped),
     /// A shares-only `renew` (§9.4).
-    Shares(PendingBatch),
+    Shares(Stamped),
+}
+/// A prepared batch with the head it was prepared on: it finishes only while that is still the
+/// head (as an ordinary action does), so two steps prepared at one head cannot both finish.
+#[derive(Debug)]
+pub struct Stamped {
+    batch: PendingBatch,
+    head: (u64, String),
 }
 impl PendingMove {
     /// What the host signs, in order.
     pub fn steps(&self) -> &[SigningStep] {
         match self {
             Self::Freeze(f) => f.steps(),
-            Self::Migration(b) | Self::Shares(b) => b.steps(),
+            Self::Migration(b) | Self::Shares(b) => b.batch.steps(),
         }
     }
 }
@@ -236,7 +243,20 @@ impl Account {
     /// the due time, after F or a recorded veto), for a key that is not eligible, and for fewer
     /// keys than the `handover` had.
     pub fn begin_swift_veto(&self, params: &SwiftVetoParams) -> Result<PendingSwiftVeto> {
-        self.stage_is(&[MoveStage::Waiting], "a veto is made during the wait")?;
+        let s = self.stage_is(&[MoveStage::Waiting], "a veto is made during the wait")?;
+        let held = self.objects.pending.iter().any(|p| {
+            AuthEnvelope::parse(p, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)
+                .ok()
+                .is_some_and(|e| {
+                    e.value.get("protocol").and_then(serde_json::Value::as_str)
+                        == Some("colophon/veto/5")
+                        && e.value
+                            .get("transition")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(s.status.genesis_digest.as_str())
+                })
+        });
+        require(!held, "a veto of this succession is already held")?;
         prepare_swift_veto(&self.objects, self.now_ms, params)
     }
 
@@ -455,7 +475,11 @@ impl Account {
         signers: &[String],
         seed: [u8; 32],
     ) -> Result<PendingMove> {
-        Ok(PendingMove::Shares(prepare_renew_shares(
+        require(
+            self.owed_shares().iter().any(|o| o.member == member),
+            "that member is owed no shares: the shares step is done, or not needed",
+        )?;
+        let batch = prepare_renew_shares(
             &self.d.effective,
             self.now_ms,
             signers,
@@ -463,7 +487,18 @@ impl Account {
             member,
             &self.d.keys,
             seed,
-        )?))
+        )?;
+        Ok(PendingMove::Shares(Stamped {
+            batch,
+            head: self.head(),
+        }))
+    }
+
+    /// A `migration` transition is already pending: a second one is never prepared or finished.
+    fn migration_pending(&self) -> bool {
+        self.pending()
+            .iter()
+            .any(|p| p.components.iter().any(|c| c == "migration"))
     }
 
     /// §15.4: prepare the `migration` transition from a finished copy. `members` is each
@@ -484,6 +519,10 @@ impl Account {
             &[MoveStage::Verified],
             "the migration is written after F and the copy",
         )?;
+        require(
+            !self.migration_pending(),
+            "a migration transition is already pending",
+        )?;
         let batch = prepare_migration(
             &self.objects,
             self.now_ms,
@@ -498,7 +537,10 @@ impl Account {
                 signers,
             },
         )?;
-        Ok(PendingMove::Migration(batch))
+        Ok(PendingMove::Migration(Stamped {
+            batch,
+            head: self.head(),
+        }))
     }
 
     /// Finish a step of the move with the host's signatures. F is returned as bytes **and held**:
@@ -524,6 +566,14 @@ impl Account {
                 Ok(Moved::Frozen(frozen))
             }
             PendingMove::Migration(b) => {
+                self.stage_is(
+                    &[MoveStage::Verified],
+                    "the migration is written after F and the copy",
+                )?;
+                require(
+                    !self.migration_pending(),
+                    "a migration transition is already pending",
+                )?;
                 let (c, stores) = self.merge_batch(b, signatures)?;
                 Ok(Moved::Migration(Box::new(c), stores))
             }
@@ -536,10 +586,14 @@ impl Account {
 
     fn merge_batch(
         &mut self,
-        b: PendingBatch,
+        b: Stamped,
         signatures: Vec<SignatureResult>,
     ) -> Result<(Changes, MoveStores)> {
-        let r = b.finish(signatures)?;
+        // The head has moved since the step was prepared: refuse, as an ordinary action does.
+        if b.head != self.head() {
+            return Err(Failure::Refused(crate::v05::Reason::Fork));
+        }
+        let r = b.batch.finish(signatures)?;
         let mut stores: Vec<(String, Vec<u8>)> = r
             .entries
             .iter()
