@@ -16,6 +16,8 @@
 pub mod authority;
 pub mod calls;
 pub mod records;
+pub mod succession;
+pub mod upgrade;
 
 use crate::v05::encoding::{bounds, canonical, encode_base64};
 use crate::v05::{malformed, Failure, Result};

@@ -197,6 +197,25 @@ fn step(
     )
 }
 
+/// A step with an explicit UV demand, for entries signed outside the `/5` rules (the 0.4
+/// control rule of an `upgrade`, §16.1; a Swift predecessor's handover).
+pub(crate) fn step_with_uv(
+    path: &str,
+    body: &[u8],
+    c: &Controller,
+    role: StepRole,
+    uv: bool,
+) -> SigningStep {
+    SigningStep::new(
+        path.to_string(),
+        body.to_vec(),
+        c.id(),
+        role,
+        c.key().clone(),
+        uv || c.verification(),
+    )
+}
+
 fn authority_path(seq: u64) -> String {
     format!("authority/{seq:08}.json")
 }
