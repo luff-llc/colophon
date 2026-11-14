@@ -405,7 +405,9 @@ impl Judge<'_> {
                         pending.push((field.to_string(), a));
                     }
                 }
-                _ => return Some("the grant has a condition this reader does not understand".into()),
+                _ => {
+                    return Some("the grant has a condition this reader does not understand".into())
+                }
             }
         }
         for (field, a) in pending {
@@ -529,10 +531,10 @@ impl CopyPlan {
         let mut candidates: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
         let mut seen_ids: BTreeSet<(String, String)> = BTreeSet::new();
         let omit = |namespaces: &mut BTreeMap<String, Vec<Item>>,
-                        unassigned: &mut Vec<(String, String)>,
-                        namespace: Option<&str>,
-                        d: String,
-                        reason: String| {
+                    unassigned: &mut Vec<(String, String)>,
+                    namespace: Option<&str>,
+                    d: String,
+                    reason: String| {
             match namespace {
                 Some(ns) => namespaces.entry(ns.to_string()).or_default().push(Item {
                     source_digest: d,
@@ -552,7 +554,11 @@ impl CopyPlan {
                 continue; // authority, requests: not records.
             }
             let whole = digest(&f.bytes);
-            let ns_of_path = f.path.split('/').nth(2).filter(|_| f.path.split('/').count() == 4);
+            let ns_of_path = f
+                .path
+                .split('/')
+                .nth(2)
+                .filter(|_| f.path.split('/').count() == 4);
             let ns_of_state = f.path.split('/').nth(2);
             if live {
                 omit(
@@ -565,7 +571,13 @@ impl CopyPlan {
                 continue;
             }
             if f.bytes.len() > MAX_FILE_BYTES {
-                omit(&mut namespaces, &mut unassigned, ns_of_path, whole, "tooLarge".into());
+                omit(
+                    &mut namespaces,
+                    &mut unassigned,
+                    ns_of_path,
+                    whole,
+                    "tooLarge".into(),
+                );
                 continue;
             }
             let parsed = (|| -> Result<(Vec<u8>, Value, Vec<u8>)> {
@@ -585,7 +597,13 @@ impl CopyPlan {
                 Ok((body.clone(), strict_parse(&body)?, sig))
             })();
             let Ok((body, header, sig)) = parsed else {
-                omit(&mut namespaces, &mut unassigned, ns_of_path, whole, "invalidPayload".into());
+                omit(
+                    &mut namespaces,
+                    &mut unassigned,
+                    ns_of_path,
+                    whole,
+                    "invalidPayload".into(),
+                );
                 continue;
             };
             let source_digest = digest(&body);
@@ -602,7 +620,13 @@ impl CopyPlan {
                     .and_then(Value::as_str)
                     .and_then(|s| decode_base64(s, MAX_FILE_BYTES).ok()),
             ) else {
-                omit(&mut namespaces, &mut unassigned, ns_of_path, source_digest, "invalidPayload".into());
+                omit(
+                    &mut namespaces,
+                    &mut unassigned,
+                    ns_of_path,
+                    source_digest,
+                    "invalidPayload".into(),
+                );
                 continue;
             };
             let mut omit_here = |reason: &str| {
@@ -646,14 +670,17 @@ impl CopyPlan {
                 omit_here("duplicate");
                 continue;
             }
-            candidates.entry(ns.to_string()).or_default().push(Candidate {
-                namespace: ns.to_string(),
-                source_digest,
-                author: author.to_string(),
-                epoch,
-                path: f.path.clone(),
-                op,
-            });
+            candidates
+                .entry(ns.to_string())
+                .or_default()
+                .push(Candidate {
+                    namespace: ns.to_string(),
+                    source_digest,
+                    author: author.to_string(),
+                    epoch,
+                    path: f.path.clone(),
+                    op,
+                });
         }
         for (ns, mut list) in candidates {
             list.sort_by(|a, b| {
@@ -670,10 +697,12 @@ impl CopyPlan {
                 let state = match judge.judge(&c.op, c.epoch, &c.author) {
                     Judged::Held(w) => State::Omitted(format!("held: {w}")),
                     Judged::Refused(w) => State::Omitted(format!("refused: {w}")),
-                    Judged::Admitted => match batch_of(&library, &fold, &c, position as u64, translate) {
-                        Ok(p) => State::Pending(p),
-                        Err(e) => State::Omitted(format!("notCleanChild: {}", e.detail())),
-                    },
+                    Judged::Admitted => {
+                        match batch_of(&library, &fold, &c, position as u64, translate) {
+                            Ok(p) => State::Pending(p),
+                            Err(e) => State::Omitted(format!("notCleanChild: {}", e.detail())),
+                        }
+                    }
                 };
                 namespaces.entry(ns.clone()).or_default().push(Item {
                     source_digest: c.source_digest,
@@ -691,7 +720,11 @@ impl CopyPlan {
                     it.state = State::Omitted("duplicate".into());
                 }
             }
-            items.sort_by(|a, b| a.order.cmp(&b.order).then(a.source_digest.cmp(&b.source_digest)));
+            items.sort_by(|a, b| {
+                a.order
+                    .cmp(&b.order)
+                    .then(a.source_digest.cmp(&b.source_digest))
+            });
         }
         let plan = Self {
             library,
@@ -791,8 +824,9 @@ impl CopyPlan {
         self.namespaces
             .get_mut(ns)
             .and_then(|v| {
-                v.iter_mut()
-                    .find(|i| i.source_digest == source_digest && matches!(i.state, State::Pending(_)))
+                v.iter_mut().find(|i| {
+                    i.source_digest == source_digest && matches!(i.state, State::Pending(_))
+                })
             })
             .ok_or_else(|| {
                 malformed("no such pending source record (written already, omitted, or unknown)")
@@ -817,7 +851,12 @@ impl CopyPlan {
 
     /// Record that a pending item is not copied, with a reason (the destination refused it, or
     /// the person chose to leave it).
-    pub fn record_omitted(&mut self, namespace: &str, source_digest: &str, reason: &str) -> Result<()> {
+    pub fn record_omitted(
+        &mut self,
+        namespace: &str,
+        source_digest: &str,
+        reason: &str,
+    ) -> Result<()> {
         require(!reason.is_empty(), "an omission needs a reason")?;
         let item = self.item_mut(namespace, source_digest)?;
         item.state = State::Omitted(reason.to_string());
@@ -930,10 +969,7 @@ fn batch_of(
         "blobs": [],
     });
     crate::imports::ImportState::new(&c.namespace)
-        .validate_batch(
-            &payload,
-            &crate::domain::ProjectionState::new(&c.namespace),
-        )
+        .validate_batch(&payload, &crate::domain::ProjectionState::new(&c.namespace))
         .map_err(|e| malformed(e.to_string()))?;
     Ok(payload)
 }

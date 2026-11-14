@@ -97,7 +97,7 @@ pub enum Moved {
     /// in with [`Account::accept_predecessor_entry`].
     Frozen(Frozen),
     /// The `migration` transition is held; it activates after its delay ([`Account::record_due`]).
-    Migration(Changes),
+    Migration(Box<Changes>),
 }
 
 /// The Swift entries of `all` up to `head_seq`, by their `seq`.
@@ -231,13 +231,12 @@ impl Account {
         )?;
         let me = match &self.me {
             super::Identity::Member(id) => id.clone(),
-            super::Identity::Controller(_) => return Err(malformed("this session is a controller")),
+            super::Identity::Controller(_) => {
+                return Err(malformed("this session is a controller"))
+            }
         };
         require(
-            self.d
-                .auth
-                .member(&me)
-                .is_some_and(|m| m.terms.import()),
+            self.d.auth.member(&me).is_some_and(|m| m.terms.import()),
             "the copying member holds no `import` term (§9.3)",
         )?;
         match self.begin_write(
@@ -248,10 +247,7 @@ impl Account {
             seed,
         )? {
             Ok(a) => Ok(a),
-            Err(d) => Err(Failure::Unavailable(format!(
-                "{}: {}",
-                d.reason, d.detail
-            ))),
+            Err(d) => Err(Failure::Unavailable(format!("{}: {}", d.reason, d.detail))),
         }
     }
 
@@ -341,7 +337,7 @@ impl Account {
                     },
                     self.now_ms,
                 )?;
-                Ok(Moved::Migration(changes))
+                Ok(Moved::Migration(Box::new(changes)))
             }
         }
     }

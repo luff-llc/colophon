@@ -63,7 +63,12 @@ fn ecdh(k: &SecretKey, peer: &[u8]) -> Vec<u8> {
 /// `SealedKey.init(_:to:)` (`ColophonCore/SealedKey.swift:13-22`): an ephemeral P-256 key, ECDH
 /// with the recipient's agreement key, HKDF-SHA256 with the recipient's **signing** point as
 /// salt and `colophon/sealed-key/1` as info, AES-256-GCM `nonce ‖ ciphertext ‖ tag`, no AAD.
-pub fn swift_sealed(plain: &[u8], recipient_signing: &[u8], recipient_agreement: &[u8], eph: &str) -> Value {
+pub fn swift_sealed(
+    plain: &[u8],
+    recipient_signing: &[u8],
+    recipient_agreement: &[u8],
+    eph: &str,
+) -> Value {
     let e = scalar(eph);
     let wrap = hkdf32(
         &ecdh(&e, recipient_agreement),
@@ -73,13 +78,26 @@ pub fn swift_sealed(plain: &[u8], recipient_signing: &[u8], recipient_agreement:
     json!({"ephemeral": b64(&point(&e)), "box": b64(&gcm_seal(&wrap, eph, plain))})
 }
 /// `VaultSlot.prf` (`VaultSlot.swift:47-57`, `:121-123`).
-pub fn swift_prf_slot(seed: &[u8], prf: &[u8], salt: &[u8], credential: &[u8], controller: &str, label: &str) -> Value {
+pub fn swift_prf_slot(
+    seed: &[u8],
+    prf: &[u8],
+    salt: &[u8],
+    credential: &[u8],
+    controller: &str,
+    label: &str,
+) -> Value {
     let wrap = hkdf32(prf, salt, b"colophon/vault-prf/1");
     json!({"kind": "prf", "controller": controller, "label": label, "credential": b64(credential),
            "salt": b64(salt), "box": b64(&gcm_seal(&wrap, label, seed))})
 }
 /// `VaultSlot.sealed` (`VaultSlot.swift:39-44`).
-pub fn swift_sealed_slot(seed: &[u8], signing: &[u8], agreement: &[u8], controller: &str, label: &str) -> Value {
+pub fn swift_sealed_slot(
+    seed: &[u8],
+    signing: &[u8],
+    agreement: &[u8],
+    controller: &str,
+    label: &str,
+) -> Value {
     json!({"kind": "sealed", "controller": controller, "label": label,
            "recipient": {"signing": b64(signing), "agreement": b64(agreement)},
            "sealed": swift_sealed(seed, signing, agreement, &format!("slot/{label}"))})
@@ -130,7 +148,9 @@ pub struct Host {
 }
 impl Host {
     pub fn new() -> Self {
-        Self { ids: BTreeMap::new() }
+        Self {
+            ids: BTreeMap::new(),
+        }
     }
     pub fn identity(&mut self, n: u8) -> (String, Vec<u8>, Vec<u8>) {
         let i = SoftwareIdentity::from_seed(&[n; 32]).unwrap();
@@ -210,11 +230,19 @@ pub struct SwiftFixture {
 impl SwiftFixture {
     /// The recovery identity's signing point (host identity 2).
     pub fn root_recovery_signing(&self) -> Vec<u8> {
-        colophon_core::v05::vault::SoftwareIdentity::from_seed(&[2; 32]).unwrap().public().signing
+        colophon_core::v05::vault::SoftwareIdentity::from_seed(&[2; 32])
+            .unwrap()
+            .public()
+            .signing
     }
 }
 
-pub fn webauthn_controller(key: &p256::ecdsa::SigningKey, credential: &[u8], roles: &[&str], label: &str) -> Value {
+pub fn webauthn_controller(
+    key: &p256::ecdsa::SigningKey,
+    credential: &[u8],
+    roles: &[&str],
+    label: &str,
+) -> Value {
     let p = key.verifying_key().to_encoded_point(false);
     json!({"kind": "webauthn", "key": b64(p.as_bytes()), "rpID": "id.example", "credential": b64(credential),
            "label": label, "roles": roles, "verification": true})
@@ -234,8 +262,18 @@ pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
     let vault = swift_vault_identity(&vault_seed);
     let passkey_key = p256::ecdsa::SigningKey::from_slice(&[9; 32]).unwrap();
     let security_key = p256::ecdsa::SigningKey::from_slice(&[10; 32]).unwrap();
-    let passkey_id = key_id(passkey_key.verifying_key().to_encoded_point(false).as_bytes());
-    let security_id = key_id(security_key.verifying_key().to_encoded_point(false).as_bytes());
+    let passkey_id = key_id(
+        passkey_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes(),
+    );
+    let security_id = key_id(
+        security_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes(),
+    );
     let credential = sha(b"e8/credential");
     let old_salt = sha(b"e8/old-salt");
     let genesis = json!({"by": "root", "issued": T_PRED, "kind": "genesis", "label": "Library", "seq": 1,
@@ -258,7 +296,14 @@ pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
     } else {
         vec![
             swift_sealed_slot(&vault_seed, &device.1, &device.2, &device.0, "Mac"),
-            swift_prf_slot(&vault_seed, &prf_bytes, &old_salt, &credential, &passkey_id, "Passkey"),
+            swift_prf_slot(
+                &vault_seed,
+                &prf_bytes,
+                &old_salt,
+                &credential,
+                &passkey_id,
+                "Passkey",
+            ),
         ]
     };
     let device_ctl = json!({"kind": "p256", "key": b64(&device.1), "label": "Mac", "roles": ["approve", "control"]});
@@ -269,15 +314,16 @@ pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
         "slots": slots, "threshold": 1, "vault": pid(&vault.0, &vault.1)});
     entries.push(entry(host, &root.0, &keyring));
     let mut seq = 2u64;
-    let controller_entry = |host: &Host, entries: &mut Vec<Vec<u8>>, mut body: Value, kind_seq: &mut u64| {
-        *kind_seq += 1;
-        body["seq"] = json!(*kind_seq);
-        body["previous"] = json!(prev(entries));
-        body["by"] = json!("controller");
-        body["signer"] = json!(device.0);
-        body["issued"] = json!(swift_date(60 + *kind_seq as u32 * 60));
-        entries.push(entry(host, &device.0, &body));
-    };
+    let controller_entry =
+        |host: &Host, entries: &mut Vec<Vec<u8>>, mut body: Value, kind_seq: &mut u64| {
+            *kind_seq += 1;
+            body["seq"] = json!(*kind_seq);
+            body["previous"] = json!(prev(entries));
+            body["by"] = json!("controller");
+            body["signer"] = json!(device.0);
+            body["issued"] = json!(swift_date(60 + *kind_seq as u32 * 60));
+            entries.push(entry(host, &device.0, &body));
+        };
     for (m, label, role) in [(&m1, "Phone", "device"), (&m2, "Tablet", "app")] {
         controller_entry(
             host,
@@ -310,16 +356,60 @@ pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
     let authority = seq;
     // Operations: each member writes one in each namespace; clocks 1 and 2.
     let mut files = Vec::new();
-    let mem = |t: &(String, Vec<u8>, Vec<u8>)| Member { id: t.0.clone(), signing: t.1.clone(), agreement: t.2.clone() };
+    let mem = |t: &(String, Vec<u8>, Vec<u8>)| Member {
+        id: t.0.clone(),
+        signing: t.1.clone(),
+        agreement: t.2.clone(),
+    };
     let (m1m, m2m) = (mem(&m1), mem(&m2));
     let ops: [(&str, &str, &Member, u64, &str, Value); 4] = [
-        ("notes", "createNotebook", &m1m, 1, "11111111-aaaa-4aaa-8aaa-000000000001", json!({"id": "nb1", "title": "Alpha"})),
-        ("notes", "createNotebook", &m2m, 2, "22222222-bbbb-4bbb-8bbb-000000000002", json!({"id": "nb2", "title": "Beta"})),
-        ("reading.saved", "capture", &m1m, 1, "33333333-cccc-4ccc-8ccc-000000000003", json!({"id": "i1", "title": "One", "url": "https://example.com/1"})),
-        ("reading.saved", "capture", &m2m, 2, "44444444-dddd-4ddd-8ddd-000000000004", json!({"id": "i2", "title": "Two", "url": "https://example.com/2"})),
+        (
+            "notes",
+            "createNotebook",
+            &m1m,
+            1,
+            "11111111-aaaa-4aaa-8aaa-000000000001",
+            json!({"id": "nb1", "title": "Alpha"}),
+        ),
+        (
+            "notes",
+            "createNotebook",
+            &m2m,
+            2,
+            "22222222-bbbb-4bbb-8bbb-000000000002",
+            json!({"id": "nb2", "title": "Beta"}),
+        ),
+        (
+            "reading.saved",
+            "capture",
+            &m1m,
+            1,
+            "33333333-cccc-4ccc-8ccc-000000000003",
+            json!({"id": "i1", "title": "One", "url": "https://example.com/1"}),
+        ),
+        (
+            "reading.saved",
+            "capture",
+            &m2m,
+            2,
+            "44444444-dddd-4ddd-8ddd-000000000004",
+            json!({"id": "i2", "title": "Two", "url": "https://example.com/2"}),
+        ),
     ];
     for (ns, kind, m, clock, id, payload) in ops {
-        files.push(swift_op(host, &library, &nskeys[ns], ns, m, 1, clock, id, kind, payload, authority));
+        files.push(swift_op(
+            host,
+            &library,
+            &nskeys[ns],
+            ns,
+            m,
+            1,
+            clock,
+            id,
+            kind,
+            payload,
+            authority,
+        ));
     }
     SwiftFixture {
         entries,
@@ -327,16 +417,32 @@ pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
         library,
         vault_seed,
         vault,
-        device: Member { id: device.0, signing: device.1, agreement: device.2 },
+        device: Member {
+            id: device.0,
+            signing: device.1,
+            agreement: device.2,
+        },
         passkey_key,
         passkey_id,
         security_key,
         security_id,
         credential,
         old_salt,
-        m1: Member { id: m1.0, signing: m1.1, agreement: m1.2 },
-        m2: Member { id: m2.0, signing: m2.1, agreement: m2.2 },
-        root: Member { id: root.0, signing: root.1, agreement: root.2 },
+        m1: Member {
+            id: m1.0,
+            signing: m1.1,
+            agreement: m1.2,
+        },
+        m2: Member {
+            id: m2.0,
+            signing: m2.1,
+            agreement: m2.2,
+        },
+        root: Member {
+            id: root.0,
+            signing: root.1,
+            agreement: root.2,
+        },
         nskeys,
     }
 }
@@ -358,12 +464,20 @@ pub fn swift_op(
     payload: Value,
     authority: u64,
 ) -> SourceFile {
-    let plain = canonical(&json!({"authority": authority, "clock": clock, "created": "2026-11-01T09:00:00Z",
-        "id": id, "kind": kind, "payload": payload, "v": 1}))
+    let plain = canonical(
+        &json!({"authority": authority, "clock": clock, "created": "2026-11-01T09:00:00Z",
+        "id": id, "kind": kind, "payload": payload, "v": 1}),
+    )
     .unwrap();
     let sealed = gcm_seal(key, id, &plain);
-    let header = canonical(&json!({"author": author.id, "epoch": epoch, "namespace": ns, "sealed": b64(&sealed)})).unwrap();
-    let rec = canonical(&json!({"body": b64(&header), "signature": b64(&host.sign(&author.id, &header))})).unwrap();
+    let header = canonical(
+        &json!({"author": author.id, "epoch": epoch, "namespace": ns, "sealed": b64(&sealed)}),
+    )
+    .unwrap();
+    let rec = canonical(
+        &json!({"body": b64(&header), "signature": b64(&host.sign(&author.id, &header))}),
+    )
+    .unwrap();
     SourceFile {
         path: format!("ops/{}/{ns}/{clock:012}-{id}.json", author.id),
         bytes: rec,

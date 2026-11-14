@@ -93,3 +93,23 @@ Shipped Swift cannot write them. Paths are Marginalia `packages/Colophon/Sources
   through the drain window). The `migration` entry only reports the counts.
 - Sign a veto with an old Swift key (the veto body builder exists; there is no step for a Swift
   descriptor to sign it).
+
+### After E8 (moving a real library)
+
+Package E8 closes the first three items above and adds the account methods:
+
+- **Old slots and keys.** `v05/swift_slots.rs` opens the Swift `sealed`, `prf` and `combined` slots and
+  the namespace keys sealed to the vault or to a principal, in the begin/finish shape of `v05::slots`.
+  The successor's vault is a **new seed** (§7.1); the opened old seed is a handle that can only open
+  the predecessor's namespace keys. One WebAuthn assertion per passkey both opens its old slot and
+  builds its new one (`pair_ceremonies`).
+- **The record copy.** `v05/swift_copy.rs` reads the predecessor's `ops/`, judges each record by the Swift
+  admission rule, and prepares one `colophon.importBatch` per copied record, with the counts and view
+  digests `prepare_migration` takes. The original author, clock and ID are labelled evidence.
+- **A Swift-key veto.** `write/swift_veto.rs`.
+- **The account.** `account/moving.rs`: `begin_upgrade`, `swift_succession`, `begin_swift_veto`,
+  `begin_swift_freeze`, `accept_predecessor_entry`, `begin_swift_copy_write`, `begin_swift_migration`.
+
+Still open: blobs, live-state records, the domain translators that give Swift wire kinds their clean
+children (without one, records of a module whose Swift kind is not its operation name are omitted
+`notCleanChild`), and a Swift-written F. See the pull request for each question with its file and line.

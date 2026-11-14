@@ -114,10 +114,9 @@ pub fn prepare_swift_veto(
     )?;
     let path = format!("vetoes/{}.json", digest(&body));
     for (i, id) in p.signers.iter().enumerate() {
-        let c = eligible
-            .get(id)
-            .and_then(|v| v.first())
-            .ok_or_else(|| bad_signature("a vetoer is not an eligible predecessor key (§15.1 step 3)"))?;
+        let c = eligible.get(id).and_then(|v| v.first()).ok_or_else(|| {
+            bad_signature("a vetoer is not an eligible predecessor key (§15.1 step 3)")
+        })?;
         steps.push(step_with_uv(
             &path,
             &body,
@@ -180,10 +179,10 @@ impl PendingSwiftVeto {
         )?;
         for sig in parsed.primary.iter().chain(&parsed.cosignatures) {
             let item: &SigItem = sig;
-            let ok = self
-                .eligible
-                .get(&item.signer)
-                .is_some_and(|cs| cs.iter().any(|c| swift::check(c, &parsed.body, item, true).is_ok()));
+            let ok = self.eligible.get(&item.signer).is_some_and(|cs| {
+                cs.iter()
+                    .any(|c| swift::check(c, &parsed.body, item, true).is_ok())
+            });
             if !ok {
                 return Err(bad_signature(
                     "a veto signature does not verify under its predecessor descriptor",

@@ -558,12 +558,20 @@ impl SwiftLibrary {
 }
 
 /// `SealedKey.open(with:)`: the wrapping key from the host's ECDH result, then AES-GCM.
-fn open_with_dh(sealed: &SwiftSealed, recipient_signing: &[u8], dh: &EcdhOutput) -> VResult<Vec<u8>> {
+fn open_with_dh(
+    sealed: &SwiftSealed,
+    recipient_signing: &[u8],
+    dh: &EcdhOutput,
+) -> VResult<Vec<u8>> {
     dh.derive_wrap(recipient_signing, SEALED_KEY_INFO)?
         .open_swift(&sealed.boxed)
         .ok_or_else(locked)
 }
-fn open_sealed(sealed: &SwiftSealed, recipient: &SwiftIdentity, dh: &EcdhOutput) -> VResult<Vec<u8>> {
+fn open_sealed(
+    sealed: &SwiftSealed,
+    recipient: &SwiftIdentity,
+    dh: &EcdhOutput,
+) -> VResult<Vec<u8>> {
     open_with_dh(sealed, &recipient.signing, dh)
 }
 
@@ -738,7 +746,8 @@ pub fn pair_ceremonies(
     let mut unpaired = Vec::new();
     for r in new {
         let hit = old.iter().enumerate().find(|(i, o)| {
-            !used[*i] && matches!(o, OpeningInput::Prf { controller, .. } if *controller == r.controller)
+            !used[*i]
+                && matches!(o, OpeningInput::Prf { controller, .. } if *controller == r.controller)
         });
         match hit {
             Some((i, OpeningInput::Prf { salt, .. })) => {
