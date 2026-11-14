@@ -106,13 +106,20 @@ fn m1_vetoed_displaces_the_activation_and_the_later_revocation() {
 
 fn succession(name: &str) -> (Objects, i64) {
     let dir = cand().join("succession").join(name);
+    let case: Value = serde_json::from_slice(&fs::read(dir.join("case.json")).unwrap()).unwrap();
+    let now = parse_date(
+        case["expected"]["now"]
+            .as_str()
+            .unwrap_or("2026-11-14T10:15:00Z"),
+    )
+    .unwrap();
     (
         Objects {
             entries: files(&dir.join("successor/authority")),
             predecessor: files(&dir.join("predecessor/authority")),
             ..Default::default()
         },
-        parse_date("2026-11-14T10:15:00Z").unwrap(),
+        now,
     )
 }
 /// The successor's own verdict and whether its succession is verified.
@@ -463,4 +470,53 @@ fn h2_a_predecessor_with_no_entry_at_f_leaves_the_genesis_held() {
     o.predecessor.truncate(2);
     let v = verify_history(&o, &Persisted::default(), now);
     assert_eq!(v.code(), "held");
+}
+
+// ---- Fix round M-b, M-c: what a predecessor admits after a provisional F ---------------------
+
+#[test]
+fn mc_a_dead_witness_home_is_revoked_and_the_succession_verifies() {
+    assert!(verified("authority5-successor-dead-witness"));
+    let v = predecessor_alone("authority5-successor-dead-witness");
+    assert_eq!((v.code(), v.branch.len()), ("ok".to_string(), 6));
+    assert!(is_final(&v, 3), "F is final");
+    assert!(is_final(&v, 4), "the home revocation is final");
+    assert_eq!(v.state.unwrap().current_homes().len(), 1, "H2 is gone");
+}
+
+#[test]
+fn mb_a_final_of_an_earlier_removal_only_activation_is_not_admitted_after_f() {
+    let v = predecessor_alone("authority5-successor-final-of-earlier-removal");
+    // The branch ends at F; the refused `final` is malformed evidence after it.
+    assert_eq!((v.code(), v.branch.len()), ("malformed".to_string(), 4));
+    assert!(!verified("authority5-successor-final-of-earlier-removal"));
+}
+
+#[test]
+fn mb_nothing_else_is_admitted_after_a_provisional_f() {
+    // The grant of the vetoed vector is a valid entry for its own branch, never for F's.
+    let (o, now) = succession("authority5-successor-provisional");
+    let (other, _) = succession("authority5-successor-vetoed");
+    let mut entries = o.predecessor.clone();
+    // A forged unsigned immediate entry at seq 4 on top of F.
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let f: Value = serde_json::from_slice(&entries[2]).unwrap();
+    let fb = STANDARD.decode(f["body"].as_str().unwrap()).unwrap();
+    let digest = colophon_core::v05::encoding::digest(&fb);
+    let body = serde_json::json!({"protocol": "colophon/authority/5", "seq": 4, "previous": digest,
+        "issued": "2026-11-14T09:06:00Z", "by": "x", "kind": "grant"});
+    entries.push(
+        serde_json::to_vec(&serde_json::json!({"body": STANDARD.encode(colophon_core::v05::encoding::canonical(&body).unwrap())}))
+            .unwrap(),
+    );
+    let _ = other;
+    let v = verify_history(
+        &Objects {
+            entries,
+            ..Default::default()
+        },
+        &Persisted::default(),
+        now,
+    );
+    assert_eq!(v.branch.len(), 3);
 }

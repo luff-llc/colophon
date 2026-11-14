@@ -4168,6 +4168,97 @@ pub fn part3(o: &mut Out) {
         "As authority5-successor-provisional (a genesis with no possession proofs), but a valid `vetoed` displaces F at seq 3 and the predecessor continues. The succession is never verified, so the carried-key exemption never applies: the genesis that was held is `badSignature`.",
         sc_extra(),
     );
+
+    // Revision 12 fix round, M-c (§15.1): a witness home that never signs cannot freeze the
+    // predecessor. After a provisional F the predecessor admits a removal-only revocation of that
+    // home (recovery rule, so the dead home isn't its own witness); once it is final the home is
+    // excused for F, and F becomes final with the remaining witness's head.
+    let mut pd = pm_prov.clone();
+    let dead_at = DUE0 + 60;
+    let t_dead = prop(
+        &cx,
+        json!({"homes": {"revoke": [h2k.id]}}),
+        sg![k1],
+        Pr {
+            at: dead_at,
+            chain: Some(&pd),
+            ..Pr::default()
+        },
+    );
+    activate(
+        &mut pd,
+        &t_dead,
+        &[receipt_of(&acct, &t_dead, &h1k, &ts(dead_at + 1))],
+    );
+    let dead_due = dead_at + W + D;
+    let hs = vec![head5(&pd, &h1k, dead_due + 100, Some(4))];
+    final_of(&mut pd, 4, hs);
+    let hs = vec![head5(&pd, &h1k, dead_due + 110, Some(3))];
+    final_of(&mut pd, 3, hs);
+    write_swift(
+        o,
+        "authority5-successor-dead-witness",
+        &pd.envs,
+        Some(&sc),
+        json!({"succession": "verified", "now": "2026-11-18T00:00:00Z"}),
+        "F (seq 3) is provisional and H2, one of its two witnesses, never signs a head. The owner revokes H2 under the recovery rule (seq 4, a removal-only home revocation the predecessor admits after F); its `final` carries H1's head (seq 5), which excuses H2; F's `final` with H1's head alone (seq 6) makes F final. The succession is verified.",
+        sc_extra(),
+    );
+    // Not every `final` is admitted after a provisional F: a `final` of an earlier removal-only
+    // activation is `malformed` evidence.
+    let mut pe = base.clone();
+    let t_x = p(&cx, rm(&b.id), sg![a]);
+    activate(&mut pe, &t_x, &[rec(&cx, &t_x)]);
+    let mut sc3 = Chain::new();
+    genesis(
+        &mut sc3,
+        &kr5,
+        sg![a],
+        Gen {
+            label: "Successor after an earlier removal",
+            predecessor: Some(
+                json!({"format": "colophon/authority/5", "account": acct, "head": anchor(&pe)}),
+            ),
+            opt: Opt {
+                adds: sg![ph, b, k1, k2],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    let f3_at = DUE0 + 10;
+    let t_f3 = prop(
+        &cx,
+        json!({"successor": {"account": account_id(&sc3)}}),
+        sg![a, k1],
+        Pr {
+            at: f3_at,
+            chain: Some(&pe),
+            ..Pr::default()
+        },
+    );
+    activate(
+        &mut pe,
+        &t_f3,
+        &[receipt_of(&acct, &t_f3, &h1k, &ts(f3_at + 1))],
+    );
+    let hs = vec![
+        head5(&pe, &h1k, DUE0 + 100, Some(3)),
+        head5(&pe, &h2k, DUE0 + 100, Some(3)),
+    ];
+    final_of(&mut pe, 3, hs);
+    write_swift(
+        o,
+        "authority5-successor-final-of-earlier-removal",
+        &pe.envs,
+        Some(&sc3),
+        json!({"succession": "unverified", "now": "2026-11-18T00:00:00Z", "predecessor": "stops at seq 4: the `final` at seq 5 is malformed evidence"}),
+        "A removal-only activation at seq 3 is provisional, F follows at seq 4 (provisional), and a `final` of the seq 3 activation is appended at seq 5. After a provisional F the predecessor admits a `final` of F, of an earlier activation that is not removal-only, or of a home revocation; a `final` of an earlier removal-only activation is none of these, so the predecessor ends at seq 4 and the succession is not verified.",
+        vec![(
+            "successor/authority/00000001.json".to_string(),
+            sc3.envs[0].clone(),
+        )],
+    );
 }
 
 fn statuses(id: &str, status: &str) -> Value {

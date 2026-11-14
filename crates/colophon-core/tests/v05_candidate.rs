@@ -894,7 +894,9 @@ fn run_succession(dir: &Path, case: &Value) -> Outcome {
             .heads
             .push(fs::read(dir.join("successor-head.json")).unwrap());
     }
-    let now = ms("2026-11-14T10:15:00Z");
+    let now = ms(case["expected"]["now"]
+        .as_str()
+        .unwrap_or("2026-11-14T10:15:00Z"));
     let v = verify_history(&objects, &Persisted::default(), now);
     let verified = v
         .state

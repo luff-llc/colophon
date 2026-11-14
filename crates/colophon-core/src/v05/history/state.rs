@@ -1591,6 +1591,50 @@ fn recorded_issued(prev: i64, at: i64) -> i64 {
     prev.max(at)
 }
 
+/// What a predecessor admits after a provisional `successor` activation F (§15.1), by kind:
+/// - a `final` of F;
+/// - a `final` of an earlier activation that is not removal-only, which Order may need first;
+/// - a `final` of a later removal-only home revocation (see below);
+/// - an `activate` of a removal-only home revocation, checked in `apply` once applied;
+/// and nothing else. A `vetoed` that displaces F is a candidate at F's seq, not a later entry.
+/// A `final` of an earlier removal-only activation is `malformed` evidence.
+fn admit_after_provisional_f(s: &State, e: &Entry) -> Result<()> {
+    match e.kind.as_str() {
+        "activate" => Ok(()),
+        "final" => {
+            let f = s.successor_seq.unwrap_or(0);
+            let seq = e
+                .env
+                .value
+                .get("activation")
+                .and_then(|a| a.get("seq"))
+                .and_then(Value::as_u64);
+            let digest = e
+                .env
+                .value
+                .get("activation")
+                .and_then(|a| a.get("digest"))
+                .and_then(Value::as_str);
+            let target = s
+                .activations
+                .iter()
+                .find(|a| Some(a.seq) == seq && Some(a.digest.as_str()) == digest);
+            let admitted = target.is_some_and(|a| {
+                a.seq == f
+                    || (a.seq < f && !a.removal_only)
+                    || (a.seq > f && a.removal_only && !a.revokes.is_empty())
+            });
+            crate::v05::require(
+                admitted,
+                "after a provisional successor activation only the entries that settle it are admitted",
+            )
+        }
+        _ => Err(malformed(
+            "after a provisional successor activation only the entries that settle it are admitted",
+        )),
+    }
+}
+
 /// Apply entry `e` to state `s` (§8.7's table).
 pub(crate) fn apply(
     s: &State,
@@ -1608,11 +1652,7 @@ pub(crate) fn apply(
         if s.successor_final() {
             return Err(malformed("entry after terminal successor").into());
         }
-        if e.kind != "final" {
-            return Err(
-                malformed("only a final settles a provisional successor activation").into(),
-            );
-        }
+        admit_after_provisional_f(s, e)?;
     }
     // §8.5 step 1: header.
     if e.seq != s.seq() + 1 || e.previous.as_deref() != s.digests.last().map(String::as_str) {
@@ -1625,7 +1665,22 @@ pub(crate) fn apply(
         return Err(Outcome::Held("issued more than 60 s ahead".into()));
     }
     let mut n = match e.kind.as_str() {
-        "activate" => activate(s, e, now_ms)?,
+        "activate" => {
+            let n = activate(s, e, now_ms)?;
+            // After a provisional F only a removal-only home revocation's activation (§15.1).
+            if s.successor.is_some()
+                && !n
+                    .activations
+                    .last()
+                    .is_some_and(|a| a.removal_only && !a.revokes.is_empty())
+            {
+                return Err(malformed(
+                    "after a provisional successor activation only a home revocation activates",
+                )
+                .into());
+            }
+            n
+        }
         "vetoed" => vetoed(s, e)?,
         "final" => final_entry(s, e, &all)?,
         "suspend" => suspend(s, e)?,

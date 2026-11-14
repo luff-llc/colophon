@@ -1536,10 +1536,14 @@ library upgrades in place instead.
 
 **F.** F is at `head.seq + 1`, with `previous` = `head.digest`, and names this account.
 - For `/5` it is the `activate` of a `successor` transition: the waiting and vetoing happen in the
-  predecessor (§8.7). After it the predecessor admits only the entries that settle it: a `final`
-  (for F, or for an earlier activation that Order, §8.7, needs first) and, as a conflicting
-  candidate at F's seq, a `vetoed` of that transition, which displaces F while it is provisional
-  (§8.6 rule 1) and lets the predecessor continue. Every other entry is `malformed` evidence.
+  predecessor (§8.7). After it, while F is provisional, the predecessor admits only
+  these entries: F's own `final`; a `final` that Order (§8.7) requires first for an earlier
+  activation that is not removal-only; a `vetoed` that displaces F (§8.6 rule 1: a candidate at F's
+  seq, which lets the predecessor continue); and the entries of a removal-only revocation of a
+  home, its `activate` and its `final`, so that a dead or hostile witness cannot freeze the
+  predecessor for ever: once that revocation is final the home is excused for F (§8.7), exactly as
+  for any other activation. A `final` of an earlier removal-only activation is not among them.
+  Every other entry is `malformed` evidence. Once F is final the account admits nothing (§15.2).
 - For Swift it is the freezing `layout` entry (§16.3). Swift has no pending entries, so the
   waiting happens in the successor first:
   1. **Handover.** The genesis carries `handover`: signatures over the genesis body by the keys
