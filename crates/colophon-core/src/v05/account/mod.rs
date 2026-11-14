@@ -130,6 +130,7 @@
 mod action;
 mod create;
 mod derived;
+mod moving;
 mod read;
 mod stored;
 mod unlock;
@@ -139,6 +140,7 @@ pub use action::{
     RevokeKeep, SignerChoice,
 };
 pub use create::{default_policy, CreateParams, CreateProgress, Creation};
+pub use moving::{MoveStage, Moved, PendingMove, SwiftSuccession};
 pub use read::Standing;
 pub use read::{
     ControllerInfo, HomeInfo, LedgerLine, MemberInfo, Notices, OwedInfo, PendingTransition, Policy,

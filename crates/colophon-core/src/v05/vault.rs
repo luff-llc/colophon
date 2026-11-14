@@ -113,7 +113,7 @@ pub(crate) mod b64 {
     }
 }
 
-fn erase(bytes: &mut [u8]) {
+pub(super) fn erase(bytes: &mut [u8]) {
     for b in bytes.iter_mut() {
         *b = 0;
     }
@@ -801,4 +801,63 @@ impl VaultSession {
     pub fn lock(&mut self) {
         self.seed = None;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The shipped Swift formats (§16.2, §16.3): the few primitives `swift_slots` needs from the
+// opaque secret types. They are `pub(super)`: visible to the `v05` modules and to nobody else,
+// and none of them returns a secret's bytes to a caller that is not itself handling a secret
+// of the same kind.
+
+impl EcdhOutput {
+    /// The wrapping key of a Swift `SealedKey` (`ColophonCore/SealedKey.swift:16`):
+    /// HKDF-SHA256 with the raw ECDH x-coordinate as IKM, the recipient's signing point as
+    /// salt and `colophon/sealed-key/1` as info, 32 bytes.
+    pub(super) fn derive_wrap(&self, salt: &[u8], info: &[u8]) -> VResult<BoxKey> {
+        hkdf32(&self.0, salt, info).map(BoxKey)
+    }
+}
+
+impl BoxKey {
+    /// Open a Swift AES-GCM `combined` box, `nonce(12) ‖ ciphertext ‖ tag(16)`, which Swift
+    /// seals with no associated data (`AES.GCM.seal(_:using:)`). Any failure is `None`; the
+    /// plaintext is the caller's to erase.
+    pub(super) fn open_swift(&self, boxed: &[u8]) -> Option<Vec<u8>> {
+        if boxed.len() < 28 {
+            return None;
+        }
+        Aes256Gcm::new_from_slice(&self.0)
+            .ok()?
+            .decrypt(Nonce::from_slice(&boxed[..12]), &boxed[12..])
+            .ok()
+    }
+}
+
+impl PartSecret {
+    /// A part secret from the plaintext of a Swift sealed part: exactly 32 bytes, else
+    /// `refused:vaultLocked`. The input buffer is overwritten.
+    pub(super) fn from_swift_plain(mut plain: Vec<u8>) -> VResult<Self> {
+        let r = <[u8; 32]>::try_from(plain.as_slice())
+            .map(Self)
+            .map_err(|_| locked());
+        erase(&mut plain);
+        r
+    }
+}
+
+impl SoftwareIdentity {
+    /// A software identity from two already-valid scalars (the Swift kit derivation, which is
+    /// not the §7.5 expansion).
+    pub(super) fn from_scalars(signing: SecretKey, agreement: SecretKey) -> Self {
+        Self {
+            signing: SigningKey::from(&signing),
+            agreement: AgreementKey(agreement),
+        }
+    }
+}
+
+/// A box key from 32 bytes the caller already holds as a secret of its own (a Swift namespace
+/// key): the AES-256-GCM key of an operation.
+pub(super) fn box_key_of(key: &[u8; 32]) -> BoxKey {
+    BoxKey(*key)
 }
