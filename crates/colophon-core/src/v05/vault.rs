@@ -101,7 +101,7 @@ pub(crate) fn require(ok: bool, reason: &str) -> VResult<()> {
 /// Serde adapter: standard padded base64, canonical spelling only (§2.2).
 pub(crate) mod b64 {
     use super::*;
-    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&encode_base64(bytes))
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {

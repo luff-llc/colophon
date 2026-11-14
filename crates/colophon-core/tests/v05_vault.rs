@@ -411,7 +411,7 @@ fn the_info_strings_are_the_slot_labels() {
     let a = "11111111111111111111111111111111".to_string();
     let b = "22222222222222222222222222222222".to_string();
     assert_eq!(
-        slot_info(v, "sealed", &[a.clone()]),
+        slot_info(v, "sealed", std::slice::from_ref(&a)),
         format!("colophon/vault-slot/4\n{v}\nsealed\n{a}").into_bytes()
     );
     assert_eq!(
@@ -424,8 +424,8 @@ fn the_info_strings_are_the_slot_labels() {
     );
     // The 0.4 library builds the same bytes.
     assert_eq!(
-        slot_info(v, "prf", &[a.clone()]),
-        colophon_core::slots::slot_info(v, "prf", &[a.clone()])
+        slot_info(v, "prf", std::slice::from_ref(&a)),
+        colophon_core::slots::slot_info(v, "prf", std::slice::from_ref(&a))
     );
     assert_eq!(
         part_info(v, 3, "sealed", &a),
