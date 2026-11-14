@@ -217,10 +217,18 @@ pub(super) fn pending_transitions(objects: &Objects, state: &State) -> Vec<Pendi
             continue;
         };
         match env.value.get("protocol").and_then(Value::as_str) {
-            Some("colophon/transition/5") => found.push((env, b.clone())),
+            // One body under several envelopes is one object (§2.2): listed once.
+            Some("colophon/transition/5") => {
+                if !found.iter().any(|(f, _)| f.digest == env.digest) {
+                    found.push((env, b.clone()))
+                }
+            }
             Some("colophon/veto/5") => {
                 if let Some(t) = env.value.get("transition").and_then(Value::as_str) {
-                    vetoes.entry(t.to_string()).or_default().push(env.digest);
+                    let list = vetoes.entry(t.to_string()).or_default();
+                    if !list.contains(&env.digest) {
+                        list.push(env.digest);
+                    }
                 }
             }
             _ => {}
@@ -541,7 +549,7 @@ impl Account {
                 .get(*id)
                 .is_some_and(|c| c.has(&Role::Control) || c.has(&Role::Recover))
         });
-        pending_transitions(&self.objects, st)
+        pending_transitions(&self.d.effective, st)
             .into_iter()
             .map(|mut t| {
                 t.first_seen_seq = self.first_seen.get(&t.digest).copied();

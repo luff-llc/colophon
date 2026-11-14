@@ -553,6 +553,53 @@ pub fn part3(o: &mut Out) {
         Some(ver(DUE0 - 60)),
         vec![],
     );
+    // Several envelopes over one body are one object (§2.2): a keyless garbage-signature twin
+    // that sorts before the real envelope changes nothing, for an entry, a pending transition
+    // and a receipt.
+    let twin = |env: &Value| {
+        let mut v = env.clone();
+        v["signature"] = json!(b64(&[0xf8u8; 64]));
+        assert!(env_bytes(&v) < env_bytes(env), "the twin sorts first");
+        v
+    };
+    let act_env = c.envs[1].clone();
+    case(
+        o,
+        "t-remove-garbage-twin-entry",
+        &c,
+        ok_at(3),
+        "The signed entry at seq 2 and, over the same body, an envelope with a garbage signature that sorts first. The entry is valid when any held envelope over its body verifies: the history is ok at seq 3.",
+        &["2.2", "8.6", "8.7"],
+        tr1(),
+        Some(ver(DUE0 + 60)),
+        vec![("twin", vec![(2, twin(&act_env))])],
+    );
+    let mut objs = tr1();
+    objs.push(("aa-transition-twin", twin(&t1)));
+    case(
+        o,
+        "t-remove-garbage-twin-transition",
+        &c,
+        ok_at(3),
+        "The pending transition held twice, the second envelope with a garbage signature sorting first: one object, the history is ok at seq 3.",
+        &["2.2", "8.7"],
+        objs,
+        Some(ver(DUE0 + 60)),
+        vec![],
+    );
+    let mut objs = tr1();
+    objs.push(("aa-receipt-twin", twin(&r1)));
+    case(
+        o,
+        "t-remove-garbage-twin-receipt",
+        &c,
+        ok_at(3),
+        "The receipt held twice, the second envelope with a garbage signature sorting first: one object, the history is ok at seq 3.",
+        &["2.2", "8.7", "13.5"],
+        objs,
+        Some(ver(DUE0 + 60)),
+        vec![],
+    );
     let c_act1 = c.clone();
     let mut cx2 = base.clone();
     grant_agent(&mut cx2, &a, &ts(DUE0 + 8 * 86400), &a);

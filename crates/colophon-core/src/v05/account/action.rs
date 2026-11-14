@@ -425,7 +425,7 @@ impl Account {
     ) -> Result<PendingAction> {
         self.require_writable()?;
         let batch = prepare_grant(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             signers,
             self.now_ms,
@@ -448,7 +448,7 @@ impl Account {
         self.require_writable()?;
         crate::v05::write::check_issued(expires_ms)?;
         let batch = prepare_renew(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             signers,
             self.now_ms,
@@ -487,7 +487,7 @@ impl Account {
             },
         };
         let prepared = prepare_revoke(
-            &self.objects,
+            &self.d.effective,
             &self.records,
             self.now_ms,
             signers,
@@ -522,7 +522,7 @@ impl Account {
     pub fn begin_end_sessions(&self, member: &str, signers: &[String]) -> Result<PendingAction> {
         self.require_writable()?;
         let batch = prepare_signed(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             Kind::EndSessions {
                 member: member.to_string(),
@@ -537,7 +537,8 @@ impl Account {
     pub fn begin_end_my_sessions(&self) -> Result<PendingAction> {
         self.require_writable()?;
         let me = self.me_member()?;
-        let batch = prepare_end_sessions_by_member(&self.objects, self.now_ms, &me, self.now_ms)?;
+        let batch =
+            prepare_end_sessions_by_member(&self.d.effective, self.now_ms, &me, self.now_ms)?;
         Ok(self.batch_action("endSessions", batch))
     }
 
@@ -551,7 +552,7 @@ impl Account {
     ) -> Result<PendingAction> {
         self.require_writable()?;
         let (batch, keys) = prepare_rekey(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             signers,
             self.now_ms,
@@ -622,7 +623,7 @@ impl Account {
             Ok(())
         })?;
         let batch = prepare_signed(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             Kind::Keyring { keyring: new },
             self.now_ms,
@@ -888,7 +889,7 @@ impl Account {
                     Ok(())
                 })?;
                 let batch = prepare_signed(
-                    &self.objects,
+                    &self.d.effective,
                     self.now_ms,
                     Kind::Keyring { keyring: new },
                     self.now_ms,
@@ -904,7 +905,7 @@ impl Account {
                 let old = self.current_seed()?;
                 let previous = old.seal_previous(&new_seed, &mut Entropy::new(seal))?;
                 let batch = prepare_signed(
-                    &self.objects,
+                    &self.d.effective,
                     self.now_ms,
                     Kind::Vault {
                         vault: new_seed.public()?.to_value(),
@@ -946,7 +947,7 @@ impl Account {
                     }),
                 );
                 let batch = prepare_transition(
-                    &self.objects,
+                    &self.d.effective,
                     self.now_ms,
                     &TransitionParams {
                         anchor: None,
@@ -980,7 +981,7 @@ impl Account {
     ) -> Result<PendingAction> {
         self.require_writable()?;
         let batch = prepare_transition(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             &TransitionParams {
                 anchor: None,
@@ -994,7 +995,8 @@ impl Account {
     }
 
     fn pending_bytes(&self, digest: &str) -> Result<Vec<u8>> {
-        self.objects
+        self.d
+            .effective
             .pending
             .iter()
             .find(|b| {
@@ -1028,13 +1030,13 @@ impl Account {
             .ok_or_else(|| malformed("issued"))?;
         let receipts = choose_receipts(
             self.d.auth.state(),
-            &self.objects.pending,
+            &self.d.effective.pending,
             &env.digest,
             issued,
             None,
         )?;
         let batch = prepare_veto(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             &VetoParams {
                 transition: bytes,
@@ -1078,7 +1080,7 @@ impl Account {
             "the transition does not remove or demote that key",
         )?;
         let batch = prepare_suspend(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             key,
             transition,
@@ -1094,7 +1096,7 @@ impl Account {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for b in &self.objects.entries {
+        for b in &self.d.effective.entries {
             if let Ok(e) = AuthEnvelope::parse(
                 b,
                 bounds::AUTHORITY_BODY,
@@ -1131,7 +1133,7 @@ impl Account {
             return Err(Failure::Refused(Reason::Rollback));
         }
         let batch = prepare_resolve(
-            &self.objects,
+            &self.d.effective,
             self.now_ms,
             anchor,
             kept,
@@ -1193,7 +1195,7 @@ impl Account {
         }
         let mut by_digest: std::collections::BTreeMap<String, (u64, Option<String>, Vec<u8>)> =
             Default::default();
-        for b in &self.objects.entries {
+        for b in &self.d.effective.entries {
             if let Ok(e) = AuthEnvelope::parse(
                 b,
                 bounds::AUTHORITY_BODY,
@@ -1214,7 +1216,7 @@ impl Account {
             }
         }
         let mut transitions: Vec<(AuthEnvelope, Vec<u8>)> = Vec::new();
-        for b in &self.objects.pending {
+        for b in &self.d.effective.pending {
             if let Ok(e) = AuthEnvelope::parse(
                 b,
                 bounds::TRANSITION_ENVELOPE,
@@ -1254,7 +1256,7 @@ impl Account {
             }
             let scoped = crate::v05::history::Objects {
                 entries: branch.into_iter().map(|(_, b)| b).collect(),
-                pending: self.objects.pending.clone(),
+                pending: self.d.effective.pending.clone(),
                 heads: self.objects.heads.clone(),
                 predecessor: self.objects.predecessor.clone(),
             };
@@ -1273,7 +1275,8 @@ impl Account {
                 .and_then(Value::as_str)
                 .and_then(crate::v05::encoding::parse_date)?;
             let receipts =
-                choose_receipts(&state, &self.objects.pending, &t.digest, issued_t, None).ok()?;
+                choose_receipts(&state, &self.d.effective.pending, &t.digest, issued_t, None)
+                    .ok()?;
             let timing = crate::v05::history::transition_timing(&state, &bytes, &receipts).ok()?;
             if timing.due_ms > self.now_ms {
                 continue;
@@ -1301,10 +1304,10 @@ impl Account {
             return None;
         }
         let st = self.d.auth.state();
-        let pending = super::read::pending_transitions(&self.objects, st);
+        let pending = super::read::pending_transitions(&self.d.effective, st);
         // The vetoes held for each transition, lowest digest first.
         let mut vetoes: Vec<(String, String)> = Vec::new();
-        for b in &self.objects.pending {
+        for b in &self.d.effective.pending {
             if let Ok(e) = AuthEnvelope::parse(b, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true) {
                 if e.value.get("protocol").and_then(Value::as_str) == Some("colophon/veto/5") {
                     if let Some(t) = e.value.get("transition").and_then(Value::as_str) {
@@ -1316,17 +1319,17 @@ impl Account {
         vetoes.sort();
         for t in &pending {
             for (td, vd) in vetoes.iter().filter(|(td, _)| *td == t.digest) {
-                if let Ok(b) = prepare_vetoed(&self.objects, self.now_ms, td, vd) {
+                if let Ok(b) = prepare_vetoed(&self.d.effective, self.now_ms, td, vd) {
                     return Some(b);
                 }
             }
-            if let Ok(b) = prepare_activate(&self.objects, self.now_ms, &t.digest) {
+            if let Ok(b) = prepare_activate(&self.d.effective, self.now_ms, &t.digest) {
                 return Some(b);
             }
         }
         for a in st.activations() {
             if !a.final_ {
-                if let Ok(b) = prepare_final(&self.objects, self.now_ms, a.seq) {
+                if let Ok(b) = prepare_final(&self.d.effective, self.now_ms, a.seq) {
                     return Some(b);
                 }
             }
@@ -1392,7 +1395,7 @@ impl Account {
             }));
         }
         let prepared = prepare_operation(
-            &self.objects,
+            &self.d.effective,
             &self.records,
             &self.d.keys,
             self.now_ms,
@@ -1436,7 +1439,7 @@ impl Account {
         self.require_writable()?;
         let me = self.me_member()?;
         let prepared = prepare_resolution(
-            &self.objects,
+            &self.d.effective,
             &self.records,
             &self.d.keys,
             self.now_ms,
@@ -1705,7 +1708,7 @@ impl Account {
             let account = self.d.auth.account().clone();
             self.seeds.install(s, &account)?;
             let (publics, boxes) =
-                super::unlock::vault_chain(&self.objects.entries, &self.d.verdict.branch);
+                super::unlock::vault_chain(&self.d.effective.entries, &self.d.verdict.branch);
             self.seeds.close_chain(&account, &publics, &boxes);
             let more = self.rebuild_in_place()?;
             finished.changes = merge_changes(finished.changes, more);

@@ -1,0 +1,1 @@
+{"description":"The pending transition held twice, the second envelope with a garbage signature sorting first: one object, the history is ok at seq 3.","expected":{"result":"ok","seq":3},"sections":["2.2","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

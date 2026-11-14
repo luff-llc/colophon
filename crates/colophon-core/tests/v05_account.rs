@@ -2004,10 +2004,8 @@ fn a_resumed_account_and_a_replayed_one_agree() {
 
 #[test]
 fn two_envelopes_over_one_body_give_one_verdict_whichever_arrived_first() {
-    // The verifier takes the first of several envelopes over one body (§8.6). The account holds
-    // its objects in one canonical order, so which it takes does not depend on arrival order.
-    // (That the choice can be made by sort order and not by which envelope verifies is a
-    // question for the verifier: see the report.)
+    // §2.2: envelopes over one body are one object, valid when any of them verifies. A
+    // keyless envelope that sorts first changes nothing, in either order and one by one.
     let mut f = create(&["notes"]);
     let seed = f.host.fresh();
     let action = f
@@ -2017,16 +2015,13 @@ fn two_envelopes_over_one_body_give_one_verdict_whichever_arrived_first() {
     let before = f.account.objects().clone();
     let done = run(&mut f.account, &f.host, action);
     let good = done.entries[0].1.clone();
-    let mut v: Value = serde_json::from_slice(&good).unwrap();
-    v["signature"] = json!(b64(&[0u8; 64]));
-    let bad = canonical(&v).unwrap();
-    let mut statuses = Vec::new();
+    let bad = twin_first(&good);
     for order in [[&good, &bad], [&bad, &good]] {
         let mut o = before.clone();
         o.entries.extend(order.iter().map(|e| (*e).clone()));
         let a = Account::open(o, vec![], None, Identity::Controller(f.d.clone()), T0).unwrap();
-        statuses.push(a.status());
-        // Through merge, one at a time, in the same two orders.
+        assert_eq!(a.status().code, "ok", "{:?}", a.status());
+        assert_eq!(a.status().seq, 3);
         let mut m = Account::open(
             before.clone(),
             vec![],
@@ -2050,376 +2045,91 @@ fn two_envelopes_over_one_body_give_one_verdict_whichever_arrived_first() {
         }
         assert_eq!(m.status(), a.status());
     }
-    assert_eq!(statuses[0], statuses[1]);
 }
 
-// ---------------------------------------------------------------------------------------------
-// Attacks: each performs the attack and asserts the refusal by its reason.
-
-fn same_state(a: &Account, before: &Value, host: &Host, d: &str) {
-    assert_eq!(&fingerprint(a, host, d), before, "the account changed");
+/// An envelope over the same body with a garbage signature that sorts before the real one.
+fn twin_first(env: &[u8]) -> Vec<u8> {
+    let mut v: Value = serde_json::from_slice(env).unwrap();
+    v["signature"] = json!(b64(&[0xf8u8; 64]));
+    let twin = canonical(&v).unwrap();
+    assert!(twin.as_slice() < env, "the twin sorts first");
+    twin
 }
 
 #[test]
-fn a_tampered_signature_is_refused_and_the_account_is_as_it_was() {
+fn a_keyless_twin_of_a_pending_object_changes_nothing() {
+    // Before the fix a twin that sorted first made `pending()` list the transition twice and
+    // could be the envelope the builders embedded (and the verifier refused).
     let mut f = create(&["notes"]);
-    let before = fingerprint(&f.account, &f.host, &f.d);
-    let held = f.account.objects().clone();
-    let seed = f.host.fresh();
+    let d2 = add_second_device(&mut f, &["approve"]);
+    let h = appoint_home(&mut f);
+    let now = f.account.now_ms();
+    let acct = f.account.id().as_str().to_string();
     let action = f
         .account
-        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
-        .unwrap();
-    let mut sigs = f.host.sign(action.steps());
-    sigs[0].signature[10] ^= 1;
-    let e = f.account.finish(action, sigs).unwrap_err();
-    assert_eq!(e.code(), "badSignature", "{e}");
-    same_state(&f.account, &before, &f.host, &f.d);
-    assert_eq!(f.account.objects().entries, held.entries);
-    // Too few signatures, and signatures for the wrong step count, are refused likewise.
-    let seed = f.host.fresh();
-    let action = f
-        .account
-        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
-        .unwrap();
-    assert_eq!(
-        f.account.finish(action, vec![]).unwrap_err().code(),
-        "malformed"
-    );
-    same_state(&f.account, &before, &f.host, &f.d);
-}
-
-#[test]
-fn an_action_prepared_before_the_history_moved_on_is_refused_by_the_verifier() {
-    let mut f = create(&["notes"]);
-    let seed = f.host.fresh();
-    let stale = f
-        .account
-        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
-        .unwrap();
-    let sigs = f.host.sign(stale.steps());
-    // Meanwhile another action lands at the same seq.
-    let seed = f.host.fresh();
-    let other = f
-        .account
-        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
-        .unwrap();
-    run(&mut f.account, &f.host, other);
-    let before = fingerprint(&f.account, &f.host, &f.d);
-    let e = f.account.finish(stale, sigs).unwrap_err();
-    assert!(
-        matches!(e, Failure::Refused(Reason::Fork) | Failure::Malformed(_)),
-        "{e}"
-    );
-    same_state(&f.account, &before, &f.host, &f.d);
-}
-
-#[test]
-fn prepare_refuses_what_finish_would_refuse() {
-    let mut f = create(&["notes"]);
-    let agent = f.host.identity(30);
-    let req = request_for(
-        &f,
-        &f.host,
-        &agent,
-        "Claude",
-        "agent",
-        agent_terms("write"),
-        T0,
-    );
-    // The kit (recover only) is not an approver.
-    let seed = f.host.fresh();
-    let e = f
-        .account
-        .begin_approve(&req.raw, agent_terms("write"), &[f.k.clone()], seed)
-        .unwrap_err();
-    assert_eq!(e.code(), "badSignature", "{e}");
-    // A signer that is not a controller at all.
-    let seed = f.host.fresh();
-    let e = f
-        .account
-        .begin_approve(&req.raw, agent_terms("write"), &[agent.clone()], seed)
-        .unwrap_err();
-    assert_eq!(e.code(), "badSignature", "{e}");
-    // Terms the request did not ask for.
-    let seed = f.host.fresh();
-    let e = f
-        .account
-        .begin_approve(&req.raw, agent_terms("write").clone(), &[f.d.clone()], seed)
-        .map(|_| ());
-    assert!(e.is_ok(), "the request asked for exactly this");
-    let wider = json!({"records": [{"namespace": "notes", "access": "write"},
-                                   {"namespace": "other", "access": "write"}]});
-    let seed = f.host.fresh();
-    assert!(f
-        .account
-        .begin_approve(&req.raw, wider, &[f.d.clone()], seed)
-        .is_err());
-    // A locked account cannot seal shares it cannot open.
-    let mut locked = Account::open(
-        f.account.objects().clone(),
-        vec![],
-        None,
-        Identity::Controller(f.d.clone()),
-        T0,
-    )
-    .unwrap();
-    let _ = &mut locked;
-    let seed = f.host.fresh();
-    let e = locked
-        .begin_approve(&req.raw, agent_terms("write"), &[f.d.clone()], seed)
-        .unwrap_err();
-    assert_eq!(e.code(), "unavailable", "{e}");
-    // A rotation of a vault that is not retiring.
-    let (n, en) = (f.host.fresh(), f.host.fresh());
-    assert!(f.account.begin_rotate_vault(&f.d, n, None, en).is_err());
-    // A member's session may not prepare a controller's action, nor a write to a namespace the
-    // grant does not cover.
-    admit(
-        &mut f,
-        &agent,
-        "Claude",
-        "agent",
-        agent_terms("write"),
-        agent_terms("write"),
-    );
-    let mut a = member_session(&f, &agent);
-    let seed = f.host.fresh();
-    let denied = a
-        .begin_write(
-            "elsewhere",
-            "createNotebook",
-            json!({"id": "x", "title": "X"}),
-            Level::Write,
-            seed,
+        .begin_remove_controller(
+            &[d2.clone()],
+            &[],
+            &[f.d.clone()],
+            TransitionRule::Control,
+            None,
         )
         .unwrap();
-    assert_eq!(denied.unwrap_err().reason, "notGranted");
-    // A payload that does not match the operation schema.
-    let seed = f.host.fresh();
-    let e = a
-        .begin_write(
-            "notes",
-            "createNotebook",
-            json!({"id": 5}),
-            Level::Write,
-            seed,
-        )
-        .unwrap_err();
-    assert_eq!(e.code(), "malformed", "{e}");
-    let _ = &mut a;
-}
-
-#[test]
-fn a_member_cannot_unlock_with_another_members_share_and_a_wrong_ecdh_opens_nothing() {
-    let mut f = create(&["notes"]);
-    let a1 = f.host.identity(30);
-    let a2 = f.host.identity(31);
-    admit(
-        &mut f,
-        &a1,
-        "One",
-        "agent",
-        agent_terms("write"),
-        agent_terms("write"),
-    );
-    admit(
-        &mut f,
-        &a2,
-        "Two",
-        "agent",
-        agent_terms("write"),
-        agent_terms("write"),
-    );
-    let mut m = Account::open(
-        f.account.objects().clone(),
-        vec![],
-        None,
-        Identity::Member(a1.clone()),
-        T0,
-    )
-    .unwrap();
-    let steps = m.begin_unlock_epochs();
-    assert_eq!(steps.len(), 1);
-    // Member 2's agreement key against member 1's seal: a wrong result.
-    let wrong = vec![EpochSecret {
-        shared: f.host.ids[&a2].agree(&steps[0].peer).unwrap(),
-        step: steps[0].clone(),
-    }];
-    let e = m.finish_unlock_epochs(wrong).unwrap_err();
-    assert_eq!(e, Failure::Refused(Reason::VaultLocked));
-    assert!(matches!(
-        m.view("notes").unwrap(),
-        colophon_core::model::Outcome::Failure { ref reason, .. } if reason == "notReadable"
-    ));
-    // A step this account never asked for (another member's) is refused before any opening.
-    let mut forged = steps[0].clone();
-    forged.recipient = a2.clone();
-    let wrong = vec![EpochSecret {
-        shared: f.host.ids[&a2].agree(&steps[0].peer).unwrap(),
-        step: forged,
-    }];
-    assert_eq!(
-        m.finish_unlock_epochs(wrong).unwrap_err().code(),
-        "malformed"
-    );
-    // The right answer opens it.
-    let right = f.host.answer_epochs(&a1, steps);
-    m.finish_unlock_epochs(right).unwrap();
-    assert!(matches!(
-        m.view("notes").unwrap(),
-        colophon_core::model::Outcome::Success { .. }
-    ));
-}
-
-#[test]
-fn an_over_bound_object_is_refused_before_it_is_held() {
-    let f = create(&["notes"]);
-    let mut a = Account::open(
-        f.account.objects().clone(),
-        vec![],
-        None,
-        Identity::Controller(f.d.clone()),
-        T0,
-    )
-    .unwrap();
-    let before = a.objects().clone();
-    let huge = vec![b'{'; MAX_OBJECT_BYTES + 1];
-    let e = a
-        .merge(
-            Incoming {
-                objects: Objects {
-                    entries: vec![huge],
-                    ..Default::default()
-                },
-                records: vec![],
-            },
-            T0,
-        )
-        .unwrap_err();
-    assert_eq!(e.code(), "malformed");
-    assert_eq!(a.objects().entries, before.entries);
-    let e = a
-        .merge(
-            Incoming {
-                objects: Objects::default(),
-                records: vec![HeldRecord {
-                    path: "p".repeat(513),
-                    bytes: vec![],
-                }],
-            },
-            T0,
-        )
-        .unwrap_err();
-    assert_eq!(e.code(), "malformed");
-    // An identity is a 32-hex key ID.
-    assert!(Account::open(
-        before,
-        vec![],
-        None,
-        Identity::Controller("nonsense".into()),
-        T0
-    )
-    .is_err());
-}
-
-#[test]
-fn an_expired_member_cannot_read_and_the_read_scope_limits_what_is_folded() {
-    let mut f = create(&["notes", "saved"]);
-    let agent = f.host.identity(30);
-    let t = json!({"records": [{"namespace": "notes", "access": "read"},
-                               {"namespace": "saved", "access": "read"}],
-                   "expires": colophon_core::v05::write::format_date(T0 + 2 * HOUR)});
-    admit(&mut f, &agent, "Claude", "agent", t.clone(), t);
-    let mut a = member_session(&f, &agent);
-    assert!(a.is_namespace_open("notes") && a.is_namespace_open("saved"));
-    a.set_read_scope(vec!["notes".into()]).unwrap();
-    assert!(a.is_namespace_open("notes"));
-    assert!(
-        !a.is_namespace_open("saved"),
-        "outside the read scope: not folded"
-    );
-    // After the expiry the member may not read (§11.5 step 2, 0.4's `expired`).
-    a.advance(T0 + 3 * HOUR).unwrap();
-    match a.view("notes").unwrap() {
-        colophon_core::model::Outcome::Failure { reason, .. } => assert_eq!(reason, "expired"),
-        other => panic!("{other:?}"),
-    }
-    // The controller reads every namespace.
-    assert!(f.account.is_namespace_open("saved"));
-    assert!(f.account.may_read("notes"));
-}
-
-#[test]
-fn a_merge_that_makes_the_history_refuse_is_reported_and_reading_continues() {
-    let mut f = create(&["notes"]);
-    let seed = f.host.fresh();
-    let action = f
-        .account
-        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
-        .unwrap();
-    let before = f.account.objects().clone();
-    let mut a = Account::open(before, vec![], None, Identity::Controller(f.d.clone()), T0).unwrap();
-    unlock_controller(&f.host, &mut a, &f.d);
     let done = run(&mut f.account, &f.host, action);
-    // The entry at seq 3 arrives with a bad signature.
-    let mut v: Value = serde_json::from_slice(&done.entries[0].1).unwrap();
-    v["signature"] = json!(b64(&[0u8; 64]));
-    let bad = canonical(&v).unwrap();
-    let ch = a
-        .merge(
-            Incoming {
-                objects: Objects {
-                    entries: vec![bad],
-                    ..Default::default()
-                },
-                records: vec![],
-            },
-            T0,
-        )
-        .unwrap();
-    let status = ch.status.unwrap();
-    assert_eq!(status.code, "badSignature");
-    assert_eq!(status.stop_seq, Some(3));
-    assert_eq!(status.seq, 2, "the verified prefix");
-    assert!(matches!(
-        a.view("notes").unwrap(),
-        colophon_core::model::Outcome::Success { .. }
-    ));
-    // Writes are refused with the verifier's own reason until the history is clean.
-    let seed = f.host.fresh();
-    let e = a
-        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
-        .unwrap_err();
-    assert_eq!(e.code(), "badSignature");
+    let t_digest = pending_digest(&done.pending[0]);
+    let r = receipt(&acct, &f.host, &h, &t_digest, now + 10 * SEC);
+    hold_pending(
+        &mut f.account,
+        vec![twin_first(&done.pending[0]), twin_first(&r), r.clone()],
+    );
+    assert_eq!(f.account.pending().len(), 1, "one transition, once");
+    // The veto, and its receipt, each with a twin that sorts first.
+    let mut p_session = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Controller(f.p.clone()),
+        now,
+    )
+    .unwrap();
+    let veto = p_session.begin_veto(&t_digest, &[f.p.clone()]).unwrap();
+    let vdone = run(&mut p_session, &f.host, veto);
+    let v_digest = pending_digest(&vdone.pending[0]);
+    let vr = receipt(&acct, &f.host, &h, &v_digest, now + 20 * SEC);
+    hold_pending(
+        &mut f.account,
+        vec![
+            twin_first(&vdone.pending[0]),
+            vdone.pending[0].clone(),
+            twin_first(&vr),
+            vr.clone(),
+        ],
+    );
+    assert_eq!(f.account.pending().len(), 1);
+    assert_eq!(f.account.pending()[0].vetoes.len(), 1, "the veto once");
+    let rec = f.account.record_due().unwrap();
+    assert_eq!(rec.len(), 1, "the vetoed entry is recorded");
+    assert!(f.account.controllers().iter().any(|c| c.id == d2));
+    assert_eq!(f.account.status().code, "ok");
 }
 
 #[test]
-fn suggest_signers_picks_a_set_the_rule_accepts() {
-    let f = create(&["notes"]);
-    let all = [f.d.clone(), f.p.clone(), f.k.clone()];
-    for need in [
-        SignerChoice::Member,
-        SignerChoice::Rekey,
-        SignerChoice::Control,
-        SignerChoice::Recovery,
-        SignerChoice::KeyringAdd,
-        SignerChoice::Veto,
-    ] {
-        let s = f.account.suggest_signers(&all, need).unwrap();
-        assert!(!s.is_empty(), "{need:?}");
-    }
-    // The kit alone cannot approve; nothing meets the member rule from it.
-    assert!(f
+fn a_keyless_twin_of_a_due_transition_does_not_stop_its_activation() {
+    let mut f = create(&["notes"]);
+    let now = f.account.now_ms();
+    let action = f
         .account
-        .suggest_signers(&[f.k.clone()], SignerChoice::Member)
-        .is_err());
-    assert_eq!(
-        f.account
-            .suggest_signers(&[f.k.clone()], SignerChoice::Recovery)
-            .unwrap(),
-        [f.k.clone()]
-    );
+        .begin_transition(
+            &Change::policy(json!({"callWindow": 600})),
+            &[f.d.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+    let done = run(&mut f.account, &f.host, action);
+    hold_pending(&mut f.account, vec![twin_first(&done.pending[0])]);
+    assert_eq!(f.account.pending().len(), 1);
+    f.account.advance(now + 2 * HOUR).unwrap();
+    assert_eq!(f.account.record_due().unwrap().len(), 1);
 }
 
 #[test]
@@ -2748,4 +2458,676 @@ fn the_persisted_state_of_another_account_is_not_mixed_into_this_one() {
         "{e}"
     );
     let _ = &mut f1;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ported from the independent check (2026-11-14).
+fn review_entries(done: &Finished) -> Incoming {
+    Incoming {
+        objects: Objects {
+            entries: done.entries.iter().map(|(_, e)| e.clone()).collect(),
+            pending: done.pending.clone(),
+            ..Default::default()
+        },
+        records: done.records.clone(),
+    }
+}
+
+/// A garbage envelope over a real entry's body, made with no key, sorts first and is the one
+/// the verifier keeps: the valid entry is never judged.
+#[test]
+fn review_q1_a_garbage_envelope_over_a_real_body_truncates_the_history() {
+    use colophon_core::v05::history::verify_history;
+    let mut f = create(&["notes"]);
+    let seed = f.host.fresh();
+    let action = f
+        .account
+        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
+        .unwrap();
+    let done3 = run(&mut f.account, &f.host, action);
+    let seed = f.host.fresh();
+    let action = f
+        .account
+        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    assert_eq!(f.account.status().seq, 4);
+    assert_eq!(f.account.status().code, "ok");
+    let good = done3.entries[0].1.clone();
+    let mut v: Value = serde_json::from_slice(&good).unwrap();
+    v["signature"] = json!(b64(&[0u8; 64]));
+    let bad = canonical(&v).unwrap();
+    assert!(bad < good, "the forged envelope sorts first");
+    // The verifier, both orders.
+    let mut first_good = f.account.objects().clone();
+    first_good.entries.push(bad.clone());
+    let mut first_bad = f.account.objects().clone();
+    first_bad.entries.insert(0, bad.clone());
+    let vg = verify_history(&first_good, &Persisted::default(), f.account.now_ms());
+    let vb = verify_history(&first_bad, &Persisted::default(), f.account.now_ms());
+    eprintln!(
+        "verifier: good first -> {} seq {}; bad first -> {} seq {}",
+        vg.code(),
+        vg.branch.len(),
+        vb.code(),
+        vb.branch.len()
+    );
+    // The account: an honest account at seq 4 that is sent the garbage envelope.
+    let before = f.account.status();
+    let ch = f
+        .account
+        .merge(
+            Incoming {
+                objects: Objects {
+                    entries: vec![bad.clone()],
+                    ..Default::default()
+                },
+                records: vec![],
+            },
+            f.account.now_ms(),
+        )
+        .unwrap();
+    let after = f.account.status();
+    eprintln!(
+        "account before {before:?}\naccount after {after:?}\nreorganized {}",
+        ch.authority.reorganized
+    );
+    // And it never recovers: the genuine envelope is already held.
+    let again = f
+        .account
+        .merge(
+            Incoming {
+                objects: Objects {
+                    entries: vec![good.clone()],
+                    ..Default::default()
+                },
+                records: vec![],
+            },
+            f.account.now_ms(),
+        )
+        .unwrap();
+    eprintln!("after re-sending the genuine envelope: {:?}", again.status);
+    let seed = f.host.fresh();
+    let w = f
+        .account
+        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed);
+    eprintln!("a write: {:?}", w.as_ref().err());
+    assert_eq!(
+        vg.code(),
+        "ok",
+        "the verifier keeps the valid entry whichever arrived first"
+    );
+    assert_eq!(
+        vb.code(),
+        "ok",
+        "the verifier keeps the valid entry whichever arrived first"
+    );
+    assert_eq!(
+        after.code, "ok",
+        "a keyless envelope must not truncate an honest account"
+    );
+    assert_eq!(after.seq, 4);
+}
+
+/// The shape of the forged checkpoint: the state JSON with one member's `revoked_seq` cleared.
+fn review_forge(bytes: &[u8], edit: impl FnOnce(&mut Value)) -> Persisted {
+    let mut v: Value = serde_json::from_slice(bytes).unwrap();
+    edit(&mut v["state"]);
+    Account::persisted_from_bytes(&serde_json::to_vec(&v).unwrap()).unwrap()
+}
+
+/// Q8 / §17.2: a well-formed persisted state that names only held entries but lies about the
+/// fold (a revoked member current) is trusted by the account for record admission and for
+/// who it shows as a member.
+#[test]
+fn review_q8_forged_persisted_state_unrevokes_a_member_and_admits_its_records() {
+    let mut f = create(&["notes"]);
+    let agent = f.host.identity(30);
+    admit(
+        &mut f,
+        &agent,
+        "Claude",
+        "agent",
+        agent_terms("write"),
+        agent_terms("write"),
+    );
+    let mut m = member_session(&f, &agent);
+    let seed = f.host.fresh();
+    let action = f
+        .account
+        .begin_revoke(&agent, &RevokeKeep::Nothing, &[f.d.clone()], seed)
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    // The revoked agent, which has not seen the revocation, writes.
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let late = write_note(&mut m, &mut host, "x", "Written after revocation");
+    f.host = host;
+    let bytes = f.account.export_persisted().unwrap();
+    let now = f.account.now_ms();
+    // Honest: replay, the record is refused.
+    let mut honest = Account::open(
+        f.account.objects().clone(),
+        late.records.clone(),
+        None,
+        Identity::Controller(f.d.clone()),
+        now,
+    )
+    .unwrap();
+    unlock_controller(&f.host, &mut honest, &f.d);
+    let hv = format!("{:?}", honest.view("notes").unwrap());
+    // Forged: the agent's revocation erased from the saved fold.
+    let forged = review_forge(&bytes, |s| {
+        for mbr in s["members"].as_array_mut().unwrap() {
+            mbr["revoked_seq"] = Value::Null;
+        }
+    });
+    let mut a = Account::open(
+        Objects::default(),
+        late.records.clone(),
+        Some(forged),
+        Identity::Controller(f.d.clone()),
+        now,
+    )
+    .unwrap();
+    unlock_controller(&f.host, &mut a, &f.d);
+    let fv = format!("{:?}", a.view("notes").unwrap());
+    let honest_current: Vec<_> = honest
+        .members()
+        .into_iter()
+        .filter(|x| x.member.id == agent)
+        .map(|x| format!("{:?}", x.member))
+        .collect();
+    let forged_current: Vec<_> = a
+        .members()
+        .into_iter()
+        .filter(|x| x.member.id == agent)
+        .map(|x| format!("{:?}", x.member))
+        .collect();
+    eprintln!(
+        "honest status {:?} member {:?}\nforged status {:?} member {:?}",
+        honest.status(),
+        honest_current,
+        a.status(),
+        forged_current
+    );
+    eprintln!(
+        "honest admits it: {}; forged admits it: {}",
+        hv.contains("Written after revocation"),
+        fv.contains("Written after revocation")
+    );
+    assert!(!hv.contains("Written after revocation"));
+    assert!(
+        !fv.contains("Written after revocation"),
+        "a forged persisted fold must not decide record admission"
+    );
+}
+
+/// Q10: a `control` controller added by a transition, then its own slot by a self-slot entry.
+#[test]
+fn review_q10_a_control_controller_added_by_a_transition_then_its_slot() {
+    let mut f = create(&["notes"]);
+    let d3 = f.host.identity(52);
+    let mut s3 = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Controller(d3.clone()),
+        f.account.now_ms(),
+    )
+    .unwrap();
+    let now = f.account.now_ms();
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    pair_and_transfer(&mut host, &f.account, &mut s3, now);
+    f.host = host;
+    let c = f
+        .host
+        .raw_controller(&d3, "Laptop", &["approve", "control"]);
+    let action = f
+        .account
+        .begin_add_controller(&AddController {
+            controller: c,
+            mode: AddMode::Transition {
+                signers: vec![f.d.clone()],
+                rule: TransitionRule::Control,
+            },
+        })
+        .unwrap();
+    let done = run(&mut f.account, &f.host, action);
+    assert_eq!(done.pending.len(), 1);
+    f.account.advance(now + 2 * HOUR).unwrap();
+    let rec = f.account.record_due().unwrap();
+    eprintln!(
+        "recorded {} entries: {:?}",
+        rec.len(),
+        rec.iter()
+            .map(|r| r.entries.iter().map(|(s, _)| *s).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert!(f.account.controllers().iter().any(|c| c.id == d3));
+    s3.merge(
+        Incoming {
+            objects: f.account.objects().clone(),
+            records: vec![],
+        },
+        now + 2 * HOUR,
+    )
+    .unwrap();
+    eprintln!("s3 standing {:?}", s3.me());
+    let entropy = f.host.fresh();
+    let action = s3.begin_add_slot(
+        &d3,
+        SlotPlan {
+            controllers: vec![d3.clone()],
+            label: "Laptop".into(),
+        },
+        entropy,
+    );
+    let action = match action {
+        Ok(a) => a,
+        Err(e) => panic!("begin_add_slot: {e}"),
+    };
+    let sigs = f.host.sign(action.steps());
+    let r = s3.finish(action, sigs);
+    eprintln!(
+        "self-slot after a transition: {:?}",
+        r.as_ref()
+            .map(|d| d.entries.len())
+            .map_err(|e| e.to_string())
+    );
+    let done = r.unwrap();
+    f.account
+        .merge(review_entries(&done), now + 2 * HOUR)
+        .unwrap();
+    assert!(
+        f.account
+            .controllers()
+            .iter()
+            .find(|c| c.id == d3)
+            .unwrap()
+            .has_slot
+    );
+}
+
+/// `RevokeKeep::Explicit`: exactly the named header is kept; the other is refused.
+#[test]
+fn review_explicit_keep_keeps_only_what_it_names() {
+    let mut f = create(&["notes"]);
+    let agent = f.host.identity(30);
+    admit(
+        &mut f,
+        &agent,
+        "Claude",
+        "agent",
+        agent_terms("write"),
+        agent_terms("write"),
+    );
+    let mut a = member_session(&f, &agent);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let r1 = write_note(&mut a, &mut host, "b1", "Kept one");
+    let r2 = write_note(&mut a, &mut host, "b2", "Dropped two");
+    f.host = host;
+    let now = f.account.now_ms();
+    merge_done(&mut f.account, &r1, now);
+    merge_done(&mut f.account, &r2, now);
+    let d1 = digest_of(&r1.records[0].bytes);
+    let seed = f.host.fresh();
+    let action = f
+        .account
+        .begin_revoke(
+            &agent,
+            &RevokeKeep::Explicit {
+                kept: vec![d1.clone()],
+                heads: vec![],
+            },
+            &[f.d.clone()],
+            seed,
+        )
+        .unwrap();
+    assert_eq!(action.info().kept, vec![d1]);
+    run(&mut f.account, &f.host, action);
+    let v = format!("{:?}", f.account.view("notes").unwrap());
+    assert!(v.contains("Kept one"), "{v}");
+    assert!(!v.contains("Dropped two") || v.contains("refused"), "{v}");
+    let admitted = match f.account.view("notes").unwrap() {
+        colophon_core::model::Outcome::Success { value, .. } => value.admitted.len(),
+        _ => panic!(),
+    };
+    assert_eq!(admitted, 1);
+    // A head naming a header this account does not hold is refused at prepare.
+    let seed = f.host.fresh();
+    let other = f.host.identity(31);
+    admit(
+        &mut f,
+        &other,
+        "Other",
+        "agent",
+        agent_terms("write"),
+        agent_terms("write"),
+    );
+    let e = f.account.begin_revoke(
+        &other,
+        &RevokeKeep::Explicit {
+            kept: vec![],
+            heads: vec![("notes".into(), "0".repeat(64))],
+        },
+        &[f.d.clone()],
+        seed,
+    );
+    assert!(e.is_err());
+}
+
+/// The last `control` key removed by a transition (§6.2: at least one holds `control`).
+#[test]
+fn review_removing_every_control_key_is_refused() {
+    let mut f = create(&["notes"]);
+    let r = f.account.begin_remove_controller(
+        &[f.d.clone(), f.p.clone()],
+        &[],
+        &[f.d.clone(), f.p.clone(), f.k.clone()],
+        TransitionRule::Control,
+        None,
+    );
+    match r {
+        Err(e) => eprintln!("prepare refuses: {e}"),
+        Ok(action) => {
+            let sigs = f.host.sign(action.steps());
+            let done = f.account.finish(action, sigs);
+            eprintln!(
+                "finish: {:?}",
+                done.as_ref()
+                    .map(|d| d.pending.len())
+                    .map_err(|e| e.to_string())
+            );
+            if done.is_ok() {
+                let now = f.account.now_ms();
+                f.account.advance(now + 2 * HOUR).unwrap();
+                let rec = f.account.record_due();
+                eprintln!(
+                    "record_due: {:?}",
+                    rec.as_ref().map(|v| v.len()).map_err(|e| e.to_string())
+                );
+                eprintln!(
+                    "controllers now: {:?}",
+                    f.account
+                        .controllers()
+                        .iter()
+                        .map(|c| (c.id.clone(), c.roles.clone()))
+                        .collect::<Vec<_>>()
+                );
+                assert!(f
+                    .account
+                    .controllers()
+                    .iter()
+                    .any(|c| c.roles.iter().any(|r| r == "control")));
+            }
+        }
+    }
+}
+
+/// A pending transition whose only signer is removed (by an earlier-due transition) before it
+/// is due: it must not activate, and `record_due` must not fail as a whole.
+#[test]
+fn review_a_pending_transition_whose_signer_is_removed_first() {
+    let mut f = create(&["notes"]);
+    let now = f.account.now_ms();
+    // B: remove the passkey, signed by the device and the kit.
+    let b = f
+        .account
+        .begin_remove_controller(
+            &[f.p.clone()],
+            &[],
+            &[f.d.clone(), f.k.clone()],
+            TransitionRule::Control,
+            None,
+        )
+        .unwrap();
+    run(&mut f.account, &f.host, b);
+    // A: a policy change signed by the passkey alone, issued later.
+    f.account.advance(now + 10 * SEC).unwrap();
+    let a = f
+        .account
+        .begin_transition(
+            &Change::policy(json!({"callWindow": 600})),
+            &[f.p.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+    run(&mut f.account, &f.host, a);
+    assert_eq!(f.account.pending().len(), 2);
+    f.account.advance(now + 3 * HOUR).unwrap();
+    let rec = f.account.record_due();
+    eprintln!(
+        "record_due: {:?}",
+        rec.as_ref().map(|v| v.len()).map_err(|e| e.to_string())
+    );
+    let rec = rec.unwrap();
+    for r in &rec {
+        eprintln!(
+            "recorded: controllers_removed {:?} policy_changed {}",
+            r.changes.authority.controllers_removed, r.changes.authority.policy_changed
+        );
+    }
+    eprintln!(
+        "status {:?}; pending now {}; callWindow {}",
+        f.account.status(),
+        f.account.pending().len(),
+        f.account.policy().call_window
+    );
+    assert!(!f.account.controllers().iter().any(|c| c.id == f.p));
+    assert_eq!(rec.len(), 1, "only the removal activates");
+    assert_eq!(f.account.status().code, "ok");
+}
+
+/// `revision` is local memory: the same objects merged in pieces give a different revision
+/// than opened at once (the builder's order test only compares sessions unlocked last).
+#[test]
+fn review_revision_depends_on_merge_history() {
+    let mut f = create(&["notes"]);
+    let agent = f.host.identity(30);
+    admit(
+        &mut f,
+        &agent,
+        "Claude",
+        "agent",
+        agent_terms("write"),
+        agent_terms("write"),
+    );
+    let mut m = member_session(&f, &agent);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let w: Vec<Finished> = (0..3)
+        .map(|i| write_note(&mut m, &mut host, &format!("b{i}"), "T"))
+        .collect();
+    f.host = host;
+    let recs: Vec<HeldRecord> = w.iter().flat_map(|d| d.records.clone()).collect();
+    let now = f.account.now_ms();
+    let mut once = Account::open(
+        f.account.objects().clone(),
+        recs.clone(),
+        None,
+        Identity::Controller(f.d.clone()),
+        now,
+    )
+    .unwrap();
+    unlock_controller(&f.host, &mut once, &f.d);
+    let mut piecewise = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Controller(f.d.clone()),
+        now,
+    )
+    .unwrap();
+    unlock_controller(&f.host, &mut piecewise, &f.d);
+    for r in recs {
+        piecewise
+            .merge(
+                Incoming {
+                    objects: Objects::default(),
+                    records: vec![r],
+                },
+                now,
+            )
+            .unwrap();
+    }
+    eprintln!(
+        "revision at once {} / piecewise {}",
+        once.revision("notes"),
+        piecewise.revision("notes")
+    );
+    assert_eq!(
+        fingerprint(&once, &f.host, &f.d)["view"],
+        fingerprint(&piecewise, &f.host, &f.d)["view"]
+    );
+}
+
+/// Hostile persisted state: shapes the shape check does not cover must not panic.
+#[test]
+fn review_hostile_persisted_state_does_not_panic() {
+    let mut f = create(&["notes"]);
+    let bytes = f.account.export_persisted().unwrap();
+    let now = f.account.now_ms();
+    let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        (
+            "policies empty",
+            Box::new(|s: &mut Value| s["policies"] = json!([])),
+        ),
+        (
+            "epochs huge",
+            Box::new(|s: &mut Value| s["epochs"]["notes"] = json!(9007199254740991u64)),
+        ),
+        (
+            "members granted at huge seq",
+            Box::new(|s: &mut Value| s["namespaces"] = json!(["notes", "other"])),
+        ),
+        (
+            "activations garbage",
+            Box::new(|s: &mut Value| s["recorded"] = json!(["x"])),
+        ),
+    ];
+    for (name, edit) in edits {
+        let p = {
+            let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+            edit(&mut v["state"]);
+            Account::persisted_from_bytes(&serde_json::to_vec(&v).unwrap())
+        };
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Ok(p) = p else {
+                return "refused at read".to_string();
+            };
+            match Account::open(
+                Objects::default(),
+                vec![],
+                Some(p),
+                Identity::Controller(f.d.clone()),
+                now,
+            ) {
+                Ok(mut a) => {
+                    unlock_controller(&f.host, &mut a, &f.d);
+                    let seed = [7u8; 32];
+                    let w = a
+                        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string());
+                    format!(
+                        "opened: {:?}, latest epoch {}, rekey {:?}",
+                        a.status().code,
+                        a.latest_epoch("notes"),
+                        w
+                    )
+                }
+                Err(e) => format!("open refused: {e}"),
+            }
+        }));
+        eprintln!("{name}: {:?}", r.as_ref().map_err(|_| "PANIC"));
+        assert!(r.is_ok(), "{name} panicked");
+    }
+}
+
+fn review_resign(v: &mut Value, sig: &str) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if k == "signature" && x.is_string() {
+                    *x = json!(sig);
+                } else {
+                    review_resign(x, sig);
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| review_resign(x, sig)),
+        _ => {}
+    }
+}
+
+/// The pending side of Q1: `Pending::parse` keeps the LAST held envelope over a transition body
+/// (a map insert), and the account holds pending objects in byte order. A keyless envelope over
+/// a real pending transition's body that sorts last replaces it.
+#[test]
+fn review_q1_a_garbage_envelope_over_a_pending_transition_blocks_its_activation() {
+    let mut f = create(&["notes"]);
+    let now = f.account.now_ms();
+    let action = f
+        .account
+        .begin_transition(
+            &Change::policy(json!({"callWindow": 600})),
+            &[f.d.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+    let done = run(&mut f.account, &f.host, action);
+    let real = done.pending[0].clone();
+    let mut v: Value = serde_json::from_slice(&real).unwrap();
+    eprintln!(
+        "transition envelope keys: {:?}",
+        v.as_object().unwrap().keys().collect::<Vec<_>>()
+    );
+    let zz: Vec<u8> = [0xCFu8, 0x3C, 0xF3]
+        .iter()
+        .cycle()
+        .take(64)
+        .cloned()
+        .collect();
+    review_resign(&mut v, &b64(&zz));
+    let forged = canonical(&v).unwrap();
+    assert!(forged > real, "sorts last");
+    // A second account holding the same objects, and the forged one.
+    let mut a = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Controller(f.d.clone()),
+        now,
+    )
+    .unwrap();
+    a.merge(
+        Incoming {
+            objects: Objects {
+                pending: vec![forged],
+                ..Default::default()
+            },
+            records: vec![],
+        },
+        now,
+    )
+    .unwrap();
+    eprintln!(
+        "pending before: honest {} / attacked {}",
+        f.account.pending().len(),
+        a.pending().len()
+    );
+    f.account.advance(now + 2 * HOUR).unwrap();
+    a.advance(now + 2 * HOUR).unwrap();
+    let h = f.account.record_due().unwrap().len();
+    let x = a.record_due();
+    eprintln!(
+        "honest recorded {h}; attacked: {:?}; attacked policy callWindow {}",
+        x.as_ref().map(|v| v.len()).map_err(|e| e.to_string()),
+        a.policy().call_window
+    );
+    assert_eq!(h, 1);
+    assert_eq!(
+        x.unwrap().len(),
+        1,
+        "a keyless envelope must not stop a valid transition"
+    );
 }

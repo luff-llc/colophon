@@ -51,6 +51,10 @@ pub(super) struct Folded {
 }
 
 pub(super) struct Derived {
+    /// The held objects with one envelope per pending transition and veto body: several
+    /// envelopes over one body are one object (§2.2), and the one used is the first in byte
+    /// order that verifies, so a keyless envelope over a real body changes nothing.
+    pub effective: Objects,
     pub verdict: Verdict,
     pub auth: RecordAuthority,
     pub keys: EpochKeys,
@@ -157,7 +161,9 @@ impl Derived {
             }
         }
         let judgement = judge_records(&auth, &keys, inputs.records);
+        let effective = effective_objects(inputs.objects, auth.state());
         let mut derived = Self {
+            effective,
             verdict,
             auth,
             keys,
@@ -303,4 +309,97 @@ pub(super) fn readable(auth: &RecordAuthority, me: &Identity, namespace: &str) -
                     .is_some_and(|r| r.iter().any(|e| e.namespace == namespace))
         }),
     }
+}
+
+/// The objects as the write side and the readers should see them: for each pending transition
+/// and veto body, the first envelope in byte order that verifies against `state` (or, when none
+/// does, the first). Receipts are passed through: choosing among them already skips those that
+/// do not verify.
+pub(super) fn effective_objects(objects: &Objects, state: &crate::v05::history::State) -> Objects {
+    use crate::v05::encoding::bounds;
+    use crate::v05::history::{check_pending_transition, check_pending_veto};
+    use crate::v05::write::authority::choose_receipts;
+    let mut groups: BTreeMap<(String, String), Vec<&Vec<u8>>> = BTreeMap::new();
+    let mut rest: Vec<&Vec<u8>> = Vec::new();
+    for b in &objects.pending {
+        let parsed = AuthEnvelope::parse(
+            b,
+            bounds::TRANSITION_ENVELOPE,
+            bounds::TRANSITION_ENVELOPE,
+            true,
+        );
+        match parsed {
+            Ok(e) => match e.value.get("protocol").and_then(Value::as_str) {
+                Some(p @ ("colophon/transition/5" | "colophon/veto/5")) => {
+                    groups.entry((p.to_string(), e.digest)).or_default().push(b)
+                }
+                _ => rest.push(b),
+            },
+            Err(_) => rest.push(b),
+        }
+    }
+    let mut chosen: BTreeMap<(String, String), Vec<u8>> = BTreeMap::new();
+    let transition_of = |digest: &str, chosen: &BTreeMap<(String, String), Vec<u8>>| {
+        chosen
+            .get(&("colophon/transition/5".to_string(), digest.to_string()))
+            .cloned()
+    };
+    for protocol in ["colophon/transition/5", "colophon/veto/5"] {
+        for ((p, digest), list) in &groups {
+            if p != protocol {
+                continue;
+            }
+            let mut list = list.clone();
+            list.sort();
+            let pick = list
+                .iter()
+                .find(|b| {
+                    if protocol == "colophon/transition/5" {
+                        return check_pending_transition(state, b).is_ok();
+                    }
+                    let Ok(v) =
+                        AuthEnvelope::parse(b, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)
+                    else {
+                        return false;
+                    };
+                    let Some(t) = v
+                        .value
+                        .get("transition")
+                        .and_then(Value::as_str)
+                        .and_then(|d| transition_of(d, &chosen))
+                    else {
+                        return false;
+                    };
+                    let Ok(te) = AuthEnvelope::parse(
+                        &t,
+                        bounds::TRANSITION_ENVELOPE,
+                        bounds::TRANSITION_ENVELOPE,
+                        true,
+                    ) else {
+                        return false;
+                    };
+                    let issued = te
+                        .value
+                        .get("issued")
+                        .and_then(Value::as_str)
+                        .and_then(crate::v05::encoding::parse_date)
+                        .unwrap_or(0);
+                    choose_receipts(state, &objects.pending, &te.digest, issued, None)
+                        .is_ok_and(|r| check_pending_veto(state, &t, &r, b).is_ok())
+                })
+                .or_else(|| list.first())
+                .map(|b| (*b).clone());
+            if let Some(b) = pick {
+                chosen.insert((p.clone(), digest.clone()), b);
+            }
+        }
+    }
+    let mut out = objects.clone();
+    out.pending = rest
+        .into_iter()
+        .cloned()
+        .chain(chosen.into_values())
+        .collect();
+    out.pending.sort();
+    out
 }

@@ -565,7 +565,7 @@ impl Account {
     }
 
     fn pending_digests(&self) -> BTreeSet<String> {
-        read::pending_transitions(&self.objects, self.d.auth.state())
+        read::pending_transitions(&self.d.effective, self.d.auth.state())
             .into_iter()
             .map(|t| t.digest)
             .collect()
@@ -612,7 +612,7 @@ impl Account {
             }
         }
         let was: BTreeSet<String> = self.pending_digests();
-        let now: BTreeSet<String> = read::pending_transitions(new_objects, ns)
+        let now: BTreeSet<String> = read::pending_transitions(&new.effective, ns)
             .into_iter()
             .map(|t| t.digest)
             .collect();
@@ -700,7 +700,7 @@ impl Account {
 
     /// The verified view calls are evaluated over (§12.3), at the account's clock.
     pub(super) fn call_view(&self) -> Result<AccountView> {
-        AccountView::from_history_verifier(&self.d.verdict, &self.objects, self.now_ms)
+        AccountView::from_history_verifier(&self.d.verdict, &self.d.effective, self.now_ms)
     }
 
     /// Merge incoming objects at the clock `now_ms` (never backwards). Objects are held as a
