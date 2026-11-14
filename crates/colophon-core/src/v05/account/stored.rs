@@ -117,6 +117,7 @@ pub(super) fn unprotect(bytes: &[u8], key: &[u8; 32], me: &Identity) -> Option<(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

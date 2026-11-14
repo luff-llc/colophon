@@ -239,6 +239,11 @@ pub(crate) fn judge_live_with(
     unsigned: Option<usize>,
     mut cache: Option<&mut super::records::JudgeCache>,
 ) -> LiveJudgement {
+    // No candidate: no verdict and no head, and the pass over the judged records below (which
+    // only serves the candidates) is not made.
+    if held.is_empty() {
+        return LiveJudgement::default();
+    }
     let account = auth.account().clone();
     // The admitted durable headers, by namespace, in fold order.
     let mut admitted: BTreeMap<String, Vec<(u64, String, String)>> = BTreeMap::new();

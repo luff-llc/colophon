@@ -1740,6 +1740,51 @@ impl Account {
         keys: EpochKeys,
         seed: Option<VaultSeed>,
     ) -> Result<Finished> {
+        // A finished record alone (no entry, no seed, no new key): the derivation is extended by
+        // it, and the account's history must admit it or nothing changes.
+        let records_only = seed.is_none()
+            && keys.is_empty()
+            && finished.entries.is_empty()
+            && finished.pending.is_empty()
+            && extra.objects.entries.is_empty()
+            && extra.objects.pending.is_empty()
+            && extra.objects.heads.is_empty()
+            && extra.objects.predecessor.is_empty()
+            && !extra.records.is_empty()
+            && !finished.records.is_empty();
+        if records_only {
+            if let Some(before) = self.extend_records(&extra.records, self.now_ms) {
+                let refusal = finished.records.iter().find_map(|r| {
+                    match self.judged_exact(&r.path, &r.bytes) {
+                        Some(j)
+                            if j.outcome == crate::v05::records::Outcome::Admitted
+                                && j.plaintext.is_some() =>
+                        {
+                            None
+                        }
+                        Some(j) => Some(j.outcome.failure().unwrap_or_else(|| {
+                            malformed("the account's history does not admit the finished record")
+                        })),
+                        None => Some(malformed("the finished record was not judged")),
+                    }
+                });
+                let Some(why) = refusal else {
+                    finished.changes = self.changes_since(&before);
+                    return Ok(finished);
+                };
+                // Not admitted: take the records back out and rebuild what was there, so that
+                // the account is as it was.
+                let gone: BTreeSet<(&str, &[u8])> = extra
+                    .records
+                    .iter()
+                    .map(|r| (r.path.as_str(), r.bytes.as_slice()))
+                    .collect();
+                self.records
+                    .retain(|r| !gone.contains(&(r.path.as_str(), r.bytes.as_slice())));
+                self.rebuild_in_place()?;
+                return Err(why);
+            }
+        }
         let mut objects = self.objects.clone();
         let mut records = self.records.clone();
         super::union(&mut objects, &extra.objects);

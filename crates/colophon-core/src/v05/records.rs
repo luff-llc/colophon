@@ -2213,6 +2213,221 @@ fn judge_impl(
     }
 }
 
+/// What [`judge_extend`] found about the records it added.
+pub(crate) struct Extended {
+    /// Whether some new record could change the §11.6 proposal fold (a proposal, an accept or a
+    /// decline), so that the proposals were folded again.
+    pub proposals_refolded: bool,
+}
+
+/// Whether the walk of the last judgement can be resumed for `new` records: nothing the walk
+/// read has changed (the same `print`, the same epoch keys, no revoked member's kept set, the
+/// same account) and the previous walk is remembered. Pure; changes nothing.
+fn can_resume(
+    auth: &RecordAuthority,
+    keys: &EpochKeys,
+    cache: &JudgeCache,
+    print: [u8; 32],
+) -> bool {
+    let account = auth.account();
+    if cache.account.as_deref() != Some(account.as_str()) {
+        return false;
+    }
+    let Some(last) = cache.last.as_ref() else {
+        return false;
+    };
+    let owners = auth
+        .state()
+        .members()
+        .iter()
+        .filter(|m| m.revoked_seq.is_some())
+        .any(|m| auth.revokes.contains_key(&m.request.member_id()));
+    if owners || !last.kept.is_empty() || last.print != print {
+        return false;
+    }
+    let keys_fp: Vec<(String, u64)> = auth
+        .namespaces()
+        .iter()
+        .flat_map(|ns| {
+            (1..=auth.latest_epoch(ns))
+                .filter(|e| keys.get(account, ns, *e).is_some())
+                .map(|e| (ns.clone(), e))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    last.keys == keys_fp
+}
+
+/// The judgement of a held set that grew by `held[at]` for each `at` in `new_at` (ascending,
+/// positions in the grown set), computed from the judgement of the set before: only the new
+/// records are parsed, signature-checked and walked, and `j` is changed to be exactly what
+/// [`judge_cached`] would give over the grown set. Returns `None`, changing nothing, when that
+/// cannot be promised: the walk cannot be resumed (see [`can_resume`]), a new record is no
+/// record at all, or some new record sorts before the last one walked in fold order.
+pub(crate) fn judge_extend(
+    auth: &RecordAuthority,
+    keys: &EpochKeys,
+    cache: &mut JudgeCache,
+    print: [u8; 32],
+    j: &mut Judgement,
+    fresh: &[(usize, &HeldRecord)],
+    total: usize,
+) -> Option<Extended> {
+    use sha2::{Digest, Sha256};
+    if fresh.is_empty() || j.records.len() + fresh.len() != total {
+        return None;
+    }
+    if !can_resume(auth, keys, cache, print) {
+        return None;
+    }
+    let account = auth.account().clone();
+    // Stage one of each new record, without touching the cache yet.
+    let mut run = JudgeStats::default();
+    let mut staged: Vec<(usize, Stage)> = Vec::with_capacity(fresh.len());
+    let mut fresh_stage: Vec<((String, [u8; 32]), StageEntry)> = Vec::new();
+    let mut fresh_verified: Vec<[u8; 32]> = Vec::new();
+    for &(at, h) in fresh {
+        let d: [u8; 32] = Sha256::digest(&h.bytes).into();
+        let k = (h.path.clone(), d);
+        let hit = cache.stage.get(&k).filter(|e| match &e.author {
+            None => true,
+            Some(a) => auth.member(a).map(|m| m.request.signing.clone()) == e.signing,
+        });
+        let stage = match hit {
+            Some(e) => e.stage.clone(),
+            None => {
+                run.parsed += 1;
+                let stage = stage_one(auth, h, false, &mut run.signatures, Some(&cache.verified));
+                let (author, signing) = match &stage {
+                    Stage::Bad(_) => return None,
+                    Stage::Unknown(c) | Stage::Ready(c) => (
+                        Some(c.header.author.clone()),
+                        auth.member(&c.header.author)
+                            .map(|m| m.request.signing.clone()),
+                    ),
+                };
+                if let (Stage::Ready(_), Some(sk)) = (&stage, &signing) {
+                    fresh_verified.push(verified_key(&h.bytes, sk));
+                }
+                fresh_stage.push((
+                    k,
+                    StageEntry {
+                        author,
+                        signing,
+                        stage: stage.clone(),
+                    },
+                ));
+                stage
+            }
+        };
+        if matches!(stage, Stage::Bad(_)) {
+            return None;
+        }
+        staged.push((at, stage));
+    }
+    let last = cache.last.as_ref()?;
+    // One candidate per body: a body already judged (or earlier among the new ones) is an alias.
+    let mut by_new: BTreeMap<String, usize> = BTreeMap::new();
+    let mut cands: Vec<(usize, Arc<Cand>, bool)> = Vec::new();
+    let mut aliases: Vec<(usize, String)> = Vec::new();
+    for (at, stage) in &staged {
+        let (c, unknown) = match stage {
+            Stage::Unknown(c) => (c.clone(), true),
+            Stage::Ready(c) => (c.clone(), false),
+            Stage::Bad(_) => return None,
+        };
+        if last.by_digest.contains_key(&c.digest) || by_new.contains_key(&c.digest) {
+            aliases.push((*at, c.digest.clone()));
+            continue;
+        }
+        by_new.insert(c.digest.clone(), *at);
+        cands.push((*at, c, unknown));
+    }
+    let mut order: Vec<usize> = (0..cands.len()).collect();
+    order.sort_by(|a, b| fold_key(&cands[*a].1).cmp(&fold_key(&cands[*b].1)));
+    if let Some(k) = last.last_key.as_ref() {
+        if order.iter().any(|i| fold_key(&cands[*i].1) <= *k) {
+            return None;
+        }
+    }
+    // From here nothing refuses: the walk resumes.
+    let mut last = cache.last.take()?;
+    let kept: BTreeMap<String, KeptSet> = BTreeMap::new();
+    let env = JudgeEnv {
+        auth,
+        keys,
+        account,
+        upgrade: auth.upgrade_seq(),
+        kept: &kept,
+    };
+    let mut judged_new: Vec<(usize, Judged)> = Vec::with_capacity(fresh.len());
+    for &ci in &order {
+        let (at, c, early) = &cands[ci];
+        run.walked += 1;
+        let jd = judge_candidate(
+            &env,
+            &mut last.state,
+            Some(&mut cache.opened),
+            &mut run,
+            c,
+            *early,
+        );
+        last.last_key = Some(fold_key(c));
+        last.by_digest.insert(c.digest.clone(), jd.clone());
+        judged_new.push((*at, jd));
+    }
+    for (at, digest) in aliases {
+        let mut jd = last.by_digest.get(&digest).cloned()?;
+        jd.path = fresh.iter().find(|(a, _)| *a == at)?.1.path.clone();
+        judged_new.push((at, jd));
+    }
+    judged_new.sort_by_key(|(at, _)| *at);
+    let proposals_refolded = judged_new.iter().any(|(_, jd)| {
+        jd.level == Some(Level::Propose)
+            || jd
+                .plaintext
+                .as_ref()
+                .is_some_and(|p| resolution_targets(p).is_some())
+    });
+    // Splice the new judgements in at their positions.
+    let old = std::mem::take(&mut j.records);
+    let mut merged: Vec<Judged> = Vec::with_capacity(total);
+    let mut old_it = old.into_iter();
+    let mut new_it = judged_new.into_iter().peekable();
+    for pos in 0..total {
+        match new_it.peek() {
+            Some((at, _)) if *at == pos => {
+                if let Some((_, jd)) = new_it.next() {
+                    merged.push(jd);
+                }
+            }
+            _ => {
+                if let Some(o) = old_it.next() {
+                    merged.push(o);
+                }
+            }
+        }
+    }
+    j.records = merged;
+    if proposals_refolded {
+        let (proposals, held_resolutions) = fold_proposals(auth, &j.records);
+        j.proposals = proposals;
+        j.held_resolutions = held_resolutions;
+    }
+    for (k, e) in fresh_stage {
+        cache.stage.insert(k, e);
+    }
+    cache.verified.extend(fresh_verified);
+    cache.totals.parsed += run.parsed;
+    cache.totals.signatures += run.signatures;
+    cache.totals.opened += run.opened;
+    cache.totals.walked += run.walked;
+    run.resumed = true;
+    cache.run = run;
+    cache.last = Some(last);
+    Some(Extended { proposals_refolded })
+}
+
 /// The §11.6 fold over the admitted, authenticated records.
 fn fold_proposals(
     auth: &RecordAuthority,
