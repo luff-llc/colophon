@@ -166,7 +166,7 @@ fn the_slots_the_shipped_swift_code_wrote_open_with_the_published_keys() {
     })
     .collect();
     for keys in [vec![by_vault], vec![by_owner]] {
-        let plan = CopyPlan::read(&lib, &files, &keys, None).unwrap();
+        let plan = CopyPlan::read(&lib, &files, &keys, None, &Destination::empty()).unwrap();
         // Authenticated, decrypted and admitted by the Swift rule: the only reason left to
         // omit them is the kind. The Swift wire kind `capture.link` is not the Rust module's
         // operation name, so verbatim they are not clean children (reported as a question).
@@ -206,15 +206,23 @@ fn a_host_translator_turns_the_real_swift_operations_into_clean_children() {
     })
     .collect();
     // The seam a domain translator (`domains::saved::import::translate`) plugs into.
-    let translate = |op: &SwiftOp<'_>| -> colophon_core::v05::Result<Vec<Child>> {
+    let translate = |op: &SwiftOp<'_>| -> colophon_core::v05::Result<Batch> {
         assert_eq!(op.kind, "capture.link");
-        Ok(vec![Child {
+        Ok(Batch::of(vec![Child {
             key: "c".into(),
             kind: "capture".into(),
             payload: json!({"id": op.payload["item"], "title": op.payload["title"], "url": op.payload["url"]}),
-        }])
+            baseline: false,
+        }]))
     };
-    let plan = CopyPlan::read(&lib, &files, &[key], Some(&translate)).unwrap();
+    let plan = CopyPlan::read(
+        &lib,
+        &files,
+        &[key],
+        Some(&translate),
+        &Destination::empty(),
+    )
+    .unwrap();
     assert_eq!(plan.omissions(), vec![], "both are copied");
     let batch = plan.next_batch(10);
     assert_eq!(batch.len(), 2);
@@ -365,7 +373,14 @@ fn a_handle_opens_only_its_own_library_and_a_key_only_its_own_records() {
     ));
     // A key opens only the records of its own library, namespace and epoch.
     let k_notes = mine.open_epoch_key(&lib_a, "notes", 1).unwrap();
-    let plan = CopyPlan::read(&lib_a, &a.files, &[k_notes], None).unwrap();
+    let plan = CopyPlan::read(
+        &lib_a,
+        &a.files,
+        &[k_notes],
+        Some(&translate),
+        &Destination::empty(),
+    )
+    .unwrap();
     let omitted: Vec<_> = plan.omissions().into_iter().map(|o| (o.0, o.2)).collect();
     assert_eq!(
         omitted,
@@ -388,7 +403,14 @@ fn plan_of(f: &SwiftFixture, host: &Host) -> (SwiftLibrary, CopyPlan) {
         .iter()
         .map(|n| h.open_epoch_key(&lib, n, 1).unwrap())
         .collect();
-    let plan = CopyPlan::read(&lib, &f.files, &keys, None).unwrap();
+    let plan = CopyPlan::read(
+        &lib,
+        &f.files,
+        &keys,
+        Some(&translate),
+        &Destination::empty(),
+    )
+    .unwrap();
     (lib, plan)
 }
 fn fake_header(namespace: &str, n: u8) -> OperationHeader {
@@ -455,7 +477,10 @@ fn a_copy_that_omits_or_duplicates_a_record_is_refused_each_by_its_reason() {
     let (_, mut plan) = plan_of(&f, &host);
     let all = plan.next_batch(10);
     // An unfinished copy: records neither written nor omitted.
-    let e = plan_of(&f, &host).1.finish().unwrap_err();
+    let e = plan_of(&f, &host)
+        .1
+        .finish(&Destination::empty())
+        .unwrap_err();
     assert!(e.detail().contains("neither written nor omitted"), "{e:?}");
     // A source record written twice.
     plan.record_written(&all[0].source_digest, &fake_header(&all[0].namespace, 1))
@@ -492,7 +517,7 @@ fn a_copy_that_omits_or_duplicates_a_record_is_refused_each_by_its_reason() {
     assert!(plan
         .record_omitted(&all[1].namespace, &all[1].source_digest, "")
         .is_err());
-    // The honest finish: three written, one omitted by the person, and the counts add up.
+    // A finish against a destination that does not hold what the plan says it wrote is refused.
     plan.record_written(&all[1].source_digest, &fake_header(&all[1].namespace, 5))
         .unwrap();
     plan.record_written(&all[2].source_digest, &fake_header(&all[2].namespace, 6))
@@ -503,14 +528,25 @@ fn a_copy_that_omits_or_duplicates_a_record_is_refused_each_by_its_reason() {
         "left behind by the person",
     )
     .unwrap();
-    let r = plan.finish().unwrap();
-    let total: u64 = r.namespaces.iter().map(|n| n.source).sum();
-    assert_eq!(total, 4);
-    for n in &r.namespaces {
-        assert_eq!(n.copied.len() as u64 + n.omitted, n.source);
+    let e = plan.finish(&Destination::empty()).unwrap_err();
+    assert!(e.detail().contains("destination does not hold"), "{e:?}");
+    // With everything omitted by the person the counts add up and nothing is claimed copied.
+    let (_, mut plan) = plan_of(&f, &host);
+    for it in plan.next_batch(10) {
+        plan.record_omitted(
+            &it.namespace,
+            &it.source_digest,
+            "left behind by the person",
+        )
+        .unwrap();
     }
-    assert_eq!(r.omitted.len(), 1);
-    assert_eq!(r.omitted[0].1, "left behind by the person");
+    let r = plan.finish(&Destination::empty()).unwrap();
+    assert_eq!(r.namespaces().iter().map(|n| n.source).sum::<u64>(), 4);
+    for n in r.namespaces() {
+        assert_eq!(n.copied.len() as u64 + n.omitted, n.source);
+        assert!(n.copied.is_empty());
+    }
+    assert_eq!(r.omitted().len(), 4);
 }
 
 #[test]
@@ -553,7 +589,8 @@ fn a_damaged_hostile_or_out_of_order_library_never_panics_and_loses_nothing_sile
         path: "authority/00000001.json".into(),
         bytes: vec![],
     });
-    let plan = CopyPlan::read(&lib, &files, &keys, None).unwrap();
+    let plan =
+        CopyPlan::read(&lib, &files, &keys, Some(&translate), &Destination::empty()).unwrap();
     let why: std::collections::BTreeMap<String, usize> =
         plan.omissions()
             .into_iter()
@@ -575,13 +612,13 @@ fn a_damaged_hostile_or_out_of_order_library_never_panics_and_loses_nothing_sile
             bytes: vec![],
         })
         .collect();
-    assert!(CopyPlan::read(&lib, &many, &keys, None).is_err());
+    assert!(CopyPlan::read(&lib, &many, &keys, Some(&translate), &Destination::empty()).is_err());
     // A file over the bound is omitted, not read.
     let big = vec![SourceFile {
         path: "ops/x/notes/000000000001-yyyyyyyyyyyyyyyyyyyyy.json".into(),
         bytes: vec![b' '; MAX_FILE_BYTES + 1],
     }];
-    let p = CopyPlan::read(&lib, &big, &keys, None).unwrap();
+    let p = CopyPlan::read(&lib, &big, &keys, Some(&translate), &Destination::empty()).unwrap();
     assert_eq!(p.omissions()[0].2, "tooLarge");
 }
 
@@ -608,8 +645,8 @@ fn the_swift_admission_rule_decides_what_is_copied() {
             epoch,
             clock,
             id,
-            "createNotebook",
-            json!({"id": id, "title": "T"}),
+            "notebook.create",
+            json!({"notebook": id, "title": "T"}),
             auth,
         )
     };
@@ -637,7 +674,8 @@ fn the_swift_admission_rule_decides_what_is_copied() {
             1,
         ), // fine
     ];
-    let plan = CopyPlan::read(&lib, &files, &keys, None).unwrap();
+    let plan =
+        CopyPlan::read(&lib, &files, &keys, Some(&translate), &Destination::empty()).unwrap();
     let why: Vec<String> = plan.omissions().into_iter().map(|o| o.2).collect();
     assert!(
         why.iter().any(|w| w.starts_with("held: cites authority")),
@@ -759,4 +797,188 @@ fn the_generators_swift_fixtures_open_in_every_form_and_the_namespace_key_authen
         .unwrap();
     let k = h.open_epoch_key(&lib, "reading.saved", 1).unwrap();
     assert_eq!((k.namespace(), k.epoch()), ("reading.saved", 1));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The fix round.
+
+#[test]
+fn a_record_under_a_namespace_the_predecessor_never_named_is_omitted_with_a_reason() {
+    let mut host = Host::new();
+    let f = keyring_library(&mut host, false);
+    let lib = SwiftLibrary::read(&f.entries).unwrap();
+    let ghost = swift_op(
+        &host,
+        "",
+        &f.nskeys["notes"],
+        "ghost",
+        &f.m1,
+        1,
+        9,
+        "99999999-aaaa-4aaa-8aaa-000000000009",
+        "notebook.create",
+        json!({"notebook": "x", "title": "T"}),
+        10,
+    );
+    let plan =
+        CopyPlan::read(&lib, &[ghost], &[], Some(&translate), &Destination::empty()).unwrap();
+    assert_eq!(
+        plan.omissions()
+            .into_iter()
+            .map(|o| (o.0, o.2))
+            .collect::<Vec<_>>(),
+        vec![(String::new(), "notAPredecessorNamespace".to_string())]
+    );
+    assert_eq!(
+        plan.source_counts().keys().cloned().collect::<Vec<_>>(),
+        vec!["notes", "reading.saved"]
+    );
+}
+
+#[test]
+fn a_granted_namespace_with_no_epoch_is_a_predecessor_namespace_with_no_records() {
+    let mut host = Host::new();
+    let f = keyring_library_with(&mut host, false, true, false);
+    let lib = SwiftLibrary::read(&f.entries).unwrap();
+    assert_eq!(
+        lib.namespaces(),
+        vec!["notes", "reading.saved"],
+        "no epoch for reading.books"
+    );
+    let all = predecessor_namespaces(&lib).unwrap();
+    assert!(all.contains("reading.books"));
+    let plan = CopyPlan::read(&lib, &[], &[], Some(&translate), &Destination::empty()).unwrap();
+    assert_eq!(plan.source_counts().get("reading.books"), Some(&0));
+}
+
+#[test]
+fn a_duplicate_operation_is_decided_by_body_digest_never_by_file_order() {
+    let mut host = Host::new();
+    let f = keyring_library(&mut host, false);
+    let (lib, _) = plan_of(&f, &host);
+    let h = open_with_host(&host, &lib, 0);
+    let keys: Vec<_> = ["notes", "reading.saved"]
+        .iter()
+        .map(|n| h.open_epoch_key(&lib, n, 1).unwrap())
+        .collect();
+    // The same operation twice with different (both authentic) header bodies.
+    let a = f.files[0].clone();
+    let mut v: Value = serde_json::from_slice(&a.bytes).unwrap();
+    let body = dec(v["body"].as_str().unwrap());
+    let mut hv: Value = serde_json::from_slice(&body).unwrap();
+    hv["x"] = json!(1);
+    let nb = canonical(&hv).unwrap();
+    v["body"] = json!(b64(&nb));
+    v["signature"] = json!(b64(&host.sign(&f.m1.id, &nb)));
+    let b = SourceFile {
+        path: a.path.clone(),
+        bytes: canonical(&v).unwrap(),
+    };
+    let run = |files: Vec<SourceFile>| {
+        let p =
+            CopyPlan::read(&lib, &files, &keys, Some(&translate), &Destination::empty()).unwrap();
+        (
+            p.next_batch(10)
+                .iter()
+                .map(|i| i.source_digest.clone())
+                .collect::<Vec<_>>(),
+            p.omissions(),
+        )
+    };
+    let mut rest: Vec<SourceFile> = f.files[1..].to_vec();
+    let mut one = vec![a.clone(), b.clone()];
+    one.append(&mut rest.clone());
+    let mut two = vec![b, a];
+    two.append(&mut rest);
+    let (p1, o1) = run(one);
+    let (p2, o2) = run(two);
+    let (mut p1, mut p2) = (p1, p2);
+    p1.sort();
+    p2.sort();
+    assert_eq!(p1, p2);
+    assert_eq!(o1.iter().filter(|o| o.2 == "duplicate").count(), 1);
+    assert_eq!(
+        o1.iter()
+            .map(|o| o.1.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        o2.iter()
+            .map(|o| o.1.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn one_malformed_slot_or_share_fails_only_itself() {
+    let mut host = Host::new();
+    let f = keyring_library_opts(&mut host, false, false, false, true);
+    let lib = SwiftLibrary::read(&f.entries).unwrap();
+    assert_eq!(lib.problems().len(), 1, "{:?}", lib.problems());
+    assert!(lib.problems()[0].contains("share"));
+    // The good slots and shares still open.
+    let h = open_with_host(&host, &lib, 0);
+    h.open_epoch_key(&lib, "notes", 1).unwrap();
+    // A malformed slot: only that slot is unusable.
+    let mut entries = f.entries.clone();
+    let mut v: Value = serde_json::from_slice(&entries[1]).unwrap();
+    let mut body: Value = serde_json::from_slice(&dec(v["body"].as_str().unwrap())).unwrap();
+    body["slots"].as_array_mut().unwrap().push(json!({"kind": "sealed", "label": "bad", "recipient": {"signing": "AA==", "agreement": "AA=="}, "sealed": {"ephemeral": "AA==", "box": "AA=="}}));
+    let nb = canonical(&body).unwrap();
+    v["body"] = json!(b64(&nb));
+    v["signature"] = json!(b64(&host.sign(&f.root.id, &nb)));
+    entries[1] = canonical(&v).unwrap();
+    // The chain after it names the old digest, so verify only the keyring entry's slots here.
+    let lib = SwiftLibrary::read(&entries[..2]).unwrap();
+    assert!(lib.slots().last().unwrap().problem().is_some());
+    assert_eq!(lib.problems().len(), 1);
+    assert!(lib.begin_open(2).is_err());
+    assert!(lib.begin_open(0).is_ok());
+}
+
+#[test]
+fn a_ceremony_pairs_by_controller_and_credential_and_asks_for_user_verification() {
+    use colophon_core::v05::slots::PrfRequest;
+    let mut host = Host::new();
+    let f = keyring_library(&mut host, false);
+    let lib = SwiftLibrary::read(&f.entries).unwrap();
+    let req = |controller: &str, credential: &[u8]| PrfRequest {
+        controller: controller.into(),
+        rp: "id.example".into(),
+        credential: credential.to_vec(),
+        salt: [1; 32],
+        challenge: [2; 32],
+    };
+    let (ok, un) = lib
+        .pair_ceremonies(1, &[req(&f.passkey_id, &f.credential)])
+        .unwrap();
+    assert_eq!((ok.len(), un.len()), (1, 0));
+    assert!(ok[0].user_verification && ok[0].old_salt == f.old_salt);
+    // The right controller with another credential, and another controller, do not pair.
+    let (ok, un) = lib
+        .pair_ceremonies(1, &[req(&f.passkey_id, b"other")])
+        .unwrap();
+    assert_eq!(ok.len(), 0);
+    assert_eq!(
+        un.len(),
+        2,
+        "the new request and the old route are both unpaired: {un:?}"
+    );
+    let (ok, _) = lib
+        .pair_ceremonies(1, &[req(&f.security_id, &f.credential)])
+        .unwrap();
+    assert_eq!(ok.len(), 0);
+    assert!(lib.pair_ceremonies(99, &[]).is_err());
+}
+
+#[test]
+fn a_plan_and_its_items_never_print_decrypted_payloads() {
+    let mut host = Host::new();
+    let f = keyring_library(&mut host, false);
+    let (_, plan) = plan_of(&f, &host);
+    let item = plan.next_batch(1).remove(0);
+    for shown in [format!("{plan:?}"), format!("{item:?}")] {
+        assert!(
+            !shown.contains("Alpha") && !shown.contains("Beta") && !shown.contains("example.com"),
+            "{shown}"
+        );
+    }
 }

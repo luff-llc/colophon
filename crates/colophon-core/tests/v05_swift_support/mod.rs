@@ -253,6 +253,30 @@ pub fn webauthn_controller(
 /// two namespaces whose epoch-1 keys are sealed to the vault and each member; and operations by
 /// both members in both namespaces (`ops/<author>/<namespace>/<clock>-<id>.json`).
 pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
+    keyring_library_with(host, combined, false, false)
+}
+
+/// The same library, optionally with grants that also name `reading.books` (a namespace that was
+/// granted and never given an epoch: the Swift writer's default, `createMissingEpochs: false`)
+/// and with the second member revoked and granted again (the shipped fold ignores the re-grant).
+pub fn keyring_library_with(
+    host: &mut Host,
+    combined: bool,
+    extra_namespace: bool,
+    regrant: bool,
+) -> SwiftFixture {
+    keyring_library_opts(host, combined, extra_namespace, regrant, false)
+}
+
+/// As [`keyring_library_with`], and optionally with one more `shareKey` whose key is not a
+/// valid sealed key (a controller-written entry Swift ignores when it opens nothing).
+pub fn keyring_library_opts(
+    host: &mut Host,
+    combined: bool,
+    extra_namespace: bool,
+    regrant: bool,
+    bad_share: bool,
+) -> SwiftFixture {
     let root = host.identity(1);
     let recovery = host.identity(2);
     let device = host.identity(3);
@@ -329,7 +353,8 @@ pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
             host,
             &mut entries,
             json!({"kind": "grant", "member": pid(&m.1, &m.2), "role": role, "custody": "software", "label": label,
-                   "namespaces": ["notes", "reading.saved"], "write": true}),
+                   "namespaces": if extra_namespace { json!(["notes", "reading.saved", "reading.books"]) }
+                                 else { json!(["notes", "reading.saved"]) }, "write": true}),
             &mut seq,
         );
     }
@@ -352,6 +377,30 @@ pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
             );
         }
     }
+    if regrant {
+        controller_entry(
+            host,
+            &mut entries,
+            json!({"kind": "revoke", "memberID": m2.0, "kept": []}),
+            &mut seq,
+        );
+        controller_entry(
+            host,
+            &mut entries,
+            json!({"kind": "grant", "member": pid(&m2.1, &m2.2), "role": "app", "custody": "software",
+                   "label": "Tablet", "namespaces": ["notes", "reading.saved"], "write": true}),
+            &mut seq,
+        );
+    }
+    if bad_share {
+        controller_entry(
+            host,
+            &mut entries,
+            json!({"kind": "shareKey", "memberID": m1.0, "namespace": "notes", "epoch": 1,
+                   "key": {"ephemeral": "AAAA", "box": "AAAA"}}),
+            &mut seq,
+        );
+    }
     let library = body_digest(&entries[0])[..32].to_string();
     let authority = seq;
     // Operations: each member writes one in each namespace; clocks 1 and 2.
@@ -365,35 +414,35 @@ pub fn keyring_library(host: &mut Host, combined: bool) -> SwiftFixture {
     let ops: [(&str, &str, &Member, u64, &str, Value); 4] = [
         (
             "notes",
-            "createNotebook",
+            "notebook.create",
             &m1m,
             1,
             "11111111-aaaa-4aaa-8aaa-000000000001",
-            json!({"id": "nb1", "title": "Alpha"}),
+            json!({"notebook": "nb1", "title": "Alpha"}),
         ),
         (
             "notes",
-            "createNotebook",
+            "notebook.create",
             &m2m,
             2,
             "22222222-bbbb-4bbb-8bbb-000000000002",
-            json!({"id": "nb2", "title": "Beta"}),
+            json!({"notebook": "nb2", "title": "Beta"}),
         ),
         (
             "reading.saved",
-            "capture",
+            "capture.link",
             &m1m,
             1,
             "33333333-cccc-4ccc-8ccc-000000000003",
-            json!({"id": "i1", "title": "One", "url": "https://example.com/1"}),
+            json!({"item": "i1", "title": "One", "url": "https://example.com/1"}),
         ),
         (
             "reading.saved",
-            "capture",
+            "capture.link",
             &m2m,
             2,
             "44444444-dddd-4ddd-8ddd-000000000004",
-            json!({"id": "i2", "title": "Two", "url": "https://example.com/2"}),
+            json!({"item": "i2", "title": "Two", "url": "https://example.com/2"}),
         ),
     ];
     for (ns, kind, m, clock, id, payload) in ops {
@@ -482,4 +531,33 @@ pub fn swift_op(
         path: format!("ops/{}/{ns}/{clock:012}-{id}.json", author.id),
         bytes: rec,
     }
+}
+
+/// The host translator of these fixtures: the Swift wire kinds (with dots) into the Rust domain
+/// modules' operations, as the Swift side does at cutover.
+pub fn translate(
+    op: &colophon_core::v05::swift_copy::SwiftOp<'_>,
+) -> colophon_core::v05::Result<colophon_core::v05::swift_copy::Batch> {
+    use colophon_core::v05::swift_copy::{Batch, Child};
+    let (kind, payload) = match op.kind {
+        "notebook.create" => (
+            "createNotebook",
+            json!({"id": op.payload["notebook"], "title": op.payload["title"]}),
+        ),
+        "capture.link" => (
+            "capture",
+            json!({"id": op.payload["item"], "title": op.payload["title"], "url": op.payload["url"]}),
+        ),
+        other => {
+            return Err(colophon_core::v05::Failure::Malformed(format!(
+                "no translation for {other}"
+            )))
+        }
+    };
+    Ok(Batch::of(vec![Child {
+        key: "c".into(),
+        kind: kind.into(),
+        payload,
+        baseline: false,
+    }]))
 }

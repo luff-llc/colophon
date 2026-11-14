@@ -38,6 +38,9 @@ use super::signature::verify_raw;
 use super::swift_slots::{SwiftEpochKey, SwiftLibrary};
 use super::write::succession::MigratedNamespace;
 use super::{malformed, require, Result};
+use crate::domain::{AuthorContext, ProjectionState};
+use crate::imports::ImportState;
+use crate::model::OperationView;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -78,7 +81,8 @@ pub struct SwiftOp<'a> {
     /// record the plan judged.
     pub admitted_order: u64,
 }
-/// A clean child of an import batch: a destination module's operation name and payload.
+/// A child of an import batch: a destination module's operation and payload, as
+/// `imports::ImportChild` takes it.
 #[derive(Clone, Debug)]
 pub struct Child {
     /// A key unique within the batch.
@@ -87,13 +91,50 @@ pub struct Child {
     pub kind: String,
     /// The clean payload.
     pub payload: Value,
+    /// A trusted importer receipt for the child (`baseline`), never inferred from a payload.
+    pub baseline: bool,
 }
-/// Maps an admitted Swift operation to the clean children of its batch. The default (no
-/// translator) is one child with the original kind and payload verbatim, which the destination
-/// accepts only where the Swift kind is the module's operation name. A domain translator
-/// (`domains::*::import::translate`) needs the original Swift codec's decoded context, which the
-/// core cannot produce, so a host supplies it here.
-pub type Translator<'a> = dyn Fn(&SwiftOp<'_>) -> Result<Vec<Child>> + 'a;
+/// What a host translator says about one admitted Swift operation: everything an import batch
+/// can carry (`docs/engine.md`, Engine3). The core adds the batch's `key` and the evidence
+/// fields that bind it to its source (library, author, label, operation ID, clock, `created`,
+/// epoch, authority, kind, version, path, source body digest); a translator can change the
+/// representation, never add a record, drop one silently or attribute one to another author.
+#[derive(Clone, Debug)]
+pub struct Batch {
+    /// The effective outputs, in order (may be empty for evidence-only records).
+    pub children: Vec<Child>,
+    /// Historical alternatives (`imports::ImportBatch::alternatives`).
+    pub alternatives: Vec<Value>,
+    /// Source occurrence key to `(category, destination id)` reservations.
+    pub identities: BTreeMap<String, (String, String)>,
+    /// Encrypted blob manifests (`blobs::BlobManifest` JSON) the host has staged.
+    pub blobs: Vec<Value>,
+    /// The domain outcome the source reader evaluated: `applied`, `noEffect`, `conflict`, ...
+    pub outcome: String,
+    /// Extra evidence, kept under `evidence.translation` (it cannot overwrite a core field).
+    pub evidence: Value,
+}
+impl Batch {
+    /// A batch of children only, outcome `applied`.
+    pub fn of(children: Vec<Child>) -> Self {
+        Self {
+            children,
+            alternatives: Vec::new(),
+            identities: BTreeMap::new(),
+            blobs: Vec::new(),
+            outcome: "applied".into(),
+            evidence: Value::Null,
+        }
+    }
+}
+/// Maps an admitted Swift operation to its batch. The shipped apps hold the Swift codecs, so
+/// translating Swift wire kinds into the Rust domain modules' operations is the host's job
+/// (as the 0.4 `colophon-clean-copy` tool does), not the core's. With no translator the batch is
+/// one child with the original kind and payload verbatim, which the destination accepts only
+/// where the two coincide. The core validates every result against the destination's cumulative
+/// projection with `imports::ImportState::validate_batch`; a translation it refuses, or an error,
+/// omits the record with the reason.
+pub type Translator<'a> = dyn Fn(&SwiftOp<'_>) -> Result<Batch> + 'a;
 
 /// One file of the predecessor's record store: its path and exact bytes.
 #[derive(Clone, Debug)]
@@ -229,23 +270,58 @@ fn swift_date(s: &str) -> Result<i64> {
     parse_date(s).ok_or_else(|| malformed("Swift date"))
 }
 
-/// The predecessor's members at its head, by the Swift fold.
+/// The predecessor's current members at its head: the Swift verifier's own fold
+/// (`history::swift`), which ignores a grant to a revoked key as the shipped reader does. The
+/// label and role are those of the member's first grant (`AuthorityState.swift:297-299`).
 pub fn swift_members(lib: &SwiftLibrary) -> Result<Vec<SwiftMember>> {
-    Ok(fold(lib)?
+    let f = fold(lib)?;
+    let snap = lib
+        .history()
+        .states
+        .get((f.latest as usize).saturating_sub(1))
+        .ok_or_else(|| malformed("Swift predecessor has no state"))?;
+    Ok(snap
         .members
-        .into_iter()
+        .keys()
+        .filter_map(|id| f.members.get(id).map(|m| (id, m)))
         .map(|(id, m)| SwiftMember {
             budget: m.grants.iter().any(|g| {
                 g.caveats
                     .iter()
                     .any(|c| c["kind"] == "budget" || c.get("budget").is_some())
             }),
-            revoked: m.revoked_at.is_some(),
-            label: m.label,
-            role: m.role,
-            id,
+            revoked: false,
+            label: m.label.clone(),
+            role: m.role.clone(),
+            id: id.clone(),
         })
         .collect())
+}
+
+/// Every namespace the predecessor names up to its head: by a grant or by a `shareKey`
+/// (§15.4 "every predecessor namespace"; the rule `prepare_migration` applies). A namespace that
+/// was granted and never given an epoch is one, with no records.
+pub fn predecessor_namespaces(lib: &SwiftLibrary) -> Result<BTreeSet<String>> {
+    let f = fold(lib)?;
+    let mut out = BTreeSet::new();
+    for e in lib.history().entries.iter().take(f.latest as usize) {
+        match e.value["kind"].as_str() {
+            Some("grant") => {
+                for n in e.value["namespaces"].as_array().into_iter().flatten() {
+                    if let Some(n) = n.as_str() {
+                        out.insert(n.to_string());
+                    }
+                }
+            }
+            Some("shareKey") => {
+                if let Some(n) = e.value["namespace"].as_str() {
+                    out.insert(n.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// What the Swift admission rule says (`Admission.swift:23-49`).
@@ -432,44 +508,188 @@ enum State {
 #[derive(Clone, Debug)]
 struct Item {
     source_digest: String,
+    /// The batch key (empty for a record that never reached a batch).
+    key: String,
     /// `(clock, author, id)`: the Swift fold order.
     order: (u64, String, String),
     state: State,
 }
 
 /// An import write the host makes with the copying member's key.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CopyItem {
     /// The destination namespace (the source's).
     pub namespace: String,
     /// The body digest of the source record this write carries.
     pub source_digest: String,
+    /// The batch's key.
+    pub key: String,
     /// The payload of the `colophon.importBatch` operation.
     pub payload: Value,
 }
+impl std::fmt::Debug for CopyItem {
+    // The payload is a decrypted record: it is never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CopyItem({}, {}, ..)",
+            self.namespace, self.source_digest
+        )
+    }
+}
 
-/// What a finished copy reports, to feed the `migration` entry.
+/// An import batch the destination already holds, as an account reports it
+/// (`Account::swift_copy_destination`). Fields are private: only the account makes one.
+#[derive(Clone)]
+pub struct DestinationBatch {
+    namespace: String,
+    key: String,
+    source_digest: String,
+    source_library: String,
+    destination_digest: String,
+    valid: bool,
+    payload: Value,
+}
+impl DestinationBatch {
+    pub(crate) fn new(
+        namespace: String,
+        destination_digest: String,
+        valid: bool,
+        payload: Value,
+    ) -> Option<Self> {
+        Some(Self {
+            namespace,
+            key: payload.get("key")?.as_str()?.to_string(),
+            source_digest: payload["evidence"]["bodyDigest"].as_str()?.to_string(),
+            source_library: payload["evidence"]["sourceLibrary"].as_str()?.to_string(),
+            destination_digest,
+            valid,
+            payload,
+        })
+    }
+}
+/// What the destination holds, in its fold order.
+#[derive(Clone, Default)]
+pub struct Destination {
+    batches: Vec<DestinationBatch>,
+}
+impl Destination {
+    /// A destination that holds nothing yet.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+    pub(crate) fn from_batches(batches: Vec<DestinationBatch>) -> Self {
+        Self { batches }
+    }
+}
+impl std::fmt::Debug for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Destination({} batches)", self.batches.len())
+    }
+}
+
+/// What a finished copy reports, to feed the `migration` entry. Its fields are private and only
+/// [`CopyPlan::finish`] makes one, after reconciling with what the destination holds.
+///
+/// ```compile_fail
+/// let _ = colophon_core::v05::swift_copy::CopyResult {
+///     namespaces: vec![],
+///     omitted: vec![],
+///     blobs_not_copied: vec![],
+/// };
+/// ```
 #[derive(Clone, Debug)]
 pub struct CopyResult {
+    namespaces: Vec<MigratedNamespace>,
+    omitted: Vec<(String, String)>,
+    blobs_not_copied: Vec<String>,
+}
+impl CopyResult {
     /// One entry per predecessor namespace: `source`, the destination digests copied, the
     /// omitted count.
-    pub namespaces: Vec<MigratedNamespace>,
-    /// Every source record not copied: `(body digest, reason)`, sorted by digest.
-    pub omitted: Vec<(String, String)>,
+    pub fn namespaces(&self) -> &[MigratedNamespace] {
+        &self.namespaces
+    }
+    /// Every source record not copied: `(body digest, reason)`, sorted.
+    pub fn omitted(&self) -> &[(String, String)] {
+        &self.omitted
+    }
     /// The blob paths the host listed, which are not copied.
-    pub blobs_not_copied: Vec<String>,
+    pub fn blobs_not_copied(&self) -> &[String] {
+        &self.blobs_not_copied
+    }
+}
+
+/// The destination's fold as the copy has built it so far: what the next batch is judged against
+/// (`imports::ImportState` and the domain projection, cumulative, in the determined order).
+struct Scratch {
+    import: ImportState,
+    projection: ProjectionState,
+    ctx: AuthorContext,
+    n: u64,
+}
+impl Scratch {
+    fn new(namespace: &str) -> Self {
+        Self {
+            import: ImportState::new(namespace),
+            projection: ProjectionState::new(namespace),
+            ctx: AuthorContext {
+                kind: crate::model::MemberKind::Device,
+                library: "0".repeat(32),
+                grant: Some(crate::model::Grant {
+                    namespaces: vec![namespace.to_string()],
+                    access: vec![crate::model::Access::Read, crate::model::Access::Write],
+                    expires: None,
+                    write_budget: None,
+                    import: Some(true),
+                }),
+            },
+            n: 0,
+        }
+    }
+    /// The destination's own validator against the cumulative state.
+    fn check(&self, payload: &Value) -> Result<()> {
+        self.import
+            .validate_batch(payload, &self.projection)
+            .map(|_| ())
+            .map_err(|e| malformed(e.to_string()))
+    }
+    fn apply(&mut self, payload: &Value) {
+        self.n += 1;
+        let op = OperationView {
+            id: format!("scratch-{}", self.n),
+            kind: crate::imports::BATCH_KIND.into(),
+            author: "0".repeat(32),
+            author_label: "Copier".into(),
+            origin: "person".into(),
+            clock: self.n,
+            created: "2026-01-01T00:00:00Z".into(),
+            payload: payload.clone(),
+        };
+        self.import.apply(&mut self.projection, &op, &self.ctx);
+    }
 }
 
 /// A copy in progress. See the module header.
-#[derive(Debug)]
 pub struct CopyPlan {
     library: String,
     namespaces: BTreeMap<String, Vec<Item>>,
-    /// Source records that belong to no namespace (an unreadable header and no namespace in the
-    /// path): in `omitted` only.
+    /// Source records that belong to no predecessor namespace: in `omitted` only.
     unassigned: Vec<(String, String)>,
     destinations: BTreeSet<String>,
     blobs: Vec<String>,
+}
+impl std::fmt::Debug for CopyPlan {
+    // Never the decrypted payloads.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CopyPlan({}, {} namespaces, {} pending, ..)",
+            self.library,
+            self.namespaces.len(),
+            self.pending()
+        )
+    }
 }
 
 struct PathParts<'a> {
@@ -507,43 +727,52 @@ struct Candidate {
     op: Operation,
 }
 
+fn omit_into(
+    namespaces: &mut BTreeMap<String, Vec<Item>>,
+    unassigned: &mut Vec<(String, String)>,
+    namespace: Option<&str>,
+    digest: String,
+    reason: &str,
+) {
+    match namespace.filter(|n| namespaces.contains_key(*n)) {
+        Some(ns) => namespaces.entry(ns.to_string()).or_default().push(Item {
+            source_digest: digest,
+            key: String::new(),
+            order: (0, String::new(), String::new()),
+            state: State::Omitted(reason.to_string()),
+        }),
+        None => unassigned.push((digest, reason.to_string())),
+    }
+}
+
 impl CopyPlan {
     /// Read the predecessor's files and plan the copy. `keys` are the namespace keys the host
-    /// opened (any number, any library: a key of another library or namespace never opens a
-    /// record that is not its own). `files` are every file of the predecessor's record store
-    /// the host holds.
+    /// opened (a key of another library, namespace or epoch never opens a record that is not its
+    /// own); `files` are every file of the predecessor's record store the host holds (a file it
+    /// does not pass is neither copied nor counted); `destination` is what the destination already
+    /// holds, so a copy interrupted half way is rebuilt and continues: a batch of the destination
+    /// is recognised by its key and evidence (library and source body digest) and is neither
+    /// written again nor lost.
+    ///
+    /// The namespaces are exactly those `prepare_migration` requires (a grant or a `shareKey` up to
+    /// the head), a granted namespace with no epoch included with no records. A file under any
+    /// other namespace is omitted, with a reason, and belongs to none.
     pub fn read(
         lib: &SwiftLibrary,
         files: &[SourceFile],
         keys: &[SwiftEpochKey],
         translate: Option<&Translator<'_>>,
+        destination: &Destination,
     ) -> Result<Self> {
         require(files.len() <= MAX_FILES, "too many source files")?;
         let fold = fold(lib)?;
         let library = lib.library().to_string();
-        let mut namespaces: BTreeMap<String, Vec<Item>> = lib
-            .namespaces()
-            .into_iter()
-            .map(|n| (n, Vec::new()))
-            .collect();
+        let known = predecessor_namespaces(lib)?;
+        let mut namespaces: BTreeMap<String, Vec<Item>> =
+            known.iter().map(|n| (n.clone(), Vec::new())).collect();
         let mut unassigned = Vec::new();
         let mut blobs = Vec::new();
-        let mut candidates: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
-        let mut seen_ids: BTreeSet<(String, String)> = BTreeSet::new();
-        let omit = |namespaces: &mut BTreeMap<String, Vec<Item>>,
-                    unassigned: &mut Vec<(String, String)>,
-                    namespace: Option<&str>,
-                    d: String,
-                    reason: String| {
-            match namespace {
-                Some(ns) => namespaces.entry(ns.to_string()).or_default().push(Item {
-                    source_digest: d,
-                    order: (0, String::new(), String::new()),
-                    state: State::Omitted(reason),
-                }),
-                None => unassigned.push((d, reason)),
-            }
-        };
+        let mut candidates: Vec<Candidate> = Vec::new();
         for f in files {
             if f.path.starts_with("blobs/") {
                 blobs.push(f.path.clone());
@@ -554,29 +783,20 @@ impl CopyPlan {
                 continue; // authority, requests: not records.
             }
             let whole = digest(&f.bytes);
-            let ns_of_path = f
-                .path
-                .split('/')
-                .nth(2)
-                .filter(|_| f.path.split('/').count() == 4);
-            let ns_of_state = f.path.split('/').nth(2);
+            let segs: Vec<&str> = f.path.split('/').collect();
+            let ns_of_path = segs.get(2).copied().filter(|_| segs.len() == 4);
             if live {
-                omit(
-                    &mut namespaces,
-                    &mut unassigned,
-                    ns_of_state,
-                    whole,
-                    "liveState".into(),
-                );
+                let ns = segs.get(2).copied();
+                omit_into(&mut namespaces, &mut unassigned, ns, whole, "liveState");
                 continue;
             }
             if f.bytes.len() > MAX_FILE_BYTES {
-                omit(
+                omit_into(
                     &mut namespaces,
                     &mut unassigned,
                     ns_of_path,
                     whole,
-                    "tooLarge".into(),
+                    "tooLarge",
                 );
                 continue;
             }
@@ -597,12 +817,12 @@ impl CopyPlan {
                 Ok((body.clone(), strict_parse(&body)?, sig))
             })();
             let Ok((body, header, sig)) = parsed else {
-                omit(
+                omit_into(
                     &mut namespaces,
                     &mut unassigned,
                     ns_of_path,
                     whole,
-                    "invalidPayload".into(),
+                    "invalidPayload",
                 );
                 continue;
             };
@@ -620,34 +840,38 @@ impl CopyPlan {
                     .and_then(Value::as_str)
                     .and_then(|s| decode_base64(s, MAX_FILE_BYTES).ok()),
             ) else {
-                omit(
+                omit_into(
                     &mut namespaces,
                     &mut unassigned,
                     ns_of_path,
                     source_digest,
-                    "invalidPayload".into(),
+                    "invalidPayload",
                 );
                 continue;
             };
-            let mut omit_here = |reason: &str| {
-                omit(
+            let mut fail = |reason: &str| {
+                omit_into(
                     &mut namespaces,
                     &mut unassigned,
                     Some(ns),
                     source_digest.clone(),
-                    reason.into(),
+                    reason,
                 )
             };
+            if !known.contains(ns) {
+                fail("notAPredecessorNamespace");
+                continue;
+            }
             if path.author != author || path.namespace.is_some_and(|p| p != ns) {
-                omit_here("pathMismatch");
+                fail("pathMismatch");
                 continue;
             }
             let Some(member) = fold.members.get(author) else {
-                omit_here("notAMember");
+                fail("notAMember");
                 continue;
             };
             if verify_raw(&member.signing, &body, &sig).is_err() {
-                omit_here("badSignature");
+                fail("badSignature");
                 continue;
             }
             let plain = keys
@@ -655,37 +879,68 @@ impl CopyPlan {
                 .find(|k| k.namespace() == ns && k.epoch() == epoch && k.library() == library)
                 .and_then(|k| k.open_operation(&library, ns, epoch, &sealed));
             let Some(plain) = plain else {
-                omit_here("unreadable");
+                fail("unreadable");
                 continue;
             };
             let Ok(op) = operation_of(&plain) else {
-                omit_here("invalidPayload");
+                fail("invalidPayload");
                 continue;
             };
             if op.id != path.id {
-                omit_here("pathMismatch");
+                fail("pathMismatch");
                 continue;
             }
-            if !seen_ids.insert((author.to_string(), op.id.clone())) {
-                omit_here("duplicate");
-                continue;
-            }
-            candidates
-                .entry(ns.to_string())
-                .or_default()
-                .push(Candidate {
-                    namespace: ns.to_string(),
-                    source_digest,
-                    author: author.to_string(),
-                    epoch,
-                    path: f.path.clone(),
-                    op,
-                });
+            candidates.push(Candidate {
+                namespace: ns.to_string(),
+                source_digest,
+                author: author.to_string(),
+                epoch,
+                path: f.path.clone(),
+                op,
+            });
         }
-        for (ns, mut list) in candidates {
+        // A duplicate `(author, id)` is decided by the body digest, never by the order the host
+        // listed the files in: the authentic record with the lowest digest is the one.
+        candidates.sort_by(|a, b| {
+            (&a.author, &a.op.id, &a.source_digest).cmp(&(&b.author, &b.op.id, &b.source_digest))
+        });
+        let mut by_ns: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
+        let mut last: Option<(String, String)> = None;
+        for c in candidates {
+            let id = (c.author.clone(), c.op.id.clone());
+            if last.as_ref() == Some(&id) {
+                omit_into(
+                    &mut namespaces,
+                    &mut unassigned,
+                    Some(&c.namespace),
+                    c.source_digest,
+                    "duplicate",
+                );
+                continue;
+            }
+            last = Some(id);
+            by_ns.entry(c.namespace.clone()).or_default().push(c);
+        }
+        let held: BTreeMap<(String, String), &DestinationBatch> = destination
+            .batches
+            .iter()
+            .filter(|b| b.source_library == library)
+            .map(|b| ((b.namespace.clone(), b.key.clone()), b))
+            .collect();
+        for (ns, mut list) in by_ns {
             list.sort_by(|a, b| {
                 (a.op.clock, &a.author, &a.op.id).cmp(&(b.op.clock, &b.author, &b.op.id))
             });
+            let mut scratch = Scratch::new(&ns);
+            // What the destination already holds, in its own order, is the state the next
+            // batch is judged against.
+            for b in destination
+                .batches
+                .iter()
+                .filter(|b| b.namespace == ns && b.valid)
+            {
+                scratch.apply(&b.payload);
+            }
             let mut judge = Judge {
                 fold: &fold,
                 lib,
@@ -694,43 +949,57 @@ impl CopyPlan {
             };
             for (position, c) in list.into_iter().enumerate() {
                 let order = (c.op.clock, c.author.clone(), c.op.id.clone());
+                let key = batch_key(&library, &c);
                 let state = match judge.judge(&c.op, c.epoch, &c.author) {
                     Judged::Held(w) => State::Omitted(format!("held: {w}")),
                     Judged::Refused(w) => State::Omitted(format!("refused: {w}")),
-                    Judged::Admitted => {
-                        match batch_of(&library, &fold, &c, position as u64, translate) {
-                            Ok(p) => State::Pending(p),
-                            Err(e) => State::Omitted(format!("notCleanChild: {}", e.detail())),
+                    Judged::Admitted => match held.get(&(ns.clone(), key.clone())) {
+                        Some(b) if b.source_digest == c.source_digest => {
+                            if b.valid {
+                                State::Written(b.destination_digest.clone())
+                            } else {
+                                State::Omitted(
+                                    "importInvalid: the destination marked it invalid".into(),
+                                )
+                            }
                         }
-                    }
+                        _ => match batch_of(&library, &fold, &c, &key, position as u64, translate)
+                            .and_then(|p| scratch.check(&p).map(|_| p))
+                        {
+                            Ok(p) => {
+                                scratch.apply(&p);
+                                State::Pending(p)
+                            }
+                            Err(e) => State::Omitted(format!("notCleanChild: {}", e.detail())),
+                        },
+                    },
                 };
                 namespaces.entry(ns.clone()).or_default().push(Item {
                     source_digest: c.source_digest,
+                    key,
                     order,
                     state,
                 });
             }
         }
-        // Duplicate source bodies (the same record at two paths) are two source records, but a
-        // destination record is made for one: the second is omitted, never copied twice.
         for items in namespaces.values_mut() {
-            let mut seen = BTreeSet::new();
-            for it in items.iter_mut() {
-                if matches!(it.state, State::Pending(_)) && !seen.insert(it.source_digest.clone()) {
-                    it.state = State::Omitted("duplicate".into());
-                }
-            }
             items.sort_by(|a, b| {
                 a.order
                     .cmp(&b.order)
                     .then(a.source_digest.cmp(&b.source_digest))
             });
         }
+        let destinations = destination
+            .batches
+            .iter()
+            .filter(|b| b.source_library == library)
+            .map(|b| b.destination_digest.clone())
+            .collect();
         let plan = Self {
             library,
             namespaces,
             unassigned,
-            destinations: BTreeSet::new(),
+            destinations,
             blobs,
         };
         require(
@@ -763,7 +1032,7 @@ impl CopyPlan {
             .count()
     }
     /// The source records already omitted, with their reasons: `(namespace or empty, source body
-    /// digest, reason)`. Records written later with [`Self::record_omitted`] are included.
+    /// digest, reason)`.
     pub fn omissions(&self) -> Vec<(String, String, String)> {
         let mut out: Vec<(String, String, String)> = self
             .unassigned
@@ -788,8 +1057,7 @@ impl CopyPlan {
     }
 
     /// The next bounded batch of writes (at most `max`, never more than [`MAX_BATCH`]): the
-    /// pending items in namespace order, each in the Swift fold order. Reading it changes
-    /// nothing; an item stays pending until [`Self::record_written`] or [`Self::record_omitted`].
+    /// pending items in namespace order, each in the Swift fold order.
     pub fn next_batch(&self, max: usize) -> Vec<CopyItem> {
         let mut out = Vec::new();
         for (ns, items) in &self.namespaces {
@@ -801,6 +1069,7 @@ impl CopyPlan {
                     out.push(CopyItem {
                         namespace: ns.clone(),
                         source_digest: it.source_digest.clone(),
+                        key: it.key.clone(),
                         payload: p.clone(),
                     });
                 }
@@ -809,12 +1078,12 @@ impl CopyPlan {
         out
     }
 
-    /// True when `item` is exactly one of the plan's pending writes (same namespace, source record
-    /// and payload).
+    /// True when `item` is exactly one of the plan's pending writes.
     pub fn is_pending(&self, item: &CopyItem) -> bool {
         self.namespaces.get(&item.namespace).is_some_and(|v| {
             v.iter().any(|i| {
                 i.source_digest == item.source_digest
+                    && i.key == item.key
                     && matches!(&i.state, State::Pending(p) if *p == item.payload)
             })
         })
@@ -834,8 +1103,8 @@ impl CopyPlan {
     }
 
     /// Record that the host wrote the item as `header` (the parsed `/5` header of the finished
-    /// operation). Refused: a source record that is not pending (written twice, omitted, or not
-    /// in the plan), a header of another namespace, and a destination record already used.
+    /// operation). Refused: a source record that is not pending, a header of another namespace,
+    /// and a destination record already used.
     pub fn record_written(&mut self, source_digest: &str, header: &OperationHeader) -> Result<()> {
         let dest = header.digest();
         require(
@@ -849,8 +1118,8 @@ impl CopyPlan {
         Ok(())
     }
 
-    /// Record that a pending item is not copied, with a reason (the destination refused it, or
-    /// the person chose to leave it).
+    /// Record that a pending item is not copied, with a reason (the destination marked it
+    /// invalid, or the person chose to leave it).
     pub fn record_omitted(
         &mut self,
         namespace: &str,
@@ -863,14 +1132,44 @@ impl CopyPlan {
         Ok(())
     }
 
-    /// Finish: refused while any item is neither written nor omitted. The result is exactly what
-    /// `write::succession::prepare_migration` takes.
-    pub fn finish(self) -> Result<CopyResult> {
+    /// Finish: refused while any item is neither written nor omitted, and unless the destination
+    /// holds exactly what the plan says it copied: every written record is a valid batch of the
+    /// destination with the plan's key and source evidence, and the destination holds no valid
+    /// batch of this library that the plan does not list. `destination` comes from
+    /// `Account::swift_copy_destination`.
+    pub fn finish(self, destination: &Destination) -> Result<CopyResult> {
         let pending = self.pending();
         if pending > 0 {
             return Err(malformed(format!(
                 "{pending} source records are neither written nor omitted"
             )));
+        }
+        let held: BTreeMap<&str, &DestinationBatch> = destination
+            .batches
+            .iter()
+            .filter(|b| b.source_library == self.library)
+            .map(|b| (b.destination_digest.as_str(), b))
+            .collect();
+        let mut claimed = BTreeSet::new();
+        for (ns, items) in &self.namespaces {
+            for it in items {
+                if let State::Written(d) = &it.state {
+                    let b = held.get(d.as_str()).ok_or_else(|| {
+                        malformed(format!("the destination does not hold the record {d}"))
+                    })?;
+                    require(
+                        b.valid && b.namespace == *ns && b.key == it.key && b.source_digest == it.source_digest,
+                        "the destination holds a record that is invalid or is not the copy of its source",
+                    )?;
+                    claimed.insert(d.clone());
+                }
+            }
+        }
+        for b in held.values().filter(|b| b.valid) {
+            require(
+                claimed.contains(&b.destination_digest),
+                "the destination holds a copied record the plan does not list",
+            )?;
         }
         let mut namespaces = Vec::new();
         let mut omitted: Vec<(String, String)> = self.unassigned.clone();
@@ -908,12 +1207,20 @@ impl CopyPlan {
     }
 }
 
-/// The `colophon.importBatch` payload of one admitted source record, checked by the destination
-/// fold's own validator (`imports::ImportState::validate_batch`) before it is offered.
+fn batch_key(library: &str, c: &Candidate) -> String {
+    format!(
+        "{TRANSFORM}:{library}:{}:{}:{}",
+        c.namespace, c.author, c.op.id
+    )
+}
+
+/// The `colophon.importBatch` payload of one admitted source record. The core writes the key and
+/// the evidence that binds the batch to its source; the translator's batch supplies the rest.
 fn batch_of(
     library: &str,
     fold: &Fold,
     c: &Candidate,
+    key: &str,
     position: u64,
     translate: Option<&Translator<'_>>,
 ) -> Result<Value> {
@@ -921,7 +1228,7 @@ fn batch_of(
         .members
         .get(&c.author)
         .map_or("Member", |m| m.label.as_str());
-    let children = match translate {
+    let batch = match translate {
         Some(t) => t(&SwiftOp {
             source_library: library,
             author_id: &c.author,
@@ -933,43 +1240,87 @@ fn batch_of(
             payload: &c.op.payload,
             admitted_order: position,
         })?,
-        None => vec![Child {
-            key: "op".into(),
-            kind: c.op.kind.clone(),
-            payload: c.op.payload.clone(),
-        }],
+        None => {
+            let mut b = Batch::of(vec![Child {
+                key: "op".into(),
+                kind: c.op.kind.clone(),
+                payload: c.op.payload.clone(),
+                baseline: false,
+            }]);
+            b.outcome = "admitted".into();
+            b
+        }
     };
-    require(!children.is_empty(), "a translator returned no child")?;
-    let children: Vec<Value> = children
-        .into_iter()
-        .map(|k| json!({"key": k.key, "kind": k.kind, "payload": k.payload, "baseline": false}))
-        .collect();
-    let payload = json!({
-        "key": format!("{TRANSFORM}:{library}:{}:{}:{}", c.namespace, c.author, c.op.id),
-        "evidence": {
-            "sourceLibrary": library,
-            "sourceFormat": SOURCE_FORMAT,
-            "transform": TRANSFORM,
-            "authorID": c.author,
-            "authorLabel": label,
-            "operationID": c.op.id,
-            "clock": c.op.clock,
-            "created": c.op.created,
-            "authority": c.op.authority,
-            "epoch": c.epoch,
-            "kind": c.op.kind,
-            "v": c.op.v,
-            "path": c.path,
-            "bodyDigest": c.source_digest,
-            "domainOutcome": "admitted",
-        },
-        "children": children,
-        "alternatives": [],
-        "identities": {},
-        "blobs": [],
+    require(
+        (1..=128).contains(&batch.outcome.len()),
+        "a translation names its domain outcome",
+    )?;
+    let mut evidence = json!({
+        "sourceLibrary": library,
+        "sourceFormat": SOURCE_FORMAT,
+        "transform": TRANSFORM,
+        "authorID": c.author,
+        "authorLabel": label,
+        "operationID": c.op.id,
+        "clock": c.op.clock,
+        "created": c.op.created,
+        "authority": c.op.authority,
+        "epoch": c.epoch,
+        "kind": c.op.kind,
+        "v": c.op.v,
+        "path": c.path,
+        "bodyDigest": c.source_digest,
+        "domainOutcome": batch.outcome,
     });
-    crate::imports::ImportState::new(&c.namespace)
-        .validate_batch(&payload, &crate::domain::ProjectionState::new(&c.namespace))
-        .map_err(|e| malformed(e.to_string()))?;
-    Ok(payload)
+    if !batch.evidence.is_null() {
+        evidence["translation"] = batch.evidence.clone();
+    }
+    let children: Vec<Value> = batch
+        .children
+        .iter()
+        .map(
+            |k| json!({"key": k.key, "kind": k.kind, "payload": k.payload, "baseline": k.baseline}),
+        )
+        .collect();
+    let identities: serde_json::Map<String, Value> = batch
+        .identities
+        .iter()
+        .map(|(s, (cat, id))| (s.clone(), json!({"category": cat, "id": id})))
+        .collect();
+    Ok(json!({
+        "key": key,
+        "evidence": evidence,
+        "children": children,
+        "alternatives": batch.alternatives,
+        "identities": identities,
+        "blobs": batch.blobs,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::amount;
+    use serde_json::json;
+
+    /// Swift counts an amount only below 1e15 (`Admission.swift:93`).
+    #[test]
+    fn an_amount_is_counted_below_1e15_exactly_as_swift_counts_it() {
+        assert_eq!(
+            amount(Some(&json!(999_999_999_999_999i64))),
+            Some(999_999_999_999_999)
+        );
+        assert_eq!(
+            amount(Some(&json!(-999_999_999_999_999i64))),
+            Some(-999_999_999_999_999)
+        );
+        assert_eq!(amount(Some(&json!(1_000_000_000_000_000i64))), None);
+        assert_eq!(amount(Some(&json!(1_000_000_000_000_001i64))), None);
+        assert_eq!(amount(Some(&json!(1.0e15))), None);
+        assert_eq!(
+            amount(Some(&json!(999_999_999_999_999.0))),
+            Some(999_999_999_999_999)
+        );
+        assert_eq!(amount(Some(&json!(1.5))), None);
+        assert_eq!(amount(None), None);
+    }
 }

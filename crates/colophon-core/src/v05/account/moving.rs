@@ -29,11 +29,15 @@
 use super::{Account, Changes, Finished, Incoming, PendingAction};
 use crate::model::Records as Legacy;
 use crate::v05::encoding::{decode_base64, strict_parse};
+use crate::v05::encoding::{digest, parse_date};
 use crate::v05::history::swift;
-use crate::v05::history::{succession_status, Objects, SuccessionStatus};
+use crate::v05::history::{
+    succession_status, verify_history, Objects, Persisted, SuccessionStatus,
+};
 use crate::v05::records::{Level, OperationHeader};
-use crate::v05::swift_copy::{CopyItem, CopyPlan, CopyResult};
+use crate::v05::swift_copy::{CopyItem, CopyPlan, CopyResult, Destination, DestinationBatch};
 use crate::v05::write::authority::PendingBatch;
+use crate::v05::write::records::prepare_renew_shares;
 use crate::v05::write::succession::{
     prepare_migration, prepare_swift_freeze, Frozen, MigratedMember, MigrationParams,
     PendingFreeze, SwiftFreezeParams,
@@ -42,6 +46,8 @@ use crate::v05::write::swift_veto::{prepare_swift_veto, PendingSwiftVeto, SwiftV
 use crate::v05::write::upgrade::{prepare_upgrade, PendingUpgrade, UpgradeParams};
 use crate::v05::write::{SignatureResult, SigningStep};
 use crate::v05::{malformed, require, Failure, Result};
+use serde_json::json;
+use std::collections::BTreeMap;
 
 /// Where a Swift succession stands, from the account's verified state and clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +60,11 @@ pub enum MoveStage {
     Waiting,
     /// The succession is due and not vetoed: F may be written.
     Due,
-    /// The succession is verified (F is written, the homes' fresh heads cover it).
+    /// F is built and held by this account but the succession is not verified yet (the homes'
+    /// fresh heads are missing). F is never built a second time.
+    Frozen,
+    /// The succession is verified (F is written, the homes' fresh heads covered it at some
+    /// moment). Once verified it stays verified (§15.1), however old the heads become.
     Verified,
     /// A valid veto is recorded: the succession is never verified.
     Vetoed,
@@ -79,13 +89,15 @@ pub enum PendingMove {
     Freeze(PendingFreeze),
     /// The `migration` transition on the successor.
     Migration(PendingBatch),
+    /// A shares-only `renew` (§9.4).
+    Shares(PendingBatch),
 }
 impl PendingMove {
     /// What the host signs, in order.
     pub fn steps(&self) -> &[SigningStep] {
         match self {
             Self::Freeze(f) => f.steps(),
-            Self::Migration(b) => b.steps(),
+            Self::Migration(b) | Self::Shares(b) => b.steps(),
         }
     }
 }
@@ -98,6 +110,8 @@ pub enum Moved {
     Frozen(Frozen),
     /// The `migration` transition is held; it activates after its delay ([`Account::record_due`]).
     Migration(Box<Changes>),
+    /// The shares-only `renew` is held.
+    Shares(Box<Changes>),
 }
 
 /// The Swift entries of `all` up to `head_seq`, by their `seq`.
@@ -139,8 +153,10 @@ impl Account {
             MoveStage::Migrated
         } else if status.vetoed {
             MoveStage::Vetoed
-        } else if status.verified.is_some() {
+        } else if self.verified_ever(&status) {
             MoveStage::Verified
+        } else if self.f_held(&status) {
+            MoveStage::Frozen
         } else {
             match &status.timing {
                 None => MoveStage::WindowNotOpen,
@@ -149,6 +165,45 @@ impl Account {
             }
         };
         Ok(SwiftSuccession { stage, status })
+    }
+
+    /// §15.1: "a verifier that has persisted a verified succession keeps it". The account derives
+    /// that from its held objects instead of a stored flag: the succession is verified if it
+    /// verifies now, or verified at the moment any held head was issued (heads only age; F, the
+    /// receipts and the history they covered are held for ever). A recorded veto overrides.
+    fn verified_ever(&self, status: &SuccessionStatus) -> bool {
+        if status.verified.is_some() {
+            return true;
+        }
+        if status.vetoed {
+            return false;
+        }
+        let mut times: Vec<i64> = self
+            .objects
+            .heads
+            .iter()
+            .filter_map(|h| {
+                let env = strict_parse(h).ok()?;
+                let body = decode_base64(env.get("body")?.as_str()?, 65_536).ok()?;
+                parse_date(strict_parse(&body).ok()?.get("issued")?.as_str()?)
+            })
+            .collect();
+        times.sort_unstable();
+        times.dedup();
+        times.into_iter().rev().take(64).any(|t| {
+            verify_history(&self.objects, &Persisted::default(), t)
+                .state
+                .and_then(|st| succession_status(&st))
+                .is_some_and(|s| s.verified.is_some())
+        })
+    }
+
+    /// The account already holds an F that names it (built here or appended by the Swift side).
+    fn f_held(&self, status: &SuccessionStatus) -> bool {
+        swift::verify(&self.objects.predecessor)
+            .ok()
+            .and_then(|h| h.entries.get(status.head_seq as usize).cloned())
+            .is_some_and(|e| e.value["successor"] == self.d.auth.account().as_str())
     }
 
     fn stage_is(&self, allowed: &[MoveStage], why: &str) -> Result<SwiftSuccession> {
@@ -178,7 +233,10 @@ impl Account {
         signers: Vec<String>,
         issued_ms: i64,
     ) -> Result<PendingMove> {
-        let s = self.stage_is(&[MoveStage::Due], "F is written once the succession is due")?;
+        let s = self.stage_is(
+            &[MoveStage::Due],
+            "F is written once the succession is due, and only once",
+        )?;
         let p = prepare_swift_freeze(
             &SwiftFreezeParams {
                 predecessor: up_to(&self.objects.predecessor, s.status.head_seq),
@@ -210,13 +268,14 @@ impl Account {
     /// §15.3 step 3 and 5: one import write of a copy plan, by this session's member, who must
     /// hold the `import` term (§9.3). Refused until the succession is verified (the predecessor
     /// is frozen: nothing more is written there), for an item the plan does not hold pending,
-    /// and for a session that is not a member with `import`.
+    /// and for a session that is not a member with `import`. The returned write carries its
+    /// item: it can be finished only as that item.
     pub fn begin_swift_copy_write(
         &self,
         plan: &CopyPlan,
         item: &CopyItem,
         seed: [u8; 32],
-    ) -> Result<PendingAction> {
+    ) -> Result<CopyWrite> {
         self.stage_is(
             &[MoveStage::Verified],
             "records are copied after F, once the succession is verified",
@@ -239,30 +298,47 @@ impl Account {
             self.d.auth.member(&me).is_some_and(|m| m.terms.import()),
             "the copying member holds no `import` term (§9.3)",
         )?;
-        match self.begin_write(
+        let action = match self.begin_write(
             &item.namespace,
             crate::imports::BATCH_KIND,
             item.payload.clone(),
             Level::Write,
             seed,
         )? {
-            Ok(a) => Ok(a),
-            Err(d) => Err(Failure::Unavailable(format!("{}: {}", d.reason, d.detail))),
-        }
+            Ok(a) => a,
+            Err(d) => return Err(Failure::Unavailable(format!("{}: {}", d.reason, d.detail))),
+        };
+        let body_digest = digest(
+            action
+                .steps()
+                .first()
+                .ok_or_else(|| malformed("the write has no step"))?
+                .body(),
+        );
+        Ok(CopyWrite {
+            action,
+            item: item.clone(),
+            body_digest,
+        })
     }
 
-    /// Finish an import write: the account verifies, admits and holds the header, and the plan
-    /// records it against its source record. Nothing is recorded in the plan when the finish
-    /// fails.
+    /// Finish an import write as the item it was begun for. The finished header's body digest
+    /// must be the one the host was asked to sign; the plan records it against its source, and
+    /// when the destination does not take the batch (its own validator refuses it) the item is
+    /// omitted `importInvalid` instead of counted. A failure changes nothing.
     pub fn finish_swift_copy_write(
         &mut self,
         plan: &mut CopyPlan,
-        item: &CopyItem,
-        action: PendingAction,
+        write: CopyWrite,
         signatures: Vec<SignatureResult>,
     ) -> Result<Finished> {
+        let CopyWrite {
+            action,
+            item,
+            body_digest,
+        } = write;
         require(
-            plan.is_pending(item),
+            plan.is_pending(&item),
             "that is not a pending write of this plan",
         )?;
         let done = self.finish(action, signatures)?;
@@ -271,8 +347,90 @@ impl Account {
             .first()
             .ok_or_else(|| malformed("the finished write holds no header"))?;
         let (header, _) = OperationHeader::parse(&record.bytes)?;
-        plan.record_written(&item.source_digest, &header)?;
+        require(
+            header.digest() == body_digest && header.namespace == item.namespace,
+            "the signed write is not the one prepared for this item",
+        )?;
+        let taken = match self.query(&item.namespace, "importReceipt", json!({"key": item.key})) {
+            Ok(crate::model::Outcome::Success { value, .. }) => !value.is_null(),
+            _ => true,
+        };
+        if taken {
+            plan.record_written(&item.source_digest, &header)?;
+        } else {
+            plan.record_omitted(
+                &item.namespace,
+                &item.source_digest,
+                "importInvalid: the destination did not take the batch",
+            )?;
+        }
         Ok(done)
+    }
+
+    /// What this account's readable namespaces hold of the copy of `library`: every admitted
+    /// `colophon.importBatch` whose evidence names it, with its destination header digest and
+    /// whether the destination's import fold took it (`importReceipt`). A [`CopyPlan`] is rebuilt
+    /// from this plus the predecessor, so an interrupted copy continues without duplicating or
+    /// losing a record; [`CopyPlan::finish`] reconciles against it.
+    pub fn swift_copy_destination(&self, library: &str) -> Result<Destination> {
+        let mut digests: BTreeMap<String, String> = BTreeMap::new();
+        for r in &self.records {
+            if let Ok((h, _)) = OperationHeader::parse(&r.bytes) {
+                digests.insert(h.id.clone(), h.digest());
+            }
+        }
+        let mut batches = Vec::new();
+        for ns in self.d.auth.namespaces().to_vec() {
+            let Ok(crate::model::Outcome::Success { value: view, .. }) = self.view(&ns) else {
+                continue;
+            };
+            for op in view.admitted {
+                if op.kind != crate::imports::BATCH_KIND
+                    || op.payload["evidence"]["sourceLibrary"] != library
+                {
+                    continue;
+                }
+                let (Some(dest), Some(key)) = (digests.get(&op.id), op.payload["key"].as_str())
+                else {
+                    continue;
+                };
+                let valid = matches!(
+                    self.query(&ns, "importReceipt", json!({"key": key})),
+                    Ok(crate::model::Outcome::Success { value, .. }) if value["publication"] == op.id
+                );
+                if let Some(b) = DestinationBatch::new(ns.clone(), dest.clone(), valid, op.payload)
+                {
+                    batches.push(b);
+                }
+            }
+        }
+        Ok(Destination::from_batches(batches))
+    }
+
+    /// Finish a copy: the plan reconciled with what this account actually holds (see
+    /// [`CopyPlan::finish`]). The only way to a [`CopyResult`].
+    pub fn finish_swift_copy(&self, plan: CopyPlan) -> Result<CopyResult> {
+        let d = self.swift_copy_destination(plan.library())?;
+        plan.finish(&d)
+    }
+
+    /// §9.4, shares only: seal the epochs a member is owed (the copying member, provisional when
+    /// they were made) without touching its expiry.
+    pub fn begin_swift_copier_shares(
+        &self,
+        member: &str,
+        signers: &[String],
+        seed: [u8; 32],
+    ) -> Result<PendingMove> {
+        Ok(PendingMove::Shares(prepare_renew_shares(
+            &self.d.effective,
+            self.now_ms,
+            signers,
+            self.now_ms,
+            member,
+            &self.d.keys,
+            seed,
+        )?))
     }
 
     /// §15.4: prepare the `migration` transition from a finished copy. `members` is each
@@ -289,7 +447,7 @@ impl Account {
         issued_ms: i64,
         signers: Vec<String>,
     ) -> Result<PendingMove> {
-        let s = self.stage_is(
+        self.stage_is(
             &[MoveStage::Verified],
             "the migration is written after F and the copy",
         )?;
@@ -300,51 +458,83 @@ impl Account {
                 predecessor: self.objects.predecessor.clone(),
                 drain_from_ms,
                 drain_until_ms,
-                namespaces: copy.namespaces.clone(),
-                omitted: copy.omitted.clone(),
+                namespaces: copy.namespaces().to_vec(),
+                omitted: copy.omitted().to_vec(),
                 members,
                 issued_ms,
                 signers,
             },
         )?;
-        require(
-            s.status.verified.is_some(),
-            "the migration needs a verified succession",
-        )?;
         Ok(PendingMove::Migration(batch))
     }
 
-    /// Finish a step of the move with the host's signatures. F is returned as bytes and is not
-    /// held (the Swift side appends it; [`Self::accept_predecessor_entry`] takes it in); the
-    /// migration transition is merged. A failure changes nothing.
+    /// Finish a step of the move with the host's signatures. F is returned as bytes **and held**:
+    /// the account takes it into its predecessor objects at once, so it can never build a
+    /// second, different F. The migration transition and the shares entry are merged. A failure
+    /// changes nothing.
     pub fn finish_move(
         &mut self,
         pending: PendingMove,
         signatures: Vec<SignatureResult>,
     ) -> Result<Moved> {
         match pending {
-            PendingMove::Freeze(f) => Ok(Moved::Frozen(f.finish(signatures)?)),
-            PendingMove::Migration(b) => {
-                let r = b.finish(signatures)?;
-                let changes = self.merge(
-                    Incoming {
-                        objects: Objects {
-                            entries: r.entries.iter().map(|(_, e)| e.clone()).collect(),
-                            pending: r.pending,
-                            ..Objects::default()
-                        },
-                        records: Vec::new(),
-                    },
-                    self.now_ms,
-                )?;
-                Ok(Moved::Migration(Box::new(changes)))
+            PendingMove::Freeze(f) => {
+                let frozen = f.finish(signatures)?;
+                self.accept_predecessor_entry(frozen.entry.clone(), self.now_ms)?;
+                Ok(Moved::Frozen(frozen))
             }
+            PendingMove::Migration(b) => {
+                Ok(Moved::Migration(Box::new(self.merge_batch(b, signatures)?)))
+            }
+            PendingMove::Shares(b) => Ok(Moved::Shares(Box::new(self.merge_batch(b, signatures)?))),
         }
+    }
+
+    fn merge_batch(
+        &mut self,
+        b: PendingBatch,
+        signatures: Vec<SignatureResult>,
+    ) -> Result<Changes> {
+        let r = b.finish(signatures)?;
+        self.merge(
+            Incoming {
+                objects: Objects {
+                    entries: r.entries.iter().map(|(_, e)| e.clone()).collect(),
+                    pending: r.pending,
+                    ..Objects::default()
+                },
+                records: Vec::new(),
+            },
+            self.now_ms,
+        )
     }
 
     /// The Swift predecessor's verified history as this account holds it, for a host that shows
     /// the person the predecessor's last entries before they confirm (§15.1 step 3).
     pub fn swift_predecessor(&self) -> Result<swift::History> {
         swift::verify(&self.objects.predecessor)
+    }
+}
+
+/// An import write begun for one item of a plan: it carries the item and the digest of the body
+/// the host signs, so it can be finished only as that item.
+pub struct CopyWrite {
+    action: PendingAction,
+    item: CopyItem,
+    body_digest: String,
+}
+impl std::fmt::Debug for CopyWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CopyWrite({:?})", self.item)
+    }
+}
+impl CopyWrite {
+    /// What the host signs: the header body, signed raw by the copying member.
+    pub fn steps(&self) -> &[SigningStep] {
+        self.action.steps()
+    }
+    /// The item this write is for.
+    pub fn item(&self) -> &CopyItem {
+        &self.item
     }
 }
