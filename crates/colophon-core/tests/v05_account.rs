@@ -2473,3 +2473,102 @@ fn another_accounts_secrets_open_nothing_here_and_a_member_ends_its_own_sessions
     params.controllers = vec![params.controllers[0].clone(); 65];
     assert!(Creation::begin(params, Identity::Controller(d), T0).is_err());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Thresholds and policy.
+
+#[test]
+fn policy_tightens_at_once_and_thresholds_change_by_a_transition() {
+    let mut f = create(&["notes"]);
+    // Lowering a window is an immediate `keyring` entry (§8.4).
+    let action = f
+        .account
+        .begin_keyring(
+            &KeyringEdit {
+                policy: Some(json!({"callWindow": 120})),
+                ..Default::default()
+            },
+            &[f.d.clone()],
+        )
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    assert_eq!(f.account.policy().call_window, 120);
+    // Loosening it again is not: the verifier refuses at finish, and nothing changes.
+    let before = f.account.status();
+    let action = f
+        .account
+        .begin_keyring(
+            &KeyringEdit {
+                policy: Some(json!({"callWindow": 600})),
+                ..Default::default()
+            },
+            &[f.d.clone()],
+        );
+    match action {
+        Err(e) => assert_eq!(e.code(), "malformed", "{e}"),
+        Ok(a) => {
+            let sigs = f.host.sign(a.steps());
+            assert_eq!(f.account.finish(a, sigs).unwrap_err().code(), "malformed");
+        }
+    }
+    assert_eq!(f.account.status(), before);
+    assert_eq!(f.account.policy().call_window, 120);
+    // The threshold rises to 2 by a transition every control key and a recovery key sign
+    // (raising needs consent, §18): a full set, due at once.
+    let action = f
+        .account
+        .begin_transition(
+            &Change::thresholds(Some(2), None, None),
+            &[f.d.clone(), f.p.clone(), f.k.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    assert_eq!(f.account.policy().threshold, 1);
+    assert_eq!(f.account.record_due().unwrap().len(), 1);
+    assert_eq!(f.account.policy().threshold, 2);
+    // Member actions are still one approver (memberRule single); a rekey now needs the
+    // `single` rule's one approver too.
+    let seed = f.host.fresh();
+    let action = f
+        .account
+        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
+        .unwrap();
+    run(&mut f.account, &f.host, action);
+    // The ledger tells the story in order.
+    let ledger = f.account.ledger();
+    assert_eq!(ledger[0].event, "created");
+    assert!(ledger.iter().any(|l| l.event == "activated"));
+    assert_eq!(
+        ledger.iter().map(|l| l.sequence).collect::<Vec<_>>(),
+        (1..=ledger.len() as u64).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_write_prepared_before_the_member_was_revoked_is_not_returned() {
+    let mut f = create(&["notes"]);
+    let agent = f.host.identity(30);
+    admit(&mut f, &agent, "Claude", "agent", agent_terms("write"), agent_terms("write"));
+    let mut a = member_session(&f, &agent);
+    let seed = f.host.fresh();
+    let action = a
+        .begin_write("notes", "createNotebook", json!({"id": "b", "title": "T"}), Level::Write, seed)
+        .unwrap()
+        .unwrap();
+    let sigs = f.host.sign(action.steps());
+    // The revocation lands first (keeping nothing).
+    let seed = f.host.fresh();
+    let revoke = f
+        .account
+        .begin_revoke(&agent, &RevokeKeep::Nothing, &[f.d.clone()], seed)
+        .unwrap();
+    let done = run(&mut f.account, &f.host, revoke);
+    let now = a.now_ms();
+    merge_done(&mut a, &done, now);
+    let before = a.records().len();
+    let e = a.finish(action, sigs).unwrap_err();
+    assert_eq!(e.code(), "unavailable", "{e}");
+    assert!(e.detail().contains("revokedBackdated"), "{e}");
+    assert_eq!(a.records().len(), before, "nothing was held");
+}

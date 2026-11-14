@@ -1653,6 +1653,20 @@ impl Account {
                 "the account's history moved on since this action was prepared",
             )?;
         }
+        // A record is returned only if the account's current history admits it.
+        for r in &finished.records {
+            let j = d
+                .judgement
+                .records
+                .iter()
+                .find(|j| j.path == r.path)
+                .ok_or_else(|| malformed("the finished record was not judged"))?;
+            if j.outcome != crate::v05::records::Outcome::Admitted || j.plaintext.is_none() {
+                return Err(j.outcome.failure().unwrap_or_else(|| {
+                    malformed("the account's history does not admit the finished record")
+                }));
+            }
+        }
         let persisted = self.persisted.clone();
         let now = self.now_ms;
         finished.changes = self.commit(d, objects, records, persisted, now);
