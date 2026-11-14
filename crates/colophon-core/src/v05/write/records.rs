@@ -37,8 +37,9 @@ use crate::v05::history::Objects;
 use crate::v05::ids::AccountId;
 use crate::v05::members::Request;
 use crate::v05::records::{
-    chain_heads, epoch_info, judge_core, operation_id, revocation_reach, verified_headers,
-    EpochKey, EpochKeys, HeaderFormat, HeldRecord, Judgement, Level, RecordAuthority,
+    admit, admit_opened, chain_heads, epoch_info, judge_core, operation_id, revocation_reach,
+    verified_headers, Admission, AuthorView, EpochKey, EpochKeys, HeaderFormat, HeldRecord,
+    Judgement, Kept, Level, NamespaceView, OperationHeader, RecordAuthority,
 };
 use crate::v05::terms::{Access, Terms, TermsKind};
 use crate::v05::vault::SealedBox;
@@ -416,9 +417,19 @@ pub fn prepare_revoke(
                     digest,
                 }));
             }
+            // Retained live-stamped copies are outside the author chain (they are `previous:
+            // null` by rule), so the walk from `heads` does not reach them: the entry names
+            // them, or a keep-everything revocation would lose them (§9.5).
+            let pairs0: Vec<(String, String)> = heads
+                .iter()
+                .map(|h| (h.namespace.clone(), h.digest.clone()))
+                .collect();
+            let (reached, _) = revocation_reach(&headers, member, &[], &pairs0);
             let mut kept: Vec<String> = headers
                 .iter()
-                .filter(|h| h.format == HeaderFormat::V3)
+                .filter(|h| {
+                    h.format == HeaderFormat::V3 || (h.live && !reached.contains(&h.digest))
+                })
                 .map(|h| h.digest.clone())
                 .collect();
             kept.sort();
@@ -522,6 +533,8 @@ pub struct PreparedOperation {
     step: SigningStep,
     auth: RecordAuthority,
     held: Vec<HeldRecord>,
+    /// A fast write: the author's signing key, for the one signature check at finish.
+    fast: Option<Vec<u8>>,
     key: EpochKey,
     body: Vec<u8>,
     path: String,
@@ -708,6 +721,193 @@ pub fn prepare_operation(
         step,
         auth,
         held: held.to_vec(),
+        fast: None,
+        key,
+        body,
+        path,
+    })
+}
+
+/// What a fast write reads of the account's judgement.
+pub struct WriteBasis<'a> {
+    /// The highest clock among records that reserved a slot in the namespace.
+    pub highest: u64,
+    /// The author's maximal chain heads in the namespace.
+    pub tips: &'a [String],
+    /// Distinct `(author, id)` pairs the author has reserved.
+    pub reserved: u64,
+    /// Whether a nonce is already used under `(namespace, epoch)`.
+    pub nonce_used: &'a dyn Fn(&str, u64, &[u8]) -> bool,
+}
+
+/// [`prepare_operation`] over a verified account's own state: the clock, the chain tip, the
+/// budget and the nonces come from the account's judgement index, and no held record is passed
+/// over or re-judged. The header is checked against the same admission rules (§11.5) from the
+/// verified state; the one signature is checked at finish.
+pub fn prepare_operation_fast(
+    auth: &RecordAuthority,
+    keys: &EpochKeys,
+    now_ms: i64,
+    spec: &OperationSpec<'_>,
+    seed: [u8; 32],
+    basis: &WriteBasis<'_>,
+) -> Result<PreparedOperation> {
+    let auth = auth.clone();
+    auth.require_clean()?;
+    let account = auth.account().clone();
+    let member = auth
+        .member(spec.author)
+        .ok_or(Failure::Refused(Reason::NotGranted))?;
+    let signing = member.request.signing.clone();
+    let member_signing = signing.clone();
+    require(
+        crate::v05::terms::valid_namespace(spec.namespace),
+        "invalid namespace",
+    )?;
+    let authority = auth.authority_seq();
+    let epoch = auth
+        .epoch_at(spec.namespace, authority)
+        .ok_or_else(|| malformed("the namespace has no epoch yet"))?;
+    let key = keys
+        .get(&account, spec.namespace, epoch)
+        .ok_or_else(|| Failure::Unavailable("the epoch key is not held".into()))?
+        .clone();
+    let highest = basis.highest;
+    let clock = match spec.clock {
+        None => highest
+            .checked_add(1)
+            .ok_or_else(|| malformed("clock overflow"))?,
+        Some(c) => {
+            require(
+                c > highest,
+                "an explicit clock must exceed the highest admitted",
+            )?;
+            require(
+                c - highest <= 1_024,
+                "an explicit clock more than 1,024 above the highest admitted is refused (clockJump)",
+            )?;
+            c
+        }
+    };
+    require(
+        (1..=bounds::MAX_INTEGER).contains(&clock),
+        "clock out of range",
+    )?;
+    if basis.tips.len() > 1 {
+        return Err(Failure::Refused(Reason::Fork));
+    }
+    let previous = basis.tips.first().cloned();
+    let nonce = Entropy::new(seed).take::<12>().map_err(entropy_error)?;
+    require(
+        !(basis.nonce_used)(spec.namespace, epoch, &nonce),
+        "that nonce is already used under this epoch key: pass a fresh seed",
+    )?;
+    let created = format_date(now_ms);
+    let mut plain = json!({
+        "id": "", "kind": spec.kind, "v": 1, "clock": clock,
+        "authority": authority, "created": created, "payload": spec.payload,
+    });
+    let id = operation_id(spec.namespace, spec.author, epoch, &nonce, &plain)?;
+    plain["id"] = json!(id);
+    let plain_bytes = canonical(&plain)?;
+    // The AAD is the verifier's own: build the header without its ciphertext.
+    let level = spec.level;
+    let sketch = crate::v05::records::OperationHeader {
+        body: Vec::new(),
+        account: account.clone(),
+        namespace: spec.namespace.to_string(),
+        author: spec.author.to_string(),
+        epoch,
+        id: id.clone(),
+        clock,
+        authority,
+        created: (created.clone(), now_ms),
+        level,
+        previous: previous.clone(),
+        nonce: nonce.to_vec(),
+        ciphertext: Vec::new(),
+        live: None,
+        unknown: Default::default(),
+    };
+    let aad = sketch.aad()?;
+    let ciphertext = seal_operation(&key, &nonce, &plain_bytes, &aad)?;
+    let body = canonical(&json!({
+        "protocol": "colophon/operation/5",
+        "account": account.as_str(),
+        "namespace": spec.namespace,
+        "author": spec.author,
+        "epoch": epoch,
+        "id": id,
+        "clock": clock,
+        "authority": authority,
+        "created": created,
+        "level": level_name(level),
+        "previous": previous,
+        "nonce": encode_base64(&nonce),
+        "ciphertext": encode_base64(&ciphertext),
+    }))?;
+    require(
+        body.len() <= bounds::OPERATION_HEADER_BODY,
+        "operation header exceeds its bound",
+    )?;
+    let path = crate::v05::records::operation_path(spec.author, spec.namespace, clock, &id);
+    // Judge the header against the verified state the way the walk does at its place (§11.5
+    // steps 1–8 and the checks after opening), without touching the held records: what finish
+    // will refuse is refused here. A signature is checked at finish.
+    let entry = member
+        .terms
+        .records()
+        .and_then(|r| r.iter().find(|e| e.namespace == spec.namespace));
+    let author_view = AuthorView {
+        access: if authority >= member.granted_seq {
+            entry.map(|e| e.access)
+        } else {
+            None
+        },
+        expires_ms: member.expires_ms,
+        revoked_seq: member.revoked_seq,
+        kept: Kept::NotKept,
+        writes_left: member
+            .terms
+            .writes()
+            .map(|b| b.saturating_sub(basis.reserved)),
+        provisional: member.provisional.is_some(),
+    };
+    let ns_view = NamespaceView {
+        authority_seq: auth.authority_seq(),
+        fork_seq: auth.fork_seq(),
+        epoch_at_cited: auth.epoch_at(spec.namespace, authority).unwrap_or(0),
+        highest_clock: highest,
+    };
+    let sketch = OperationHeader {
+        ciphertext: ciphertext.clone(),
+        ..sketch
+    };
+    match admit(&sketch, &author_view, &ns_view) {
+        Admission::Admitted => {}
+        Admission::Refused(r) => return Err(Failure::Refused(r)),
+        Admission::Held(w) => return Err(Failure::Unavailable(format!("held: {w}"))),
+        Admission::NewerFormat => {
+            return Err(Failure::NewerFormat("unknown condition operator".into()))
+        }
+    }
+    match entry.map(|e| admit_opened(&plain, e, &member.terms)) {
+        Some(Admission::Admitted) => {}
+        Some(Admission::Refused(r)) => return Err(Failure::Refused(r)),
+        Some(_) | None => return Err(Failure::Refused(Reason::NotGranted)),
+    }
+    let step = SigningStep::for_call(
+        path.clone(),
+        body.clone(),
+        spec.author.to_string(),
+        signing,
+        None,
+    );
+    Ok(PreparedOperation {
+        step,
+        auth,
+        held: Vec::new(),
+        fast: Some(member_signing),
         key,
         body,
         path,
@@ -748,6 +948,22 @@ impl PreparedOperation {
         let envelope = canonical(
             &json!({"body": encode_base64(&self.body), "signature": encode_base64(&signature.signature)}),
         )?;
+        if let Some(signing) = &self.fast {
+            // A fast write was judged against the verified state at prepare; what remains is
+            // the signature, over the exact bytes returned.
+            let raw = crate::v05::signature::RawEnvelope::parse(
+                &envelope,
+                bounds::OPERATION_HEADER_BODY,
+                false,
+            )?;
+            OperationHeader::verify(&raw, signing)?;
+            let digest = crate::v05::encoding::digest(&self.body);
+            return Ok(FinishedOperation {
+                path: self.path,
+                envelope,
+                digest,
+            });
+        }
         let mut with = self.held.clone();
         with.push(HeldRecord {
             path: self.path.clone(),

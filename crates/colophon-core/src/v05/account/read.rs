@@ -730,6 +730,17 @@ impl Account {
         }
     }
 
+    /// Why `namespace` is not readable now, or `None` when it is: the grant check, then whether
+    /// the latest epoch's key is held (0.4's `access`).
+    pub fn access(&self, namespace: &str) -> Option<Denial> {
+        self.authorize(namespace, Access::Read)
+            .or_else(|| self.notreadable(namespace))
+    }
+    /// Why this session may not write `namespace` now, or `None` when it may.
+    pub fn write_denial(&self, namespace: &str) -> Option<Denial> {
+        self.authorize(namespace, Access::Write)
+    }
+
     fn notreadable(&self, namespace: &str) -> Option<Denial> {
         if self.d.folded.contains_key(namespace) {
             None

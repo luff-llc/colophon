@@ -102,6 +102,9 @@ pub struct Persisted {
     checkpoint: Option<Checkpoint>,
     /// Per home member ID, the highest `(seq, digest)` of a head accepted from it (§13.3).
     head_marks: BTreeMap<String, (u64, String)>,
+    /// This verifier saw the succession verified (§15.1: "a verifier that has persisted a
+    /// verified succession keeps it"): never re-derived, never lost when heads age.
+    succession_verified: bool,
 }
 
 /// Checkpoint format. 2 added `held_until`; 3 added the successor fields; 4 added the per-home
@@ -121,6 +124,9 @@ struct Checkpoint {
     high_water: Option<(u64, String)>,
     /// Per home, the highest accepted head (format 4).
     head_marks: BTreeMap<String, (u64, String)>,
+    /// The succession was seen verified (additive: absent means not seen).
+    #[serde(default)]
+    succession_verified: bool,
 }
 
 impl Persisted {
@@ -130,7 +136,18 @@ impl Persisted {
             high_water: Some((seq, digest)),
             checkpoint: None,
             head_marks: BTreeMap::new(),
+            succession_verified: false,
         }
+    }
+
+    /// Whether this verifier saw its account's succession verified (§15.1).
+    pub fn succession_verified(&self) -> bool {
+        self.succession_verified
+    }
+    /// Record that the succession was seen verified. Monotone: never cleared.
+    pub fn with_succession_verified(mut self) -> Self {
+        self.succession_verified = true;
+        self
     }
 
     /// This verifier's high-water mark for `home`: the highest head `(seq, digest)` it accepted.
@@ -195,6 +212,7 @@ impl Persisted {
         Self {
             high_water: high_water.clone(),
             head_marks: previous.head_marks.clone(),
+            succession_verified: previous.succession_verified,
             checkpoint: Some(Checkpoint {
                 version: CHECKPOINT_VERSION,
                 now_ms,
@@ -205,6 +223,7 @@ impl Persisted {
                 held_until: verdict.held_until,
                 high_water,
                 head_marks: previous.head_marks.clone(),
+                succession_verified: previous.succession_verified,
             }),
         }
     }
@@ -218,6 +237,7 @@ impl Persisted {
         let mut cp = cp.clone();
         cp.high_water = self.high_water.clone();
         cp.head_marks = self.head_marks.clone();
+        cp.succession_verified = self.succession_verified;
         serde_json::to_vec(&cp).map_err(|e| crate::v05::malformed(e.to_string()))
     }
 
@@ -236,6 +256,7 @@ impl Persisted {
         Ok(Self {
             high_water: cp.high_water.clone(),
             head_marks: cp.head_marks.clone(),
+            succession_verified: cp.succession_verified,
             checkpoint: Some(cp),
         })
     }
@@ -251,8 +272,16 @@ impl Persisted {
             .and_then(|m| serde_json::from_value::<BTreeMap<String, (u64, String)>>(m).ok())
             .filter(|m| check_head_marks(m).is_ok())
             .unwrap_or_default();
+        let kept = serde_json::from_slice::<serde_json::Value>(old)
+            .ok()
+            .and_then(|v| {
+                v.get("succession_verified")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false);
         let previous = Self {
             head_marks: marks,
+            succession_verified: kept,
             ..Self::default()
         };
         Self::checkpoint(objects, &previous, now_ms)

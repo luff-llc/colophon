@@ -28,12 +28,10 @@
 //! secret or keeps a clock: the host signs each step's exact bytes and passes the time.
 use super::{Account, Changes, Finished, Incoming, PendingAction};
 use crate::model::Records as Legacy;
+use crate::v05::encoding::digest;
 use crate::v05::encoding::{decode_base64, strict_parse};
-use crate::v05::encoding::{digest, parse_date};
 use crate::v05::history::swift;
-use crate::v05::history::{
-    succession_status, verify_history, Objects, Persisted, SuccessionStatus,
-};
+use crate::v05::history::{succession_status, Objects, SuccessionStatus};
 use crate::v05::records::{Level, OperationHeader};
 use crate::v05::swift_copy::{CopyItem, CopyPlan, CopyResult, Destination, DestinationBatch};
 use crate::v05::write::authority::PendingBatch;
@@ -167,35 +165,15 @@ impl Account {
         Ok(SwiftSuccession { stage, status })
     }
 
-    /// §15.1: "a verifier that has persisted a verified succession keeps it". The account derives
-    /// that from its held objects instead of a stored flag: the succession is verified if it
-    /// verifies now, or verified at the moment any held head was issued (heads only age; F, the
-    /// receipts and the history they covered are held for ever). A recorded veto overrides.
+    /// §15.1: "a verifier that has persisted a verified succession keeps it". The fact is stored
+    /// in the account's persisted verifier state when the account first sees the succession
+    /// verified, and read from there: it is never re-derived from held heads, and never lost
+    /// when they age. A recorded veto overrides.
     fn verified_ever(&self, status: &SuccessionStatus) -> bool {
         if status.verified.is_some() {
             return true;
         }
-        if status.vetoed {
-            return false;
-        }
-        let mut times: Vec<i64> = self
-            .objects
-            .heads
-            .iter()
-            .filter_map(|h| {
-                let env = strict_parse(h).ok()?;
-                let body = decode_base64(env.get("body")?.as_str()?, 65_536).ok()?;
-                parse_date(strict_parse(&body).ok()?.get("issued")?.as_str()?)
-            })
-            .collect();
-        times.sort_unstable();
-        times.dedup();
-        times.into_iter().rev().take(64).any(|t| {
-            verify_history(&self.objects, &Persisted::default(), t)
-                .state
-                .and_then(|st| succession_status(&st))
-                .is_some_and(|s| s.verified.is_some())
-        })
+        !status.vetoed && self.persisted.succession_verified()
     }
 
     /// The account already holds an F that names it (built here or appended by the Swift side).

@@ -32,8 +32,8 @@ use crate::v05::write::calls::{
     PreparedCall, PreparedLink,
 };
 use crate::v05::write::records::{
-    prepare_grant, prepare_operation, prepare_rekey, prepare_renew, prepare_resolution,
-    prepare_revoke, Keep, OperationSpec, PreparedOperation,
+    prepare_grant, prepare_rekey, prepare_renew, prepare_resolution, prepare_revoke, Keep,
+    OperationSpec, PreparedOperation,
 };
 use crate::v05::write::{format_date, KeptHead, Kind, SignatureResult, SigningStep};
 use crate::v05::{malformed, require, Failure, Reason, Result};
@@ -124,6 +124,16 @@ impl Change {
     /// Appoint or revoke homes (`appoint` takes grant-like objects; `revoke` member IDs).
     pub fn homes(fields: Value) -> Self {
         Self(Map::from_iter([("homes".to_string(), fields)]))
+    }
+    /// Grant a member by a transition (§8.7, §9.2): the embedded request and the granted
+    /// terms. An import grant (§9.3: `terms.import`) and a home's are transitions. A transition's
+    /// `grant` carries no shares: once it is final, [`Account::begin_renew_shares`] seals the
+    /// epochs the member is owed.
+    pub fn grant(request: &[u8], terms: Value) -> Self {
+        Self(Map::from_iter([(
+            "grant".to_string(),
+            json!({"request": crate::v05::encoding::encode_base64(request), "terms": terms}),
+        )]))
     }
     /// Add another component set to this one (components of the same name merge their
     /// members, the right-hand side winning).
@@ -483,6 +493,29 @@ impl Account {
             self.now_ms,
             member,
             &format_date(expires_ms),
+            &self.d.keys,
+            seed,
+        )?;
+        Ok(self.batch_action("renew", batch))
+    }
+
+    /// The shares-only form of `renew` (§9.4, revision 14: `expires` is optional): seal the
+    /// epochs a member is owed (an import grant is a transition and carries none; a member that
+    /// was provisional or expired when an epoch was made lacks it) and leave its expiry exactly
+    /// as it is.
+    pub fn begin_renew_shares(
+        &self,
+        member: &str,
+        signers: &[String],
+        seed: [u8; 32],
+    ) -> Result<PendingAction> {
+        self.require_writable()?;
+        let batch = crate::v05::write::records::prepare_renew_shares(
+            &self.d.effective,
+            self.now_ms,
+            signers,
+            self.now_ms,
+            member,
             &self.d.keys,
             seed,
         )?;
@@ -1400,9 +1433,16 @@ impl Account {
                 detail: "Unlock the namespace epoch before writing".into(),
             }));
         }
-        let prepared = prepare_operation(
-            &self.d.effective,
-            &self.records,
+        // Constant work: the clock, the chain tip, the budget and the nonces come from the
+        // judgement the account already holds, not from a pass over the held records.
+        let w = &self.d.windex;
+        let tips = w
+            .tips
+            .get(&(me.clone(), namespace.to_string()))
+            .map_or(&[][..], Vec::as_slice);
+        let used = |ns: &str, e: u64, n: &[u8]| w.nonces.contains(&(ns.to_string(), e, n.to_vec()));
+        let prepared = crate::v05::write::records::prepare_operation_fast(
+            &self.d.auth,
             &self.d.keys,
             self.now_ms,
             &OperationSpec {
@@ -1414,6 +1454,12 @@ impl Account {
                 clock: None,
             },
             seed,
+            &crate::v05::write::records::WriteBasis {
+                highest: w.highest.get(namespace).copied().unwrap_or(0),
+                tips,
+                reserved: w.reserved.get(&me).copied().unwrap_or(0),
+                nonce_used: &used,
+            },
         )?;
         let steps = vec![prepared.step().clone()];
         Ok(Ok(self.pending_for(

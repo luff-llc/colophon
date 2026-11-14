@@ -3,8 +3,16 @@
 //! then finish*, merges incoming objects, and answers views and queries.
 //!
 //! It is sans-IO: no storage, no network, no clock, no RNG. Seeds, nonces and the time are
-//! arguments. The storage engine, record sources, on-disk checkpoints, blobs and relay cursors
-//! are the next package (E6).
+//! arguments. The storage engine, record sources, on-disk checkpoints, blobs and home exchange
+//! are [`crate::v05::engine`] (E6), built on this account.
+//!
+//! **Incremental judgement (E6).** A merge of records that sort after everything held resumes
+//! the walk of [`judge_records`](crate::v05::records::judge_records) from its last state; a merge
+//! of earlier ones walks again without repeating a signature check or a decryption
+//! ([`records::JudgeCache`](crate::v05::records::JudgeCache)); a namespace fold is extended, not
+//! redone, when the operations it folded are the first of those it folds now. Each answer is
+//! the one a full judgement gives (`tests/v05_account_engine.rs`). Authority changes, new keys
+//! and a changed standing of any member rebuild from the memo, as before.
 //!
 //! # What the core guarantees, exactly, and what the host is trusted with
 //!
@@ -93,7 +101,7 @@
 //! | `set_read_scope` | [`Account::set_read_scope`] |
 //! | `merge`, `merge_with_changes`, `changes`, `finish_with_changes` | [`Account::merge`] returns [`Changes`]; [`Account::finish`] returns it too |
 //! | `revision`, `applied_operations` | [`Account::revision`] |
-//! | `checkpoint`, `restore_checkpoint`, `set_checkpoint_policy` | E6 for on-disk namespace checkpoints. The verifier's persisted state (§17.2), authenticated under a device-held key as 0.4 protects its checkpoints: [`Account::export_persisted`] and the stored bytes and key given to [`Account::open`] |
+//! | `checkpoint`, `restore_checkpoint`, `set_checkpoint_policy` | [`engine::Engine::save`](crate::v05::engine::Engine::save) for the on-disk namespace checkpoint (E6). The verifier's persisted state (§17.2), authenticated under a device-held key as 0.4 protects its checkpoints: [`Account::export_persisted`] and the stored bytes and key given to [`Account::open`] |
 //! | `query`, `view` | [`Account::query`], [`Account::view`] |
 //! | `finish`, `finish_authority` | [`Account::finish`] (one call; WebAuthn assertions travel in [`SignatureResult`]) |
 //! | `begin_unlock_slot`, `finish_unlock_slot`, `begin_unlock_slots` | [`Account::slots`], [`Account::begin_unlock_slot`], [`Account::finish_unlock_slot`] |
@@ -107,22 +115,22 @@
 //! | `begin_add_controller`, `begin_recovery_add`, `begin_add_passkey` | [`Account::begin_add_controller`] (immediate `approve`/`sign`, or a transition for `control`/`recover`), with [`Account::transfer_seed`] and [`Account::accept_seed_transfer`] for §7.4 |
 //! | `begin_remove_controller` | [`Account::begin_remove_controller`] (`plan_rotation`, the `vault` component) and [`Account::begin_rotate_vault`] (the `vault` entry) |
 //! | `select_controller`, `eligible_signers`, `prepare_authority` | gone in 0.5: the caller names the signers (controller IDs) and the write side checks the rule of §8.4 and refuses a set that does not meet it. [`Account::suggest_signers`] picks a set that meets a rule from the keys a host can sign with |
-//! | `begin_import_grant`, `begin_import`, `import_*`, `reconcile_import_prefix` | `import` is a `terms` field in 0.5 (§9.3, §10.1): [`Account::begin_approve`] carries it; import batches belong to E6 |
-//! | `begin_write`, `written_operation*`, `live_generation` | [`Account::begin_write`] (a `/5` operation); live stamps and live generations belong to E6 |
+//! | `begin_import_grant`, `begin_import`, `import_*`, `reconcile_import_prefix` | `import` is a `terms` field in 0.5 (§9.3, §10.1): [`Account::begin_approve`] carries it; import batches: [`engine::Engine::begin_import`](crate::v05::engine::Engine::begin_import) |
+//! | `begin_write`, `written_operation*`, `live_generation` | [`Account::begin_write`] (a `/5` operation); live stamps and live generations are the engine's: [`engine::Engine::begin_live_write`](crate::v05::engine::Engine::begin_live_write), judged by [`live`](crate::v05::live) |
 //! | `begin_layout` | gone in 0.5: a `/5` account is at layout 2 from genesis (§11.8) |
 //! | `members`, `me` | [`Account::members`], [`Account::me`], [`Account::controllers`] |
 //! | `tools`, `begin_call` | [`Account::tools`]; calls: [`Account::begin_link`], [`Account::begin_call`] (§12) |
 //! | `ledger` | [`Account::ledger`] |
-//! | `begin_blob`, `open_blob_chunk`, `read_blob_chunk`, `NativeBlobWriter` | E6 (blobs) |
-//! | `NativeEngine::*`, `RecordSource`, `verify_batch`, `records_at`, `update_versions` | E6 (the storage engine) |
-//! | `NativeCheckpoint*` | E6 |
+//! | `begin_blob`, `open_blob_chunk`, `read_blob_chunk`, `NativeBlobWriter` | [`engine::Engine::begin_blob`](crate::v05::engine::Engine::begin_blob), [`read_blob`](crate::v05::engine::Engine::read_blob) (E6) |
+//! | `NativeEngine::*`, `RecordSource`, `verify_batch`, `records_at`, `update_versions` | [`engine::Engine`](crate::v05::engine::Engine) (E6) |
+//! | `NativeCheckpoint*` | [`engine::Engine::save`](crate::v05::engine::Engine::save) seals under the host's device-held key; there is no member-signed ticket (see `engine::seal`) |
 //! | `vault_public`, `webauthn_prf_input`, `parse_registration` | already in `v05::vault`, `v05::slots` and `keys` |
 //! | `KeyProvider::sign_with`, `sign_controller_with`, `HostAction::sign_with` | gone in 0.5: the core never calls into a key provider (§3.4, §17.1). The host reads [`PendingAction::steps`] (each step's exact body, signer and WebAuthn challenge) and passes the signatures to [`Account::finish`] |
 //! | `PendingBatch::record_paths`, `HostAction::record_paths` | [`Finished::record_paths`] (the paths of what a finish produced: `authority/<seq>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`, `ops/…`); before finish, [`SigningStep::path`] |
 //! | `migration.rs`: `import_legacy_batch`, `bind_legacy_import_state` | the upgrade tooling step (plan step 8), not the account: legacy import batches are `import` records written through [`Account::begin_write`] once the account is upgraded |
 //! | the 0.4 → 0.5 in-place `upgrade` entry (§16.1) and the Swift keyring upgrade (§16.2) | `moving.rs` (package E8): [`Account::begin_upgrade`] (an associated function: a plain 0.4 history is not an account yet) and the Swift succession steps [`Account::swift_succession`], [`Account::begin_swift_veto`], [`Account::begin_swift_freeze`] and [`Account::finish_move`], [`Account::accept_predecessor_entry`], [`Account::begin_swift_copy_write`] and [`Account::finish_swift_copy_write`], [`Account::begin_swift_migration`] |
 //! | §15 succession (`successor` transition, `handover`, the freezing `layout`, `migration` entry) and §16.2 Swift succession | the Swift form is `moving.rs` (above); the `/5` form (`begin_successor`, `begin_succession_*`) is still not built here. The account reads a succession's `successor` and `migration` through the verifier's state |
-//! | §15 exit and the clean copy (§15.3, the drain window) | the copying itself is the engine's and a home's (**E6**, §13–§14); the account's part is the `successor` and `migration` entries above |
+//! | §15 exit and the clean copy (§15.3, the drain window) | the copying itself is the engine's and a home's ([`engine::exchange`](crate::v05::engine::exchange), §13–§14); the account's part is the `successor` and `migration` entries above |
 //! | (new) pending transitions | [`Account::pending`], [`Account::begin_transition`], [`Account::begin_veto`], [`Account::begin_suspend`], [`Account::record_due`] (the determined `activate`, `vetoed` and `final`), [`Account::begin_resolve`] and [`Account::fork_candidates`] |
 //! | (new) notices (§17.5) | [`Account::pending`], [`Account::notices`] |
 //! | (new) shares owed | [`Account::owed_shares`], [`Account::begin_renew`] |
@@ -236,6 +244,36 @@ impl Status {
     }
 }
 
+/// The work of the latest derivation, and the sum since the account opened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Work {
+    /// The latest judgement of the held records.
+    pub last: crate::v05::records::JudgeStats,
+    /// All judgements since the account was opened.
+    pub total: crate::v05::records::JudgeStats,
+    /// Operations applied to namespace folds by the latest build (the rest were reused).
+    pub fold_applied: u64,
+}
+
+/// One namespace's fold, as a sealed checkpoint carries it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FoldSnapshot {
+    /// The namespace.
+    pub namespace: String,
+    /// The hash of the verified standing it was made under, hex.
+    pub print: String,
+    /// The domain state.
+    pub state: serde_json::Value,
+    /// The digests folded, in fold order.
+    pub order: Vec<String>,
+    /// The highest clock folded.
+    pub clock: u64,
+    /// Operations applied.
+    pub applied: u64,
+    /// The admitted operations.
+    pub admitted: Vec<crate::model::OperationView>,
+}
+
 /// What a merge, an unlock or a finished action changed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Changes {
@@ -311,6 +349,10 @@ pub struct Account {
     now_ms: i64,
     objects: Objects,
     records: Vec<HeldRecord>,
+    /// Live-state candidates (0.3 §5.1) at `state/` paths.
+    live: Vec<HeldRecord>,
+    /// Namespace folds taken back from a sealed checkpoint.
+    fold_seed: BTreeMap<String, (String, derived::Folded)>,
     persisted: Persisted,
     seeds: SeedRing,
     scope: Option<BTreeSet<String>>,
@@ -404,16 +446,49 @@ fn union(into: &mut Objects, from: &Objects) -> bool {
     }
     grew
 }
-fn union_records(into: &mut Vec<HeldRecord>, from: &[HeldRecord]) {
-    let mut seen: BTreeSet<(String, Vec<u8>)> = into
-        .iter()
-        .map(|r| (r.path.clone(), r.bytes.clone()))
-        .collect();
-    for r in from {
-        if seen.insert((r.path.clone(), r.bytes.clone())) {
-            into.push(r.clone());
+/// Of several held byte strings at one path, drop those that are no record at all (they do not
+/// parse, or their signature, account or path is wrong) when another held string at that path is
+/// one. A keyless party's garbage twin of a real record then changes nothing, whichever arrived
+/// first; with nothing better at the path it stays, as evidence. Returns `None` when nothing is
+/// dropped. A function of the held set and the verdicts, so of the set alone.
+fn without_junk(records: &[HeldRecord], d: &Derived) -> Option<Vec<HeldRecord>> {
+    use crate::v05::records::Outcome as Verdict;
+    let junk = |i: usize| matches!(d.judgement.records[i].outcome, Verdict::Invalid(_));
+    if d.judgement.records.len() != records.len() || !(0..records.len()).any(junk) {
+        return None;
+    }
+    let mut good: BTreeSet<&str> = BTreeSet::new();
+    for (i, r) in records.iter().enumerate() {
+        if !junk(i) {
+            good.insert(r.path.as_str());
         }
     }
+    let keep: Vec<HeldRecord> = records
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| !junk(*i) || !good.contains(r.path.as_str()))
+        .map(|(_, r)| r.clone())
+        .collect();
+    (keep.len() != records.len()).then_some(keep)
+}
+fn union_records(into: &mut Vec<HeldRecord>, from: &[HeldRecord]) {
+    // `into` is sorted by (path, bytes): a new record is found by binary search, so a merge
+    // costs the new records, not the held ones.
+    let mut added: Vec<&HeldRecord> = Vec::new();
+    let mut fresh: BTreeSet<(&str, &[u8])> = BTreeSet::new();
+    for r in from {
+        let key = (r.path.as_str(), r.bytes.as_slice());
+        let present = into
+            .binary_search_by(|h| (h.path.as_str(), h.bytes.as_slice()).cmp(&key))
+            .is_ok();
+        if !present && fresh.insert(key) {
+            added.push(r);
+        }
+    }
+    if added.is_empty() {
+        return;
+    }
+    into.extend(added.into_iter().cloned());
     into.sort_by(|a, b| (&a.path, &a.bytes).cmp(&(&b.path, &b.bytes)));
 }
 
@@ -484,20 +559,50 @@ impl Account {
             &Inputs {
                 objects: &all,
                 records: &held,
+                live: &[],
                 persisted: &persisted,
                 now_ms,
                 seeds: &seeds,
                 me,
                 scope: &scope,
+                fold_seed: &BTreeMap::new(),
             },
             None,
             None,
         )?;
+        let mut d = d;
+        if let Some(keep) = without_junk(&held, &d) {
+            held = keep;
+            d = Derived::build(
+                &Inputs {
+                    objects: &all,
+                    records: &held,
+                    live: &[],
+                    persisted: &persisted,
+                    now_ms,
+                    seeds: &seeds,
+                    me,
+                    scope: &scope,
+                    fold_seed: &BTreeMap::new(),
+                },
+                None,
+                None,
+            )?;
+        }
+        let persisted = if crate::v05::history::succession_status(d.auth.state())
+            .is_some_and(|s| s.verified.is_some())
+        {
+            persisted.with_succession_verified()
+        } else {
+            persisted
+        };
         let mut a = Self {
             me: me.clone(),
             now_ms,
             objects: all,
             records: held,
+            live: Vec::new(),
+            fold_seed: BTreeMap::new(),
             persisted,
             seeds,
             scope,
@@ -530,11 +635,13 @@ impl Account {
             &Inputs {
                 objects,
                 records,
+                live: &self.live,
                 persisted,
                 now_ms,
                 seeds: &self.seeds,
                 me: &self.me,
                 scope: &self.scope,
+                fold_seed: &self.fold_seed,
             },
             Some(&self.d),
             extra,
@@ -561,6 +668,14 @@ impl Account {
         now_ms: i64,
     ) -> Changes {
         let mut changes = self.diff(&d, &objects);
+        // §15.1: a verifier that has seen the succession verified keeps it. The fact is stored
+        // with the persisted verifier state, never re-derived and never lost when heads age.
+        let mut persisted = persisted;
+        if crate::v05::history::succession_status(d.auth.state())
+            .is_some_and(|s| s.verified.is_some())
+        {
+            persisted = persisted.with_succession_verified();
+        }
         self.d = d;
         self.objects = objects;
         self.records = records;
@@ -691,6 +806,10 @@ impl Account {
     pub fn status(&self) -> Status {
         Status::of(&self.d.verdict)
     }
+    /// The body digests of the verified branch, in seq order (seq 1 first).
+    pub fn branch_digests(&self) -> &[String] {
+        &self.d.verdict.branch
+    }
     /// The held authority-side objects: public bytes an engine stores.
     pub fn objects(&self) -> &Objects {
         &self.objects
@@ -704,6 +823,294 @@ impl Account {
     /// objects arrived. It is not a counter. 0 when nothing is folded here.
     pub fn revision(&self, namespace: &str) -> u64 {
         self.d.folded.get(namespace).map_or(0, |f| f.revision)
+    }
+    /// The work the latest derivation did, so a host and a test can see that a merge of new
+    /// records judged and folded only what is new (E6's incremental judgement).
+    pub fn work(&self) -> Work {
+        let (last, total) = {
+            let c = self
+                .d
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (c.last_run(), c.totals())
+        };
+        Work {
+            last,
+            total,
+            fold_applied: self.d.fold_applied,
+        }
+    }
+    /// Move the verifier's resume point to the current verified state, in memory (the sealed
+    /// export is [`Account::export_persisted`]). Later merges then verify only the entries
+    /// after it instead of the whole history (§13.3, §17.2). Crate-private: the engine calls it
+    /// after it has loaded, and it changes no verdict (the account tests show a resumed
+    /// verifier and a replaying one agree).
+    pub(crate) fn checkpoint_verifier(&mut self) {
+        self.persisted = Persisted::checkpoint(&self.objects, &self.persisted, self.now_ms);
+    }
+    /// What this device may remember of the held records' crypto, for the engine's sealed
+    /// checkpoint (crate-private: a caller could not tell it from verified state).
+    pub(crate) fn export_judge_memo(&self) -> Vec<crate::v05::records::RecordMemo> {
+        self.d
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .export_memo(&self.records)
+    }
+    /// Take a memo back from a checkpoint whose seal verified.
+    pub(crate) fn import_judge_memo(&mut self, memo: Vec<crate::v05::records::RecordMemo>) {
+        self.d
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .import_memo(memo);
+    }
+    /// The current live heads (0.3 §5.1): verified, current, folded.
+    pub fn live_heads(&self) -> &[crate::v05::live::LiveHead] {
+        &self.d.live.heads
+    }
+    /// The verdict on each live-state candidate held: `(path, verdict)`.
+    pub fn live_verdicts(&self) -> &[(String, crate::v05::live::LiveVerdict)] {
+        &self.d.live.verdicts
+    }
+    /// Hold live-state candidates (`state/<author>/<namespace>/<slot>.json` envelopes) and
+    /// judge them with the history (0.3 §5.1). They are held as a set, so the heads are a
+    /// function of what is held. What is held is pruned as a function of the set (see the
+    /// code): never more than [`crate::v05::live::MAX_CANDIDATES_PER_PATH`] byte strings per
+    /// path and 16,384 in all; a merge past either bound is refused whole. Nothing changes on
+    /// failure.
+    pub fn merge_live(&mut self, candidates: Vec<HeldRecord>, now_ms: i64) -> Result<Changes> {
+        crate::v05::write::check_issued(now_ms)?;
+        require(
+            candidates.len() <= 16_384
+                && candidates
+                    .iter()
+                    .all(|c| c.bytes.len() <= MAX_RECORD_BYTES && c.path.len() <= 512),
+            "a live candidate exceeds its bound",
+        )?;
+        let mut live = self.live.clone();
+        union_records(&mut live, &candidates);
+        require(live.len() <= 32_768, "too many live candidates")?;
+        let now = now_ms.max(self.now_ms);
+        let build = |this: &Self, live: &[HeldRecord]| {
+            Derived::build(
+                &Inputs {
+                    objects: &this.objects,
+                    records: &this.records,
+                    live,
+                    persisted: &this.persisted,
+                    now_ms: now,
+                    seeds: &this.seeds,
+                    me: &this.me,
+                    scope: &this.scope,
+                    fold_seed: &this.fold_seed,
+                },
+                Some(&this.d),
+                None,
+            )
+        };
+        let mut d = build(self, &live)?;
+        // Keep what can still matter, as a function of the set: a candidate that is no live
+        // record at all is dropped, and of the valid ones a slot keeps its two highest
+        // generations (the head, and the one that takes over if the head stops being valid).
+        let mut keep: Vec<HeldRecord> = Vec::new();
+        let mut superseded: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
+        for (i, (c, (_, v))) in live.iter().zip(&d.live.verdicts).enumerate() {
+            match v {
+                crate::v05::live::LiveVerdict::Invalid(_) => {}
+                crate::v05::live::LiveVerdict::Superseded => {
+                    let g = crate::v05::records::OperationHeader::parse(&c.bytes)
+                        .map_or(0, |(h, _)| h.clock);
+                    superseded.entry(c.path.clone()).or_default().push((g, i));
+                }
+                _ => keep.push(c.clone()),
+            }
+        }
+        for list in superseded.values_mut() {
+            list.sort_by(|a, b| b.cmp(a));
+            for (_, i) in list.iter().take(2) {
+                keep.push(live[*i].clone());
+            }
+        }
+        keep.sort_by(|a, b| (&a.path, &a.bytes).cmp(&(&b.path, &b.bytes)));
+        let mut per: BTreeMap<&str, usize> = BTreeMap::new();
+        for c in &keep {
+            *per.entry(c.path.as_str()).or_default() += 1;
+        }
+        require(
+            keep.len() <= 16_384
+                && per
+                    .values()
+                    .all(|n| *n <= crate::v05::live::MAX_CANDIDATES_PER_PATH),
+            "too many live candidates",
+        )?;
+        if keep.len() != live.len() {
+            live = keep;
+            d = build(self, &live)?;
+        }
+        let (o, r, p) = (
+            self.objects.clone(),
+            self.records.clone(),
+            self.persisted.clone(),
+        );
+        let c = self.commit(d, o, r, p, now);
+        self.live = live;
+        Ok(c)
+    }
+    /// The verdict on the held record at `path`, as the §11.5 spelling (`admitted`,
+    /// `refused:…`, `held:…`), or `None` when no held record is at that path.
+    pub fn record_verdict(&self, path: &str) -> Option<String> {
+        let i = *self.d.judged_at.get(path)?;
+        self.d.judgement.records.get(i).map(|j| j.outcome.code())
+    }
+    /// Whether `bytes` at `path` would be a record of this account (see
+    /// [`crate::v05::records`]): not garbage, not another account's, not a bad signature. One
+    /// signature check, nothing is held.
+    pub fn would_hold(&self, path: &str, bytes: &[u8]) -> bool {
+        crate::v05::records::is_record_candidate(
+            &self.d.auth,
+            &HeldRecord {
+                path: path.to_string(),
+                bytes: bytes.to_vec(),
+            },
+        )
+    }
+    /// The verdict on exactly these bytes at `path`, when the account holds them: `None` when it
+    /// does not hold this byte string there.
+    pub fn verdict_of(&self, path: &str, bytes: &[u8]) -> Option<String> {
+        let i = self
+            .records
+            .binary_search_by(|r| (r.path.as_str(), r.bytes.as_slice()).cmp(&(path, bytes)))
+            .ok()?;
+        self.d.judgement.records.get(i).map(|j| j.outcome.code())
+    }
+    /// The highest clock of an admitted, authenticated operation in `namespace` (0 if none): a
+    /// writer's next clock is one past it (§11.4).
+    pub fn highest_admitted_clock(&self, namespace: &str) -> u64 {
+        self.d
+            .judgement
+            .records
+            .iter()
+            .filter(|j| {
+                j.outcome == crate::v05::records::Outcome::Admitted
+                    && j.plaintext.is_some()
+                    && j.namespace.as_deref() == Some(namespace)
+            })
+            .map(|j| j.clock)
+            .max()
+            .unwrap_or(0)
+    }
+    /// The highest generation among the live candidates held for `author`'s `slot` in
+    /// `namespace` that are live records at all (0 if none): a new sample goes above it, so a
+    /// writer never reuses a generation an equivocation spoiled.
+    pub fn live_generation_floor(&self, author: &str, namespace: &str, slot: &str) -> u64 {
+        let path = crate::v05::live::live_path(author, namespace, slot);
+        self.live
+            .iter()
+            .filter(|c| c.path == path)
+            .filter_map(|c| crate::v05::records::OperationHeader::parse(&c.bytes).ok())
+            .map(|(h, _)| h.clock)
+            .max()
+            .unwrap_or(0)
+    }
+    /// What the live judgement would say of `candidate` held with the live candidates now held,
+    /// without holding it. `unsigned` skips the signature check (the write side's own header
+    /// before the host signed it).
+    pub(crate) fn preview_live(
+        &self,
+        candidate: HeldRecord,
+        unsigned: bool,
+    ) -> Result<crate::v05::live::LiveVerdict> {
+        let mut live = self.live.clone();
+        union_records(&mut live, std::slice::from_ref(&candidate));
+        let at = live
+            .iter()
+            .position(|c| c.path == candidate.path && c.bytes == candidate.bytes)
+            .ok_or_else(|| crate::v05::malformed("candidate not held"))?;
+        let mut cache = self
+            .d
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let j = crate::v05::live::judge_live_with(
+            &self.d.auth,
+            &self.d.keys,
+            &self.d.judgement,
+            &live,
+            unsigned.then_some(at),
+            Some(&mut cache),
+        );
+        Ok(j.verdicts
+            .get(at)
+            .map(|v| v.1.clone())
+            .unwrap_or(crate::v05::live::LiveVerdict::Invalid("not judged".into())))
+    }
+    /// The namespace folds, for the engine's sealed checkpoint: what a resumed open reuses
+    /// instead of folding every operation again. Crate-private (it holds plaintext state).
+    pub(crate) fn export_folds(&self) -> Vec<FoldSnapshot> {
+        let print = crate::v05::engine::hex(&self.d.print);
+        self.d
+            .folded
+            .iter()
+            .filter_map(|(ns, f)| {
+                Some(FoldSnapshot {
+                    namespace: ns.clone(),
+                    print: print.clone(),
+                    state: serde_json::to_value(&f.fold.state).ok()?,
+                    order: f.fold.order.clone(),
+                    clock: f.fold.clock,
+                    applied: f.fold.applied,
+                    admitted: f.admitted.clone(),
+                })
+            })
+            .collect()
+    }
+    /// Take namespace folds back from a checkpoint whose seal verified. They are used only
+    /// when the verified standing they were made under (the print) and the operations folded
+    /// are exactly those the judgement now yields, as a prefix.
+    pub(crate) fn import_folds(&mut self, snaps: Vec<FoldSnapshot>) {
+        for s in snaps {
+            let Ok(state) = serde_json::from_value(s.state) else {
+                continue;
+            };
+            let hashes = crate::engine::prefix_hashes(&s.order);
+            let fold = crate::engine::Namespace {
+                revision: 0,
+                state,
+                order: s.order,
+                hashes,
+                clock: s.clock,
+                checkpoints: Vec::new(),
+                applied: s.applied,
+            };
+            self.fold_seed.insert(
+                s.namespace,
+                (
+                    s.print,
+                    derived::Folded {
+                        revision: 0,
+                        fold,
+                        admitted: s.admitted,
+                    },
+                ),
+            );
+        }
+    }
+    /// Whether this account has seen its succession verified (§15.1), kept in its persisted
+    /// verifier state.
+    pub fn succession_seen_verified(&self) -> bool {
+        self.persisted.succession_verified()
+    }
+    /// The record-layer view of the verified history, for the engine (crate-private: it holds
+    /// no secret, but the engine must not take verified state from a caller, so it reads this).
+    pub(crate) fn record_authority(&self) -> &crate::v05::records::RecordAuthority {
+        &self.d.auth
+    }
+    /// The epoch keys this account holds, for the engine's blob and live-state work.
+    /// Crate-private: nothing outside the crate can read a key through it.
+    pub(crate) fn epoch_keys(&self) -> &crate::v05::records::EpochKeys {
+        &self.d.keys
     }
     /// Restrict which namespaces this session folds and unlocks (as 0.4's read scope).
     pub fn set_read_scope(&mut self, namespaces: Vec<String>) -> Result<Changes> {
@@ -775,7 +1182,11 @@ impl Account {
         let foreign = before - incoming.objects.entries.len();
         union(&mut objects, &incoming.objects);
         union_records(&mut records, &incoming.records);
-        let d = self.candidate(&objects, &records, &self.persisted, now)?;
+        let mut d = self.candidate(&objects, &records, &self.persisted, now)?;
+        if let Some(keep) = without_junk(&records, &d) {
+            records = keep;
+            d = self.candidate(&objects, &records, &self.persisted, now)?;
+        }
         let mut persisted = self.persisted.clone();
         let mut heads = HeadChanges::default();
         {
