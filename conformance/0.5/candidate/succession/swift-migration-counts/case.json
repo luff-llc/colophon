@@ -1,0 +1,1 @@
+{"description":"§15.4: `copied` + `omitted` must equal `source`: the migration's activation is malformed.","expected":{"now":"2026-11-14T10:12:30Z","seq3":"migration malformed","succession":"verified"},"sections":["15.1","16.3"]}

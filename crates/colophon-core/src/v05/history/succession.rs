@@ -160,7 +160,11 @@ pub(crate) fn handover_authorized(
         || ids.intersection(&recover_set).count() as u64 >= s.recover_threshold;
     if s.adopted {
         ids.iter()
-            .filter(|id| s.controllers.get(*id).is_some_and(|c| c.has(&Role::Control)))
+            .filter(|id| {
+                s.controllers
+                    .get(*id)
+                    .is_some_and(|c| c.has(&Role::Control))
+            })
             .count() as u64
             >= s.threshold
             && consent
@@ -880,5 +884,13 @@ pub(crate) fn receipt_is_valid(
         ..w.clone()
     };
     let item = Value::String(crate::v05::encoding::encode_base64(held));
-    receipts(s, &one, std::slice::from_ref(&item), object, issued_ms, deadline_ms).is_ok()
+    receipts(
+        s,
+        &one,
+        std::slice::from_ref(&item),
+        object,
+        issued_ms,
+        deadline_ms,
+    )
+    .is_ok()
 }

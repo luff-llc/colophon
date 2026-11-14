@@ -234,7 +234,12 @@ pub fn swift_carried_controllers(
             Some(w) => {
                 let origins = options.authority_origins.get(id).cloned();
                 // Validates the origins under the general rule.
-                WebAuthnKey::new(w.rp().to_string(), w.credential().to_vec(), None, origins.clone())?;
+                WebAuthnKey::new(
+                    w.rp().to_string(),
+                    w.credential().to_vec(),
+                    None,
+                    origins.clone(),
+                )?;
                 key_v.insert("form".into(), json!("webauthn"));
                 key_v.insert("rp".into(), json!(w.rp()));
                 key_v.insert("credential".into(), json!(encode_base64(w.credential())));
@@ -1146,8 +1151,12 @@ pub fn prepare_migration(
         .states
         .get(head_idx)
         .ok_or_else(|| malformed("predecessor head"))?;
+    super::check_issued(p.drain_from_ms)?;
+    super::check_issued(p.drain_until_ms)?;
+    super::check_issued(p.issued_ms)?;
     require(
-        p.drain_until_ms >= p.drain_from_ms && p.drain_until_ms - p.drain_from_ms <= 2_592_000_000,
+        p.drain_until_ms >= p.drain_from_ms
+            && p.drain_until_ms.saturating_sub(p.drain_from_ms) <= 2_592_000_000,
         "the drain window is 0 to 30 days",
     )?;
     require(

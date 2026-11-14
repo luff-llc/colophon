@@ -40,7 +40,9 @@ pub fn files_in(dir: &Path) -> Vec<Vec<u8>> {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
     v.sort();
-    v.into_iter().map(|p| strip(std::fs::read(p).unwrap())).collect()
+    v.into_iter()
+        .map(|p| strip(std::fs::read(p).unwrap()))
+        .collect()
 }
 pub fn body_value(env: &[u8]) -> Value {
     let e: Value = serde_json::from_slice(env).unwrap();
@@ -93,7 +95,13 @@ impl Key {
         }
     }
     /// A synthetic authenticator: UP and UV set (`flags`), the step's challenge, the origin.
-    pub fn sign_webauthn(&self, rp: &str, origin: &str, flags: u8, challenge: &str) -> SignatureResult {
+    pub fn sign_webauthn(
+        &self,
+        rp: &str,
+        origin: &str,
+        flags: u8,
+        challenge: &str,
+    ) -> SignatureResult {
         let mut auth = Sha256::digest(rp.as_bytes()).to_vec();
         auth.push(flags);
         auth.extend([0, 0, 0, 1]);
@@ -113,7 +121,10 @@ pub fn published_scalars() -> BTreeMap<String, Vec<u8>> {
     let c = repo().join("conformance/0.5/candidate");
     for f in ["keys.json", "rules/keys-r4.json"] {
         for k in read_json(&c.join(f))["keys"].as_object().unwrap().values() {
-            put(k["signing"].as_str().unwrap(), k["scalar"].as_str().unwrap());
+            put(
+                k["signing"].as_str().unwrap(),
+                k["scalar"].as_str().unwrap(),
+            );
         }
     }
     let v = read_json(&repo().join("conformance/0.4/keys/keys.json"));
@@ -134,7 +145,11 @@ pub fn published_scalars() -> BTreeMap<String, Vec<u8>> {
     // list are found by trying every plain string literal of the generator's source as a name (the
     // source is read as text, never compiled in or called).
     for lit in literals() {
-        for name in [lit.clone(), format!("webauthn/{lit}"), format!("{lit}/signing")] {
+        for name in [
+            lit.clone(),
+            format!("webauthn/{lit}"),
+            format!("{lit}/signing"),
+        ] {
             let k = derived(&name);
             let public = k.sk.verifying_key().to_encoded_point(false);
             out.entry(key_id(public.as_bytes()))
@@ -176,7 +191,10 @@ fn literals() -> Vec<String> {
 
 /// Sign every step: raw keys over the body; WebAuthn keys with a synthetic authenticator whose
 /// origin is `https://<rp of the step's descriptor>`.
-pub fn sign_steps(steps: &[SigningStep], scalars: &BTreeMap<String, Vec<u8>>) -> Vec<SignatureResult> {
+pub fn sign_steps(
+    steps: &[SigningStep],
+    scalars: &BTreeMap<String, Vec<u8>>,
+) -> Vec<SignatureResult> {
     steps
         .iter()
         .map(|s| {

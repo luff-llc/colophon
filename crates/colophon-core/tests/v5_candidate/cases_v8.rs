@@ -3684,6 +3684,53 @@ pub fn part3(o: &mut Out) {
         60,
         vec![],
     );
+    // §15.4: the `migration` entry of a Swift succession, as a transition the owner's control
+    // keys sign and the successor home receipts; recorded once, after its due time. The counts
+    // must add up (`copied` + `omitted` = `source`), the view is the digest of the sorted copied
+    // digests, and the drain window is at most 30 days.
+    for (name, why, good) in [
+        ("swift-migration", "§15.4: a migration with real view digests is recorded after F and its due time.", true),
+        ("swift-migration-counts", "§15.4: `copied` + `omitted` must equal `source`: the migration's activation is malformed.", false),
+    ] {
+        let recs = swift_library(true);
+        let mut g = new_genesis(&recs, 2, sg![a], "Library");
+        let rg = successor_with_home(&mut g, 60, sr0 - 60);
+        let f = swift_freeze_signed(&recs, &account_id(&g), &a, &ts(sr0 + after));
+        let copied = [sha(b"one"), sha(b"two")];
+        let mut sorted = copied.to_vec();
+        sorted.sort();
+        let view = sha(sorted.join("\n").as_bytes());
+        let change = json!({"migration": {
+            "predecessor": {"format": "colophon/swift-keyring/2", "account": &sha(&body_of(&recs[0]))[..32],
+                            "final": {"seq": 3, "digest": sha(&body_of(&f))}},
+            "drain": {"from": ts(sr0 + after - 120), "until": ts(sr0 + after - 60)},
+            "namespaces": [{"namespace": "notes", "source": if good { 3 } else { 5 }, "copied": 2, "omitted": 1, "view": view}],
+            "omitted": [{"ref": "cd".repeat(32), "reason": "invalidPayload"}],
+            "controllers": [{"id": a.id, "slot": true}, {"id": k1.id, "slot": false}],
+            "members": [],
+        }});
+        let t = transition(
+            &g,
+            change,
+            sg![a, k1],
+            &ts(sr0 + after + 30),
+            TOpt {
+                origin: Some("https://id.example"),
+                ..TOpt::default()
+            },
+        );
+        let r = receipt_of(&account_id(&g), &t, &sh, &ts(sr0 + after + 90));
+        let act = activate_full(&mut g, &t, &[r]);
+        let at = secs(body_json(&act)["issued"].as_str().unwrap()) + 60;
+        let mut all = recs.to_vec();
+        all.push(f);
+        let expected = if good {
+            json!({"succession": "verified", "migration": "recorded", "now": ts(at)})
+        } else {
+            json!({"succession": "verified", "seq3": "migration malformed", "now": ts(at)})
+        };
+        write_swift(o, name, &all, Some(&g), expected, why, succ_extra(&g, &rg));
+    }
     // Revision 12, M4 (§8.4 Possession): a carried key is exempt from its possession proof only
     // when the genesis's `handover` meets the rule that may write F at `head`. The genesis lists
     // the kit, a predecessor key, and proves its possession in neither case.

@@ -616,8 +616,8 @@ pub fn prepare_genesis_receipt(
     use crate::v05::signature::RawEnvelope;
     require(is_key_id(home), "a home is a member ID")?;
     let state = super::authority::head_state(objects, now_ms)?;
-    let status = succession_status(&state)
-        .ok_or_else(|| malformed("this account has no predecessor"))?;
+    let status =
+        succession_status(&state).ok_or_else(|| malformed("this account has no predecessor"))?;
     let t = status.timing.as_ref().ok_or_else(|| {
         crate::v05::Failure::Unavailable("the succession window has not opened".into())
     })?;
@@ -684,6 +684,9 @@ pub fn finish_genesis_receipt(
         t.window_start_ms,
         i64::MAX,
     );
-    require(valid, "the succession verifier does not accept this receipt")?;
+    require(
+        valid,
+        "the succession verifier does not accept this receipt",
+    )?;
     Ok(env)
 }

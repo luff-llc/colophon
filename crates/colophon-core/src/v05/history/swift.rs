@@ -329,8 +329,7 @@ pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
 /// applies it before it asks a host to sign the freezing entry F.
 pub(crate) fn layout_signers_meet_rule(s: &Snapshot, ids: &BTreeSet<String>) -> bool {
     let controls = |id: &String| s.controllers.get(id).is_some_and(|c| c.has(&Role::Control));
-    ids.iter().filter(|id| controls(id)).count() as u64 >= s.threshold
-        && ids.iter().all(controls)
+    ids.iter().filter(|id| controls(id)).count() as u64 >= s.threshold && ids.iter().all(controls)
 }
 
 fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {

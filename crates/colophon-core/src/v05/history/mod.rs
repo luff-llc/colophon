@@ -16,11 +16,11 @@ pub(crate) mod succession;
 pub mod swift;
 pub(crate) mod upgrade;
 
-pub use succession::{succession_status, SuccessionStatus, SuccessionTiming};
 pub use state::{
     check_pending_transition, check_pending_veto, Activation, HomeStatus, MemberRecord, State,
     Suspension,
 };
+pub use succession::{succession_status, SuccessionStatus, SuccessionTiming};
 
 use crate::v05::{Failure, Unknown};
 use envelope::AuthEnvelope;

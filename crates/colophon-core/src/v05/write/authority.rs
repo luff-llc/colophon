@@ -709,7 +709,11 @@ fn receipt_received(state: &State, bytes: &[u8]) -> Result<i64> {
 }
 
 /// The held transition or veto envelope whose body digest is `want`.
-pub(crate) fn find_pending<'a>(objects: &'a Objects, want: &str, protocol: &str) -> Result<&'a Vec<u8>> {
+pub(crate) fn find_pending<'a>(
+    objects: &'a Objects,
+    want: &str,
+    protocol: &str,
+) -> Result<&'a Vec<u8>> {
     objects
         .pending
         .iter()

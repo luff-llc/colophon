@@ -89,7 +89,9 @@ impl Vector {
         body_value(&self.genesis)
     }
     fn head_seq(&self) -> usize {
-        self.genesis_body()["predecessor"]["head"]["seq"].as_u64().unwrap() as usize
+        self.genesis_body()["predecessor"]["head"]["seq"]
+            .as_u64()
+            .unwrap() as usize
     }
     /// The predecessor up to and including `head`, and F when the vector holds it.
     fn prefix(&self) -> Vec<Vec<u8>> {
@@ -170,13 +172,12 @@ fn build_freeze(v: &Vector, scalars: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u
     let f = v.f().ok_or("the vector holds no F")?;
     let fenv: Value = serde_json::from_slice(&f).unwrap();
     let fb = body_value(&f);
-    let signer0 = fb
-        .get("signer")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let signer0 = fb.get("signer").and_then(Value::as_str).map(str::to_string);
     // A root library's F is `by: root`: the signer is the current root, found from the history.
     let signers: Vec<String> = match signer0 {
-        Some(s) => std::iter::once(s).chain(ids_of(&fenv, "cosignatures")).collect(),
+        Some(s) => std::iter::once(s)
+            .chain(ids_of(&fenv, "cosignatures"))
+            .collect(),
         None => vec![root_of(&v.prefix())],
     };
     let p = SwiftFreezeParams {
@@ -213,7 +214,6 @@ fn root_of(prefix: &[Vec<u8>]) -> String {
     colophon_core::v05::ids::key_id(&dec(&root.unwrap()))
 }
 
-
 /// Every vector: a valid succession's genesis and F reproduce byte for byte; an invalid one is
 /// refused by the builder before a host is asked to sign, for the reason the vector gives.
 #[test]
@@ -234,7 +234,10 @@ fn the_swift_vectors_reproduce_from_their_inputs() {
                 if e.contains("handover does not meet") {
                     refused += 1;
                 } else {
-                    bad.push(format!("{}: genesis refused for another reason: {e}", v.name));
+                    bad.push(format!(
+                        "{}: genesis refused for another reason: {e}",
+                        v.name
+                    ));
                 }
             }
             Err(e) => bad.push(format!("{}: valid genesis not built: {e}", v.name)),
@@ -258,8 +261,13 @@ fn vector(name: &str) -> Vector {
 
 /// The home of a vector: the member that receipted the genesis.
 fn receipt_of(v: &Vector) -> (String, i64) {
-    let r = body_value(&strip(std::fs::read(v.dir.join("genesis-receipt.json")).unwrap()));
-    (r["by"].as_str().unwrap().to_string(), ms(r["received"].as_str().unwrap()))
+    let r = body_value(&strip(
+        std::fs::read(v.dir.join("genesis-receipt.json")).unwrap(),
+    ));
+    (
+        r["by"].as_str().unwrap().to_string(),
+        ms(r["received"].as_str().unwrap()),
+    )
 }
 
 #[test]
@@ -274,31 +282,51 @@ fn a_successor_home_drafts_the_genesis_receipt_the_vector_holds() {
             ..Objects::default()
         };
         let prepared = prepare_genesis_receipt(&objects, &home, received).unwrap();
-        assert_eq!(prepared.object(), digest(&dec(
-            serde_json::from_slice::<Value>(&v.genesis).unwrap()["body"].as_str().unwrap())));
+        assert_eq!(
+            prepared.object(),
+            digest(&dec(serde_json::from_slice::<Value>(&v.genesis).unwrap()
+                ["body"]
+                .as_str()
+                .unwrap()))
+        );
         let sig = sign_steps(std::slice::from_ref(prepared.step()), &scalars).remove(0);
         let env = finish_genesis_receipt(&prepared, &sig).unwrap();
-        assert_eq!(env, strip(std::fs::read(v.dir.join("genesis-receipt.json")).unwrap()), "{name}");
+        assert_eq!(
+            env,
+            strip(std::fs::read(v.dir.join("genesis-receipt.json")).unwrap()),
+            "{name}"
+        );
         // The window is the window: before its opening, and after its end, no receipt.
         let t = succession_status(
-            &verify_history(&objects, &Persisted::default(), received).state.unwrap(),
+            &verify_history(&objects, &Persisted::default(), received)
+                .state
+                .unwrap(),
         )
         .unwrap()
         .timing
         .unwrap();
         assert!(prepare_genesis_receipt(&objects, &home, t.window_start_ms - 1_000).is_err());
         let e = prepare_genesis_receipt(&objects, &home, t.window_end_ms + 1_000).unwrap_err();
-        assert!(matches!(e, Failure::Malformed(ref m) if m.contains("within the succession window")), "{e:?}");
+        assert!(
+            matches!(e, Failure::Malformed(ref m) if m.contains("within the succession window")),
+            "{e:?}"
+        );
         // A home signs at most one receipt per object.
         let mut again = objects.clone();
         again.pending.push(env.clone());
         let e = prepare_genesis_receipt(&again, &home, received + 1_000).unwrap_err();
-        assert!(matches!(e, Failure::Malformed(ref m) if m.contains("at most one receipt")), "{e:?}");
+        assert!(
+            matches!(e, Failure::Malformed(ref m) if m.contains("at most one receipt")),
+            "{e:?}"
+        );
         // A member that was not a home at the window's entry has no receipt to give.
         assert!(prepare_genesis_receipt(&objects, &"0".repeat(32), received).is_err());
         // A receipt signed by another key is refused at finish.
         let other = key_from_scalar(scalars.values().find(|s| **s != scalars[&home]).unwrap());
-        let forged = SignatureResult { signature: other.sign_raw(prepared.step().body()), assertion: None };
+        let forged = SignatureResult {
+            signature: other.sign_raw(prepared.step().body()),
+            assertion: None,
+        };
         assert!(finish_genesis_receipt(&prepared, &forged).is_err());
     }
 }
@@ -311,7 +339,9 @@ fn timing_gives_the_window_the_due_time_the_deadline_and_the_vetoers() {
         predecessor: v.prefix(),
         ..Objects::default()
     };
-    let st = verify_history(&objects, &Persisted::default(), v.now()).state.unwrap();
+    let st = verify_history(&objects, &Persisted::default(), v.now())
+        .state
+        .unwrap();
     let status = succession_status(&st).unwrap();
     let t = status.timing.clone().unwrap();
     // W0 is the `issued` of the activation that left the account with headQuorum homes; the
@@ -329,7 +359,11 @@ fn timing_gives_the_window_the_due_time_the_deadline_and_the_vetoers() {
     // recovery identity, which the keyring entry (the last that removed a controller) replaced:
     // current immediately before it.
     let h = swift::verify(&v.prefix()).unwrap();
-    let mut ids: Vec<String> = h.states.iter().flat_map(|s| s.controllers.keys().cloned()).collect();
+    let mut ids: Vec<String> = h
+        .states
+        .iter()
+        .flat_map(|s| s.controllers.keys().cloned())
+        .collect();
     ids.sort();
     ids.dedup();
     assert_eq!(t.vetoers.iter().cloned().collect::<Vec<_>>(), ids);
@@ -355,15 +389,22 @@ fn complete(v: &Vector, scalars: &BTreeMap<String, Vec<u8>>) -> (Objects, Vec<u8
     };
     let prepared = prepare_genesis_receipt(&objects, &home, received).unwrap();
     let sig = sign_steps(std::slice::from_ref(prepared.step()), scalars).remove(0);
-    objects.pending.push(finish_genesis_receipt(&prepared, &sig).unwrap());
+    objects
+        .pending
+        .push(finish_genesis_receipt(&prepared, &sig).unwrap());
     // F, signed as the vector's F is.
-    let mut with = Vector { genesis: genesis.clone(), ..clone_vector(v) };
+    let mut with = Vector {
+        genesis: genesis.clone(),
+        ..clone_vector(v)
+    };
     with.dir = v.dir.clone();
     let f = {
         let fenv: Value = serde_json::from_slice(&v.f().unwrap()).unwrap();
         let fb = body_value(&v.f().unwrap());
         let signers: Vec<String> = match fb.get("signer").and_then(Value::as_str) {
-            Some(s) => std::iter::once(s.to_string()).chain(ids_of(&fenv, "cosignatures")).collect(),
+            Some(s) => std::iter::once(s.to_string())
+                .chain(ids_of(&fenv, "cosignatures"))
+                .collect(),
             None => vec![root_of(&v.prefix())],
         };
         let pending = prepare_swift_freeze(
@@ -380,7 +421,11 @@ fn complete(v: &Vector, scalars: &BTreeMap<String, Vec<u8>>) -> (Objects, Vec<u8
             if s.role() == StepRole::Primary {
                 return Some(fenv.clone());
             }
-            fenv["cosignatures"].as_array()?.iter().find(|i| i["signer"] == s.signer()).cloned()
+            fenv["cosignatures"]
+                .as_array()?
+                .iter()
+                .find(|i| i["signer"] == s.signer())
+                .cloned()
         };
         let sigs = sign_like_vector(pending.steps(), &item, scalars).unwrap();
         pending.finish(sigs).unwrap()
@@ -424,8 +469,12 @@ fn a_swift_root_library_and_a_keyring_library_each_succeed_and_the_succession_ve
             if let Some(o) = old.controllers.get(id) {
                 assert_eq!(o.key().signing(), c.key().signing(), "{name}");
                 assert_eq!(
-                    o.key().webauthn().map(|w| (w.rp().to_string(), w.credential().to_vec())),
-                    c.key().webauthn().map(|w| (w.rp().to_string(), w.credential().to_vec())),
+                    o.key()
+                        .webauthn()
+                        .map(|w| (w.rp().to_string(), w.credential().to_vec())),
+                    c.key()
+                        .webauthn()
+                        .map(|w| (w.rp().to_string(), w.credential().to_vec())),
                     "{name}: a carried passkey is the same credential"
                 );
             } else {
@@ -434,7 +483,11 @@ fn a_swift_root_library_and_a_keyring_library_each_succeed_and_the_succession_ve
         }
         if name != "swift-root-library" {
             assert!(
-                state.keyring().controllers.keys().all(|id| old.controllers.contains_key(id)),
+                state
+                    .keyring()
+                    .controllers
+                    .keys()
+                    .all(|id| old.controllers.contains_key(id)),
                 "{name}: a controller that the predecessor never had"
             );
         }
@@ -453,7 +506,13 @@ fn the_carried_controllers_keep_their_roles_and_the_slotted_ones_are_named() {
     )
     .unwrap();
     let want = v.genesis_body()["keyring"]["controllers"].clone();
-    let key_roles = |c: &Value| (c["key"]["signing"].clone(), c["roles"].clone(), c["label"].clone());
+    let key_roles = |c: &Value| {
+        (
+            c["key"]["signing"].clone(),
+            c["roles"].clone(),
+            c["label"].clone(),
+        )
+    };
     let got: Vec<_> = carried.iter().map(key_roles).collect();
     let exp: Vec<_> = want.as_array().unwrap().iter().map(key_roles).collect();
     assert_eq!(got, exp, "the vector carries roles over exactly");
@@ -467,7 +526,10 @@ fn the_carried_controllers_keep_their_roles_and_the_slotted_ones_are_named() {
     let c = swift_carried_controllers(&r.prefix(), &CarryOptions::default()).unwrap();
     let mut roles: Vec<Value> = c.iter().map(|c| c["roles"].clone()).collect();
     roles.sort_by_key(|r| r.to_string());
-    assert_eq!(roles, vec![json!(["approve", "control"]), json!(["recover"])]);
+    assert_eq!(
+        roles,
+        vec![json!(["approve", "control"]), json!(["recover"])]
+    );
 }
 
 #[test]
@@ -479,7 +541,12 @@ fn the_vetoed_succession_is_recorded_and_never_verified() {
     let rec = body_value(&recorded);
     let emb = |f: &str| dec(rec[f].as_str().unwrap());
     let list = |f: &str| -> Vec<Vec<u8>> {
-        rec[f].as_array().unwrap().iter().map(|x| dec(x.as_str().unwrap())).collect()
+        rec[f]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| dec(x.as_str().unwrap()))
+            .collect()
     };
     // What a home holds when the veto reaches it: the veto, its receipts, the genesis receipts.
     let mut objects = Objects {
@@ -511,7 +578,10 @@ fn the_vetoed_succession_is_recorded_and_never_verified() {
         signers: vec![root_of(&v.prefix())],
     };
     let e = prepare_swift_freeze(&p, v.now()).unwrap_err();
-    assert!(matches!(e, Failure::Malformed(ref m) if m.contains("vetoed")), "{e:?}");
+    assert!(
+        matches!(e, Failure::Malformed(ref m) if m.contains("vetoed")),
+        "{e:?}"
+    );
     // And a veto that is not held is not recorded.
     p.successor = Objects::default();
     objects.pending.retain(|b| body_digest(b) != veto_digest);
@@ -550,7 +620,8 @@ fn the_swift_genesis_is_refused_for_each_reason_the_spec_names() {
     // §15.1 step 3: the genesis is not earlier than head's `issued`.
     let mut p = ok.clone();
     p.issued_ms = ms("2026-10-31T00:00:00Z");
-    assert!(why(prepare_swift_genesis(&p, v.now()).unwrap_err()).contains("before the predecessor's head"));
+    assert!(why(prepare_swift_genesis(&p, v.now()).unwrap_err())
+        .contains("before the predecessor's head"));
     // §15.1 step 1: no handover, or too few keys: it would never verify.
     let mut p = ok.clone();
     p.handover.clear();
@@ -558,7 +629,8 @@ fn the_swift_genesis_is_refused_for_each_reason_the_spec_names() {
     // A handover key that is not a controller current at head (an outsider), and one twice.
     let mut p = ok.clone();
     p.handover = vec!["0".repeat(32)];
-    assert!(why(prepare_swift_genesis(&p, v.now()).unwrap_err()).contains("not a controller of the predecessor"));
+    assert!(why(prepare_swift_genesis(&p, v.now()).unwrap_err())
+        .contains("not a controller of the predecessor"));
     let mut p = ok.clone();
     p.handover = vec![p.handover[0].clone(), p.handover[0].clone()];
     assert!(why(prepare_swift_genesis(&p, v.now()).unwrap_err()).contains("twice"));
@@ -577,24 +649,47 @@ fn the_swift_genesis_is_refused_for_each_reason_the_spec_names() {
     // §15.3, §16.2: a controller that had a slot must be carried with a rebuilt slot. The Mac
     // holds the only slot; the new keyring's slot is changed to name the kit instead.
     let mut p = ok.clone();
-    let mac = swift_slotted_controllers(&v.prefix()).unwrap().into_iter().next().unwrap();
-    let kit = p.keyring["controllers"].as_array().unwrap().iter()
+    let mac = swift_slotted_controllers(&v.prefix())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let kit = p.keyring["controllers"]
+        .as_array()
+        .unwrap()
+        .iter()
         .map(|c| colophon_core::v05::ids::key_id(&dec(c["key"]["signing"].as_str().unwrap())))
-        .find(|id| *id != mac).unwrap();
+        .find(|id| *id != mac)
+        .unwrap();
     p.keyring["slots"][0]["controllers"] = json!([kit]);
     let e = why(prepare_swift_genesis(&p, v.now()).unwrap_err());
-    assert!(e.contains("had a slot") || e.contains("slot"), "{e}");
+    assert!(
+        e.contains("had a slot is not carried with a rebuilt slot"),
+        "{e}"
+    );
     // Finish: a signature by another key, and a missing handover signature, return nothing.
     let pending = prepare_swift_genesis(&ok, v.now()).unwrap();
     let mut sigs = sign_like_vector(pending.steps(), &|_| None, &scalars).unwrap_or_else(|_| {
-        pending.steps().iter().map(|s| SignatureResult {
-            signature: key_from_scalar(&scalars[s.signer()]).sign_raw(s.body()),
-            assertion: None,
-        }).collect()
+        pending
+            .steps()
+            .iter()
+            .map(|s| SignatureResult {
+                signature: key_from_scalar(&scalars[s.signer()]).sign_raw(s.body()),
+                assertion: None,
+            })
+            .collect()
     });
-    let forged = key_from_scalar(scalars.values().find(|s| **s != scalars[pending.steps()[0].signer()]).unwrap());
+    let forged = key_from_scalar(
+        scalars
+            .values()
+            .find(|s| **s != scalars[pending.steps()[0].signer()])
+            .unwrap(),
+    );
     sigs[0].signature = forged.sign_raw(pending.steps()[0].body());
-    assert!(matches!(pending.finish(sigs).unwrap_err(), Failure::BadSignature(_)));
+    assert!(matches!(
+        pending.finish(sigs).unwrap_err(),
+        Failure::BadSignature(_)
+    ));
     let pending = prepare_swift_genesis(&ok, v.now()).unwrap();
     assert!(pending.finish(vec![]).is_err());
 }
@@ -603,7 +698,11 @@ fn the_swift_genesis_is_refused_for_each_reason_the_spec_names() {
 fn the_steps_ask_a_proof_only_of_keys_that_are_not_carried_and_a_handover_of_the_keys_offered() {
     let v = vector("swift-root-library");
     let pending = prepare_swift_genesis(&genesis_params(&v), v.now()).unwrap();
-    let kinds: Vec<_> = pending.steps().iter().map(|s| (s.role(), s.signer().to_string())).collect();
+    let kinds: Vec<_> = pending
+        .steps()
+        .iter()
+        .map(|s| (s.role(), s.signer().to_string()))
+        .collect();
     let env: Value = serde_json::from_slice(&v.genesis).unwrap();
     let hand = ids_of(&env, "handover");
     let adds = ids_of(&env, "additions");
@@ -614,12 +713,27 @@ fn the_steps_ask_a_proof_only_of_keys_that_are_not_carried_and_a_handover_of_the
             _ => {}
         }
     }
-    assert_eq!(kinds.iter().filter(|(r, _)| *r == StepRole::Handover).count(), hand.len());
-    assert_eq!(kinds.iter().filter(|(r, _)| *r == StepRole::Possession).count(), adds.len());
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|(r, _)| *r == StepRole::Handover)
+            .count(),
+        hand.len()
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|(r, _)| *r == StepRole::Possession)
+            .count(),
+        adds.len()
+    );
     // The keyring-library vector: the genesis keys are all carried, so no proof is asked.
     let k = vector("swift-keyring");
     let pending = prepare_swift_genesis(&genesis_params(&k), k.now()).unwrap();
-    assert!(pending.steps().iter().all(|s| s.role() != StepRole::Possession));
+    assert!(pending
+        .steps()
+        .iter()
+        .all(|s| s.role() != StepRole::Possession));
 }
 
 #[test]
@@ -636,7 +750,10 @@ fn f_is_refused_before_the_due_time_for_the_wrong_signers_and_a_fractional_secon
     // §15.1 step 5: only after the due time (the clock, then F's own `issued`).
     let t = succession_status(
         &verify_history(
-            &Objects { predecessor: v.prefix(), ..v.successor_objects() },
+            &Objects {
+                predecessor: v.prefix(),
+                ..v.successor_objects()
+            },
             &Persisted::default(),
             v.now(),
         )
@@ -647,10 +764,16 @@ fn f_is_refused_before_the_due_time_for_the_wrong_signers_and_a_fractional_secon
     .timing
     .unwrap();
     let e = prepare_swift_freeze(&p, t.due_ms - 1_000).unwrap_err();
-    assert!(matches!(e, Failure::Unavailable(ref m) if m.contains("due time")), "{e:?}");
+    assert!(
+        matches!(e, Failure::Unavailable(ref m) if m.contains("due time")),
+        "{e:?}"
+    );
     let mut early = p.clone();
     early.issued_ms = t.due_ms;
-    assert!(matches!(prepare_swift_freeze(&early, v.now()).unwrap_err(), Failure::Unavailable(_)));
+    assert!(matches!(
+        prepare_swift_freeze(&early, v.now()).unwrap_err(),
+        Failure::Unavailable(_)
+    ));
     // The Swift date has no fractions.
     let mut frac = p.clone();
     frac.issued_ms += 500;
@@ -671,7 +794,10 @@ fn f_is_refused_before_the_due_time_for_the_wrong_signers_and_a_fractional_secon
         predecessor: extra.predecessor.clone(),
         successor: extra.successor_objects(),
         issued_ms: ms("2026-11-14T10:10:00Z"),
-        signers: vec![body_value(&extra.f().unwrap())["signer"].as_str().unwrap().to_string()],
+        signers: vec![body_value(&extra.f().unwrap())["signer"]
+            .as_str()
+            .unwrap()
+            .to_string()],
     };
     q.predecessor.push(extra.f().unwrap());
     assert!(why(prepare_swift_freeze(&q, extra.now()).unwrap_err()).contains("last entry as head"));
@@ -689,9 +815,20 @@ fn f_finish_returns_nothing_for_a_forged_signature() {
         signers: vec![fb["signer"].as_str().unwrap().to_string()],
     };
     let pending = prepare_swift_freeze(&p, v.now()).unwrap();
-    let forged = key_from_scalar(scalars.values().find(|s| **s != scalars[pending.steps()[0].signer()]).unwrap());
-    let sigs = vec![SignatureResult { signature: forged.sign_raw(pending.steps()[0].body()), assertion: None }];
-    assert!(matches!(pending.finish(sigs).unwrap_err(), Failure::BadSignature(_)));
+    let forged = key_from_scalar(
+        scalars
+            .values()
+            .find(|s| **s != scalars[pending.steps()[0].signer()])
+            .unwrap(),
+    );
+    let sigs = vec![SignatureResult {
+        signature: forged.sign_raw(pending.steps()[0].body()),
+        assertion: None,
+    }];
+    assert!(matches!(
+        pending.finish(sigs).unwrap_err(),
+        Failure::BadSignature(_)
+    ));
 }
 
 #[test]
@@ -700,7 +837,10 @@ fn the_migration_entry_is_built_with_real_view_digests_and_refused_when_it_canno
     // View digest: SHA-256 of the sorted, newline-joined lowercase hex digests.
     let a = "b".repeat(64);
     let b = "a".repeat(64);
-    assert_eq!(view_digest(&[a.clone(), b.clone()]).unwrap(), sha(format!("{b}\n{a}").as_bytes()));
+    assert_eq!(
+        view_digest(&[a.clone(), b.clone()]).unwrap(),
+        sha(format!("{b}\n{a}").as_bytes())
+    );
     assert_eq!(view_digest(&[]).unwrap(), sha(b""));
     assert!(view_digest(&["AB".repeat(32)]).is_err());
     assert!(view_digest(&["a".repeat(63)]).is_err());
@@ -714,14 +854,20 @@ fn the_migration_transition_is_built_activated_and_recorded() {
     let scalars = published_scalars();
     let v = vector("swift-keyring");
     let (objects, _genesis, _f) = complete(&v, &scalars);
-    let st = verify_history(&objects, &Persisted::default(), v.now()).state.unwrap();
+    let st = verify_history(&objects, &Persisted::default(), v.now())
+        .state
+        .unwrap();
     assert!(st.verified_succession().is_some());
     let mac = v.genesis_body()["by"].as_str().unwrap().to_string();
     let kit = st
         .keyring()
         .controllers
         .iter()
-        .find(|(_, c)| c.roles().iter().all(|r| *r == colophon_core::v05::descriptor::Role::Recover))
+        .find(|(_, c)| {
+            c.roles()
+                .iter()
+                .all(|r| *r == colophon_core::v05::descriptor::Role::Recover)
+        })
         .map(|(id, _)| id.clone())
         .unwrap();
     let issued = ms("2026-11-14T10:13:00Z");
@@ -740,19 +886,34 @@ fn the_migration_transition_is_built_activated_and_recorded() {
     let now = v.now();
     let mut p = params.clone();
     p.issued_ms = ms("2026-11-14T10:11:00Z");
-    assert!(why(prepare_migration(&objects, now, &p).unwrap_err()).contains("after the drain window"));
+    assert!(
+        why(prepare_migration(&objects, now, &p).unwrap_err()).contains("after the drain window")
+    );
     let mut p = params.clone();
-    p.omitted = (0..4097).map(|i| (format!("{i:064x}"), "x".into())).collect();
+    p.omitted = (0..4097)
+        .map(|i| (format!("{i:064x}"), "x".into()))
+        .collect();
     assert!(why(prepare_migration(&objects, now, &p).unwrap_err()).contains("4,096"));
     let mut p = params.clone();
     p.drain_until_ms = p.drain_from_ms + 2_592_000_001;
     p.issued_ms = p.drain_until_ms;
     assert!(why(prepare_migration(&objects, now, &p).unwrap_err()).contains("30 days"));
     let mut p = params.clone();
-    p.namespaces = vec![MigratedNamespace { namespace: "notes".into(), source: 1, copied: vec!["d".repeat(64)], omitted: 0 }];
-    assert!(why(prepare_migration(&objects, now, &p).unwrap_err()).contains("exactly the predecessor's namespaces"));
+    p.namespaces = vec![MigratedNamespace {
+        namespace: "notes".into(),
+        source: 1,
+        copied: vec!["d".repeat(64)],
+        omitted: 0,
+    }];
+    assert!(why(prepare_migration(&objects, now, &p).unwrap_err())
+        .contains("exactly the predecessor's namespaces"));
     let mut p = params.clone();
-    p.members = vec![MigratedMember { id: "e".repeat(32), label: "x".into(), kind: "device".into(), dropped: None }];
+    p.members = vec![MigratedMember {
+        id: "e".repeat(32),
+        label: "x".into(),
+        kind: "device".into(),
+        dropped: None,
+    }];
     assert!(why(prepare_migration(&objects, now, &p).unwrap_err()).contains("current members"));
     // Not before the succession is verified.
     let mut unverified = objects.clone();
@@ -772,10 +933,14 @@ fn the_migration_transition_is_built_activated_and_recorded() {
     // The home receipts the transition; after its due time the entry is activated.
     let home = receipt_of(&v).0;
     let acct = st.account().as_str().to_string();
-    let rbody = canonical(&json!({"protocol": "colophon/receipt/5", "account": acct, "object": t_digest,
-        "received": "2026-11-14T10:13:30Z", "by": home})).unwrap();
+    let rbody = canonical(
+        &json!({"protocol": "colophon/receipt/5", "account": acct, "object": t_digest,
+        "received": "2026-11-14T10:13:30Z", "by": home}),
+    )
+    .unwrap();
     let hk = key_from_scalar(&scalars[&home]);
-    let receipt = canonical(&json!({"body": b64(&rbody), "signature": b64(&hk.sign_raw(&rbody))})).unwrap();
+    let receipt =
+        canonical(&json!({"body": b64(&rbody), "signature": b64(&hk.sign_raw(&rbody))})).unwrap();
     let mut held = objects.clone();
     held.pending.extend([transition, receipt]);
     let due = issued + 259_200_000;
@@ -786,14 +951,19 @@ fn the_migration_transition_is_built_activated_and_recorded() {
     assert!(v2.stop.is_none(), "{:?}", v2.stop);
     let state = v2.state.unwrap();
     let rec = state.migration.clone().unwrap();
-    assert_eq!(rec["predecessor"]["account"], v.genesis_body()["predecessor"]["account"]);
+    assert_eq!(
+        rec["predecessor"]["account"],
+        v.genesis_body()["predecessor"]["account"]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
 // A `/5` predecessor.
 
 fn vec5(name: &str) -> (std::path::PathBuf, Vec<u8>, Vec<Vec<u8>>) {
-    let dir = repo().join("conformance/0.5/candidate/succession").join(name);
+    let dir = repo()
+        .join("conformance/0.5/candidate/succession")
+        .join(name);
     (
         dir.clone(),
         strip(std::fs::read(dir.join("genesis.json")).unwrap()),
@@ -806,7 +976,12 @@ fn vec5(name: &str) -> (std::path::PathBuf, Vec<u8>, Vec<Vec<u8>>) {
 fn split_account(set: &[Vec<u8>], account: &str) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let by_digest: BTreeMap<String, (Option<String>, &Vec<u8>)> = set
         .iter()
-        .map(|b| (body_digest(b), (body_value(b)["previous"].as_str().map(str::to_string), b)))
+        .map(|b| {
+            (
+                body_digest(b),
+                (body_value(b)["previous"].as_str().map(str::to_string), b),
+            )
+        })
         .collect();
     let owner = |d: &str| {
         let mut cur = d.to_string();
@@ -837,7 +1012,11 @@ fn genesis5_params(genesis: &[u8], set: &[Vec<u8>], omit: bool) -> Authority5Gen
         namespaces: vec![],
         keyring: body["keyring"].clone(),
         issued_ms: ms(body["issued"].as_str().unwrap()),
-        predecessor: Objects { entries: mine, predecessor: rest, ..Objects::default() },
+        predecessor: Objects {
+            entries: mine,
+            predecessor: rest,
+            ..Objects::default()
+        },
         signers: vec![body["by"].as_str().unwrap().to_string()],
         omit_carried_proofs: omit,
     }
@@ -852,7 +1031,10 @@ fn a_5_predecessor_succeeds_with_the_genesis_held_until_f_is_final() {
     let mut p = genesis5_params(&genesis, &before, true);
     p.predecessor.entries = before.clone();
     let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
-    assert!(pending.steps().iter().all(|s| s.role() != StepRole::Possession && s.role() != StepRole::Handover));
+    assert!(pending
+        .steps()
+        .iter()
+        .all(|s| s.role() != StepRole::Possession && s.role() != StepRole::Handover));
     let sigs = sign_steps(pending.steps(), &scalars);
     let built = pending.finish(sigs).unwrap().entries[0].1.clone();
     assert_eq!(built, genesis, "the held genesis reproduces");
@@ -861,29 +1043,70 @@ fn a_5_predecessor_succeeds_with_the_genesis_held_until_f_is_final() {
     let act = body_value(&pred[2]);
     let t_bytes = dec(act["transition"].as_str().unwrap());
     let t = body_value(&t_bytes);
-    let objects = Objects { entries: before.clone(), ..Objects::default() };
-    let signers: Vec<String> = t["signers"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().into()).collect();
+    let objects = Objects {
+        entries: before.clone(),
+        ..Objects::default()
+    };
+    let signers: Vec<String> = t["signers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().into())
+        .collect();
     let mut ordered = vec![t["by"].as_str().unwrap().to_string()];
-    ordered.extend(signers.into_iter().filter(|s| s != t["by"].as_str().unwrap()));
-    let pend = prepare_successor_transition(&objects, ms("2026-11-14T09:00:00Z"), &built, ms(t["issued"].as_str().unwrap()), ordered).unwrap();
+    ordered.extend(
+        signers
+            .into_iter()
+            .filter(|s| s != t["by"].as_str().unwrap()),
+    );
+    let pend = prepare_successor_transition(
+        &objects,
+        ms("2026-11-14T09:00:00Z"),
+        &built,
+        ms(t["issued"].as_str().unwrap()),
+        ordered,
+    )
+    .unwrap();
     let sigs = sign_steps(pend.steps(), &scalars);
     let transition = pend.finish(sigs).unwrap().pending[0].clone();
     assert_eq!(transition, t_bytes);
     // A transition for a genesis that does not name this head is refused.
     let (_, other, _) = vec5("authority5-chain");
-    assert!(prepare_successor_transition(&objects, ms("2026-11-14T09:00:00Z"), &other, ms(t["issued"].as_str().unwrap()), vec![t["by"].as_str().unwrap().into()]).is_err());
+    assert!(prepare_successor_transition(
+        &objects,
+        ms("2026-11-14T09:00:00Z"),
+        &other,
+        ms(t["issued"].as_str().unwrap()),
+        vec![t["by"].as_str().unwrap().into()]
+    )
+    .is_err());
     let _ = dir;
     // The whole set verifies with the succession verified: the genesis was held until now.
-    let all = Objects { entries: pred.clone(), ..Objects::default() };
-    let succ = Objects { entries: vec![genesis.clone()], predecessor: pred.clone(), ..Objects::default() };
+    let all = Objects {
+        entries: pred.clone(),
+        ..Objects::default()
+    };
+    let succ = Objects {
+        entries: vec![genesis.clone()],
+        predecessor: pred.clone(),
+        ..Objects::default()
+    };
     let _ = all;
     let v = verify_history(&succ, &Persisted::default(), ms("2026-11-14T10:00:00Z"));
     assert!(v.stop.is_none(), "{:?}", v.stop);
     assert!(v.state.unwrap().verified_succession().is_some());
     // Before F is final the same genesis is held, not refused.
-    let early = Objects { entries: vec![genesis], predecessor: pred[..3].to_vec(), ..Objects::default() };
+    let early = Objects {
+        entries: vec![genesis],
+        predecessor: pred[..3].to_vec(),
+        ..Objects::default()
+    };
     let v = verify_history(&early, &Persisted::default(), ms("2026-11-14T10:00:00Z"));
-    assert!(matches!(v.stop, Some(colophon_core::v05::history::Stop::Held { .. })), "{:?}", v.stop);
+    assert!(
+        matches!(v.stop, Some(colophon_core::v05::history::Stop::Held { .. })),
+        "{:?}",
+        v.stop
+    );
 }
 
 #[test]
@@ -892,11 +1115,18 @@ fn a_5_genesis_with_every_proof_verifies_at_once_and_a_chain_of_two_follows() {
     let (_, genesis, pred) = vec5("authority5-successor-final");
     let p = genesis5_params(&genesis, &pred[..2], false);
     let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
-    assert!(pending.steps().iter().any(|s| s.role() == StepRole::Possession));
+    assert!(pending
+        .steps()
+        .iter()
+        .any(|s| s.role() == StepRole::Possession));
     let sigs = sign_steps(pending.steps(), &scalars);
     let g = pending.finish(sigs).unwrap().entries[0].1.clone();
     let v = verify_history(
-        &Objects { entries: vec![g], predecessor: pred[..2].to_vec(), ..Objects::default() },
+        &Objects {
+            entries: vec![g],
+            predecessor: pred[..2].to_vec(),
+            ..Objects::default()
+        },
         &Persisted::default(),
         ms("2026-11-14T09:00:00Z"),
     );
@@ -909,20 +1139,67 @@ fn a_5_genesis_with_every_proof_verifies_at_once_and_a_chain_of_two_follows() {
     let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
     let sigs = sign_steps(pending.steps(), &scalars);
     let built = pending.finish(sigs).unwrap().entries[0].1.clone();
-    let (bv, cv): (Value, Value) = (serde_json::from_slice(&built).unwrap(), serde_json::from_slice(&c_genesis).unwrap());
+    let (bv, cv): (Value, Value) = (
+        serde_json::from_slice(&built).unwrap(),
+        serde_json::from_slice(&c_genesis).unwrap(),
+    );
     assert_eq!(bv["body"], cv["body"], "the chain genesis body reproduces");
-    assert_eq!(bv["signature"], cv["signature"], "the chain genesis signature reproduces");
+    assert_eq!(
+        bv["signature"], cv["signature"],
+        "the chain genesis signature reproduces"
+    );
     // 17 accounts is one too many (§2.4): refused at finish.
     let (_, g17, set17) = vec5("authority5-chain-17");
     let p = genesis5_params(&g17, &set17, true);
     let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
     let sigs = sign_steps(pending.steps(), &scalars);
     let e = pending.finish(sigs).unwrap_err();
-    assert!(matches!(e, Failure::Malformed(ref m) if m.contains("longer than 16")), "{e:?}");
+    assert!(
+        matches!(e, Failure::Malformed(ref m) if m.contains("longer than 16")),
+        "{e:?}"
+    );
     // 16 is allowed.
     let (_, g16, set16) = vec5("authority5-chain-16");
     let p = genesis5_params(&g16, &set16, true);
     let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
     let sigs = sign_steps(pending.steps(), &scalars);
     assert!(pending.finish(sigs).is_ok());
+}
+
+/// The generator's `swift-migration` vector lists a namespace (`notes`) that its predecessor
+/// never had (the generator's Swift library has no grant); §15.4 says the entry lists "every
+/// predecessor namespace", so the builder refuses to write it. The vector stays a verifier case.
+#[test]
+fn the_migration_vector_lists_a_namespace_the_predecessor_never_had_and_the_builder_refuses_it() {
+    let scalars = published_scalars();
+    let v = vector("swift-migration");
+    let (objects, _, _) = complete(&vector("swift-keyring"), &scalars);
+    let t = body_value(&dec(body_value(
+        &files_in(&v.dir.join("successor/authority"))[2],
+    )["transition"]
+        .as_str()
+        .unwrap()));
+    let m = &t["change"]["migration"];
+    let params = MigrationParams {
+        predecessor: objects.predecessor.clone(),
+        drain_from_ms: ms(m["drain"]["from"].as_str().unwrap()),
+        drain_until_ms: ms(m["drain"]["until"].as_str().unwrap()),
+        namespaces: vec![MigratedNamespace {
+            namespace: "notes".into(),
+            source: 3,
+            copied: vec![digest(b"one"), digest(b"two")],
+            omitted: 1,
+        }],
+        omitted: vec![("cd".repeat(32), "invalidPayload".into())],
+        members: vec![],
+        issued_ms: ms(t["issued"].as_str().unwrap()),
+        signers: vec![],
+    };
+    // The view digest the generator wrote, from the same inputs, by the builder's own function.
+    assert_eq!(
+        m["namespaces"][0]["view"],
+        view_digest(&params.namespaces[0].copied).unwrap()
+    );
+    let e = prepare_migration(&objects, v.now(), &params).unwrap_err();
+    assert!(why(e).contains("exactly the predecessor's namespaces"));
 }
