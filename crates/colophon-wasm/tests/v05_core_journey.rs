@@ -1,180 +1,133 @@
-//! The wasm build's exports, driven natively through `AccountCore`: the engine needs a JS
-//! record source and cannot be constructed outside a browser or Node. This runs the same
-//! journey as the UniFFI crate's up to the engine: create with a passkey-like controller,
-//! approve a member, the member writes and reads, a second device pairs and receives the seed,
-//! and the hostile-argument cases. The engine, the exchange and the JS callbacks are NOT run
-//! here (see docs/bindings-05.md, "What was run").
+//! The wasm build's exports, driven natively: everything that needs no JS host. The engine needs
+//! a JS record source and cannot be constructed outside a browser or Node, so it, the exchange,
+//! the JS callbacks and the thrown `AccountFault` are NOT run here (see docs/bindings-05.md,
+//! "What was run"). This runs creation with a passkey-like controller (PRF), a member's
+//! request, the history verifier, the pairing ceremony and the typed errors, through the web
+//! build's own types (`Vec<Record>` fields, `Option<Record>` getters and setters).
 #![allow(clippy::unwrap_used)]
+pub use colophon_wasm::v05::*;
 #[path = "../../colophon-ffi/tests/v05_support/host.rs"]
 mod host;
-use colophon_wasm::v05::*;
+use colophon_core::v05::history::Objects;
 use host::*;
-use serde_json::{json, Value};
+use serde_json::json;
 
 const NOW: i64 = T0 + 3 * HOUR;
 
-fn objects_of(stores: &Value) -> (String, String) {
-    let mut o = json!({"entries": [], "pending": [], "heads": [], "predecessor": []});
-    let mut records = Vec::new();
-    for it in stores.as_array().unwrap() {
-        let path = it["path"].as_str().unwrap();
-        let key = if path.starts_with("authority/") {
-            "entries"
-        } else if path.starts_with("transitions/")
-            || path.starts_with("vetoes/")
-            || path.starts_with("receipts/")
-        {
-            "pending"
-        } else {
-            records.push(it.clone());
-            continue;
-        };
-        o[key].as_array_mut().unwrap().push(it["bytes"].clone());
-    }
-    (s(&o), s(&Value::Array(records)))
-}
-fn run(core: &AccountCore, host: &mut Host, spec: Value, entropy: usize) -> Value {
-    let action = core.begin(s(&spec), host.fresh(entropy)).unwrap();
-    assert_eq!(action.denial().unwrap(), "");
-    let prf = action.prf_requests().unwrap();
-    if prf != "[]" {
-        core.provide_prf(&action, host.answer_prf(&prf)).unwrap();
-    }
-    let sigs = host.sign(&action.steps().unwrap());
-    j(&core.finish(&action, sigs).unwrap())
-}
-fn request(host: &Host, account: &str, member: &str, terms: Value) -> Value {
-    let p = host.keys[member].public();
-    let spec = json!({"account": account, "signing": b64(&p.signing), "agreement": b64(&p.agreement),
-        "label": "Phone", "kind": "device", "terms": terms,
-        "created": account_format_date(NOW - 2 * HOUR).unwrap()});
-    let req = AccountRequest::prepare(s(&spec)).unwrap();
-    let sigs = host.sign(&format!("[{}]", req.step().unwrap()));
-    j(&req.finish(sigs).unwrap())
-}
-
 #[test]
-fn the_web_build_creates_approves_writes_pairs_and_refuses_hostile_input() {
+fn the_web_build_creates_verifies_requests_pairs_and_refuses_hostile_input() {
     let mut host = Host::new();
     let d = host.identity(10);
     let k = host.kit(20);
     let p = host.passkey();
-    let d2 = host.identity(11);
-    let m1 = host.identity(31);
-    let mut policy = j(&account_default_policy().unwrap());
+    let mut policy: serde_json::Value =
+        serde_json::from_str(&account_default_policy().unwrap()).unwrap();
     policy["recoveryDelay"] = json!(3600);
-    let params = json!({"label": "Web", "namespaces": ["notes"],
-        "controllers": [host.raw_controller(&d, "Mac", &["approve", "control"]),
-                        host.passkey_controller("Passkey", &["approve", "control", "recover"]),
-                        host.raw_controller(&k, "Kit", &["recover"])],
-        "slots": [{"controllers": [d], "label": "Mac"}, {"controllers": [k], "label": "Kit"},
-                  {"controllers": [p], "label": "Passkey"}, {"controllers": [d, p], "label": "Both"}],
-        "policy": policy, "signers": [d], "rekeySigners": [d]});
+    let params = CreateParams::new(
+        "Web".into(),
+        vec!["notes".into()],
+        vec![
+            host.raw_controller(&d, "Mac", &["approve", "control"]),
+            host.passkey_controller("Passkey", &["approve", "control", "recover"]),
+            host.raw_controller(&k, "Kit", &["recover"]),
+        ],
+        vec![
+            SlotPlan::new(vec![d.clone()], "Mac".into()),
+            SlotPlan::new(vec![k.clone()], "Kit".into()),
+            SlotPlan::new(vec![p.clone()], "Passkey".into()),
+            SlotPlan::new(vec![d.clone(), p.clone()], "Both".into()),
+        ],
+        None,
+        None,
+        None,
+        false,
+        policy.to_string(),
+        vec![d.clone()],
+        vec![d.clone()],
+    );
     let creation =
-        AccountCreation::begin(s(&params), format!("controller:{d}"), T0, host.fresh(96)).unwrap();
+        AccountCreation::begin(params, format!("controller:{d}"), T0, host.fresh(96)).unwrap();
     let reqs = creation.prf_requests().unwrap();
-    assert_eq!(j(&reqs).as_array().unwrap().len(), 2);
+    assert_eq!(reqs.len(), 2);
     creation.provide_prf(host.answer_prf(&reqs)).unwrap();
-    loop {
-        let steps = creation.steps().unwrap();
-        if creation.provide_signatures(host.sign(&steps)).unwrap() == "done" {
-            break;
+    while creation
+        .provide_signatures(host.sign(&creation.steps().unwrap()))
+        .unwrap()
+        != CreateStage::Done
+    {}
+    let created = creation.take_result().unwrap();
+    assert_eq!(created.account.len(), 64);
+    // The history verifier needs no identity and agrees.
+    let mut o = Objects::default();
+    for s in &created.stores {
+        if s.path.starts_with("authority/") {
+            o.entries.push(s.bytes.clone());
         }
     }
-    let core = creation.take_account().unwrap();
-    let account = core.id().unwrap();
-    // The history verifier needs no identity and agrees.
-    let (objs, _) = objects_of(&j(&core.stores().unwrap()));
-    let v = j(&account_verify_history(objs, NOW).unwrap());
-    assert_eq!(v["code"], "ok");
-    assert_eq!(v["account"], account.as_str());
-    // Approve a member, who reads and writes through its own shares.
-    let terms = json!({"records": [{"namespace": "notes", "access": "write"}]});
-    let r = request(&host, &account, &m1, terms.clone());
-    run(
-        &core,
-        &mut host,
-        json!({"action": "approve", "request": r["raw"], "terms": terms, "signers": [d]}),
-        32,
+    let blobs = |v: &Vec<Vec<u8>>| v.iter().map(|b| Blob::new(b.clone())).collect::<Vec<_>>();
+    let report = account_verify_history(
+        AuthorityObjects::new(blobs(&o.entries), vec![], vec![], vec![]),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(report.code, "ok");
+    assert_eq!(report.account.as_deref(), Some(created.account.as_str()));
+    // A member's request, signed with the member's own key.
+    let m = host.identity(31);
+    let pk = host.keys[&m].public();
+    let req = AccountRequest::prepare(RequestSpec::new(
+        created.account.clone(),
+        pk.signing,
+        pk.agreement,
+        "Phone".into(),
+        AccountMemberKind::Device,
+        json!({"records": [{"namespace": "notes", "access": "write"}]}).to_string(),
+        account_format_date(NOW - 2 * HOUR).unwrap(),
+        String::new(),
+        String::new(),
+        vec![],
+    ))
+    .unwrap();
+    let step = req.step().unwrap();
+    assert_eq!(step.form, SignForm::Raw);
+    let info = req.finish(host.sign_one(&step.body, &m, false)).unwrap();
+    assert_eq!(info.kind, AccountMemberKind::Device);
+    assert_eq!(
+        account_request_info(info.raw.clone()).unwrap().member,
+        info.member
     );
-    let (o, rec) = objects_of(&j(&core.stores().unwrap()));
-    let member = AccountCore::open(o, rec, vec![], vec![], format!("member:{m1}"), NOW).unwrap();
-    member
-        .finish_unlock_epochs(host.answer_epochs(&m1, &member.begin_unlock_epochs().unwrap()))
-        .unwrap();
-    assert_eq!(member.access("notes".into()).unwrap(), "");
-    run(
-        &member,
-        &mut host,
-        json!({"action": "write", "namespace": "notes", "kind": "createNotebook",
-        "payload": {"id": "n", "title": "Web"}}),
-        32,
+    assert!(
+        req.finish(host.sign_one(&step.body, &m, false)).is_err(),
+        "one-shot"
     );
-    let view = j(&member.view("notes".into()).unwrap());
-    assert_eq!(view["value"]["admitted"].as_array().unwrap().len(), 1);
-    // A second device pairs and receives the seed.
-    let laptop = host.raw_controller(&d2, "Laptop", &["approve"]);
-    run(
-        &core,
-        &mut host,
-        json!({"action": "add_controller", "mode": "immediate", "signers": [d], "controller": laptop}),
-        0,
-    );
+    // Pairing.
     let tk = PairingTransferKey::create(host.fresh(32)).unwrap();
-    let joiner = AccountPairing::join(account.clone(), tk.public(), host.fresh(32)).unwrap();
-    let limiter = PairingFailureLimiter::from_json(String::new()).unwrap();
+    let joiner =
+        AccountPairing::join(created.account.clone(), tk.public(), host.fresh(32)).unwrap();
+    let limiter = PairingFailureLimiter::from_state(String::new()).unwrap();
     let existing = AccountPairing::existing_receive_commitment(
-        account.clone(),
+        created.account.clone(),
         joiner.commitment().unwrap(),
         &limiter,
         NOW,
     )
     .unwrap();
     let na = existing.send_nonce(host.fresh(32)).unwrap();
-    let reveal = j(&joiner.receive_nonce(na).unwrap());
+    let reveal = joiner.receive_nonce(na).unwrap().unwrap();
     let shown = existing
-        .receive_reveal(
-            unb64(reveal["e"].as_str().unwrap()),
-            unb64(reveal["nb"].as_str().unwrap()),
-            &limiter,
-            NOW,
-        )
+        .receive_reveal(reveal.e.clone(), reveal.nb.clone(), &limiter, NOW)
         .unwrap();
     assert_eq!(shown, joiner.digits().unwrap());
     existing.confirm().unwrap();
-    joiner.confirm().unwrap();
     assert!(existing.confirm().is_err());
-    let sealed = core.transfer_seed(&existing, host.fresh(32)).unwrap();
-    let (o, rec) = objects_of(&j(&core.stores().unwrap()));
-    let second =
-        AccountCore::open(o, rec, vec![], vec![], format!("controller:{d2}"), NOW).unwrap();
-    assert!(!second.is_unlocked().unwrap());
-    second.accept_seed_transfer(&tk, sealed, &joiner).unwrap();
-    assert!(second.is_unlocked().unwrap());
-    // Hostile input is a typed error.
-    let a = core
-        .begin(
-            s(&json!({"action": "rekey", "namespaces": ["notes"], "signers": [d]})),
-            host.fresh(32),
-        )
-        .unwrap();
+    assert_eq!(existing.stage().unwrap(), PairingStage::Confirmed);
+    // The web build's typed records round-trip their fields.
+    let mut sig = Signature::new(vec![1, 2, 3], None, None);
+    sig.authenticator_data = Some(vec![9]);
+    assert_eq!(sig.authenticator_data.clone().unwrap(), vec![9]);
+    // Typed errors.
     assert!(matches!(
-        core.finish(&a, "[{\"signature\":\"AAAA\"}]".into()),
-        Err(AccountError::BadSignature { .. })
-    ));
-    assert!(matches!(
-        core.finish(&a, "[]".into()),
-        Err(AccountError::Consumed { .. })
-    ));
-    assert!(matches!(
-        core.begin("x".into(), vec![]),
-        Err(AccountError::Malformed { .. })
-    ));
-    assert!(matches!(
-        core.begin(
-            s(&json!({"action": "rekey", "namespaces": [], "signers": []})),
-            vec![1; 3]
-        ),
+        account_key_id(vec![0; 1000]),
         Err(AccountError::Bound { .. })
     ));
     assert_eq!(

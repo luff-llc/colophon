@@ -1,15 +1,16 @@
 //! The host's side of the journeys: key custody (`host.rs`, shared with the wasm crate's test),
-//! a record source implementing the callback, and a simulated home.
+//! a record source implementing the callback, and a simulated home driven by the exchange
+//! values the engine emits.
 #![allow(dead_code, clippy::unwrap_used, clippy::too_many_arguments)]
+pub use colophon_ffi::v05::api::*;
 mod host;
-use colophon_core::v05::encoding::{canonical, digest};
+use colophon_core::v05::encoding::{canonical, decode_base64, digest, encode_base64};
 use colophon_core::v05::history::home::{
     admit as home_admit, admit_pending_batch, HomeState, ServingInterval,
 };
 use colophon_core::v05::history::Objects;
 use colophon_core::v05::write::calls::{finish_receipt, prepare_receipt};
 use colophon_core::v05::write::{format_date, SignatureResult};
-use colophon_ffi::v05::api::*;
 pub use host::*;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex};
 pub struct MemSource {
     pub files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     pub reads: Arc<Mutex<u64>>,
-    pub garbage: Arc<Mutex<bool>>,
+    pub mode: Arc<Mutex<u8>>, // 0 honest, 1 garbage, 2 throws "boom", 3 slow
 }
 impl MemSource {
     pub fn new() -> Self {
@@ -32,20 +33,20 @@ impl MemSource {
     pub fn get(&self, path: &str) -> Option<Vec<u8>> {
         self.files.lock().unwrap().get(path).cloned()
     }
-    pub fn listing(&self) -> String {
-        s(&json!(self
-            .files
+    pub fn listing(&self) -> Vec<ListedPath> {
+        self.files
             .lock()
             .unwrap()
             .keys()
-            .collect::<Vec<_>>()))
+            .map(|p| ListedPath {
+                path: p.clone(),
+                version: String::new(),
+            })
+            .collect()
     }
-    pub fn store(&self, stores_json: &Value) {
-        for it in stores_json.as_array().unwrap() {
-            self.put(
-                it["path"].as_str().unwrap(),
-                unb64(it["bytes"].as_str().unwrap()),
-            );
+    pub fn store(&self, stores: &[Store]) {
+        for s in stores {
+            self.put(&s.path, s.bytes.clone());
         }
     }
     pub fn copy_of(&self) -> MemSource {
@@ -57,17 +58,55 @@ impl MemSource {
 impl HostSource for MemSource {
     fn read(&self, path: String) -> Result<Vec<u8>, AccountError> {
         *self.reads.lock().unwrap() += 1;
-        if *self.garbage.lock().unwrap() {
-            return Ok(vec![0xff; 17]);
+        match *self.mode.lock().unwrap() {
+            1 => return Ok(vec![0xff; 17]),
+            2 => return Err(AccountError::host("boom: the disk read failed")),
+            3 => std::thread::sleep(std::time::Duration::from_millis(150)),
+            _ => {}
         }
         self.get(&path)
             .ok_or_else(|| AccountError::host(format!("missing {path}")))
     }
-    fn version(&self, _path: String) -> Result<String, AccountError> {
-        Ok(String::new())
-    }
     fn read_blob(&self, path: String) -> Result<Vec<u8>, AccountError> {
         Ok(self.get(&path).unwrap_or_default())
+    }
+}
+
+/// A store list as the core's authority objects and records.
+pub fn objects_of(stores: &[Store]) -> (Objects, Vec<colophon_core::v05::records::HeldRecord>) {
+    let mut o = Objects::default();
+    let mut records = Vec::new();
+    for s in stores {
+        let p = s.path.as_str();
+        if p.starts_with("authority/") {
+            o.entries.push(s.bytes.clone());
+        } else if p.starts_with("predecessor/") {
+            o.predecessor.push(s.bytes.clone());
+        } else if p.starts_with("heads/") {
+            o.heads.push(s.bytes.clone());
+        } else if p.starts_with("transitions/")
+            || p.starts_with("vetoes/")
+            || p.starts_with("receipts/")
+        {
+            o.pending.push(s.bytes.clone());
+        } else {
+            records.push(colophon_core::v05::records::HeldRecord {
+                path: s.path.clone(),
+                bytes: s.bytes.clone(),
+            });
+        }
+    }
+    (o, records)
+}
+pub fn blobs(v: &[Vec<u8>]) -> Vec<Blob> {
+    v.iter().map(|b| Blob { bytes: b.clone() }).collect()
+}
+pub fn authority_objects(o: &Objects) -> AuthorityObjects {
+    AuthorityObjects {
+        entries: blobs(&o.entries),
+        pending: blobs(&o.pending),
+        heads: blobs(&o.heads),
+        predecessor: blobs(&o.predecessor),
     }
 }
 
@@ -75,7 +114,7 @@ impl HostSource for MemSource {
 
 pub fn entry_seq(bytes: &[u8]) -> u64 {
     let v: Value = serde_json::from_slice(bytes).unwrap();
-    let body = unb64(v["body"].as_str().unwrap());
+    let body = decode_base64(v["body"].as_str().unwrap(), 1 << 22).unwrap();
     let b: Value = serde_json::from_slice(&body).unwrap();
     b["seq"].as_u64().unwrap()
 }
@@ -88,7 +127,6 @@ fn q_get(query: &str, key: &str) -> Option<String> {
         (k == key).then(|| v.to_string())
     })
 }
-
 pub struct SimHome {
     pub id: String,
     pub base: String,
@@ -134,7 +172,7 @@ impl SimHome {
         let seq = self.entries.keys().max().copied()?;
         let e = &self.entries[&seq];
         let v: Value = serde_json::from_slice(e).unwrap();
-        let body = unb64(v["body"].as_str().unwrap());
+        let body = decode_base64(v["body"].as_str().unwrap(), 1 << 22).unwrap();
         let body = canonical(&json!({
             "protocol": "colophon/head/5", "account": self.account,
             "authority": {"seq": seq, "digest": digest(&body)}, "by": self.id,
@@ -142,8 +180,8 @@ impl SimHome {
         }))
         .unwrap();
         Some(
-            canonical(&json!({"body": b64(&body),
-                "signature": b64(&host.keys[&self.id].sign(&body))}))
+            canonical(&json!({"body": encode_base64(&body),
+                "signature": encode_base64(&host.keys[&self.id].sign(&body))}))
             .unwrap(),
         )
     }
@@ -172,18 +210,24 @@ impl SimHome {
         self.files.insert(path.to_string(), bytes);
         self.log.push(path.to_string());
     }
-    /// Answer one request the engine emitted (the JSON `exchange_next` returned).
-    pub fn call(&mut self, host: &Host, req: &Value, now_ms: i64) -> (u16, Vec<u8>) {
-        let url = req["url"].as_str().unwrap();
-        let rest = url.strip_prefix(&self.base).expect("another home's URL");
+    /// Answer one request the engine emitted.
+    pub fn call(&mut self, host: &Host, req: &HttpRequest, now_ms: i64) -> (u16, Vec<u8>) {
+        let rest = req
+            .url
+            .strip_prefix(&self.base)
+            .expect("another home's URL");
         let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
-        let method = req["method"].as_str().unwrap();
-        let body = unb64(req["body"].as_str().unwrap());
-        let headers = |k: &str| {
-            req["headers"].as_array().unwrap().iter().find_map(|h| {
-                (h[0].as_str().unwrap().eq_ignore_ascii_case(k))
-                    .then(|| h[1].as_str().unwrap().to_string())
-            })
+        let method = match req.method {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Put => "PUT",
+        };
+        let body = req.body.clone();
+        let header = |k: &str| {
+            req.headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case(k))
+                .map(|h| h.value.clone())
         };
         let now = format_date(now_ms);
         match (method, path) {
@@ -296,10 +340,7 @@ impl SimHome {
                 let page: Vec<&String> = slice.iter().take(limit).collect();
                 let entries: Vec<Value> = page
                     .iter()
-                    .map(|p| {
-                        json!({"path": p, "size": self.files[*p].len(),
-                        "sha256": digest(&self.files[*p])})
-                    })
+                    .map(|p| json!({"path": p, "size": self.files[*p].len(), "sha256": digest(&self.files[*p])}))
                     .collect();
                 resp(
                     200,
@@ -322,8 +363,8 @@ impl SimHome {
                 let live = rec.starts_with("state/");
                 match (
                     self.files.get(&rec).cloned(),
-                    headers("If-None-Match"),
-                    headers("If-Match"),
+                    header("If-None-Match"),
+                    header("If-Match"),
                 ) {
                     (None, Some(_), None) => {
                         self.store(&rec, body);
@@ -359,8 +400,7 @@ impl SimHome {
     }
 }
 
-/// Run one full pass of `engine` with `home`, as an app would: the loop is the host's, the
-/// requests and what to store come from the exports' JSON.
+/// Run one full pass of `engine` with `home`, as an app would: the loop is the host's.
 pub fn sync_pass(
     engine: &AccountEngine,
     src: &MemSource,
@@ -368,41 +408,42 @@ pub fn sync_pass(
     sim: &mut SimHome,
     host: &Host,
     now_ms: i64,
-) -> Vec<Value> {
+) -> Vec<ExchangeFault> {
     let mut faults = Vec::new();
     engine.advance(now_ms).unwrap();
     engine.refresh(src.listing()).unwrap();
     for _ in 0..100_000 {
-        let step = j(&engine.exchange_next(home_id.into()).unwrap());
-        match step["step"].as_str().unwrap() {
-            "done" => return faults,
-            "waiting" => panic!("the loop answers every request"),
-            "needCall" => {
-                let n = &step["need"];
+        let step = engine.exchange_next(home_id.into()).unwrap();
+        match step.kind {
+            ExchangeStepKind::Done => return faults,
+            ExchangeStepKind::Waiting => panic!("the loop answers every request"),
+            ExchangeStepKind::NeedCall => {
+                let n = step.need.unwrap();
                 engine
                     .exchange_provide_call(
                         home_id.into(),
-                        n["ticket"].as_u64().unwrap(),
-                        format!("call-{}", n["ticket"]).into_bytes(),
+                        n.ticket,
+                        format!("call-{}", n.ticket).into_bytes(),
                     )
                     .unwrap();
             }
-            "request" => {
-                let r = &step["request"];
-                let (status, body) = sim.call(host, r, now_ms);
-                let report = j(&engine
+            ExchangeStepKind::Request => {
+                let r = step.request.unwrap();
+                let (status, body) = sim.call(host, &r, now_ms);
+                let report = engine
                     .exchange_answer(
                         home_id.into(),
-                        r["ticket"].as_u64().unwrap(),
-                        status as u32,
-                        "[]".into(),
-                        body,
+                        r.ticket,
+                        HttpAnswer {
+                            status: u32::from(status),
+                            headers: vec![],
+                            body,
+                        },
                     )
-                    .unwrap());
-                src.store(&report["store"]);
-                faults.extend(report["faults"].as_array().unwrap().clone());
+                    .unwrap();
+                src.store(&report.store);
+                faults.extend(report.faults);
             }
-            other => panic!("{other}"),
         }
     }
     panic!("a pass did not end");

@@ -9,31 +9,48 @@ pub use api::*;
 
 #[wasm_bindgen]
 extern "C" {
-    /// A JavaScript object the host supplies: `read(path) -> Uint8Array`, `version(path) ->
-    /// string` (empty for none) and `readBlob(path) -> Uint8Array` (empty: not held). Each
-    /// throws to say it cannot answer. They are synchronous and must not call the engine.
+    /// A JavaScript object the host supplies: `read(path) -> Uint8Array` and
+    /// `readBlob(path) -> Uint8Array` (empty: not held). Each throws to say it cannot answer;
+    /// the message reaches the caller as a `Host` error. They are synchronous and must not
+    /// call the engine.
     pub type JsSource;
     #[wasm_bindgen(method, catch)]
     fn read(this: &JsSource, path: &str) -> Result<Vec<u8>, JsValue>;
-    #[wasm_bindgen(method, catch)]
-    fn version(this: &JsSource, path: &str) -> Result<String, JsValue>;
     #[wasm_bindgen(method, catch, js_name = readBlob)]
     fn read_blob(this: &JsSource, path: &str) -> Result<Vec<u8>, JsValue>;
 }
 
+#[wasm_bindgen(inline_js = r#"
+export class AccountFault extends Error {
+  constructor(kind, code, detail) {
+    super(detail);
+    this.name = 'AccountFault';
+    this.kind = kind;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+export function makeFault(kind, code, detail) { return new AccountFault(kind, code, detail); }
+export function messageOf(e) {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'string') return e;
+  return 'the host source threw';
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = makeFault)]
+    fn make_fault(kind: &str, code: &str, detail: &str) -> JsValue;
+    #[wasm_bindgen(js_name = messageOf)]
+    fn message_of(e: &JsValue) -> String;
+}
+
 struct JsHost(JsSource);
 fn thrown(e: JsValue) -> AccountError {
-    AccountError::host(
-        e.as_string()
-            .unwrap_or_else(|| "the host source threw".into()),
-    )
+    AccountError::host(message_of(&e))
 }
 impl HostSource for JsHost {
     fn read(&self, path: String) -> Result<Vec<u8>, AccountError> {
         self.0.read(&path).map_err(thrown)
-    }
-    fn version(&self, path: String) -> Result<String, AccountError> {
-        self.0.version(&path).map_err(thrown)
     }
     fn read_blob(&self, path: String) -> Result<Vec<u8>, AccountError> {
         self.0.read_blob(&path).map_err(thrown)
@@ -46,12 +63,12 @@ impl AccountEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         source: JsSource,
-        listing: String,
+        listing: Vec<ListedPath>,
         identity: String,
         account: String,
-        namespaces: String,
+        namespaces: Vec<String>,
         batch: u64,
-        saved: String,
+        saved: SavedState,
         key: Vec<u8>,
         now_ms: i64,
     ) -> Result<AccountEngine, AccountError> {
@@ -69,38 +86,10 @@ impl AccountEngine {
     }
 }
 
-/// What is thrown: a typed error with its protocol code, never a message to parse.
-#[wasm_bindgen]
-pub struct AccountFault {
-    kind: String,
-    code: String,
-    detail: String,
-}
-#[wasm_bindgen]
-impl AccountFault {
-    /// `Malformed`, `BadSignature`, `NewerFormat`, `Unavailable`, `Refused`, `Host`,
-    /// `Reentered`, `Consumed`, `WrongObject`, `Bound`, `Internal` or `Denied`.
-    #[wasm_bindgen(getter)]
-    pub fn kind(&self) -> String {
-        self.kind.clone()
-    }
-    /// The protocol result code (`refused:audience`, `badSignature`, ...) or the binding's own.
-    #[wasm_bindgen(getter)]
-    pub fn code(&self) -> String {
-        self.code.clone()
-    }
-    /// A diagnostic for logs; never key material, never to be parsed.
-    #[wasm_bindgen(getter)]
-    pub fn detail(&self) -> String {
-        self.detail.clone()
-    }
-}
+/// What is thrown is a real JS `Error` subclass (`AccountFault`) with `kind`, `code` and
+/// `detail`: a typed error with its protocol code, never a message to parse.
 impl From<AccountError> for JsValue {
     fn from(e: AccountError) -> JsValue {
-        JsValue::from(AccountFault {
-            kind: e.kind(),
-            code: e.code(),
-            detail: e.detail(),
-        })
+        make_fault(&e.kind(), &e.code(), &e.detail())
     }
 }

@@ -66,6 +66,12 @@ pub enum AccountError {
         reason: String,
         detail: String,
     },
+    /// The engine found its own source or home inconsistent and is unusable: discard it and
+    /// open a new one. Not a mistake in the call.
+    Integrity {
+        code: String,
+        detail: String,
+    },
 }
 impl std::fmt::Display for AccountError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -91,7 +97,8 @@ impl AccountError {
             | Self::WrongObject { code, .. }
             | Self::Bound { code, .. }
             | Self::Internal { code, .. }
-            | Self::Denied { code, .. } => code.clone(),
+            | Self::Denied { code, .. }
+            | Self::Integrity { code, .. } => code.clone(),
         }
     }
     pub fn detail(&self) -> String {
@@ -112,6 +119,7 @@ impl AccountError {
             Self::Bound { .. } => "Bound",
             Self::Internal { .. } => "Internal",
             Self::Denied { .. } => "Denied",
+            Self::Integrity { .. } => "Integrity",
         }
         .into()
     }
@@ -128,7 +136,8 @@ impl AccountError {
             | Self::WrongObject { detail, .. }
             | Self::Bound { detail, .. }
             | Self::Internal { detail, .. }
-            | Self::Denied { detail, .. } => detail.clone(),
+            | Self::Denied { detail, .. }
+            | Self::Integrity { detail, .. } => detail.clone(),
         }
     }
     pub fn denied(reason: &str, detail: &str) -> Self {
@@ -136,6 +145,12 @@ impl AccountError {
             code: format!("denied:{reason}"),
             reason: cap(reason),
             detail: cap(detail),
+        }
+    }
+    pub fn integrity(detail: impl AsRef<str>) -> Self {
+        Self::Integrity {
+            code: "integrity".into(),
+            detail: cap(detail.as_ref()),
         }
     }
     pub fn host(detail: impl AsRef<str>) -> Self {
