@@ -323,6 +323,15 @@ pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
     require(!out.entries.is_empty(), "Swift empty predecessor")?;
     Ok(out)
 }
+/// The rule for a `layout` entry in an adopted keyring library (§16.3): every signer holds
+/// `control`, and there are at least `threshold` of them. (UV is demanded of each signature
+/// separately.) The one definition: [`append`] applies it to a verified record and the write side
+/// applies it before it asks a host to sign the freezing entry F.
+pub(crate) fn layout_signers_meet_rule(s: &Snapshot, ids: &BTreeSet<String>) -> bool {
+    let controls = |id: &String| s.controllers.get(id).is_some_and(|c| c.has(&Role::Control));
+    ids.iter().filter(|id| controls(id)).count() as u64 >= s.threshold && ids.iter().all(controls)
+}
+
 fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
     let seq = out.entries.len() as u64 + 1;
     let mut current = out.states.last().cloned();
@@ -444,7 +453,7 @@ fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
                                         .is_some_and(|ns| ns.iter().any(|n| v["namespace"] == *n))))
                     })
             }
-            "layout" => control && ids.iter().all(|id| s.controllers[id].has(&Role::Control)),
+            "layout" => layout_signers_meet_rule(s, &ids),
             "keyring" => {
                 let next = new_keyring(v, s)?;
                 let recovery = ids.len() as u64 >= s.recover_threshold

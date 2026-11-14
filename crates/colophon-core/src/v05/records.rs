@@ -624,6 +624,9 @@ pub struct OwedShare {
     pub epoch: u64,
     /// The member is provisional (its activation is not final yet).
     pub provisional: bool,
+    /// The member has no expiry, so only the shares-only `renew` (§9.4, no `expires`) can carry
+    /// the share.
+    pub shares_only: bool,
 }
 /// What an ECDH needs to open an epoch seal: the peer point to agree with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -873,6 +876,7 @@ impl RecordAuthority {
                             namespace: entry.namespace.clone(),
                             epoch: e,
                             provisional: m.provisional.is_some(),
+                            shares_only: m.expires_ms.is_none(),
                         });
                     }
                 }

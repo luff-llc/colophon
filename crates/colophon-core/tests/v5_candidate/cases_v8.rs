@@ -3731,6 +3731,86 @@ pub fn part3(o: &mut Out) {
         60,
         vec![],
     );
+    // §15.4: the `migration` entry of a Swift succession, as a transition the owner's control
+    // keys sign and the successor home receipts; recorded once, after its due time. The counts
+    // must add up (`copied` + `omitted` = `source`), the view is the digest of the sorted copied
+    // digests, and the drain window is at most 30 days.
+    for (name, why, good) in [
+        ("swift-migration", "§15.4: the owner's migration of a library with a member and a namespace, written after F with a drain window after F, is recorded.", true),
+        ("swift-migration-counts", "§15.4: `copied` + `omitted` must equal `source`: the migration's activation is malformed.", false),
+        ("swift-migration-final-digest", "§15.4: `final.digest` is not F's digest: the migration's activation is malformed.", true),
+        ("swift-migration-drain-before-f", "§15.4: the drain window starts before F's `issued`: the migration's activation is malformed.", true),
+        ("swift-migration-before-drain-ends", "§15.4: the migration transition is issued before `drain.until`: the activation is malformed.", true),
+        ("swift-migration-premature-f", "§15.4: F is issued before the succession is due, so the succession is not verified and the migration's activation is malformed.", true),
+    ] {
+        let mut recs = swift_library(true);
+        let mem_s = derived("swift/member/signing");
+        let mem_a = derived("swift/member/agreement");
+        if good {
+            // One grant to a device for `notes`: the predecessor then has that namespace and member.
+            let grant = json!({"by": "controller", "custody": "platform", "issued": "2026-11-01T08:02:00Z",
+                "kind": "grant", "label": "Phone", "member": pid(&mem_s, &mem_a), "namespaces": ["notes"],
+                "previous": sha(&body_of(&recs[1])), "role": "device", "seq": 3, "signer": a.id, "write": true});
+            recs.push(swift_signed(&grant, &a, &[]));
+        }
+        let mut g = new_genesis(&recs, recs.len(), sg![a], "Library");
+        let rg = successor_with_home(&mut g, 60, sr0 - 60);
+        let f_at = if name == "swift-migration-premature-f" {
+            sr0 + 100
+        } else {
+            sr0 + after
+        };
+        let f = swift_freeze_signed(&recs, &account_id(&g), &a, &ts(f_at));
+        let f_seq = recs.len() + 1;
+        let copied = [sha(b"one"), sha(b"two")];
+        let mut sorted = copied.to_vec();
+        sorted.sort();
+        let view = sha(sorted.join("\n").as_bytes());
+        let mut ctrls = vec![(a.id.clone(), true), (k1.id.clone(), false)];
+        ctrls.sort();
+        let ctrls: Vec<Value> = ctrls.into_iter().map(|(id, slot)| json!({"id": id, "slot": slot})).collect();
+        let members = if good {
+            json!([{"id": mem_s.id, "label": "Phone", "kind": "device", "outcome": "rejoin"}])
+        } else {
+            json!([])
+        };
+        let change = json!({"migration": {
+            "predecessor": {"format": "colophon/swift-keyring/2", "account": &sha(&body_of(&recs[0]))[..32],
+                            "final": {"seq": f_seq, "digest": if name == "swift-migration-final-digest" { sha(b"not F") } else { sha(&body_of(&f)) }}},
+            "drain": match name {
+                "swift-migration-drain-before-f" => json!({"from": ts(sr0 + after - 60), "until": ts(sr0 + after - 30)}),
+                "swift-migration-before-drain-ends" => json!({"from": ts(sr0 + after + 60), "until": ts(sr0 + after + 300)}),
+                _ => json!({"from": ts(sr0 + after + 60), "until": ts(sr0 + after + 120)}),
+            },
+            "namespaces": [{"namespace": "notes", "source": if good { 3 } else { 5 }, "copied": 2, "omitted": 1, "view": view}],
+            "omitted": [{"ref": "cd".repeat(32), "reason": "invalidPayload"}],
+            "controllers": ctrls,
+            "members": members,
+        }});
+        let t = transition(
+            &g,
+            change,
+            sg![a, k1],
+            &ts(sr0 + after + 150),
+            TOpt {
+                origin: Some("https://id.example"),
+                ..TOpt::default()
+            },
+        );
+        let r = receipt_of(&account_id(&g), &t, &sh, &ts(sr0 + after + 210));
+        let act = activate_full(&mut g, &t, &[r]);
+        let at = secs(body_json(&act)["issued"].as_str().unwrap()) + 30;
+        let mut all = recs.to_vec();
+        all.push(f);
+        let expected = if name == "swift-migration-premature-f" {
+            json!({"succession": "unverified", "seq3": "migration malformed", "now": ts(at)})
+        } else if name == "swift-migration" {
+            json!({"succession": "verified", "migration": "recorded", "now": ts(at)})
+        } else {
+            json!({"succession": "verified", "seq3": "migration malformed", "now": ts(at)})
+        };
+        write_swift(o, name, &all, Some(&g), expected, why, succ_extra(&g, &rg));
+    }
     // Revision 12, M4 (§8.4 Possession): a carried key is exempt from its possession proof only
     // when the genesis's `handover` meets the rule that may write F at `head`. The genesis lists
     // the kit, a predecessor key, and proves its possession in neither case.

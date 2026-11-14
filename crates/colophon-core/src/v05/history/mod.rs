@@ -12,14 +12,15 @@ pub mod envelope;
 pub mod home;
 pub mod keyring;
 mod state;
-mod succession;
+pub(crate) mod succession;
 pub mod swift;
-mod upgrade;
+pub(crate) mod upgrade;
 
 pub use state::{
     check_pending_transition, check_pending_veto, Activation, HomeStatus, MemberRecord, State,
     Suspension,
 };
+pub use succession::{succession_status, SuccessionStatus, SuccessionTiming};
 
 use crate::v05::{Failure, Unknown};
 use envelope::AuthEnvelope;
@@ -106,7 +107,7 @@ pub struct Persisted {
 /// Checkpoint format. 2 added `held_until`; 3 added the successor fields; 4 added the per-home
 /// head high-water marks and the fork a `resolve` names. A checkpoint of another format is
 /// refused, and the caller rebuilds it from its retained objects.
-const CHECKPOINT_VERSION: u32 = 4;
+const CHECKPOINT_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Checkpoint {

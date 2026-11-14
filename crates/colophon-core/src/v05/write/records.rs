@@ -261,7 +261,49 @@ pub fn prepare_renew(
         now_ms,
         Kind::Renew {
             member: member.to_string(),
-            expires: expires.to_string(),
+            expires: Some(expires.to_string()),
+            shares,
+        },
+        issued_ms,
+        signers,
+    )
+}
+
+/// The shares-only `renew` (§9.4): no `expires`, so the member's expiry stays exactly as it is
+/// (none included), and `shares` seal every epoch in its `records` scope that no earlier epoch
+/// object sealed to it. The member must be current (not revoked, not expired, not provisional)
+/// and must be owed at least one epoch; the history verifier refuses the entry otherwise.
+pub fn prepare_renew_shares(
+    objects: &Objects,
+    now_ms: i64,
+    signers: &[String],
+    issued_ms: i64,
+    member: &str,
+    keys: &EpochKeys,
+    seed: [u8; 32],
+) -> Result<PendingBatch> {
+    let auth = RecordAuthority::from_objects(objects, now_ms)?;
+    auth.require_clean()?;
+    let m = auth
+        .member(member)
+        .ok_or_else(|| malformed("the member does not exist"))?;
+    let mut wanted = BTreeSet::new();
+    for entry in m.terms.records().unwrap_or_default() {
+        for e in 1..=auth.latest_epoch(&entry.namespace) {
+            if !auth.sealed_to(&entry.namespace, e).contains(member) {
+                wanted.insert((entry.namespace.clone(), e));
+            }
+        }
+    }
+    require(!wanted.is_empty(), "the member is owed no share")?;
+    let agreement = m.request.agreement.clone();
+    let shares = shares_for(&auth, keys, member, &agreement, &wanted, seed)?;
+    prepare_signed(
+        objects,
+        now_ms,
+        Kind::Renew {
+            member: member.to_string(),
+            expires: None,
             shares,
         },
         issued_ms,

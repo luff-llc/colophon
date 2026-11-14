@@ -13,6 +13,23 @@ fn failure(e: crate::Error) -> Failure {
     }
 }
 
+/// The 0.4 control rule an `upgrade` is signed under (§16.1): at least `threshold` signers,
+/// each a current controller holding `control`, none with a WebAuthn assertion that lacks UV.
+/// `signers` is `(controller ID, uv)` with `uv` `None` for a raw signature. The one definition of
+/// the rule: [`check_upgrade`] applies it to the verified signatures and the write side applies it
+/// before it asks a host to sign.
+pub(crate) fn signers_meet_rule(prior: &Authority, signers: &[(String, Option<bool>)]) -> bool {
+    !signers.is_empty()
+        && signers.len() >= prior.keyring.threshold as usize
+        && signers.iter().all(|(id, uv)| {
+            *uv != Some(false)
+                && prior
+                    .keyring
+                    .controller(id)
+                    .is_some_and(|c| c.roles.contains(&crate::authority::Role::Control))
+        })
+}
+
 fn check_upgrade(
     prior: &Authority,
     env: &AuthorityEnvelope,
@@ -23,20 +40,25 @@ fn check_upgrade(
         .verify_all(|id| prior.keyring.controller(id).map(|c| &c.key), true)
         .map_err(failure)?;
     require(!signers.is_empty(), "unsigned upgrade")?;
-    if signers.len() < prior.keyring.threshold as usize
-        || signers.iter().any(|s| {
-            s.uv == Some(false)
-                || prior
-                    .keyring
-                    .controller(&s.id)
-                    .is_none_or(|c| !c.roles.contains(&crate::authority::Role::Control))
-        })
-    {
+    let ids: Vec<(String, Option<bool>)> = signers.iter().map(|s| (s.id.clone(), s.uv)).collect();
+    if !signers_meet_rule(prior, &ids) {
         return Err(crate::v05::bad_signature(
             "upgrade requires the 0.4 control rule",
         ));
     }
     env.check_known_fields().map_err(failure)?;
+    check_upgrade_body(prior, value, account)
+}
+
+/// Everything about an `upgrade` body that does not depend on its signatures (§16.1): the
+/// closed field set, `seq` (not 2, the next one), `previous`, `account`, `issued`, the 0.5
+/// keyring and its carried fields. The write side runs it on the body it is about to ask a host
+/// to sign.
+pub(crate) fn check_upgrade_body(
+    prior: &Authority,
+    value: &Value,
+    account: &str,
+) -> Result<Keyring> {
     let mut fields = encoding::Obj::new(value.clone(), "upgrade")?;
     for f in [
         "protocol", "seq", "previous", "issued", "by", "kind", "account", "keyring",
