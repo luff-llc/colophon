@@ -333,6 +333,61 @@ fn known_agreements(h: &swift::History) -> BTreeMap<String, Vec<u8>> {
 // ---------------------------------------------------------------------------------------------
 // The successor genesis.
 
+/// §15.1 "Competing attempts": the predecessor's final entry is the first freezing entry whose
+/// succession is verified, so a new attempt needs every freezing entry already in the history
+/// to have a known successor that does not verify. A freezing entry with no successor supplied,
+/// or whose succession verifies, refuses the attempt (a verifier holding only the new successor
+/// could not tell, and a second verified successor must never be built).
+fn check_earlier_attempts(
+    entries: &[Vec<u8>],
+    history: &swift::History,
+    attempts: &[Objects],
+    now_ms: i64,
+) -> Result<()> {
+    for (i, rec) in history.entries.iter().enumerate() {
+        let v = &rec.value;
+        let freezing = v["kind"] == "layout" && v["layout"].as_u64().is_some_and(|n| n > 2);
+        let Some(named) = v["successor"].as_str().filter(|_| freezing) else {
+            continue;
+        };
+        let seq = i as u64 + 1;
+        let prefix: Vec<Vec<u8>> = entries
+            .iter()
+            .filter(|b| swift_seq(b).is_some_and(|n| n <= seq))
+            .cloned()
+            .collect();
+        let mut known = false;
+        for a in attempts {
+            let mut o = a.clone();
+            o.predecessor = prefix.clone();
+            let verdict = verify_history(&o, &Persisted::default(), now_ms);
+            let Some(state) = verdict.state else { continue };
+            if state.account().as_str() != named {
+                continue;
+            }
+            known = true;
+            require(
+                state.verified_succession().is_none(),
+                "an earlier freezing entry's succession is verified: the predecessor is final",
+            )?;
+        }
+        require(
+            known,
+            "the predecessor already holds a freezing entry whose successor is not supplied",
+        )?;
+    }
+    Ok(())
+}
+
+fn swift_seq(envelope: &[u8]) -> Option<u64> {
+    let v = crate::v05::encoding::strict_parse(envelope).ok()?;
+    let body = decode_base64(v.get("body")?.as_str()?, 1_048_576).ok()?;
+    crate::v05::encoding::strict_parse(&body)
+        .ok()?
+        .get("seq")?
+        .as_u64()
+}
+
 /// Inputs of [`prepare_swift_genesis`].
 #[derive(Clone, Debug)]
 pub struct SwiftGenesisParams {
@@ -354,6 +409,11 @@ pub struct SwiftGenesisParams {
     /// meet the rule that may write F at `head` (§15.1 step 1); every further key offered raises
     /// the number of keys a veto needs.
     pub handover: Vec<String>,
+    /// For each freezing entry already in `predecessor`: the objects of the successor it named
+    /// (genesis, entries, receipts, heads). A new attempt is built only when every earlier
+    /// freezing entry has its successor here and none of them verifies (§15.1 "Competing
+    /// attempts": the first freezing entry whose succession is verified is final).
+    pub earlier_attempts: Vec<Objects>,
 }
 
 /// Exact signing work for a successor genesis, and what finishing it needs.
@@ -525,6 +585,7 @@ pub fn prepare_swift_genesis(p: &SwiftGenesisParams, now_ms: i64) -> Result<Pend
         p.issued_ms >= head.issued_ms,
         "genesis issued before the predecessor's head",
     )?;
+    check_earlier_attempts(&p.predecessor, &head.history, &p.earlier_attempts, now_ms)?;
     let k = check_new_keyring(&p.keyring, &p.signers)?;
     // Slots (§15.3, §16.2): every slotted controller is carried and has a new slot.
     let new_slotted: BTreeSet<String> = k.slots.iter().flat_map(Keyring::slot_ids).collect();
@@ -740,6 +801,9 @@ pub struct SwiftFreezeParams {
     /// The predecessor controllers that sign: the first is the primary. For a root library, the
     /// root alone; for a keyring library, `control` signers, at least `threshold`.
     pub signers: Vec<String>,
+    /// As in [`SwiftGenesisParams::earlier_attempts`]: the successors of the freezing entries that
+    /// precede F in `predecessor`.
+    pub earlier_attempts: Vec<Objects>,
 }
 
 /// Exact signing work for F, and what finishing it needs.
@@ -786,6 +850,7 @@ pub fn prepare_swift_freeze(p: &SwiftFreezeParams, now_ms: i64) -> Result<Pendin
     let snap = head.snapshot()?;
     let mut objects = p.successor.clone();
     objects.predecessor = p.predecessor.clone();
+    check_earlier_attempts(&p.predecessor, &head.history, &p.earlier_attempts, now_ms)?;
     let state = state_of(&objects, now_ms)?;
     let status = succession_status(&state)
         .ok_or_else(|| malformed("the successor holds no genesis with a predecessor"))?;
@@ -1122,6 +1187,10 @@ pub fn view_digest(copied: &[String]) -> Result<String> {
         )?;
     }
     v.sort_unstable();
+    require(
+        v.windows(2).all(|w| w[0] != w[1]),
+        "a destination record is copied once: a digest appears twice",
+    )?;
     Ok(digest(v.join("\n").as_bytes()))
 }
 

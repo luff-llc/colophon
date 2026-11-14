@@ -103,6 +103,16 @@ impl Vector {
     fn now(&self) -> i64 {
         ms(self.case["expected"]["now"].as_str().unwrap_or(DEFAULT_NOW))
     }
+    /// The successors of earlier freezing entries (the thief's, in the premature-freeze vector).
+    fn attempts(&self) -> Vec<Objects> {
+        match std::fs::read(self.dir.join("thief-genesis.json")) {
+            Ok(b) => vec![Objects {
+                entries: vec![strip(b)],
+                ..Objects::default()
+            }],
+            Err(_) => Vec::new(),
+        }
+    }
     fn successor_objects(&self) -> Objects {
         let mut o = Objects {
             entries: files_in(&self.dir.join("successor/authority")),
@@ -148,6 +158,7 @@ fn build_genesis(v: &Vector, scalars: &BTreeMap<String, Vec<u8>>) -> Result<Vec<
         predecessor: v.prefix(),
         signers,
         handover: ids_of(&env, "handover"),
+        earlier_attempts: v.attempts(),
     };
     let pending = prepare_swift_genesis(&p, v.now()).map_err(|e| format!("prepare: {e}"))?;
     let item = |s: &SigningStep| -> Option<Value> {
@@ -183,6 +194,7 @@ fn build_freeze(v: &Vector, scalars: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u
     let p = SwiftFreezeParams {
         predecessor: v.prefix(),
         successor: v.successor_objects(),
+        earlier_attempts: v.attempts(),
         issued_ms: ms(fb["issued"].as_str().unwrap()),
         signers,
     };
@@ -412,6 +424,7 @@ fn complete(v: &Vector, scalars: &BTreeMap<String, Vec<u8>>) -> (Objects, Vec<u8
             &SwiftFreezeParams {
                 predecessor: v.prefix(),
                 successor: objects.clone(),
+                earlier_attempts: v.attempts(),
                 issued_ms: ms(fb["issued"].as_str().unwrap()),
                 signers,
             },
@@ -575,6 +588,7 @@ fn the_vetoed_succession_is_recorded_and_never_verified() {
     let mut p = SwiftFreezeParams {
         predecessor: v.prefix(),
         successor: all.clone(),
+        earlier_attempts: v.attempts(),
         issued_ms: ms("2026-11-14T10:10:00Z"),
         signers: vec![root_of(&v.prefix())],
     };
@@ -606,6 +620,7 @@ fn genesis_params(v: &Vector) -> SwiftGenesisParams {
         predecessor: v.prefix(),
         signers,
         handover: ids_of(&env, "handover"),
+        earlier_attempts: v.attempts(),
     }
 }
 fn why(e: Failure) -> String {
@@ -744,6 +759,7 @@ fn f_is_refused_before_the_due_time_for_the_wrong_signers_and_a_fractional_secon
     let mut p = SwiftFreezeParams {
         predecessor: v.prefix(),
         successor: v.successor_objects(),
+        earlier_attempts: v.attempts(),
         issued_ms: ms(fb["issued"].as_str().unwrap()),
         signers: vec![fb["signer"].as_str().unwrap().to_string()],
     };
@@ -789,11 +805,12 @@ fn f_is_refused_before_the_due_time_for_the_wrong_signers_and_a_fractional_secon
     none.signers = vec![fb["signer"].as_str().unwrap().to_string()];
     none.successor.pending.clear();
     assert!(prepare_swift_freeze(&none, v.now()).is_err());
-    // A predecessor with an entry after the genesis's head is not the head the genesis names.
+    // A predecessor that already holds a second freezing entry after the genesis's head.
     let extra = vector("swift-premature-freeze-then-owner");
     let mut q = SwiftFreezeParams {
         predecessor: extra.predecessor.clone(),
         successor: extra.successor_objects(),
+        earlier_attempts: extra.attempts(),
         issued_ms: ms("2026-11-14T10:10:00Z"),
         signers: vec![body_value(&extra.f().unwrap())["signer"]
             .as_str()
@@ -801,7 +818,7 @@ fn f_is_refused_before_the_due_time_for_the_wrong_signers_and_a_fractional_secon
             .to_string()],
     };
     q.predecessor.push(extra.f().unwrap());
-    assert!(why(prepare_swift_freeze(&q, extra.now()).unwrap_err()).contains("last entry as head"));
+    assert!(why(prepare_swift_freeze(&q, extra.now()).unwrap_err()).contains("freezing entry"));
 }
 
 #[test]
@@ -812,6 +829,7 @@ fn f_finish_returns_nothing_for_a_forged_signature() {
     let p = SwiftFreezeParams {
         predecessor: v.prefix(),
         successor: v.successor_objects(),
+        earlier_attempts: v.attempts(),
         issued_ms: ms(fb["issued"].as_str().unwrap()),
         signers: vec![fb["signer"].as_str().unwrap().to_string()],
     };
@@ -845,6 +863,10 @@ fn the_migration_entry_is_built_with_real_view_digests_and_refused_when_it_canno
     assert_eq!(view_digest(&[]).unwrap(), sha(b""));
     assert!(view_digest(&["AB".repeat(32)]).is_err());
     assert!(view_digest(&["a".repeat(63)]).is_err());
+    assert!(
+        view_digest(&[a.clone(), a.clone()]).is_err(),
+        "a duplicate digest is refused (L2)"
+    );
     assert_eq!(map_swift_role("web"), Some("app"));
     assert_eq!(map_swift_role("service"), Some("server"));
     assert_eq!(map_swift_role("robot"), None);
@@ -1180,7 +1202,9 @@ fn the_migration_vector_reproduces_from_its_inputs() {
     let want_t = dec(body_value(&held[2])["transition"].as_str().unwrap());
     let t = body_value(&want_t);
     let m = &t["change"]["migration"];
-    assert!(ms(m["drain"]["from"].as_str().unwrap()) > ms(body_value(&f)["issued"].as_str().unwrap()));
+    assert!(
+        ms(m["drain"]["from"].as_str().unwrap()) > ms(body_value(&f)["issued"].as_str().unwrap())
+    );
     let member = m["members"][0]["id"].as_str().unwrap().to_string();
     let params = MigrationParams {
         predecessor: objects.predecessor.clone(),
@@ -1193,9 +1217,19 @@ fn the_migration_vector_reproduces_from_its_inputs() {
             omitted: 1,
         }],
         omitted: vec![("cd".repeat(32), "invalidPayload".into())],
-        members: vec![MigratedMember { id: member, label: "Phone".into(), kind: "device".into(), dropped: None }],
+        members: vec![MigratedMember {
+            id: member,
+            label: "Phone".into(),
+            kind: "device".into(),
+            dropped: None,
+        }],
         issued_ms: ms(t["issued"].as_str().unwrap()),
-        signers: t["signers"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect(),
+        signers: t["signers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect(),
     };
     let mut ordered = params.clone();
     let by = t["by"].as_str().unwrap().to_string();
@@ -1210,14 +1244,18 @@ fn the_migration_vector_reproduces_from_its_inputs() {
             assert_eq!(b[k], w[k], "transition field {k}");
         }
         for k in w["change"]["migration"].as_object().unwrap().keys() {
-            assert_eq!(b["change"]["migration"][k], w["change"]["migration"][k], "migration field {k}");
+            assert_eq!(
+                b["change"]["migration"][k], w["change"]["migration"][k],
+                "migration field {k}"
+            );
         }
         panic!("only the signatures differ");
     }
     // A member the predecessor never had, or a namespace it never had, is still refused.
     let mut bad = ordered.clone();
     bad.namespaces[0].namespace = "other".into();
-    assert!(why(prepare_migration(&objects, v.now(), &bad).unwrap_err()).contains("exactly the predecessor's namespaces"));
+    assert!(why(prepare_migration(&objects, v.now(), &bad).unwrap_err())
+        .contains("exactly the predecessor's namespaces"));
     // A drain window that ends before F is refused (§15.4 orders the migration after F).
     let mut early = ordered.clone();
     early.drain_from_ms = ms("2020-01-01T00:00:00Z");
@@ -1232,7 +1270,12 @@ fn f_is_refused_while_a_valid_veto_is_held_and_not_recorded() {
     let entries = files_in(&v.dir.join("successor/authority"));
     let rec = body_value(&entries[2]);
     let list = |f: &str| -> Vec<Vec<u8>> {
-        rec[f].as_array().unwrap().iter().map(|x| dec(x.as_str().unwrap())).collect()
+        rec[f]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| dec(x.as_str().unwrap()))
+            .collect()
     };
     let mut objects = Objects {
         entries: entries[..2].to_vec(),
@@ -1244,8 +1287,12 @@ fn f_is_refused_while_a_valid_veto_is_held_and_not_recorded() {
     let p = |o: &Objects| SwiftFreezeParams {
         predecessor: v.prefix(),
         successor: o.clone(),
+        earlier_attempts: Vec::new(),
         issued_ms: ms(body_value(&v.f().unwrap())["issued"].as_str().unwrap()),
-        signers: vec![body_value(&v.f().unwrap())["signer"].as_str().unwrap().to_string()],
+        signers: vec![body_value(&v.f().unwrap())["signer"]
+            .as_str()
+            .unwrap()
+            .to_string()],
     };
     // Without the veto the same objects prepare (so the refusal below is the veto's).
     assert!(prepare_swift_freeze(&p(&objects), v.now()).is_ok());
@@ -1254,4 +1301,42 @@ fn f_is_refused_while_a_valid_veto_is_held_and_not_recorded() {
     objects.pending.extend(list("genesisReceipts"));
     let e = prepare_swift_freeze(&p(&objects), v.now()).unwrap_err();
     assert!(why(e).contains("a valid veto is held"));
+}
+
+/// M4: a second attempt on a head that already is (or follows) a freezing entry (§15.1
+/// "Competing attempts").
+#[test]
+fn a_competing_successor_is_refused_when_the_head_follows_a_freezing_entry() {
+    let scalars = published_scalars();
+    let v = vector("swift-keyring");
+    let (first, _, _) = complete(&v, &scalars); // the first successor, verified, with its F
+    let mut gp = genesis_params(&v);
+    gp.predecessor = v.predecessor.clone(); // head is now F itself
+    gp.issued_ms = ms("2026-11-14T10:20:00Z");
+    let now = ms("2026-11-14T10:21:00Z");
+    // The earlier freezing entry's successor is not supplied: refused.
+    gp.earlier_attempts = vec![];
+    assert!(why(prepare_swift_genesis(&gp, now).unwrap_err()).contains("successor is not supplied"));
+    // Supplied, and its succession is verified: refused, the predecessor is final.
+    let mut verified = first.clone();
+    verified.predecessor = v.predecessor.clone();
+    assert!(verify_history(&verified, &Persisted::default(), v.now())
+        .state
+        .unwrap()
+        .verified_succession()
+        .is_some());
+    gp.earlier_attempts = vec![verified.clone()];
+    assert!(why(prepare_swift_genesis(&gp, v.now()).unwrap_err()).contains("is verified"));
+    // The F builder says the same.
+    let fp = SwiftFreezeParams {
+        predecessor: v.predecessor.clone(),
+        successor: v.successor_objects(),
+        issued_ms: ms("2026-11-14T10:30:00Z"),
+        signers: vec![body_value(&v.f().unwrap())["signer"]
+            .as_str()
+            .unwrap()
+            .to_string()],
+        earlier_attempts: vec![verified],
+    };
+    assert!(prepare_swift_freeze(&fp, now).is_err());
 }
