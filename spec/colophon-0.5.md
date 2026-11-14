@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 12, for review, 2026-11-14.** Not frozen, not
+**Status: final candidate, revision 13, for review, 2026-11-14.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -14,7 +14,12 @@ the object set only; revision 9 keeps a revoked home current until its revocatio
 one-recovery-key stall and narrows the liveness claim; revision 11 states recovery conditions in
 units; revision 12 answers the engine check of the 0.5 history verifier and its own check: one
 meaning of "final", final successions, possession under handover, the proposer cap, the chain
-bound and the Swift steward threshold. The
+bound and the Swift steward threshold; revision 13 answers the checks of the write side (the
+authority builders, the vault, slots and pairing, the homes and calls): resolving a fork,
+per-home head rollback, determined veto receipts and `final` heads, a late veto at a home,
+two heads for one seq, the §7.2 slot shape at replay, equivocation evidence, and the text
+gaps the builders found (notices, link `created`, the kit derivation, the restricted open, the
+PRF assertion, the QR bytes, the seed guarantee). The
 mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative

@@ -1,10 +1,11 @@
 # Colophon 0.5: implementation notes
 
 **Status:** running list kept while building `colophon_core::v05` against
-[colophon-0.5.md](colophon-0.5.md) revision 12 (`spec-0.5-r12`). The foundation (encoding, keys,
-signatures, terms, records, calls) was merged as colophon#4. Step 1 brought it to revision 11
-(`63bbeff`); step 2 added the authority history verifier of §8; revision 12 is the last section.
-No vector of revision 12 was replayed by the Swift source.
+[colophon-0.5.md](colophon-0.5.md) revision 13 (`spec-0.5-r12` plus the revision 13 branch). The
+foundation (encoding, keys, signatures, terms, records, calls) was merged as colophon#4. Step 1
+brought it to revision 11 (`63bbeff`); step 2 added the authority history verifier of §8;
+revision 12 and revision 13 are the last two sections. No vector of revision 12 or revision 13
+was replayed by the Swift source.
 
 Revisions 7–11 settled every open item of the revision-6 list:
 - retention 7,260 s;
@@ -480,7 +481,7 @@ test of revision 13 was replayed by the Swift source.**
     `HOST_OPEN_MAX_CIPHERTEXT` 65,536, the `{enc, ciphertext}` of §11.1, ciphertext at least 16
     bytes, `refused:outOfScope` for a `colophon/` label), PRF-building assertion (§7.2: the §4.3
     general origin rule, UV iff the controller's `verification`), the seed guarantee (§17.1, §3.4;
-    coordinator item C).*
+    coordinator item C).
   - *QR payload (§7.3).* Canonical JSON of the closed object `{account, e, nB, protocol:
     "colophon/pair-qr/5"}`. `pairing.rs` has `QrPayload {account, e, nb}` and no encoder or decoder
     ("the byte format is not specified"): it needs `to_bytes`/`from_bytes` for this and a doc

@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 12, 2026-11-14. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 13, 2026-11-14. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -199,6 +199,20 @@ clocks and admission.
 | 101 | §8.7 says a revocation of a home that is not removal-only revokes it once final without excusing it, and that a later full set's anchor may be the activation itself | M-a, L3 of the check of revision 12 |
 | 102 | Checkpoint format 3 | L1 of the check of revision 12 |
 | 103 | Engine correction, no text change (§8.3 already says it): a keyring `update` that changes a controller's `agreement` drops every slot naming it and retires the vault, as a removal or demotion does. `t-rekey-slotted-drops-slot`, `i-rekey-slotted-as-immediate` | Found by the independent check of another package: the verifier kept the slot and left `retiring` false, so the holder of the old agreement key could still open the vault |
+
+### A.9 Revision 13
+
+| # | Change | Why |
+| --- | --- | --- |
+| 104 | §8.6 "Resolving a fork": a `resolve` is built on one branch, judged by the control rule of the keyring before the fork plus consent, activates there, and the verifier stands the branch whose activation discards every other candidate; two resolves leave the fork; a resolve naming no held fork is void | E1 M3: a fork could never be resolved |
+| 105 | §13.3 high-water mark per home; a head behind it, while the marked entry is on the held history, is `refused:rollback`; checkpoint format 4 | E1: head verification had no mark; `rules/rollback` ran for the first time |
+| 106 | §8.7 "Choosing receipts": a veto's receipts are valid, at or before the veto deadline and not after the `vetoed`'s `issued`; the verifier enforces the choice over held receipts plus the entry's own | E1 H4 |
+| 107 | §8.7 "Choosing heads" for a `final`: lowest body digest per witness among covering heads not dated after the `final`'s `issued`; enforced the same way | E1 L5; the write side's clock rule would flip verdicts over time |
+| 108 | §13.1: a home stores a late veto that comes with an in-window receipt from another current home and signs none of its own | E3 M2 |
+| 109 | §13.3: a home MUST give heads strictly increasing `issued` and MUST NOT sign a second digest at a seq unless the first was displaced under §8.6 rule 1; `HomeState::guard_head` | E3 |
+| 110 | §7.2 slot shape is enforced by the verifier (`malformed` at replay) | Check of the integrated write side |
+| 111 | §13.3 equivocation: the three forms are judged against held history (heads follow both entries back to the divergence; entries convict the signer units on both; the veto form carries the activation); "verifiable from the keys it names alone" removed | E1, coordinator B |
+| 112 | §17.5, §13.1 notices have no signed body or wire format; §12.1 `created` carries no rule; §7.5 one kit derivation; §17.1 the restricted open and the seed guarantee (and §3.4); §7.2 the PRF assertion's origin and UV; §7.3 QR payload bytes; §8.7 admission at a home's current head | The write-side builders' questions |
 
 ## B. Galley's requirements
 
@@ -827,6 +841,27 @@ prefix replay) is left to the performance step.
 | M-d §16.3 called a fraction or exponent a Swift decoding error | §16.3 "Steward threshold"; every entry kind checked |
 | M-e A quorum `handover` Swift accepts and the engine refuses | §16.3 "Quorum handover" (text only; engine unchanged) |
 | Low: checkpoint format, "anchor follows", bookkeeping | Format 3; §8.7 "is it or follows it"; the spec header, the guide's log and the notes now cover revisions 10 to 12. No vector of revision 12 was replayed by the Swift source |
+
+### G.18 Checks of the write side (2026-11-14), answered in revision 13
+
+The independent checks of the authority builders (E1), the vault, slots and pairing (E2) and
+the homes and calls (E3), and of the integrated write side, found these gaps in the verifier and
+the text. Their probe tests are not repeated here.
+
+| Finding | Settled in |
+| --- | --- |
+| E1 M3: a fork can never be resolved | §8.6 "Resolving a fork"; `t-resolve-fork`, `t-resolve-two`, `t-resolve-below-rule`; tests in `v05_write_authority.rs` |
+| E1: no head high-water mark, `refused:rollback` never returned | §13.3, §17.2; `rules/rollback` now runs; `v05_head_marks.rs` |
+| E1 H4: one late receipt blocks a valid `vetoed`; two bodies for one `vetoed` | §8.7 "Choosing receipts"; `t-vetoed-choice-right`, `-late-receipt-skipped`, `-wrong-choice` |
+| E1 L5: no choosing rule for a `final`'s heads | §8.7 "Choosing heads"; `t-final-head-choice-right`, `-choice-wrong`, `-ahead-ignored` |
+| E1: equivocation evidence "verifiable from the keys it names alone" | §13.3 Equivocation |
+| E3 M2: a late valid veto is never stored at a home | §13.1; test `a_late_veto_is_stored_with_an_in_window_receipt_from_another_home_and_signs_none` |
+| E3: signing two heads for one seq | §13.3 last bullet; `HomeState::guard_head` |
+| E3, E2: notices, link `created`, kit derivation, restricted open, PRF assertion, QR bytes | §17.5/§13.1, §12.1, §7.5, §17.1, §7.2, §7.3 |
+| Integrated write side: the verifier never checks the §7.2 slot shape | `Keyring::parse` runs the slot validation; `t-slot-wrong-length-genesis`, `i-slot-add-valid`, `i-slot-add-wrong-length` |
+| Integrated write side: what the core guarantees about the seed | §17.1 "The seed", §3.4 |
+
+No vector of revision 13 was replayed by the Swift source.
 
 ## H. Theft and loss, worked through
 

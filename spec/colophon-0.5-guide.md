@@ -208,3 +208,4 @@ without stopping either thief. What protects the owner is the veto window.
 | 2026-11-12 | Confirmation review of revision 10 | units, not controllers; sufficient not necessary; stale wording | Revision 11; changes §G.14 |
 | 2026-11-14 | Claude, engine check of the 0.5 history verifier (PRs #5 and #6) | 3 High, 4 Medium, 6 Low | Revision 12 answers M1, M2, M4, L2, L5 and the chain bound; changes §A.8, §G.16 |
 | 2026-11-14 | Claude, independent check of revision 12 (PR #7) | 3 High, 5 Medium, 4 Low | Revision 12 (fix round); changes §A.8, §G.17 |
+| 2026-11-14 | Claude, checks of the write side: authority builders (E1), vault, slots and pairing (E2), homes and calls (E3), and the integrated write side | resolve, rollback, receipt and head choices, late veto, two heads, slot shape, equivocation evidence, seven text gaps | Revision 13; changes §A.9, §G.18 |
