@@ -1,6 +1,6 @@
 //! WebAssembly transport for the pure core. Every private-key operation is a Uint8Array host step.
 #![deny(missing_docs)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 use colophon_core::{
     crypto::PublicIdentity,
     library::{AgreementStep, Call, CreateOptions, Library, PendingBatch, SignatureResult},
