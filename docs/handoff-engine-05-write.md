@@ -57,3 +57,39 @@ when E7 lands.
   new files, and rebase onto it when it merges.
 - The checker of the engine did not drive home admission, forged Swift predecessors or the 0.4
   upgrade with tests. E3 and E7 are where that coverage is added.
+
+## What a new Apple app version must do to write F
+
+The builders (`v05/write/succession.rs`) return F as exact Swift-format record bytes (§16.3).
+Shipped Swift cannot write them. Paths are Marginalia `packages/Colophon/Sources/`, at
+`origin/main` `c8280332`.
+
+1. **A `successor` member on the entry type.** `ColophonAuthority/AuthorityEntry.swift:32-80`
+   lists the stored members and has no `successor`; `numbered(_:after:)` (`:93-123`) copies a
+   fixed list and would drop it.
+2. **A supported layout of 3 or more.** `ColophonAuthority/AuthorityState.swift:56`
+   (`supportedStorageLayout = 2`) and `:120-121` (a `layout` above it throws); the writer guard
+   at `AuthorityHolder.swift:50-54`. The only layout writers are `AuthorityHolder.swift:35-40`
+   and `KeyringHolder.swift:29-34`, both layout 2.
+3. **A way to append the exact record bytes the builder returns.** `AuthorityEntry.swift:82-88`
+   sets `issued` to `.now` and `numbered` (`:94`) calls that initializer again, so a draft
+   re-stamps `issued` and the signatures made over the builder's body no longer match. The app
+   needs a raw-record append on `AuthorityLog`, or an explicit `issued` on the draft.
+4. **A reader rule that F is final.** Once a `layout` entry carries `successor`, the version that
+   writes F must stop writing to that library; with item 2 alone it would keep reading and
+   writing after F, which §15.1 calls `malformed` evidence.
+5. **Old versions stop with `unsupportedStorageLayout`,** shown as update required: the throw at
+   `AuthorityState.swift:120-121`, the message at `ColophonCore/ColophonError.swift:43`, mapped to
+   `.updateRequired` at `apps/apple/App/Sync/SharedLibraryDiagnostics.swift:58`. Versions that
+   predate `layout` stop with `newerAuthority`. The message says to update the app, which will not
+   help for this library; the person must be sent to the successor.
+
+### What a real library still cannot do after the E7 package
+
+- Open its old Swift slots (`sealed` `colophon/sealed-key/1`, `prf` `colophon/vault-prf/1`,
+  `combined`) and build the new ones. The genesis builder requires a rebuilt slot for every
+  slotted controller, so no real genesis can be built until this exists.
+- Copy its records into the successor (opening the Swift namespace keys and re-writing records
+  through the drain window). The `migration` entry only reports the counts.
+- Sign a veto with an old Swift key (the veto body builder exists; there is no step for a Swift
+  descriptor to sign it).
