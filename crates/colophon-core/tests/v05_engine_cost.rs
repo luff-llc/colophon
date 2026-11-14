@@ -1,7 +1,9 @@
 //! What the engine costs, opt in: `cargo test -p colophon-core --release --test v05_engine_cost
-//! -- --ignored --nocapture`. For N = 1,000 and 10,000 held records it prints cold open,
-//! resumed open, one write, a refresh adding 100 records, a first sync from a home and a live
-//! write, each as signature checks, decryptions, fold applications and wall time. Nothing here
+//! -- --ignored --nocapture`. For N = 1,000, 10,000 and 100,000 held records (`COST_SIZES`, a
+//! comma-separated list, picks others) it prints cold open, resumed open, one write, a refresh
+//! adding 100 records, a first sync from a home (up to 10,000 records) and a live write with
+//! 2,000 slots, each as signature checks, decryptions, fold applications, wall time and the
+//! resident set of the process, with the bytes the account holds, computed. Nothing here
 //! asserts a time; the assertions are the counts that must not depend on N.
 #![allow(clippy::unwrap_used, clippy::too_many_arguments)]
 #[path = "v05_engine_support/mod.rs"]
@@ -14,14 +16,26 @@ use support::*;
 const NOW: i64 = T0 + 3 * HOUR;
 const NS: &str = "notes";
 
+/// The resident set of this process in MiB, from `ps` (portable to macOS and Linux).
+fn rss_mib() -> f64 {
+    std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map_or(0.0, |kib| kib / 1024.0)
+}
+
 fn row(label: &str, before: &EngineStats, after: &EngineStats, t: Instant) {
     println!(
-        "  {label:<34} {:>9.1} ms  sig {:>6}  dec {:>6}  fold {:>6}  walked {:>6}",
+        "  {label:<34} {:>9.1} ms  sig {:>6}  dec {:>6}  fold {:>6}  walked {:>6}  rss {:>7.1} MiB",
         t.elapsed().as_secs_f64() * 1e3,
         after.signatures_verified - before.signatures_verified,
         after.payloads_decrypted - before.payloads_decrypted,
         after.folds_applied_last,
         after.walked_last,
+        rss_mib(),
     );
 }
 
@@ -59,6 +73,15 @@ fn run(n: usize) {
         &cold.stats(),
         t,
     );
+    let held = cold.account().held_bytes();
+    println!(
+        "  held by the account: {} B envelopes + {} B plaintext + {} B fold = {:.0} B per record",
+        held.records,
+        held.plaintext,
+        held.folds,
+        (held.records + held.plaintext + held.folds) as f64 / n as f64,
+    );
+    drop(cold);
     // Resumed open, nothing new.
     let t = Instant::now();
     let mut r = Engine::open(
@@ -116,40 +139,42 @@ fn run(n: usize) {
         100
     );
 
-    // First sync from a home that holds everything.
-    let mut files = 0;
-    for p in src.listing() {
-        if p.starts_with("ops/") {
-            s.sim.files.insert(p.clone(), src.get(&p).unwrap());
-            s.sim.log.push(p);
-            files += 1;
+    // First sync from a home that holds everything (measured up to 10,000 records).
+    if n <= 10_000 {
+        let mut files = 0;
+        for p in src.listing() {
+            if p.starts_with("ops/") {
+                s.sim.files.insert(p.clone(), src.get(&p).unwrap());
+                s.sim.log.push(p);
+                files += 1;
+            }
         }
+        let fresh_src = device_source(&s);
+        let mut fresh = member_engine(&s.f, &host, &fresh_src, &writer, NOW);
+        let home = s.home.clone();
+        let before = fresh.stats();
+        let t = Instant::now();
+        let faults = sync_pass(
+            &mut fresh,
+            &fresh_src,
+            &home,
+            &mut s.sim,
+            &host,
+            NOW + 1_000,
+        );
+        row(
+            &format!("first sync of {files} records"),
+            &before,
+            &fresh.stats(),
+            t,
+        );
+        assert!(
+            faults
+                .iter()
+                .all(|f| matches!(f, colophon_core::v05::engine::exchange::Fault::More { .. })),
+            "{faults:?}"
+        );
     }
-    let fresh_src = device_source(&s);
-    let mut fresh = member_engine(&s.f, &host, &fresh_src, &writer, NOW);
-    let home = s.home.clone();
-    let before = fresh.stats();
-    let t = Instant::now();
-    let faults = sync_pass(
-        &mut fresh,
-        &fresh_src,
-        &home,
-        &mut s.sim,
-        &host,
-        NOW + 1_000,
-    );
-    row(
-        &format!("first sync of {files} records"),
-        &before,
-        &fresh.stats(),
-        t,
-    );
-    assert!(
-        faults
-            .iter()
-            .all(|f| matches!(f, colophon_core::v05::engine::exchange::Fault::More { .. })),
-        "{faults:?}"
-    );
 
     println!("  sealed checkpoint: {} KiB for {n} records", mem / 1024);
 }
@@ -194,16 +219,15 @@ fn live(slots: usize) {
 
 #[test]
 #[ignore]
-fn cost_of_open_resume_write_refresh_sync_for_1000_records() {
-    run(std::env::var("COST_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1_000));
-}
-#[test]
-#[ignore]
-fn cost_of_open_resume_write_refresh_sync_for_10000_records() {
-    run(10_000);
+fn cost_of_open_resume_write_refresh_sync_for_the_sizes_asked() {
+    let sizes: Vec<usize> = std::env::var("COST_SIZES")
+        .unwrap_or_else(|_| "1000,10000".into())
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    for n in sizes {
+        run(n);
+    }
 }
 #[test]
 #[ignore]
