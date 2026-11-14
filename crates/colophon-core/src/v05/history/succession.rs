@@ -330,7 +330,8 @@ fn eligible(p: &Succession, w: &Window) -> BTreeMap<String, Vec<Controller>> {
     let mut last_removal = None;
     for i in 0..end {
         effective = effective.max(h.entries[i].issued_ms);
-        if effective >= cutoff {
+        // An entry dated exactly at the cutoff gives the state after it only (§15.1 step 3).
+        if effective > cutoff {
             for state in h.states[i.saturating_sub(1)..=i].iter() {
                 for (id, c) in &state.controllers {
                     out.entry(id.clone()).or_default().push(c.clone());

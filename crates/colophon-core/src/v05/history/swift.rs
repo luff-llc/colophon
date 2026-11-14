@@ -426,7 +426,7 @@ fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
                                         .is_some_and(|ns| ns.iter().any(|n| v["namespace"] == *n))))
                     })
             }
-            "layout" => control,
+            "layout" => control && ids.iter().all(|id| s.controllers[id].has(&Role::Control)),
             "keyring" => {
                 let next = new_keyring(v, s)?;
                 let recovery = ids.len() as u64 >= s.recover_threshold

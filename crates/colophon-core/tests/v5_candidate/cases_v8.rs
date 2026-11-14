@@ -3268,6 +3268,19 @@ pub fn part3(o: &mut Out) {
         60,
         vec![],
     );
+    // §16.3: a `layout` needs all signers to hold `control`; the kit holds only `recover`.
+    let mut g = new_genesis(&recs, 2, sg![a], "Extra cosigner");
+    let rg = successor_with_home(&mut g, 60, sr0 - 60);
+    let f_body = json!({"by": "controller", "issued": ts(sr0 + after), "kind": "layout", "layout": 3,
+                        "previous": sha(&unb64(recs.last().unwrap()["body"].as_str().unwrap())),
+                        "seq": recs.len() + 1, "signer": a.id, "successor": account_id(&g)});
+    let f_extra = swift_signed(&f_body, &a, &[&k1]);
+    let mut all = recs.clone();
+    all.push(f_extra);
+    write_swift(o, "swift-layout-extra-noncontrol-cosigner", &all, Some(&g),
+                json!({"succession": "unverified"}),
+                "F is signed by the Mac (control) and cosigned by the kit, which holds only recover: a layout needs every signer to hold control.",
+                succ_extra(&g, &rg));
     let mut g = new_genesis(&recs, 2, sg![a], "Late receipt");
     swift_case(o, "swift-late-genesis-receipt", &recs, &mut g, after, json!({"succession": "unverified"}),
                "The receipt is 400 s after the appointing entry, outside the succession window: never due.", &a, false, 400, vec![]);
@@ -3372,6 +3385,19 @@ pub fn part3(o: &mut Out) {
         60,
         vec![gv],
     );
+    // §15.1 step 3: the instant W0 minus the delay. An entry dated exactly then gives the state
+    // after it, not the state before it: X, removed by that entry, can't veto.
+    let w0 = {
+        let mut probe = new_genesis(&recs, 2, sg![a], "probe");
+        successor_with_home(&mut probe, 60, sr0 - 60);
+        secs(&fstr(&probe.envs[1], "issued"))
+    };
+    let cutoff = w0 - D;
+    let recs_c = xy_library(&ts(cutoff - 3600), &ts(cutoff), &ts(cutoff + 3600));
+    let mut g = new_genesis(&recs_c, 5, sg![a], "X vetoes at the cutoff");
+    let gv = gveto(&g, &kx, sv);
+    swift_case(o, "swift-veto-by-key-removed-at-cutoff", &recs_c, &mut g, after, json!({"succession": "verified", "seq3": "successionVetoed malformed"}),
+               "X was removed by an entry dated exactly W0 minus the delay: only the state after that entry is taken at that instant, so X is not eligible.", &a, false, 60, vec![gv]);
     let recs_w = xy_library(
         "2026-11-02T08:00:00Z",
         "2026-11-09T09:00:00Z",
