@@ -438,6 +438,7 @@ pub fn part(out: &mut Out) {
     duplicates(out);
     retiring(out);
     renew_shares(out);
+    renew_shares_only(out);
     proposals(out);
     legacy(out);
 }
@@ -885,6 +886,89 @@ fn renew_shares(out: &mut Out) {
         &["9.4", "11.1", "11.5"],
         json!({}),
     );
+}
+
+/// The shares-only `renew` (§9.4): no `expires`, only `shares`.
+fn renew_shares_only(out: &mut Out) {
+    let w = member("w");
+    // A member with no expiry lacks epoch 2 (the epoch went to the vault only): the shares-only
+    // renew catches it up and leaves its expiry (none) as it is.
+    let mut a = Ra::new("renew-shares-only");
+    a.rekey(10, 1, &[]); // 2
+    a.grant(20, &w, "device", w_terms(), &[1]); // 3
+    a.rekey(400, 2, &[]); // 4: the vault only
+    let e2 = a.epoch_obj(NS, 2, &[(w.sign.id.as_str(), w.agree.point.clone())]);
+    a.add("renew", 450, json!({"member": w.sign.id, "shares": [e2]})); // 5
+    a.holder(&w);
+    let w1 = a.op(Op::new(&w, 1, 3, "w1"));
+    a.expect_opened(&w1);
+    let mut s = Op::new(&w, 2, 5, "w2");
+    s.epoch = 2;
+    s.created = 500;
+    let w2 = a.op(s);
+    a.expect_opened(&w2);
+    a.write_case(
+        out,
+        "renew-shares-only",
+        "Shares-only renew (§9.4). The writer has no expiry; epoch 2 is introduced at +400 s and sealed to the vault only; the renew at +450 s has no `expires` and its `shares` seal epoch 2 to the writer, whose expiry stays as it is (none). The writer opens epoch 2 through the share and a record under it is admitted.",
+        &["9.4", "7.1", "11.1"],
+        json!({}),
+    );
+    let refused = [
+        (
+            "renew-shares-only-empty",
+            "A renew without `expires` and with no `shares` (§9.4): malformed at seq 5.",
+        ),
+        (
+            "renew-shares-only-has-epoch",
+            "A renew without `expires` whose share is for epoch 1, which the writer already has (§9.4): malformed at seq 5.",
+        ),
+        (
+            "renew-shares-only-revoked",
+            "A renew without `expires` of a revoked member (§9.4: the member must be current): malformed at seq 5.",
+        ),
+        (
+            "renew-shares-only-expired",
+            "A renew without `expires` of a member whose expiry (+300 s) has passed at the renew's `issued` (+450 s) (§9.4: the member must be current, not expired): malformed at seq 5.",
+        ),
+    ];
+    for (name, text) in refused {
+        let mut a = Ra::new(name);
+        a.rekey(10, 1, &[]); // 2
+        if name == "renew-shares-only-expired" {
+            let terms =
+                json!({"records": [{"namespace": NS, "access": "write"}], "expires": ts(300)});
+            a.grant(20, &w, "device", terms, &[1]); // 3
+        } else {
+            a.grant(20, &w, "device", w_terms(), &[1]); // 3
+        }
+        let shares = match name {
+            "renew-shares-only-empty" => {
+                a.rekey(400, 2, &[]); // 4
+                json!([])
+            }
+            "renew-shares-only-has-epoch" => {
+                a.rekey(400, 2, &[]); // 4
+                json!([a.epoch_obj(NS, 1, &[(w.sign.id.as_str(), w.agree.point.clone())])])
+            }
+            "renew-shares-only-revoked" => {
+                revoke_entry(&mut a, 400, &w, &[], &[]); // 4: epoch 2, the vault only
+                json!([a.epoch_obj(NS, 2, &[(w.sign.id.as_str(), w.agree.point.clone())])])
+            }
+            _ => {
+                a.rekey(400, 2, &[]); // 4
+                json!([a.epoch_obj(NS, 2, &[(w.sign.id.as_str(), w.agree.point.clone())])])
+            }
+        };
+        a.add("renew", 450, json!({"member": w.sign.id, "shares": shares})); // 5
+        a.write_case(
+            out,
+            name,
+            text,
+            &["9.4"],
+            json!({"history": {"result": "malformed", "seq": 5}, "records": {}, "opened": []}),
+        );
+    }
 }
 
 fn prop_world(label: &str) -> (Ra, Member, Member, Member) {

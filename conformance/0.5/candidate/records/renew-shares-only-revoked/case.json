@@ -1,0 +1,1 @@
+{"description":"A renew without `expires` of a revoked member (§9.4: the member must be current): malformed at seq 5.","expected":{"history":{"result":"malformed","seq":5},"opened":[],"records":{}},"holders":[],"sections":["9.4"],"verifier":{"now":"2026-11-11T16:20:00Z"}}

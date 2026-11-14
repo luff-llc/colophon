@@ -52,6 +52,11 @@ pub struct MemberRecord {
     pub revoked_seq: Option<u64>,
     /// Seq of the activation that added it, when that activation isn't final yet.
     pub provisional: Option<u64>,
+    /// `(namespace, epoch)` of every epoch an entry of the verified history sealed to this
+    /// member (a grant's or renew's `shares`, a `rekey`'s or `revoke`'s `epochs`): what a
+    /// shares-only `renew` (§9.4) may not repeat.
+    #[serde(default)]
+    pub sealed: BTreeSet<(String, u64)>,
     /// Home status.
     pub home: HomeStatus,
 }
@@ -676,6 +681,8 @@ pub(crate) struct TCheck {
     pub full_set: bool,
     pub due_ms: i64,
     pub deadline_ms: i64,
+    /// The transition's `issued`, ms.
+    pub issued_ms: i64,
     pub removal_only: bool,
     pub revokes: Vec<String>,
     pub undecidable: bool,
@@ -1262,6 +1269,7 @@ pub(crate) fn check_transition(
         full_set,
         due_ms,
         deadline_ms: issued.saturating_add(delay),
+        issued_ms: issued,
         removal_only: cls.removal_only,
         revokes: witnesses_revoked,
         undecidable,
@@ -1522,7 +1530,7 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
         changed = true;
     }
     if let Some(m) = t.change.get("migration") {
-        super::succession::migration(&mut n, m)?;
+        super::succession::migration(&mut n, m, t.issued_ms)?;
         changed = true;
     }
     if let Some(a) = t.change.get("successor") {
@@ -1626,6 +1634,7 @@ fn member_from(s: &State, v: &Value, seq: u64, home: bool) -> Result<MemberRecor
         end_sessions: Vec::new(),
         revoked_seq: None,
         provisional: Some(seq),
+        sealed: Default::default(),
         home: if home {
             HomeStatus::Home
         } else {
@@ -2586,8 +2595,17 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 end_sessions: Vec::new(),
                 revoked_seq: None,
                 provisional: None,
+                sealed: Default::default(),
                 home: HomeStatus::NotHome,
             });
+            let id = n.members.last().map(|m| m.request.member_id());
+            if let (Some(id), Some(m)) = (id, n.members.last_mut()) {
+                for sh in &g.shares {
+                    if sh.recipients.contains(&id) {
+                        m.sealed.insert((sh.namespace.clone(), sh.epoch));
+                    }
+                }
+            }
         }
         "renew" => {
             super::prescan("renew", v).check()?;
@@ -2599,14 +2617,61 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 return Err(malformed("renewing a home is a transition").into());
             }
             let r = Renew::parse(fields, e.issued, current, m.and_then(|m| m.expires_ms))?;
+            if r.expires_ms.is_none() {
+                // The shares-only form (§9.4): each share is for an epoch of the member's scope
+                // that exists, that it lacks, once, and sealed to the member.
+                let m = m.ok_or_else(|| malformed("renew of an unknown member"))?;
+                let scope: BTreeSet<&str> = m
+                    .terms
+                    .records()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|r| r.namespace.as_str())
+                    .collect();
+                let mut seen = BTreeSet::new();
+                for sh in &r.shares {
+                    crate::v05::require(
+                        scope.contains(sh.namespace.as_str()),
+                        "renew: a share outside the member's scope",
+                    )
+                    .map_err(Outcome::from)?;
+                    crate::v05::require(
+                        s.epochs.get(&sh.namespace).is_some_and(|l| sh.epoch <= *l),
+                        "renew: a share for an epoch that does not exist",
+                    )
+                    .map_err(Outcome::from)?;
+                    crate::v05::require(
+                        !m.sealed.contains(&(sh.namespace.clone(), sh.epoch)),
+                        "renew: a share for an epoch the member already has",
+                    )
+                    .map_err(Outcome::from)?;
+                    crate::v05::require(
+                        seen.insert((sh.namespace.clone(), sh.epoch)),
+                        "renew: one share per epoch",
+                    )
+                    .map_err(Outcome::from)?;
+                    crate::v05::require(
+                        sh.recipients.contains(&r.member),
+                        "renew: a share not sealed to the member",
+                    )
+                    .map_err(Outcome::from)?;
+                }
+            }
             charge_rate(&mut n, e, true)?;
             if let Some(m) = n
                 .members
                 .iter_mut()
                 .find(|m| m.request.member_id() == r.member)
             {
-                m.expires_ms = Some(r.expires_ms);
-                m.renewals.push((e.seq, r.expires_ms));
+                if let Some(x) = r.expires_ms {
+                    m.expires_ms = Some(x);
+                    m.renewals.push((e.seq, x));
+                }
+                for sh in &r.shares {
+                    if sh.recipients.contains(&r.member) {
+                        m.sealed.insert((sh.namespace.clone(), sh.epoch));
+                    }
+                }
             }
         }
         "revoke" => {
@@ -2677,6 +2742,11 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
             }
             for ep in &r.epochs {
                 n.epochs.insert(ep.namespace.clone(), ep.epoch);
+                for m in n.members.iter_mut() {
+                    if ep.recipients.contains(&m.request.member_id()) {
+                        m.sealed.insert((ep.namespace.clone(), ep.epoch));
+                    }
+                }
             }
         }
         "endSessions" => {
@@ -2748,6 +2818,13 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                     ep.get("epoch").and_then(Value::as_u64),
                 ) {
                     n.epochs.insert(ns.to_string(), no);
+                    if let Some(seals) = ep.get("seals").and_then(Value::as_object) {
+                        for m in n.members.iter_mut() {
+                            if seals.contains_key(&m.request.member_id()) {
+                                m.sealed.insert((ns.to_string(), no));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3400,6 +3477,7 @@ pub(super) fn from_upgrade(
             renewals: Vec::new(),
             end_sessions: Vec::new(),
             provisional: None,
+            sealed: Default::default(),
             home: HomeStatus::NotHome,
         });
     }

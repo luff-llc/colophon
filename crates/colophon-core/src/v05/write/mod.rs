@@ -120,8 +120,8 @@ pub enum Kind {
     Renew {
         /// The member ID.
         member: String,
-        /// A §2.2 date.
-        expires: String,
+        /// A §2.2 date; `None` is the shares-only form, which leaves the expiry as it is.
+        expires: Option<String>,
         /// Epoch objects.
         shares: Vec<Value>,
     },
@@ -274,7 +274,9 @@ impl Kind {
                 shares,
             } => {
                 put("member", json!(member));
-                put("expires", json!(expires));
+                if let Some(expires) = expires {
+                    put("expires", json!(expires));
+                }
                 put("shares", Value::Array(shares.clone()));
             }
             Self::Revoke {

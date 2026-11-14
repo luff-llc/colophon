@@ -1263,6 +1263,39 @@ fn the_migration_vector_reproduces_from_its_inputs() {
     assert!(why(prepare_migration(&objects, v.now(), &early).unwrap_err()).contains("after F"));
 }
 
+/// The verifier refuses a `migration` for each rule of §15.4 "What a verifier checks", by its own
+/// reason, and the `swift-migration` vector is recorded.
+#[test]
+fn the_verifier_refuses_a_migration_by_each_of_its_rules() {
+    let history = |name: &str| {
+        let v = vector(name);
+        let mut o = v.successor_objects();
+        o.predecessor = v.predecessor.clone();
+        verify_history(&o, &Persisted::default(), v.now())
+    };
+    let ok = history("swift-migration");
+    assert!(ok.stop.is_none(), "{:?}", ok.stop);
+    assert!(ok.state.unwrap().migration.is_some());
+    for (name, reason) in [
+        ("swift-migration-final-digest", "final is not F"),
+        ("swift-migration-drain-before-f", "drain starts before F"),
+        (
+            "swift-migration-before-drain-ends",
+            "issued before the drain window ends",
+        ),
+        ("swift-migration-premature-f", "needs a verified succession"),
+        ("swift-migration-counts", "migration counts"),
+    ] {
+        let verdict = history(name);
+        match verdict.stop {
+            Some(colophon_core::v05::history::Stop::Failed { failure, .. }) => {
+                assert!(failure.to_string().contains(reason), "{name}: {failure}");
+            }
+            other => panic!("{name}: expected a failed entry, got {other:?}"),
+        }
+    }
+}
+
 /// M1: a veto the home holds but has not recorded still stops F.
 #[test]
 fn f_is_refused_while_a_valid_veto_is_held_and_not_recorded() {

@@ -28,6 +28,9 @@ pub struct Succession {
     pub window: Option<Window>,
     pub vetoed: bool,
     pub verified: Option<(u64, String)>,
+    /// `issued` of F, for a `/5` predecessor whose F is final (a Swift F is read from `swift`).
+    #[serde(default)]
+    pub f_issued_ms: Option<i64>,
     pub evidence_after_final: Vec<u64>,
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -201,6 +204,7 @@ pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Op
         window: None,
         vetoed: false,
         verified: None,
+        f_issued_ms: None,
         evidence_after_final: Vec::new(),
     };
     if predecessor.is_empty() {
@@ -303,6 +307,14 @@ pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Op
                 && s.successor_seq == Some(seq + 1);
             if names_us && s.successor_final() {
                 p.verified = s.history().get(seq as usize).map(|d| (seq + 1, d.clone()));
+            }
+            if let Some((_, d)) = &p.verified {
+                p.f_issued_ms = objects
+                    .entries
+                    .iter()
+                    .filter_map(|b| super::parse_entry(b).ok())
+                    .find(|x| &x.env.digest == d)
+                    .map(|x| x.issued);
             }
             p.authorized = p.verified.is_some();
             p.undecided = !p.authorized && (names_us || (s.history().len() as u64) <= seq);
@@ -622,7 +634,7 @@ pub(super) fn finish(s: &mut State, objects: &Objects, now: i64) {
     s.succession = Some(p);
 }
 
-pub(super) fn migration(s: &mut State, value: &Value) -> Result<()> {
+pub(super) fn migration(s: &mut State, value: &Value, issued_ms: i64) -> Result<()> {
     require(
         s.succession.is_some() && s.migration.is_none(),
         "migration needs predecessor and occurs once",
@@ -632,6 +644,49 @@ pub(super) fn migration(s: &mut State, value: &Value) -> Result<()> {
         .as_ref()
         .ok_or_else(|| malformed("migration predecessor"))?;
     require(!p.vetoed, "migration after succession veto")?;
+    // The succession is verified (§15.1), apart from the evidence that is not in the history: a
+    // Swift predecessor's genesis receipts and fresh heads depend on the objects held and the
+    // clock, so they are not part of whether this entry is valid. What is: for `/5`, F is final;
+    // for Swift, the handover meets the rule that may write F, the window is open, and F is the
+    // entry after `head`, a `layout` above 2 naming this account, issued after the due time.
+    let (f_digest, f_issued) = match &p.swift {
+        Some(h) => {
+            require(
+                p.authorized && p.window.is_some(),
+                "migration needs a verified succession",
+            )?;
+            let f = h
+                .entries
+                .get(p.head_seq as usize)
+                .ok_or_else(|| malformed("migration: the predecessor holds no F"))?;
+            let w = p
+                .window
+                .as_ref()
+                .ok_or_else(|| malformed("migration needs a verified succession"))?;
+            let due = w
+                .start
+                .saturating_add(300_000)
+                .saturating_add((w.delay as i64).saturating_mul(1000));
+            require(
+                f.value["kind"] == "layout"
+                    && f.value["layout"].as_u64().unwrap_or(0) > 2
+                    && f.value["successor"] == s.account().as_str()
+                    && f.issued_ms > due,
+                "migration needs a verified succession",
+            )?;
+            (f.digest.clone(), f.issued_ms)
+        }
+        None => {
+            let (_, d) = p
+                .verified
+                .clone()
+                .ok_or_else(|| malformed("migration needs a verified succession"))?;
+            let at = p
+                .f_issued_ms
+                .ok_or_else(|| malformed("migration: F's issued is unknown"))?;
+            (d, at)
+        }
+    };
     let mut o = Obj::new(value.clone(), "migration")?;
     let mut pred = o.obj("predecessor")?;
     require(
@@ -641,13 +696,21 @@ pub(super) fn migration(s: &mut State, value: &Value) -> Result<()> {
     )?;
     let mut final_ = pred.obj("final")?;
     require(final_.uint("seq")? == p.head_seq + 1, "migration final seq")?;
-    final_.digest("digest")?;
+    require(
+        final_.digest("digest")? == f_digest,
+        "migration final is not F",
+    )?;
     final_.finish_closed()?;
     pred.finish_closed()?;
     let mut drain = o.obj("drain")?;
     let (_, from) = drain.date("from")?;
     let (_, until) = drain.date("until")?;
     drain.finish_closed()?;
+    require(from >= f_issued, "migration drain starts before F")?;
+    require(
+        issued_ms >= until,
+        "migration is issued before the drain window ends",
+    )?;
     require(
         until >= from && until.saturating_sub(from) <= 2_592_000_000,
         "migration drain window",

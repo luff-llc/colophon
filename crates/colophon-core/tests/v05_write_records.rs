@@ -16,9 +16,11 @@ use colophon_core::v05::records::{
     Judgement, Level, Outcome, ProposalState, RecordAuthority,
 };
 use colophon_core::v05::vault::{EcdhOutput, VaultSeed};
-use colophon_core::v05::write::authority::{prepare_genesis, GenesisParams, PendingBatch};
+use colophon_core::v05::write::authority::{
+    prepare_genesis, prepare_signed, GenesisParams, PendingBatch,
+};
 use colophon_core::v05::write::records::*;
-use colophon_core::v05::write::{Records, SignatureResult, SigningStep};
+use colophon_core::v05::write::{Kind, Records, SignatureResult, SigningStep};
 use colophon_core::v05::{Failure, Reason};
 use p256::ecdsa::{signature::Signer, Signature as P256Signature, SigningKey};
 use serde_json::{json, Value};
@@ -561,6 +563,151 @@ fn renew_seals_the_epochs_the_member_lacks_including_one_introduced_while_expire
         "addNote",
         json!({"text": "back"}),
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The shares-only `renew` (§9.4): no `expires`, the expiry stays as it is.
+
+/// Try a shares-only `renew` as the controller signs it; the text of the refusal, from prepare or
+/// from finish.
+fn shares_only_refusal(w: &World, member: &str, shares: Vec<Value>, issued: i64) -> String {
+    let r = prepare_signed(
+        &w.objects,
+        w.now,
+        Kind::Renew {
+            member: member.to_string(),
+            expires: None,
+            shares,
+        },
+        issued,
+        &w.cids(),
+    );
+    match r {
+        Err(f) => f.to_string(),
+        Ok(batch) => {
+            let sigs = batch
+                .steps()
+                .iter()
+                .map(|s| signature_of(&w.c.sign, s))
+                .collect();
+            match batch.finish(sigs) {
+                Err(f) => f.to_string(),
+                Ok(_) => panic!("a shares-only renew that should be refused was accepted"),
+            }
+        }
+    }
+}
+
+/// The `shares` of the last held entry (a grant): epoch objects the member already has.
+fn last_entry_shares(w: &World) -> Vec<Value> {
+    let env: Value = serde_json::from_slice(w.objects.entries.last().unwrap()).unwrap();
+    let body: Value =
+        serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap()).unwrap();
+    body["shares"].as_array().unwrap().clone()
+}
+
+#[test]
+fn prepare_renew_shares_refuses_an_expired_member_that_lacks_an_epoch() {
+    let mut w = World::new(T0 + 120 * SEC);
+    let wr = person(10);
+    // A member whose expiry lapses lacks the epoch made after; the shares-only form does not
+    // revive it (an ordinary `renew` with `expires` does).
+    let short = json!({"records": [{"namespace": "notes", "access": "write"}],
+                       "expires": "2026-11-11T08:05:00Z"});
+    w.grant(&wr, "device", short);
+    w.now = T0 + 600 * SEC;
+    let seed = w.seed();
+    let (batch, keys) = prepare_rekey(
+        &w.objects,
+        w.now,
+        &w.cids(),
+        T0 + 400 * SEC,
+        &["notes".into()],
+        seed,
+    )
+    .unwrap();
+    w.run(batch);
+    w.absorb(keys);
+    let seed = w.seed();
+    let batch = prepare_renew_shares(
+        &w.objects,
+        w.now,
+        &w.cids(),
+        T0 + 450 * SEC,
+        &wr.sign.id,
+        &w.keys,
+        seed,
+    )
+    .unwrap();
+    let sigs = batch
+        .steps()
+        .iter()
+        .map(|s| signature_of(&w.c.sign, s))
+        .collect();
+    let err = batch.finish(sigs).map(|_| ()).unwrap_err().to_string();
+    assert!(err.contains("expired"), "{err}");
+}
+
+#[test]
+fn a_shares_only_renew_without_shares_is_refused() {
+    let mut w = World::new(T0 + 120 * SEC);
+    let wr = person(10);
+    w.grant(&wr, "device", terms("write"));
+    let issued = w.issued();
+    let e = shares_only_refusal(&w, &wr.sign.id, vec![], issued);
+    assert!(e.contains("must carry shares"), "{e}");
+}
+
+#[test]
+fn a_shares_only_renew_of_a_revoked_member_is_refused() {
+    let mut w = World::new(T0 + 120 * SEC);
+    let wr = person(10);
+    w.grant(&wr, "device", terms("write"));
+    let shares = last_entry_shares(&w);
+    let seed = w.seed();
+    let issued = w.issued();
+    let p = prepare_revoke(
+        &w.objects,
+        &w.held,
+        w.now,
+        &w.cids(),
+        issued,
+        &wr.sign.id,
+        &Keep::Nothing,
+        seed,
+    )
+    .unwrap();
+    let (batch, keys) = p.into_parts();
+    w.run(batch);
+    w.absorb(keys);
+    let issued = w.issued();
+    let e = shares_only_refusal(&w, &wr.sign.id, shares, issued);
+    assert!(e.contains("revoked"), "{e}");
+}
+
+#[test]
+fn a_shares_only_renew_of_an_expired_member_is_refused() {
+    let mut w = World::new(T0 + 120 * SEC);
+    let wr = person(10);
+    let short = json!({"records": [{"namespace": "notes", "access": "write"}],
+                       "expires": "2026-11-11T08:05:00Z"});
+    w.grant(&wr, "device", short);
+    let shares = last_entry_shares(&w);
+    w.now = T0 + 600 * SEC;
+    let e = shares_only_refusal(&w, &wr.sign.id, shares, T0 + 500 * SEC);
+    assert!(e.contains("expired"), "{e}");
+}
+
+#[test]
+fn a_shares_only_renew_carrying_an_epoch_the_member_already_has_is_refused() {
+    let mut w = World::new(T0 + 120 * SEC);
+    let wr = person(10);
+    w.grant(&wr, "device", terms("write"));
+    let shares = last_entry_shares(&w);
+    assert!(!shares.is_empty());
+    let issued = w.issued();
+    let e = shares_only_refusal(&w, &wr.sign.id, shares, issued);
+    assert!(e.contains("already has"), "{e}");
 }
 
 // ---------------------------------------------------------------------------------------------

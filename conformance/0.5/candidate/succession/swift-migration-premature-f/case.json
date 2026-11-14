@@ -1,0 +1,1 @@
+{"description":"§15.4: F is issued before the succession is due, so the succession is not verified and the migration's activation is malformed.","expected":{"now":"2026-11-14T10:14:00Z","seq3":"migration malformed","succession":"unverified"},"sections":["15.1","16.3"]}
