@@ -546,3 +546,81 @@ fn early_sighting_of_a_transition_does_not_poison_a_later_in_window_receipt() {
     let activation = admit(&restore(&late_t.state), &entry, &stamp(due));
     assert_eq!(activation.result, Ok(()));
 }
+
+/// A transition signed by `by` and cosigned by `cosigners` (raw signatures over the body).
+fn cosigned(value: &Value, cosigners: &[&str]) -> Vec<u8> {
+    let bytes = canonical(value).unwrap();
+    let sign = |id: &str| -> String {
+        let sig: Signature = key_for(id).sign(&bytes);
+        STANDARD.encode(sig.to_bytes())
+    };
+    let mut ids: Vec<&str> = cosigners.to_vec();
+    ids.sort_unstable();
+    let cos: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"signer": id, "signature": sign(id)}))
+        .collect();
+    canonical(&json!({
+        "body": STANDARD.encode(&bytes),
+        "signature": sign(value["by"].as_str().unwrap()),
+        "cosignatures": cos,
+    }))
+    .unwrap()
+}
+
+const MAC: &str = "b609e0fd25ac2aefc193156581e112cb";
+const KIT: &str = "7a14b43d4e9010e7987d86ec054f0d79";
+
+/// Revision 12, L5 (§13.1 step 1): the proposer cap charges the unit of the primary signer;
+/// cosigners are not charged.
+#[test]
+fn proposer_cap_charges_the_primary_signer_only() {
+    let t = fixture("t-remove-after-delay", "objects/transition.json");
+    let at = time(&t);
+    let home = setup("t-remove-after-delay", false, always(), at);
+    let by_mac_with_kit = |offset: i64| {
+        let mut b = body(&t);
+        b["issued"] = Value::from(stamp(at + offset));
+        b["signers"] = json!([KIT, MAC]);
+        cosigned(&b, &[KIT])
+    };
+    let by_kit = {
+        let mut b = body(&t);
+        b["by"] = Value::from(KIT);
+        b["signers"] = json!([KIT]);
+        b["issued"] = Value::from(stamp(at + 3));
+        signed(&b)
+    };
+    let batch = vec![
+        by_mac_with_kit(0),
+        by_mac_with_kit(1),
+        by_mac_with_kit(2),
+        by_kit.clone(),
+    ];
+    let (state, results, _) = admit_pending_batch(&home, &batch, &stamp(at + 10)).unwrap();
+    // The kit cosigned two pending transitions and is charged for neither: it may propose.
+    assert_eq!(
+        results,
+        vec![Ok(()), Ok(()), Err(Refusal::ProposerFull), Ok(())]
+    );
+    assert_eq!(state.pending_page(0, 64, at + 10).unwrap().objects.len(), 3);
+}
+
+/// Revision 12, L5: the caps follow `refused:early`.
+#[test]
+fn early_is_refused_before_the_caps() {
+    let t = fixture("t-remove-after-delay", "objects/transition.json");
+    let at = time(&t);
+    let home = setup("t-remove-after-delay", false, always(), at);
+    let mut proposals = Vec::new();
+    for offset in 0..2 {
+        let mut b = body(&t);
+        b["issued"] = Value::from(stamp(at + offset));
+        proposals.push(signed(&b));
+    }
+    let mut future = body(&t);
+    future["issued"] = Value::from(stamp(at + 60_000));
+    proposals.push(signed(&future));
+    let (_, results, _) = admit_pending_batch(&home, &proposals, &stamp(at + 10)).unwrap();
+    assert_eq!(results, vec![Ok(()), Ok(()), Err(Refusal::Early)]);
+}

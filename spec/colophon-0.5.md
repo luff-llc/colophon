@@ -1369,10 +1369,14 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   validity never depends on which home admitted what, only on receipts reaching `headQuorum`.
   Hosts refused at one home retry at the others.
   1. each `control` or `recover` unit may have at most 2 pending transitions it proposed
-     (`refused:proposerFull`);
+     (`refused:proposerFull`); the proposer is the unit of the primary signer (`by`), and
+     cosigners are not charged;
   2. the account may have at most 2 pending transitions per such unit, so no set of proposers can
      take another unit's share (`refused:pendingFull`);
   3. a transition may have at most 8 vetoes, at most one per vetoing unit (`refused:vetoFull`).
+
+  A home checks the clock first (`refused:early`, "Clock" above), then these caps in this order.
+
   A hostile home at `headQuorum` 1 can still receipt a transition, hide it from its listing, and
   reveal it only in its `activate` after the deadline; then nobody can veto it. That is why quorum
   1 doesn't resist a hostile home (§18).

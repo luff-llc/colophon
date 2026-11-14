@@ -626,6 +626,8 @@ enum Rule {
 pub(crate) struct TCheck {
     pub digest: String,
     pub by: String,
+    /// The unit of the primary signer (`by`): the proposer a home charges (§13.1 step 1).
+    pub proposer: String,
     pub units: BTreeSet<String>,
     pub anchor_seq: u64,
     pub change: Map<String, Value>,
@@ -1121,9 +1123,15 @@ pub(crate) fn check_transition(
     } else {
         Vec::new()
     };
+    let proposer = k
+        .controllers
+        .get(&by)
+        .map(|c| k.unit_of(c))
+        .unwrap_or_default();
     Ok(TCheck {
         digest: env.digest.clone(),
         by,
+        proposer,
         units: all,
         anchor_seq,
         change,
