@@ -324,8 +324,14 @@ pub(crate) fn open_core_seal_with_dh(
         info.starts_with(RESERVED_LABEL),
         "core open: not a core label",
     )?;
-    require(valid_point(&sealed.enc), "core open: enc is not a valid point")?;
-    require(sealed.ciphertext.len() == 48, "core open: ciphertext length")?;
+    require(
+        valid_point(&sealed.enc),
+        "core open: enc is not a valid point",
+    )?;
+    require(
+        sealed.ciphertext.len() == 48,
+        "core open: ciphertext length",
+    )?;
     open_dh(sealed, recipient, dh, info)
 }
 
