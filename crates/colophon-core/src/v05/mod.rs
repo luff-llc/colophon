@@ -14,6 +14,7 @@
 //! The 0.4 engine is untouched. This module shares only the strict duplicate-refusing JSON
 //! parser (`keys::strict_json`) and the `p256`, `sha2`, `base64` and `aes-gcm` primitives.
 
+pub mod build;
 pub mod calls;
 pub mod descriptor;
 pub mod encoding;
