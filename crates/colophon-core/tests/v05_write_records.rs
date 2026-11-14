@@ -1519,3 +1519,48 @@ fn a_legacy_header_in_a_native_account_is_fenced_out_by_format() {
         Outcome::Invalid("badSignature".into())
     );
 }
+
+#[test]
+fn no_mangled_header_panics_the_reader_and_none_is_admitted_as_a_different_record() {
+    let mut w = World::new(T0 + 120 * SEC);
+    let wr = person(10);
+    w.grant(&wr, "device", terms("write"));
+    let rec = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "a"}));
+    let auth = w.auth();
+    let honest = judge_records(&auth, &w.keys, std::slice::from_ref(&rec)).records[0]
+        .outcome
+        .clone();
+    assert_eq!(honest, Outcome::Admitted);
+    // Every truncation, and every byte replaced by three other values, of the envelope.
+    let mut admitted_other = 0;
+    for len in 0..rec.bytes.len() {
+        let held = HeldRecord {
+            path: rec.path.clone(),
+            bytes: rec.bytes[..len].to_vec(),
+        };
+        let j = judge_records(&auth, &w.keys, &[held]);
+        assert_ne!(
+            j.records[0].outcome,
+            Outcome::Admitted,
+            "truncated at {len}"
+        );
+    }
+    for i in 0..rec.bytes.len() {
+        for b in [0u8, b'"', 0xff] {
+            let mut bytes = rec.bytes.clone();
+            if bytes[i] == b {
+                continue;
+            }
+            bytes[i] = b;
+            let held = HeldRecord {
+                path: rec.path.clone(),
+                bytes,
+            };
+            let j = judge_records(&auth, &w.keys, &[held]);
+            if j.records[0].outcome == Outcome::Admitted {
+                admitted_other += 1;
+            }
+        }
+    }
+    assert_eq!(admitted_other, 0, "a damaged envelope was admitted");
+}
