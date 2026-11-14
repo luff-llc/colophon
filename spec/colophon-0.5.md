@@ -249,7 +249,8 @@ The core holds no platform private key. Every signature, ECDH and PRF evaluation
 two-phase: `begin_*` returns the exact input, `finish_*` verifies the result before using it.
 The vault seed is an account secret: the core MAY hold it in memory for a session and MUST NOT
 persist it; the host persists it only inside slots. The core never returns seed bytes or a raw
-ECDH output (§17.1 states what an opened seed can be sealed to).
+ECDH output, and never epoch key bytes (§17.1 states what an opened seed can be sealed to and
+how far handles are trusted).
 
 ### 3.5 COSE_Key at registration
 
@@ -1968,6 +1969,15 @@ a new vault the host creates at a rotation, or to a device the person confirmed 
 (§7.4). The host is trusted with the seed during rotation and transfer: it supplies the
 entropy of a new vault and performs the scan or code comparison.
 
+**Epoch keys.** The core never returns epoch key bytes: it hands the host opaque handles that
+open only headers of their own account, namespace and epoch, and it seals a new epoch only to the
+recipients the verified state names (§7.1). **A handle is as trusted as the key it stands for.** A
+grant's `shares` are part of the body the controller signs, so they are sealed before anyone signs;
+a host that holds handles can therefore have them sealed to a member it is preparing to admit, and
+that member can read the raw keys. The host is likewise trusted with the entropy it supplies for
+new epochs, vaults and slots (it can recompute what they make) and with the ECDH and PRF results it
+passes in. A host MUST NOT hand handles to code it does not trust as much as the keys.
+
 **Restricted open.** The host alone may ask the core to open an HPKE seal to the vault for its
 own registered formats. The seal is `{"enc","ciphertext"}` as §11.1 (`enc` a valid 65-byte
 uncompressed P-256 point, `ciphertext` 16 to 65,536 bytes); `info` equals the AAD and is at most
@@ -1978,7 +1988,11 @@ refused `refused:outOfScope`, whatever the seal holds. The host interface and th
 ### 17.2 Persisted verifier state
 
 A verifier that resumes (§13.3) MUST persist, per account, atomically and with a format version.
-Every item except the head marks is a function of the history and the objects held, recomputed
+**Stored verifier state is a cache, never an authority.** The host seals it under a key it derives
+from a device-held secret and binds it to the account and the identity it was saved for. A missing
+or wrong key, a failed seal, a blob for another account or identity, or an unknown format means
+the verifier replays from the objects it holds; none of them is an error that stops it opening,
+and bytes that were not authenticated are never resumed from. Every item except the head marks is a function of the history and the objects held, recomputed
 identically by replay from seq 1, so two verifiers that persist it reach the same verdicts:
 - the high-water `(seq, digest)` and each home's head mark (rollback detection only, §13.3) and
   the folded state there. **Head marks are local memory:** no replay of the history recomputes
