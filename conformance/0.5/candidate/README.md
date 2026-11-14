@@ -53,9 +53,10 @@ the same 1,078 files.
 | `rules/origin-*`, `rules/replay-*`, `rules/removal-after-heads`, `rules/rollback`, `rules/malleated-envelope`, `rules/non-canonical-*`, `rules/invalid-expires-date` | §2, §4.3, §12, §13 | Unchanged from revision 3, rebuilt on the new account |
 | `rules/equivocation`, `rules/equivocation-displaced` | §8.6, §13.3 | Heads evidence judged against held history: each ships the account's history and the ordinary grant held beside the seq 3 activation (`branch-ordinary/`). An earlier head over the activation that stands and a later one over the grant that lost to it convict; an earlier head over the grant and a later one over the activation that displaced it (§8.6 rule 1) do not. Rebuilt after revision 12 (the first form's second head covered no held entry) |
 | `pairing/pairing.json` | §7.3 | Commitment and code |
-| `rules/t-resolve-fork`, `t-resolve-two`, `t-resolve-below-rule` | §8.4, §8.6, §8.7 | Revision 13: a fork resolved by a `resolve` activation on one branch (that branch stands); a `resolve` on each branch (the fork stands); a `resolve` signed by a recover-only key (no control rule: the fork stands) |
-| `rules/t-vetoed-choice-right`, `t-vetoed-late-receipt-skipped`, `t-vetoed-wrong-choice` | §8.7 | Revision 13: the lowest home's timely veto receipt is the choice; a lower home's receipt after the veto deadline is skipped and does not block the entry; another selection of receipts the verifier holds is `malformed` |
-| `rules/t-final-head-choice-right`, `t-final-head-choice-wrong`, `t-final-head-ahead-ignored` | §8.7, §13.3 | Revision 13: of two heads one home signed over the activation the `final` carries the lower body digest; the higher is `malformed`; a head dated after the `final`'s `issued` is not usable |
+| `rules/t-resolve-fork`, `t-resolve-two`, `t-resolve-below-rule`, `t-resolve-three-candidates`, `t-resolve-no-losing-branch`, `t-resolve-second-fork` | §8.4, §8.6, §8.7 | Revision 13 (`resolve` keeps one entry): a fork resolved by a `resolve` activation on one branch (that branch stands); a `resolve` on each branch keeping its own entry (the fork stands); a `resolve` signed by a recover-only key (no control rule: the fork stands); three candidates settled by one `resolve`; the resolved branch and the owner's next entry with no trace of the loser; a second fork later on the same branch settled the same way |
+| `rules/t-resolve-late-fork-witnessed`, `t-resolve-homeless-late-fork` | §8.6, §13.1, §18 | Revision 13 fix round: with homes, a late fork by a former controller and its `resolve` do not discard a branch whose later activation homes witnessed (`refused:fork`); **the stated limit**: with no home the same late fork wins for a new verifier (`ok`), because nothing in the objects tells the histories apart |
+| `rules/t-vetoed-choice-right`, `t-vetoed-late-receipt-skipped`, `t-vetoed-other-valid-receipt-accepted` | §8.7 | Revision 13: the lowest home's timely receipt is what a recorder chooses; a lower home's receipt after the veto deadline is skipped and does not block the entry; an entry carrying another valid receipt is accepted (a verifier judges what an entry carries) |
+| `rules/t-final-head-choice-right`, `t-final-head-other-valid-head-accepted`, `t-final-head-ahead-ignored` | §8.7, §13.3 | Revision 13: of two heads one home signed over the activation a recorder carries the lower body digest; an entry carrying the other valid head is accepted; a head dated after the `final`'s `issued` is not usable |
 | `rules/t-slot-wrong-length-genesis`, `i-slot-add-valid`, `i-slot-add-wrong-length` | §7.2, §8.5 | Revision 13: a sealed slot box of 47 bytes is `malformed` at replay in a genesis and in a `keyring` entry; the same entry with a 48-byte box is `ok` |
 | `rules/rollback` | §13.3 | Now run (revision 13): `verifier.history` names the account's records; the head over seq 2 is `refused:rollback` against the home's mark at seq 3, and accepted without it |
 | `succession/swift-*` | §13.5, §15.1, §16.3 | Receipt 60 s into the succession window (verified), 400 s (late, unverified); F before the due time; veto recorded as `successionVetoed`; a key removed before the last removal and before the delay can't veto, the last-removed key can, and so can a key removed within the delay before the genesis; a hand-over with an extra key needs two vetoers; root library signed by the root alone, and vetoed by the kit; WebAuthn and recover-set swaps; a premature thief freeze followed by the owner's verified layout-4 freeze; an entry after a verified F |
@@ -67,14 +68,13 @@ the same 1,078 files.
 
 ## What was run
 
-- `v5_generator_check` (the Rust generator), revision 13: 1,403 generated files match, byte for
-  byte, including twelve new vector directories (three each for `resolve`, `vetoed` receipts,
-  `final` heads and the slot shape). The directory holds 1,406 files: those plus three sources (`README.md` and the probe's
+- `v5_generator_check` (the Rust generator), revision 13: 1,454 generated files match, byte for
+  byte, including the revision 13 vector directories. The directory holds 1,457 files: those plus three sources (`README.md` and the probe's
   `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each , a seven-file chained succession, a nine-file Swift layout case and a thirteen-file cutoff case).
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
   intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).
-- **`v05_candidate` (the 0.5 history verifier), revision 13:** 314 in scope, 314 pass, 0 fail,
+- **`v05_candidate` (the 0.5 history verifier), revision 13:** 319 in scope, 319 pass, 0 fail,
   0 not implemented (before: 301 / 301 / 0 / 1). No vector of revision 13 was replayed by the Swift
   source.
 - **0.4 engine** on `upgrade/*`: `newerFormat` everywhere except `foreign-signer` (`badSignature`).
