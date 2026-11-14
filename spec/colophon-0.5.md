@@ -106,7 +106,11 @@ verified as their own version required.
 - **Integers** in fields defined here are integer tokens from 0 to 2^53−1 unless stated.
 - **Printable ASCII** is bytes 0x21–0x7E; space is not printable.
 - **Equality** of authority entries, records, heads and receipts is equality of their body bytes.
-  Two envelopes over one body are the same object; the first one received is kept.
+  **Several envelopes over one body are one object**, for authority entries, transitions, vetoes,
+  receipts, heads, requests and operation headers alike. The object is valid where any envelope
+  held over it verifies; among those that verify, the first in byte order (of the envelope bytes)
+  is the one kept; an envelope that does not verify is ignored and never makes the object fail.
+  Nothing depends on which envelope arrived first, and a store MAY keep several.
 - **Signature bytes are never identifiers.** ECDSA signatures are malleable (high-S is valid,
   §4.3), so no record, cache, replay store or index may be keyed by signature bytes or by a
   digest of an envelope that includes them; use body digests, `requestId`s and key IDs.
@@ -760,7 +764,8 @@ Entries are equal when their bodies are equal. Two **conflicting** entries are v
 the same `seq` and `previous` and different bodies. A verifier classifies a conflict between X and
 Y using only the objects it holds — entries, transitions, vetoes, receipts and heads — so every
 verifier holding the same objects reaches the same verdict, in any order. What it held before
-never selects a branch (§13.3).
+never selects a branch (§13.3). Several envelopes over one body are one candidate (§2.2): it is
+valid when any of them is, and an envelope that does not verify is ignored.
 
 With more than two valid candidates, apply the comparisons below to every pair. A candidate
 stands only if every comparison involving it selects it. If none does (including a cycle), the
@@ -1309,8 +1314,9 @@ Substitutions:
   `invalidPayload`, not preserved.
 - §7.1's "exact outer envelope bytes (including signatures)" reads "exact body bytes" (§8.6).
 - §8.2's 412 for different bytes at an immutable path reads: different envelope bytes over an
-  identical body are identical (200, the first envelope is kept), and only a different body is
-  412.
+  identical body are identical (200; a relay MAY keep the first it stored, but a verifier judges
+  every envelope it holds and its verdict never depends on which was stored first, §2.2), and only
+  a different body is 412.
 - §8's "await acknowledgement of each authority sequence before uploading its successor" reads:
   a home's acknowledgement of a `POST {base}/authority` batch (§14) acknowledges every entry in
   it.
