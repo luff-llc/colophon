@@ -3806,8 +3806,6 @@ pub fn part3(o: &mut Out) {
             json!({"succession": "unverified", "seq3": "migration malformed", "now": ts(at)})
         } else if name == "swift-migration" {
             json!({"succession": "verified", "migration": "recorded", "now": ts(at)})
-        } else if good {
-            json!({"succession": "verified", "seq3": "migration malformed", "now": ts(at)})
         } else {
             json!({"succession": "verified", "seq3": "migration malformed", "now": ts(at)})
         };
