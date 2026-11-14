@@ -49,6 +49,53 @@ impl Succession {
     }
 }
 
+/// Most distinct accounts a predecessor object set may hold: the chain A to B to C to ... that a
+/// verifier follows through one genesis. The 0.5 text names no bound for the length of a chain,
+/// so this is the implementation's (a spec question); a longer set is `malformed`.
+pub(super) const MAX_PREDECESSOR_ACCOUNTS: usize = 16;
+
+/// Split a `/5` predecessor object set for the account `account` (§15.1): the entries that
+/// descend from its genesis, and everything else, which is that account's own predecessor
+/// history when it is itself a successor. Unparseable bytes go to both halves, as evidence for
+/// the first and as possible foreign-format history for the second. `None` when no genesis of
+/// `account` is held; the whole set is then verified as before.
+fn split_chain(
+    predecessor: &[Vec<u8>],
+    account: &str,
+) -> Result<Option<(Vec<Vec<u8>>, Vec<Vec<u8>>)>> {
+    let parsed: Vec<(&Vec<u8>, Option<Entry>)> = predecessor
+        .iter()
+        .map(|b| (b, super::parse_entry(b).ok()))
+        .collect();
+    let entries: Vec<&Entry> = parsed.iter().filter_map(|(_, e)| e.as_ref()).collect();
+    let genesis_accounts: BTreeSet<&str> = entries
+        .iter()
+        .filter(|e| e.kind == "genesis" && e.seq == 1 && e.previous.is_none())
+        .map(|e| e.env.digest.as_str())
+        .collect();
+    require(
+        genesis_accounts.len() <= MAX_PREDECESSOR_ACCOUNTS,
+        "predecessor chain longer than 16 accounts",
+    )?;
+    if !genesis_accounts.contains(account) {
+        return Ok(None);
+    }
+    let own = super::state::descendants(&entries, account);
+    let mut mine = Vec::new();
+    let mut rest = Vec::new();
+    for (bytes, e) in parsed {
+        match e {
+            Some(e) if own.contains(&e.env.digest) => mine.push(bytes.clone()),
+            Some(_) => rest.push(bytes.clone()),
+            None => {
+                mine.push(bytes.clone());
+                rest.push(bytes.clone());
+            }
+        }
+    }
+    Ok(Some((mine, rest)))
+}
+
 pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Option<Succession>> {
     let Some(claim) = e.env.value.get("predecessor") else {
         require(e.env.handover.is_empty(), "handover without predecessor")?;
@@ -156,8 +203,17 @@ pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Op
             p.swift = Some(history);
         }
         "colophon/authority/5" => {
+            // The predecessor may itself be a successor: its own predecessor's history is the
+            // rest of the set, and its verification follows it through its genesis. Each level
+            // takes at least its own genesis out of the set, so the walk ends, and a cycle
+            // can't recur; the number of accounts is bounded by MAX_PREDECESSOR_ACCOUNTS.
+            let (entries, older) = match split_chain(predecessor, &account)? {
+                Some(split) => split,
+                None => (predecessor.to_vec(), Vec::new()),
+            };
             let objects = Objects {
-                entries: predecessor.to_vec(),
+                entries,
+                predecessor: older,
                 ..Default::default()
             };
             let v = super::verify_history(&objects, &Default::default(), now);

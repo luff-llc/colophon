@@ -51,13 +51,14 @@ the same 1,078 files.
 | `rules/origin-*`, `rules/replay-*`, `rules/removal-after-heads`, `rules/equivocation`, `rules/rollback`, `rules/malleated-envelope`, `rules/non-canonical-*`, `rules/invalid-expires-date` | §2, §4.3, §12, §13 | Unchanged from revision 3, rebuilt on the new account |
 | `pairing/pairing.json` | §7.3 | Commitment and code |
 | `succession/swift-*` | §13.5, §15.1, §16.3 | Receipt 60 s into the succession window (verified), 400 s (late, unverified); F before the due time; veto recorded as `successionVetoed`; a key removed before the last removal and before the delay can't veto, the last-removed key can, and so can a key removed within the delay before the genesis; a hand-over with an extra key needs two vetoers; root library signed by the root alone, and vetoed by the kit; WebAuthn and recover-set swaps; a premature thief freeze followed by the owner's verified layout-4 freeze; an entry after a verified F |
+| `succession/authority5-chain` | §15.1 | A to B to C, each a `/5` successor: C verifies B through B's own predecessor |
 | `probes/swift-der/` | §16.3 | CryptoKit probe |
 
 ## What was run
 
-- `v5_generator_check` (the Rust generator): 1,094 generated files match, byte for byte. The
-  directory holds 1,097 files: those plus three sources (`README.md` and the probe's
-  `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each).
+- `v5_generator_check` (the Rust generator): 1,101 generated files match, byte for byte. The
+  directory holds 1,104 files: those plus three sources (`README.md` and the probe's
+  `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each and a seven-file chained succession).
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
   intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).

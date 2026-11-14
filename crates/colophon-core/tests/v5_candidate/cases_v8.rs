@@ -3730,6 +3730,43 @@ pub fn part3(o: &mut Out) {
         TOpt::default(),
     );
     activate(&mut old5, &t_succ, &[]);
+    // A chain A to B to C (§15.1): B is a successor of A and then hands over to C. C verifies
+    // B through its own predecessor.
+    let mut c5 = Chain::new();
+    let pred_b = json!({"format": "colophon/authority/5", "account": account_id(&next5), "head": anchor(&next5)});
+    genesis(
+        &mut c5,
+        &old5kr,
+        sg![a],
+        Gen {
+            label: "Chained successor",
+            predecessor: Some(pred_b),
+            ..Gen::default()
+        },
+    );
+    let mut b5 = next5.clone();
+    let t_succ_b = transition(
+        &b5,
+        json!({"successor": {"account": account_id(&c5)}}),
+        sg![a, k1],
+        &ts(120),
+        TOpt::default(),
+    );
+    activate(&mut b5, &t_succ_b, &[]);
+    let mut chain_envs = old5.envs.clone();
+    chain_envs.extend(b5.envs.iter().cloned());
+    write_swift(
+        o,
+        "authority5-chain",
+        &chain_envs,
+        Some(&c5),
+        json!({"succession": "verified"}),
+        "A /5 predecessor that is itself a successor: A to B to C verifies with both histories.",
+        vec![(
+            "successor/authority/00000001.json".to_string(),
+            c5.envs[0].clone(),
+        )],
+    );
     write_swift(
         o,
         "authority5-successor",

@@ -126,3 +126,49 @@ fn h3_resume_reconsiders_a_candidate_held_at_checkpoint_time() {
     assert_eq!(resumed.branch, replay.branch);
     assert_eq!(resumed.conflicts, replay.conflicts);
 }
+
+fn chain_objects() -> (Objects, i64) {
+    let dir = cand().join("succession/authority5-chain");
+    let o = Objects {
+        entries: files(&dir.join("successor/authority")),
+        predecessor: files(&dir.join("predecessor/authority")),
+        ..Default::default()
+    };
+    (o, parse_date("2026-11-14T10:15:00Z").unwrap())
+}
+
+#[test]
+fn m3_chained_succession_verifies() {
+    let (o, now) = chain_objects();
+    let v = verify_history(&o, &Persisted::default(), now);
+    assert_eq!(v.code(), "ok");
+    let s = v.state.unwrap();
+    assert!(s.verified_succession().is_some());
+}
+
+#[test]
+fn m3_chain_without_the_older_history_is_unavailable() {
+    let (mut o, now) = chain_objects();
+    o.predecessor.drain(..2); // drop A's two entries, keep B's
+    let v = verify_history(&o, &Persisted::default(), now);
+    assert_ne!(v.code(), "ok");
+}
+
+#[test]
+fn m3_chain_longer_than_sixteen_accounts_is_malformed() {
+    let (mut o, now) = chain_objects();
+    let base = body(&o.predecessor[2]);
+    assert_eq!(base["kind"], "genesis");
+    for i in 0..17 {
+        let mut b = base.clone();
+        b["issued"] = json!(format!("2026-11-13T09:{:02}:00Z", i));
+        o.predecessor.push(unsigned_env(&b));
+    }
+    let v = verify_history(&o, &Persisted::default(), now);
+    assert_eq!(v.code(), "malformed");
+    assert!(
+        format!("{:?}", v.stop).contains("longer than 16"),
+        "{:?}",
+        v.stop
+    );
+}

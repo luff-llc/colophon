@@ -2762,7 +2762,7 @@ fn kind_rank(k: &str) -> u8 {
     }
 }
 /// Digests of entries reachable from `from` by `previous` links (its descendants and itself).
-fn descendants(all: &[&Entry], from: &str) -> BTreeSet<String> {
+pub(super) fn descendants(all: &[&Entry], from: &str) -> BTreeSet<String> {
     let mut set: BTreeSet<String> = [from.to_string()].into();
     loop {
         let before = set.len();
