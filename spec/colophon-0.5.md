@@ -1752,6 +1752,15 @@ valid when controllers are distinct valid points, `webauthn` ones have `rpID`, a
 and then `threshold ≥ recoverThreshold`, and slots are complete. `layout` must exceed the current
 layout.
 
+**Steward threshold.** `threshold` on a `genesis` or a `stewards` entry is an optional integer in
+the Swift source (`AuthorityEntry.threshold: Int?`). Absent or `null` is 0 (`AuthorityState`:
+`genesis.threshold ?? 0`, `entry.threshold ?? 0`), and a `quorum` `handover` needs `threshold > 0`
+as well as that many distinct steward signatures, so a threshold of 0 (or a negative one) lets no
+quorum hand the root over. A present value that is not an integer (a string, a boolean, an array,
+an object, a number with a fraction or an exponent, or an integer beyond 64 bits) is a decoding
+error there, which makes the history `malformed` here. This reading has not been replayed by the
+Swift source.
+
 **The freezing entry.** F is a `layout` entry with `layout` greater than 2 and an extra field
 `successor` (the 64-hex 0.5 account ID), signed under the rule in force (root before adoption, the `layout` rule
 after). Released Swift readers verify it and then stop with `unsupportedStorageLayout` (those

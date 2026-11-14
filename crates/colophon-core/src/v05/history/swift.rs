@@ -67,6 +67,20 @@ fn num(v: &Value, f: &str) -> Result<u64> {
         .filter(|n| *n < 1 << 53)
         .ok_or_else(|| malformed(format!("Swift {f}")))
 }
+/// A steward `threshold` (§16.3), read as the Swift source reads its `Int?`: absent or `null` is
+/// nil, which `AuthorityState` turns into 0; a present value that is not an integer is a
+/// `DecodingError` there, so the history can't be read (`malformed` here). A negative integer
+/// decodes, and with the quorum rule's `threshold > 0` guard it behaves as 0.
+fn steward_threshold(v: &Value) -> Result<u64> {
+    match v.get("threshold") {
+        None | Some(Value::Null) => Ok(0),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .map(|i| u64::try_from(i).unwrap_or(0))
+            .ok_or_else(|| malformed("Swift threshold")),
+        Some(_) => Err(malformed("Swift threshold")),
+    }
+}
 fn point(v: &Value, f: &str) -> Result<Vec<u8>> {
     let p = decode_base64(text(v, f)?, 65)?;
     require(crate::v05::descriptor::valid_point(&p), "Swift point")?;
@@ -342,7 +356,7 @@ fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
             root: rid,
             recovery: kid,
             stewards,
-            steward_threshold: v["threshold"].as_u64().unwrap_or(1),
+            steward_threshold: steward_threshold(v)?,
             adopted: false,
             layout: v["layout"].as_u64().unwrap_or(1),
             raw_keyring: Value::Null,
@@ -462,7 +476,9 @@ fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
             return Err(bad_signature("Swift authority rule"));
         }
     } else if by == "quorum"
-        && (!ids.is_subset(&s.stewards) || (ids.len() as u64) < s.steward_threshold)
+        && (s.steward_threshold == 0
+            || !ids.is_subset(&s.stewards)
+            || (ids.len() as u64) < s.steward_threshold)
     {
         return Err(bad_signature("Swift steward quorum"));
     }
@@ -506,7 +522,7 @@ fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
                 next.stewards.insert(c.id());
                 next.controllers.insert(c.id(), c);
             }
-            next.steward_threshold = v["threshold"].as_u64().unwrap_or(0);
+            next.steward_threshold = steward_threshold(v)?;
         }
         "grant" => {
             if let Some(role) = v.get("role").and_then(Value::as_str) {

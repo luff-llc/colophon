@@ -252,3 +252,145 @@ fn a_predecessor_chain_of_sixteen_accounts_is_accepted_and_seventeen_is_malforme
     assert_eq!(seventeen.code(), "malformed");
     assert!(format!("{:?}", seventeen.stop).contains("longer than 16"));
 }
+
+// ---- L2: the Swift steward threshold (§16.3) --------------------------------------------------
+//
+// Marginalia `origin/main` reads `threshold` as an optional Int (`AuthorityEntry.threshold: Int?`)
+// and `AuthorityState` turns nil into 0 for a genesis (`genesis.threshold ?? 0`) and for a
+// `stewards` entry (`entry.threshold ?? 0`); a quorum `handover` needs `threshold > 0`
+// (`guard entry.kind == .handover, threshold > 0`). A non-integer value is a decoding error.
+// These tests are the Rust engine's reading of that source. The Swift source has not replayed them.
+
+mod swift_stewards {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use colophon_core::v05::history::swift;
+    use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+
+    fn key(name: &str) -> SigningKey {
+        SigningKey::from_slice(&Sha256::digest(format!("revision-12/{name}").as_bytes())).unwrap()
+    }
+    fn point(k: &SigningKey) -> Vec<u8> {
+        k.verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec()
+    }
+    fn identity(name: &str) -> Value {
+        let p = STANDARD.encode(point(&key(name)));
+        json!({"signing": p, "agreement": p})
+    }
+    fn id_of(name: &str) -> String {
+        hex(&Sha256::digest(point(&key(name))))[..32].to_string()
+    }
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+    fn record(body: &Value, signers: &[&str]) -> Vec<u8> {
+        // serde_json writes object keys sorted, compact: the stored body bytes.
+        let bytes = serde_json::to_vec(body).unwrap();
+        let sign = |n: &str| -> String {
+            let s: Signature = key(n).sign(&bytes);
+            STANDARD.encode(s.to_bytes())
+        };
+        let mut rec = json!({"body": STANDARD.encode(&bytes), "signature": sign(signers[0])});
+        if signers.len() > 1 {
+            rec["cosignatures"] = Value::Array(
+                signers[1..]
+                    .iter()
+                    .map(|n| json!({"signer": id_of(n), "signature": sign(n)}))
+                    .collect(),
+            );
+        }
+        serde_json::to_vec(&rec).unwrap()
+    }
+    fn digest_of(rec: &[u8]) -> String {
+        let v: Value = serde_json::from_slice(rec).unwrap();
+        let body = STANDARD.decode(v["body"].as_str().unwrap()).unwrap();
+        hex(&Sha256::digest(body))
+    }
+    /// A pre-adoption library with stewards S1 and S2; `genesis_threshold` is spliced into the
+    /// genesis body when given. Returns the genesis record.
+    fn genesis(genesis_threshold: Option<Value>) -> Vec<u8> {
+        let mut body = json!({"by": "root", "issued": "2026-11-01T08:00:00Z", "kind": "genesis",
+            "label": "Library", "recovery": identity("recovery"), "root": identity("root"),
+            "seq": 1, "stewards": [identity("s1"), identity("s2")]});
+        if let Some(t) = genesis_threshold {
+            body["threshold"] = t;
+        }
+        record(&body, &["root"])
+    }
+    fn stewards_entry(prev: &[u8], threshold: Option<Value>) -> Vec<u8> {
+        let mut body = json!({"by": "root", "issued": "2026-11-01T08:01:00Z", "kind": "stewards",
+            "previous": digest_of(prev), "seq": 2, "stewards": [identity("s1"), identity("s2")]});
+        if let Some(t) = threshold {
+            body["threshold"] = t;
+        }
+        record(&body, &["root"])
+    }
+    fn quorum_handover(prev: &[u8], seq: u64, signers: &[&str]) -> Vec<u8> {
+        let body = json!({"by": "quorum", "issued": "2026-11-01T08:02:00Z", "kind": "handover",
+            "previous": digest_of(prev), "root": identity("new-root"), "seq": seq});
+        record(&body, signers)
+    }
+    fn verdict(entries: Vec<Vec<u8>>) -> String {
+        match swift::verify(&entries) {
+            Ok(_) => "ok".to_string(),
+            Err(f) => f.code().to_string(),
+        }
+    }
+
+    #[test]
+    fn a_genesis_threshold_of_one_lets_one_steward_hand_over() {
+        let g = genesis(Some(json!(1)));
+        let h = quorum_handover(&g, 2, &["s1"]);
+        assert_eq!(verdict(vec![g, h]), "ok");
+    }
+
+    #[test]
+    fn an_absent_genesis_threshold_is_zero_and_no_quorum_can_hand_over() {
+        // The engine used to default this to 1.
+        let g = genesis(None);
+        let h = quorum_handover(&g, 2, &["s1"]);
+        assert_eq!(verdict(vec![g.clone()]), "ok");
+        assert_eq!(verdict(vec![g, h]), "badSignature");
+        // `null` is nil in Swift's Codable, so it is absent too.
+        let g = genesis(Some(Value::Null));
+        let h = quorum_handover(&g, 2, &["s1"]);
+        assert_eq!(verdict(vec![g, h]), "badSignature");
+    }
+
+    #[test]
+    fn a_genesis_threshold_that_is_not_an_integer_is_a_decoding_error() {
+        // The engine used to default this to 1.
+        for bad in [json!("1"), json!(true), json!([1]), json!(1.5), json!({})] {
+            let g = genesis(Some(bad.clone()));
+            assert_eq!(verdict(vec![g]), "malformed", "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_stewards_entry_without_a_threshold_is_zero_and_no_quorum_can_hand_over() {
+        let g = genesis(Some(json!(1)));
+        let st = stewards_entry(&g, None);
+        let h = quorum_handover(&st, 3, &["s1"]);
+        assert_eq!(verdict(vec![g.clone(), st.clone()]), "ok");
+        assert_eq!(verdict(vec![g.clone(), st, h]), "badSignature");
+        // With a threshold of 2, one steward is too few and two are enough.
+        let st = stewards_entry(&g, Some(json!(2)));
+        let one = quorum_handover(&st, 3, &["s1"]);
+        let two = quorum_handover(&st, 3, &["s1", "s2"]);
+        assert_eq!(verdict(vec![g.clone(), st.clone(), one]), "badSignature");
+        assert_eq!(verdict(vec![g, st, two]), "ok");
+    }
+
+    #[test]
+    fn a_stewards_entry_threshold_that_is_not_an_integer_is_a_decoding_error() {
+        let g = genesis(Some(json!(1)));
+        for bad in [json!("2"), json!(false), json!(2.5)] {
+            let st = stewards_entry(&g, Some(bad.clone()));
+            assert_eq!(verdict(vec![g.clone(), st]), "malformed", "{bad}");
+        }
+    }
+}
