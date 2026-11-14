@@ -48,9 +48,6 @@ pub const MAX_PENDING_ENTRIES: usize = MAX_PENDING_PAGES as usize * PAGE;
 pub const MAX_PULLS_PER_PASS: usize = MAX_CHANGE_ENTRIES;
 /// Live-slot pulls queued in one pass.
 pub const MAX_LIVE_PULLS_PER_PASS: usize = 16_384;
-/// Pending objects judged together in one merge: the pages of a pass are merged in batches of
-/// this many, so a page of junk costs a parse and not a merge of the account.
-pub const PENDING_MERGE_BATCH: usize = 256;
 /// Digests of junk a home served that the engine remembers.
 pub const MAX_JUNK: usize = 4_096;
 /// Entries, objects or receipts per authority and pending page (§14).
@@ -351,7 +348,6 @@ struct Home {
     /// This pass's pending-feed bounds, and the objects waiting for their merge.
     pend_pages: u32,
     pend_entries: usize,
-    pend_buf: Vec<Vec<u8>>,
     /// Receipts (by SHA-256 hex) already submitted to this home.
     sent_receipts: BTreeSet<String>,
     /// Predecessor entries pulled this pass.
@@ -395,7 +391,6 @@ impl Default for Home {
             seen_cursors: BTreeSet::new(),
             pend_pages: 0,
             pend_entries: 0,
-            pend_buf: Vec::new(),
             sent_receipts: BTreeSet::new(),
             pred_pulled: 0,
             notes: Vec::new(),
@@ -638,7 +633,6 @@ impl<S: RecordSource> Engine<S> {
                 h.seen_cursors.clear();
                 h.pend_pages = 0;
                 h.pend_entries = 0;
-                h.pend_buf.clear();
                 h.pred_pulled = 0;
                 h.genesis_asked.clear();
                 h.verified_live.clear();
@@ -657,6 +651,31 @@ impl<S: RecordSource> Engine<S> {
             };
             self.plan(home, phase)?;
         }
+    }
+
+    /// Abandon the pass with `home`: the request in flight (if any) is forgotten, the queue is
+    /// emptied, what was pulled and verified is judged and taken, and the next
+    /// [`Engine::exchange_next`] starts a new pass. The engine stays consistent: nothing
+    /// unverified is held, no cursor moves past an object that was not taken, and a late answer
+    /// to the forgotten request is refused as not outstanding.
+    pub fn exchange_abort(&mut self, home: &str) -> Result<Report> {
+        self.check_ready()?;
+        let mut report = Report::default();
+        {
+            let h = self.home_mut(home);
+            h.inflight = None;
+            h.awaiting = None;
+            h.provided = None;
+            h.last_item = None;
+            h.carried_call = false;
+            h.queue.clear();
+            h.phase = Phase::PullAuthority;
+            h.halted = false;
+            h.stalls = 0;
+            h.verified_live.clear();
+        }
+        self.flush_pulled(home, &mut report)?;
+        Ok(report)
     }
 
     fn make_request(
@@ -833,9 +852,12 @@ impl<S: RecordSource> Engine<S> {
             open.insert(t.digest.clone());
             open.extend(t.vetoes.iter().cloned());
         }
-        let genesis =
-            crate::v05::history::succession_status(self.account.record_authority().state())
-                .map(|s| s.genesis_digest);
+        let status =
+            crate::v05::history::succession_status(self.account.record_authority().state());
+        let succession_start = status
+            .as_ref()
+            .and_then(|s| s.timing.as_ref().map(|t| t.window_start_ms));
+        let genesis = status.map(|s| s.genesis_digest);
         let sent = self.home_mut(home).sent_receipts.clone();
         let mut todo: Vec<(String, Vec<u8>, bool)> = Vec::new();
         let mut receipts: Vec<(String, Vec<u8>, String)> = Vec::new();
@@ -850,10 +872,17 @@ impl<S: RecordSource> Engine<S> {
             };
             match env.value.get("protocol").and_then(Value::as_str) {
                 Some(proto @ ("colophon/transition/5" | "colophon/veto/5")) => {
+                    // A veto of the succession is submitted only when it verifies against it
+                    // (eligible signers, signatures and UV, inside its deadline): a forged one in
+                    // the folder is never sent.
                     let succession_veto = proto == "colophon/veto/5"
                         && genesis.is_some()
                         && env.value.get("transition").and_then(Value::as_str)
-                            == genesis.as_deref();
+                            == genesis.as_deref()
+                        && crate::v05::history::succession::veto_is_valid(
+                            self.account.record_authority().state(),
+                            p,
+                        );
                     if !(open.contains(&env.digest) || succession_veto) {
                         continue;
                     }
@@ -878,12 +907,28 @@ impl<S: RecordSource> Engine<S> {
                     }
                     // Another home's receipt of an object this home may need: only a receipt
                     // a current home signed, of an object still pending or of the genesis.
-                    let Some((object, by)) = self.receipt_parts(p) else {
+                    let Some((object, by, _)) = self.receipt_fields(p) else {
                         continue;
                     };
                     if by == home
                         || !(open.contains(&object) || genesis.as_deref() == Some(object.as_str()))
                     {
+                        continue;
+                    }
+                    // Its window must hold too: a receipt of a transition or veto (§13.5), or of
+                    // the successor's genesis (§15.1 step 2).
+                    let in_window = self.receipt_of(p).is_some()
+                        || (genesis.as_deref() == Some(object.as_str())
+                            && succession_start.is_some_and(|w0| {
+                                crate::v05::history::succession::receipt_is_valid(
+                                    self.account.record_authority().state(),
+                                    p,
+                                    &object,
+                                    w0,
+                                    i64::MAX,
+                                )
+                            }));
+                    if !in_window {
                         continue;
                     }
                     receipts.push((object, p.clone(), sha));
@@ -1008,14 +1053,24 @@ impl<S: RecordSource> Engine<S> {
             return Ok(());
         }
         let before = self.account.objects().predecessor.len();
-        self.merge_objects(
-            Objects {
-                predecessor: vec![r.body.clone()],
-                ..Default::default()
-            },
-            report,
-            home,
-        )?;
+        // A home's forged entry is a fault of that home, never an error of the engine.
+        if self
+            .merge_objects(
+                Objects {
+                    predecessor: vec![r.body.clone()],
+                    ..Default::default()
+                },
+                report,
+                home,
+            )
+            .is_err()
+        {
+            report.faults.push(Fault::BadObject {
+                home: home.into(),
+                code: "notAPredecessorEntry".into(),
+            });
+            return Ok(());
+        }
         if self.account.objects().predecessor.len() == before {
             return Ok(());
         }
@@ -1903,11 +1958,6 @@ impl<S: RecordSource> Engine<S> {
         (received >= issued && received <= issued.saturating_add(300_000)).then_some((object, by))
     }
 
-    /// `(object, by)` of a receipt a current home of this account signed, window not checked.
-    fn receipt_parts(&self, e: &[u8]) -> Option<(String, String)> {
-        self.receipt_fields(e).map(|(o, b, _)| (o, b))
-    }
-
     /// `(object, by, received)` of a receipt of this account that a current home signed.
     fn receipt_fields(&self, e: &[u8]) -> Option<(String, String, i64)> {
         let raw = crate::v05::signature::RawEnvelope::parse(
@@ -1950,40 +2000,132 @@ impl<S: RecordSource> Engine<S> {
         }
     }
 
-    /// Whether `b` is shaped like an object of the pending feed of this account: a transition,
-    /// a veto or a receipt that names this account. Cheap (one parse, no merge, no signature):
-    /// what is not is dropped before the account is asked to hold it.
-    fn is_pending_candidate(&self, b: &[u8]) -> bool {
-        let Ok(env) = crate::v05::history::envelope::AuthEnvelope::parse(
+    /// How a pending object stands before it is held: `Some(false)` for a transition, a receipt
+    /// or a succession veto that verifies as far as a holder can tell (the envelope's
+    /// signatures against the keys the verified history names), `Some(true)` for an ordinary
+    /// veto that waits for its transition to be held, `None` for what is not an object of this
+    /// account's pending feed or does not verify. Nothing unverified is held.
+    fn pending_standing(&self, b: &[u8]) -> Option<bool> {
+        let env = crate::v05::history::envelope::AuthEnvelope::parse(
             b,
             crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
             crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
             true,
+        )
+        .ok()?;
+        if env.value.get("account").and_then(Value::as_str) != Some(self.account.id().as_str()) {
+            return None;
+        }
+        let state = self.account.record_authority().state();
+        match env.value.get("protocol").and_then(Value::as_str)? {
+            "colophon/transition/5" => crate::v05::history::check_pending_transition(state, b)
+                .is_ok()
+                .then_some(false),
+            "colophon/receipt/5" => self.receipt_fields(b).map(|_| false),
+            "colophon/veto/5" => {
+                if crate::v05::history::succession::veto_is_valid(state, b) {
+                    Some(false)
+                } else {
+                    Some(true)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the held history verifies this ordinary veto of a held transition.
+    fn veto_verifies(&self, b: &[u8]) -> bool {
+        use crate::v05::encoding::bounds;
+        let state = self.account.record_authority().state();
+        let pending = &self.account.objects().pending;
+        let Ok(v) = crate::v05::history::envelope::AuthEnvelope::parse(
+            b,
+            bounds::VETO_BODY,
+            bounds::VETO_ENVELOPE,
+            true,
         ) else {
             return false;
         };
-        matches!(
-            env.value.get("protocol").and_then(Value::as_str),
-            Some("colophon/transition/5" | "colophon/veto/5" | "colophon/receipt/5")
-        ) && env.value.get("account").and_then(Value::as_str) == Some(self.account.id().as_str())
+        let Some(target) = v.value.get("transition").and_then(Value::as_str) else {
+            return false;
+        };
+        for t in pending {
+            let Ok(te) = crate::v05::history::envelope::AuthEnvelope::parse(
+                t,
+                bounds::TRANSITION_ENVELOPE,
+                bounds::TRANSITION_ENVELOPE,
+                true,
+            ) else {
+                continue;
+            };
+            if te.digest != target
+                || te.value.get("protocol").and_then(Value::as_str) != Some("colophon/transition/5")
+            {
+                continue;
+            }
+            let issued = te
+                .value
+                .get("issued")
+                .and_then(Value::as_str)
+                .and_then(crate::v05::encoding::parse_date)
+                .unwrap_or(0);
+            if crate::v05::write::authority::choose_receipts(
+                state, pending, &te.digest, issued, None,
+            )
+            .is_ok_and(|r| crate::v05::history::check_pending_veto(state, t, &r, b).is_ok())
+            {
+                return true;
+            }
+        }
+        false
     }
 
-    /// Merge the pending objects waiting in the home's buffer, in one merge.
-    fn flush_pending(&mut self, home: &str, report: &mut Report) -> Result<()> {
-        let objects = std::mem::take(&mut self.home_mut(home).pend_buf);
-        if objects.is_empty() {
-            return Ok(());
+    /// Hold the verified objects of one page of the pending feed, and hand the host the ones
+    /// the account took. A transition, receipt or succession veto is taken first; a veto of a
+    /// transition then needs that transition held. Objects that do not verify are dropped.
+    fn take_pending(
+        &mut self,
+        objects: Vec<Vec<u8>>,
+        home: &str,
+        report: &mut Report,
+    ) -> Result<()> {
+        let mut first: Vec<Vec<u8>> = Vec::new();
+        let mut vetoes: Vec<Vec<u8>> = Vec::new();
+        for b in objects {
+            match self.pending_standing(&b) {
+                Some(false) => first.push(b),
+                Some(true) => vetoes.push(b),
+                None => {}
+            }
         }
-        self.merge_objects(
-            Objects {
-                pending: objects.clone(),
-                ..Default::default()
-            },
-            report,
-            home,
-        )?;
-        self.note_receipts(&objects);
-        for b in &objects {
+        let mut taken = first.clone();
+        if !first.is_empty() {
+            self.merge_objects(
+                Objects {
+                    pending: first.clone(),
+                    ..Default::default()
+                },
+                report,
+                home,
+            )?;
+        }
+        let late: Vec<Vec<u8>> = vetoes
+            .into_iter()
+            .filter(|b| self.veto_verifies(b))
+            .collect();
+        if !late.is_empty() {
+            self.merge_objects(
+                Objects {
+                    pending: late.clone(),
+                    ..Default::default()
+                },
+                report,
+                home,
+            )?;
+            taken.extend(late);
+        }
+        self.note_receipts(&taken);
+        for b in &taken {
             if let Some(path) = verified_pending_path(b) {
                 if !self.ix.have.contains_key(&path) {
                     self.ix.have.insert(
@@ -2052,27 +2194,23 @@ impl<S: RecordSource> Engine<S> {
             last = seq;
             entries += 1;
             if let Ok(b) = canonical(env) {
-                if self.is_pending_candidate(&b) {
-                    fresh.push(b);
-                }
+                fresh.push(b);
             }
         }
         let (pages, total) = {
             let h = self.home_mut(home);
             h.pend_pages += 1;
             h.pend_entries += entries;
-            h.pend_buf.extend(fresh);
             (h.pend_pages, h.pend_entries)
         };
         let more = v["more"].as_bool().unwrap_or(false);
         let capped = pages >= MAX_PENDING_PAGES || total >= MAX_PENDING_ENTRIES;
-        // The cursor moves only past what was read in order.
+        // The objects of this page are verified and held first (a page that fails to merge
+        // leaves the cursor where it was), and only then does the cursor move past them: a
+        // cursor never passes an object the engine has not taken.
+        self.take_pending(fresh, home, report)?;
         if last > after {
             self.home_mut(home).pending_after = last;
-        }
-        let going = more && !stop && last > after && !capped;
-        if !going || self.home_mut(home).pend_buf.len() >= PENDING_MERGE_BATCH {
-            self.flush_pending(home, report)?;
         }
         if more && !stop {
             if last == after {

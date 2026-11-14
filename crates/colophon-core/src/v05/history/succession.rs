@@ -527,6 +527,76 @@ pub(super) fn vetoed(s: &State, e: &Entry) -> Result<State> {
     Ok(n)
 }
 
+/// Whether `bytes` is a valid veto of this account's Swift succession as far as a holder can
+/// tell before any home has receipted it (§15.1 step 3): it binds to this account and the
+/// successor's genesis, carries at least `handover` signers, was issued inside the window and
+/// before the veto deadline, and every signature verifies under a key eligible at some instant
+/// of the window (UV included). The receipts are not required here; a home issues them.
+pub(crate) fn veto_is_valid(s: &State, bytes: &[u8]) -> bool {
+    veto_check(s, bytes).is_ok()
+}
+fn veto_check(s: &State, bytes: &[u8]) -> Result<()> {
+    let p = s
+        .succession
+        .as_ref()
+        .ok_or_else(|| malformed("no succession"))?;
+    require(
+        !p.vetoed && p.swift.is_some(),
+        "a Swift succession not yet vetoed",
+    )?;
+    let w = p
+        .window
+        .as_ref()
+        .ok_or_else(|| malformed("succession window absent"))?;
+    let deadline = w
+        .start
+        .saturating_add((w.delay as i64).saturating_mul(1000));
+    let v = AuthEnvelope::parse(bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)?;
+    let mut vo = Obj::new(v.value.clone(), "succession veto")?;
+    require(
+        vo.string("protocol")? == "colophon/veto/5"
+            && vo.string("account")? == s.account().as_str()
+            && vo.digest("transition")? == p.genesis_digest,
+        "succession veto binding",
+    )?;
+    let (_, issued) = vo.date("issued")?;
+    let _by = vo.key_id("by")?;
+    let ids = vo.array("signers")?;
+    vo.finish_closed()?;
+    let signers = v.signer_ids();
+    require(
+        ids == signers
+            .iter()
+            .map(|s| Value::String(s.clone()))
+            .collect::<Vec<_>>(),
+        "succession veto signers",
+    )?;
+    require(
+        signers.len() >= p.handover_count && p.handover_count > 0,
+        "succession veto count",
+    )?;
+    require(
+        issued >= w.start && issued < deadline,
+        "succession veto deadline",
+    )?;
+    let keys = eligible(p, w);
+    for sig in v.primary.iter().chain(&v.cosignatures) {
+        let cs = keys
+            .get(&sig.signer)
+            .ok_or_else(|| malformed("ineligible succession vetoer"))?;
+        if !cs
+            .iter()
+            .any(|c| swift::check(c, &v.body, sig, true).is_ok())
+        {
+            return Err(bad_signature("succession veto signature"));
+        }
+    }
+    require(
+        v.additions.is_empty() && v.handover.is_empty(),
+        "succession veto envelope",
+    )
+}
+
 pub(super) fn finish(s: &mut State, objects: &Objects, now: i64) {
     let Some(mut p) = s.succession.clone() else {
         return;
