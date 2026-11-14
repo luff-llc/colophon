@@ -27,6 +27,7 @@ pub mod records;
 pub mod replay;
 pub mod signature;
 pub mod terms;
+pub mod write;
 
 /// A refusal reason (§19). The protocol spelling is `refused:<reason>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
