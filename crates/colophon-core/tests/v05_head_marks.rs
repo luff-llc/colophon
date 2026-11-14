@@ -105,3 +105,40 @@ fn marks_survive_a_checkpoint_and_a_previous_format_is_refused() {
         "ok"
     );
 }
+
+#[test]
+fn marks_are_shape_checked_and_carried_over_a_rebuild() {
+    // M2: marks are local memory a replay cannot rebuild. An edited checkpoint with a malformed
+    // mark is refused; a checkpoint of another format is refused, and `rebuild` carries its
+    // marks into the checkpoint rebuilt from the retained objects.
+    let w = world();
+    let home = head_by(&w.new_head).unwrap();
+    let mut p = Persisted::checkpoint(&w.objects, &Persisted::default(), NOW);
+    with_ctx(&w, |c| p.accept_head(&w.new_head, c)).unwrap();
+    let bytes = p.to_bytes().unwrap();
+    let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // A malformed mark: refused.
+    let mut bad = v.clone();
+    bad["head_marks"] = serde_json::json!({"not-a-member-id": [3, "00"]});
+    assert!(Persisted::from_bytes(&serde_json::to_vec(&bad).unwrap()).is_err());
+    // Another format: refused by from_bytes, marks carried by rebuild.
+    v["version"] = 3.into();
+    let old = serde_json::to_vec(&v).unwrap();
+    assert!(Persisted::from_bytes(&old).is_err());
+    let rebuilt = Persisted::rebuild(&w.objects, &old, NOW);
+    assert_eq!(rebuilt.head_mark(&home).unwrap().0, 3);
+    let back = Persisted::from_bytes(&rebuilt.to_bytes().unwrap()).unwrap();
+    let r = with_ctx(&w, |c| back.check_head(&w.old_head, c));
+    assert!(
+        matches!(r, Err(Failure::Refused(Reason::Rollback))),
+        "{r:?}"
+    );
+    // Garbage or a malformed mark in the old bytes carries nothing over.
+    assert!(Persisted::rebuild(&w.objects, b"not json", NOW)
+        .head_mark(&home)
+        .is_none());
+    let mut broken = v.clone();
+    broken["head_marks"] = serde_json::json!({"x": [0, "y"]});
+    let none = Persisted::rebuild(&w.objects, &serde_json::to_vec(&broken).unwrap(), NOW);
+    assert!(none.head_mark(&home).is_none());
+}

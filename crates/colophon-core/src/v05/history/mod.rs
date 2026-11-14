@@ -231,6 +231,7 @@ impl Persisted {
         if let Some(state) = &cp.state {
             state.check_checkpoint_shape()?;
         }
+        check_head_marks(&cp.head_marks)?;
         Ok(Self {
             high_water: cp.high_water.clone(),
             head_marks: cp.head_marks.clone(),
@@ -238,10 +239,45 @@ impl Persisted {
         })
     }
 
+    /// Rebuild a checkpoint from retained objects after a format change or a refused checkpoint,
+    /// **carrying over the head marks** of `old` (§17.2): marks are local memory that no replay
+    /// can recompute, so they are read from the old bytes of any format, ignoring what does not
+    /// parse or fails the shape check. Never call this with bytes from a peer.
+    pub fn rebuild(objects: &Objects, old: &[u8], now_ms: i64) -> Self {
+        let marks = serde_json::from_slice::<serde_json::Value>(old)
+            .ok()
+            .and_then(|v| v.get("head_marks").cloned())
+            .and_then(|m| serde_json::from_value::<BTreeMap<String, (u64, String)>>(m).ok())
+            .filter(|m| check_head_marks(m).is_ok())
+            .unwrap_or_default();
+        let previous = Self {
+            head_marks: marks,
+            ..Self::default()
+        };
+        Self::checkpoint(objects, &previous, now_ms)
+    }
+
     /// Objects retained for rollback, conflict reconsideration and call-view construction.
     pub fn objects(&self) -> Option<&Objects> {
         self.checkpoint.as_ref().map(|cp| &cp.objects)
     }
+}
+
+/// Head marks are local storage, so this is corruption detection: member IDs, seqs and digests of
+/// the right shape, and a bounded count (§8.7 allows 8 homes; marks of revoked homes may linger).
+fn check_head_marks(marks: &BTreeMap<String, (u64, String)>) -> crate::v05::Result<()> {
+    let hex = |s: &str, n: usize| {
+        s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    crate::v05::require(
+        marks.len() <= 64
+            && marks.iter().all(|(home, (seq, digest))| {
+                hex(home, 32)
+                    && (1..=crate::v05::encoding::bounds::MAX_INTEGER).contains(seq)
+                    && hex(digest, 64)
+            }),
+        "invalid head marks",
+    )
 }
 
 fn merged_objects(objects: &Objects, persisted: &Persisted) -> Objects {
