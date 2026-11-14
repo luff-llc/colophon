@@ -660,8 +660,8 @@ impl Account {
         let before: BTreeMap<String, u64> = self
             .d
             .folded
-            .iter()
-            .map(|(k, f)| (k.clone(), f.revision))
+            .keys()
+            .map(|k| (k.clone(), self.d.revision_of_ns(k)))
             .collect();
         if fresh.is_empty() {
             return Some(before);
@@ -757,9 +757,10 @@ impl Account {
     /// objects and the verified history being as they were.
     pub(super) fn changes_since(&self, before: &BTreeMap<String, u64>) -> Changes {
         let mut c = self.diff(&self.d, &self.objects);
-        for (name, f) in &self.d.folded {
-            if before.get(name) != Some(&f.revision) {
-                c.namespaces.insert(name.clone(), f.revision);
+        for name in self.d.folded.keys() {
+            let rev = self.d.revision_of_ns(name);
+            if before.get(name) != Some(&rev) {
+                c.namespaces.insert(name.clone(), rev);
             }
         }
         c.status = Some(Status::of(&self.d.verdict));
@@ -913,10 +914,14 @@ impl Account {
         c.authority.controllers_removed = ctl(os).difference(&ctl(ns)).cloned().collect();
         c.authority.vault_changed = os.keyring().vault != ns.keyring().vault;
         c.authority.policy_changed = os.keyring().policy != ns.keyring().policy;
-        for (name, f) in &new.folded {
-            let before = old.folded.get(name).map(|b| b.revision);
-            if before != Some(f.revision) {
-                c.namespaces.insert(name.clone(), f.revision);
+        for name in new.folded.keys() {
+            let before = old
+                .folded
+                .contains_key(name)
+                .then(|| old.revision_of_ns(name));
+            let rev = new.revision_of_ns(name);
+            if before != Some(rev) {
+                c.namespaces.insert(name.clone(), rev);
             }
         }
         let was: BTreeSet<String> = self.pending_digests();
@@ -1001,10 +1006,38 @@ impl Account {
             None,
             Some(&self.d.keys),
         )?;
-        require(
-            derived::fingerprint(&self.d) == derived::fingerprint(&fresh),
-            "the maintained derivation differs from a rebuild over the same inputs",
-        )
+        let (mine, theirs) = (derived::fingerprint(&self.d), derived::fingerprint(&fresh));
+        if mine != theirs {
+            let part = mine
+                .iter()
+                .zip(&theirs)
+                .find(|(a, b)| a != b)
+                .map_or_else(|| "its parts".to_string(), |(a, _)| a.0.clone());
+            return Err(crate::v05::malformed(format!(
+                "the maintained derivation differs from a rebuild over the same inputs: {part}"
+            )));
+        }
+        for ns in self.d.auth.namespaces() {
+            require(
+                self.durable_clock(ns) == self.highest_admitted_clock(ns),
+                "the durable clock index differs from the judged records",
+            )?;
+        }
+        // What readers see with live heads is what one plain fold of the merged order gives.
+        for ns in self.d.folded.keys() {
+            let Some(o) = self.d.overlaid(ns) else {
+                continue;
+            };
+            let Some((rev, state, _)) = derived::reference_merged(&self.d, ns) else {
+                continue;
+            };
+            require(
+                rev == o.revision
+                    && state == serde_json::to_string(&o.fold.state).unwrap_or_default(),
+                "the live overlay differs from a fold of the merged order",
+            )?;
+        }
+        Ok(())
     }
     /// The held record headers: public bytes an engine stores.
     pub fn records(&self) -> &[HeldRecord] {
@@ -1014,7 +1047,7 @@ impl Account {
     /// their order, so two accounts holding the same objects have the same token however the
     /// objects arrived. It is not a counter. 0 when nothing is folded here.
     pub fn revision(&self, namespace: &str) -> u64 {
-        self.d.folded.get(namespace).map_or(0, |f| f.revision)
+        self.d.revision_of_ns(namespace)
     }
     /// The work the latest derivation did, so a host and a test can see that a merge of new
     /// records judged and folded only what is new (E6's incremental judgement).
@@ -1081,6 +1114,150 @@ impl Account {
                     .all(|c| c.bytes.len() <= MAX_RECORD_BYTES && c.path.len() <= 512),
             "a live candidate exceeds its bound",
         )?;
+        // The clock where the derivation was made: the slots the candidates are at are judged
+        // again and no other thing is (a slot's verdict reads only its own candidates, the
+        // verified history, the keys and the durable index).
+        if now_ms.max(self.now_ms) == self.now_ms {
+            return self.merge_live_slots(candidates);
+        }
+        self.merge_live_whole(candidates, now_ms)
+    }
+
+    /// [`Account::merge_live`] judging only the slots the candidates are at. The same set is
+    /// held, and the same verdicts and heads result, as [`Account::merge_live_whole`] gives
+    /// (`tests/v05_incremental.rs` compares them after every step): the merge, the pruning
+    /// of what can no longer matter and the bounds are decided per path, and a failed merge
+    /// changes nothing.
+    fn merge_live_slots(&mut self, candidates: Vec<HeldRecord>) -> Result<Changes> {
+        use crate::v05::live::{judge_group, prune_group};
+        let mut by_path: BTreeMap<String, Vec<HeldRecord>> = BTreeMap::new();
+        for c in candidates {
+            by_path.entry(c.path.clone()).or_default().push(c);
+        }
+        // The union per path, and what it adds.
+        struct Group {
+            path: String,
+            from: usize,
+            to: usize,
+            union: Vec<HeldRecord>,
+        }
+        let mut groups: Vec<Group> = Vec::new();
+        let mut added = 0usize;
+        for (path, new) in by_path {
+            let from = self
+                .live
+                .partition_point(|h| h.path.as_str() < path.as_str());
+            let to = from
+                + self.live[from..]
+                    .iter()
+                    .take_while(|h| h.path == path)
+                    .count();
+            let mut union: Vec<HeldRecord> = self.live[from..to].to_vec();
+            union_records(&mut union, &new);
+            if union.len() == to - from {
+                continue;
+            }
+            added += union.len() - (to - from);
+            groups.push(Group {
+                path,
+                from,
+                to,
+                union,
+            });
+        }
+        require(
+            self.live.len().saturating_add(added) <= 32_768,
+            "too many live candidates",
+        )?;
+        // The namespaces the candidates are in: only their change tokens can move.
+        let touched: BTreeSet<String> = groups
+            .iter()
+            .flat_map(|g| g.union.iter())
+            .filter_map(|c| crate::v05::records::OperationHeader::parse(&c.bytes).ok())
+            .map(|(h, _)| h.namespace)
+            .filter(|n| self.d.folded.contains_key(n))
+            .collect();
+        let before: BTreeMap<String, u64> = touched
+            .iter()
+            .map(|k| (k.clone(), self.d.revision_of_ns(k)))
+            .collect();
+        // Judge each path, keep what can still matter, judge what is kept.
+        let mut done: Vec<(Group, Vec<HeldRecord>, crate::v05::live::GroupJudgement)> = Vec::new();
+        {
+            let mut cache = self
+                .d
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for g in groups {
+                let j = judge_group(
+                    &self.d.auth,
+                    &self.d.keys,
+                    &self.d.durable,
+                    &g.union,
+                    None,
+                    Some(&mut cache),
+                );
+                let keep = prune_group(&g.union, &j);
+                let (keep, j) = if keep.len() != g.union.len() {
+                    let j = judge_group(
+                        &self.d.auth,
+                        &self.d.keys,
+                        &self.d.durable,
+                        &keep,
+                        None,
+                        Some(&mut cache),
+                    );
+                    (keep, j)
+                } else {
+                    (g.union.clone(), j)
+                };
+                done.push((g, keep, j));
+            }
+        }
+        let mut total = self.live.len();
+        for (g, keep, _) in &done {
+            require(
+                keep.len() <= crate::v05::live::MAX_CANDIDATES_PER_PATH,
+                "too many live candidates",
+            )?;
+            total = total - (g.to - g.from) + keep.len();
+        }
+        require(total <= 16_384, "too many live candidates")?;
+        // Nothing can fail from here: splice the groups in, last position first so the
+        // positions of the earlier ones hold.
+        done.sort_by(|a, b| (b.0.from, &b.0.path).cmp(&(a.0.from, &a.0.path)));
+        for (g, keep, j) in done {
+            let jumped = j
+                .verdicts
+                .iter()
+                .any(|v| matches!(v, crate::v05::live::LiveVerdict::Refused("clockJump")));
+            self.d.live.verdicts.splice(
+                g.from..g.to,
+                keep.iter()
+                    .zip(j.verdicts)
+                    .map(|(c, v)| (c.path.clone(), v)),
+            );
+            self.d.set_head_of(&g.path, j.head);
+            self.d
+                .live_idx
+                .set_group(&g.path, j.metas.into_iter().flatten().collect(), jumped);
+            self.live.splice(g.from..g.to, keep);
+        }
+        let mut c = self.diff(&self.d, &self.objects);
+        // `diff` of a derivation with itself names no namespace: the touched ones are compared.
+        for name in &touched {
+            let rev = self.d.revision_of_ns(name);
+            if before.get(name) != Some(&rev) {
+                c.namespaces.insert(name.clone(), rev);
+            }
+        }
+        c.status = Some(Status::of(&self.d.verdict));
+        Ok(c)
+    }
+
+    /// [`Account::merge_live`] judging every held live candidate and rebuilding the derivation.
+    fn merge_live_whole(&mut self, candidates: Vec<HeldRecord>, now_ms: i64) -> Result<Changes> {
         let mut live = self.live.clone();
         union_records(&mut live, &candidates);
         require(live.len() <= 32_768, "too many live candidates")?;
@@ -1220,13 +1397,29 @@ impl Account {
     /// writer never reuses a generation an equivocation spoiled.
     pub fn live_generation_floor(&self, author: &str, namespace: &str, slot: &str) -> u64 {
         let path = crate::v05::live::live_path(author, namespace, slot);
-        self.live
-            .iter()
-            .filter(|c| c.path == path)
-            .filter_map(|c| crate::v05::records::OperationHeader::parse(&c.bytes).ok())
-            .map(|(h, _)| h.clock)
-            .max()
-            .unwrap_or(0)
+        self.d.live_idx.floor(&path)
+    }
+    /// Whether a live candidate held names this epoch and nonce (a nonce is never used twice
+    /// under a key).
+    pub(crate) fn live_nonce_used(&self, epoch: u64, nonce: &[u8]) -> bool {
+        self.d.live_idx.has_nonce(epoch, nonce)
+    }
+    /// Whether a header held (a record or a live candidate) uses this namespace, epoch and
+    /// nonce.
+    pub(crate) fn durable_nonce_used(&self, namespace: &str, epoch: u64, nonce: &[u8]) -> bool {
+        self.d
+            .windex
+            .nonces
+            .contains(&(namespace.to_string(), epoch, nonce.to_vec()))
+    }
+    /// The current live head at `path`, when there is one.
+    pub fn live_head_at(&self, path: &str) -> Option<&crate::v05::live::LiveHead> {
+        self.d.live.heads.iter().find(|h| h.path == path)
+    }
+    /// The highest admitted durable clock of `namespace`, from the index the live judgement
+    /// reads (it equals [`Account::highest_admitted_clock`]; `verify_derivation` checks that).
+    pub(crate) fn durable_clock(&self, namespace: &str) -> u64 {
+        self.d.durable.highest(namespace)
     }
     /// What the live judgement would say of `candidate` held with the live candidates now held,
     /// without holding it. `unsigned` skips the signature check (the write side's own header
@@ -1236,9 +1429,18 @@ impl Account {
         candidate: HeldRecord,
         unsigned: bool,
     ) -> Result<crate::v05::live::LiveVerdict> {
-        let mut live = self.live.clone();
-        union_records(&mut live, std::slice::from_ref(&candidate));
-        let at = live
+        // The slot's own candidates with this one: no other slot's verdict reads them.
+        let from = self
+            .live
+            .partition_point(|h| h.path.as_str() < candidate.path.as_str());
+        let to = from
+            + self.live[from..]
+                .iter()
+                .take_while(|h| h.path == candidate.path)
+                .count();
+        let mut group: Vec<HeldRecord> = self.live[from..to].to_vec();
+        union_records(&mut group, std::slice::from_ref(&candidate));
+        let at = group
             .iter()
             .position(|c| c.path == candidate.path && c.bytes == candidate.bytes)
             .ok_or_else(|| crate::v05::malformed("candidate not held"))?;
@@ -1247,17 +1449,17 @@ impl Account {
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let j = crate::v05::live::judge_live_with(
+        let j = crate::v05::live::judge_group(
             &self.d.auth,
             &self.d.keys,
-            &self.d.judgement,
-            &live,
+            &self.d.durable,
+            &group,
             unsigned.then_some(at),
             Some(&mut cache),
         );
         Ok(j.verdicts
             .get(at)
-            .map(|v| v.1.clone())
+            .cloned()
             .unwrap_or(crate::v05::live::LiveVerdict::Invalid("not judged".into())))
     }
     /// The namespace folds, for the engine's sealed checkpoint: what a resumed open reuses
@@ -1306,7 +1508,7 @@ impl Account {
                         revision: 0,
                         fold,
                         admitted: s.admitted,
-                        last_pos: None,
+                        keys: Vec::new(),
                     },
                 ),
             );

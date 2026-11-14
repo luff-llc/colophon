@@ -212,12 +212,10 @@ impl<S: RecordSource> Engine<S> {
         };
         // The generation: one past the highest admitted durable clock and past this slot's
         // current head; live heads never advance the durable clock (0.3 §5.1).
-        let durable = self.account.highest_admitted_clock(namespace);
+        let durable = self.account.durable_clock(namespace);
         let prior = self
             .account
-            .live_heads()
-            .iter()
-            .find(|h| h.author == author && h.namespace == namespace && h.slot == slot);
+            .live_head_at(&live_path(&author, namespace, &slot));
         let generation = durable
             .max(prior.map_or(0, |h| h.generation))
             .max(
@@ -236,21 +234,8 @@ impl<S: RecordSource> Engine<S> {
         let nonce = crate::crypto::Entropy::new(seed)
             .take::<12>()
             .map_err(|e| malformed(e.to_string()))?;
-        let own_prefix = format!("ops/{author}/{namespace}/");
-        let reused = self
-            .account
-            .records()
-            .iter()
-            .filter(|r| r.path.starts_with(&own_prefix))
-            .filter_map(|r| OperationHeader::parse(&r.bytes).ok())
-            .map(|(h, _)| h)
-            .chain(
-                self.account
-                    .live_heads()
-                    .iter()
-                    .filter_map(|h| OperationHeader::parse(&h.bytes).ok().map(|x| x.0)),
-            )
-            .any(|h| h.epoch == epoch && h.nonce == nonce);
+        let reused = self.account.durable_nonce_used(namespace, epoch, &nonce)
+            || self.account.live_nonce_used(epoch, &nonce);
         require(
             !reused,
             "that nonce is already used under this epoch key: pass a fresh seed",
@@ -425,7 +410,8 @@ impl<S: RecordSource> Engine<S> {
         }
         let c = self.account.merge_live(vec![cand], now)?;
         super::absorb(&mut total, c);
-        for h in self.account.live_heads() {
+        // The one slot this write is at: no other head moved.
+        if let Some(h) = self.account.live_head_at(&pending.state_path) {
             let w = self.live_witness.entry(h.path.clone()).or_default();
             if h.generation > w.0 {
                 *w = (h.generation, h.digest.clone());

@@ -218,63 +218,121 @@ fn judge_one(
     })
 }
 
-/// Judge `held` live candidates against the verified history `auth`, the epoch `keys` and the
-/// judgement of the immutable records (for the clock bound and the retained copies).
-pub fn judge_live(
-    auth: &super::records::RecordAuthority,
-    keys: &EpochKeys,
-    judgement: &Judgement,
-    held: &[HeldRecord],
-) -> LiveJudgement {
-    judge_live_with(auth, keys, judgement, held, None, None)
+/// What the live judgement reads of the judged durable records: the admitted headers of each
+/// namespace in fold order (for the 1,024 bound), the digests admitted (an exact retained copy)
+/// and the `(author, id)` pairs admitted (`duplicateID`). It is a function of the judgement,
+/// built whole by [`DurableIndex::of`] and grown by [`DurableIndex::add`] (the same code), so a
+/// derivation that grew record by record holds the index a rebuild gives.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DurableIndex {
+    admitted: BTreeMap<String, BTreeSet<(u64, String, String)>>,
+    retained: BTreeSet<String>,
+    ids: BTreeSet<(String, String)>,
+}
+impl DurableIndex {
+    /// The index of a whole judgement.
+    pub(crate) fn of(judgement: &Judgement) -> Self {
+        let mut x = Self::default();
+        for j in &judgement.records {
+            x.add(j);
+        }
+        x
+    }
+    /// Add one judged record (a record that is not admitted adds nothing).
+    pub(crate) fn add(&mut self, j: &super::records::Judged) {
+        if j.outcome != Outcome::Admitted {
+            return;
+        }
+        if let (Some(ns), Some(a), Some(id), Some(d)) = (
+            j.namespace.as_deref(),
+            j.author.as_deref(),
+            j.id.as_deref(),
+            j.digest.as_deref(),
+        ) {
+            self.ids.insert((a.to_string(), id.to_string()));
+            self.admitted.entry(ns.to_string()).or_default().insert((
+                j.clock,
+                a.to_string(),
+                id.to_string(),
+            ));
+            self.retained.insert(d.to_string());
+        }
+    }
+    /// The highest admitted durable clock in `ns` at a fold position before `key`.
+    fn earlier(&self, ns: &str, key: (u64, &str, &str)) -> u64 {
+        self.admitted.get(ns).map_or(0, |v| {
+            v.range(..(key.0, key.1.to_string(), key.2.to_string()))
+                .next_back()
+                .map_or(0, |k| k.0)
+        })
+    }
+    /// The highest admitted durable clock in `ns` (0 if none).
+    pub(crate) fn highest(&self, ns: &str) -> u64 {
+        self.admitted
+            .get(ns)
+            .and_then(|v| v.iter().next_back())
+            .map_or(0, |k| k.0)
+    }
+    /// Whether `digest` is an admitted durable header.
+    pub(crate) fn retains(&self, digest: &str) -> bool {
+        self.retained.contains(digest)
+    }
+    /// Whether `(author, id)` is an admitted durable operation.
+    pub(crate) fn has_id(&self, author: &str, id: &str) -> bool {
+        self.ids.contains(&(author.to_string(), id.to_string()))
+    }
 }
 
-/// [`judge_live`], optionally skipping the signature check of the one candidate at `unsigned`
-/// (the write side judges its header before the host has signed it).
-pub(crate) fn judge_live_with(
+/// What the live index keeps of one held candidate that parsed as a header: enough to find the
+/// slots a new durable record can change, without parsing the candidates again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CandMeta {
+    pub digest: String,
+    pub author: String,
+    pub id: String,
+    pub clock: u64,
+    pub epoch: u64,
+    pub nonce: Vec<u8>,
+}
+
+/// The result of judging the candidates held at one path.
+pub(crate) struct GroupJudgement {
+    /// One verdict per candidate, in the order given.
+    pub verdicts: Vec<LiveVerdict>,
+    /// The current head of the slot, when there is one.
+    pub head: Option<LiveHead>,
+    /// What each candidate that parsed names.
+    pub metas: Vec<Option<CandMeta>>,
+}
+
+/// Judge the candidates held at one path (they are one slot's, or none): the verdict of a
+/// candidate reads only its own slot's candidates, the verified history, the keys and the
+/// durable index, so [`judge_live_with`] is this over every path, and a change to one slot
+/// judges that slot alone.
+pub(crate) fn judge_group(
     auth: &super::records::RecordAuthority,
     keys: &EpochKeys,
-    judgement: &Judgement,
+    durable: &DurableIndex,
     held: &[HeldRecord],
     unsigned: Option<usize>,
     mut cache: Option<&mut super::records::JudgeCache>,
-) -> LiveJudgement {
-    // No candidate: no verdict and no head, and the pass over the judged records below (which
-    // only serves the candidates) is not made.
-    if held.is_empty() {
-        return LiveJudgement::default();
-    }
+) -> GroupJudgement {
     let account = auth.account().clone();
-    // The admitted durable headers, by namespace, in fold order.
-    let mut admitted: BTreeMap<&str, Vec<(u64, &str, &str)>> = BTreeMap::new();
-    let mut retained: BTreeSet<&str> = BTreeSet::new();
-    let mut admitted_ids: BTreeSet<(&str, &str)> = BTreeSet::new();
-    for j in &judgement.records {
-        if j.outcome == Outcome::Admitted {
-            if let (Some(ns), Some(a), Some(id), Some(d)) = (
-                j.namespace.as_deref(),
-                j.author.as_deref(),
-                j.id.as_deref(),
-                j.digest.as_deref(),
-            ) {
-                admitted_ids.insert((a, id));
-                admitted.entry(ns).or_default().push((j.clock, a, id));
-                retained.insert(d);
-            }
-        }
-    }
-    for v in admitted.values_mut() {
-        v.sort();
-    }
-    let earlier = |ns: &str, key: (u64, &str, &str)| -> u64 {
-        admitted.get(ns).map_or(0, |v| {
-            let at = v.partition_point(|(c, a, i)| (*c, *a, *i) < key);
-            at.checked_sub(1).map_or(0, |i| v[i].0)
-        })
-    };
+    let earlier = |ns: &str, key: (u64, &str, &str)| durable.earlier(ns, key);
     let mut verdicts: Vec<Option<LiveVerdict>> = vec![None; held.len()];
+    let mut metas: Vec<Option<CandMeta>> = vec![None; held.len()];
     let mut valid: Vec<Valid> = Vec::new();
     for (idx, h) in held.iter().enumerate() {
+        if let Ok((hd, _)) = OperationHeader::parse(&h.bytes) {
+            metas[idx] = Some(CandMeta {
+                digest: hd.digest(),
+                author: hd.author.clone(),
+                id: hd.id.clone(),
+                clock: hd.clock,
+                epoch: hd.epoch,
+                nonce: hd.nonce.clone(),
+            });
+        }
         match judge_one(
             auth,
             keys,
@@ -302,10 +360,9 @@ pub(crate) fn judge_live_with(
             verdicts[v.idx] = Some(LiveVerdict::Superseded);
         }
     }
-    let valid = kept;
     // Per slot: the highest valid generation that no two bodies share.
     let mut slots: BTreeMap<(String, String, String), Vec<&Valid>> = BTreeMap::new();
-    for v in &valid {
+    for v in &kept {
         slots
             .entry((
                 v.head.namespace.clone(),
@@ -315,7 +372,7 @@ pub(crate) fn judge_live_with(
             .or_default()
             .push(v);
     }
-    let mut heads = Vec::new();
+    let mut head_out: Option<LiveHead> = None;
     for list in slots.values() {
         let mut gens: BTreeMap<u64, Vec<&Valid>> = BTreeMap::new();
         for v in list {
@@ -332,30 +389,248 @@ pub(crate) fn judge_live_with(
             if current.is_none() {
                 current = Some(*g);
                 let v = group[0];
-                if retained.contains(v.head.digest.as_str()) {
+                if durable.retains(v.head.digest.as_str()) {
                     verdicts[v.idx] = Some(LiveVerdict::Retained);
-                } else if admitted_ids.contains(&(v.head.author.as_str(), v.head.id.as_str())) {
+                } else if durable.has_id(v.head.author.as_str(), v.head.id.as_str()) {
                     // One author, one operation ID: a live head and an immutable record that
                     // share it do not both fold (0.3 §5: `duplicateID`).
                     verdicts[v.idx] = Some(LiveVerdict::Refused("duplicateID"));
                 } else {
                     verdicts[v.idx] = Some(LiveVerdict::Current);
-                    heads.push(v.head.clone());
+                    // Held at one path means one slot; a second slot at a path cannot be
+                    // valid (the path names the slot), so there is at most one head.
+                    head_out = Some(v.head.clone());
                 }
             } else {
                 verdicts[group[0].idx] = Some(LiveVerdict::Superseded);
             }
         }
     }
+    GroupJudgement {
+        verdicts: verdicts
+            .into_iter()
+            .map(|v| v.unwrap_or_else(|| bad("not judged")))
+            .collect(),
+        head: head_out,
+        metas,
+    }
+}
+
+/// Judge `held` live candidates against the verified history `auth`, the epoch `keys` and the
+/// judgement of the immutable records (for the clock bound and the retained copies).
+pub fn judge_live(
+    auth: &super::records::RecordAuthority,
+    keys: &EpochKeys,
+    judgement: &Judgement,
+    held: &[HeldRecord],
+) -> LiveJudgement {
+    judge_live_with(auth, keys, judgement, held, None, None)
+}
+
+/// [`judge_live`], optionally skipping the signature check of the one candidate at `unsigned`
+/// (the write side judges its header before the host has signed it).
+pub(crate) fn judge_live_with(
+    auth: &super::records::RecordAuthority,
+    keys: &EpochKeys,
+    judgement: &Judgement,
+    held: &[HeldRecord],
+    unsigned: Option<usize>,
+    cache: Option<&mut super::records::JudgeCache>,
+) -> LiveJudgement {
+    judge_live_indexed(
+        auth,
+        keys,
+        &DurableIndex::of(judgement),
+        held,
+        unsigned,
+        cache,
+    )
+    .0
+}
+
+/// The judgement of every held live candidate over a durable index, and what each candidate
+/// that parsed names (aligned with `held`).
+pub(crate) fn judge_live_indexed(
+    auth: &super::records::RecordAuthority,
+    keys: &EpochKeys,
+    durable: &DurableIndex,
+    held: &[HeldRecord],
+    unsigned: Option<usize>,
+    mut cache: Option<&mut super::records::JudgeCache>,
+) -> (LiveJudgement, Vec<Option<CandMeta>>) {
+    // No candidate: no verdict and no head.
+    if held.is_empty() {
+        return (LiveJudgement::default(), Vec::new());
+    }
+    // Group by held path (each group is a run in path order, whatever the order given).
+    let mut by_path: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, h) in held.iter().enumerate() {
+        by_path.entry(h.path.as_str()).or_default().push(i);
+    }
+    let mut verdicts: Vec<Option<LiveVerdict>> = vec![None; held.len()];
+    let mut metas: Vec<Option<CandMeta>> = vec![None; held.len()];
+    let mut heads = Vec::new();
+    for idxs in by_path.values() {
+        let group: Vec<HeldRecord> = idxs.iter().map(|i| held[*i].clone()).collect();
+        let at = unsigned.and_then(|u| idxs.iter().position(|i| *i == u));
+        let g = judge_group(auth, keys, durable, &group, at, cache.as_deref_mut());
+        for ((i, v), m) in idxs.iter().zip(g.verdicts).zip(g.metas) {
+            verdicts[*i] = Some(v);
+            metas[*i] = m;
+        }
+        heads.extend(g.head);
+    }
+    sort_heads(&mut heads);
+    (
+        LiveJudgement {
+            heads,
+            verdicts: held
+                .iter()
+                .zip(verdicts)
+                .map(|(h, v)| (h.path.clone(), v.unwrap_or_else(|| bad("not judged"))))
+                .collect(),
+        },
+        metas,
+    )
+}
+
+/// The order the heads are kept in: `(namespace, author, slot)`.
+pub(crate) fn sort_heads(heads: &mut [LiveHead]) {
     heads.sort_by(|a, b| {
         (&a.namespace, &a.author, &a.slot).cmp(&(&b.namespace, &b.author, &b.slot))
     });
-    LiveJudgement {
-        heads,
-        verdicts: held
-            .iter()
-            .zip(verdicts)
-            .map(|(h, v)| (h.path.clone(), v.unwrap_or_else(|| bad("not judged"))))
-            .collect(),
+}
+
+/// What the live judgement keeps of the candidates held, by path, to find which slots a new
+/// durable record can change: a record that is exactly a candidate's body (a retained copy), one
+/// that shares a candidate's `(author, id)` (`duplicateID`), or, for any record, a slot whose
+/// candidate was refused as `clockJump` (the bound reads the highest earlier admitted clock,
+/// which only a new record can raise). A function of the candidates and their verdicts, built
+/// whole by [`LiveIndex::of`] and kept in step by [`LiveIndex::set_group`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LiveIndex {
+    groups: BTreeMap<String, (Vec<CandMeta>, bool)>,
+    by_digest: BTreeMap<String, BTreeSet<String>>,
+    by_id: BTreeMap<(String, String), BTreeSet<String>>,
+    by_nonce: BTreeMap<(u64, Vec<u8>), BTreeSet<String>>,
+    jumped: BTreeSet<String>,
+}
+impl LiveIndex {
+    /// The index of a whole judgement (`held` and `metas` are aligned with its verdicts).
+    pub(crate) fn of(held: &[HeldRecord], metas: &[Option<CandMeta>], j: &LiveJudgement) -> Self {
+        let mut by_path: BTreeMap<&str, (Vec<CandMeta>, bool)> = BTreeMap::new();
+        for ((h, m), (_, v)) in held.iter().zip(metas).zip(&j.verdicts) {
+            let e = by_path.entry(h.path.as_str()).or_default();
+            if let Some(m) = m {
+                e.0.push(m.clone());
+            }
+            e.1 |= matches!(v, LiveVerdict::Refused("clockJump"));
+        }
+        let mut x = Self::default();
+        for (p, (metas, jumped)) in by_path {
+            x.set_group(p, metas, jumped);
+        }
+        x
     }
+    /// Replace what is known of the candidates at `path` (none: the group is forgotten).
+    pub(crate) fn set_group(&mut self, path: &str, metas: Vec<CandMeta>, jumped: bool) {
+        if let Some((old, _)) = self.groups.remove(path) {
+            for m in old {
+                if let Some(s) = self.by_digest.get_mut(&m.digest) {
+                    s.remove(path);
+                    if s.is_empty() {
+                        self.by_digest.remove(&m.digest);
+                    }
+                }
+                let k = (m.author, m.id);
+                if let Some(s) = self.by_id.get_mut(&k) {
+                    s.remove(path);
+                    if s.is_empty() {
+                        self.by_id.remove(&k);
+                    }
+                }
+                let n = (m.epoch, m.nonce);
+                if let Some(s) = self.by_nonce.get_mut(&n) {
+                    s.remove(path);
+                    if s.is_empty() {
+                        self.by_nonce.remove(&n);
+                    }
+                }
+            }
+        }
+        self.jumped.remove(path);
+        if metas.is_empty() && !jumped {
+            return;
+        }
+        for m in &metas {
+            self.by_digest
+                .entry(m.digest.clone())
+                .or_default()
+                .insert(path.to_string());
+            self.by_id
+                .entry((m.author.clone(), m.id.clone()))
+                .or_default()
+                .insert(path.to_string());
+            self.by_nonce
+                .entry((m.epoch, m.nonce.clone()))
+                .or_default()
+                .insert(path.to_string());
+        }
+        if jumped {
+            self.jumped.insert(path.to_string());
+        }
+        self.groups.insert(path.to_string(), (metas, jumped));
+    }
+    /// The highest generation among the candidates held at `path` that parse as headers (0 if
+    /// none).
+    pub(crate) fn floor(&self, path: &str) -> u64 {
+        self.groups
+            .get(path)
+            .map_or(0, |(m, _)| m.iter().map(|c| c.clock).max().unwrap_or(0))
+    }
+    /// Whether a candidate held names this epoch and nonce.
+    pub(crate) fn has_nonce(&self, epoch: u64, nonce: &[u8]) -> bool {
+        self.by_nonce.contains_key(&(epoch, nonce.to_vec()))
+    }
+    /// The paths whose verdicts a newly admitted durable record can change.
+    pub(crate) fn affected_by(&self, j: &super::records::Judged, out: &mut BTreeSet<String>) {
+        if j.outcome != Outcome::Admitted {
+            return;
+        }
+        if let Some(d) = j.digest.as_deref() {
+            if let Some(s) = self.by_digest.get(d) {
+                out.extend(s.iter().cloned());
+            }
+        }
+        if let (Some(a), Some(id)) = (j.author.as_deref(), j.id.as_deref()) {
+            if let Some(s) = self.by_id.get(&(a.to_string(), id.to_string())) {
+                out.extend(s.iter().cloned());
+            }
+        }
+        out.extend(self.jumped.iter().cloned());
+    }
+}
+
+/// What a path's candidates keep after the merge rule: no candidate that is no live record at
+/// all, every candidate that is the head, in equivocation, retained, refused or quarantined, and
+/// of the superseded ones the two highest generations. `group` is in `(path, bytes)` order and
+/// `g` is its judgement. A function of the group, so a set pruned all at once and pruned by
+/// path is the same.
+pub(crate) fn prune_group(group: &[HeldRecord], g: &GroupJudgement) -> Vec<HeldRecord> {
+    let mut keep: Vec<usize> = Vec::new();
+    let mut superseded: Vec<(u64, usize)> = Vec::new();
+    for (i, (c, v)) in group.iter().zip(&g.verdicts).enumerate() {
+        match v {
+            LiveVerdict::Invalid(_) => {}
+            LiveVerdict::Superseded => {
+                let gen = OperationHeader::parse(&c.bytes).map_or(0, |(h, _)| h.clock);
+                superseded.push((gen, i));
+            }
+            _ => keep.push(i),
+        }
+    }
+    superseded.sort_by(|a, b| b.cmp(a));
+    keep.extend(superseded.iter().take(2).map(|(_, i)| *i));
+    keep.sort_unstable();
+    keep.into_iter().map(|i| group[i].clone()).collect()
 }

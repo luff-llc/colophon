@@ -49,15 +49,31 @@ type FoldItem = (
     String,
 );
 
-/// One namespace's fold.
+/// One namespace's fold, of the durable records only: live heads are an overlay answered at
+/// read time (see [`Derived::overlaid`]), so a live write never touches this.
 #[derive(Clone)]
 pub(super) struct Folded {
     pub revision: u64,
     pub fold: Namespace,
     pub admitted: Vec<OperationView>,
-    /// The fold position `(clock, author, id, digest)` of the last operation folded, when this
-    /// fold was built from the judgement (a fold taken from a checkpoint does not know it).
-    pub last_pos: Option<(u64, String, String, String)>,
+    /// The fold position `(clock, author, id, digest)` of each operation folded, parallel to
+    /// `fold.order`. A fold taken from a checkpoint is given its positions when the derivation
+    /// matches it to the judgement.
+    pub keys: Vec<(u64, String, String, String)>,
+}
+
+/// The overlaid namespaces answered so far, by namespace, with the merged-chain key each was made for.
+pub(super) type OverlayCache = BTreeMap<String, ([u8; 32], Arc<Overlaid>)>;
+
+/// A namespace as readers see it when live heads are held: the durable fold with the heads
+/// applied at their positions (what folding durable records and heads together gives).
+pub(super) struct Overlaid {
+    pub fold: Namespace,
+    /// The operations from position `split` on, in merged order: durable ones after the first
+    /// head and the heads. The operations before `split` are the durable fold's.
+    pub admitted: Vec<OperationView>,
+    pub split: usize,
+    pub revision: u64,
 }
 
 pub(super) struct Derived {
@@ -72,8 +88,18 @@ pub(super) struct Derived {
     pub keys: EpochKeys,
     pub judgement: Judgement,
     pub windex: WriteIndex,
+    /// What the live judgement reads of the judged durable records.
+    pub durable: crate::v05::live::DurableIndex,
     /// The judgement of the live-state candidates held (0.3 §5.1).
     pub live: crate::v05::live::LiveJudgement,
+    /// The positions `(generation, author, id, digest)` of the heads, by namespace, in fold
+    /// order: what the change token and the overlay merge the durable fold with.
+    pub head_order: BTreeMap<String, BTreeSet<(u64, String, String, String)>>,
+    /// Which slots a new durable record can change.
+    pub live_idx: crate::v05::live::LiveIndex,
+    /// The overlaid namespaces answered so far, by namespace: the merged-chain key they were
+    /// made for and the result. Only ever an answer that is a function of the key.
+    pub overlays: Mutex<OverlayCache>,
     pub folded: BTreeMap<String, Folded>,
     /// What the judgement read from the verified state that its branch does not fix.
     pub print: [u8; 32],
@@ -302,21 +328,25 @@ impl Derived {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             judge_cached(&auth, &keys, inputs.records, &mut c, print)
         };
-        let live = {
+        let durable = crate::v05::live::DurableIndex::of(&judgement);
+        let (live, live_idx) = {
             let mut c = cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            crate::v05::live::judge_live_with(
+            let (j, metas) = crate::v05::live::judge_live_indexed(
                 &auth,
                 &keys,
-                &judgement,
+                &durable,
                 inputs.live,
                 None,
                 Some(&mut c),
-            )
+            );
+            let idx = crate::v05::live::LiveIndex::of(inputs.live, &metas, &j);
+            (j, idx)
         };
         let (effective, verified_pending) = effective_objects(inputs.objects, auth.state());
         let windex = WriteIndex::of(&judgement, &auth);
+        let head_order = Self::head_order_of(&live);
         let mut derived = Self {
             effective,
             verified_pending,
@@ -325,7 +355,11 @@ impl Derived {
             keys,
             windex,
             judgement,
+            durable,
+            head_order,
             live,
+            live_idx,
+            overlays: Mutex::new(BTreeMap::new()),
             folded: BTreeMap::new(),
             print,
             cache,
@@ -444,8 +478,8 @@ impl Derived {
         total: usize,
     ) -> bool {
         let new_at: Vec<usize> = fresh.iter().map(|(at, _)| *at).collect();
-        let mut cache = self
-            .cache
+        let cache_handle = self.cache.clone();
+        let mut cache = cache_handle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(ext) = crate::v05::records::judge_extend(
@@ -476,23 +510,16 @@ impl Derived {
             .iter()
             .filter_map(|at| self.judgement.records.get(*at))
             .collect();
+        // What the live judgement reads of the durable records, and the live slots a new one
+        // can change: each of those is judged again, no other.
+        let mut affected: BTreeSet<String> = BTreeSet::new();
+        for j in &news {
+            self.durable.add(j);
+            self.live_idx.affected_by(j, &mut affected);
+        }
         self.windex.add(news.into_iter(), &self.auth);
-        // Live candidates read the admitted records: judged again when there are any.
-        if !inputs.live.is_empty() {
-            let before = format!("{:?}", self.live.heads);
-            self.live = crate::v05::live::judge_live_with(
-                &self.auth,
-                &self.keys,
-                &self.judgement,
-                inputs.live,
-                None,
-                Some(&mut cache),
-            );
-            // The folds take the live heads at their positions: they are folded again only
-            // when the heads are not the ones already folded.
-            if format!("{:?}", self.live.heads) != before {
-                full_fold = true;
-            }
+        if !affected.is_empty() {
+            self.rejudge_live(inputs.live, &affected, &mut cache);
         }
         drop(cache);
         self.fold_applied = 0;
@@ -504,7 +531,7 @@ impl Derived {
                     // Not folded here (unreadable, out of scope, no key): nothing to extend.
                     continue;
                 };
-                let after = match &f.last_pos {
+                let after = match f.keys.last() {
                     Some(last) => items.first().is_none_or(|i| i.0 > *last),
                     // An empty fold with a checkpoint's snapshot to reuse: the full path takes it.
                     None => f.fold.order.is_empty() && !inputs.fold_seed.contains_key(ns),
@@ -538,12 +565,276 @@ impl Derived {
                 });
                 f.fold.append(dg, view, ctx, &policy);
                 f.admitted.push(view.clone());
-                f.last_pos = Some(pos.clone());
+                f.keys.push(pos.clone());
                 self.fold_applied += 1;
             }
             f.revision = Self::revision_of(&f.fold);
         }
         true
+    }
+
+    /// Set the head of the slot at `path` (none: the slot has no head), keeping the heads in
+    /// `(namespace, author, slot)` order.
+    pub(super) fn set_head_of(&mut self, path: &str, head: Option<crate::v05::live::LiveHead>) {
+        self.set_head(path, head);
+    }
+    fn head_key(h: &crate::v05::live::LiveHead) -> (u64, String, String, String) {
+        (
+            h.generation,
+            h.author.clone(),
+            h.id.clone(),
+            h.digest.clone(),
+        )
+    }
+    fn head_order_of(
+        live: &crate::v05::live::LiveJudgement,
+    ) -> BTreeMap<String, BTreeSet<(u64, String, String, String)>> {
+        let mut m: BTreeMap<String, BTreeSet<(u64, String, String, String)>> = BTreeMap::new();
+        for h in &live.heads {
+            m.entry(h.namespace.clone())
+                .or_default()
+                .insert(Self::head_key(h));
+        }
+        m
+    }
+    fn set_head(&mut self, path: &str, head: Option<crate::v05::live::LiveHead>) {
+        if let Some(old) = self.live.heads.iter().find(|h| h.path == path) {
+            let k = Self::head_key(old);
+            if let Some(set) = self.head_order.get_mut(&old.namespace) {
+                set.remove(&k);
+                if set.is_empty() {
+                    self.head_order.remove(&old.namespace);
+                }
+            }
+        }
+        if let Some(h) = &head {
+            self.head_order
+                .entry(h.namespace.clone())
+                .or_default()
+                .insert(Self::head_key(h));
+        }
+        self.live.heads.retain(|h| h.path != path);
+        if let Some(h) = head {
+            let at = self.live.heads.partition_point(|x| {
+                (&x.namespace, &x.author, &x.slot) < (&h.namespace, &h.author, &h.slot)
+            });
+            self.live.heads.insert(at, h);
+        }
+    }
+
+    /// Judge the candidates held at each of `paths` again, in place: their verdicts, their head
+    /// and the live index. `live` is the candidate set the verdicts are aligned with.
+    pub(super) fn rejudge_live(
+        &mut self,
+        live: &[HeldRecord],
+        paths: &BTreeSet<String>,
+        cache: &mut JudgeCache,
+    ) {
+        for path in paths {
+            let from = live.partition_point(|h| h.path.as_str() < path.as_str());
+            let to = from + live[from..].iter().take_while(|h| h.path == *path).count();
+            if from == to {
+                continue;
+            }
+            let g = crate::v05::live::judge_group(
+                &self.auth,
+                &self.keys,
+                &self.durable,
+                &live[from..to],
+                None,
+                Some(cache),
+            );
+            let jumped = g
+                .verdicts
+                .iter()
+                .any(|v| matches!(v, crate::v05::live::LiveVerdict::Refused("clockJump")));
+            for (k, v) in g.verdicts.into_iter().enumerate() {
+                if let Some(slot) = self.live.verdicts.get_mut(from + k) {
+                    slot.1 = v;
+                }
+            }
+            self.set_head(path, g.head);
+            self.live_idx
+                .set_group(path, g.metas.into_iter().flatten().collect(), jumped);
+        }
+    }
+
+    /// The heads of `ns`'s live slots as fold items, in fold order.
+    fn head_items(&self, ns: &str) -> Vec<FoldItem> {
+        let mut out: Vec<FoldItem> = Vec::new();
+        for head in self.live.heads.iter().filter(|h| h.namespace == ns) {
+            let plain = &head.plaintext;
+            let member = self.auth.member(&head.author);
+            let (mk, label) = member.map_or((MemberKind::Device, String::new()), |m| {
+                (m.request.kind.clone(), m.request.label.clone())
+            });
+            out.push((
+                (
+                    head.generation,
+                    head.author.clone(),
+                    head.id.clone(),
+                    head.digest.clone(),
+                ),
+                OperationView {
+                    id: head.id.clone(),
+                    kind: head.kind.clone(),
+                    author: head.author.clone(),
+                    author_label: label,
+                    origin: if mk == MemberKind::Agent {
+                        "ai"
+                    } else {
+                        "person"
+                    }
+                    .into(),
+                    clock: head.generation,
+                    created: plain
+                        .get("created")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    payload: plain.get("payload").cloned().unwrap_or(Value::Null),
+                },
+                mk,
+                head.digest.clone(),
+            ));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn ctx_of(&self, author: &str) -> Option<AuthorContext> {
+        let library = self
+            .auth
+            .account()
+            .as_str()
+            .chars()
+            .take(32)
+            .collect::<String>();
+        self.auth.member(author).map(|m| AuthorContext {
+            kind: model_kind(&m.request.kind),
+            library,
+            grant: Some(grant_of(m)),
+        })
+    }
+
+    /// Where the live heads of `ns` meet the durable fold: the heads in fold order, the number
+    /// of durable operations before the first of them and the rolled hash of the merged order
+    /// (the namespace's change token comes from it). `None` when the namespace holds no head or
+    /// is not folded here.
+    fn merge_plan(&self, ns: &str) -> Option<(usize, [u8; 32])> {
+        let base = self.folded.get(ns)?;
+        let heads = self.head_order.get(ns)?;
+        let first = heads.iter().next()?;
+        let p = base.keys.partition_point(|k| k < first);
+        let mut h = base.fold.hashes.get(p).copied()?;
+        let mut i = p;
+        let mut hs = heads.iter().peekable();
+        loop {
+            let head_first = match (hs.peek(), base.keys.get(i)) {
+                (Some(hd), Some(k)) => *hd < k,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            if head_first {
+                let hd = hs.next()?;
+                h = crate::engine::roll(h, &hd.3);
+            } else {
+                h = crate::engine::roll(h, base.fold.order.get(i)?);
+                i += 1;
+            }
+        }
+        Some((p, h))
+    }
+
+    /// The change token of `ns` as readers see it, the live heads included.
+    pub(super) fn revision_of_ns(&self, ns: &str) -> u64 {
+        match self.merge_plan(ns) {
+            Some((_, h)) => {
+                let mut eight = [0u8; 8];
+                eight.copy_from_slice(&h[..8]);
+                u64::from_be_bytes(eight) & crate::v05::encoding::bounds::MAX_INTEGER
+            }
+            None => self.folded.get(ns).map_or(0, |f| f.revision),
+        }
+    }
+
+    /// The namespace as readers see it when it holds live heads: the durable fold with each
+    /// head applied at its position in fold order. A head after every durable operation (the
+    /// listening app's passive positions) is applied to a copy of the durable state; one before
+    /// the last durable operation takes the durable fold back to its nearest snapshot at or
+    /// before it and folds the merged operations from there. `None` when there is no head.
+    /// Answers are remembered by the merged order they were made for.
+    pub(super) fn overlaid(&self, ns: &str) -> Option<Arc<Overlaid>> {
+        let (p, chain) = self.merge_plan(ns)?;
+        {
+            let c = self
+                .overlays
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((k, o)) = c.get(ns) {
+                if *k == chain {
+                    return Some(o.clone());
+                }
+            }
+        }
+        let o = Arc::new(self.build_overlay(ns, self.head_items(ns), p)?);
+        self.overlays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ns.to_string(), (chain, o.clone()));
+        Some(o)
+    }
+
+    fn build_overlay(&self, ns: &str, heads: Vec<FoldItem>, p: usize) -> Option<Overlaid> {
+        let base = self.folded.get(ns)?;
+        // Where the replay starts: the snapshot at or before `p` the durable fold still holds.
+        let snap = base
+            .fold
+            .checkpoints
+            .iter()
+            .rev()
+            .find(|s| s.position <= p && base.fold.hashes.get(s.position) == Some(&s.digest));
+        let (mut state, from) = match snap {
+            Some(s) => (s.state.clone(), s.position),
+            None if p == base.keys.len() => (base.fold.state.clone(), p),
+            None => (crate::domain::State::new(ns), 0),
+        };
+        let mut h = base.fold.hashes.get(from).copied()?;
+        let mut tail: Vec<OperationView> = Vec::new();
+        let (mut i, mut j) = (from, 0usize);
+        while i < base.keys.len() || j < heads.len() {
+            let (digest, view, ctx, in_tail): (&str, &OperationView, _, bool) =
+                if j >= heads.len() || (i < base.keys.len() && base.keys[i] < heads[j].0) {
+                    let v = base.admitted.get(i)?;
+                    let d = base.fold.order.get(i)?;
+                    i += 1;
+                    // Durable operations before `p` are replayed from the snapshot only.
+                    (d.as_str(), v, self.ctx_of(&v.author), i > p)
+                } else {
+                    let it = &heads[j];
+                    j += 1;
+                    (it.3.as_str(), &it.1, self.ctx_of(&it.1.author), true)
+                };
+            state.apply_with_context(view, ctx.as_ref());
+            h = crate::engine::roll(h, digest);
+            state.bind_admitted_prefix(h);
+            if in_tail {
+                tail.push(view.clone());
+            }
+        }
+        let mut eight = [0u8; 8];
+        eight.copy_from_slice(&h[..8]);
+        Some(Overlaid {
+            fold: {
+                let mut n = crate::engine::Namespace::new(ns);
+                n.state = state;
+                n
+            },
+            admitted: tail,
+            split: p,
+            revision: u64::from_be_bytes(eight) & crate::v05::encoding::bounds::MAX_INTEGER,
+        })
     }
 
     fn fold(&mut self, inputs: &Inputs<'_>, prior: Option<(&BTreeMap<String, Folded>, [u8; 32])>) {
@@ -570,45 +861,6 @@ impl Derived {
                 if let Some(item) = self.fold_item(j, &accepted) {
                     ops.push(item);
                 }
-            }
-            // Current live heads fold at their `(generation, author, id)` position, as any
-            // operation does; the caller of `judge_live` already left out the ones that are an
-            // admitted immutable record too.
-            for head in self.live.heads.iter().filter(|h| h.namespace == ns) {
-                let plain = &head.plaintext;
-                let member = self.auth.member(&head.author);
-                let (mk, label) = member.map_or((MemberKind::Device, String::new()), |m| {
-                    (m.request.kind.clone(), m.request.label.clone())
-                });
-                ops.push((
-                    (
-                        head.generation,
-                        head.author.clone(),
-                        head.id.clone(),
-                        head.digest.clone(),
-                    ),
-                    OperationView {
-                        id: head.id.clone(),
-                        kind: head.kind.clone(),
-                        author: head.author.clone(),
-                        author_label: label,
-                        origin: if mk == MemberKind::Agent {
-                            "ai"
-                        } else {
-                            "person"
-                        }
-                        .into(),
-                        clock: head.generation,
-                        created: plain
-                            .get("created")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        payload: plain.get("payload").cloned().unwrap_or(Value::Null),
-                    },
-                    mk,
-                    head.digest.clone(),
-                ));
             }
             ops.sort_by(|a, b| a.0.cmp(&b.0));
             // A fold is a left fold over the operations in fold order, so when the previous
@@ -660,14 +912,15 @@ impl Derived {
             // A change token, not a counter: a function of the folded operations and their
             // order, so it is the same however the objects arrived. Zero for no operations.
             let revision = Self::revision_of(&fold);
-            let last_pos = ops.last().map(|o| o.0.clone());
+            let keys: Vec<(u64, String, String, String)> =
+                ops.iter().map(|o| o.0.clone()).collect();
             self.folded.insert(
                 ns,
                 Folded {
                     revision,
                     fold,
                     admitted,
-                    last_pos,
+                    keys,
                 },
             );
         }
@@ -791,22 +1044,117 @@ pub(super) fn effective_objects(
 /// Everything a derivation holds that a rebuild over the same inputs must reproduce, as one
 /// string: the judgement of every record, the proposals, the write index, the live judgement
 /// and each namespace fold. [`super::Account::verify_derivation`] compares it with a rebuild.
-pub(super) fn fingerprint(d: &Derived) -> String {
-    use std::fmt::Write;
-    let mut s = String::new();
-    let _ = write!(s, "{:?}|{:?}|{:?}|", d.judgement, d.windex, d.live);
+pub(super) fn fingerprint(d: &Derived) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = vec![
+        ("judgement".into(), format!("{:?}", d.judgement)),
+        ("windex".into(), format!("{:?}", d.windex)),
+        (
+            "live heads".into(),
+            format!(
+                "{:?}",
+                d.live
+                    .heads
+                    .iter()
+                    .map(|h| (
+                        &h.path[h.path.len().saturating_sub(12)..],
+                        &h.digest[..8],
+                        h.generation
+                    ))
+                    .collect::<Vec<_>>()
+            ),
+        ),
+        (
+            "live verdicts".into(),
+            format!(
+                "{:?}",
+                d.live
+                    .verdicts
+                    .iter()
+                    .map(|(p, v)| (
+                        format!(
+                            "{}..{}",
+                            &p[6..10.min(p.len())],
+                            &p[p.len().saturating_sub(8)..]
+                        ),
+                        v
+                    ))
+                    .collect::<Vec<_>>()
+            ),
+        ),
+        ("durable".into(), format!("{:?}", d.durable)),
+        ("live index".into(), format!("{:?}", d.live_idx)),
+        ("head order".into(), format!("{:?}", d.head_order)),
+    ];
     for (ns, f) in &d.folded {
-        let _ = write!(
-            s,
-            "{ns}:{}:{:?}:{:?}:{}:{:?};",
-            f.revision,
-            f.fold.order,
-            f.last_pos,
-            serde_json::to_string(&f.fold.state).unwrap_or_default(),
-            serde_json::to_string(&f.admitted).unwrap_or_default(),
-        );
+        v.push((
+            format!("fold {ns}"),
+            format!(
+                "{}:{:?}:{:?}:{}:{}",
+                f.revision,
+                f.fold.order,
+                f.keys,
+                serde_json::to_string(&f.fold.state).unwrap_or_default(),
+                serde_json::to_string(&f.admitted).unwrap_or_default(),
+            ),
+        ));
+        v.push((format!("revision {ns}"), d.revision_of_ns(ns).to_string()));
+        if let Some(o) = d.overlaid(ns) {
+            v.push((
+                format!("overlay {ns}"),
+                format!(
+                    "{}:{}:{}:{}",
+                    o.revision,
+                    o.split,
+                    serde_json::to_string(&o.fold.state).unwrap_or_default(),
+                    serde_json::to_string(&o.admitted).unwrap_or_default(),
+                ),
+            ));
+        }
     }
-    s
+    v
+}
+
+/// What readers see of `ns` when the live heads are folded together with the durable records
+/// by one plain fold of the merged order from nothing: the reference the overlay must equal.
+/// Costs a full fold of the namespace.
+pub(super) fn reference_merged(d: &Derived, ns: &str) -> Option<(u64, String, String)> {
+    let base = d.folded.get(ns)?;
+    let heads = d.head_items(ns);
+    type Op = (
+        (u64, String, String, String),
+        OperationView,
+        Option<AuthorContext>,
+    );
+    let mut ops: Vec<Op> = base
+        .keys
+        .iter()
+        .cloned()
+        .zip(base.admitted.iter().cloned())
+        .map(|(k, v)| {
+            let c = d.ctx_of(&v.author);
+            (k, v, c)
+        })
+        .collect();
+    for h in heads {
+        let c = d.ctx_of(&h.1.author);
+        ops.push((h.0, h.1, c));
+    }
+    ops.sort_by(|a, b| a.0.cmp(&b.0));
+    let policy = CheckpointPolicy {
+        every: 0,
+        retain: 0,
+    };
+    let mut fold = Namespace::new(ns);
+    let mut admitted = Vec::new();
+    for (k, v, c) in &ops {
+        fold.append(&k.3, v, c.clone(), &policy);
+        admitted.push(v.clone());
+    }
+    Some((
+        Derived::revision_of(&fold),
+        serde_json::to_string(&fold.state).unwrap_or_default(),
+        serde_json::to_string(&admitted).unwrap_or_default(),
+    ))
 }
 
 /// What a derivation holds in memory per kind, in bytes (see [`super::Account::held_bytes`]).
@@ -862,6 +1210,13 @@ impl Derived {
             for v in &mut f.admitted {
                 wipe_value(&mut v.payload);
             }
+        }
+        self.overlays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        for h in &mut self.live.heads {
+            wipe_value(&mut h.plaintext);
         }
         let mut c = self
             .cache
