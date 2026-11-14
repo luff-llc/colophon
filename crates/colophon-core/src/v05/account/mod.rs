@@ -30,6 +30,13 @@
 //! for new epochs, new vaults and slots (it can recompute what they make), and with the ECDH
 //! results and PRF outputs it passes in. Hosts MUST pass a fresh seed per action.
 //!
+//! **Erasure is best effort.** The crate forbids `unsafe` and has no zeroizing dependency. The
+//! seeds, ECDH and PRF outputs and epoch keys this module holds are the opaque types of
+//! `v05::vault` and `v05::records`, which overwrite their bytes on drop with ordinary writes
+//! that `std::hint::black_box` only discourages the optimizer from removing. The entropy seeds
+//! a host passes to `begin_*` are plain arrays: a prepared action keeps the ones it still
+//! needs until it is finished or dropped, and does not overwrite them.
+//!
 //! No accessor reaches the seed, the epoch keys or what a prepared action will sign:
 //!
 //! ```compile_fail

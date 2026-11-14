@@ -668,6 +668,10 @@ fn add_second_device(f: &mut Fixture, roles: &[&str]) -> String {
     )
     .unwrap();
     assert!(!s2.is_unlocked());
+    assert!(
+        matches!(s2.me(), Standing::Unknown(ref id) if *id == d2),
+        "a prospective identity"
+    );
     let now = f.account.now_ms();
     let mut host = std::mem::replace(&mut f.host, Host::new());
     pair_and_transfer(&mut host, &f.account, &mut s2, now);
@@ -706,6 +710,7 @@ fn add_second_device(f: &mut Fixture, roles: &[&str]) -> String {
     )
     .unwrap();
     assert!(s2.controllers().iter().any(|c| c.id == d2));
+    assert!(matches!(s2.me(), Standing::Controller(ref c) if c.id == d2 && !c.has_slot));
     // The new core builds the slot (a sealed slot: no PRF), signed by the new key.
     let entropy = f.host.fresh();
     let action = s2
@@ -2723,4 +2728,24 @@ fn a_key_a_pending_removal_would_remove_is_suspended_by_a_signer_of_it() {
         )
         .is_err());
     let _ = seed;
+}
+
+#[test]
+fn the_persisted_state_of_another_account_is_not_mixed_into_this_one() {
+    let mut f1 = create(&["notes"]);
+    let mut f2 = create_v(&["notes"], 1);
+    let theirs = Account::persisted_from_bytes(&f2.account.export_persisted().unwrap()).unwrap();
+    let e = Account::open(
+        f1.account.objects().clone(),
+        vec![],
+        Some(theirs),
+        Identity::Controller(f1.d.clone()),
+        T0,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e, Failure::Unavailable(_) | Failure::Malformed(_)),
+        "{e}"
+    );
+    let _ = &mut f1;
 }
