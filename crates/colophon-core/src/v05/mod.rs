@@ -22,11 +22,14 @@ pub mod heads;
 pub mod history;
 pub mod ids;
 pub mod members;
+pub mod pairing;
 pub mod prescan;
 pub mod records;
 pub mod replay;
 pub mod signature;
+pub mod slots;
 pub mod terms;
+pub mod vault;
 
 /// A refusal reason (§19). The protocol spelling is `refused:<reason>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
