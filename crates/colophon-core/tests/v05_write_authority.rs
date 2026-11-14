@@ -3320,3 +3320,140 @@ mod seed_paths {
         assert!(FailureLimiter::new().permit(10).is_ok());
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Revision 13 fix round: the checker's probes (r13 check), ported with their corrected outcomes.
+
+fn grant_entry(
+    objects: &Objects,
+    now: i64,
+    host: &Host,
+    account: &str,
+    n: u8,
+    issued: i64,
+    by: &Key,
+) -> Vec<u8> {
+    let (m, magree) = (key(n), key(n + 1));
+    let req = request(account, &m, &magree, "Agent", "agent", agent_terms());
+    let batch = prepare_signed(
+        objects,
+        now,
+        Kind::Grant {
+            request: req,
+            terms: granted_terms("2026-11-18T08:00:00Z"),
+            shares: vec![],
+        },
+        issued,
+        std::slice::from_ref(&by.id),
+    )
+    .unwrap();
+    let sigs = host.sign(batch.steps());
+    batch.finish(sigs).unwrap().entries[0].1.clone()
+}
+
+#[test]
+fn a_second_receipt_of_one_veto_never_makes_a_recorded_vetoed_refused() {
+    // H3: a home signs a second, lower-digest receipt of a veto after the `vetoed` was
+    // recorded. Before the fix a verifier holding it answered `malformed`, one without it `ok`.
+    let f = fixture();
+    let (mut chain, h, host) = account_with_home(&f);
+    let account = chain.account();
+    let t2_issued = T0 + 100 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t2_issued,
+            &[&f.a],
+            json!({"keyring": {"remove": [f.b.id]}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t2 = r.pending[0].clone();
+    let t2_digest = body_digest_of_env(&t2);
+    let r2 = receipt(&account, &h, &t2_digest, t2_issued + 10 * SEC);
+    chain.objects.pending.push(r2.clone());
+    let v_issued = t2_issued + 30 * SEC;
+    let batch = prepare_veto(
+        &chain.objects,
+        chain.now,
+        &VetoParams {
+            transition: t2.clone(),
+            transition_receipts: vec![r2.clone()],
+            issued_ms: v_issued,
+            signers: vec![f.b.id.clone()],
+        },
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let veto = r.pending[0].clone();
+    let v_digest = body_digest_of_env(&veto);
+    let honest_receipt = receipt(&account, &h, &v_digest, v_issued + 5 * SEC);
+    chain.objects.pending.push(honest_receipt.clone());
+    let act = prepare_activate(&chain.objects, chain.now, &t2_digest)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let batch = prepare_vetoed(&chain.objects, chain.now, &t2_digest, &v_digest).unwrap();
+    chain.run(&host, batch);
+    let honest_d = body_digest_of_env(&honest_receipt);
+    let forged = (0..5_000)
+        .map(|ms| receipt(&account, &h, &v_digest, v_issued + ms))
+        .find(|r| body_digest_of_env(r) < honest_d)
+        .expect("a lower digest within 5,000 tries");
+    let mut split = chain.objects.clone();
+    split.pending.push(forged);
+    split
+        .entries
+        .extend(act.entries.iter().map(|(_, b)| b.clone()));
+    let v = verify_history(&split, &Persisted::default(), chain.now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+    assert!(
+        v.state.unwrap().keyring().controllers.contains_key(&f.b.id),
+        "the veto holds whichever receipts a verifier holds: B stays"
+    );
+}
+
+#[test]
+fn a_second_head_of_a_witness_never_makes_a_recorded_final_refused() {
+    // H4: a witness's routine refresh head, held by a verifier but not the recorder.
+    let f = fixture();
+    let (mut chain, h, host) = account_with_home(&f);
+    let account = chain.account();
+    let t3_issued = T0 + 200 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t3_issued,
+            &[&f.a],
+            json!({"policy": {"callWindow": 600}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t3_digest = body_digest_of_env(&r.pending[0]);
+    chain
+        .objects
+        .pending
+        .push(receipt(&account, &h, &t3_digest, t3_issued + 10 * SEC));
+    let act = prepare_activate(&chain.objects, chain.now, &t3_digest).unwrap();
+    chain.run(&host, act);
+    let a = chain.state().activations().last().unwrap().clone();
+    let h1 = head(&account, &h, a.seq, &a.digest, T0 + 5_000 * SEC);
+    chain.objects.heads.push(h1.clone());
+    let fin = prepare_final(&chain.objects, chain.now, a.seq).unwrap();
+    chain.run(&host, fin);
+    let d1 = body_digest_of_env(&h1);
+    let other = (1..5_000)
+        .map(|s| head(&account, &h, a.seq, &a.digest, T0 + 5_000 * SEC - s))
+        .find(|h2| body_digest_of_env(h2) < d1)
+        .unwrap();
+    let mut split = chain.objects.clone();
+    split.heads.push(other);
+    let v = verify_history(&split, &Persisted::default(), chain.now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+}

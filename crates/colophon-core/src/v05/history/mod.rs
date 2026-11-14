@@ -439,8 +439,6 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
                     .iter()
                     .all(|h| cp.objects.predecessor.contains(h))
                 && incoming.heads.iter().all(|h| cp.objects.heads.contains(h))
-                // Held receipts decide a `vetoed`'s choice (§8.7): a new one replays.
-                && incoming.pending.iter().all(|p| cp.objects.pending.contains(p))
                 && incoming.entries.iter().all(|b| {
                     retained.contains(b)
                         || parse_entry(b).is_ok_and(|e| e.seq > saved.history().len() as u64)

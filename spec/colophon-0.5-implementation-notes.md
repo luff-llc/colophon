@@ -484,3 +484,14 @@ test of revision 13 was replayed by the Swift source.**
     "colophon/pair-qr/5"}`. `pairing.rs` has `QrPayload {account, e, nb}` and no encoder or decoder
     ("the byte format is not specified"): it needs `to_bytes`/`from_bytes` for this and a doc
     update. **Not changed** (not my file); the `protocol` member is new text, not a payload field.
+
+### Revision 13 fix round (2026-11-14)
+
+- **H3, H4 (§8.7).** The spec owner withdrew the enforcement of the choosing rules. The verifier
+  judges the receipts and heads an entry carries for validity only; `veto_choice_is_determined`,
+  the `final` head-choice check and the held-receipt replay in the fast path are gone. The choosing
+  rules stay as recorder behaviour. `t-vetoed-wrong-choice` and `t-final-head-choice-wrong` became
+  `t-vetoed-other-valid-receipt-accepted` and `t-final-head-other-valid-head-accepted` (`ok`).
+  Tests `a_second_receipt_of_one_veto_never_makes_a_recorded_vetoed_refused` and
+  `a_second_head_of_a_witness_never_makes_a_recorded_final_refused` (the checker's probes with the
+  corrected outcome). The hostile-home risk noted earlier no longer exists.

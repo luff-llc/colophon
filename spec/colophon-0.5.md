@@ -858,16 +858,20 @@ receipts, due time and veto as §8.7 says; it has no veto deadline of its own be
   it, each a `control` or `recover` controller current in the state before the entry recording
   it; a key the transition would remove may sign.
 - **Receipt** (§13.5): by a current home, `received` within 300 s after the object's `issued`.
-  **Choosing receipts:** an entry carries exactly `headQuorum` receipts for an object, from the
-  homes with the lowest member IDs whose valid receipts it holds, for each home its receipt with
-  the lowest body digest, sorted by home ID. For a veto, the receipts that may be chosen are those
-  valid under §13.5, **received at or before the transition's veto deadline** and not dated after
-  the `vetoed`'s own `issued` (which is at least the latest receipt a recorder chose, so a
-  receipt that reached the recorder later cannot make its entry fail at another verifier): a later
-  receipt is skipped, never chosen, and never blocks the entry. A verifier enforces the choice over the
-  receipts it holds together with the entry's own: a `vetoed` whose receipts are not the choice
-  among those is `malformed`. A receipt the verifier lacks cannot make a correct entry fail, since
-  the entry carries the ones it chose.
+  **Choosing receipts (a rule for a recorder):** an entry carries exactly `headQuorum` receipts for
+  an object, from the homes with the lowest member IDs whose valid receipts the recorder holds,
+  for each home its receipt with the lowest body digest, sorted by home ID, so honest recorders
+  holding the same receipts build the same entry. For a veto the receipts that may be chosen are
+  those valid under §13.5 and **received at or before the transition's veto deadline**; a later
+  receipt is skipped, never chosen, and never blocks the entry. **A verifier judges only the
+  receipts the entry carries, for validity:** `headQuorum` receipts (at most the current homes)
+  from distinct current homes, sorted by home ID, each valid under §13.5, in window and, for a
+  veto, at or before the deadline. It never refuses an entry because a different valid receipt
+  exists or is held: a verdict that depended on which objects a verifier holds would let one
+  home split verifiers. Two `vetoed` (or two `activate`) entries for one object that differ only
+  in receipts are ordered by §8.6 rule 1 (the lower body digest stands, the other is dropped). A
+  home that signed two receipts for one object is a matter for equivocation evidence, never a
+  reason to refuse an entry.
 
 **Times.** For a transition T judged in state S:
 - the delay is the larger of `recoveryDelay` at T's anchor and in S;
@@ -944,18 +948,17 @@ from heads it has seen or the order it saw things in.
   set is empty or fully excused, a `final` entry names it, a later `final` carries a head from every
   one of its witnesses, or a later full set's anchor is it or follows it. This is the one meaning
   of "final" in §8.6, §8.7 and §15.
-- **Choosing heads.** A `final` carries, for each witness, one head: among the heads valid for it
-  (signed by that home's key in the state before the activation, covering the activation on this
-  branch, not necessarily fresh) and **usable** (not dated after the `final`'s own `issued`), the
-  one with the lowest body digest. A head dated later is skipped, never chosen, and never blocks
-  the entry. A verifier enforces the choice over the heads it holds together with the entry's: a
-  `final` whose head for a witness is not the lowest among those is `malformed`. A head the
-  verifier lacks cannot make a correct entry fail, since the entry carries the ones it chose.
-  A recorder takes the lowest digest among the heads usable at its clock (not dated more than 60 s
-  ahead, §13.3) and sets `issued` to the latest it chose, so for an entry it built the two
-  measures agree; measuring against `issued` keeps a recorded `final` from changing verdict as
-  the verifier's clock moves, and from failing because a later `final` embeds a lower-digest head
-  dated after it.
+- **Choosing heads (a rule for a recorder).** A `final` carries, for each witness, one head: among
+  the heads valid for it (signed by that home's key in the state before the activation, covering
+  the activation on this branch, not necessarily fresh) and usable (not dated more than 60 s
+  ahead of the recorder's clock, §13.3), the one with the lowest body digest, and its `issued` is
+  the latest head's, so honest recorders converge. **A verifier judges only the heads the entry
+  carries:** exactly one valid covering head per non-excused witness, signed under that home's key
+  in the state before the activation, not dated after the entry's own `issued` (the measure is
+  the entry's `issued`, not the verifier's clock, so a recorded `final` never changes verdict as
+  time passes). It never refuses a `final` because a different valid head exists or is held; two
+  `final` entries of one activation are ordered by §8.6 rule 1. A home with two heads at one seq
+  is a matter for equivocation evidence (§13.3), never a reason to refuse an entry.
 - **Order.** An activation that is not removal-only gets a `final`, or becomes final by excusal,
   only when every earlier activation that is not removal-only is final. Removal-only activations
   are outside this order: they never wait for an earlier provisional activation, and none waits
@@ -1007,7 +1010,7 @@ with the result shown, and an entry that fails changes nothing. Every recording 
 | **`suspend` (key K, T, receipts)** | §8.5 steps 1–2; signer is a signer of T (`badSignature`); T valid at E; T not recorded on the branch; T removes or demotes K; T's delta not void; the signer's unit has no outstanding suspension (`malformed`) | K suspended until the earliest of: T's `activate` or `vetoed`; the first entry after which T is no longer valid at a hypothetical `activate`; the first entry, or the verifier's clock, past T's due time + 7 days. |
 | **`activate` (T, receipts)**, T not a full set | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); delta not void (`malformed`) | Apply the delta (with `keep`, §8.3's slot drops, retiring, and the drop of keys the removed key added); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set; it becomes final when every witness is excused, in Order (the fixed point). |
 | **Full-set `activate`** | As `activate`, with the full set's due time; no veto | As `activate`; every activation before T's anchor becomes final. |
-| **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts chosen as §8.7 "Choosing receipts" says, each within 300 s of V's `issued` and at or before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
+| **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts: `headQuorum` from distinct current homes, sorted, each valid, within 300 s of V's `issued` and at or before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
 | **`final` (activation A, heads)** | A is an `activate` on the branch, not yet final; if A is not removal-only, every earlier activation that is not removal-only is final; `heads` is non-empty and has exactly one head per witness of A, each signed by that home's key in the state before A, covering A on this branch (not necessarily fresh); `by` = A's `by`; `issued` = max(latest head's `issued`, previous `issued`) (`malformed`) | A is final, and so is every earlier activation whose witnesses all have a head here covering it; what they added counts. A removal-only A that revoked homes excuses them from every other activation's witnesses. |
 | **`successionVetoed`** | §15.1 step 4 (`malformed`; a veto signature by an ineligible key `badSignature`) | The succession is never verified. |
 | **Conflict at one seq** | §8.6 | The standing entry is on the branch; rollback as above. |

@@ -57,34 +57,36 @@ fn now_of(name: &str) -> String {
 }
 
 #[test]
-fn the_lowest_digest_head_is_accepted_and_the_other_is_refused() {
-    for (name, want) in [
-        ("t-final-head-choice-right", ("ok", 4)),
-        ("t-final-head-ahead-ignored", ("ok", 4)),
-        ("t-final-head-choice-wrong", ("malformed", 4)),
+fn a_final_is_judged_by_the_heads_it_carries_whatever_else_is_held() {
+    // §8.7 (revision 13 fix round): one valid covering head per witness; a different valid head
+    // the verifier holds never makes the entry refused.
+    for name in [
+        "t-final-head-choice-right",
+        "t-final-head-ahead-ignored",
+        "t-final-head-other-valid-head-accepted",
     ] {
         assert_eq!(
             code(&vector(name, &[]), &now_of(name)),
-            (want.0.to_string(), want.1),
+            ("ok".to_string(), 4),
             "{name}"
         );
+    }
+    for skip in ["head-H1-low", "head-H1-high"] {
+        for name in [
+            "t-final-head-choice-right",
+            "t-final-head-other-valid-head-accepted",
+        ] {
+            assert_eq!(
+                code(&vector(name, &[skip]), &now_of(name)).0,
+                "ok",
+                "{name} without {skip}"
+            );
+        }
     }
 }
 
 #[test]
-fn a_verifier_missing_the_lower_head_does_not_refuse() {
-    let n = "t-final-head-choice-wrong";
-    // Without the lower head the verifier has no evidence the entry chose wrongly.
-    assert_eq!(code(&vector(n, &["head-H1-low"]), &now_of(n)).0, "ok");
-    let n = "t-final-head-choice-right";
-    assert_eq!(code(&vector(n, &["head-H1-high"]), &now_of(n)).0, "ok");
-    assert_eq!(code(&vector(n, &["head-H1-low"]), &now_of(n)).0, "ok");
-}
-
-#[test]
 fn the_verdict_does_not_change_as_the_clock_advances() {
-    // A head dated ahead of the entry is not usable, whatever the verifier's clock says later:
-    // judging usability by the verifier's clock would turn an `ok` into `malformed` over time.
     let n = "t-final-head-ahead-ignored";
     assert_eq!(
         code(&vector(n, &[]), "2026-11-20T00:00:00Z"),

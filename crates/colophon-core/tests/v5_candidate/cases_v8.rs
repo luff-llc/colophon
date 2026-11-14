@@ -932,8 +932,8 @@ pub fn part3(o: &mut Out) {
         &v_c,
         std::slice::from_ref(&hi_r),
     );
-    case(o, "t-vetoed-wrong-choice", &c, bad("malformed", 3),
-         "Both homes receipted the veto in time and the verifier holds both; the entry carries the higher home ID's receipt, not the chosen one.",
+    case(o, "t-vetoed-other-valid-receipt-accepted", &c, ok_at(3),
+         "Both homes receipted the veto in time and the verifier holds both; the entry carries the higher home ID's receipt, not the one a recorder would choose. The entry is still valid: a verifier judges the receipts an entry carries, never the ones it could have carried, so verdicts do not depend on which objects a verifier holds.",
          &["8.7"], vobjs(vec![("receipt-low", lo_r), ("receipt-high", hi_r)]),
          Some(ver(DUE0 + 60)), vec![]);
 
@@ -1098,8 +1098,8 @@ pub fn part3(o: &mut Out) {
          Some(ver(DUE0 + 200)), vec![]);
     let mut wrong = pc.clone();
     final_of(&mut wrong, 3, vec![h1_high.clone(), h2_head.clone()]);
-    case(o, "t-final-head-choice-wrong", &wrong, bad("malformed", 4),
-         "The same two heads of H1, both held; the `final` carries the higher body digest, not the chosen one.",
+    case(o, "t-final-head-other-valid-head-accepted", &wrong, ok_at(4),
+         "The same two heads of H1, both held; the `final` carries the higher body digest, not the one a recorder would choose. It is still valid (one valid covering head per witness): a verifier never refuses an entry for a different valid head it holds.",
          &["8.7", "13.3"], head_objs(vec![("head-H1-low", h1_low.clone()), ("head-H1-high", h1_high.clone())]),
          Some(ver(DUE0 + 200)), vec![]);
     // A head dated 1000 s ahead of the verifier's clock is not usable, however low its digest.
