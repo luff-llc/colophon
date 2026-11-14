@@ -125,6 +125,16 @@ impl Change {
     pub fn homes(fields: Value) -> Self {
         Self(Map::from_iter([("homes".to_string(), fields)]))
     }
+    /// Grant a member by a transition (§8.7, §9.2): the embedded request and the granted
+    /// terms. An import grant (§9.3: `terms.import`) and a home's are transitions. A transition's
+    /// `grant` carries no shares: once it is final, [`Account::begin_renew_shares`] seals the
+    /// epochs the member is owed.
+    pub fn grant(request: &[u8], terms: Value) -> Self {
+        Self(Map::from_iter([(
+            "grant".to_string(),
+            json!({"request": crate::v05::encoding::encode_base64(request), "terms": terms}),
+        )]))
+    }
     /// Add another component set to this one (components of the same name merge their
     /// members, the right-hand side winning).
     pub fn and(mut self, other: Change) -> Self {
