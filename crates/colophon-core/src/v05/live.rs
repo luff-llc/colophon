@@ -246,18 +246,18 @@ pub(crate) fn judge_live_with(
     }
     let account = auth.account().clone();
     // The admitted durable headers, by namespace, in fold order.
-    let mut admitted: BTreeMap<String, Vec<(u64, String, String)>> = BTreeMap::new();
-    let mut retained: BTreeSet<String> = BTreeSet::new();
-    let mut admitted_ids: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut admitted: BTreeMap<&str, Vec<(u64, &str, &str)>> = BTreeMap::new();
+    let mut retained: BTreeSet<&str> = BTreeSet::new();
+    let mut admitted_ids: BTreeSet<(&str, &str)> = BTreeSet::new();
     for j in &judgement.records {
         if j.outcome == Outcome::Admitted {
             if let (Some(ns), Some(a), Some(id), Some(d)) = (
-                j.namespace.clone(),
-                j.author.clone(),
-                j.id.clone(),
-                j.digest.clone(),
+                j.namespace.as_deref(),
+                j.author.as_deref(),
+                j.id.as_deref(),
+                j.digest.as_deref(),
             ) {
-                admitted_ids.insert((a.clone(), id.clone()));
+                admitted_ids.insert((a, id));
                 admitted.entry(ns).or_default().push((j.clock, a, id));
                 retained.insert(d);
             }
@@ -268,7 +268,7 @@ pub(crate) fn judge_live_with(
     }
     let earlier = |ns: &str, key: (u64, &str, &str)| -> u64 {
         admitted.get(ns).map_or(0, |v| {
-            let at = v.partition_point(|(c, a, i)| (*c, a.as_str(), i.as_str()) < key);
+            let at = v.partition_point(|(c, a, i)| (*c, *a, *i) < key);
             at.checked_sub(1).map_or(0, |i| v[i].0)
         })
     };
@@ -332,9 +332,9 @@ pub(crate) fn judge_live_with(
             if current.is_none() {
                 current = Some(*g);
                 let v = group[0];
-                if retained.contains(&v.head.digest) {
+                if retained.contains(v.head.digest.as_str()) {
                     verdicts[v.idx] = Some(LiveVerdict::Retained);
-                } else if admitted_ids.contains(&(v.head.author.clone(), v.head.id.clone())) {
+                } else if admitted_ids.contains(&(v.head.author.as_str(), v.head.id.as_str())) {
                     // One author, one operation ID: a live head and an immutable record that
                     // share it do not both fold (0.3 §5: `duplicateID`).
                     verdicts[v.idx] = Some(LiveVerdict::Refused("duplicateID"));

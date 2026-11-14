@@ -479,6 +479,7 @@ impl Derived {
         self.windex.add(news.into_iter(), &self.auth);
         // Live candidates read the admitted records: judged again when there are any.
         if !inputs.live.is_empty() {
+            let before = format!("{:?}", self.live.heads);
             self.live = crate::v05::live::judge_live_with(
                 &self.auth,
                 &self.keys,
@@ -487,7 +488,11 @@ impl Derived {
                 None,
                 Some(&mut cache),
             );
-            full_fold = true;
+            // The folds take the live heads at their positions: they are folded again only
+            // when the heads are not the ones already folded.
+            if format!("{:?}", self.live.heads) != before {
+                full_fold = true;
+            }
         }
         drop(cache);
         self.fold_applied = 0;
@@ -820,4 +825,48 @@ pub(super) fn held_bytes(d: &Derived) -> (usize, usize) {
         .map(|v| serde_json::to_vec(v).map_or(0, |b| b.len()))
         .sum();
     (plaintext, folds)
+}
+
+/// Overwrite every string and number of `v` with zeros and drop its structure.
+pub(crate) fn wipe_value(v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            let mut b = std::mem::take(s).into_bytes();
+            crate::v05::hpke_wiped::wipe(&mut b);
+        }
+        Value::Array(a) => {
+            for x in a.iter_mut() {
+                wipe_value(x);
+            }
+            a.clear();
+        }
+        Value::Object(m) => {
+            for (_, x) in m.iter_mut() {
+                wipe_value(x);
+            }
+            m.clear();
+        }
+        other => *other = Value::Null,
+    }
+}
+
+impl Derived {
+    /// Overwrite the opened plaintext this derivation (and its cache) holds, before it is freed.
+    pub(super) fn wipe_plaintext(&mut self) {
+        for j in &mut self.judgement.records {
+            if let Some(p) = j.plaintext.as_mut() {
+                wipe_value(p);
+            }
+        }
+        for f in self.folded.values_mut() {
+            for v in &mut f.admitted {
+                wipe_value(&mut v.payload);
+            }
+        }
+        let mut c = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        c.wipe_plaintext();
+    }
 }

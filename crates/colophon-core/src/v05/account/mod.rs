@@ -138,6 +138,7 @@
 mod action;
 mod create;
 mod derived;
+pub(crate) use derived::wipe_value;
 mod moving;
 mod read;
 mod stored;
@@ -714,22 +715,28 @@ impl Account {
         if !ok {
             return None;
         }
-        let old = std::mem::take(&mut self.records);
-        let mut merged: Vec<HeldRecord> = Vec::with_capacity(total);
-        let mut old_it = old.into_iter();
-        let mut at = 0usize;
-        for (pos, r) in &placed {
-            while at < *pos {
-                if let Some(o) = old_it.next() {
-                    merged.push(o);
+        if placed.len() <= 16 {
+            for (pos, r) in &placed {
+                self.records.insert(*pos, (*r).clone());
+            }
+        } else {
+            let old = std::mem::take(&mut self.records);
+            let mut merged: Vec<HeldRecord> = Vec::with_capacity(total);
+            let mut old_it = old.into_iter();
+            let mut at = 0usize;
+            for (pos, r) in &placed {
+                while at < *pos {
+                    if let Some(o) = old_it.next() {
+                        merged.push(o);
+                    }
+                    at += 1;
                 }
+                merged.push((*r).clone());
                 at += 1;
             }
-            merged.push((*r).clone());
-            at += 1;
+            merged.extend(old_it);
+            self.records = merged;
         }
-        merged.extend(old_it);
-        self.records = merged;
         Some(before)
     }
 
