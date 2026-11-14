@@ -796,7 +796,7 @@ fn differential_canonical_and_strict() {
             byte_mutate(&mut r, &mut bytes);
         }
         total += 1;
-        let model = model_canonical_accepts(&bytes, 127);
+        let model = model_canonical_accepts(&bytes, 64);
         let engine = engine_canonical(&bytes);
         if case % 4 == 0 && !byte_mutated && !(engine && model) {
             // Unmutated canonical bytes must be accepted by both.
@@ -819,7 +819,7 @@ fn differential_canonical_and_strict() {
         }
         // Strict generic parse agreement (any JSON, canonical or not).
         strict_cases += 1;
-        let ms = model_parse(&bytes, 127).is_ok();
+        let ms = model_parse(&bytes, 64).is_ok();
         let es = strict_parse(&bytes).is_ok();
         if ms != es && dis_strict.len() < 50 {
             dis_strict.push(format!(
@@ -876,7 +876,7 @@ fn number_forms_exhaustive() {
         count += 1;
         let b = format!("{{\"n\":{t}}}");
         let (m, e) = (
-            model_canonical_accepts(b.as_bytes(), 127),
+            model_canonical_accepts(b.as_bytes(), 64),
             engine_canonical(b.as_bytes()),
         );
         if m != e {
@@ -911,11 +911,11 @@ fn string_escapes_exhaustive() {
             count += 1;
             let b = format!("{{\"s\":\"{f}\"}}");
             let (m, e) = (
-                model_canonical_accepts(b.as_bytes(), 127),
+                model_canonical_accepts(b.as_bytes(), 64),
                 engine_canonical(b.as_bytes()),
             );
             let (ms, es) = (
-                model_parse(b.as_bytes(), 127).is_ok(),
+                model_parse(b.as_bytes(), 64).is_ok(),
                 strict_parse(b.as_bytes()).is_ok(),
             );
             if m != e || ms != es {
@@ -1004,7 +1004,7 @@ fn nesting_limit_and_no_stack_exhaustion() {
     for d in [limit - 1, limit, limit + 1] {
         let b = format!("{{\"a\":{}{}}}", "[".repeat(d - 1), "]".repeat(d - 1));
         assert_eq!(
-            model_canonical_accepts(b.as_bytes(), 127),
+            model_canonical_accepts(b.as_bytes(), 64),
             engine_canonical(b.as_bytes()),
             "depth {d}"
         );

@@ -15,29 +15,42 @@
 //! description.
 #![allow(clippy::unwrap_used)]
 use base64::{engine::general_purpose::STANDARD, Engine};
+use colophon_core::v05::history::{check_pending_transition, Stop};
 use colophon_core::v05::{
-    calls::{
-        verify_call, AccountView, CallConfig, ControllerStatus, HistoryVerifierOutput,
-        MemberStatus, ViewController, ViewMember,
-    },
-    descriptor::{Controller, Policy},
-    encoding::{bounds, canonical_body, digest, parse_date, strict_parse},
+    calls::{verify_call, AccountView, CallConfig, ControllerStatus},
+    descriptor::Controller,
+    encoding::{bounds, canonical_body, parse_date},
     heads::{verify_head, HeadContext},
-    ids::{key_id, AccountId, Reference},
-    members::{AuthorityHeader, Grant, GrantContext, Request, Revoke},
+    history::{verify_history, Objects, Persisted},
+    ids::{AccountId, Reference},
     replay::MemoryReplayStore,
     signature::{verify_authority_signature, verify_raw, AssertionBytes, AuthorityRule, Checked},
-    terms::{Terms, TermsKind},
     Failure,
 };
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// In-scope vectors whose expected outcome contradicts the spec text as this implementation
 /// reads it, with the reason. They are reported as FAIL (disputed), not bent to pass.
-const DISPUTED: &[(&str, &str)] = &[];
+const DISPUTED: &[(&str, &str)] = &[
+    (
+        "rules/t-receipt-by-revoked-home",
+        "H2's revocation at seq 3 is under the control rule and has no `final`; §8.7 \"Revoking a home\": a revoked home \
+         stays current, for receipts too, until its revocation is final, so its receipt at seq 4 is valid",
+    ),
+    (
+        "rules/t-recovery-rule-appoints-home-low-threshold",
+        "the genesis has threshold 2 and one control signer (Ph signs only `additions`, which never count toward a rule, \
+         §4.1): the genesis fails the control rule at seq 1",
+    ),
+    (
+        "rules/t-veto-22-signers",
+        "the genesis keyring keeps the base slot naming A, who is not a controller of this account (§7.2: slots name \
+         current controllers): the genesis is malformed at seq 1",
+    ),
+];
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -99,368 +112,237 @@ fn parse_controllers(keyring: &Value) -> Result<Vec<Controller>, Failure> {
         .collect()
 }
 
-type ControllerFx = (Vec<(u64, Option<Controller>)>, ControllerStatus);
-struct MemberFx {
-    req: Request,
-    terms: Terms,
-    granted: u64,
-    revoked: Option<u64>,
-    provisional: bool,
-}
-/// The fixture loader's result.
-struct Loaded {
-    account: AccountId,
-    history: Vec<String>,
-    policies: Vec<(u64, Policy)>,
-    controllers: BTreeMap<String, ControllerFx>,
-    members: Vec<MemberFx>,
-    points: BTreeSet<Vec<u8>>,
-    namespaces: Vec<String>,
-    /// Embedded transition body digests and the seq of their `activate`.
-    activations: Vec<(String, u64)>,
-    undecidable: bool,
-}
-
-/// Load an authority history from record directories, entry by entry. Returns the seq and
-/// failure of the first entry that fails.
-fn load(dirs: &[PathBuf]) -> Result<Loaded, (u64, Failure)> {
-    let mut files = Vec::new();
-    for d in dirs {
-        let mut fs_: Vec<PathBuf> = fs::read_dir(d.join("authority"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        fs_.sort();
-        files.extend(fs_);
-    }
-    let mut l = Loaded {
-        account: AccountId::parse(&"0".repeat(64)).unwrap(),
-        history: Vec::new(),
-        policies: Vec::new(),
-        controllers: BTreeMap::new(),
-        members: Vec::new(),
-        points: BTreeSet::new(),
-        namespaces: Vec::new(),
-        activations: Vec::new(),
-        undecidable: false,
-    };
-    for (i, f) in files.iter().enumerate() {
-        let seq = i as u64 + 1;
-        let fail = |e: Failure| (seq, e);
-        let env = strict_parse(&fs::read(f).unwrap()).map_err(fail)?;
-        let body = b64(env["body"].as_str().unwrap());
-        let value = canonical_body(&body, bounds::AUTHORITY_BODY).map_err(fail)?;
-        let (header, fields) = AuthorityHeader::split(value.clone()).map_err(fail)?;
-        if header.seq != seq {
-            return Err((seq, Failure::Malformed("seq".into())));
-        }
-        let current: BTreeMap<String, Controller> = if header.kind == "genesis" {
-            parse_controllers(&value["keyring"])
-                .map_err(fail)?
-                .into_iter()
-                .map(|c| (c.id(), c))
-                .collect()
-        } else {
-            l.controllers
-                .iter()
-                .filter_map(|(id, (vs, _))| {
-                    vs.last()
-                        .and_then(|(_, c)| c.clone())
-                        .map(|c| (id.clone(), c))
-                })
-                .collect()
-        };
-        // The rule each signature is counted under (fixture-level reading of §8.4).
-        let primary_rule = match header.kind.as_str() {
-            "genesis" | "layout" | "migration" => AuthorityRule::Control,
-            "keyring" => AuthorityRule::KeyringEntry,
-            "suspend" => AuthorityRule::Suspend,
-            _ => AuthorityRule::Single,
-        };
-        if let Some(sig) = env.get("signature").and_then(Value::as_str) {
-            let by = current
-                .get(&header.by)
-                .ok_or_else(|| fail(Failure::BadSignature("by is not a controller".into())))?;
-            if check_sig(by, &body, &b64(sig), env.get("assertion"), primary_rule).map_err(fail)?
-                == Checked::UndecidableForm
-            {
-                l.undecidable = true;
-            }
-        } else if header.kind != "activate" && header.kind != "vetoed" {
-            return Err(fail(Failure::Malformed("missing signature".into())));
-        }
-        for (list, rule) in [
-            ("cosignatures", primary_rule),
-            ("additions", AuthorityRule::Possession),
-        ] {
-            for item in env
-                .get(list)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let signer = item["signer"].as_str().unwrap();
-                let pool: BTreeMap<String, Controller> =
-                    if list == "additions" && header.kind == "keyring" {
-                        parse_controllers(&value["keyring"])
-                            .map_err(fail)?
-                            .into_iter()
-                            .map(|c| (c.id(), c))
-                            .collect()
-                    } else {
-                        current.clone()
-                    };
-                let c = pool.get(signer).ok_or_else(|| {
-                    fail(Failure::BadSignature(format!("{list}: unknown signer")))
-                })?;
-                if check_sig(
-                    c,
-                    &body,
-                    &b64(item["signature"].as_str().unwrap()),
-                    item.get("assertion"),
-                    rule,
-                )
-                .map_err(fail)?
-                    == Checked::UndecidableForm
-                {
-                    l.undecidable = true;
-                }
-            }
-        }
-        match header.kind.as_str() {
-            "genesis" => {
-                l.account = AccountId::of_genesis(&body);
-                let kr = &value["keyring"];
-                for c in parse_controllers(kr).map_err(fail)? {
-                    l.points.insert(c.key().signing().to_vec());
-                    if let Some(a) = c.key().agreement() {
-                        l.points.insert(a.to_vec());
-                    }
-                    l.controllers
-                        .insert(c.id(), (vec![(seq, Some(c))], ControllerStatus::Active));
-                }
-                for k in ["signing", "agreement"] {
-                    l.points.insert(b64(kr["vault"][k].as_str().unwrap()));
-                }
-                l.policies.push((
-                    seq,
-                    Policy::parse(kr["policy"].clone(), "policy").map_err(fail)?,
-                ));
-                l.namespaces = value["namespaces"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_string())
-                    .collect();
-            }
-            "grant" => {
-                let ctx = GrantContext {
-                    account: &l.account,
-                    issued_ms: header.issued.1,
-                    namespaces: &l.namespaces,
-                    known_keys: &l.points,
-                    epochs: None,
-                };
-                let g = Grant::parse(fields, ctx).map_err(fail)?;
-                add_member(&mut l, g.request, g.terms, seq, false);
-            }
-            "revoke" => {
-                let r = Revoke::parse(fields).map_err(fail)?;
-                if let Some(m) = l.members.iter_mut().find(|m| m.req.member_id() == r.member) {
-                    m.revoked = Some(seq);
-                }
-            }
-            "activate" => {
-                // §8.7 is out of scope: the embedded transition's change is applied as given.
-                let t_bytes = b64(value["transition"].as_str().unwrap());
-                let t_env = strict_parse(&t_bytes).map_err(fail)?;
-                let t_body = b64(t_env["body"].as_str().unwrap());
-                l.activations.push((digest(&t_body), seq));
-                let t: Value = serde_json::from_slice(&t_body).unwrap();
-                let change = &t["change"];
-                for a in change["homes"]["appoint"].as_array().into_iter().flatten() {
-                    let req =
-                        Request::parse(&b64(a["request"].as_str().unwrap()), true).map_err(fail)?;
-                    let terms =
-                        Terms::parse(a["terms"].clone(), TermsKind::Member).map_err(fail)?;
-                    add_member(&mut l, req, terms, seq, true);
-                }
-                for c in change["keyring"]["add"].as_array().into_iter().flatten() {
-                    let c = Controller::parse(c.clone(), "controller").map_err(fail)?;
-                    l.controllers.insert(
-                        c.id(),
-                        (vec![(seq, Some(c))], ControllerStatus::AddedNotFinal),
-                    );
-                }
-                for id in change["keyring"]["remove"].as_array().into_iter().flatten() {
-                    if let Some((vs, _)) = l.controllers.get_mut(id.as_str().unwrap()) {
-                        vs.push((seq, None));
-                    }
-                }
-            }
-            "suspend" => {
-                let key = value["key"].as_str().unwrap();
-                if let Some((_, st)) = l.controllers.get_mut(key) {
-                    *st = ControllerStatus::Suspended;
-                }
-            }
-            other => {
-                return Err((
-                    seq,
-                    Failure::Malformed(format!("fixture loader does not handle {other}")),
-                ))
-            }
-        }
-        l.history.push(digest(&body));
-    }
-    Ok(l)
-}
-fn add_member(l: &mut Loaded, req: Request, terms: Terms, seq: u64, provisional: bool) {
-    l.points.insert(req.signing.clone());
-    l.points.insert(req.agreement.clone());
-    l.members.push(MemberFx {
-        req,
-        terms,
-        granted: seq,
-        revoked: None,
-        provisional,
-    });
-}
-
-fn head_files(dir: &Path, ver: &Value) -> Vec<PathBuf> {
-    match &ver["heads"] {
-        Value::Array(a) => a.iter().map(|s| repo().join(s.as_str().unwrap())).collect(),
-        _ => {
-            let mut v: Vec<PathBuf> = fs::read_dir(dir.join("objects"))
-                .map(|r| {
-                    r.map(|e| e.unwrap().path())
-                        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("head"))
-                        .collect()
-                })
-                .unwrap_or_default();
-            v.sort();
-            v
-        }
-    }
-}
-
-/// Build the view, resolving finality from the heads (§8.7 "Finality", fixture-level): an
-/// activation is final once every home current before it has a fresh head covering it.
-fn view_of(l: &Loaded, dir: &Path, case: &Value, now: i64) -> Result<AccountView, String> {
-    let heads: Vec<Vec<u8>> = head_files(dir, &case["verifier"])
-        .iter()
+fn files_in(dir: &Path) -> Vec<Vec<u8>> {
+    let mut v: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|r| r.map(|e| e.unwrap().path()).collect())
+        .unwrap_or_default();
+    v.sort();
+    v.into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .map(|p| fs::read(p).unwrap())
-        .collect();
-    let max_age = l.policies.last().unwrap().1.head_max_age();
-    // Heads by the homes that are final so far, resolved activation by activation.
-    let mut final_member: Vec<bool> = l.members.iter().map(|m| !m.provisional).collect();
-    let mut final_seq: BTreeSet<u64> = BTreeSet::new();
-    for (_, aseq) in &l.activations {
-        let homes_before: Vec<(String, Vec<u8>)> = l
-            .members
-            .iter()
-            .zip(&final_member)
-            .filter(|(m, f)| {
-                **f && m.granted < *aseq && m.terms.serves_home() && m.revoked.is_none()
-            })
-            .map(|(m, _)| (m.req.member_id(), m.req.signing.clone()))
-            .collect();
-        let covered = homes_before.iter().all(|(id, _)| {
-            heads.iter().any(|h| {
-                let ctx = HeadContext {
-                    account: &l.account,
-                    history: &l.history,
-                    homes: &homes_before,
-                    now_ms: now,
-                };
-                verify_head(h, ctx)
-                    .is_ok_and(|h| h.by() == id && h.seq() >= *aseq && h.fresh(now, max_age))
-            })
-        });
-        if covered {
-            final_seq.insert(*aseq);
-            for (m, f) in l.members.iter().zip(final_member.iter_mut()) {
-                if m.granted == *aseq {
-                    *f = true;
-                }
+        .collect()
+}
+
+/// The object set of a case for the history verifier: its records (or the histories the
+/// verifier names), and its objects: heads by name or by `verifier.heads`, everything else
+/// except the call as pending objects.
+fn objects_for(dir: &Path, ver: &Value) -> Objects {
+    let record_dirs: Vec<PathBuf> = match &ver["history"] {
+        Value::String(s) => vec![repo().join(s)],
+        Value::Array(a) => a.iter().map(|s| repo().join(s.as_str().unwrap())).collect(),
+        _ => vec![dir.join("records")],
+    };
+    let mut o = Objects::default();
+    for d in record_dirs {
+        o.entries.extend(files_in(&d.join("authority")));
+    }
+    let mut objs: Vec<PathBuf> = fs::read_dir(dir.join("objects"))
+        .map(|r| r.map(|e| e.unwrap().path()).collect())
+        .unwrap_or_default();
+    objs.sort();
+    for p in objs {
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        if name.starts_with("head") {
+            if !ver["heads"].is_array() {
+                o.heads.push(fs::read(&p).unwrap());
+            }
+        } else if name != "call.json" {
+            o.pending.push(fs::read(&p).unwrap());
+        }
+    }
+    for h in ver["heads"].as_array().into_iter().flatten() {
+        o.heads
+            .push(fs::read(repo().join(h.as_str().unwrap())).unwrap());
+    }
+    o
+}
+
+/// The view a call is verified over: the history verifier's verdict on the case's objects.
+fn view_for(dir: &Path, case: &Value, now: i64) -> Result<AccountView, String> {
+    let ver = &case["verifier"];
+    let objects = objects_for(dir, ver);
+    let verdict = verify_history(&objects, &Persisted::default(), now);
+    if verdict.stop.is_some() {
+        return Err(format!(
+            "history: {} at seq {}",
+            verdict.code(),
+            verdict.seq()
+        ));
+    }
+    let view =
+        AccountView::from_history_verifier(&verdict, &objects, now).map_err(|e| e.to_string())?;
+    // Statuses a vector states must be what the verifier derived.
+    if let Some(stated) = ver["statuses"]["controllers"].as_object() {
+        for (id, st) in stated {
+            let want = match st.as_str().unwrap_or("") {
+                "pendingAddition" => ControllerStatus::PendingAddition,
+                "pendingRemoval" => ControllerStatus::PendingRemoval,
+                "suspended" => ControllerStatus::Suspended,
+                "addedNotFinal" => ControllerStatus::AddedNotFinal,
+                other => return Err(format!("unknown status {other}")),
+            };
+            let got = view.controller_status(id);
+            if got != Some(want) {
+                return Err(format!(
+                    "status of {id}: vector says {want:?}, verifier derived {got:?}"
+                ));
             }
         }
     }
-    let mut controllers = l.controllers.clone();
-    for (vs, st) in controllers.values_mut() {
-        if *st == ControllerStatus::AddedNotFinal
-            && vs.first().is_some_and(|(s, _)| final_seq.contains(s))
-        {
-            *st = ControllerStatus::Active;
+    Ok(view)
+}
+
+/// The object set of a case: its records, every branch, and the objects (heads by name).
+pub fn objects_of(dir: &Path) -> Objects {
+    let mut o = Objects {
+        entries: files_in(&dir.join("records/authority")),
+        ..Default::default()
+    };
+    for e in fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        if name.starts_with("branch-") {
+            o.entries.extend(files_in(&p.join("authority")));
         }
     }
-    // Pending transitions: a transition object no `activate` embeds.
-    if dir.join("objects/transition.json").exists() {
-        let t = json(&dir.join("objects/transition.json"));
-        let t_digest = digest(&b64(t["body"].as_str().unwrap()));
-        if !l.activations.iter().any(|(d, _)| d == &t_digest) {
-            let body = body_of(&t);
-            for id in body["change"]["keyring"]["remove"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                if let Some((_, st)) = controllers.get_mut(id.as_str().unwrap()) {
-                    if *st == ControllerStatus::Active {
-                        *st = ControllerStatus::PendingRemoval;
-                    }
-                }
-            }
-            for c in body["change"]["keyring"]["add"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                let id = key_id(&b64(c["key"]["signing"].as_str().unwrap()));
-                controllers
-                    .entry(id)
-                    .or_insert((Vec::new(), ControllerStatus::PendingAddition));
-            }
+    let mut objs: Vec<PathBuf> = fs::read_dir(dir.join("objects"))
+        .map(|r| r.map(|e| e.unwrap().path()).collect())
+        .unwrap_or_default();
+    objs.sort();
+    for p in objs {
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        let bytes = fs::read(&p).unwrap();
+        if name.starts_with("head") {
+            o.heads.push(bytes);
+        } else if name != "call.json" {
+            o.pending.push(bytes);
         }
     }
-    let members = l
-        .members
-        .iter()
-        .zip(&final_member)
-        .map(|(m, f)| {
-            ViewMember::new(
-                m.req.signing.clone(),
-                m.req.kind.clone(),
-                m.terms.clone(),
-                m.granted,
-                Vec::new(),
-                Vec::new(),
-                m.revoked,
-                if *f {
-                    MemberStatus::Active
-                } else {
-                    MemberStatus::AddedNotFinal
+    o
+}
+
+fn now_of(case: &Value) -> i64 {
+    parse_date(
+        case["verifier"]["now"]
+            .as_str()
+            .unwrap_or("2026-11-20T00:00:00Z"),
+    )
+    .unwrap()
+}
+
+fn run_history(dir: &Path, case: &Value) -> Outcome {
+    let exp = &case["expected"];
+    if let Some(want) = exp.get("transition").and_then(Value::as_str) {
+        // A held transition judged against the verified state.
+        let objs = objects_of(dir);
+        let v = verify_history(&objs, &Persisted::default(), now_of(case));
+        let Some(st) = v.state else {
+            return Outcome::Fail("history failed".into());
+        };
+        let t = fs::read(dir.join("objects/transition.json")).unwrap();
+        let got = match check_pending_transition(&st, &t) {
+            Ok(()) => "ok".to_string(),
+            Err(f) => f.code(),
+        };
+        return if got == want {
+            Outcome::Pass(format!("transition {got}"))
+        } else {
+            Outcome::Fail(format!("transition: expected {want}, got {got}"))
+        };
+    }
+    if let Some(want) = exp.get("standsAtSeq3").and_then(Value::as_str) {
+        let v = verify_history(&objects_of(dir), &Persisted::default(), now_of(case));
+        let got = v.branch.get(2).cloned().unwrap_or_default();
+        return if got == want {
+            Outcome::Pass("the lower body digest stands".into())
+        } else {
+            Outcome::Fail(format!("stands {got} ({})", v.code()))
+        };
+    }
+    let (Some(result), Some(seq)) = (
+        exp.get("result").and_then(Value::as_str),
+        exp.get("seq").and_then(Value::as_u64),
+    ) else {
+        return Outcome::NotImplemented("expectation not machine-checkable in this step (events, home-side or builder properties)");
+    };
+    if case["verifier"].get("variants").is_some() {
+        // Conflict without evidence: the same verdict for every high-water mark.
+        let objs = objects_of(dir);
+        let mut codes = Vec::new();
+        for v in case["verifier"]["variants"].as_array().unwrap() {
+            let hw = (
+                v["highWater"]["seq"].as_u64().unwrap(),
+                v["highWater"]["digest"].as_str().unwrap().to_string(),
+            );
+            let verdict = verify_history(
+                &objs,
+                &Persisted {
+                    high_water: Some(hw),
                 },
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    let controllers = controllers
-        .into_iter()
-        .map(|(id, (vs, st))| ViewController::new(id, vs, st))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    AccountView::from_history_verifier(HistoryVerifierOutput {
-        account: l.account.clone(),
-        history: l.history.clone(),
-        policies: l.policies.clone(),
-        controllers,
-        members,
-        heads,
-        vouched_fork: false,
-        principal_points: l.points.clone(),
-    })
-    .map_err(|e| e.to_string())
+                now_of(case),
+            );
+            codes.push((verdict.code(), verdict.seq()));
+        }
+        let want = (result.to_string(), seq);
+        return if codes.iter().all(|c| c == &want) {
+            Outcome::Pass(format!("{result} at seq {seq} for every high-water mark"))
+        } else {
+            Outcome::Fail(format!("expected {want:?}, got {codes:?}"))
+        };
+    }
+    let verdict = verify_history(&objects_of(dir), &Persisted::default(), now_of(case));
+    let got = (verdict.code(), verdict.seq());
+    let detail = match &verdict.stop {
+        Some(Stop::Failed { failure, .. }) => failure.detail().to_string(),
+        Some(Stop::Held { why, .. }) => why.clone(),
+        _ => String::new(),
+    };
+    if got != (result.to_string(), seq) {
+        return Outcome::Fail(format!(
+            "expected {result} at seq {seq}, got {} at seq {} ({detail})",
+            got.0, got.1
+        ));
+    }
+    // Extra structured expectations this verifier can check.
+    if let Some(st) = &verdict.state {
+        if let Some(cs) = exp.get("controllers").and_then(Value::as_array) {
+            let want: Vec<String> = cs.iter().map(|c| c.as_str().unwrap().to_string()).collect();
+            let have: Vec<String> = st.keyring().controllers.keys().cloned().collect();
+            if want != have {
+                return Outcome::Fail(format!("controllers: expected {want:?}, got {have:?}"));
+            }
+        }
+        if let Some(v) = exp.get("vault").and_then(Value::as_str) {
+            let retiring = st.vault_retiring();
+            if (v == "retiring") != retiring {
+                return Outcome::Fail(format!("vault: expected {v}, retiring = {retiring}"));
+            }
+        }
+        if let Some(n) = exp.get("slots").and_then(Value::as_u64) {
+            if st.keyring().slots.len() as u64 != n {
+                return Outcome::Fail(format!(
+                    "slots: expected {n}, got {}",
+                    st.keyring().slots.len()
+                ));
+            }
+        }
+        if let Some(f) = exp.get("finality").and_then(Value::as_object) {
+            for (sq, want) in f {
+                let sq: u64 = sq.parse().unwrap_or(0);
+                let fin = st
+                    .activations()
+                    .iter()
+                    .find(|a| a.seq == sq)
+                    .is_some_and(|a| a.final_);
+                if (want == "final") != fin {
+                    return Outcome::Fail(format!(
+                        "finality of {sq}: expected {want}, final = {fin}"
+                    ));
+                }
+            }
+        }
+    }
+    Outcome::Pass(format!("{result} at seq {seq}"))
 }
 
 fn expected_of(case: &Value, key: &str) -> String {
@@ -477,12 +359,9 @@ fn run_call(dir: &Path, case: &Value) -> Outcome {
         Value::Array(a) => a.iter().map(|s| repo().join(s.as_str().unwrap())).collect(),
         _ => vec![dir.join("records")],
     };
-    let loaded = match load(&record_dirs) {
-        Ok(l) => l,
-        Err((seq, e)) => return Outcome::Fail(format!("fixture history failed at seq {seq}: {e}")),
-    };
+    let _ = record_dirs;
     let now = ms(ver["now"].as_str().unwrap());
-    let view = match view_of(&loaded, dir, case, now) {
+    let view = match view_for(dir, case, now) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(format!("view refused: {e}")),
     };
@@ -557,18 +436,25 @@ fn run_call(dir: &Path, case: &Value) -> Outcome {
 
 fn run_head(dir: &Path, case: &Value) -> Outcome {
     let ver = &case["verifier"];
-    let l = load(&[repo().join(ver["history"].as_str().unwrap())])
-        .unwrap_or_else(|(s, e)| panic!("{s}: {e}"));
     let now = ms(ver["now"].as_str().unwrap());
-    let homes = view_of(&l, dir, case, now).unwrap().current_homes(now);
+    let objects = objects_for(Path::new("/nonexistent"), ver);
+    let verdict = verify_history(&objects, &Persisted::default(), now);
+    let Some(st) = verdict.state.as_ref() else {
+        return Outcome::Fail("history failed".into());
+    };
+    let homes: Vec<(String, Vec<u8>)> = st
+        .current_homes()
+        .into_iter()
+        .map(|m| (m.request.member_id(), m.request.signing.clone()))
+        .collect();
     let ctx = HeadContext {
-        account: &l.account,
-        history: &l.history,
+        account: st.account(),
+        history: st.history(),
         homes: &homes,
         now_ms: now,
     };
     let got = match verify_head(&fs::read(dir.join("head.json")).unwrap(), ctx) {
-        Ok(h) if h.fresh(now, l.policies[0].1.head_max_age()) => "ok".into(),
+        Ok(h) if h.fresh(now, st.keyring().policy.head_max_age()) => "ok".into(),
         Ok(_) => "ok (accepted, not fresh)".into(),
         Err(e) => e.code(),
     };
@@ -580,27 +466,28 @@ fn run_head(dir: &Path, case: &Value) -> Outcome {
     }
 }
 
-/// Entry-level checks: canonical bytes, shapes, controller and policy parsing, grants, and
-/// every attributable signature under its rule's UV requirement. Not the §8.4 rule table.
+/// Entry cases, now judged by the full history verifier.
 fn run_entries(dir: &Path, case: &Value) -> Outcome {
     let want_result = case["expected"]["result"].as_str().unwrap();
     let want_seq = case["expected"]["seq"].as_u64().unwrap();
-    let got = match load(&[dir.join("records")]) {
-        Ok(l) if l.undecidable => (l.history.len() as u64, "newerFormat".to_string()),
-        Ok(l) => (l.history.len() as u64, "ok".to_string()),
-        Err((seq, e)) => (seq, e.code()),
+    let now = case["verifier"]["now"]
+        .as_str()
+        .map(ms)
+        .unwrap_or_else(|| ms("2026-11-20T00:00:00Z"));
+    let objects = Objects {
+        entries: files_in(&dir.join("records/authority")),
+        ..Default::default()
     };
-    let ok = if want_result == "ok" {
-        got.1 == "ok" && got.0 >= want_seq
-    } else {
-        got == (want_seq, want_result.to_string())
-    };
-    if ok {
-        Outcome::Pass(format!("{want_result} at seq {want_seq} (entry layer: canonical bytes, shapes, signatures; not §8.4 rules)"))
+    let v = verify_history(&objects, &Persisted::default(), now);
+    let got = (v.code(), v.seq());
+    if got == (want_result.to_string(), want_seq) {
+        Outcome::Pass(format!(
+            "{want_result} at seq {want_seq} (history verifier)"
+        ))
     } else {
         Outcome::Fail(format!(
             "expected {want_result} at seq {want_seq}, got {} at seq {}",
-            got.1, got.0
+            got.0, got.1
         ))
     }
 }
@@ -645,7 +532,7 @@ fn run_veto_sig(dir: &Path, case: &Value) -> Outcome {
     let cs = parse_controllers(&body_of(&g)["keyring"]).unwrap();
     let veto = json(&dir.join("veto.json"));
     let body = b64(veto["body"].as_str().unwrap());
-    let v = canonical_body(&body, bounds::RECEIPT_BODY).unwrap();
+    let v = canonical_body(&body, bounds::VETO_BODY).unwrap();
     let Some(signer) = cs.iter().find(|c| c.id() == v["by"].as_str().unwrap()) else {
         return Outcome::Fail("veto signer is not the fixture passkey".into());
     };
@@ -674,6 +561,36 @@ fn run_veto_sig(dir: &Path, case: &Value) -> Outcome {
     } else {
         Outcome::Fail(format!("expected {want}, got {}", detail(&got)))
     }
+}
+
+fn run_number_ties() -> Vec<(String, Outcome)> {
+    let d = json(&cand().join("encoding/number-ties.json"));
+    d["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let bits = u64::from_str_radix(c["bits"].as_str().unwrap(), 16).unwrap();
+            let f = f64::from_bits(bits);
+            let canon = c["canonical"].as_str().unwrap();
+            let refused = c["refused"].as_str().unwrap();
+            let wrote = String::from_utf8(
+                colophon_core::v05::encoding::canonical(&serde_json::json!(f)).unwrap(),
+            )
+            .unwrap();
+            let ok = wrote == canon
+                && canonical_body(format!("{{\"n\":{canon}}}").as_bytes(), 64).is_ok()
+                && canonical_body(format!("{{\"n\":{refused}}}").as_bytes(), 64).is_err();
+            (
+                format!("encoding/number-ties.json:{}", c["bits"].as_str().unwrap()),
+                if ok {
+                    Outcome::Pass("canonical tie spelling".into())
+                } else {
+                    Outcome::Fail(format!("wrote {wrote}"))
+                },
+            )
+        })
+        .collect()
 }
 
 fn run_identifiers() -> Vec<(String, Outcome)> {
@@ -716,38 +633,30 @@ fn run_identifiers() -> Vec<(String, Outcome)> {
 }
 
 fn classify(rel: &str) -> Option<&'static str> {
-    let name = rel.rsplit('/').next().unwrap_or(rel);
     if rel.starts_with("succession/") {
         return Some("succession (§15, §16): out of scope");
     }
     if rel.starts_with("upgrade/") {
         return Some("upgrade (§16.1, plan step 3): out of scope");
     }
-    if rel == "account" {
-        return Some("full history replay (§8.4/§8.5, plan steps 2-3): out of scope");
-    }
-    if rel.starts_with("rules/") {
-        if name.starts_with("t-") {
-            return Some("pending transitions (§8.7): out of scope");
-        }
-        if name.starts_with("row-") {
-            return Some("who-wins event sequences (§8.7): out of scope");
-        }
-        if name.starts_with("i-") {
-            return Some("immediate keyring classification (§8.4, plan step 2): out of scope");
-        }
-        if matches!(name, "equivocation" | "rollback") {
-            return Some(
-                "equivocation evidence and high-water mark (§8.6, §13.3 persistence): out of scope",
-            );
-        }
-    }
     None
+}
+
+fn is_history_case(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    rel == "account"
+        || (rel.starts_with("rules/")
+            && (name.starts_with("t-")
+                || name.starts_with("i-")
+                || name.starts_with("row-")
+                || name == "equivocation"
+                || name == "rollback"))
 }
 
 #[test]
 fn candidate_conformance() {
     let mut results: Vec<(String, Outcome)> = run_identifiers();
+    results.extend(run_number_ties());
     let mut dirs = Vec::new();
     for top in [
         "account",
@@ -779,6 +688,19 @@ fn candidate_conformance() {
         let name = rel.rsplit('/').next().unwrap().to_string();
         let outcome = if let Some(why) = classify(&rel) {
             Outcome::NotImplemented(why)
+        } else if rel == "account" {
+            let v = verify_history(
+                &objects_of(&dir),
+                &Persisted::default(),
+                ms("2026-11-11T09:01:00Z"),
+            );
+            if v.code() == "ok" {
+                Outcome::Pass(format!("history ok through seq {}", v.seq()))
+            } else {
+                Outcome::Fail(format!("{} at {}", v.code(), v.seq()))
+            }
+        } else if is_history_case(&rel) {
+            run_history(&dir, &case)
         } else if rel.starts_with("calls/")
             || name.starts_with("call-")
             || name.starts_with("replay-")

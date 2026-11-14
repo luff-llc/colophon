@@ -13,12 +13,12 @@ mod support;
 use base64::{engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use colophon_core::v05::descriptor::KeyDescriptor;
 use colophon_core::v05::signature::{
-    parse_der, verify_assertion_possession, verify_raw, verify_webauthn, webauthn_check,
-    AssertionBytes, OriginRule, SigFailure, Strictness,
+    parse_der, verify_assertion_possession, verify_raw, webauthn_check, AssertionBytes, SigFailure,
 };
 use p256::ecdsa::{signature::hazmat::PrehashSigner, signature::Signer, Signature, SigningKey};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use support::webauthn::{verify_webauthn, OriginRule, Strictness};
 use support::Rng;
 
 const N: [u8; 32] = [
@@ -794,8 +794,10 @@ fn webauthn_client_and_authenticator_data() {
                 authenticator_data: &ad,
                 client_data: base.as_bytes()
             },
-            false,
-            OriginRule::General
+            colophon_core::v05::signature::CheckMode::Call {
+                origins: &[],
+                uv_required: false
+            }
         ),
         Err(Form)
     );

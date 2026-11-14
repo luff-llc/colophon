@@ -19,6 +19,7 @@ pub mod descriptor;
 pub mod encoding;
 pub mod floor;
 pub mod heads;
+pub mod history;
 pub mod ids;
 pub mod members;
 pub mod prescan;

@@ -355,6 +355,7 @@ pub struct Terms {
     serves_present: bool,
     import: bool,
     unknown: Unknown,
+    unknown_fields: Unknown,
 }
 
 /// Where a terms object appears; link terms are restricted (§10.1).
@@ -389,6 +390,7 @@ impl Terms {
             serves_present: false,
             import: false,
             unknown: Unknown::default(),
+            unknown_fields: Unknown::default(),
         };
         if let Some(items) = o.opt_value("records")? {
             let Value::Array(items) = items else {
@@ -533,6 +535,13 @@ impl Terms {
             )?,
             TermsKind::Link => require(t.services.is_some(), "link terms need services")?,
         }
+        t.unknown_fields = Unknown(
+            sink.0
+                .iter()
+                .filter(|u| !u.starts_with("conditions: operator"))
+                .cloned()
+                .collect(),
+        );
         t.unknown = sink;
         Ok(t)
     }
@@ -591,8 +600,17 @@ impl Terms {
         self.import
     }
     /// Unknown terms, values and condition operators in these terms.
+    ///
+    /// For an authority entry every one of these is unknown content (§8.5 step 4, §11.5). For a
+    /// call, an unknown condition operator is reported only when it decides the result
+    /// (§10.4, §12.3 step 8): see [`Terms::unknown_outside_conditions`].
     pub fn unknown(&self) -> &Unknown {
         &self.unknown
+    }
+    /// Unknown terms and values, without unknown condition operators (whose effect is the
+    /// three-valued result of [`Terms::conditions_on`]).
+    pub fn unknown_outside_conditions(&self) -> &Unknown {
+        &self.unknown_fields
     }
     /// §10.3: these (link) terms narrow `parent`: every services entry has one in the parent
     /// for the same audience covering its purposes; `depth` is less than the parent's; and

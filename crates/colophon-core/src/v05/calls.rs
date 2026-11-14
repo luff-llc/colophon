@@ -1,6 +1,8 @@
 //! Links and calls (§12.1–§12.3) as a pure function over a **given** verified view.
 //!
-//! The view ([`AccountView`]) is built only by [`AccountView::from_history_verifier`], which
+//! The view ([`AccountView`]) is built from the history verifier's verdict by
+//! [`AccountView::from_history_verifier`]; [`AccountView::from_parts_unverified`] assembles one
+//! from parts the caller vouches for (tests and tools only). Both check every invariant and
 //! validates every structural invariant and returns an error instead of panicking. Its only
 //! production caller is the history verifier of plan Step 3 (§17.2); this crate does not
 //! verify authority histories yet, so the controllers, members and policies it is given are
@@ -248,10 +250,131 @@ pub struct AccountView {
 pub const MAX_VIEW_HEADS: usize = 64;
 
 impl AccountView {
-    /// Build a view from the history verifier's output, checking every structural invariant.
-    /// The only production caller is the Step-3 history verifier; anything else passing claims
-    /// it didn't verify is outside this crate's guarantees.
-    pub fn from_history_verifier(v: HistoryVerifierOutput) -> Result<Self> {
+    /// Build a view from the history verifier's verdict over `objects` (§8, §17.2), at the
+    /// verifier's clock. Statuses come from the verdict: controllers added by an activation with
+    /// no finality are `AddedNotFinal`; outstanding suspensions (until their transition's due
+    /// time + 7 days) are `Suspended`; held transitions that are valid against the state and not
+    /// recorded make the keys they add `PendingAddition` and the keys they remove
+    /// `PendingRemoval`. An unresolved fork makes every call `refused:fork`.
+    pub fn from_history_verifier(
+        verdict: &crate::v05::history::Verdict,
+        objects: &crate::v05::history::Objects,
+        now_ms: i64,
+    ) -> Result<Self> {
+        use crate::v05::history::{check_pending_transition, HomeStatus, Stop};
+        let st = verdict
+            .state
+            .as_ref()
+            .ok_or_else(|| Failure::Unavailable("no verified history".into()))?;
+        let mut statuses: BTreeMap<String, ControllerStatus> = BTreeMap::new();
+        for id in st.keyring().controllers.keys() {
+            if st.controller_provisional(id).is_some() {
+                statuses.insert(id.clone(), ControllerStatus::AddedNotFinal);
+            }
+        }
+        for sp in &st.suspensions {
+            if now_ms <= sp.ends_ms() {
+                statuses.insert(sp.key.clone(), ControllerStatus::Suspended);
+            }
+        }
+        let mut pending_add: Vec<String> = Vec::new();
+        for o in &objects.pending {
+            let Ok(env) = crate::v05::history::envelope::AuthEnvelope::parse(
+                o,
+                bounds::TRANSITION_ENVELOPE,
+                bounds::TRANSITION_ENVELOPE,
+                false,
+            ) else {
+                continue;
+            };
+            if env.value.get("protocol").and_then(Value::as_str) != Some("colophon/transition/5")
+                || st.recorded.contains(&env.digest)
+                || check_pending_transition(st, o).is_err()
+            {
+                continue;
+            }
+            let kc = env.value.get("change").and_then(|c| c.get("keyring"));
+            for id in kc
+                .and_then(|k| k.get("remove"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(id) = id.as_str() {
+                    statuses
+                        .entry(id.to_string())
+                        .or_insert(ControllerStatus::PendingRemoval);
+                }
+            }
+            for c in kc
+                .and_then(|k| k.get("add"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(c) = Controller::parse(c.clone(), "add") {
+                    if !st.keyring().controllers.contains_key(&c.id()) {
+                        pending_add.push(c.id());
+                    }
+                }
+            }
+        }
+        let mut controllers = Vec::new();
+        for (id, versions) in &st.ever {
+            let status = statuses
+                .get(id)
+                .copied()
+                .unwrap_or(ControllerStatus::Active);
+            controllers.push(ViewController::new(id.clone(), versions.clone(), status)?);
+        }
+        for id in pending_add {
+            if !st.ever.contains_key(&id) {
+                controllers.push(ViewController::new(
+                    id,
+                    Vec::new(),
+                    ControllerStatus::PendingAddition,
+                )?);
+            }
+        }
+        let mut members = Vec::new();
+        for m in st.members() {
+            let status = if m.provisional.is_some() {
+                MemberStatus::AddedNotFinal
+            } else {
+                MemberStatus::Active
+            };
+            let _ = HomeStatus::Home;
+            members.push(ViewMember::new(
+                m.request.signing.clone(),
+                m.request.kind.clone(),
+                m.terms.clone(),
+                m.granted_seq,
+                m.renewals.clone(),
+                m.end_sessions.clone(),
+                m.revoked_seq,
+                status,
+            )?);
+        }
+        Self::from_parts_unverified(HistoryVerifierOutput {
+            account: st.account().clone(),
+            history: st.history().to_vec(),
+            policies: st.policies.clone(),
+            controllers,
+            members,
+            heads: objects.heads.clone(),
+            vouched_fork: matches!(verdict.stop, Some(Stop::Fork { .. })),
+            principal_points: st
+                .points
+                .iter()
+                .filter(|p| p.len() == 65)
+                .cloned()
+                .collect(),
+        })
+    }
+    /// Assemble a view from parts the caller vouches for, checking every structural invariant.
+    /// Production code builds views with [`AccountView::from_history_verifier`]; this is for
+    /// tests and tools, and anything it is given is outside this crate's guarantees.
+    pub fn from_parts_unverified(v: HistoryVerifierOutput) -> Result<Self> {
         let held = v.history.len() as u64;
         require(held >= 1, "a view needs at least the genesis")?;
         require(
@@ -298,6 +421,14 @@ impl AccountView {
     /// The account.
     pub fn account(&self) -> &AccountId {
         &self.v.account
+    }
+    /// The status of controller `id` in this view.
+    pub fn controller_status(&self, id: &str) -> Option<ControllerStatus> {
+        self.v
+            .controllers
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.status)
     }
     /// Held history digests.
     pub fn history(&self) -> &[String] {
@@ -429,7 +560,9 @@ fn parse_link(text: &Value, first: bool, unknown: &mut Unknown) -> Result<Link> 
         "session is present exactly on the first link",
     )?;
     let terms = Terms::parse(o.value("terms")?, TermsKind::Link)?;
-    unknown.0.extend(terms.unknown().0.iter().cloned());
+    unknown
+        .0
+        .extend(terms.unknown_outside_conditions().0.iter().cloned());
     let (_, not_before_ms) = o.date("notBefore")?;
     let (_, expires_ms) = o.date("expires")?;
     let _created = o.date("created")?;
@@ -818,18 +951,25 @@ pub fn verify_call(
             member = Some(m);
         }
     }
-    // 6. Chain, link by link.
+    // 6. Chain: first every binding and the acting key (badSignature), then link by link.
     if let Some(m) = member {
         let mut prev_key: &[u8] = &m.signing;
-        let mut prev_terms: &Terms = &m.terms;
-        let mut prev_expiry: Option<i64> = m.expiry_at(s);
-        for (i, l) in call.links.iter().enumerate() {
+        for l in &call.links {
             require_sig(
                 l.env.verify(prev_key).is_ok()
                     && l.account == call.account
                     && l.from == key_id(prev_key),
                 "link does not verify under the previous key, or names another account or from",
             )?;
+            prev_key = &l.to;
+        }
+        require_sig(
+            call.key == prev_key,
+            "the acting key is not the last link's to.signing",
+        )?;
+        let mut prev_terms: &Terms = &m.terms;
+        let mut prev_expiry: Option<i64> = m.expiry_at(s);
+        for (i, l) in call.links.iter().enumerate() {
             if i == 0 {
                 require_refused(
                     l.session == Some(m.end_sessions.len() as u64),
@@ -848,14 +988,9 @@ pub fn verify_call(
                     "a link's to.signing is a principal's key (§3.3 rule 4)",
                 ));
             }
-            prev_key = &l.to;
             prev_terms = &l.terms;
             prev_expiry = Some(l.expires_ms);
         }
-        require_sig(
-            call.key == prev_key,
-            "the acting key is not the last link's to.signing",
-        )?;
     }
     // 7. Purpose. Conditions are three-valued: false refuses, unknown waits for step 8.
     let at_home = cfg.home_endpoints.iter().any(|e| e == &call.audience)
@@ -888,7 +1023,7 @@ pub fn verify_call(
     // terms supplied by the view; an undecided condition; a key of unknown form.
     call.unknown.check()?;
     if let Some(m) = member {
-        m.terms.unknown().check()?;
+        m.terms.unknown_outside_conditions().check()?;
     }
     if condition_unknown {
         return Err(Failure::NewerFormat(
