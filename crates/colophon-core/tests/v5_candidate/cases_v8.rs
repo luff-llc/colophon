@@ -3738,6 +3738,10 @@ pub fn part3(o: &mut Out) {
     for (name, why, good) in [
         ("swift-migration", "§15.4: the owner's migration of a library with a member and a namespace, written after F with a drain window after F, is recorded.", true),
         ("swift-migration-counts", "§15.4: `copied` + `omitted` must equal `source`: the migration's activation is malformed.", false),
+        ("swift-migration-final-digest", "§15.4: `final.digest` is not F's digest: the migration's activation is malformed.", true),
+        ("swift-migration-drain-before-f", "§15.4: the drain window starts before F's `issued`: the migration's activation is malformed.", true),
+        ("swift-migration-before-drain-ends", "§15.4: the migration transition is issued before `drain.until`: the activation is malformed.", true),
+        ("swift-migration-premature-f", "§15.4: F is issued before the succession is due, so the succession is not verified and the migration's activation is malformed.", true),
     ] {
         let mut recs = swift_library(true);
         let mem_s = derived("swift/member/signing");
@@ -3751,7 +3755,12 @@ pub fn part3(o: &mut Out) {
         }
         let mut g = new_genesis(&recs, recs.len(), sg![a], "Library");
         let rg = successor_with_home(&mut g, 60, sr0 - 60);
-        let f = swift_freeze_signed(&recs, &account_id(&g), &a, &ts(sr0 + after));
+        let f_at = if name == "swift-migration-premature-f" {
+            sr0 + 100
+        } else {
+            sr0 + after
+        };
+        let f = swift_freeze_signed(&recs, &account_id(&g), &a, &ts(f_at));
         let f_seq = recs.len() + 1;
         let copied = [sha(b"one"), sha(b"two")];
         let mut sorted = copied.to_vec();
@@ -3767,8 +3776,12 @@ pub fn part3(o: &mut Out) {
         };
         let change = json!({"migration": {
             "predecessor": {"format": "colophon/swift-keyring/2", "account": &sha(&body_of(&recs[0]))[..32],
-                            "final": {"seq": f_seq, "digest": sha(&body_of(&f))}},
-            "drain": {"from": ts(sr0 + after + 60), "until": ts(sr0 + after + 120)},
+                            "final": {"seq": f_seq, "digest": if name == "swift-migration-final-digest" { sha(b"not F") } else { sha(&body_of(&f)) }}},
+            "drain": match name {
+                "swift-migration-drain-before-f" => json!({"from": ts(sr0 + after - 60), "until": ts(sr0 + after - 30)}),
+                "swift-migration-before-drain-ends" => json!({"from": ts(sr0 + after + 60), "until": ts(sr0 + after + 300)}),
+                _ => json!({"from": ts(sr0 + after + 60), "until": ts(sr0 + after + 120)}),
+            },
             "namespaces": [{"namespace": "notes", "source": if good { 3 } else { 5 }, "copied": 2, "omitted": 1, "view": view}],
             "omitted": [{"ref": "cd".repeat(32), "reason": "invalidPayload"}],
             "controllers": ctrls,
@@ -3789,8 +3802,12 @@ pub fn part3(o: &mut Out) {
         let at = secs(body_json(&act)["issued"].as_str().unwrap()) + 30;
         let mut all = recs.to_vec();
         all.push(f);
-        let expected = if good {
+        let expected = if name == "swift-migration-premature-f" {
+            json!({"succession": "unverified", "seq3": "migration malformed", "now": ts(at)})
+        } else if name == "swift-migration" {
             json!({"succession": "verified", "migration": "recorded", "now": ts(at)})
+        } else if good {
+            json!({"succession": "verified", "seq3": "migration malformed", "now": ts(at)})
         } else {
             json!({"succession": "verified", "seq3": "migration malformed", "now": ts(at)})
         };

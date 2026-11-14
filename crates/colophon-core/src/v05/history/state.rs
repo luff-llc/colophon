@@ -681,6 +681,8 @@ pub(crate) struct TCheck {
     pub full_set: bool,
     pub due_ms: i64,
     pub deadline_ms: i64,
+    /// The transition's `issued`, ms.
+    pub issued_ms: i64,
     pub removal_only: bool,
     pub revokes: Vec<String>,
     pub undecidable: bool,
@@ -1267,6 +1269,7 @@ pub(crate) fn check_transition(
         full_set,
         due_ms,
         deadline_ms: issued.saturating_add(delay),
+        issued_ms: issued,
         removal_only: cls.removal_only,
         revokes: witnesses_revoked,
         undecidable,
@@ -1527,7 +1530,7 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
         changed = true;
     }
     if let Some(m) = t.change.get("migration") {
-        super::succession::migration(&mut n, m)?;
+        super::succession::migration(&mut n, m, t.issued_ms)?;
         changed = true;
     }
     if let Some(a) = t.change.get("successor") {
@@ -1631,10 +1634,10 @@ fn member_from(s: &State, v: &Value, seq: u64, home: bool) -> Result<MemberRecor
         end_sessions: Vec::new(),
         revoked_seq: None,
         provisional: Some(seq),
+        sealed: Default::default(),
         home: if home {
             HomeStatus::Home
         } else {
-        sealed: Default::default(),
             HomeStatus::NotHome
         },
     })
@@ -2592,12 +2595,9 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 end_sessions: Vec::new(),
                 revoked_seq: None,
                 provisional: None,
+                sealed: Default::default(),
                 home: HomeStatus::NotHome,
             });
-        }
-                sealed: Default::default(),
-        "renew" => {
-            super::prescan("renew", v).check()?;
             let id = n.members.last().map(|m| m.request.member_id());
             if let (Some(id), Some(m)) = (id, n.members.last_mut()) {
                 for sh in &g.shares {
@@ -2606,6 +2606,9 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                     }
                 }
             }
+        }
+        "renew" => {
+            super::prescan("renew", v).check()?;
             let (_, fields) = AuthorityHeader::split(v.clone())?;
             let member = fields_member(v)?;
             let m = s.members.iter().find(|m| m.request.member_id() == member);
@@ -2614,9 +2617,6 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 return Err(malformed("renewing a home is a transition").into());
             }
             let r = Renew::parse(fields, e.issued, current, m.and_then(|m| m.expires_ms))?;
-            charge_rate(&mut n, e, true)?;
-            if let Some(m) = n
-                .members
             if r.expires_ms.is_none() {
                 // The shares-only form (§9.4): each share is for an epoch of the member's scope
                 // that exists, that it lacks, once, and sealed to the member.
@@ -2657,6 +2657,9 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                     .map_err(Outcome::from)?;
                 }
             }
+            charge_rate(&mut n, e, true)?;
+            if let Some(m) = n
+                .members
                 .iter_mut()
                 .find(|m| m.request.member_id() == r.member)
             {
@@ -2739,14 +2742,14 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
             }
             for ep in &r.epochs {
                 n.epochs.insert(ep.namespace.clone(), ep.epoch);
-            }
-        }
-        "endSessions" => {
                 for m in n.members.iter_mut() {
                     if ep.recipients.contains(&m.request.member_id()) {
                         m.sealed.insert((ep.namespace.clone(), ep.epoch));
                     }
                 }
+            }
+        }
+        "endSessions" => {
             super::prescan("endSessions", v).check()?;
             let member = fields_member(v)?;
             crate::v05::require(
@@ -2815,9 +2818,6 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                     ep.get("epoch").and_then(Value::as_u64),
                 ) {
                     n.epochs.insert(ns.to_string(), no);
-                }
-            }
-        }
                     if let Some(seals) = ep.get("seals").and_then(Value::as_object) {
                         for m in n.members.iter_mut() {
                             if seals.contains_key(&m.request.member_id()) {
@@ -2825,6 +2825,9 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                             }
                         }
                     }
+                }
+            }
+        }
         "keyring" => keyring_entry(s, &mut n, e, &signers, &mut undecidable)?,
         other => {
             // Unknown kind: control rule passed; now its content is unknown.
@@ -3474,10 +3477,10 @@ pub(super) fn from_upgrade(
             renewals: Vec::new(),
             end_sessions: Vec::new(),
             provisional: None,
+            sealed: Default::default(),
             home: HomeStatus::NotHome,
         });
     }
-            sealed: Default::default(),
     let mut ever: BTreeMap<String, Vec<(u64, Option<Controller>)>> = BTreeMap::new();
     let mut points = BTreeSet::new();
     let mut historical_sets = Vec::new();
