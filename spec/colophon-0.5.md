@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 13, for review, 2026-11-14.** Not frozen, not
+**Status: final candidate, revision 14, for review, 2026-11-14.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -19,7 +19,12 @@ authority builders, the vault, slots and pairing, the homes and calls): resolvin
 per-home head rollback, determined veto receipts and `final` heads, a late veto at a home,
 two heads for one seq, the §7.2 slot shape at replay, equivocation evidence, and the text
 gaps the builders found (notices, link `created`, the kit derivation, the restricted open, the
-PRF assertion, the QR bytes, the seed guarantee). The
+PRF assertion, the QR bytes, the seed guarantee); revision 14 is a text-only revision that says
+what the merged, independently checked engine (the write side, packages E1 to E5 and E7) does and
+answers the builders' questions: several envelopes over one body, what a `revoke` introduces and
+how its walk runs, tie-breaks and resolvers in records, how far epoch key handles and stored state
+are trusted, the veto and competing-attempt rules of succession, the migration and upgrade
+limits of the shipped Swift code, and the account-facing host rules. The
 mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative

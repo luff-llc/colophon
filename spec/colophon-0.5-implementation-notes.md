@@ -1,11 +1,11 @@
 # Colophon 0.5: implementation notes
 
 **Status:** running list kept while building `colophon_core::v05` against
-[colophon-0.5.md](colophon-0.5.md) revision 13 (`spec-0.5-r12` plus the revision 13 branch). The
-foundation (encoding, keys, signatures, terms, records, calls) was merged as colophon#4. Step 1
+[colophon-0.5.md](colophon-0.5.md) revision 14 (`spec-0.5-r12`, the revision 13 branch and the
+revision 14 text). The foundation (encoding, keys, signatures, terms, records, calls) was merged as colophon#4. Step 1
 brought it to revision 11 (`63bbeff`); step 2 added the authority history verifier of §8;
-revision 12 and revision 13 are the last two sections. No vector of revision 12 or revision 13
-was replayed by the Swift source.
+revisions 12 to 14 are the last sections. No vector of revision 12, 13 or 14 was replayed by the
+Swift source.
 
 Revisions 7–11 settled every open item of the revision-6 list:
 - retention 7,260 s;
@@ -507,3 +507,27 @@ test of revision 13 was replayed by the Swift source.**
   reproduce the two vector heads the home may sign and show the guard refusing the rest).
   `signed_heads` keeps the latest `issued` and the digests at seqs above the highest final
   activation (`signed_heads_are_pruned_to_what_the_guard_needs`).
+
+## Revision 14 (2026-11-14)
+
+Text only. The spec now says what the merged E4, E5 and E7 code does (changes §A.10, §G.20). **No
+vector or test of revisions 12 to 14 was replayed by the Swift source.** Places where the text
+and the code or a decision do not meet, left open:
+
+- **Competing successors (§15.1).** Open item 2 above: two successors of one predecessor can each
+  verify, for different verifiers; the text and the verifier leave it undecided. The builders
+  refuse the case; the verifier cannot.
+- **`renew` and a provisional member with no expiry (§7.1, §9.4).** §7.1 now says a member
+  provisional when an epoch is made gets its shares by `renew`, but a `renew` of a member with no
+  expiry is `malformed`, and it must strictly extend the expiry. A provisional member whose grant
+  has no `expires` has no way to get the shares of an epoch made before its activation was final.
+  The code (`history/state.rs` `Renew::parse`, `RecordAuthority::owed_shares`) lists it as owed.
+  Needs a decision: let `renew` carry shares for a member with no expiry, or a separate way.
+- **`migration` timing (§15.4).** The verifier checks neither that `drain` starts after F nor
+  that the entry is issued after `drain.until`; the builder does. Whether a verifier should is
+  the owner's call.
+- **A grant without a label (§16.2).** `prepare_migration` takes the member label from its
+  caller and checks 1 to 200 bytes; it refuses a grant without a role. It does not read the
+  Swift grant's label.
+- **Self-slot after `final` (§17.3).** Stated as a host rule; no code enforces or tests it with
+  homes.

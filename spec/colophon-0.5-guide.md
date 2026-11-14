@@ -258,3 +258,4 @@ without stopping either thief. What protects the owner is the veto window.
 | 2026-11-14 | Claude, independent check of revision 12 (PR #7) | 3 High, 5 Medium, 4 Low | Revision 12 (fix round); changes §A.8, §G.17 |
 | 2026-11-14 | Claude, checks of the write side: authority builders (E1), vault, slots and pairing (E2), homes and calls (E3), and the integrated write side | resolve, rollback, receipt and head choices, late veto, two heads, slot shape, equivocation evidence, seven text gaps | Revision 13; changes §A.9, §G.18 |
 | 2026-11-14 | Claude, independent check of revision 13 (PR #10) | 6 High, 5 Medium, 4 Low | Revision 13 (fix round); changes §A.9, §G.19 |
+| 2026-11-14 | Claude, independent checks of the records (E4, PR #11), account (E5, PR #12) and upgrade and succession (E7, PR #13) packages, and the builders' questions | text gaps and rules the merged engine already follows | Revision 14 (text only); changes §A.10, §G.20 |
