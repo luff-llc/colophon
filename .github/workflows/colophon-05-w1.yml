@@ -31,6 +31,8 @@ jobs:
         run: cargo test -p colophon-core --test legacy_draft1_conformance
       - name: Colophon 0.5 candidate engine (v05) and conformance runner
         run: cargo test -p colophon-core --test v05_engine --test v05_candidate -- --nocapture
+      - name: Candidate vector generator check (byte for byte, no stray files)
+        run: cargo test -p colophon-core --test v5_candidate -- --ignored v5_generator_check
       - name: Full native workspace suite
         run: cargo test --workspace
       - name: Build wasm target of consuming crate

@@ -55,9 +55,8 @@ fn self_check(out: &Out) -> usize {
         {
             continue;
         }
-        let Ok(env) = serde_json::from_slice::<Value>(data) else {
-            continue;
-        };
+        let env = serde_json::from_slice::<Value>(data)
+            .unwrap_or_else(|e| panic!("{rel} is a .json file that does not parse: {e}"));
         let Some(body_text) = env.get("body").and_then(Value::as_str) else {
             continue;
         };
@@ -99,6 +98,38 @@ fn self_check(out: &Out) -> usize {
     honest
 }
 
+/// Files under the vector directory that the generator does not produce and that are not one of
+/// the hand-kept sources: `README.md` and `probes/swift-der/**`.
+fn strays(out: &Out, dir: &Path) -> Vec<String> {
+    fn walk(dir: &Path, base: &Path, found: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, base, found);
+            } else {
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                found.push(rel);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, dir, &mut found);
+    found.retain(|rel| {
+        rel != "README.md" && !rel.starts_with("probes/swift-der/") && !out.contains_key(rel)
+    });
+    found.sort();
+    found
+}
+
 /// Generated files that are missing or differ from the files on disk.
 fn differences(out: &Out, dir: &Path) -> Vec<String> {
     out.iter()
@@ -111,7 +142,8 @@ fn differences(out: &Out, dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// `--check`: the generator's 1,078 files match the files on disk, byte for byte.
+/// `--check`: every generated file matches the file on disk byte for byte, and no other file
+/// is there (besides `README.md` and `probes/swift-der/**`).
 #[test]
 #[ignore = "opt-in: regenerates every candidate vector and compares it with the files on disk"]
 fn v5_generator_check() {
@@ -123,6 +155,13 @@ fn v5_generator_check() {
         bad.len(),
         out.len(),
         bad.join("\n  ")
+    );
+    let stray = strays(&out, &candidate());
+    assert!(
+        stray.is_empty(),
+        "files the generator does not produce ({}):\n  {}",
+        stray.len(),
+        stray.join("\n  ")
     );
     eprintln!("ok: {} files match", out.len());
 }
@@ -137,6 +176,12 @@ fn v5_generator_write() {
     }
     let (out, _) = build();
     let dir = candidate();
+    let stray = strays(&out, &dir);
+    assert!(
+        stray.is_empty(),
+        "refusing to write: files the generator does not produce (remove or keep them by hand):\n  {}",
+        stray.join("\n  ")
+    );
     for (rel, data) in &out {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

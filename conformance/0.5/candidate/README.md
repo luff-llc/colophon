@@ -16,7 +16,7 @@ Never use them for real data.
 One Rust generator, `crates/colophon-core/tests/v5_candidate.rs` (helpers in
 `crates/colophon-core/tests/v5_candidate/`), builds every generated file here. It is opt-in
 (both tests are `#[ignore]`) and uses only the core's own dependencies (`p256`, `aes-gcm`, `hkdf`,
-`sha2`, `serde_json`, `base64`). It does not call the 0.5 verifier: canonical JSON, signing and
+`sha2`, `serde`, `serde_json`, `base64`). It does not call the 0.5 verifier: canonical JSON, signing and
 entry building are written out again in the test, so the vectors stay independent of the code they
 test.
 

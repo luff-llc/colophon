@@ -24,7 +24,7 @@ verifier.
 
 - **Files.** New `crates/colophon-core/tests/v5_candidate.rs`, which writes to
   `conformance/0.5/`, is opt-in, and is deterministic from published seeds. Port the cases in
-  `conformance/0.5/candidate/` (built by `generate.py` and `rules.py`) into it, so one generator
+  `conformance/0.5/candidate/` (then built by the Python `generate.py` and `rules.py`) into it, so one generator
   owns them all. The ported files must come out byte-identical, or the difference becomes a
   spec question. **Status: done.** The port is `v5_candidate.rs` with helpers in
   `tests/v5_candidate/`. Its check mode reproduces all 1,078 files byte for byte, and
