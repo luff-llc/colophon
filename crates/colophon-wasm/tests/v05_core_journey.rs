@@ -64,7 +64,11 @@ fn the_web_build_creates_verifies_requests_pairs_and_refuses_hostile_input() {
             o.entries.push(s.bytes.clone());
         }
     }
-    let blobs = |v: &Vec<Vec<u8>>| v.iter().map(|b| Blob::new(b.clone())).collect::<Vec<_>>();
+    let blobs = |v: &Vec<Vec<u8>>| {
+        v.iter()
+            .map(|b| ByteString::new(b.clone()))
+            .collect::<Vec<_>>()
+    };
     let report = account_verify_history(
         AuthorityObjects::new(blobs(&o.entries), vec![], vec![], vec![]),
         NOW,

@@ -160,7 +160,7 @@ record! {
 }
 record! {
     /// One byte string (a list of them cannot be a field on every platform).
-    pub struct Blob { pub bytes: Vec<u8> }
+    pub struct ByteString { pub bytes: Vec<u8> }
 }
 record! {
     /// A key as the protocol writes it (§3.1), the one form the surface uses everywhere.
@@ -663,10 +663,10 @@ record! {
 record! {
     /// The authority objects of an account, for the history verifier.
     pub struct AuthorityObjects {
-        pub entries: Vec<Blob>,
-        pub pending: Vec<Blob>,
-        pub heads: Vec<Blob>,
-        pub predecessor: Vec<Blob>,
+        pub entries: Vec<ByteString>,
+        pub pending: Vec<ByteString>,
+        pub heads: Vec<ByteString>,
+        pub predecessor: Vec<ByteString>,
     }
 }
 record! {

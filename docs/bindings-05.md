@@ -1,300 +1,312 @@
 # Colophon 0.5 bindings (package B1)
 
-The UniFFI (`colophon-ffi`) and wasm-bindgen (`colophon-wasm`) exports of the 0.5 Rust core. This is
-the contract the Swift, Kotlin/Android and JavaScript SDK layers are written against. The 0.4
-exports are untouched and keep working (an in-place upgrade reads a 0.4 library first, and the SDKs
-move over one at a time).
+The UniFFI (`colophon-ffi`) and wasm-bindgen (`colophon-wasm`) exports of the 0.5 Rust core. This is the
+contract the Swift, Kotlin/Android and JavaScript SDK layers are written against. The 0.4 exports are
+untouched and keep working (an in-place upgrade reads a 0.4 library first, and the SDKs move over one at a
+time).
 
 **One source, two crates.** The surface is written once, in `crates/colophon-ffi/src/v05/api/`.
-`colophon-ffi` compiles it with the `native05` feature (UniFFI attributes); `colophon-wasm` includes
-the same files by `#[path]` with the `web05` feature (wasm-bindgen attributes). The two differ only
-where the platform forces it (below). The list of exported names is
-`crates/colophon-ffi/src/v05/surface-names.txt`; each crate has a test that computes its own names
-from the sources and fails if they differ from that list.
+`colophon-ffi` compiles it with the `native05` feature (UniFFI attributes); `colophon-wasm` includes the same
+files by `#[path]` with the `web05` feature (wasm-bindgen attributes). The list of exported names, records,
+fields and enum variants is `crates/colophon-ffi/src/v05/surface-names.txt`; each crate has a test that
+computes its own list from the sources and fails if it differs. The two features cannot be on together:
+`--all-features` is refused by a `compile_error!` that says to build each crate with its own feature.
 
-## 1. Shape of the surface
+## 1. Shape
 
-Everything that crosses is a scalar, a byte string (`Vec<u8>` / `Uint8Array`), a UTF-8 string, or a
-**JSON string**. In JSON, binary fields are standard base64 (the protocol's own text form). Composite
-results (views, members, steps, changes) are JSON documented below. Objects stay in Rust; a host holds
-opaque handles. Async is the SDK layer's concern (as in 0.4): every call is synchronous.
+Everything that crosses is **typed**: records, C-like enums, bytes, strings, integers, booleans, options and
+lists. Every binary field is bytes (`Data` / `ByteArray` / `Uint8Array`), never base64. JSON appears only
+where the protocol or a domain leaves the value open, as in 0.4: controller objects, terms, the policy
+document, the `change` of a transition, record payloads, import batches, blob manifests, and `view`,
+`query`, `history`, `operation_at`, `ledger`, `proposals` and `tools` results. Those fields and calls are
+named `*_json`. Async is the SDK layer's concern (as in 0.4): every call is synchronous.
+
+An action is one method per action (`begin_approve`, `begin_revoke`, ...), each with typed arguments. (The
+spec asked for an enum with one variant per action; wasm-bindgen cannot export data-carrying enums, and one
+method per action carries exactly the same typed fields on both platforms, as 0.4's `begin_*` did.)
+
+**Naming.** Methods and fields are `snake_case` in Rust and on the web (as 0.4's wasm exports); the Swift and
+Kotlin generators camel-case them. Enum variants are UpperCamel (`Cold`; Swift `.cold`, Kotlin `COLD`, web
+numeric `OpenMode.Cold`). Four record names carry an `Account` prefix because 0.4's UniFFI namespace already
+has them: `AccountSigningStep`, `AccountMember`, `AccountMemberKind`, `AccountGrant` and `AccountDenial`.
+On the web, a record is a class with a constructor taking every field in order and a getter and a setter per
+field; `u64` and `i64` are `bigint`; `optional<T>` is `undefined`.
+
+## 2. Objects and calls
 
 | Object | What it is |
 | --- | --- |
-| `AccountEngine` | The session an app runs: reads the host's record source, unlock, refresh, reads, writes, live state, blobs, imports, checkpoints, the exchange with a home. Wraps the core's `Engine`. |
-| `AccountCore` | An account held in memory without an engine: opened from objects. Used for what the engine does not forward (below), for creation's result, seed transfer, calls and links, moving. Wraps the core's `Account`. |
-| `AccountAction` | A prepared action: what to sign, held by the core until finished. One-shot. |
-| `AccountCreation` | Creation in progress (genesis, first `rekey`, first slots). |
-| `AccountRequest` | A member's request (§9.1), public values only. |
-| `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | Pairing (§7.3) and moving the seed (§7.4). |
+| `AccountEngine` | The session: reads the host's record source; unlock; refresh; reads; every action; live state; blobs; imports; saved state; the exchange. The only object a session needs. |
+| `AccountAction` | A prepared action held in Rust. One-shot. |
+| `AccountCreation` | Creation before any store exists: PRF, genesis, first `rekey`; the result is the account ID and the stores. |
+| `AccountRequest` | A device's membership request before it is a member (public values only). |
+| `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | The pairing ceremony (§7.3). |
+| `AccountMove` | A prepared move step: the 0.4 upgrade, a Swift veto, F, a copier's shares. |
 | `AccountBlobWriter`, `AccountLiveWrite` | A streaming blob upload; a prepared live write. |
-| `AccountMove` | A prepared move step: the 0.4 upgrade, a Swift veto, F, shares. |
-| free functions `account_*` | The standalone verifiers and small helpers. |
-| `HostSource` | The host callback: `read(path)`, `version(path)`, `read_blob(path)`. |
+| free `account_*` | The standalone verifiers and helpers. |
+| `HostSource` | The host callback: `read(path)`, `read_blob(path)`. |
 | `AccountError` | The error of every call. |
 
-### Platform differences (and only these)
+### Prepare, sign, finish
 
-| | UniFFI (Swift, Kotlin) | wasm-bindgen (JS) |
+`begin_*(..., entropy)` returns an `AccountAction`. A write refused for access reasons returns an action whose
+`denial()` is set (a value, as in 0.4). `AccountAction.steps()` is `list<AccountSigningStep>`: copies of the
+exact bodies and who signs them; `prf_requests()` is `list<PrfRequest>` (answer them with
+`AccountEngine.provide_prf(action, list<PrfAnswer>)`, after which `steps()` is non-empty). The host signs
+each `body` with the key named by `signer` and calls `AccountEngine.finish(action, list<Signature>)`: the core
+assembles the bytes from its own state, verifies them under the history verifier, then changes. `Written`
+holds `stores` to persist exactly as given, in order, and the typed `Changes`. A failed finish changes
+nothing and consumes the action; prepare again with fresh entropy. An action finished on another session is
+`WrongObject` (and not consumed).
+
+| `begin_*` | Arguments (besides `entropy`) | Entropy |
 | --- | --- | --- |
-| Constructors | `#[uniffi::constructor]`, return `Arc<T>` | static methods returning the object (`AccountCore.open(...)`) |
-| Passing an object | `Arc<T>` | `&T` (a JS object) |
-| Host callback | `HostSource` callback interface (`Send + Sync`) | a JS object with `read`, `version`, `readBlob` (`JsSource`); only `AccountEngine.open` takes it |
-| Error | `AccountError` enum (variants with fields) | thrown `AccountFault` object with `kind`, `code`, `detail` getters |
-| Integers | `u64`, `i64` | `bigint` for `u64` and `i64` |
-| Panic | caught, returned as `AccountError.Internal`; the object is poisoned and says so | **not catchable on wasm32** (panic aborts the instance): discard the instance. The code forbids `unsafe`, checks every bound before allocating and returns errors instead of panicking; none is known to panic |
-
-Method names are the Rust `snake_case` names in both crates; the Swift and Kotlin generators camel-case
-them (`finishUnlockSlot`), the wasm exports keep `snake_case` (as the 0.4 wasm exports did).
-
-## 2. Errors
-
-Every call returns `AccountError` or succeeds. A host branches on the variant or on `code`, never on
-`detail` (a diagnostic for logs that never carries key material).
-
-| Variant | `code` | Meaning |
-| --- | --- | --- |
-| `Malformed` | `malformed` | The bytes or structure break a rule; also an argument that is not JSON/base64. |
-| `BadSignature` | `badSignature` | A signature, assertion, possession proof or key binding failed. |
-| `NewerFormat` | `newerFormat` | Authenticated content of a newer format. |
-| `Unavailable` | `unavailable` | Something needed could not be obtained (never evidence of anything). |
-| `Refused` | `refused:<reason>` and `reason` | A §19 refusal: `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`. |
-| `Denied` | `denied:<reason>` and `reason` | A grant or key does not allow it now: `notGranted revoked expired budgetSpent notReadable unavailable`. |
-| `Host` | `host` | A host callback failed. |
-| `Reentered` | `reentered` | A callback called back into the object that was calling it. |
-| `Consumed` | `consumed` | A one-shot object (action, creation, pairing step, writer) was used up or is in the wrong stage. |
-| `WrongObject` | `wrongObject` | An action was finished on a session other than the one that prepared it. |
-| `Bound` | `bound` | An argument exceeded a bound or has the wrong length. |
-| `Internal` | `internal` | A panic was caught; discard the object. |
-
-Pairing aborts are `Malformed` with `code` `pairing:commitmentMismatch`, `pairing:invalidPoint`,
-`pairing:wrongAccount`; the five-per-hour limit is `Refused` with `code` `pairing:limit`.
-
-## 3. What crosses, and what never does
-
-**Never returned, logged, or serialized by any export:** vault seed bytes; epoch key bytes; a PRF
-output; a raw ECDH result; the sealed-state key; a prepared action's retained state; the private scalar
-of a transfer key. No export has a `Debug`, `Display` or JSON form of any of these; `AccountError`
-carries only the core's own diagnostics (which carry none).
-
-**Crosses in (host to core), consumed and not read back:** PRF outputs and ECDH results (inside
-`finish_unlock_slot`, `finish_unlock_epochs`, `provide_prf`) as base64 in a JSON argument; fresh
-entropy (`Vec<u8>`, overwritten after use); the device-held sealed-state key (see 6); a host-chosen
-vault seed inside the 96 bytes given to `AccountCreation.begin`, and the 32 bytes given to
-`PairingTransferKey.create`. The host is trusted with these exactly as the core's header says
-(`v05/account/mod.rs`): it can recompute what it seals. The JSON text a host builds for a secret is
-the host's own string; the parse inside the call is dropped but, like the core's erasure, not
-overwritten (best effort).
-
-**Crosses out (core to host), all public or the host's own bytes:** exact signing bodies, signers and
-challenges (copies); PRF requests (salt, challenge, rp, credential: public); unlock inputs (the HPKE
-`enc` points and PRF salts); records and objects the host stores; a sealed seed (an HPKE ciphertext
-only the paired device can open); views, members, ledger, policy.
-
-**Never accepted from the host:** verified state (no export takes a state, keyring, terms, session
-number, fold or seed), a `PendingAction` or `SigningStep` (an action is held in Rust; the host passes
-signatures only; finishing re-assembles the bytes from the core's own state and verifies them under the
-history verifier first), a checkpoint that was not sealed under the device key (an unsealable state is
-ignored and the history replays).
-
-Which types are `Clone` or serializable: no core type was made so. This crate adds none; the JSON the
-exports return is built field by field from non-secret accessors, never `serde` of a secret-holding type.
-
-## 4. Bounds and hostile hosts
-
-Checked before allocation or parse: any JSON argument 64 MiB; any binary argument 40 MiB; lists
-262,144 items; signer, namespace and controller name lists 256; an entropy argument exactly 32, 64 or
-96 bytes as the action says; a bearer token 8 KiB; a call 16 KiB; an HTTP response body 128 MiB; a blob
-chunk 64 KiB (writer) and 1 MiB (open); the sealed state 1 GiB; a status code and a history page limit
-(1 to 200) are range-checked. The core adds its own bounds on top (`MAX_OBJECTS` and the like).
-
-A callback that returns garbage is judged by the core (it is bytes; nothing is trusted on its say). A
-callback that errors becomes `Host` (open and refresh fail; the engine stays usable). A callback that
-re-enters the object it is called from gets `Reentered`, because every object takes a non-waiting lock;
-nothing deadlocks. A host that passes the same action twice gets `Consumed`; an action to another
-session `WrongObject`. A finish that fails changes nothing (the core's rule) and consumes the action:
-prepare again with fresh entropy.
-
-## 5. The calls
-
-`R` is JSON. `entropy` is fresh random bytes from the host's CSPRNG, never reused.
-
-### Free functions
-
-| Call | Args | Result |
-| --- | --- | --- |
-| `account_verify_history` | `objects` JSON `{entries,pending,heads,predecessor}` (base64 arrays), `now_ms` | `{code, seq, detail, rollback, account, branch[], conflicts[], heldUntil}`: the history verifier with no identity |
-| `account_webauthn_check` | descriptor JSON, body, DER signature, authenticatorData, clientData, mode JSON | `{ok,uv,origin,counter}` or `BadSignature` naming the failed check |
-| `account_verify_swift_predecessor` | `entries` JSON (base64 array) | `{account, entries[{seq,digest,issuedMs,layout}]}` |
-| `account_key_id`, `account_webauthn_prf_input`, `account_vault_public`, `account_format_date`, `account_default_policy`, `account_request_info` | | helpers, public values only |
-
-### `AccountCreation` (replaces `begin_create`, `begin_create_with`, `advance_create`)
-
-`begin(params, identity, now_ms, entropy[96])` then `stage`, `prf_requests`, `steps`, `provide_prf(results)`,
-`provide_signatures(sigs)` (returns `continue` or `done`), `take_account()` returns an `AccountCore`. `params` JSON: `label`,
-`namespaces`, `controllers` (protocol JSON), `slots [{controllers,label}]`, optional `threshold`,
-`recoverThreshold`, `addThreshold`, `countByHolders`, `policy`, `signers`, `rekeySigners`.
-`identity` is `controller:<32 hex>` or `member:<32 hex>`.
-
-### Steps, signatures, PRF (the shape of "begin and finish")
-
-`AccountAction.steps()` is `[{path, body, signer, role, form, descriptor, signingKey, challenge, uv}]`:
-`body` is base64 of the exact bytes to sign; `role` is `primary|cosignature|possession|handover`; `form`
-is `raw` or `webauthn`; `challenge` is present for a WebAuthn signer. Signatures go back in step order as
-`[{signature, authenticatorData?, clientData?}]` (raw `r||s`, or DER with the assertion). PRF:
-`prf_requests()` is `[{controller, rp, credential, salt, challenge}]`; the host makes the assertion and
-returns `[{authenticatorData, clientData, signature, output}]` (`output` is the 32-byte `results.first`)
-through `provide_prf`, after which `steps()` is non-empty.
-
-### `AccountCore` and `AccountEngine` shared reads
-
-`id identity status head controllers homes policy pending owed_shares notices(shown_seq,
-shown_transitions, local_keys) proposals tools slots is_unlocked begin_unlock_epochs begin_unlock_slot
-fork_candidates suggest_signers latest_epoch write_denial stores`, plus on both (the engine's own
-versions on the engine): `me members ledger access view query revision`.
-
-### `begin(spec, entropy)` on `AccountCore` and `AccountEngine`
-
-Returns an `AccountAction` (`kind`, `denial`, `info`, `account`, `steps`, `prf_requests`). `denial()` is
-non-empty (`{"reason","detail"}`) when a write is refused for access reasons (it is a value, as in 0.4).
-`spec` is JSON with `"action"`:
-
-| `action` | Fields | Entropy | 0.5 call |
-| --- | --- | --- | --- |
-| `approve` | `request`(b64), `terms`, `signers` | 32 | `begin_approve` (a `grant`; `terms.import` is an import grant) |
-| `renew` | `member`, `expiresMs`, `signers` | 32 | `begin_renew` |
-| `renew_shares` | `member`, `signers` | 32 | `begin_renew_shares` |
-| `revoke` | `member`, `keep` (`everything`/`nothing`/`{kept,heads}`), `signers` | 32 | `begin_revoke` |
-| `end_sessions` | `member`, `signers` | 0 | `begin_end_sessions` |
-| `end_my_sessions` | none | 0 | `begin_end_my_sessions` |
-| `rekey` | `namespaces`, `signers` | 32 | `begin_rekey` |
-| `keyring` | `addControllers`, `addSlots`, `policy`, `signers` | 0 | `begin_keyring` |
-| `add_controller` | `controller`, `mode` (`immediate`/`transition`), `signers`, `rule` | 0 | `begin_add_controller` |
-| `add_slot` | `signer`, `plan{controllers,label}` | 32 | `begin_add_slot` |
-| `rotate_vault` | `signer`, `plans`? | 64 (new seed, entropy) | `begin_rotate_vault` |
-| `remove_controller` | `remove`, `keep`, `signers`, `rule`, `rotate` | 0 or 64 | `begin_remove_controller` |
-| `transition` | `change` (the §8.7 object), `signers`, `rule` | 0 | `begin_transition` |
-| `veto`, `suspend`, `resolve` | as the core | 0 | |
-| `write`, `propose` | `namespace`, `kind`, `payload` | 32 | `begin_write`, `begin_propose` (the engine's `begin_write` retains live heads) |
-| `resolution` | `namespace`, `accept`, `proposals` | 32 | `begin_resolution` |
-| `link`, `call` | see the core; `call`'s request ID is the 32 entropy bytes | 0 / 32 | `begin_link`, `begin_call`, **on `AccountCore` only** (the engine does not return a call's artifact) |
-
-Then `provide_prf(action, results)` if `prf_requests()` is non-empty, then `finish(action, signatures)`.
-`AccountCore.finish` returns `{entries[{seq,bytes}], pending[], records[{path,bytes}], artifact, stores,
-changes, info}`; `AccountEngine.finish` returns `{stores, changes}`. **`stores` is `[{path, bytes}]`:
-store exactly those bytes at those paths, in order.** An engine that finished a write already holds
-the bytes; the host stores them and need not call `apply_paths`.
+| `begin_approve` | `request: bytes`, `terms_json`, `signers` | 32 |
+| `begin_renew` / `begin_renew_shares` | `member`, `expires_ms` (renew only), `signers` | 32 |
+| `begin_revoke` | `member`, `keep: RevokeKeep`, `signers` | 32 |
+| `begin_end_sessions` / `begin_end_my_sessions` | `member`, `signers` / none | 0 |
+| `begin_rekey` | `namespaces`, `signers` | 32 |
+| `begin_keyring` | `add_controllers_json: list<string>`, `add_slots_json: list<string>`, `policy_json`, `signers` | 0 |
+| `begin_add_controller` | `controller_json`, `mode: AddMode`, `signers`, `rule: RuleKind` | 0 |
+| `begin_add_slot` | `signer`, `plan: SlotPlan` | 32 |
+| `begin_rotate_vault` | `signer`, `has_plans: bool`, `plans: list<SlotPlan>` | 64 (new seed, entropy) |
+| `begin_remove_controller` | `remove`, `keep`, `signers`, `rule`, `rotate: bool` | 64 if `rotate`, else 0 |
+| `begin_transition` | `change_json`, `signers`, `rule` | 0 |
+| `begin_veto` / `begin_suspend` / `begin_resolve` | as the core | 0 |
+| `begin_write` / `begin_propose` | `namespace`, `kind`, `payload_json` | 32 |
+| `begin_resolution` | `namespace`, `accept`, `proposals` | 32 |
+| `begin_import` | `namespace`, `batch_json` | 32 |
 
 ### `AccountEngine`
 
-`open(source, listing, identity, account, namespaces, batch, saved, key, now_ms)`: `listing` is a JSON
-array of every path the source holds; `namespaces` a JSON array (empty: all); `saved` the JSON `save`
-returned (or empty); `key` the 32-byte device-held key. Then `open_mode stats load refresh apply_paths
-advance finish_unlock_slot finish_unlock_epochs missing_covered budget_scope_unavailable rejudged
-revisions history operation_at begin begin_import provide_prf finish begin_live_write finish_live_write
-apply_live stale_live live_verdicts save verify_batch begin_blob blob_manifest open_blob_chunk blob_chunk
-read_blob blob_availability required_blob_fetches`, and the exchange: `exchange_homes
-exchange_set_bearer exchange_next exchange_provide_call exchange_answer exchange_want_blob receipted_by`.
+`open(source, listing: list<ListedPath>, identity, account, namespaces, batch, saved: SavedState, key, now_ms)`
+(`identity` is `controller:<32 hex>` or `member:<32 hex>`; `listing` carries each path's content version in
+one batch, an empty version meaning none; empty `SavedState` means none). Reads: `id identity status head_seq
+head_digest controllers homes policy pending owed_shares notices(shown_seq, shown_transitions, local_keys)
+slots is_unlocked begin_unlock_slot(index) begin_unlock_epochs fork_candidates suggest_signers(available, need)
+latest_epoch write_denial record_verdict verdict_of live_heads open_info stats access revision revisions me
+members`, and JSON: `proposals_json tools_json ledger_json view_json query_json history_json
+operation_at_json blob_manifest_json`. Progress: `load refresh(listing) apply_paths(list<ListedPath>) advance
+finish_unlock_slot(index, list<UnlockSecret>) finish_unlock_epochs(list<EpochAnswer>) apply_live stale_live
+live_verdicts missing_covered budget_scope_unavailable rejudged save(nonce_seed) verify_batch(limit)`. Blobs:
+`begin_blob open_blob_chunk blob_chunk read_blob blob_availability required_blob_fetches`. Live: `begin_live_write
+finish_live_write`. Exchange: `exchange_homes exchange_set_bearer exchange_next(home) exchange_provide_call
+exchange_answer(home, ticket, HttpAnswer) exchange_want_blob receipted_by`. Move: `swift_succession
+swift_predecessor begin_swift_veto begin_swift_freeze begin_swift_copier_shares`.
 
-The exchange as values the host performs: `exchange_next(home)` returns `{"step":"request","request":
-{ticket, home, method, url, headers[[k,v]], body}}`, `{"step":"needCall","need":{ticket, home, audience,
-purpose, method, url}}`, `{"step":"waiting"}` or `{"step":"done"}`. The host sends the request,
-and calls `exchange_answer(home, ticket, status, headers, body)`, which returns `{store[{path,bytes}],
-changes, faults[{kind, home, ...}]}`. Fault kinds: `rollback fork badObject foreignAccount noProgress
-mismatch refused conflict race unauthorized redirect malformed cursorReset more headAhead status`. A `needCall` is answered by
-`exchange_provide_call(home, ticket, call)` with a call built by the host (`begin` `call` on an `AccountCore`).
+The exchange: `exchange_next` returns an `ExchangeStep`: `Request` (with `request: HttpRequest`: ticket, home,
+method, url, headers, body), `NeedCall` (with `need: CallNeed`: ticket, home, audience, purpose, method, url;
+build the call for exactly that and give it to `exchange_provide_call`), `Waiting` or `Done`. The host performs
+the request and answers it; the `Report` has `store` (persist), `changes` and `faults: list<ExchangeFault>`.
 
-### Pairing and the seed (replaces `begin_add_passkey`, `begin_recovery_add`, the 0.4 pairing)
+Standalone: `account_verify_history`, `account_webauthn_check(KeyDescriptorView, body, der_signature,
+authenticator_data, client_data, WebauthnMode)`, `account_verify_swift_predecessor`, `account_key_id`,
+`account_webauthn_prf_input`, `account_vault_public`, `account_format_date`, `account_request_info`,
+`account_default_policy`.
 
-Joiner (new device): `PairingTransferKey.create(entropy32)`; `AccountPairing.join(account, key.public(),
-nb)`; send `commitment()`; on `na`: `receive_nonce(na)` returns `{e, nb}` to send; `digits()`; `confirm()`.
-Existing device: `AccountPairing.existing_receive_commitment(account, commitment, limiter, now_ms)`;
-`send_nonce(na)`; `receive_reveal(e, nb, limiter, now_ms)` returns the digits; `confirm()`; then
-`AccountCore.transfer_seed(pairing, entropy)` returns a sealed box JSON. New device:
-`AccountCore.accept_seed_transfer(key, sealed, pairing)`. The QR path is `join_qr` / `qr_payload` and
-`existing_scan_qr` (the host attests the scan). Keep the `PairingFailureLimiter` state (`to_json`).
+### Key descriptors
 
-### Moving
+One encoding on the whole surface: `KeyDescriptorView` is the protocol descriptor of §3.1 (`form`, `signing`,
+and `agreement` for raw, or `rp`, `credential`, `origins`, `authority_origins` for webauthn). A step carries
+it as `descriptor`; `account_webauthn_check` takes it. The core's internal serde form never crosses.
 
-`AccountMove.begin_upgrade(history, params, now_ms)` is the 0.4 in-place upgrade (§16.1): `history` is
-`{"authority/00000001.json": b64, ...}`; `finish(sigs)` returns the entry to store at
-`authority/<seq>.json`. Swift succession on `AccountCore`: `swift_succession`, `swift_predecessor`,
-`begin_swift_veto`, `begin_swift_freeze`, `begin_swift_copier_shares`, `finish_move`,
-`accept_predecessor_entry`. **Not exported: the Swift copy** (`CopyPlan`, the host `Translator`
-callback, `begin_swift_copy_write`/`finish_swift_copy_write`, `swift_copy_destination`,
-`finish_swift_copy`, `begin_swift_migration`). It needs the Swift slot opening (`swift_slots`: a host
-opening a Swift library's epoch keys) and a translator callback with a documented JSON shape; it is
-the next piece, not a hidden gap.
+## 3. Errors
 
-## 6. Sealed state and keys
+Every call returns `AccountError` or succeeds. A host branches on the variant or on `code`; `detail` is for
+logs and never carries key material. `Refused` carries the §19 reason; `Denied` the access reason.
 
-`AccountEngine.open` takes the device-held key once and the core's engine keeps it for `save` and the
-saved-state check (the core's design; `EngineOptions` has no accessor). Stored state is a cache: a bad
-tag, another account or identity, an unknown format or a wrong key is ignored and the history replays
-(`open_mode` says `invalidated`). `AccountCore.open` and `export_persisted` take the key per call and
-keep nothing. The core never calls a host key provider (§3.4, §17.1): there is no `KeyProvider`
-callback in 0.5; the host reads the steps and signs.
+| Variant | `code` | Meaning |
+| --- | --- | --- |
+| `Malformed` | `malformed` | A rule is broken; also an argument that is not valid JSON. Pairing aborts: `pairing:commitmentMismatch`, `pairing:invalidPoint`, `pairing:wrongAccount`. |
+| `BadSignature` | `badSignature`; from `account_webauthn_check` `badSignature:<check>` | A signature, assertion, possession proof or key binding failed. Checks: `point rawLength scalar der verify clientData clientDataBound unknownForm type challenge origin crossOrigin relyingParty userPresence userVerification form callOrigin`. |
+| `NewerFormat` | `newerFormat` | Authenticated content of a newer format. |
+| `Unavailable` | `unavailable` | Something needed could not be obtained. |
+| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`). |
+| `Denied` | `denied:<reason>`, `reason` | `notGranted revoked expired budgetSpent notReadable unavailable`. |
+| `Host` | `host` | A host callback failed; `detail` is the host's own message (a foreign exception arrives here too). |
+| `Reentered` | `reentered` | A callback called back into the object that was calling it, on the same thread. |
+| `Consumed` | `consumed` | A one-shot object was used up, or a pairing step is in the wrong stage (nothing consumed then). |
+| `WrongObject` | `wrongObject` | An action was finished on another session. |
+| `Bound` | `bound` | An argument exceeded a bound or has the wrong length. |
+| `Integrity` | `integrity` | The engine found its source or home inconsistent and is unusable; discard it. Not a mistake in the call. |
+| `Internal` | `internal` | A panic was caught; discard the object. |
 
-## 7. The 0.4 calls and their exports (the account header's table)
+Concurrency: a call from another thread waits for the engine's lock (as 0.4 does). Only a call from the thread
+that already holds it, from inside a callback, is `Reentered`.
 
-| 0.4 | Export, or why none |
+## 4. What crosses, and what never does
+
+**Never returned, logged, or serialized:** vault seed bytes; epoch key bytes; a PRF output or ECDH result read
+back; the sealed-state key; a prepared action's retained state; a transfer key's private scalar. No type here
+has a `Debug`, `Clone` or serial form that includes one: the three records that carry a host secret
+(`PrfAnswer`, `UnlockSecret`, `EpochAnswer`) have no `Clone` even on the web build.
+
+**Crosses in, consumed and wiped:** PRF outputs, ECDH results and epoch shares (fields of the three secret
+records), entropy (`Vec<u8>`), the nonce seed of `save`, and the device-held sealed-state key. Every copy the
+binding makes is overwritten before the call returns, including on error paths, and the argument vectors are
+wiped. `v05_secrets.rs` runs a counting allocator that scans every freed block for the secret in raw, base64,
+base64url and hex form: **through the binding, no freed block holds a share or an ECDH result that the core
+alone does not already leave** (before this round, on the JSON-string surface: 2 freed blocks with the raw
+secret and 3 with its base64 for one `finish_unlock_slot`). The residue is the core's own: `hpke::extract`
+builds a 51-byte temporary containing a share that it does not erase (`finish_unlock_epochs`: 1 block, with or
+without the binding; `finish_unlock_slot`: 0). The core's engine keeps its own copy of the device key for its
+life (its `EngineOptions` has no wipe; the branch `engine-0.5-e9` adds one); the binding wipes its argument.
+The host is trusted with these secrets exactly as the core's header says.
+
+**Never accepted from the host:** verified state, a `PendingAction` or `SigningStep`, a keyring, terms, a
+fold, a seed. Saved state is accepted only sealed under the device key; one that fails its seal is ignored
+and the history replays (`open_info` says so).
+
+## 5. Bounds
+
+Every bound is checked on the raw length before any parse or allocation that scales with it. JSON document
+argument (`*_json`, `policy_json`, controller, terms, payload): 4 MiB. Binary argument: 40 MiB (a `ListedPath`
+list, `ByteString` list and `Store` list: 262,144 items). Name lists (signers, namespaces, controllers, slot
+controllers, shown transitions, local keys): 256. Entropy: exactly the 32, 64 or 96 bytes the call says; the
+sealed-state key 32. Signatures list 256; signature or assertion field 64 KiB. Bearer token 8 KiB; call 16 KiB;
+HTTP response body 128 MiB; headers 256; blob chunk 64 KiB (writer) and 1 MiB (open); QR payload 4 KiB;
+limiter state 64 KiB; a request or entry blob 40 MiB. The core adds its own bounds. Measured
+(`v05_secrets.rs`): a 64 MiB payload argument is refused with **381 bytes** of extra allocation (on the
+JSON-string surface the same size reached **1.07 GiB** peak before its bound applied).
+
+A callback that returns garbage is judged by the core. A callback that fails is `Host` with its message. A
+callback that re-enters is `Reentered` and nothing deadlocks. A finish that fails changes nothing.
+
+## 6. Types
+
+Enums are C-like. A record's `optional` field is set only as its doc says.
+
+| Enum | Variants | Meaning |
+| --- | --- | --- |
+| `StepRole` | `Primary`, `Cosignature`, `Possession`, `Handover` | What a signature is for in a batch. |
+| `SignForm` | `Raw`, `Webauthn` | The signature form a signer uses. |
+| `AccountMemberKind` | `Device`, `App`, `Agent`, `Server` | A member's kind. |
+| `HttpMethod` | `Get`, `Post`, `Put` | An HTTP method. |
+| `OpenMode` | `Cold`, `Resumed`, `Invalidated` | How an engine open treated saved state. |
+| `ExchangeStepKind` | `Request`, `Waiting`, `NeedCall`, `Done` | What the exchange asks the host to do next. |
+| `ExchangeFaultKind` | `Rollback`, `Fork`, `BadObject`, `ForeignAccount`, `NoProgress`, `Mismatch`, `Refused`, `Conflict`, `Race`, `Unauthorized`, `Redirect`, `Malformed`, `CursorReset`, `More`, `HeadAhead`, `Status` | What a home did that the engine did not follow. |
+| `LiveVerdictKind` | `Current`, `Superseded`, `Retained`, `Equivocation`, `Quarantined`, `Refused`, `Invalid` | What became of a live candidate. |
+| `BlobState` | `Complete`, `Partial`, `Missing`, `Inaccessible` | How much of a blob is held locally. |
+| `StandingKind` | `Controller`, `Member`, `Unknown` | What a session is in the verified history. |
+| `KeepMode` | `Everything`, `Nothing`, `Explicit` | Which of a revoked member's records a revocation keeps. |
+| `UnlockKind` | `Ecdh`, `Prf` | The route of a slot an unlock needs the host to answer. |
+| `CreateStage` | `Prf`, `Genesis`, `Rekey`, `Done`, `Spent` | Where a creation stands. |
+| `PairingStage` | `Joiner`, `Revealed`, `QrJoiner`, `Waiting`, `AwaitingReveal`, `Code`, `Scanned`, `Confirmed`, `Spent` | Where a pairing session stands. |
+| `RuleKind` | `Control`, `Recovery` | The rule a transition is counted under. |
+| `AddMode` | `Immediate`, `Transition` | How a controller is added. |
+| `SignerNeed` | `Member`, `Rekey`, `Control`, `Recovery`, `KeyringAdd`, `Veto` | Which rule a set of signers is chosen for. |
+| `CheckKind` | `Authority`, `Call`, `SwiftPredecessor` | Which check `account_webauthn_check` applies. |
+| `AuthorityRuleKind` | `Control`, `Recovery`, `KeyringEntry`, `Transition`, `Veto`, `Handover`, `Single`, `Suspend`, `Possession` | The authority rule a signature is checked for. |
+| `WriteLevel` | `Write`, `Propose` | Whether a write may be levelled as a write or a proposal. |
+| `AccessKind` | `Read`, `Write` | The access a grant gives. |
+| `MoveStage` | `WindowNotOpen`, `Waiting`, `Due`, `Frozen`, `Verified`, `Vetoed`, `Migrated` | Where a Swift succession stands. |
+
+| Record | Fields (name: type) | Meaning |
+| --- | --- | --- |
+| `Store` | `path: String`, `bytes: bytes` | Exact bytes the host stores at a path. |
+| `ListedPath` | `path: String`, `version: String` | A listed path with the provider's content-version token (empty for none). |
+| `ByteString` | `bytes: bytes` | One byte string (a list of them cannot be a field on every platform). |
+| `KeyDescriptorView` | `form: SignForm`, `signing: bytes`, `agreement: optional<bytes>`, `rp: optional<String>`, `credential: optional<bytes>`, `origins: list<String>`, `authority_origins: list<String>` | A key as the protocol writes it (§3.1), the one form the surface uses everywhere. `raw` keys have `agreement`; `webauthn` keys have `rp`, `credential` and `origins`. |
+| `AccountSigningStep` | `path: String`, `body: bytes`, `signer: String`, `role: StepRole`, `form: SignForm`, `descriptor: optional<KeyDescriptorView>`, `signing_key: bytes`, `challenge: optional<String>`, `uv: bool` | The exact body and signer of one signature the host makes. |
+| `Signature` | `signature: bytes`, `authenticator_data: optional<bytes>`, `client_data: optional<bytes>` | A signature the host made over a step's body: raw `r||s`, or DER with the assertion. |
+| `PrfRequest` | `controller: String`, `rp: String`, `credential: bytes`, `salt: bytes`, `challenge: bytes` | The assertion the host must make for a new PRF route (§7.2). |
+| `PrfAnswer` (secret input, wiped) | `authenticator_data: bytes`, `client_data: bytes`, `signature: bytes`, `output: bytes` | The host's answer to a `PrfRequest`. `output` is the 32-byte `results.first`: a secret, consumed and wiped by the call it is passed to. |
+| `UnlockInput` | `kind: UnlockKind`, `controller: String`, `enc: bytes`, `salt: bytes` | One route of a slot the host answers: `Ecdh` against `enc`, or `Prf` with `salt`. |
+| `UnlockSecret` (secret input, wiped) | `kind: UnlockKind`, `secret: bytes` | The host's raw result for one `UnlockInput`, in input order: a secret, consumed and wiped. |
+| `EpochAgreement` | `namespace: String`, `epoch: u64`, `recipient: String`, `recipient_point: bytes`, `peer: bytes` | One ECDH a member's host performs to open a share. |
+| `EpochAnswer` (secret input, wiped) | `namespace: String`, `epoch: u64`, `shared: bytes` | The host's raw ECDH result for one share: a secret, consumed and wiped. |
+| `SlotController` | `id: String`, `label: String` | A controller a slot names. |
+| `SlotInfo` | `index: u64`, `kind: String`, `label: String`, `controllers: list<SlotController>` | One slot of the current vault, as a chooser shows it. |
+| `SlotPlan` | `controllers: list<String>`, `label: String` | What a slot is built for: its controllers and label. |
+| `Status` | `seq: u64`, `code: String`, `stop_seq: optional<u64>`, `detail: optional<String>`, `rollback: bool` | The verdict on the verified history. |
+| `EntryChange` | `seq: u64`, `kind: String` | An entry that joined the verified branch. |
+| `NamespaceRevision` | `namespace: String`, `revision: u64` | A namespace whose fold changed, with its new revision. |
+| `RefusedHead` | `home: String`, `code: String` | A head a home sent that was refused. |
+| `Changes` | `authority_from_seq: u64`, `authority_to_seq: u64`, `entries: list<EntryChange>`, `members_added: list<String>`, `members_revoked: list<String>`, `controllers_added: list<String>`, `controllers_removed: list<String>`, `vault_changed: bool`, `policy_changed: bool`, `reorganized: bool`, `namespaces: list<NamespaceRevision>`, `pending_added: list<String>`, `pending_gone: list<String>`, `pending_now: list<String>`, `heads_accepted: list<String>`, `heads_refused: list<RefusedHead>`, `foreign: u64`, `status: optional<Status>` | What a call changed in the account. |
+| `Written` | `stores: list<Store>`, `changes: Changes` | What a finished action produced: store these bytes at these paths, in order. |
+| `Controller` | `id: String`, `label: String`, `roles: list<String>`, `form: SignForm`, `verification: bool`, `holder: optional<String>`, `has_slot: bool`, `provisional: bool`, `suspended: bool` | A controller of the verified keyring. |
+| `AccountGrant` | `namespaces: list<String>`, `access: list<AccessKind>`, `expires: optional<String>`, `write_budget: optional<u64>`, `import: bool` | What a grant allows (the 0.4 shape). |
+| `AccountMember` | `id: String`, `label: String`, `kind: AccountMemberKind`, `grant: optional<AccountGrant>`, `since: u64`, `revoked_at: optional<u64>`, `writes: u64`, `expires_ms: optional<i64>`, `provisional: bool`, `home: bool`, `session: u64` | A member with its standing. |
+| `Standing` | `kind: StandingKind`, `controller: optional<Controller>`, `member: optional<AccountMember>`, `unknown_id: optional<String>` | What this session is. Exactly one of `controller`, `member`, `unknown_id` is set, by `kind`. |
+| `Home` | `id: String`, `label: String`, `status: String`, `endpoints: list<String>`, `primary: bool` | A home the account names. |
+| `Policy` | `threshold: u64`, `recover_threshold: u64`, `add_threshold: u64`, `count_by_holders: bool`, `call_window: u64`, `head_max_age: u64`, `head_quorum: u64`, `link_max_age: u64`, `member_rule: String`, `recovery_delay: u64`, `primary_home: optional<String>` | The effective policy (§6.3). |
+| `Signer` | `id: String`, `label: String` | A signer with its label. |
+| `Pending` | `digest: String`, `by: String`, `signers: list<Signer>`, `issued_ms: i64`, `anchor_seq: u64`, `first_seen_seq: optional<u64>`, `due_ms: optional<i64>`, `veto_deadline_ms: optional<i64>`, `full_set: optional<bool>`, `components: list<String>`, `removes: list<String>`, `adds: list<String>`, `vetoes: list<String>`, `vetoable: bool` | A pending transition, as §17.5 says it must be shown. |
+| `Receipted` | `home: String`, `received_ms: i64` | When a home receipted an object. |
+| `SeenActivation` | `seq: u64`, `transition: String`, `signers: list<String>`, `components: list<String>`, `receipted: list<Receipted>` | An activation the person has not seen. |
+| `Owed` | `member: String`, `namespace: String`, `epoch: u64`, `provisional: bool` | A share a member is owed (§9.4). |
+| `Notices` | `pending: list<Pending>`, `activations: list<SeenActivation>`, `owed: list<Owed>`, `controllers_without_slot: list<String>`, `vault_retiring: bool`, `no_home: bool` | What the person must be shown (§17.5). |
+| `AccountDenial` | `reason: String`, `detail: String` | A write refused for access reasons: `reason` is one of notGranted, revoked, expired, budgetSpent, notReadable, unavailable. |
+| `HeadRef` | `namespace: String`, `digest: String` | Facts about a prepared action a host may show or follow up on. |
+| `ActionInfo` | `name: String`, `rekey_owed: bool`, `owed_namespaces: list<String>`, `walk_incomplete: bool`, `kept: list<String>`, `heads: list<HeadRef>` | Facts about a prepared action. |
+| `EngineStats` | `records_read: u64`, `signatures_verified: u64`, `payloads_decrypted: u64`, `walked_last: u64`, `folds_applied_last: u64`, `ignored_paths: u64`, `held_paths: u64`, `unread_paths: u64` | Work the engine did. |
+| `OpenInfo` | `mode: OpenMode`, `reason: optional<String>` | How the open treated saved state: `mode`, and why when it was invalidated. |
+| `SavedPart` | `namespace: String`, `bytes: bytes` | One sealed part of saved state. |
+| `SavedState` | `verifier: bytes`, `checkpoint: bytes`, `parts: list<SavedPart>` | The sealed state a host stores between sessions (caches sealed under the device key). An empty `verifier` and `checkpoint` mean "no saved state". |
+| `ForkCandidate` | `seq: u64`, `first: String`, `second: String` | Two candidates at a seq a `resolve` may choose between. |
+| `Header` | `name: String`, `value: String` | A header of an HTTP message. |
+| `HttpRequest` | `ticket: u64`, `home: String`, `method: HttpMethod`, `url: String`, `headers: list<Header>`, `body: bytes` | A request for the host to send. |
+| `CallNeed` | `ticket: u64`, `home: String`, `audience: String`, `purpose: String`, `method: HttpMethod`, `url: String` | A request that needs a fresh `Authorization: Colophon` call built for exactly it. |
+| `ExchangeStep` | `kind: ExchangeStepKind`, `request: optional<HttpRequest>`, `need: optional<CallNeed>` | The next step of an exchange pass. `request` is set for `Request`, `need` for `NeedCall`. |
+| `HttpAnswer` | `status: u32`, `headers: list<Header>`, `body: bytes` | What the host got back. |
+| `ExchangeFault` | `kind: ExchangeFaultKind`, `home: String`, `path: optional<String>`, `feed: optional<String>`, `code: optional<String>`, `what: optional<String>`, `why: optional<String>`, `purpose: optional<String>`, `audience: optional<String>`, `endpoints: list<String>`, `status: optional<u32>` | A fault of a home. Which fields are set depends on `kind`: `path` (Mismatch, Conflict, Race), `feed` (NoProgress, More), `code` (BadObject, Refused), `what` (Refused), `why` (Malformed), `purpose` and `audience` (Unauthorized), `endpoints` (Redirect), `status` (Status). |
+| `Report` | `store: list<Store>`, `changes: Changes`, `faults: list<ExchangeFault>` | What one answer produced. |
+| `LiveVerdict` | `path: String`, `kind: LiveVerdictKind`, `detail: optional<String>` | The verdict on a live candidate; `detail` carries the `Quarantined` or `Refused` reason code or the `Invalid` explanation. |
+| `StaleLive` | `path: String`, `generation: u64` | A live candidate refused for being below its slot's witness. |
+| `LiveHead` | `path: String`, `digest: String`, `author: String`, `namespace: String`, `slot: String`, `generation: u64` | A live head the verifier accepted. |
+| `Replaces` | `path: String`, `sha256: String` | The slot a live replacement is conditional on (`If-Match`): the sha256 of its bytes. |
+| `LiveWritten` | `stores: list<Store>`, `replaces: optional<Replaces>`, `changes: Changes` | A finished live write. |
+| `BlobAvailability` | `state: BlobState`, `present: u64`, `total: u64`, `detail: optional<String>` | How much of a blob is held locally. |
+| `BlobChunk` | `path: String`, `bytes: bytes` | A sealed chunk to store before the manifest is published. |
+| `VerifyProgress` | `checked: u64`, `remaining: u64` | Progress of the integrity audit. |
+| `RevokeKeep` | `mode: KeepMode`, `kept: list<String>`, `heads: list<HeadRef>` | Which of a revoked member's records a revocation keeps (§9.5). |
+| `CreateParams` | `label: String`, `namespaces: list<String>`, `controllers_json: list<String>`, `slots: list<SlotPlan>`, `threshold: optional<u64>`, `recover_threshold: optional<u64>`, `add_threshold: optional<u64>`, `count_by_holders: bool`, `policy_json: String`, `signers: list<String>`, `rekey_signers: list<String>` | What to create. `controllers_json` holds one protocol controller object (§6.1) per item; `policy_json` the §6.3 policy document (empty: the §18 person default). |
+| `Created` | `account: String`, `stores: list<Store>` | A created account: its ID and everything to store. |
+| `RequestSpec` | `account: String`, `signing: bytes`, `agreement: bytes`, `label: String`, `kind: AccountMemberKind`, `terms_json: String`, `created: String`, `custody: String`, `operator: String`, `endpoints: list<String>` | A member's request (§9.1). `custody` and `operator` are empty for none. |
+| `RequestInfo` | `raw: bytes`, `member: String`, `label: String`, `kind: AccountMemberKind`, `terms_json: String` | A verified request as an approver sees it. |
+| `AuthorityObjects` | `entries: list<ByteString>`, `pending: list<ByteString>`, `heads: list<ByteString>`, `predecessor: list<ByteString>` | The authority objects of an account, for the history verifier. |
+| `Conflict` | `seq: u64`, `standing: String`, `losing: list<String>` | A conflict the verifier decided (§8.6). |
+| `HistoryReport` | `code: String`, `seq: u64`, `detail: optional<String>`, `rollback: bool`, `account: optional<String>`, `branch: list<String>`, `conflicts: list<Conflict>`, `held_until_ms: optional<i64>` | The history verifier's verdict, with no host identity. |
+| `WebauthnMode` | `kind: CheckKind`, `rule: AuthorityRuleKind`, `verification: bool`, `sign_controller: bool`, `origins: list<String>`, `uv_required: bool` | How `account_webauthn_check` judges a signature. `kind` selects the fields used: `rule`, `verification`, `sign_controller` for Authority; `origins`, `uv_required` for Call; `uv_required` for SwiftPredecessor. |
+| `WebauthnOk` | `uv: bool`, `origin: String`, `counter: u32` | A verified WebAuthn assertion. |
+| `SwiftEntry` | `seq: optional<u64>`, `digest: String`, `issued_ms: i64`, `layout: optional<u64>` | An entry of a verified Swift predecessor. |
+| `SwiftPredecessor` | `account: String`, `entries: list<SwiftEntry>` | A verified Swift predecessor history. |
+| `UpgradeParams` | `policy_json: String`, `add_threshold: u64`, `count_by: String`, `issued_ms: i64`, `signers: list<String>` | The 0.5 settings an in-place upgrade adds (§16.1). `count_by` is `keys` or `holders`. |
+| `LegacyHistory` | `records: list<Store>` | The 0.4 account's authority records, by path. |
+| `PairingReveal` | `e: bytes`, `nb: bytes` | The pairing reveal a joiner sends: its ephemeral point and nonce. |
+| `SuccessionTiming` | `window_start_ms: i64`, `window_end_ms: i64`, `recovery_delay_s: u64`, `veto_deadline_ms: i64`, `due_ms: i64`, `quorum: u64`, `homes: list<String>`, `vetoers: list<String>`, `keys_needed: u64` | The succession window and the times derived from it. |
+| `SwiftSuccession` | `stage: MoveStage`, `format: String`, `predecessor: String`, `head_seq: u64`, `head_digest: String`, `genesis_digest: String`, `handover_count: u64`, `authorized: bool`, `vetoed: bool`, `verified_seq: optional<u64>`, `verified_digest: optional<String>`, `timing: optional<SuccessionTiming>` | The Swift succession an account claims (§15.1). |
+| `MoveResult` | `stores: list<Store>`, `veto: optional<bytes>`, `frozen_entry: optional<bytes>`, `frozen_seq: optional<u64>`, `succession_verified: bool` | What a finished step of a move produced: bytes to store, and for F the exact Swift entry (`frozen_entry`) the host appends to the predecessor. |
+
+## 7. `todo` until the core's engine forwards them
+
+The coordinator's engine branch `engine-0.5-e9` adds these to `v05::engine::Engine`. They are **not** routed
+through a second object; the exports wait for the merge:
+
+| Export (planned) | Needs |
 | --- | --- |
-| `begin_create`, `begin_create_with`, `advance_create` | `AccountCreation` |
-| `open`, `open_with_checkpoints` | `AccountCore.open`; `AccountEngine.open` |
-| `id`, `identity`, `me` | `id`, `identity`, `me` |
-| `records`, `authority` | `AccountCore.stores`, `controllers`, `policy`, `homes` |
-| `set_read_scope` | `AccountCore.set_read_scope`; the engine takes `namespaces` at `open` (the core's engine has no forward) |
-| `merge`, `merge_with_changes`, `changes`, `finish_with_changes` | `AccountCore.merge`; every `finish` returns `changes` |
-| `revision`, `applied_operations` | `revision`, `revisions`, `stats` |
-| `checkpoint`, `restore_checkpoint`, `set_checkpoint_policy` | `AccountEngine.save` and `open(saved)`; `AccountCore.export_persisted` and `open(stored, key)` |
-| `query`, `view` | `query`, `view` |
-| `finish`, `finish_authority` | `finish` |
-| `begin_unlock_slot`, `finish_unlock_slot`, `begin_unlock_slots` | `slots`, `begin_unlock_slot`, `finish_unlock_slot` |
-| `begin_unlock`, `finish_unlock`, `finish_unlock_many` | `finish_unlock_slot` (vault), `begin_unlock_epochs`, `finish_unlock_epochs` (member) |
-| `build_sealed_slot`, `begin_prf_slot`, `finish_prf_slot`, `begin_combined_slot`, `finish_combined_slot`, `finish_prf_part`, `finish_prf_slot_for` | `begin add_slot`, `prf_requests`, `provide_prf` |
-| `begin_request`, `finish_request` | `AccountRequest`, `account_request_info` |
-| `begin_approve` | `begin approve` |
-| `begin_revoke` | `begin revoke` |
-| `begin_rekey` | `begin rekey` |
-| `begin_keyring`, `begin_thresholds` | `begin keyring`, `begin transition` |
-| `begin_add_controller`, `begin_recovery_add`, `begin_add_passkey` | `begin add_controller`, `AccountPairing`, `transfer_seed`, `accept_seed_transfer` |
-| `begin_remove_controller` | `begin remove_controller`, `begin rotate_vault` |
-| `select_controller`, `eligible_signers`, `prepare_authority` | gone in 0.5 (the caller names signers); `suggest_signers` |
-| `begin_import_grant`, `begin_import`, `import_*`, `reconcile_import_prefix` | `begin approve` with `terms.import`; `AccountEngine.begin_import` |
-| `begin_write`, `written_operation*`, `live_generation` | `begin write`, `operation_at`, `begin_live_write`, `finish_live_write`, `live_verdicts` |
-| `begin_layout` | none: a 0.5 account is at layout 2 from genesis (§11.8) |
-| `members`, `me` | `members`, `me`, `controllers` |
-| `tools`, `begin_call` | `tools`, `begin call`, `begin link` (`AccountCore`) |
-| `ledger` | `ledger` |
-| `begin_blob`, `open_blob_chunk`, `read_blob_chunk`, `NativeBlobWriter` | `AccountEngine.begin_blob`, `AccountBlobWriter`, `open_blob_chunk`, `blob_chunk`, `read_blob` |
-| `NativeEngine::*`, `RecordSource`, `verify_batch`, `records_at`, `update_versions` | `AccountEngine`, `HostSource` (its `version` replaces `update_versions`), `verify_batch`; `records_at` none (the engine reads by path) |
-| `NativeCheckpoint*` | `save`, `open(saved)`: sealed under the device key; no member-signed ticket |
-| `vault_public`, `webauthn_prf_input`, `parse_registration` | `account_vault_public`, `account_webauthn_prf_input`; `parse_registration` is the 0.4 export, unchanged and still correct for 0.5 |
-| `KeyProvider::sign_with`, `sign_controller_with`, `HostAction::sign_with` | none: the core never calls a key provider; the host signs the steps |
-| `PendingBatch::record_paths`, `HostAction::record_paths` | `finish` returns `stores`; before finish, each step's `path` |
-| `migration.rs` `import_legacy_batch`, `bind_legacy_import_state` | none: upgrade tooling (plan step 8), not the account |
-| the 0.4 to 0.5 `upgrade` entry (§16.1) | `AccountMove.begin_upgrade` |
-| the Swift keyring upgrade (§16.2) | the Swift succession steps above; the copy is not exported |
-| §15 `/5` succession (`begin_successor`, `begin_succession_*`) | none: not built in the core |
-| (new) pending transitions, notices, owed shares, proposals | `pending`, `record_due`, `begin transition/veto/suspend/resolve`, `fork_candidates`, `notices`, `owed_shares`, `begin renew_shares`, `proposals`, `begin propose/resolution` |
+| `AccountEngine.record_due`, `set_read_scope`, `lock`, `is_locked` | `Engine::record_due`, `set_read_scope`, `lock`, `is_locked` |
+| `AccountEngine.transfer_seed`, `accept_seed_transfer` (the end of the pairing flow) | `Engine::transfer_seed`, `accept_seed_transfer` |
+| `AccountEngine.accept_predecessor_entry` (taking F in at once) | `Engine::accept_predecessor_entry` |
+| `begin_link`, `begin_call` and the artifact on `Written` | `Written.artifact` |
+| the Swift copy: `begin_swift_copy_write`, `finish_swift_copy_write`, `swift_copy_destination`, `finish_swift_copy`, `begin_swift_migration`, `finish_move`; `CopyPlan` and the typed translator callback | the same forwards |
+| batched versions through `refresh_batched`, `version_paths`; `Engine::source_faults` | (the binding already batches versions itself) |
+| the device key wiped when the engine drops | `EngineOptions` wipe on drop |
 
-## 8. Gaps in the core the exports cannot close
+Until then a move can be prepared and signed through the exports (`begin_upgrade`, `begin_swift_veto`,
+`begin_swift_freeze`, `begin_swift_copier_shares` finish to bytes the host stores), but F is not taken into
+the account and the copy and the migration are not exported.
 
-* The core's `Engine` exposes `Account` read-only, so it forwards no `record_due`, `set_read_scope`,
-  `accept_seed_transfer` or `accept_predecessor_entry`, and its `finish_write` drops a link or call's
-  artifact. These are on `AccountCore`: a host that needs them opens an `AccountCore` over the same
-  stores, does the step, stores what comes back, and calls `AccountEngine.apply_paths`. A one-line
-  `Engine::account_mut` or those forwards would remove the second object; they were not added because
-  `v05/engine/` is being edited by another package.
+## 8. What was run
 
-## 9. What was run, and what was not
-
-See the pull request for the numbers. Run: the name tests in both crates; two journeys through the
-UniFFI surface (create with a passkey-like controller, approve, write, read, pair, transfer, sync two
-engines through an in-memory home built from the exchange values; upgrade a 0.4 library in place, read
-its records, write a new one); the hostile cases; the same create/approve/write/pair path natively
-through the wasm build's `AccountCore`. **Not run:** anything that needs a JS host: the wasm
-`AccountEngine`, `JsSource`, the exchange and the thrown `AccountFault` were compiled for
-`wasm32-unknown-unknown` and compiled natively but never executed in a browser or Node (there is no
-harness here). The generated Swift and Kotlin sources were produced and `swiftc -parse` accepted the
-Swift; they were not compiled with an Apple SDK or Gradle.
+Native (UniFFI crate): `v05_journeys` (5 tests: create with a passkey-like controller and a device key and
+unlock; approve a member; write and read; the pairing ceremony; two engines synced through an in-memory home
+built from the exchange values; saved-state resume; the 0.4 in-place upgrade then old records and a new
+write; a prepared action cannot be altered, replayed or finished elsewhere; a hostile source: garbage, a
+throwing callback, a re-entering callback, a second thread; a record changed under the engine is `Integrity`),
+`v05_secrets` (3), name tests. The home and record_due setup of journey one go through the core, because the
+engine forward is `todo`. Swift and Kotlin: `tests/smoke/` (see its README), both pass on generated sources.
+Web: the wasm build compiles for `wasm32-unknown-unknown` and its exports were read from the module; nothing
+was executed through the wasm-bindgen glue, because the installed CLI (0.2.127) refuses the crate (0.2.130)
+and nothing was installed. The web test that runs natively covers everything that needs no JS host
+(creation with PRF, the verifier, a request, pairing, typed errors).

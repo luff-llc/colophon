@@ -98,8 +98,8 @@ pub fn objects_of(stores: &[Store]) -> (Objects, Vec<colophon_core::v05::records
     }
     (o, records)
 }
-pub fn blobs(v: &[Vec<u8>]) -> Vec<Blob> {
-    v.iter().map(|b| Blob { bytes: b.clone() }).collect()
+pub fn blobs(v: &[Vec<u8>]) -> Vec<ByteString> {
+    v.iter().map(|b| ByteString { bytes: b.clone() }).collect()
 }
 pub fn authority_objects(o: &Objects) -> AuthorityObjects {
     AuthorityObjects {

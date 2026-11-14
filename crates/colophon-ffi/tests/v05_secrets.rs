@@ -264,7 +264,7 @@ fn a_64_mib_argument_is_refused_on_its_raw_length_with_memory_near_its_own_size(
         member.begin_rekey(many, vec![], host.fresh(32)),
         Err(AccountError::Bound { .. })
     ));
-    let blob = vec![Blob {
+    let blob = vec![ByteString {
         bytes: vec![0; 41 << 20],
     }];
     let baseline = LIVE.load(Ordering::SeqCst);

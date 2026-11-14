@@ -26,7 +26,7 @@ macro_rules! free_fn {
     };
 }
 
-fn blobs(v: Vec<Blob>, what: &str) -> R<Vec<Vec<u8>>> {
+fn blobs(v: Vec<ByteString>, what: &str) -> R<Vec<Vec<u8>>> {
     list_len(&v, what)?;
     v.into_iter()
         .map(|b| {
@@ -157,7 +157,7 @@ free_fn! {
 }
 free_fn! {
     /// The pure Swift predecessor verifier (§16.3): the account, and each verified entry.
-    pub fn account_verify_swift_predecessor(entries: Vec<Blob>) -> Result<SwiftPredecessor, AccountError> {
+    pub fn account_verify_swift_predecessor(entries: Vec<ByteString>) -> Result<SwiftPredecessor, AccountError> {
         guard(|| {
             let e = blobs(entries, "an entry")?;
             let h = swift::verify(&e)?;

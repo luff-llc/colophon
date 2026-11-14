@@ -315,13 +315,13 @@ record:AuthorityObjects.entries
 record:AuthorityObjects.heads
 record:AuthorityObjects.pending
 record:AuthorityObjects.predecessor
-record:Blob
 record:BlobAvailability
 record:BlobAvailability.detail
 record:BlobAvailability.present
 record:BlobAvailability.state
 record:BlobAvailability.total
 record:BlobChunk
+record:ByteString
 record:CallNeed
 record:CallNeed.audience
 record:CallNeed.home
