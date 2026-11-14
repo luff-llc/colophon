@@ -50,7 +50,7 @@ pub struct Persisted {
 
 /// Checkpoint format. 2 added `held_until`; a format 1 checkpoint is refused, and the caller
 /// rebuilds it from its retained objects.
-const CHECKPOINT_VERSION: u32 = 2;
+const CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Checkpoint {

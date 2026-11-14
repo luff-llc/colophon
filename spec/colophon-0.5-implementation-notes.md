@@ -307,7 +307,7 @@ and, where a vector fits, a generated one:
   covers nothing. Vectors `t-vetoed-beats-activate-invalid-final`,
   `t-activate-after-covered-entry-invalid-final`.
 - H3: the checkpoint records the earliest time a candidate held at an already decided seq comes
-  due (`held_until`); a resumed verifier replays once the clock reaches it. **Checkpoint format 2**;
+  due (`held_until`); a resumed verifier replays once the clock reaches it. **Checkpoint format 2** (3 since revision 12);
   a format 1 checkpoint is refused (`unknown checkpoint version`) and is rebuilt from its objects.
 - M3: a `/5` predecessor that is itself a successor is verified with its own predecessor, split
   from the flat set by genesis and descent. The implementation refuses more than 16 distinct
