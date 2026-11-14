@@ -345,6 +345,8 @@ pub struct Engine<S: RecordSource> {
     /// Live candidates refused for being below their witness: `(path, generation)`.
     pub(crate) stale_live: Vec<(String, u64)>,
     pub(crate) stats: EngineStats,
+    /// Covered paths the open judged again because their bytes changed.
+    rejudged: Vec<String>,
     ready: bool,
     failure: Option<Failure>,
     verify_cursor: usize,
@@ -492,6 +494,7 @@ impl<S: RecordSource> Engine<S> {
             live_witness,
             stale_live: Vec::new(),
             stats,
+            rejudged: Vec::new(),
             ready: false,
             failure: None,
             verify_cursor: 0,
@@ -570,6 +573,25 @@ impl<S: RecordSource> Engine<S> {
                     }
                 }
             }
+        }
+        // A checkpoint covers a path only for the exact bytes it saw. Where the bytes now at a
+        // covered path are other bytes, the memo did not apply (it is keyed by the exact
+        // bytes), the path was judged again, and the open says so instead of claiming a clean
+        // resume (0.3 §7.1).
+        let mut changed: Vec<String> = self
+            .restored
+            .iter()
+            .filter(|(p, e)| self.ix.have.get(*p).is_some_and(|h| h.sha != sha_of(e)))
+            .map(|(p, _)| p.clone())
+            .collect();
+        changed.sort();
+        if !changed.is_empty() {
+            self.mode = OpenMode::Invalidated(format!(
+                "{} covered path(s) hold other bytes than the checkpoint saw and were judged again: {}",
+                changed.len(),
+                changed.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+            ));
+            self.rejudged = changed;
         }
         self.restored.clear();
         self.account.checkpoint_verifier();
@@ -886,6 +908,11 @@ impl<S: RecordSource> Engine<S> {
     pub fn missing_covered(&self) -> Vec<String> {
         self.missing.iter().cloned().collect()
     }
+    /// Covered paths whose bytes changed since the checkpoint, which the resumed open judged
+    /// again.
+    pub fn rejudged(&self) -> &[String] {
+        &self.rejudged
+    }
     /// Why `namespace` is not readable, or `None` when it is.
     pub fn access(&self, namespace: &str) -> Result<Option<Denial>> {
         self.check_usable()?;
@@ -1103,6 +1130,20 @@ impl<S: RecordSource> Engine<S> {
     /// checkpoint, both caches under the device-held key. `nonce_seed` is fresh host entropy.
     pub fn save(&mut self, nonce_seed: [u8; 32]) -> Result<Saved> {
         self.check_ready()?;
+        // Never persist over a replacement that waits for an epoch key this member can open
+        // (0.3 §5.1).
+        if self
+            .account
+            .live_verdicts()
+            .iter()
+            .any(|(_, v)| *v == crate::v05::live::LiveVerdict::Quarantined("unavailable"))
+            && !self.account.begin_unlock_epochs().is_empty()
+        {
+            return Err(Failure::Unavailable(
+                "a live replacement waits for an epoch key this member can unlock: unlock first"
+                    .into(),
+            ));
+        }
         let key = self.options.checkpoint_key;
         let verifier = self.account.export_persisted(&key, nonce_seed)?;
         let mut index: Vec<checkpoint::IndexEntry> = self
@@ -1178,6 +1219,11 @@ impl<S: RecordSource> Engine<S> {
 
     fn audit_signature(&mut self, path: &str, bytes: &[u8]) -> Result<()> {
         let Ok((header, _)) = OperationHeader::parse(bytes) else {
+            // Bytes that are no header where a record was covered: an integrity error, not a
+            // pass.
+            if self.rejudged.iter().any(|p| p == path) {
+                return Err(self.poison(Failure::Refused(Reason::Fork)));
+            }
             return Ok(());
         };
         let Some(member) = self.account.record_authority().member(&header.author) else {

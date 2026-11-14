@@ -861,6 +861,9 @@ pub fn sync_pass<S: RecordSource>(
         match e.exchange_next(home).unwrap() {
             Step::Done => return faults,
             Step::Waiting => panic!("the loop answers every request"),
+            Step::NeedCall(n) => e
+                .exchange_provide_call(home, n.ticket, format!("call-{}", n.ticket).as_bytes())
+                .unwrap(),
             Step::Request(r) => {
                 let a = wire.call(host, &r, now_ms);
                 let report = e.exchange_answer(home, r.ticket, a).unwrap();

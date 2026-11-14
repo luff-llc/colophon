@@ -78,8 +78,10 @@ impl<S: RecordSource> Engine<S> {
             let version = self.source.content_version(&p).unwrap_or(None);
             self.ix.unread.remove(&p);
             if let Ok((h, _)) = OperationHeader::parse(&bytes) {
-                if let Some((g, _)) = self.live_witness.get(&p) {
-                    if h.clock < *g {
+                if let Some((g, d)) = self.live_witness.get(&p) {
+                    // Below the witness, or the same generation with another body (author
+                    // equivocation, or a swap): fails closed.
+                    if h.clock < *g || (h.clock == *g && h.digest() != *d) {
                         self.stale_live.push((p.clone(), h.clock));
                         continue;
                     }
@@ -135,7 +137,7 @@ impl<S: RecordSource> Engine<S> {
                 if self
                     .live_witness
                     .get(&c.path)
-                    .is_some_and(|(g, _)| h.clock < *g)
+                    .is_some_and(|(g, d)| h.clock < *g || (h.clock == *g && h.digest() != *d))
                 {
                     self.stale_live.push((c.path.clone(), h.clock));
                     continue;

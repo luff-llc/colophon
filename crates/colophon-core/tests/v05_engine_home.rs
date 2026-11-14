@@ -481,49 +481,39 @@ fn tampered_records_are_never_stored_or_folded() {
 }
 
 #[test]
-fn a_home_that_wants_a_call_gets_none_signed_by_the_engine_and_one_the_host_gives_is_sent() {
+fn a_home_that_wants_a_call_is_asked_once_per_request_and_the_engine_signs_nothing() {
     let mut w = world();
-    let (f, seen) = w.pass('l', Mode::Unauthorized, NOW + 2_000);
-    assert_eq!(seen.len(), 1, "the pass ends at the 401");
-    match &f[0] {
-        Fault::Unauthorized {
-            purpose, audience, ..
-        } => {
-            assert_eq!(purpose, "colophon.home.read");
-            assert_eq!(audience, "https://home.example");
-        }
-        o => panic!("{o:?}"),
-    }
     let home = w.s.home.clone();
-    w.laptop
-        .exchange_authorize(&home, "colophon.home.read", b"{\"call\":\"opaque\"}")
-        .unwrap();
+    w.laptop.advance(NOW + 2_000).unwrap();
     w.laptop.exchange_set_bearer(&home, Some("token".into()));
-    assert!(w
-        .laptop
-        .exchange_authorize(&home, "colophon.home.delete", b"x")
-        .is_err());
-    let (_, seen) = w.pass('l', Mode::Honest, NOW + 3_000);
-    let first = &seen[0];
-    let auth = first
-        .headers
-        .iter()
-        .find(|(k, _)| k == "Authorization")
-        .map(|(_, v)| v.clone())
-        .unwrap();
-    assert!(auth.starts_with("Colophon "), "{auth}");
-    let wrote = seen.iter().find(|r| r.method != Method::Get).map(|r| {
-        r.headers
-            .iter()
-            .find(|(k, _)| k == "Authorization")
-            .map(|(_, v)| v.clone())
-    });
-    if let Some(Some(a)) = wrote {
-        assert!(
-            a.starts_with("Bearer "),
-            "writes use the bearer unless a write call was given: {a}"
-        );
+    // The home answers 401 to everything: the first request is asked again with a call, and a
+    // call that is still refused ends the pass with the fault.
+    let mut wire = Wrapped { inner: &mut w.s.sim, mode: Mode::Unauthorized, seen: vec![] };
+    let mut faults = Vec::new();
+    let mut calls = 0;
+    for _ in 0..20 {
+        match w.laptop.exchange_next(&home).unwrap() {
+            Step::Done => break,
+            Step::Waiting => panic!(),
+            Step::NeedCall(n) => {
+                assert_eq!(n.purpose, "colophon.home.read");
+                assert_eq!(n.audience, "https://home.example");
+                calls += 1;
+                w.laptop.exchange_provide_call(&home, n.ticket, b"{\"call\":\"opaque\"}").unwrap();
+            }
+            Step::Request(r) => {
+                let a = wire.call(&w.host, &r, NOW + 2_000);
+                faults.extend(w.laptop.exchange_answer(&home, r.ticket, a).unwrap().faults);
+            }
+        }
     }
+    assert_eq!(calls, 1, "one call asked for, once");
+    assert!(matches!(faults.last(), Some(Fault::Unauthorized { purpose, .. }) if purpose == "colophon.home.read"), "{faults:?}");
+    // The purposes a call can be for are two; the engine has no way to attach a call to any
+    // request but the one it was asked for (a wrong ticket is refused).
+    assert!(w.laptop.exchange_provide_call(&home, 99_999, b"x").is_err());
+    let auth = wire.seen.iter().filter_map(|r| r.headers.iter().find(|(k, _)| k == "Authorization")).map(|(_, v)| v.clone()).collect::<Vec<_>>();
+    assert!(auth.iter().any(|a| a.starts_with("Bearer ")) && auth.iter().any(|a| a.starts_with("Colophon ")), "{auth:?}");
 }
 
 #[test]

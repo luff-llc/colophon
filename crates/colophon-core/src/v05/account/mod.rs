@@ -449,15 +449,23 @@ fn without_junk(records: &[HeldRecord], d: &Derived) -> Option<Vec<HeldRecord>> 
     (keep.len() != records.len()).then_some(keep)
 }
 fn union_records(into: &mut Vec<HeldRecord>, from: &[HeldRecord]) {
-    let mut seen: BTreeSet<(String, Vec<u8>)> = into
-        .iter()
-        .map(|r| (r.path.clone(), r.bytes.clone()))
-        .collect();
+    // `into` is sorted by (path, bytes): a new record is found by binary search, so a merge
+    // costs the new records, not the held ones.
+    let mut added: Vec<&HeldRecord> = Vec::new();
+    let mut fresh: BTreeSet<(&str, &[u8])> = BTreeSet::new();
     for r in from {
-        if seen.insert((r.path.clone(), r.bytes.clone())) {
-            into.push(r.clone());
+        let key = (r.path.as_str(), r.bytes.as_slice());
+        let present = into
+            .binary_search_by(|h| (h.path.as_str(), h.bytes.as_slice()).cmp(&key))
+            .is_ok();
+        if !present && fresh.insert(key) {
+            added.push(r);
         }
     }
+    if added.is_empty() {
+        return;
+    }
+    into.extend(added.into_iter().cloned());
     into.sort_by(|a, b| (&a.path, &a.bytes).cmp(&(&b.path, &b.bytes)));
 }
 
@@ -911,6 +919,27 @@ impl Account {
     /// `refused:…`, `held:…`), or `None` when no held record is at that path.
     pub fn record_verdict(&self, path: &str) -> Option<String> {
         let i = *self.d.judged_at.get(path)?;
+        self.d.judgement.records.get(i).map(|j| j.outcome.code())
+    }
+    /// Whether `bytes` at `path` would be a record of this account (see
+    /// [`crate::v05::records`]): not garbage, not another account's, not a bad signature. One
+    /// signature check, nothing is held.
+    pub fn would_hold(&self, path: &str, bytes: &[u8]) -> bool {
+        crate::v05::records::is_record_candidate(
+            &self.d.auth,
+            &HeldRecord {
+                path: path.to_string(),
+                bytes: bytes.to_vec(),
+            },
+        )
+    }
+    /// The verdict on exactly these bytes at `path`, when the account holds them: `None` when it
+    /// does not hold this byte string there.
+    pub fn verdict_of(&self, path: &str, bytes: &[u8]) -> Option<String> {
+        let i = self
+            .records
+            .binary_search_by(|r| (r.path.as_str(), r.bytes.as_slice()).cmp(&(path, bytes)))
+            .ok()?;
         self.d.judgement.records.get(i).map(|j| j.outcome.code())
     }
     /// The highest clock of an admitted, authenticated operation in `namespace` (0 if none): a

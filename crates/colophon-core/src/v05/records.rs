@@ -1491,6 +1491,13 @@ fn stage_one(
     Stage::Ready(Arc::new(c))
 }
 
+/// Whether `h` is a record of this account at all: it parses, binds to the account and its
+/// path, and (when its author is a member) carries a valid signature. An author the verified
+/// history does not know yet is not junk (the grant may arrive later). Pure, one signature check.
+pub(crate) fn is_record_candidate(auth: &RecordAuthority, h: &HeldRecord) -> bool {
+    !matches!(stage_one(auth, h, false, &mut 0, None), Stage::Bad(_))
+}
+
 /// [`judge_records`], optionally skipping the signature check of the one held record at index
 /// `unsigned` (the write side judges its own header before the host has signed it).
 ///
