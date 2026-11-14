@@ -1173,6 +1173,10 @@ staging) are then two audiences, and a grant that names one does not reach the o
 A member with any `records` entry for a namespace receives its epochs. Proposing into a
 namespace one cannot read is not part of 0.5.
 
+**Controllers.** A controller that holds the vault seed opens every epoch (§7.1), so a host MAY
+show it the content of every declared namespace. A controller is never an author: it writes no
+records, and a host never writes records as a controller (§9.7 says the reverse for members).
+
 ### 10.3 Narrowing
 
 Link terms B narrow parent terms A (member terms or the previous link's) when every `services`
@@ -2002,6 +2006,10 @@ that member can read the raw keys. The host is likewise trusted with the entropy
 new epochs, vaults and slots (it can recompute what they make) and with the ECDH and PRF results it
 passes in. A host MUST NOT hand handles to code it does not trust as much as the keys.
 
+**Reading.** A host shows a namespace's records only when it holds the key of the namespace's
+**latest** epoch (§11.1); with older epochs only, the namespace is not shown (a verifier folds
+nothing it cannot open, §11.5 `unavailable`).
+
 **Restricted open.** The host alone may ask the core to open an HPKE seal to the vault for its
 own registered formats. The seal is `{"enc","ciphertext"}` as §11.1 (`enc` a valid 65-byte
 uncompressed P-256 point, `ciphertext` 16 to 65,536 bytes); `info` equals the AAD and is at most
@@ -2050,7 +2058,9 @@ identically by replay from seq 1, so two verifiers that persist it reach the sam
    performs one assertion for the PRF slot, and signs the transition body as its possession
    proof.
 2. Without the seed, the devices pair and the seed moves (§7.3, §7.4); the new core builds the
-   slot.
+   slot. A transition carries slots only in a `vault` component, so a controller added by a
+   transition adds its slot by a self-slot `keyring` entry (§8.4), signed by the new key after
+   the activation is final (with homes, provisional is not enough: a rollback would drop the key).
 3. An existing control key signs the transition that adds it with `control`. It activates after
    the delay, or at once when every control key signs. The person may instead add it as
    `approve` only at once (an immediate entry), and then propose `control`.
@@ -2076,7 +2086,13 @@ knowledge of pending transitions, so:
 - **Polling.** Every host holding a controller key MUST list pending objects (§14) at every current
   home at launch and at least every `recoveryDelay` / 6.
 - **Showing.** It MUST show each transition it hasn't shown, with its signers' labels, key IDs and
-  first-seen seq, its veto deadline, and a one-tap **veto**.
+  first-seen seq, its veto deadline, and a one-tap **veto**. The **first-seen seq** is the verified
+  authority seq at which this host first held the object. It is local memory: no verdict ever
+  depends on it, and a host SHOULD persist it so a notice is not repeated after a restart.
+- **Recording.** A host that records due transitions (§8.7: the determined `activate`, `vetoed`
+  and `final`) records them in due-time order, then by transition digest, the order §8.6 rule 1
+  uses. A transition signed by a key whose removal falls due earlier is then not recorded ahead of
+  that removal.
 - **Missed notices are visible afterwards.** Whenever a person uses any key with any host, the host
   MUST first show every activation since that host last showed the account's history that no key
   on this device signed and the person hasn't seen, with when each home receipted it. A recovery

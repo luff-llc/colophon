@@ -129,6 +129,20 @@ The host alone may open a non-`colophon/` HPKE seal to the vault for its own reg
 The history verifier also returns, per transition, its due time and veto deadline; per activation,
 whether it is final and which homes it still needs; and per unit, v(u).
 
+### What an account host does beyond the verifier (§17)
+
+- **Recording due transitions** in due-time order, then by transition digest, so a key being
+  removed cannot get its own transition recorded ahead of the removal (§17.5).
+- **Reading.** A controller that holds the seed may read record content and never writes records
+  as a controller; a namespace is shown only when the key of its latest epoch is held (§10.2, §17.1).
+- **First-seen seq** in a notice is the verified seq at which this host first held the object:
+  local memory, to be persisted so a notice does not repeat after a restart (§17.5).
+- **A controller added by a transition** builds its slot by a self-slot entry once its activation
+  is final (§17.3).
+- **Handles and stored state.** Epoch key handles are as trusted as the keys. Stored verifier
+  state is a cache sealed under a key the host derives from a device-held secret; when it does not
+  open, replay (§17.1, §17.2).
+
 ### Writing F from an Apple app (§16.3, §15.1)
 
 The 0.5 builders return F as exact Swift-format record bytes, and no shipped app can write them.
