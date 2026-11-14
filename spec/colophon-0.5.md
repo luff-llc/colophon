@@ -1948,10 +1948,13 @@ refused `refused:outOfScope`, whatever the seal holds. The host interface and th
 ### 17.2 Persisted verifier state
 
 A verifier that resumes (§13.3) MUST persist, per account, atomically and with a format version.
-Every item is a function of the history and the objects held, recomputed identically by replay
-from seq 1, so two verifiers that persist it reach the same verdicts:
+Every item except the head marks is a function of the history and the objects held, recomputed
+identically by replay from seq 1, so two verifiers that persist it reach the same verdicts:
 - the high-water `(seq, digest)` and each home's head mark (rollback detection only, §13.3) and
-  the folded state there: keyring, members (terms, expiry,
+  the folded state there. **Head marks are local memory:** no replay of the history recomputes
+  them, since they record what this verifier accepted and when. They survive a checkpoint format
+  change by being carried over when the checkpoint is rebuilt from the retained objects, and a
+  checkpoint whose marks are malformed is refused. Everything else listed here is recomputed: keyring, members (terms, expiry,
   session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
   is retiring;
 - the digests of transitions with an `activate` or `vetoed` on the branch, and the forks a
@@ -2091,7 +2094,7 @@ check as an optional diagnostic.
 
 **Versions.** 0.5 accepts exactly these markers: `colophon/authority/5`, `/request/5`, `/link/5`,
 `/call/5`, `/head/5`, `/receipt/5`, `/transition/5`, `/veto/5`, `/equivocation/5`,
-`/operation/5`, the legacy markers of an upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
+`/operation/5`, `colophon/pair-qr/5` (the QR payload, §7.3), the legacy markers of an upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
 `colophon/relay/3`, and `colophon/swift-keyring/2` for predecessors. A verifier MUST NOT read a
 0.5 account under 0.4 rules, and MUST NOT accept a `/3` or `/4` object where §11.5 or §16.1 fences
 it out. A later version that adds markers will say which 0.5 markers it retires and how an account

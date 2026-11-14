@@ -268,4 +268,13 @@ from Marginalia `origin/main` first: the reference copy lacks the `layout` kind)
   - cold replay and incremental verification;
   - call verification with three links;
   - the author-chain walk at 50,000 records.
+  - the `resolve` look-ahead (checker M5, revision 13, not measured): `resolved_by_activation`
+    folds every candidate's branch to its end for each fork the rules leave open, the main fold
+    folds the chosen branch again, and `state::apply` builds the list of every held entry on each
+    call, so with F resolved forks on a branch of length L over N held entries the work is about
+    F·L·N, polynomial and not exponential (no nested look-ahead). A key holder in an account
+    without homes can add a fork and resolve pair every few entries, so the cost is
+    attacker-controlled; any prior conflict also forces a full replay on every resume. Measure it
+    with chained resolves (`prepare_resolve` now builds them) and bound it (cache `by_seq_all`,
+    resume past a resolved fork) if the numbers warrant.
 - Then the version bump and changelog. None of this is done by the candidate.
