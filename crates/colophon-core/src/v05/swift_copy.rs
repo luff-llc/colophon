@@ -574,6 +574,13 @@ pub struct Destination {
     batches: Vec<DestinationBatch>,
 }
 impl Destination {
+    /// The destination digest of the batch the destination took under `key`, if any.
+    pub(crate) fn taken(&self, namespace: &str, key: &str) -> Option<&str> {
+        self.batches
+            .iter()
+            .find(|b| b.valid && b.namespace == namespace && b.key == key)
+            .map(|b| b.destination_digest.as_str())
+    }
     /// A destination that holds nothing yet.
     pub fn empty() -> Self {
         Self::default()
@@ -921,12 +928,21 @@ impl CopyPlan {
             last = Some(id);
             by_ns.entry(c.namespace.clone()).or_default().push(c);
         }
-        let held: BTreeMap<(String, String), &DestinationBatch> = destination
+        // Several batches can sit under one key (the same item written twice): the one the
+        // destination took, if any, is the copy; the others are no-op duplicates (§15.3 step 5).
+        let mut held: BTreeMap<(String, String), &DestinationBatch> = BTreeMap::new();
+        for b in destination
             .batches
             .iter()
             .filter(|b| b.source_library == library)
-            .map(|b| ((b.namespace.clone(), b.key.clone()), b))
-            .collect();
+        {
+            let slot = held
+                .entry((b.namespace.clone(), b.key.clone()))
+                .or_insert(b);
+            if b.valid && !slot.valid {
+                *slot = b;
+            }
+        }
         for (ns, mut list) in by_ns {
             list.sort_by(|a, b| {
                 (a.op.clock, &a.author, &a.op.id).cmp(&(b.op.clock, &b.author, &b.op.id))
@@ -1118,6 +1134,30 @@ impl CopyPlan {
         Ok(())
     }
 
+    /// Record that the copy of a pending item is a batch the destination already holds and took
+    /// (`destination_digest`), because the same item was written again and the later write was a
+    /// no-op. The digest comes from the account's own view of the destination, and the final
+    /// reconciliation checks it again; refused when another item already claims it.
+    pub(crate) fn record_existing(
+        &mut self,
+        namespace: &str,
+        source_digest: &str,
+        destination_digest: &str,
+    ) -> Result<()> {
+        require(
+            !self
+                .namespaces
+                .values()
+                .flatten()
+                .any(|i| matches!(&i.state, State::Written(d) if d == destination_digest)),
+            "a destination record is copied once: this one is already recorded",
+        )?;
+        let item = self.item_mut(namespace, source_digest)?;
+        item.state = State::Written(destination_digest.to_string());
+        self.destinations.insert(destination_digest.to_string());
+        Ok(())
+    }
+
     /// Record that a pending item is not copied, with a reason (the destination marked it
     /// invalid, or the person chose to leave it).
     pub fn record_omitted(
@@ -1254,6 +1294,11 @@ fn batch_of(
     require(
         (1..=128).contains(&batch.outcome.len()),
         "a translation names its domain outcome",
+    )?;
+    // A batch with no child writes nothing: it is not a copy of the record but its absence.
+    require(
+        !batch.children.is_empty(),
+        "the translation produced no child record",
     )?;
     let mut evidence = json!({
         "sourceLibrary": library,
