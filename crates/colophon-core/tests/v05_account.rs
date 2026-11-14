@@ -11,6 +11,9 @@ use colophon_core::keys::testing::SyntheticAuthenticator;
 use colophon_core::v05::account::*;
 use colophon_core::v05::encoding::{canonical, digest};
 use colophon_core::v05::history::{Objects, Persisted};
+
+/// The host's device-held key for stored verifier state.
+const KEY: [u8; 32] = [0x5a; 32];
 use colophon_core::v05::ids::key_id;
 use colophon_core::v05::pairing::{ExistingWaiting, FailureLimiter, Joiner, TransferKey};
 use colophon_core::v05::records::{HeldRecord, Level};
@@ -397,9 +400,13 @@ fn secrets_never_appear_in_debug_or_serialization() {
     assert!(!text.contains("seed:"), "{text}");
     // The persisted state and the held objects are public bytes; neither names a seed or key.
     let mut a = f.account;
-    let persisted = a.export_persisted().unwrap();
+    let persisted = a.export_persisted(&KEY, [3; 32]).unwrap();
     let text = String::from_utf8_lossy(&persisted).to_lowercase();
     assert!(!text.contains("\"seed\""));
+    assert!(
+        !text.contains("controllers"),
+        "the stored state is protected, not plain"
+    );
     assert!(!text.contains("epoch_key"));
     assert!(!text.contains("scalar"));
 }
@@ -1718,6 +1725,7 @@ struct Story {
     /// The persisted state exported when the story was half told, and the objects it covered.
     mid: Vec<u8>,
     mid_entries: usize,
+    mid_covered: BTreeSet<Vec<u8>>,
 }
 
 /// create, a second device, an agent admitted and writing, a revoke, a removal that rotates the
@@ -1743,7 +1751,8 @@ fn story() -> Story {
         terms("read"),
         terms("read"),
     );
-    let mid = f.account.export_persisted().unwrap();
+    let mid = f.account.export_persisted(&KEY, [1; 32]).unwrap();
+    let mid_covered: BTreeSet<Vec<u8>> = f.account.objects().entries.iter().cloned().collect();
     let mid_entries = f.account.objects().entries.len();
     let now = f.account.now_ms();
     let mut a = member_session(&f, &agent);
@@ -1799,6 +1808,7 @@ fn story() -> Story {
         host: f.host,
         mid,
         mid_entries,
+        mid_covered,
     }
 }
 
@@ -1847,12 +1857,12 @@ fn open_unlocked(
     s: &Story,
     objects: Objects,
     records: Vec<HeldRecord>,
-    p: Option<Persisted>,
+    p: Option<&[u8]>,
 ) -> Account {
     let mut a = Account::open(
         objects,
         records,
-        p,
+        p.map(|b| (b, &KEY)),
         Identity::Controller(s.d.clone()),
         s.now,
     )
@@ -1934,23 +1944,15 @@ fn a_resumed_account_and_a_replayed_one_agree() {
     let s = story();
     let replayed = open_unlocked(&s, s.objects.clone(), s.records.clone(), None);
     let want = fingerprint(&replayed, &s.host, &s.d);
-    // The state exported half way through the story, read back from the host's own storage.
-    let persisted = Account::persisted_from_bytes(&s.mid).unwrap();
-    // Open with only what came after: the persisted state retains the earlier objects.
-    let covered: BTreeSet<Vec<u8>> = persisted
-        .objects()
-        .unwrap()
-        .entries
-        .iter()
-        .cloned()
-        .collect();
-    assert_eq!(covered.len(), s.mid_entries);
+    // Open with only what came after the state exported half way through the story: the
+    // authenticated state retains the earlier objects.
+    assert_eq!(s.mid_covered.len(), s.mid_entries);
     let rest = Objects {
         entries: s
             .objects
             .entries
             .iter()
-            .filter(|e| !covered.contains(*e))
+            .filter(|e| !s.mid_covered.contains(*e))
             .cloned()
             .collect(),
         pending: s.objects.pending.clone(),
@@ -1958,48 +1960,101 @@ fn a_resumed_account_and_a_replayed_one_agree() {
         predecessor: vec![],
     };
     // Sensitivity: the mid-story state alone is a different account state.
-    let mid_only = open_unlocked(&s, Objects::default(), vec![], Some(persisted.clone()));
+    let mid_only = open_unlocked(&s, Objects::default(), vec![], Some(&s.mid));
     assert_ne!(fingerprint(&mid_only, &s.host, &s.d), want);
     assert_eq!(mid_only.status().seq as usize, s.mid_entries);
-    let resumed = open_unlocked(&s, rest, s.records.clone(), Some(persisted));
+    let resumed = open_unlocked(&s, rest.clone(), s.records.clone(), Some(&s.mid));
     assert_eq!(fingerprint(&resumed, &s.host, &s.d), want);
     assert_eq!(
         serde_json::to_value(resumed.objects()).unwrap(),
         serde_json::to_value(replayed.objects()).unwrap().clone(),
-        "{}",
         "the same held objects"
     );
-    // Export from the resumed account, import into a fresh one with no objects at all: the
-    // retained objects come with the state.
+    // Export from the resumed account, open a fresh one with no objects at all: the retained
+    // objects come with the state.
     let mut resumed = resumed;
-    let bytes = resumed.export_persisted().unwrap();
-    let again = open_unlocked(
-        &s,
-        Objects::default(),
-        s.records.clone(),
-        Some(Account::persisted_from_bytes(&bytes).unwrap()),
-    );
+    let bytes = resumed.export_persisted(&KEY, [2; 32]).unwrap();
+    let again = open_unlocked(&s, Objects::default(), s.records.clone(), Some(&bytes));
     assert_eq!(fingerprint(&again, &s.host, &s.d), want);
-    // Stored state that names entries this account does not hold is refused, not trusted.
-    let mut forged: Value = serde_json::from_slice(&bytes).unwrap();
-    forged["objects"]["entries"] = json!([]);
-    let forged = Account::persisted_from_bytes(&serde_json::to_vec(&forged).unwrap()).unwrap();
-    let e = Account::open(
+}
+
+#[test]
+fn stored_state_that_does_not_authenticate_means_a_silent_replay() {
+    let s = story();
+    let want = fingerprint(
+        &open_unlocked(&s, s.objects.clone(), s.records.clone(), None),
+        &s.host,
+        &s.d,
+    );
+    let open = |bytes: Option<(&[u8], &[u8; 32])>, me: Identity| {
+        let mut a = Account::open(s.objects.clone(), s.records.clone(), bytes, me, s.now).unwrap();
+        unlock_controller(&s.host, &mut a, &s.d);
+        a
+    };
+    let me = || Identity::Controller(s.d.clone());
+    // Each of these must open and must replay: the same account as with no stored state.
+    let mut tampered = s.mid.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    let mut header_tampered = s.mid.clone();
+    header_tampered[20] ^= 1;
+    let wrong_key = [0x5bu8; 32];
+    let mut plain_json = serde_json::to_vec(&json!({"version": 4, "state": {}})).unwrap();
+    plain_json.extend_from_slice(&[0; 40]);
+    let cases: Vec<(&str, Vec<u8>, [u8; 32], Identity)> = vec![
+        ("a flipped tag byte", tampered, KEY, me()),
+        ("a flipped header byte", header_tampered, KEY, me()),
+        ("a wrong key", s.mid.clone(), wrong_key, me()),
+        (
+            "another identity",
+            s.mid.clone(),
+            KEY,
+            Identity::Member(s.d.clone()),
+        ),
+        ("bare JSON", plain_json, KEY, me()),
+        ("truncated", s.mid[..30].to_vec(), KEY, me()),
+        ("empty", vec![], KEY, me()),
+        (
+            "huge header length",
+            {
+                let mut b = s.mid.clone();
+                b[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+                b
+            },
+            KEY,
+            me(),
+        ),
+    ];
+    for (name, bytes, key, who) in cases {
+        let member = matches!(who, Identity::Member(_));
+        let a = open(Some((&bytes, &key)), who);
+        if !member {
+            assert_eq!(fingerprint(&a, &s.host, &s.d), want, "{name}");
+        } else {
+            assert_eq!(a.status().code, "ok", "{name}");
+        }
+    }
+    // With no key supplied the account always replays; it loses the head marks only.
+    assert_eq!(fingerprint(&open(None, me()), &s.host, &s.d), want);
+    // With the right key the state is used: with no objects the account still opens.
+    let a = Account::open(
         Objects::default(),
         vec![],
-        Some(forged),
-        Identity::Controller(s.d.clone()),
+        Some((&s.mid, &KEY)),
+        me(),
         s.now,
     )
-    .unwrap_err();
-    assert!(
-        e.detail().contains("does not hold") || e.code() == "unavailable",
-        "{e}"
-    );
-    // A wrong format version is refused when it is read.
-    let mut old: Value = serde_json::from_slice(&bytes).unwrap();
-    old["version"] = json!(3);
-    assert!(Account::persisted_from_bytes(&serde_json::to_vec(&old).unwrap()).is_err());
+    .unwrap();
+    assert_eq!(a.status().seq as usize, s.mid_entries);
+    // Without a verified state and without objects there is nothing to replay: an error.
+    assert!(Account::open(
+        Objects::default(),
+        vec![],
+        Some((&s.mid, &wrong_key)),
+        me(),
+        s.now
+    )
+    .is_err());
 }
 
 #[test]
@@ -2441,21 +2496,34 @@ fn a_key_a_pending_removal_would_remove_is_suspended_by_a_signer_of_it() {
 }
 
 #[test]
-fn the_persisted_state_of_another_account_is_not_mixed_into_this_one() {
+fn the_stored_state_of_another_account_is_not_mixed_into_this_one() {
     let mut f1 = create(&["notes"]);
     let mut f2 = create_v(&["notes"], 1);
-    let theirs = Account::persisted_from_bytes(&f2.account.export_persisted().unwrap()).unwrap();
-    let e = Account::open(
+    // Account 2's state, exported for account 2's identity under the same key.
+    let theirs = f2.account.export_persisted(&KEY, [4; 32]).unwrap();
+    let a = Account::open(
         f1.account.objects().clone(),
         vec![],
-        Some(theirs),
+        Some((&theirs, &KEY)),
         Identity::Controller(f1.d.clone()),
         T0,
     )
-    .unwrap_err();
-    assert!(
-        matches!(e, Failure::Unavailable(_) | Failure::Malformed(_)),
-        "{e}"
+    .unwrap();
+    assert_eq!(a.id(), f1.account.id());
+    assert_eq!(a.status().seq, f1.account.status().seq);
+    // Even for the same identity ID it is account 1's objects that stand, not account 2's.
+    let b = Account::open(
+        f1.account.objects().clone(),
+        vec![],
+        Some((&theirs, &KEY)),
+        Identity::Controller(f2.d.clone()),
+        T0,
+    )
+    .unwrap();
+    assert_eq!(
+        b.id(),
+        f1.account.id(),
+        "the blob claims another account and is dropped"
     );
     let _ = &mut f1;
 }
@@ -2569,16 +2637,9 @@ fn review_q1_a_garbage_envelope_over_a_real_body_truncates_the_history() {
     assert_eq!(after.seq, 4);
 }
 
-/// The shape of the forged checkpoint: the state JSON with one member's `revoked_seq` cleared.
-fn review_forge(bytes: &[u8], edit: impl FnOnce(&mut Value)) -> Persisted {
-    let mut v: Value = serde_json::from_slice(bytes).unwrap();
-    edit(&mut v["state"]);
-    Account::persisted_from_bytes(&serde_json::to_vec(&v).unwrap()).unwrap()
-}
-
-/// Q8 / §17.2: a well-formed persisted state that names only held entries but lies about the
-/// fold (a revoked member current) is trusted by the account for record admission and for
-/// who it shows as a member.
+/// Q8 / §17.2: the stored fold is never trusted on its bare bytes. A forged blob (here any
+/// tampering, since the attacker has no key) ends in a replay: the revoked member stays
+/// revoked and its late record is refused.
 #[test]
 fn review_q8_forged_persisted_state_unrevokes_a_member_and_admits_its_records() {
     let mut f = create(&["notes"]);
@@ -2602,64 +2663,45 @@ fn review_q8_forged_persisted_state_unrevokes_a_member_and_admits_its_records() 
     let mut host = std::mem::replace(&mut f.host, Host::new());
     let late = write_note(&mut m, &mut host, "x", "Written after revocation");
     f.host = host;
-    let bytes = f.account.export_persisted().unwrap();
+    let bytes = f.account.export_persisted(&KEY, [6; 32]).unwrap();
     let now = f.account.now_ms();
-    // Honest: replay, the record is refused.
-    let mut honest = Account::open(
-        f.account.objects().clone(),
-        late.records.clone(),
-        None,
-        Identity::Controller(f.d.clone()),
-        now,
-    )
-    .unwrap();
-    unlock_controller(&f.host, &mut honest, &f.d);
+    let open = |stored: Option<(&[u8], &[u8; 32])>| {
+        let mut a = Account::open(
+            f.account.objects().clone(),
+            late.records.clone(),
+            stored,
+            Identity::Controller(f.d.clone()),
+            now,
+        )
+        .unwrap();
+        unlock_controller(&f.host, &mut a, &f.d);
+        a
+    };
+    let honest = open(None);
     let hv = format!("{:?}", honest.view("notes").unwrap());
-    // Forged: the agent's revocation erased from the saved fold.
-    let forged = review_forge(&bytes, |s| {
-        for mbr in s["members"].as_array_mut().unwrap() {
-            mbr["revoked_seq"] = Value::Null;
-        }
-    });
-    let mut a = Account::open(
-        Objects::default(),
-        late.records.clone(),
-        Some(forged),
-        Identity::Controller(f.d.clone()),
-        now,
-    )
-    .unwrap();
-    unlock_controller(&f.host, &mut a, &f.d);
-    let fv = format!("{:?}", a.view("notes").unwrap());
-    let honest_current: Vec<_> = honest
-        .members()
-        .into_iter()
-        .filter(|x| x.member.id == agent)
-        .map(|x| format!("{:?}", x.member))
-        .collect();
-    let forged_current: Vec<_> = a
-        .members()
-        .into_iter()
-        .filter(|x| x.member.id == agent)
-        .map(|x| format!("{:?}", x.member))
-        .collect();
-    eprintln!(
-        "honest status {:?} member {:?}\nforged status {:?} member {:?}",
-        honest.status(),
-        honest_current,
-        a.status(),
-        forged_current
-    );
-    eprintln!(
-        "honest admits it: {}; forged admits it: {}",
-        hv.contains("Written after revocation"),
-        fv.contains("Written after revocation")
-    );
     assert!(!hv.contains("Written after revocation"));
-    assert!(
-        !fv.contains("Written after revocation"),
-        "a forged persisted fold must not decide record admission"
-    );
+    let revoked_at = |a: &Account| {
+        a.members()
+            .into_iter()
+            .find(|x| x.member.id == agent)
+            .unwrap()
+            .member
+            .revoked_at
+    };
+    assert!(revoked_at(&honest).is_some());
+    // A blob edited to say otherwise (bytes changed anywhere in the ciphertext) is dropped.
+    for at in [bytes.len() - 1, bytes.len() / 2, bytes.len() - 20] {
+        let mut forged = bytes.clone();
+        forged[at] ^= 0x40;
+        let a = open(Some((&forged, &KEY)));
+        let fv = format!("{:?}", a.view("notes").unwrap());
+        assert!(!fv.contains("Written after revocation"), "byte {at}");
+        assert_eq!(revoked_at(&a), revoked_at(&honest), "byte {at}");
+    }
+    // The genuine blob is used and agrees with the replay.
+    let a = open(Some((&bytes, &KEY)));
+    assert_eq!(revoked_at(&a), revoked_at(&honest));
+    assert!(!format!("{:?}", a.view("notes").unwrap()).contains("Written after revocation"));
 }
 
 /// Q10: a `control` controller added by a transition, then its own slot by a self-slot entry.
@@ -2980,66 +3022,35 @@ fn review_revision_depends_on_merge_history() {
     );
 }
 
-/// Hostile persisted state: shapes the shape check does not cover must not panic.
+/// Hostile stored bytes must not panic and must not block opening.
 #[test]
 fn review_hostile_persisted_state_does_not_panic() {
     let mut f = create(&["notes"]);
-    let bytes = f.account.export_persisted().unwrap();
+    let bytes = f.account.export_persisted(&KEY, [8; 32]).unwrap();
     let now = f.account.now_ms();
-    let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
-        (
-            "policies empty",
-            Box::new(|s: &mut Value| s["policies"] = json!([])),
-        ),
-        (
-            "epochs huge",
-            Box::new(|s: &mut Value| s["epochs"]["notes"] = json!(9007199254740991u64)),
-        ),
-        (
-            "members granted at huge seq",
-            Box::new(|s: &mut Value| s["namespaces"] = json!(["notes", "other"])),
-        ),
-        (
-            "activations garbage",
-            Box::new(|s: &mut Value| s["recorded"] = json!(["x"])),
-        ),
+    let mut cases: Vec<Vec<u8>> = vec![
+        vec![],
+        vec![0; 7],
+        b"COLOPS05".to_vec(),
+        bytes[..bytes.len() / 2].to_vec(),
     ];
-    for (name, edit) in edits {
-        let p = {
-            let mut v: Value = serde_json::from_slice(&bytes).unwrap();
-            edit(&mut v["state"]);
-            Account::persisted_from_bytes(&serde_json::to_vec(&v).unwrap())
-        };
+    for len in [0u32, 1, 1024, 1025, u32::MAX] {
+        let mut b = bytes.clone();
+        b[8..12].copy_from_slice(&len.to_le_bytes());
+        cases.push(b);
+    }
+    for (i, junk) in cases.into_iter().enumerate() {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let Ok(p) = p else {
-                return "refused at read".to_string();
-            };
-            match Account::open(
-                Objects::default(),
+            Account::open(
+                f.account.objects().clone(),
                 vec![],
-                Some(p),
+                Some((&junk, &KEY)),
                 Identity::Controller(f.d.clone()),
                 now,
-            ) {
-                Ok(mut a) => {
-                    unlock_controller(&f.host, &mut a, &f.d);
-                    let seed = [7u8; 32];
-                    let w = a
-                        .begin_rekey(&["notes".to_string()], &[f.d.clone()], seed)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string());
-                    format!(
-                        "opened: {:?}, latest epoch {}, rekey {:?}",
-                        a.status().code,
-                        a.latest_epoch("notes"),
-                        w
-                    )
-                }
-                Err(e) => format!("open refused: {e}"),
-            }
+            )
+            .map(|a| a.status().code)
         }));
-        eprintln!("{name}: {:?}", r.as_ref().map_err(|_| "PANIC"));
-        assert!(r.is_ok(), "{name} panicked");
+        assert_eq!(r.unwrap().unwrap(), "ok", "case {i}");
     }
 }
 

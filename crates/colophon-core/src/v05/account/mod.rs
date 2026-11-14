@@ -75,7 +75,10 @@
 //! them, so the verdict, the namespace folds and everything read through [`Account::view`] do
 //! not depend on the order objects arrive in, nor on which valid objects a verifier holds
 //! beyond the set. A merge that makes the history refuse is reported, and the account keeps
-//! reading the verified prefix; writes are refused until the history is clean again. What does
+//! reading the verified prefix; writes are refused until the history is clean again.
+//! **Stored state is a cache authenticated by a device-held key; without it the account
+//! replays** (see [`Account::open`] and `stored.rs`): the exported bytes are protected as 0.4
+//! protects its checkpoints, and are never trusted on their bare bytes. What does
 //! depend on arrival order is local memory only (the head high-water marks of §13.3, and the
 //! seq at which a pending transition was first held, §17.5), never a verdict.
 //!
@@ -84,13 +87,13 @@
 //! | 0.4 (`Library`, `NativeLibrary`, `NativeEngine`) | 0.5 |
 //! | --- | --- |
 //! | `begin_create`, `begin_create_with`, `advance_create` | [`Creation::begin`], [`Creation::provide_prf`], [`Creation::provide_signatures`]: genesis, the first `rekey` and the first slots, in as many rounds as the ceremonies need |
-//! | `open`, `open_with_checkpoints` | [`Account::open`] (objects, records, optional [`Persisted`], identity, clock) |
+//! | `open`, `open_with_checkpoints` | [`Account::open`] (objects, records, optional stored state and its key, identity, clock) |
 //! | `id`, `identity`, `me` | [`Account::id`], [`Account::identity`], [`Account::me`] |
 //! | `records`, `authority` | [`Account::objects`], [`Account::records`] (held public objects), [`Account::controllers`], [`Account::policy`] |
 //! | `set_read_scope` | [`Account::set_read_scope`] |
 //! | `merge`, `merge_with_changes`, `changes`, `finish_with_changes` | [`Account::merge`] returns [`Changes`]; [`Account::finish`] returns it too |
 //! | `revision`, `applied_operations` | [`Account::revision`] |
-//! | `checkpoint`, `restore_checkpoint`, `set_checkpoint_policy` | E6 for on-disk namespace checkpoints. The verifier's persisted state (§17.2): [`Account::export_persisted`], [`Account::persisted_from_bytes`] |
+//! | `checkpoint`, `restore_checkpoint`, `set_checkpoint_policy` | E6 for on-disk namespace checkpoints. The verifier's persisted state (§17.2), authenticated under a device-held key as 0.4 protects its checkpoints: [`Account::export_persisted`] and the stored bytes and key given to [`Account::open`] |
 //! | `query`, `view` | [`Account::query`], [`Account::view`] |
 //! | `finish`, `finish_authority` | [`Account::finish`] (one call; WebAuthn assertions travel in [`SignatureResult`]) |
 //! | `begin_unlock_slot`, `finish_unlock_slot`, `begin_unlock_slots` | [`Account::slots`], [`Account::begin_unlock_slot`], [`Account::finish_unlock_slot`] |
@@ -122,6 +125,7 @@ mod action;
 mod create;
 mod derived;
 mod read;
+mod stored;
 mod unlock;
 
 pub use action::{
@@ -406,23 +410,51 @@ fn union_records(into: &mut Vec<HeldRecord>, from: &[HeldRecord]) {
 }
 
 impl Account {
-    /// Open an account from its objects and records, and optionally the verifier's persisted
-    /// state (§17.2), as `me` at the clock `now_ms`. The history is verified; stored state is
-    /// accepted only as far as it names entries this account holds (it is locally trusted, as
-    /// §17.2 says, and shape-checked when it was read by [`Account::persisted_from_bytes`]).
-    /// An account with no verified genesis does not open.
+    /// Open an account from its objects and records as `me` at the clock `now_ms`, and
+    /// optionally the verifier's stored state (§17.2): the bytes [`Account::export_persisted`]
+    /// made and the same 32-byte device-held key.
+    ///
+    /// **Stored state is a cache authenticated by a device-held key; without it the account
+    /// replays.** With no key, a wrong key, a failed tag, an unknown format, a blob for another
+    /// account or identity, or any shape failure, the account silently replays the history from
+    /// the objects it is given (it is never an error that stops it opening), and the per-home
+    /// head marks are lost. Only a blob whose tag verified supplies its retained objects, its
+    /// folded state and its head marks. An account with no verified genesis does not open.
     pub fn open(
         objects: Objects,
         records: Vec<HeldRecord>,
-        persisted: Option<Persisted>,
+        stored: Option<(&[u8], &[u8; 32])>,
         me: Identity,
         now_ms: i64,
     ) -> Result<Self> {
         check_identity(&me)?;
         crate::v05::write::check_issued(now_ms)?;
-        let persisted = persisted.unwrap_or_default();
         let given = Incoming { objects, records };
         check_bounds(&Objects::default(), &[], &given)?;
+        if let Some((bytes, _)) = stored {
+            require(
+                bytes.len() <= MAX_TOTAL_BYTES,
+                "the stored state exceeds its bound",
+            )?;
+        }
+        let verified = stored.and_then(|(b, k)| stored::unprotect(b, k, &me));
+        if let Some((persisted, account)) = verified {
+            let tried = Self::open_with(&given, persisted, &me, now_ms)
+                .ok()
+                .filter(|a| a.d.auth.account().as_str() == account);
+            if let Some(a) = tried {
+                return Ok(a);
+            }
+        }
+        Self::open_with(&given, Persisted::default(), &me, now_ms)
+    }
+
+    fn open_with(
+        given: &Incoming,
+        persisted: Persisted,
+        me: &Identity,
+        now_ms: i64,
+    ) -> Result<Self> {
         let mut all = Objects::default();
         if let Some(p) = persisted.objects() {
             check_bounds(
@@ -447,14 +479,14 @@ impl Account {
                 persisted: &persisted,
                 now_ms,
                 seeds: &seeds,
-                me: &me,
+                me,
                 scope: &scope,
             },
             None,
             None,
         )?;
         let mut a = Self {
-            me,
+            me: me.clone(),
             now_ms,
             objects: all,
             records: held,
@@ -772,19 +804,22 @@ impl Account {
     // -----------------------------------------------------------------------------------------
     // Persisted verifier state (§17.2).
 
-    /// The verifier's persisted state, as bytes with a format version, for the host to store
-    /// atomically. It carries the retained objects, so a resumed account holds what this one
-    /// holds. The account resumes from it from now on.
-    pub fn export_persisted(&mut self) -> Result<Vec<u8>> {
+    /// The verifier's persisted state (§17.2), protected under the host's 32-byte device-held
+    /// `key` and bound to this account and identity, for the host to store atomically.
+    /// `nonce_seed` is fresh host entropy for this export. The bytes carry the retained objects
+    /// and the head marks; they are a cache, and [`Account::open`] replays without the key.
+    /// The account resumes from the checkpoint it made from now on.
+    pub fn export_persisted(&mut self, key: &[u8; 32], nonce_seed: [u8; 32]) -> Result<Vec<u8>> {
         let p = Persisted::checkpoint(&self.objects, &self.persisted, self.now_ms);
-        let bytes = p.to_bytes()?;
+        let bytes = stored::protect(
+            &p,
+            self.d.auth.account().as_str(),
+            &self.me,
+            key,
+            nonce_seed,
+        )?;
         self.persisted = p;
         Ok(bytes)
-    }
-    /// Read persisted state back from the host's own storage, never from a peer: the format
-    /// version, the folded shape and the head marks are checked.
-    pub fn persisted_from_bytes(bytes: &[u8]) -> Result<Persisted> {
-        Persisted::from_bytes(bytes)
     }
 }
 
