@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The checkpoint format.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// One path the engine had read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,8 +41,6 @@ pub struct Body {
     pub head: (u64, String),
     /// Every immutable path read.
     pub index: Vec<IndexEntry>,
-    /// The crypto memo of the records.
-    pub memo: Vec<RecordMemo>,
     /// The namespace revisions at the time.
     pub revisions: BTreeMap<String, u64>,
     /// Per live path `(generation, body digest)`.
@@ -50,4 +48,16 @@ pub struct Body {
     /// Per home, its cursors and remembered remote set.
     #[serde(default)]
     pub exchange: BTreeMap<String, super::exchange::SavedHome>,
+}
+
+/// One namespace's part of the checkpoint, sealed on its own (so the checkpoint is bounded per
+/// namespace, never silently dropped whole): the crypto memo of its records and its fold.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NsPart {
+    /// The namespace.
+    pub namespace: String,
+    /// The crypto memo of its records.
+    pub memo: Vec<RecordMemo>,
+    /// Its fold.
+    pub fold: Option<crate::v05::account::FoldSnapshot>,
 }

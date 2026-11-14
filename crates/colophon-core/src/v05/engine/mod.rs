@@ -150,14 +150,18 @@ pub struct Written {
     pub changes: Changes,
 }
 
-/// The sealed state a host stores between sessions: the account's verifier state and the
-/// engine's checkpoint. Both are caches sealed under the device-held key.
+/// The sealed state a host stores between sessions: the account's verifier state, the engine's
+/// checkpoint and one sealed part per namespace (its record memo and its fold). All are caches
+/// sealed under the device-held key; a part that fails its seal makes that namespace open cold
+/// and the open says so.
 #[derive(Clone, Debug)]
 pub struct Saved {
     /// The account's persisted verifier state (§17.2).
     pub verifier: Vec<u8>,
     /// The engine's checkpoint.
     pub checkpoint: Vec<u8>,
+    /// One sealed part per namespace.
+    pub parts: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -455,27 +459,50 @@ impl<S: RecordSource> Engine<S> {
         let mut restored_revisions = None;
         let mut live_witness = BTreeMap::new();
         let mut saved_exchange = BTreeMap::new();
+        let mut bad_parts: Vec<String> = Vec::new();
         if let Some(b) = body {
             // A changed provider token drops that path's memo (0.3 §7.1): the work is done
             // again even for identical bytes.
-            let mut memo = b.memo;
             let tokens: BTreeMap<&str, &Option<String>> = b
                 .index
                 .iter()
                 .map(|i| (i.path.as_str(), &i.version))
                 .collect();
-            memo.retain(|m| match tokens.get(m.path.as_str()) {
-                None => false,
-                Some(was) => {
-                    ix.listing.contains(&m.path)
-                        && **was == source.content_version(&m.path).unwrap_or(None)
+            let mut folds = Vec::new();
+            if let Some(sv) = saved {
+                for (ns, bytes) in &sv.parts {
+                    let mut ps = scope.clone();
+                    ps.push(format!("ns:{ns}"));
+                    let part = seal::open(bytes, &options.account, &me, &ps, &key)
+                        .and_then(|p| serde_json::from_slice::<checkpoint::NsPart>(&p).ok())
+                        .filter(|p| p.namespace == *ns);
+                    let Some(part) = part else {
+                        bad_parts.push(ns.clone());
+                        continue;
+                    };
+                    let mut memo = part.memo;
+                    memo.retain(|m| match tokens.get(m.path.as_str()) {
+                        None => false,
+                        Some(was) => {
+                            ix.listing.contains(&m.path)
+                                && **was == source.content_version(&m.path).unwrap_or(None)
+                        }
+                    });
+                    account.import_judge_memo(memo);
+                    folds.extend(part.fold);
                 }
-            });
-            account.import_judge_memo(memo);
+            }
+            account.import_folds(folds);
             restored = b.index.into_iter().map(|i| (i.path.clone(), i)).collect();
             restored_revisions = Some(b.revisions);
             live_witness = b.live_witness;
             saved_exchange = b.exchange;
+        }
+        if !bad_parts.is_empty() {
+            mode = OpenMode::Invalidated(format!(
+                "namespace part(s) failed their seal and open cold: {}",
+                bad_parts.join(", ")
+            ));
         }
         // What the checkpoint covered and the listing no longer names is unavailable, not
         // gone (0.3 §7.1).
@@ -1164,7 +1191,6 @@ impl<S: RecordSource> Engine<S> {
             format: checkpoint::FORMAT,
             head: self.account.head(),
             index,
-            memo: self.account.export_judge_memo(),
             revisions: self.revisions(),
             live_witness: self.live_witness.clone(),
             exchange: self.exchange.export(),
@@ -1175,10 +1201,44 @@ impl<S: RecordSource> Engine<S> {
         h.update(b"colophon/engine-checkpoint-nonce");
         let seed2: [u8; 32] = h.finalize().into();
         let scope = self.scope();
-        let checkpoint = seal::seal(&plain, &self.options.account, &self.me, &scope, &key, seed2)?;
+        let checkpoint =
+            seal::seal(&plain, &self.options.account, &self.me, &scope, &key, seed2)?;
+        // One sealed part per namespace: the memo of its records and its fold.
+        let mut memos: BTreeMap<String, Vec<crate::v05::records::RecordMemo>> = BTreeMap::new();
+        for m in self.account.export_judge_memo() {
+            if let Some(Kind::Op { namespace, .. }) = paths::classify(&m.path) {
+                memos.entry(namespace).or_default().push(m);
+            }
+        }
+        let mut folds: BTreeMap<String, crate::v05::account::FoldSnapshot> = self
+            .account
+            .export_folds()
+            .into_iter()
+            .map(|f| (f.namespace.clone(), f))
+            .collect();
+        let names: BTreeSet<String> = memos.keys().chain(folds.keys()).cloned().collect();
+        let mut parts = BTreeMap::new();
+        for ns in names {
+            let part = checkpoint::NsPart {
+                namespace: ns.clone(),
+                memo: memos.remove(&ns).unwrap_or_default(),
+                fold: folds.remove(&ns),
+            };
+            let plain = serde_json::to_vec(&part).map_err(|e| malformed(e.to_string()))?;
+            let mut hh = Sha256::new();
+            hh.update(seed2);
+            hh.update(ns.as_bytes());
+            let mut ps = scope.clone();
+            ps.push(format!("ns:{ns}"));
+            parts.insert(
+                ns,
+                seal::seal(&plain, &self.options.account, &self.me, &ps, &key, hh.finalize().into())?,
+            );
+        }
         Ok(Saved {
             verifier,
             checkpoint,
+            parts,
         })
     }
 

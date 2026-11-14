@@ -113,6 +113,7 @@ fn judge_one(
     earlier: Earlier<'_>,
     h: &HeldRecord,
     skip_signature: bool,
+    mut cache: Option<&mut super::records::JudgeCache>,
 ) -> Result<LiveHead, LiveVerdict> {
     let Ok((hd, env)) = OperationHeader::parse(&h.bytes) else {
         return Err(bad("not a /5 header"));
@@ -134,16 +135,22 @@ fn judge_one(
     let Some(member) = auth.member(&hd.author) else {
         return Err(LiveVerdict::Refused("notGranted"));
     };
-    if !skip_signature
-        && RawEnvelope::parse(
+    let vk = super::records::verified_key(&h.bytes, &member.request.signing);
+    let known = cache.as_ref().is_some_and(|c| c.sig_known(&vk));
+    if !skip_signature && !known {
+        if RawEnvelope::parse(
             &h.bytes,
             super::encoding::bounds::OPERATION_HEADER_BODY,
             false,
         )
         .and_then(|e| OperationHeader::verify(&e, &member.request.signing))
         .is_err()
-    {
-        return Err(bad("bad signature"));
+        {
+            return Err(bad("bad signature"));
+        }
+        if let Some(c) = cache.as_mut() {
+            c.mark_sig(vk);
+        }
     }
     let _ = env;
     let entry = member
@@ -171,7 +178,18 @@ fn judge_one(
     let Some(key) = keys.get(account, &hd.namespace, hd.epoch) else {
         return Err(LiveVerdict::Quarantined("unavailable"));
     };
-    let Ok(pt) = key.open(&hd) else {
+    let body = hd.digest();
+    let opened = match cache.as_ref().and_then(|c| c.opened_get(&body)) {
+        Some(o) => o,
+        None => {
+            let o = key.open(&hd).ok();
+            if let Some(c) = cache.as_mut() {
+                c.opened_put(&body, o.clone());
+            }
+            o
+        }
+    };
+    let Some(pt) = opened else {
         return Err(LiveVerdict::Refused("invalidPayload"));
     };
     let kind = pt.get("kind").and_then(Value::as_str).unwrap_or_default();
@@ -208,7 +226,7 @@ pub fn judge_live(
     judgement: &Judgement,
     held: &[HeldRecord],
 ) -> LiveJudgement {
-    judge_live_with(auth, keys, judgement, held, None)
+    judge_live_with(auth, keys, judgement, held, None, None)
 }
 
 /// [`judge_live`], optionally skipping the signature check of the one candidate at `unsigned`
@@ -219,6 +237,7 @@ pub(crate) fn judge_live_with(
     judgement: &Judgement,
     held: &[HeldRecord],
     unsigned: Option<usize>,
+    mut cache: Option<&mut super::records::JudgeCache>,
 ) -> LiveJudgement {
     let account = auth.account().clone();
     // The admitted durable headers, by namespace, in fold order.
@@ -249,7 +268,15 @@ pub(crate) fn judge_live_with(
     let mut verdicts: Vec<Option<LiveVerdict>> = vec![None; held.len()];
     let mut valid: Vec<Valid> = Vec::new();
     for (idx, h) in held.iter().enumerate() {
-        match judge_one(auth, keys, &account, &earlier, h, unsigned == Some(idx)) {
+        match judge_one(
+            auth,
+            keys,
+            &account,
+            &earlier,
+            h,
+            unsigned == Some(idx),
+            cache.as_deref_mut(),
+        ) {
             Ok(head) => valid.push(Valid { idx, head }),
             Err(v) => verdicts[idx] = Some(v),
         }

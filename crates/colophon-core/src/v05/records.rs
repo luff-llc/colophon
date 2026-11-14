@@ -1875,7 +1875,7 @@ pub struct RecordMemo {
     /// The opened plaintext.
     pub plaintext: Option<Value>,
 }
-fn verified_key(bytes: &[u8], signing: &[u8]) -> [u8; 32] {
+pub(crate) fn verified_key(bytes: &[u8], signing: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(bytes);
@@ -1896,6 +1896,24 @@ fn unhex32(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 impl JudgeCache {
+    /// Whether this exact signature check already succeeded.
+    pub(crate) fn sig_known(&self, k: &[u8; 32]) -> bool {
+        self.verified.contains(k)
+    }
+    /// Remember a successful signature check.
+    pub(crate) fn mark_sig(&mut self, k: [u8; 32]) {
+        if self.verified.len() <= 1 << 20 {
+            self.verified.insert(k);
+        }
+    }
+    /// The opened payload of a body, when it was opened before.
+    pub(crate) fn opened_get(&self, body: &str) -> Option<Option<Value>> {
+        self.opened.get(body).cloned()
+    }
+    /// Remember an opened payload.
+    pub(crate) fn opened_put(&mut self, body: &str, v: Option<Value>) {
+        self.opened.insert(body.to_string(), v);
+    }
     /// The memo of the given held records.
     pub(crate) fn export_memo(&self, held: &[HeldRecord]) -> Vec<RecordMemo> {
         use sha2::{Digest, Sha256};
@@ -2151,8 +2169,9 @@ fn judge_impl(
         }
         c.verified.extend(fresh_verified);
         // Forget what no held record names, so the cache stays the size of the held set.
-        // (Not while nothing is held: a memo taken back from a checkpoint waits for its records.)
-        if !held.is_empty() {
+        // Opened payloads of live candidates share this memo, so it is not pruned to the held
+        // records; it is bounded by size instead.
+        if c.opened.len() > held.len().saturating_mul(4).saturating_add(65_536) {
             let live: BTreeSet<&str> = by_digest.keys().map(String::as_str).collect();
             c.opened.retain(|d, _| live.contains(d.as_str()));
         }

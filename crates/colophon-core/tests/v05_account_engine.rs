@@ -865,3 +865,30 @@ fn a_write_over_budget_or_clock_is_refused_at_prepare_as_the_full_judgement_refu
         o => panic!("{o:?}"),
     }
 }
+
+#[test]
+fn a_resumed_open_with_nothing_new_does_no_signature_check_decryption_or_fold() {
+    let w = world(40);
+    let mut e = open(&w, &w.src, w.src.listing(), None);
+    assert_eq!(e.stats().folds_applied_last, 40);
+    let want = view(&e);
+    let saved = e.save([2; 32]).unwrap();
+    assert_eq!(saved.parts.len(), 1, "one sealed part per namespace");
+    let r = open(&w, &w.src, w.src.listing(), Some(&saved));
+    assert_eq!(*r.open_mode(), OpenMode::Resumed);
+    let st = r.stats();
+    assert_eq!(st.signatures_verified, 0, "{st:?}");
+    assert_eq!(st.payloads_decrypted, 0, "{st:?}");
+    assert_eq!(st.folds_applied_last, 0, "no fold: the snapshot is the fold ({st:?})");
+    assert_eq!(view(&r), want);
+    assert_eq!(r.revision("notes"), e.revision("notes"));
+    // One new record is the only fold; a part that fails its seal opens that namespace cold and says so.
+    let mut bad = saved.clone();
+    let part = bad.parts.get_mut("notes").unwrap();
+    let n = part.len() - 3;
+    part[n] ^= 1;
+    let c = open(&w, &w.src, w.src.listing(), Some(&bad));
+    assert!(matches!(c.open_mode(), OpenMode::Invalidated(m) if m.contains("notes")), "{:?}", c.open_mode());
+    assert_eq!(c.stats().folds_applied_last, 40);
+    assert_eq!(view(&c), want);
+}

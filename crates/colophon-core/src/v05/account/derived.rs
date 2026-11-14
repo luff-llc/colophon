@@ -35,6 +35,9 @@ pub(super) struct Inputs<'a> {
     pub seeds: &'a SeedRing,
     pub me: &'a Identity,
     pub scope: &'a Option<BTreeSet<String>>,
+    /// Namespace folds a sealed checkpoint carried: `(print in hex, fold)`. Used only when the
+    /// print and the operations folded match.
+    pub fold_seed: &'a BTreeMap<String, (String, Folded)>,
 }
 
 /// One admitted record on its way into a fold: its position `(clock, author, id, digest)`, its
@@ -47,6 +50,7 @@ type FoldItem = (
 );
 
 /// One namespace's fold.
+#[derive(Clone)]
 pub(super) struct Folded {
     pub revision: u64,
     pub fold: Namespace,
@@ -275,7 +279,12 @@ impl Derived {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             judge_cached(&auth, &keys, inputs.records, &mut c, print)
         };
-        let live = crate::v05::live::judge_live(&auth, &keys, &judgement, inputs.live);
+        let live = {
+            let mut c = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::v05::live::judge_live_with(&auth, &keys, &judgement, inputs.live, None, Some(&mut c))
+        };
         let (effective, verified_pending) = effective_objects(inputs.objects, auth.state());
         let mut derived = Self {
             effective,
@@ -451,7 +460,21 @@ impl Derived {
                     f.fold.order.len() <= ops.len()
                         && f.fold.order.iter().zip(&ops).all(|(a, b)| *a == b.3)
                 });
-            let (mut fold, mut admitted, start) = match reuse {
+            let seeded = inputs
+                .fold_seed
+                .get(&ns)
+                .filter(|(p, _)| *p == crate::v05::engine::hex(&self.print))
+                .map(|(_, f)| f)
+                .filter(|f| {
+                    f.fold.order.len() <= ops.len()
+                        && f.fold.order.iter().zip(&ops).all(|(a, b)| *a == b.3)
+                });
+            // Whichever covers more of the operations.
+            let chosen = match (reuse, seeded) {
+                (Some(a), Some(b)) => Some(if b.fold.order.len() > a.fold.order.len() { b } else { a }),
+                (a, b) => a.or(b),
+            };
+            let (mut fold, mut admitted, start) = match chosen {
                 Some(f) => (f.fold.clone(), f.admitted.clone(), f.fold.order.len()),
                 None => (Namespace::new(&ns), Vec::new(), 0),
             };

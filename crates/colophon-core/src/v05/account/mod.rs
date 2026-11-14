@@ -253,6 +253,25 @@ pub struct Work {
     pub fold_applied: u64,
 }
 
+/// One namespace's fold, as a sealed checkpoint carries it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FoldSnapshot {
+    /// The namespace.
+    pub namespace: String,
+    /// The hash of the verified standing it was made under, hex.
+    pub print: String,
+    /// The domain state.
+    pub state: serde_json::Value,
+    /// The digests folded, in fold order.
+    pub order: Vec<String>,
+    /// The highest clock folded.
+    pub clock: u64,
+    /// Operations applied.
+    pub applied: u64,
+    /// The admitted operations.
+    pub admitted: Vec<crate::model::OperationView>,
+}
+
 /// What a merge, an unlock or a finished action changed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Changes {
@@ -330,6 +349,8 @@ pub struct Account {
     records: Vec<HeldRecord>,
     /// Live-state candidates (0.3 §5.1) at `state/` paths.
     live: Vec<HeldRecord>,
+    /// Namespace folds taken back from a sealed checkpoint.
+    fold_seed: BTreeMap<String, (String, derived::Folded)>,
     persisted: Persisted,
     seeds: SeedRing,
     scope: Option<BTreeSet<String>>,
@@ -542,6 +563,7 @@ impl Account {
                 seeds: &seeds,
                 me,
                 scope: &scope,
+                fold_seed: &BTreeMap::new(),
             },
             None,
             None,
@@ -559,6 +581,7 @@ impl Account {
                     seeds: &seeds,
                     me,
                     scope: &scope,
+                    fold_seed: &BTreeMap::new(),
                 },
                 None,
                 None,
@@ -570,6 +593,7 @@ impl Account {
             objects: all,
             records: held,
             live: Vec::new(),
+            fold_seed: BTreeMap::new(),
             persisted,
             seeds,
             scope,
@@ -608,6 +632,7 @@ impl Account {
                 seeds: &self.seeds,
                 me: &self.me,
                 scope: &self.scope,
+                fold_seed: &self.fold_seed,
             },
             Some(&self.d),
             extra,
@@ -862,6 +887,7 @@ impl Account {
                     seeds: &this.seeds,
                     me: &this.me,
                     scope: &this.scope,
+                    fold_seed: &this.fold_seed,
                 },
                 Some(&this.d),
                 None,
@@ -985,17 +1011,74 @@ impl Account {
             .iter()
             .position(|c| c.path == candidate.path && c.bytes == candidate.bytes)
             .ok_or_else(|| crate::v05::malformed("candidate not held"))?;
+        let mut cache = self
+            .d
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let j = crate::v05::live::judge_live_with(
             &self.d.auth,
             &self.d.keys,
             &self.d.judgement,
             &live,
             unsigned.then_some(at),
+            Some(&mut cache),
         );
         Ok(j.verdicts
             .get(at)
             .map(|v| v.1.clone())
             .unwrap_or(crate::v05::live::LiveVerdict::Invalid("not judged".into())))
+    }
+    /// The namespace folds, for the engine's sealed checkpoint: what a resumed open reuses
+    /// instead of folding every operation again. Crate-private (it holds plaintext state).
+    pub(crate) fn export_folds(&self) -> Vec<FoldSnapshot> {
+        let print = crate::v05::engine::hex(&self.d.print);
+        self.d
+            .folded
+            .iter()
+            .filter_map(|(ns, f)| {
+                Some(FoldSnapshot {
+                    namespace: ns.clone(),
+                    print: print.clone(),
+                    state: serde_json::to_value(&f.fold.state).ok()?,
+                    order: f.fold.order.clone(),
+                    clock: f.fold.clock,
+                    applied: f.fold.applied,
+                    admitted: f.admitted.clone(),
+                })
+            })
+            .collect()
+    }
+    /// Take namespace folds back from a checkpoint whose seal verified. They are used only
+    /// when the verified standing they were made under (the print) and the operations folded
+    /// are exactly those the judgement now yields, as a prefix.
+    pub(crate) fn import_folds(&mut self, snaps: Vec<FoldSnapshot>) {
+        for s in snaps {
+            let Ok(state) = serde_json::from_value(s.state) else {
+                continue;
+            };
+            let hashes = crate::engine::prefix_hashes(&s.order);
+            let fold = crate::engine::Namespace {
+                revision: 0,
+                state,
+                order: s.order,
+                hashes,
+                clock: s.clock,
+                checkpoints: Vec::new(),
+                applied: s.applied,
+            };
+            self.fold_seed.insert(
+                s.namespace,
+                (
+                    s.print,
+                    derived::Folded {
+                        revision: 0,
+                        fold,
+                        admitted: s.admitted,
+                    },
+                ),
+            );
+        }
     }
     /// The record-layer view of the verified history, for the engine (crate-private: it holds
     /// no secret, but the engine must not take verified state from a caller, so it reads this).
