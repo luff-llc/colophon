@@ -129,6 +129,48 @@ The host alone may open a non-`colophon/` HPKE seal to the vault for its own reg
 The history verifier also returns, per transition, its due time and veto deadline; per activation,
 whether it is final and which homes it still needs; and per unit, v(u).
 
+### What an account host does beyond the verifier (§17)
+
+- **Recording due transitions** in due-time order, then by transition digest, so a key being
+  removed cannot get its own transition recorded ahead of the removal (§17.5).
+- **Reading.** A controller that holds the seed may read record content and never writes records
+  as a controller; a namespace is shown only when the key of its latest epoch is held (§10.2, §17.1).
+- **First-seen seq** in a notice is the verified seq at which this host first held the object:
+  local memory, to be persisted so a notice does not repeat after a restart (§17.5).
+- **A controller added by a transition** builds its slot by a self-slot entry once its activation
+  is final (§17.3).
+- **Handles and stored state.** Epoch key handles are as trusted as the keys. Stored verifier
+  state is a cache sealed under a key the host derives from a device-held secret; when it does not
+  open, replay (§17.1, §17.2).
+
+### Writing F from an Apple app (§16.3, §15.1)
+
+The 0.5 builders return F as exact Swift-format record bytes, and no shipped app can write them.
+Paths are Marginalia `packages/Colophon/Sources/` at `origin/main` `c8280332`. A new Apple app
+version must:
+
+1. **Add a `successor` member to the entry type.** `ColophonAuthority/AuthorityEntry.swift:32-80`
+   lists the stored members and has none; `numbered(_:after:)` (`:93-123`) copies a fixed list
+   and would drop it.
+2. **Support a layout of 3 or more.** `AuthorityState.swift:56` (`supportedStorageLayout = 2`) and
+   `:120-121` (a `layout` above it throws); the writer guard at `AuthorityHolder.swift:50-54`. The
+   only layout writers, `AuthorityHolder.swift:35-40` and `KeyringHolder.swift:29-34`, write 2.
+3. **Append the exact record bytes the builder returns.** `AuthorityEntry.swift:82-88` sets
+   `issued` to `.now` and `numbered` (`:94`) calls that initializer again, so a draft re-stamps
+   `issued` and the signatures made over the builder's body no longer match. The app needs a
+   raw-record append on `AuthorityLog`, or an explicit `issued` on the draft.
+4. **Make F final for that app.** Once a `layout` entry carries `successor`, the version that
+   writes F must stop writing to that library; with item 2 alone it would keep writing after F,
+   which §15.1 calls `malformed` evidence.
+5. **Old versions stop with `unsupportedStorageLayout`**, shown as update required (the throw at
+   `AuthorityState.swift:120-121`, the message at `ColophonCore/ColophonError.swift:43`, mapped to
+   `.updateRequired` at `apps/apple/App/Sync/SharedLibraryDiagnostics.swift:58`); versions that
+   predate `layout` stop with `newerAuthority`. The message tells the person to update the app,
+   which will not help for this library: send them to the successor.
+
+A Swift grant carries a role and a label in everything the shipped apps write; the `migration`
+builder refuses a member whose grant has no role.
+
 ## 5. What to tell people, and what this protects (§17.5, §18)
 
 - When an account is set up with one device: "If this device is stolen, nothing can veto what the
@@ -216,3 +258,4 @@ without stopping either thief. What protects the owner is the veto window.
 | 2026-11-14 | Claude, independent check of revision 12 (PR #7) | 3 High, 5 Medium, 4 Low | Revision 12 (fix round); changes §A.8, §G.17 |
 | 2026-11-14 | Claude, checks of the write side: authority builders (E1), vault, slots and pairing (E2), homes and calls (E3), and the integrated write side | resolve, rollback, receipt and head choices, late veto, two heads, slot shape, equivocation evidence, seven text gaps | Revision 13; changes §A.9, §G.18 |
 | 2026-11-14 | Claude, independent check of revision 13 (PR #10) | 6 High, 5 Medium, 4 Low | Revision 13 (fix round); changes §A.9, §G.19 |
+| 2026-11-14 | Claude, independent checks of the records (E4, PR #11), account (E5, PR #12) and upgrade and succession (E7, PR #13) packages, and the builders' questions | text gaps and rules the merged engine already follows | Revision 14 (text only); changes §A.10, §G.20 |

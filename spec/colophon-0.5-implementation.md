@@ -1,10 +1,18 @@
 # Colophon 0.5: implementation plan
 
-**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 13, 2026-11-14. Steps 0, 1 and 4
+**Status:** plan for [colophon-0.5.md](colophon-0.5.md), revision 14, 2026-11-14. Steps 0, 1 and 4
 are merged into `spec-0.5` (luff-llc/colophon#4); revision 7's effect on them is listed under
 each step. The §8.7 state machine (step 2's transition part and step 3's conflict rules) is the
 state table of §8.7, over the persisted state of §17.2. No engine code has
-been changed by the spec work. Steps are in order. The vectors come first, because §21 says the
+been changed by the spec work.
+
+**What is built now (2026-11-14).** The engine's verifier and its write side are merged into
+`spec-0.5`: the authority builders, vault, slots and pairing, homes and calls (E1 to E3), records
+(E4, PR #11), the account (E5, PR #12) and the upgrade and succession builders (E7, PR #13), each
+independently checked. E6 (the storage engine) and E8 are in progress. The bindings (FFI and
+WASM surfaces, Swift, TypeScript), the relay and the tooling of step 8 are not started. **No
+vector of revisions 12 to 14 was replayed by the Swift source**; and the shipped Swift code cannot
+write F (step 8). Steps are in order. The vectors come first, because §21 says the
 spec can't freeze without them, and every verifier step is then tested against them.
 
 Rules carried over from `docs/handoff-keys-04.md`:
@@ -249,7 +257,12 @@ from Marginalia `origin/main` first: the reference copy lacks the `layout` kind)
   - collect `handover` (the current root alone for a root library; the control threshold, plus
     recover signers when the recover set changes or its threshold is lowered, for a keyring
     library; every other key at `head` the host can obtain);
-  - write the freezing `layout` entry through the Swift `ColophonAuthority`;
+  - write the freezing `layout` entry through the Swift `ColophonAuthority` (**blocked until a
+    new Apple app version exists**: the shipped Swift code cannot write F; the list of what the
+    version must add is in the guide §4 "Writing F from an Apple app", from
+    `docs/handoff-engine-05-write.md`: a `successor` member, layout 3 or more, a raw-record append
+    or explicit `issued`, a reader rule that F is final for the app that wrote it, and the
+    update-required path for old versions);
   - rebuild a slot for every slotted controller, or stop;
   - map roles, custody, operator and caveats, or stop;
   - copy the records;

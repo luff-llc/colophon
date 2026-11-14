@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 13, 2026-11-14. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 14, 2026-11-14. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -219,6 +219,29 @@ clocks and admission.
 | 116 | §13.1, §8.7 "No home", §18, guide §5: an account with no home has no witness of time or order, so a former controller can show a new verifier a different history from before its removal; hosts MUST create accounts with at least one home and warn when there is none; a verifier's rollback report is a refusal hosts MUST show. Documented vector `t-resolve-homeless-late-fork` | H1 (b): a stated limit, not a mechanism |
 | 117 | §17.2: head marks are local memory a replay cannot recompute; carried over a checkpoint rebuild; shape-checked | M2 |
 | 118 | §20 lists `colophon/pair-qr/5`; §7.3 payload bytes implemented in `pairing.rs` | M4 |
+
+### A.10 Revision 14
+
+Text only: no code, vector or test changed. Each row says what the text now states, and the check or builder question it answers (E4, E5 and E7 are the independent checks of the records, account and upgrade-and-succession packages, PRs #11, #12 and #13; "Q" is the builder's numbered question in the PR body).
+
+| # | Change | Why |
+| --- | --- | --- |
+| 119 | §2.2, §8.6, §11.8: several envelopes over one body are one object for entries, transitions, vetoes, receipts, heads, requests and operation headers; valid where any envelope verifies; the first in byte order among those that verify is kept; one that does not verify is ignored; nothing depends on arrival. The sentence "the first one received is kept" is gone | E5 H1 and PR #12 Q1 (§2.2 against §8.6); E4 M1 |
+| 120 | §9.5: `epochs` is the current epoch plus one in every namespace the member could read, one per namespace; a verifier refuses an omission; empty while the vault is retiring, with a `rekey` owed afterwards | E4 H1; PR #12 Q11; E5 L6 (the verifier now enforces the omission) |
+| 121 | §8.3: a verifier refuses a `rekey`, or a `revoke` with non-empty `epochs`, while the vault is retiring | E4 H1, PR #11 Q10 (the verifier half) |
+| 122 | §9.5 walk: a `heads` item naming another author's or namespace's header starts no walk; an unheld digest makes the walk incomplete; the walk goes through any held header; an incomplete walk holds every record not kept and not reached (before the revocation seq) as `unavailable` | PR #11 Q2, Q3 |
+| 123 | §11.4: two headers by one author with one ID and clock are ordered by body digest, lowest first | E4 H2 |
+| 124 | §11.5 step 1: an unknown author is `notGranted` without a signature check; "at the verified authority" is the grant as of the cited seq. §11.2: a `previous` naming no held header is admitted | PR #11 Q1, Q4, Q11 |
+| 125 | §11.6: a resolver whose grant lists `kinds` must list `colophon.accept` and `colophon.decline`; no implicit right to resolve | PR #11 Q6 |
+| 126 | §7.1: a member provisional or expired when an epoch is made gets its shares by `renew` | PR #11 Q8; E5 |
+| 127 | §17.1, §3.4: epoch key handles are as trusted as the keys; the core never returns epoch key bytes | E4 H3 |
+| 128 | §17.2: stored verifier state is an authenticated cache; any failure means replay; a replay starts without head marks | E5 H2; PR #12 Q8 |
+| 129 | §15.1 step 5: F is not written while a valid veto is held, recorded or not. §15.1 "Starting a later attempt": a host starts a successor on a predecessor with a freezing entry only when every earlier attempt is in hand and none verifies; what the verifier does today is stated | E7 M1, M4; PR #13 |
+| 130 | §15.4 `drain`: the window starts after F and the `migration` is issued after it ends; tools refuse otherwise; the verifier checks neither | E7 M3, L2; PR #13 Q5 |
+| 131 | §16.2: the shipped apps write a role and a label on every grant; the builder refuses a member whose grant has no role. §16.3: the shipped Swift code cannot write F; guide §4 and the plan's step 8 list what an app version must add | E7 M2; PR #13 Q1, Q3 |
+| 132 | §17.5: due transitions are recorded in due-time order, then by transition digest; "first-seen seq" defined; §10.2: controllers read and never write records; §17.1: a namespace is shown only with the latest epoch's key; §17.3: a controller added by a transition builds its slot by a self-slot entry once the activation is final | E5 M1; PR #12 Q4, Q6, Q7, Q10 |
+
+Checked and unchanged: §19 lists `revokedBackdated`, `authorityBehind`, `unavailable` and `duplicateID`, and `....000Z` dates are canonical under §2.2 (PR #11 Q9, Q12). The no-home rollback warning (decisions item from the check of revision 13) is already row 116.
 
 ## B. Galley's requirements
 
@@ -890,6 +913,31 @@ the text. Their probe tests are not repeated here.
 | L4 Late veto at a home | No change |
 
 No vector of revision 13 was replayed by the Swift source.
+
+### G.20 Checks of the records, account and upgrade packages (2026-11-14), answered in revision 14
+
+The independent checks of the records layer (E4, PR #11), the account (E5, PR #12) and the upgrade
+and succession builders (E7, PR #13), and the builders' own questions, asked for text; the code
+and its fixes were merged first. Rows 119 to 132 of §A.10 hold the changes.
+
+| Source | Settled in |
+| --- | --- |
+| E4 H1 a new epoch sealed to a retiring vault; PR #11 Q10 | §8.3, §9.5; verifier refuses (code) |
+| E4 H2 same-ID bodies decided by arrival | §11.4 |
+| E4 H3 handles turn into key bytes | §17.1, §3.4 |
+| E4 M1, E5 H1, PR #12 Q1 one body, several envelopes | §2.2, §8.6, §11.8 |
+| E5 H2, PR #12 Q8 forged stored state | §17.2 |
+| E5 M1 recording out of due order | §17.5 |
+| E5 L6, PR #12 Q11 revoke epochs | §9.5 |
+| PR #11 Q1, Q2, Q3, Q4, Q6, Q8, Q11 | §11.5, §9.5, §11.6, §7.1, §11.2 |
+| PR #12 Q4, Q6, Q7, Q10 | §17.5, §17.1, §10.2, §17.3 |
+| E7 M1 F built while a veto is held | §15.1 step 5 |
+| E7 M2, PR #13 Q1, Q3 the shipped Swift cannot write F | §16.3, §16.2, guide §4, plan step 8 |
+| E7 M3, L2, PR #13 Q5 the migration's drain window | §15.4 |
+| E7 M4 a competing successor on a freezing head | §15.1 "Starting a later attempt"; the case of two verifying successors is left open (notes, open item 2) |
+| Not written | PR #11 Q5, Q7; PR #12 Q2, Q3, Q5, Q9; PR #13 Q2, Q4, Q6, Q7, Q8; E7 L1, L3 to L7: engine readings the text does not need or that wait for the owner |
+
+No vector of revisions 12 to 14 was replayed by the Swift source.
 
 ## H. Theft and loss, worked through
 

@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 13, for review, 2026-11-14.** Not frozen, not
+**Status: final candidate, revision 14, for review, 2026-11-14.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -19,7 +19,12 @@ authority builders, the vault, slots and pairing, the homes and calls): resolvin
 per-home head rollback, determined veto receipts and `final` heads, a late veto at a home,
 two heads for one seq, the §7.2 slot shape at replay, equivocation evidence, and the text
 gaps the builders found (notices, link `created`, the kit derivation, the restricted open, the
-PRF assertion, the QR bytes, the seed guarantee). The
+PRF assertion, the QR bytes, the seed guarantee); revision 14 is a text-only revision that says
+what the merged, independently checked engine (the write side, packages E1 to E5 and E7) does and
+answers the builders' questions: several envelopes over one body, what a `revoke` introduces and
+how its walk runs, tie-breaks and resolvers in records, how far epoch key handles and stored state
+are trusted, the veto and competing-attempt rules of succession, the migration and upgrade
+limits of the shipped Swift code, and the account-facing host rules. The
 mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
@@ -106,7 +111,11 @@ verified as their own version required.
 - **Integers** in fields defined here are integer tokens from 0 to 2^53−1 unless stated.
 - **Printable ASCII** is bytes 0x21–0x7E; space is not printable.
 - **Equality** of authority entries, records, heads and receipts is equality of their body bytes.
-  Two envelopes over one body are the same object; the first one received is kept.
+  **Several envelopes over one body are one object**, for authority entries, transitions, vetoes,
+  receipts, heads, requests and operation headers alike. The object is valid where any envelope
+  held over it verifies; among those that verify, the first in byte order (of the envelope bytes)
+  is the one kept; an envelope that does not verify is ignored and never makes the object fail.
+  Nothing depends on which envelope arrived first, and a store MAY keep several.
 - **Signature bytes are never identifiers.** ECDSA signatures are malleable (high-S is valid,
   §4.3), so no record, cache, replay store or index may be keyed by signature bytes or by a
   digest of an envelope that includes them; use body digests, `requestId`s and key IDs.
@@ -245,7 +254,8 @@ The core holds no platform private key. Every signature, ECDH and PRF evaluation
 two-phase: `begin_*` returns the exact input, `finish_*` verifies the result before using it.
 The vault seed is an account secret: the core MAY hold it in memory for a session and MUST NOT
 persist it; the host persists it only inside slots. The core never returns seed bytes or a raw
-ECDH output (§17.1 states what an opened seed can be sealed to).
+ECDH output, and never epoch key bytes (§17.1 states what an opened seed can be sealed to and
+how far handles are trusted).
 
 ### 3.5 COSE_Key at registration
 
@@ -459,7 +469,9 @@ domain-separation label, unchanged in 0.5.
 **Each newly introduced epoch MUST be sealed to exactly the current vault and the active,
 unexpired members with any access to its namespace (§10.2), at the introducing entry.**
 Historical seals stay valid; epochs sealed to an earlier vault are reached through
-`previousVault` (§8.3). Later `shares` add only recipients this document authorizes.
+`previousVault` (§8.3). Later `shares` add only recipients this document authorizes. A member that
+is provisional (§8.7) or expired when an epoch is made is not sealed to it; it gets its shares by
+a `renew` (§9.4) once its activation is final or it is current again.
 
 After opening any slot the core MUST check the plaintext is 32 bytes, derive the identity and
 compare both public keys with the keyring's `vault`; a mismatch is `refused:vaultLocked` and
@@ -623,8 +635,9 @@ its seed. While the vault is retiring:
   (§8.4). Hosts MUST warn (§6.4) while a remaining controller has no slot. The old seed is
   retired once every remaining controller that had an old slot has a new one; until then it opens
   only what it opened before.
-- Hosts MUST NOT introduce epochs, and a `revoke` MAY carry empty `epochs`; the `rekey` after the
-  rotation covers them.
+- Hosts MUST NOT introduce epochs, and a `revoke` carries empty `epochs` (§9.5); the `rekey` after
+  the rotation covers them. A verifier refuses a `rekey`, or a `revoke` with non-empty `epochs`,
+  while the vault is retiring.
 - **What the removed key can still read:** everything sealed to the retiring vault, which is every
   epoch introduced before the `vault` entry and every record under them, including records written
   while the vault was retiring. Nothing introduced after the `vault` entry is sealed to it.
@@ -760,7 +773,8 @@ Entries are equal when their bodies are equal. Two **conflicting** entries are v
 the same `seq` and `previous` and different bodies. A verifier classifies a conflict between X and
 Y using only the objects it holds — entries, transitions, vetoes, receipts and heads — so every
 verifier holding the same objects reaches the same verdict, in any order. What it held before
-never selects a branch (§13.3).
+never selects a branch (§13.3). Several envelopes over one body are one candidate (§2.2): it is
+valid when any of them is, and an envelope that does not verify is ignored.
 
 With more than two valid candidates, apply the comparisons below to every pair. A candidate
 stands only if every comparison involving it selects it. If none does (including a cycle), the
@@ -1093,20 +1107,29 @@ was expired. Nothing else changes.
 ### 9.5 Revoke
 
 `revoke` ends `member`. `epochs` introduces a new epoch in every namespace the member could read
-(empty if none). A record by the member is **kept** exactly when:
+(every namespace of its `records` entries; empty if none): for each, the namespace's current epoch
+plus one, at most one per namespace, as a `rekey`'s (§8.4). A verifier refuses a `revoke` that
+omits a namespace the member could read. **While the vault is retiring (§8.3), `epochs` is empty**
+(a new epoch would be readable by the removed key), a verifier refuses a `revoke` with non-empty
+`epochs`, and a `rekey` for those namespaces is owed once the new vault is in place. A record by
+the member is **kept** exactly when:
 
 - its header-body digest is in `kept` (sorted, distinct; any header digest, `/3` or `/5`, live
   or not); or
 - it is reached by the **walk**: start at each item of `heads`, an array of
   `{"namespace","digest"}` objects sorted by namespace then digest, at most 16 per namespace, each
   naming a header of this member in that namespace, and follow
-  `previous` from header to header, through any header whose body digest matches, whether or not
-  that header is itself admitted.
+  `previous` from header to header, through any held header whose body digest matches, whether or not
+  that header is itself admitted and whatever its author or namespace.
+  An item that names a held header of another author or another namespace starts no walk and is
+  not an error; an item whose digest no held header has makes the walk incomplete (below).
 
 A kept record still passes every other admission check, and a kept record citing the revocation
-seq or later is refused `revoked`. A reader that cannot complete a walk because an intermediate
-header is missing holds the records it would decide as *held* (`unavailable`), never as not
-kept. The approver's host computes `kept` and `heads` from every record it holds, including
+seq or later is refused `revoked`. A reader that cannot complete a walk, because a `heads` item or an intermediate
+header is not held, is **incomplete** for that revocation: it holds as *held* (`unavailable`)
+every record of the member that is neither in `kept` nor reached by a walk it completed (the
+missing header could have reached any of them), never as not kept. A record that cites the
+revocation seq or later is refused `revoked` whatever the walk says (§11.5 step 3). The approver's host computes `kept` and `heads` from every record it holds, including
 every fork head (up to 16) so no branch is lost. A kept record whose payload doesn't
 authenticate is refused `invalidPayload`, not preserved (§11.8).
 
@@ -1154,6 +1177,10 @@ staging) are then two audiences, and a grant that names one does not reach the o
 
 A member with any `records` entry for a namespace receives its epochs. Proposing into a
 namespace one cannot read is not part of 0.5.
+
+**Controllers.** A controller that holds the vault seed opens every epoch (§7.1), so a host MAY
+show it the content of every declared namespace. A controller is never an author: it writes no
+records, and a host never writes records as a controller (§9.7 says the reverse for members).
 
 ### 10.3 Narrowing
 
@@ -1211,7 +1238,9 @@ At `ops/<author>/<namespace>/<clock, 12 digits>-<id>.json`:
   **author chain**), or `null` for its first. A member key MUST have exactly one writing process.
   A writer MUST persist its chain head before publishing, rebuild it from the store after any
   restore, and, if it finds more than one maximal head in a namespace, MUST stop writing there;
-  the account then revokes the member (keeping every head, §9.5) and grants a new key.
+  the account then revokes the member (keeping every head, §9.5) and grants a new key. A
+  `previous` that names no header the verifier holds does not keep the header from being
+  admitted: only the §9.5 walk follows `previous`.
 - Optional `live` stamp `{"account","slot","generation","operationID"}` (§11.8); a live-stamped
   header has `level` `write` and `previous` `null`.
 - AAD: canonical JSON of `{account, author, authority, clock, created, epoch, id, level,
@@ -1226,7 +1255,10 @@ Plaintext ID, clock, authority and date MUST match the header; the ID MUST verif
 
 ### 11.4 Fold order and clocks
 
-Fold order is `(clock, author, id)`, never `created`. Clocks are positive integers at most
+Fold order is `(clock, author, id)`, never `created`. Two headers by one author with the same
+operation ID and clock (they can differ in `level` or `previous`, which the ID does not cover)
+are ordered by body digest, lowest first, so the verdict is a function of the set held; the second
+to authenticate is `duplicateID` (0.3 §5). Clocks are positive integers at most
 2^53−1; a writer increments past the highest admitted clock in the namespace; an otherwise
 admissible header more than 1,024 above the highest earlier admitted clock is refused `clockJump`.
 
@@ -1235,7 +1267,11 @@ admissible header more than 1,024 above the highest earlier admitted clock is re
 After the header's signature, account binding, format and path:
 
 1. Author is a member with a `records` entry for the namespace covering `level`, at the verified
-   authority (latest verified for a future claim): else refused `notGranted`.
+   authority (the member's grant as it stands at the seq the header cites, so a cite before the
+   grant is `notGranted`; the latest verified state for a seq beyond the replica): else refused
+   `notGranted`. An author that is not a
+   member of the verified history is `notGranted` as well, without a signature check (there is
+   no key to check one with).
 2. `created` later than the member's latest verified expiry: refused `expired`.
 3. Author revoked and record not kept (§9.5): refused `revoked` if it cites the revocation or
    later, else held `revokedBackdated`; walk incomplete: held `unavailable`.
@@ -1260,7 +1296,10 @@ A `propose` record is admitted like a write and not folded as one.
 
 - `colophon.accept` and `colophon.decline` have payload `{"proposals":["<operation ID>", …]}`
   (1–64). Each is a `write` record in the proposals' namespace and resolves a proposal only if
-  its author may `write` the proposal's kind and **its clock exceeds the proposal's**.
+  its author may `write` the proposal's kind and **its clock exceeds the proposal's**. A resolution
+  is a record of its own kind, so a resolver whose grant lists `kinds` for the namespace MUST list
+  `colophon.accept` and `colophon.decline`, or its resolution is refused `outOfScope`: there is
+  no implicit right to resolve.
 - For each proposal the first valid resolution in fold order wins; later ones are evidence.
 - An accepted proposal is folded once, at its accept's position, attributed to the proposer with
   `acceptedBy`; it counts once against the proposer's `writes`, the accept once against the
@@ -1309,8 +1348,9 @@ Substitutions:
   `invalidPayload`, not preserved.
 - §7.1's "exact outer envelope bytes (including signatures)" reads "exact body bytes" (§8.6).
 - §8.2's 412 for different bytes at an immutable path reads: different envelope bytes over an
-  identical body are identical (200, the first envelope is kept), and only a different body is
-  412.
+  identical body are identical (200; a relay MAY keep the first it stored, but a verifier judges
+  every envelope it holds and its verdict never depends on which was stored first, §2.2), and only
+  a different body is 412.
 - §8's "await acknowledgement of each authority sequence before uploading its successor" reads:
   a home's acknowledgement of a `POST {base}/authority` batch (§14) acknowledges every entry in
   it.
@@ -1713,7 +1753,10 @@ library upgrades in place instead.
      descriptor (§16.3: `rpID` as `rp`, the general origin rule, UV). An account has at most one
      such entry; it is ordered by §8.6 rule 1 with the succession's due time and bounded in time
      like a `vetoed`. After it the succession is never verified and no `migration` activates.
-  5. **Write F.** F is written only after the due time.
+  5. **Write F.** F is written only after the due time, and **not while a valid veto is held**,
+     whether or not a `successionVetoed` entry records it yet: a tool that holds one records it
+     (step 4) first. A home that signs a clean head while holding a valid veto misbehaves (§13.3),
+     so F written then freezes the library with a succession that can never verify.
   - A root library's hand-over is signed by the root alone (rationale: guide §7).
 - **Published** at the predecessor's own homes (`/5`), or at the successor's homes under
   `{base}/predecessor/` (Swift).
@@ -1739,7 +1782,20 @@ never change the verdict.
 succession is verified. A freezing entry whose succession isn't verified (premature, vetoed or
 never due) doesn't end the predecessor: the owner may make a new attempt and write a later freezing
 entry (a higher layout) after it. The predecessor's sequence orders freezing entries, so there is
-no tie. A verifier that has persisted a verified succession keeps it. Any entry after the final
+no tie. A verifier that has persisted a verified succession keeps it.
+
+**Starting a later attempt.** A host MUST NOT start a successor on a predecessor that already
+holds a freezing entry unless it has every earlier attempt's successor objects (genesis, entries,
+receipts and heads) and none of them verifies (§15.1 "Verified"); with any earlier attempt missing,
+or verified, the predecessor is not open to a new one. A verifier of the later successor cannot
+check this for the host: it holds only that successor's objects. **What a verifier does today:**
+for a Swift predecessor it verifies the predecessor entries through F, reads F as the entry after
+`head` (a `layout` above 2 whose `successor` names this account, issued after the due time) and
+checks the rest of §15.1 "Verified" against the successor's own objects. It does not look for a
+freezing entry before `head`, and it cannot tell whether an earlier freezing entry's succession
+verified, because that succession's objects are not in its set. Whether two successors of one
+predecessor can each verify, for different verifiers, is **not decided** by this text or the
+verifier (open item 2 in the implementation notes). Any entry after the final
 entry is `malformed` evidence. A predecessor confers nothing: no member, grant or key comes from
 it.
 
@@ -1785,7 +1841,7 @@ whose genesis has `predecessor`:
 
 | Field | Rule |
 | --- | --- |
-| `drain` | The drain window (§15.3). |
+| `drain` | The drain window (§15.3): at most 30 days, starting after F. The entry is issued after the window ends. A tool refuses to build one that does not meet both; **a verifier checks neither**, only that `until` is not before `from` and the window is at most 30 days (§15.3 step 5 is a tool rule). |
 | `namespaces` | Every predecessor namespace. `view` is the SHA-256 of the sorted, newline-joined lowercase hex body digests of the destination records copied into the namespace. |
 | `omitted` | Up to 4,096 source records not copied, each by body digest with a reason. More than that: the tool stops. |
 | `controllers` | Every predecessor controller, with whether it has a slot here. |
@@ -1842,7 +1898,9 @@ on each `webauthn` controller. **No new account at any service and no new passke
 - Each passkey or security key with PRF needs one assertion to build its new `prf` slot; sealed
   slots need none.
 - Members rejoin. Swift roles map `device`→`device`, `app`→`app`, `web`→`app`, `agent`→`agent`
-  and `service`→`server`.
+  and `service`→`server`. The shipped apps' Swift code always writes a `role` and a `label` on a
+  grant (both are optional fields of the format), and the `migration` builder refuses a current
+  member whose grant has no `role`, because its kind is then not decided by this document.
 - `custody` and `keyOperator` map to the request's `custody` and `operator`.
 - Caveats: `kinds` maps to `records.kinds`, and `ceiling` to an `lte` condition. A `budget` caveat
   has no 0.5 form, so the tool stops unless the person drops that member.
@@ -1924,6 +1982,12 @@ after). Released Swift readers verify it and then stop with `unsupportedStorageL
 that predate `layout` stop with `newerAuthority`); they never write after it. A verifier of a
 predecessor reads `successor` from F's body.
 
+**The shipped Swift code cannot write F.** `AuthorityEntry` has no `successor` member, its writers
+only ever write layout 2, and its entries are stamped with the Swift clock when numbered, so the
+bytes a 0.5 builder returns for F cannot pass through it. A new app version must add what the
+guide §4 lists; until it exists, §15.1's Swift path has a verifier and a builder but no way to
+append F to a shipped library.
+
 ## 17. Host interface
 
 ### 17.1 Core and host
@@ -1938,6 +2002,19 @@ a new vault the host creates at a rotation, or to a device the person confirmed 
 (§7.4). The host is trusted with the seed during rotation and transfer: it supplies the
 entropy of a new vault and performs the scan or code comparison.
 
+**Epoch keys.** The core never returns epoch key bytes: it hands the host opaque handles that
+open only headers of their own account, namespace and epoch, and it seals a new epoch only to the
+recipients the verified state names (§7.1). **A handle is as trusted as the key it stands for.** A
+grant's `shares` are part of the body the controller signs, so they are sealed before anyone signs;
+a host that holds handles can therefore have them sealed to a member it is preparing to admit, and
+that member can read the raw keys. The host is likewise trusted with the entropy it supplies for
+new epochs, vaults and slots (it can recompute what they make) and with the ECDH and PRF results it
+passes in. A host MUST NOT hand handles to code it does not trust as much as the keys.
+
+**Reading.** A host shows a namespace's records only when it holds the key of the namespace's
+**latest** epoch (§11.1); with older epochs only, the namespace is not shown (a verifier folds
+nothing it cannot open, §11.5 `unavailable`).
+
 **Restricted open.** The host alone may ask the core to open an HPKE seal to the vault for its
 own registered formats. The seal is `{"enc","ciphertext"}` as §11.1 (`enc` a valid 65-byte
 uncompressed P-256 point, `ciphertext` 16 to 65,536 bytes); `info` equals the AAD and is at most
@@ -1948,11 +2025,16 @@ refused `refused:outOfScope`, whatever the seal holds. The host interface and th
 ### 17.2 Persisted verifier state
 
 A verifier that resumes (§13.3) MUST persist, per account, atomically and with a format version.
-Every item except the head marks is a function of the history and the objects held, recomputed
+**Stored verifier state is a cache, never an authority.** The host seals it under a key it derives
+from a device-held secret and binds it to the account and the identity it was saved for. A missing
+or wrong key, a failed seal, a blob for another account or identity, or an unknown format means
+the verifier replays from the objects it holds; none of them is an error that stops it opening,
+and bytes that were not authenticated are never resumed from. Every item except the head marks is a function of the history and the objects held, recomputed
 identically by replay from seq 1, so two verifiers that persist it reach the same verdicts:
 - the high-water `(seq, digest)` and each home's head mark (rollback detection only, §13.3) and
   the folded state there. **Head marks are local memory:** no replay of the history recomputes
-  them, since they record what this verifier accepted and when. They survive a checkpoint format
+  them, since they record what this verifier accepted and when; a replay that has no authenticated
+  blob starts without them. They survive a checkpoint format
   change by being carried over when the checkpoint is rebuilt from the retained objects, and a
   checkpoint whose marks are malformed is refused. Everything else listed here is recomputed: keyring, members (terms, expiry,
   session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
@@ -1981,7 +2063,9 @@ identically by replay from seq 1, so two verifiers that persist it reach the sam
    performs one assertion for the PRF slot, and signs the transition body as its possession
    proof.
 2. Without the seed, the devices pair and the seed moves (§7.3, §7.4); the new core builds the
-   slot.
+   slot. A transition carries slots only in a `vault` component, so a controller added by a
+   transition adds its slot by a self-slot `keyring` entry (§8.4), signed by the new key after
+   the activation is final (with homes, provisional is not enough: a rollback would drop the key).
 3. An existing control key signs the transition that adds it with `control`. It activates after
    the delay, or at once when every control key signs. The person may instead add it as
    `approve` only at once (an immediate entry), and then propose `control`.
@@ -2007,7 +2091,13 @@ knowledge of pending transitions, so:
 - **Polling.** Every host holding a controller key MUST list pending objects (§14) at every current
   home at launch and at least every `recoveryDelay` / 6.
 - **Showing.** It MUST show each transition it hasn't shown, with its signers' labels, key IDs and
-  first-seen seq, its veto deadline, and a one-tap **veto**.
+  first-seen seq, its veto deadline, and a one-tap **veto**. The **first-seen seq** is the verified
+  authority seq at which this host first held the object. It is local memory: no verdict ever
+  depends on it, and a host SHOULD persist it so a notice is not repeated after a restart.
+- **Recording.** A host that records due transitions (§8.7: the determined `activate`, `vetoed`
+  and `final`) records them in due-time order, then by transition digest, the order §8.6 rule 1
+  uses. A transition signed by a key whose removal falls due earlier is then not recorded ahead of
+  that removal.
 - **Missed notices are visible afterwards.** Whenever a person uses any key with any host, the host
   MUST first show every activation since that host last showed the account's history that no key
   on this device signed and the person hasn't seen, with when each home receipted it. A recovery
