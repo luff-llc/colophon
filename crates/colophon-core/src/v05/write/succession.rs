@@ -797,6 +797,33 @@ pub fn prepare_swift_freeze(p: &SwiftFreezeParams, now_ms: i64) -> Result<Pendin
         "the successor's genesis does not name this predecessor and its last entry as head",
     )?;
     require(!status.vetoed, "the succession is vetoed")?;
+    // A veto the home holds but has not recorded still vetoes (§15.1 step 4, §15.3 step 4:
+    // F only after the succession is due and unvetoed): refuse when the recording entry would
+    // be accepted for any held veto.
+    for held in &objects.pending {
+        let Ok(env) = crate::v05::history::envelope::AuthEnvelope::parse(
+            held,
+            bounds::VETO_BODY,
+            bounds::VETO_ENVELOPE,
+            true,
+        ) else {
+            continue;
+        };
+        if env.value.get("protocol").and_then(Value::as_str) != Some("colophon/veto/5")
+            || env.value.get("transition").and_then(Value::as_str)
+                != Some(status.genesis_digest.as_str())
+        {
+            continue;
+        }
+        if prepare_succession_vetoed(&objects, now_ms, &env.digest)
+            .and_then(|b| b.finish(vec![]))
+            .is_ok()
+        {
+            return Err(Failure::Malformed(
+                "the succession is vetoed: a valid veto is held and not yet recorded".into(),
+            ));
+        }
+    }
     require(
         status.authorized,
         "the genesis's handover does not meet the rule that may write F",

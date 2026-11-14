@@ -1224,3 +1224,34 @@ fn the_migration_vector_reproduces_from_its_inputs() {
     early.drain_until_ms = early.drain_from_ms;
     assert!(why(prepare_migration(&objects, v.now(), &early).unwrap_err()).contains("after F"));
 }
+
+/// M1: a veto the home holds but has not recorded still stops F.
+#[test]
+fn f_is_refused_while_a_valid_veto_is_held_and_not_recorded() {
+    let v = vector("swift-succession-vetoed");
+    let entries = files_in(&v.dir.join("successor/authority"));
+    let rec = body_value(&entries[2]);
+    let list = |f: &str| -> Vec<Vec<u8>> {
+        rec[f].as_array().unwrap().iter().map(|x| dec(x.as_str().unwrap())).collect()
+    };
+    let mut objects = Objects {
+        entries: entries[..2].to_vec(),
+        predecessor: v.prefix(),
+        heads: v.successor_objects().heads,
+        ..Objects::default()
+    };
+    objects.pending.extend(v.successor_objects().pending);
+    let p = |o: &Objects| SwiftFreezeParams {
+        predecessor: v.prefix(),
+        successor: o.clone(),
+        issued_ms: ms(body_value(&v.f().unwrap())["issued"].as_str().unwrap()),
+        signers: vec![body_value(&v.f().unwrap())["signer"].as_str().unwrap().to_string()],
+    };
+    // Without the veto the same objects prepare (so the refusal below is the veto's).
+    assert!(prepare_swift_freeze(&p(&objects), v.now()).is_ok());
+    objects.pending.push(dec(rec["veto"].as_str().unwrap()));
+    objects.pending.extend(list("receipts"));
+    objects.pending.extend(list("genesisReceipts"));
+    let e = prepare_swift_freeze(&p(&objects), v.now()).unwrap_err();
+    assert!(why(e).contains("a valid veto is held"));
+}
