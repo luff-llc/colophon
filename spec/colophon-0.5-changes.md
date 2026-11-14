@@ -222,7 +222,7 @@ clocks and admission.
 
 ### A.10 Revision 14
 
-Text only: no code, vector or test changed. Each row says what the text now states, and the check or builder question it answers (E4, E5 and E7 are the independent checks of the records, account and upgrade-and-succession packages, PRs #11, #12 and #13; "Q" is the builder's numbered question in the PR body).
+Rows 119 to 125 and 127 to 129, 131 to 134 are text only. Rows 126 and 130 (the fix round after the check of revision 14, PR #14) also change the verifier, with tests and vectors: the shares-only `renew` (`records/renew-shares-only*`, checkpoint format 5) and the `migration` rules (`succession/swift-migration-*`). Each row says what the text now states, and the check or builder question it answers (E4, E5 and E7 are the independent checks of the records, account and upgrade-and-succession packages, PRs #11, #12 and #13; "Q" is the builder's numbered question in the PR body).
 
 | # | Change | Why |
 | --- | --- | --- |
@@ -233,13 +233,15 @@ Text only: no code, vector or test changed. Each row says what the text now stat
 | 123 | §11.4: two headers by one author with one ID and clock are ordered by body digest, lowest first | E4 H2 |
 | 124 | §11.5 step 1: an unknown author is `notGranted` without a signature check; "at the verified authority" is the grant as of the cited seq. §11.2: a `previous` naming no held header is admitted | PR #11 Q1, Q4, Q11 |
 | 125 | §11.6: a resolver whose grant lists `kinds` must list `colophon.accept` and `colophon.decline`; no implicit right to resolve | PR #11 Q6 |
-| 126 | §7.1: a member provisional or expired when an epoch is made gets its shares by `renew` | PR #11 Q8; E5 |
+| 126 | §7.1, §9.4: a member provisional or expired when an epoch is made gets its shares by `renew`; `renew.expires` is optional: without it the expiry stays as it is (none included) and `shares` is non-empty, for epochs of the member's scope that exist and that it lacks, the member current and not expired. Engine: `Renew::parse`, the `renew` arm, `MemberRecord.sealed`, checkpoint format 5, `prepare_renew_shares`, `owed_shares`; vectors `records/renew-shares-only*` | PR #11 Q8; E5; H1 of the check of revision 14 |
 | 127 | §17.1, §3.4: epoch key handles are as trusted as the keys; the core never returns epoch key bytes | E4 H3 |
 | 128 | §17.2: stored verifier state is an authenticated cache; any failure means replay; a replay starts without head marks | E5 H2; PR #12 Q8 |
 | 129 | §15.1 step 5: F is not written while a valid veto is held, recorded or not. §15.1 "Starting a later attempt": a host starts a successor on a predecessor with a freezing entry only when every earlier attempt is in hand and none verifies; what the verifier does today is stated | E7 M1, M4; PR #13 |
-| 130 | §15.4 `drain`: the window starts after F and the `migration` is issued after it ends; tools refuse otherwise; the verifier checks neither | E7 M3, L2; PR #13 Q5 |
+| 130 | §15.4: a verifier refuses a `migration` unless its succession is verified (apart from a Swift predecessor's genesis receipts and fresh heads), its `final` is F by `seq` and `digest`, its `drain` starts at or after F's `issued`, and it is issued at or after `drain.until`; member `label` 1 to 200 bytes is stated. Engine: `history/succession.rs` `migration`; vectors `succession/swift-migration-*` | E7 M3, L2; PR #13 Q5; M3 of the check of revision 14 |
 | 131 | §16.2: the shipped apps write a role and a label on every grant; the builder refuses a member whose grant has no role. §16.3: the shipped Swift code cannot write F; guide §4 and the plan's step 8 list what an app version must add | E7 M2; PR #13 Q1, Q3 |
 | 132 | §17.5: due transitions are recorded in due-time order, then by transition digest; "first-seen seq" defined; §10.2: controllers read and never write records; §17.1: a namespace is shown only with the latest epoch's key; §17.3: a controller added by a transition builds its slot by a self-slot entry once the activation is final | E5 M1; PR #12 Q4, Q6, Q7, Q10 |
+| 133 | §15.1 "Competing attempts" no longer says a verifier picks the first verified freezing entry: it states what a verifier of a successor checks, that it does not see other attempts, and the limit (two successors can each verify, for different verifiers); the host rule names attempts that "cannot verify": vetoed, premature or never due | H2, M4 of the check of revision 14 |
+| 134 | §9.5 walk: records reached by any walk, complete or not, are kept; §14: a home keeps the envelope it stored and MAY keep another; §2.2 a verifier uses one of the envelopes that verify; §9.5 `epochs` MAY cover other declared namespaces; §11.6 the resolution's own kind; §17.1, §17.2, §17.3, §17.5 wording; a self-slot before `final` is `badSignature` (§8.7) | M1, M2, L1–L10 of the check of revision 14 |
 
 Checked and unchanged: §19 lists `revokedBackdated`, `authorityBehind`, `unavailable` and `duplicateID`, and `....000Z` dates are canonical under §2.2 (PR #11 Q9, Q12). The no-home rollback warning (decisions item from the check of revision 13) is already row 116.
 
@@ -931,9 +933,12 @@ and its fixes were merged first. Rows 119 to 132 of §A.10 hold the changes.
 | E5 L6, PR #12 Q11 revoke epochs | §9.5 |
 | PR #11 Q1, Q2, Q3, Q4, Q6, Q8, Q11 | §11.5, §9.5, §11.6, §7.1, §11.2 |
 | PR #12 Q4, Q6, Q7, Q10 | §17.5, §17.1, §10.2, §17.3 |
+| PR #12 Q12 head marks depend on arrival order | §17.2 (head marks are local memory; a replay without an authenticated blob starts without them) |
 | E7 M1 F built while a veto is held | §15.1 step 5 |
 | E7 M2, PR #13 Q1, Q3 the shipped Swift cannot write F | §16.3, §16.2, guide §4, plan step 8 |
-| E7 M3, L2, PR #13 Q5 the migration's drain window | §15.4 |
+| E7 M3, L2, PR #13 Q5 the migration's drain window | §15.4; verifier rules in `history/succession.rs` |
+| Check of revision 14: H1 `renew` of a member with no expiry | §9.4, §7.1; shares-only form |
+| Check of revision 14: H2, M4 competing attempts | §15.1 |
 | E7 M4 a competing successor on a freezing head | §15.1 "Starting a later attempt"; the case of two verifying successors is left open (notes, open item 2) |
 | Not written | PR #11 Q5, Q7; PR #12 Q2, Q3, Q5, Q9; PR #13 Q2, Q4, Q6, Q7, Q8; E7 L1, L3 to L7: engine readings the text does not need or that wait for the owner |
 

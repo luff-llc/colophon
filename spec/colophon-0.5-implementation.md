@@ -9,7 +9,7 @@ been changed by the spec work.
 **What is built now (2026-11-14).** The engine's verifier and its write side are merged into
 `spec-0.5`: the authority builders, vault, slots and pairing, homes and calls (E1 to E3), records
 (E4, PR #11), the account (E5, PR #12) and the upgrade and succession builders (E7, PR #13), each
-independently checked. E6 (the storage engine) and E8 are in progress. The bindings (FFI and
+independently checked. E6 (the account engine, the 0.5 counterpart of `storage::Engine`) and E8 (moving a Swift library: old slots, record copy, a Swift-key veto, the account's upgrade and succession methods) are in progress. The bindings (FFI and
 WASM surfaces, Swift, TypeScript), the relay and the tooling of step 8 are not started. **No
 vector of revisions 12 to 14 was replayed by the Swift source**; and the shipped Swift code cannot
 write F (step 8). Steps are in order. The vectors come first, because §21 says the

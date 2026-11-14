@@ -510,24 +510,46 @@ test of revision 13 was replayed by the Swift source.**
 
 ## Revision 14 (2026-11-14)
 
-Text only. The spec now says what the merged E4, E5 and E7 code does (changes §A.10, §G.20). **No
-vector or test of revisions 12 to 14 was replayed by the Swift source.** Places where the text
-and the code or a decision do not meet, left open:
+The spec says what the merged E4, E5 and E7 code does (changes §A.10, §G.20), plus the fix round
+of PR #14: `renew.expires` is optional (the shares-only form), and a `migration` is judged by the
+verifier. **No vector or test of revisions 12 to 14 was replayed by the Swift source.**
 
-- **Competing successors (§15.1).** Open item 2 above: two successors of one predecessor can each
-  verify, for different verifiers; the text and the verifier leave it undecided. The builders
-  refuse the case; the verifier cannot.
-- **`renew` and a provisional member with no expiry (§7.1, §9.4).** §7.1 now says a member
-  provisional when an epoch is made gets its shares by `renew`, but a `renew` of a member with no
-  expiry is `malformed`, and it must strictly extend the expiry. A provisional member whose grant
-  has no `expires` has no way to get the shares of an epoch made before its activation was final.
-  The code (`history/state.rs` `Renew::parse`, `RecordAuthority::owed_shares`) lists it as owed.
-  Needs a decision: let `renew` carry shares for a member with no expiry, or a separate way.
-- **`migration` timing (§15.4).** The verifier checks neither that `drain` starts after F nor
-  that the entry is issued after `drain.until`; the builder does. Whether a verifier should is
-  the owner's call.
-- **A grant without a label (§16.2).** `prepare_migration` takes the member label from its
-  caller and checks 1 to 200 bytes; it refuses a grant without a role. It does not read the
-  Swift grant's label.
-- **Self-slot after `final` (§17.3).** Stated as a host rule; no code enforces or tests it with
-  homes.
+Built in the fix round:
+- **Shares-only `renew` (§9.4).** `members.rs` (`Renew::parse`: `expires` optional, `shares` not
+  empty, member current and not expired), the `renew` arm in `history/state.rs` (each share for an
+  existing epoch of the member's scope that it lacks, once, sealed to it), `MemberRecord.sealed`
+  (which epochs an entry sealed to a member; checkpoint format 5), `write/records.rs`
+  `prepare_renew_shares`, `RecordAuthority::owed_shares` (`shares_only`). Vectors
+  `records/renew-shares-only*`.
+- **`migration` in the verifier (§15.4)** (`history/succession.rs`): succession verified apart
+  from the Swift genesis receipts and fresh heads, `final.digest` is F's, `drain` starts at or
+  after F's `issued`, the transition's `issued` is at or after `drain.until`. Vectors
+  `succession/swift-migration-*`.
+
+Open, each in one line:
+- **Competing successors (§15.1).** Two successors of one predecessor can each verify, for
+  different verifiers; undecided in the text and the verifier (open item 2 above).
+- **Builder checks the current time (§15.1 "Starting a later attempt").** `check_earlier_attempts`
+  (`write/succession.rs`, about lines 341–378) refuses only when an earlier attempt verifies now;
+  it should refuse one that may still verify (heads missing), as the host rule says.
+- **`migration` and the Swift evidence.** The verifier does not require a Swift predecessor's
+  genesis receipts or fresh heads for a `migration`: they depend on the clock, and a history must
+  not turn invalid when heads age. An application that acts on a `migration` still requires a
+  verified succession (§15.4).
+- **A grant's label (§16.2).** `prepare_migration` takes the member label from its caller and
+  checks 1 to 200 bytes; it refuses a grant without a role and does not read the Swift grant's
+  label.
+- **`Account::begin_renew` has no shares-only form.** It still builds the `expires` form
+  (`account/` was not edited in this round); `prepare_renew_shares` is the builder to wire.
+- **Upgraded members' `sealed` set is empty.** A member carried over by an in-place upgrade has
+  no recorded seals, so a shares-only `renew` may repeat an epoch it holds from before: harmless,
+  not refused.
+- **PR #10:** a witnessed honest branch does not win without the homes' heads in hand; a home
+  stopped at a fork cannot receipt a `resolve` anchored beyond its folded state; the cost of the
+  `resolve` look-ahead is not measured (plan step 9).
+- **PR #11:** the caveated live-writer rule, 0.2-style paths, and legacy payload opening beyond
+  the 0.3 plaintext checks are not built.
+- **PR #12:** the account has no upgrade or succession methods (`begin_upgrade`,
+  `begin_succession*`, E8); `record_due`'s rollback has no failure-injection test.
+- **PR #13:** nothing opens an old Swift slot, copies records into a successor, or signs a veto
+  with a Swift key (E8).
