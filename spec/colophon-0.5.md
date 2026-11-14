@@ -10,9 +10,11 @@ first engine builder's questions, making that state model checkable by every ver
 revision 7 answers two reviews of revision 6 (281e7c4) and the engine attack, recording finality
 in the history and stating §8.7 as a state table; revision 8 answers the second review of revision 7
 (0a25988): removals, revoked homes, recovery that restores control, and verdicts that depend on
-the object set only; revision 9 keeps a revoked home current until its revocation is final; revision 12 answers the
-engine check of the 0.5 history verifier: finality by excusal, final successions, possession under
-handover, the proposer cap, the chain bound and the Swift steward threshold. The
+the object set only; revision 9 keeps a revoked home current until its revocation is final; revision 10 states the
+one-recovery-key stall and narrows the liveness claim; revision 11 states recovery conditions in
+units; revision 12 answers the engine check of the 0.5 history verifier and its own check: one
+meaning of "final", final successions, possession under handover, the proposer cap, the chain
+bound and the Swift steward threshold. The
 mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
