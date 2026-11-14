@@ -3734,6 +3734,58 @@ pub fn part3(o: &mut Out) {
         )],
     );
 
+    // Revision 12 fix round, H1 (§8.6 rule 1, §8.7): an activation that is final in any way §8.7
+    // gives is never displaced by a `vetoed`: here by a later `final` whose heads cover it, and
+    // by a later full set whose anchor is the activation.
+    let veto_objs = || vec![("veto", v_addc.clone()), ("veto-receipt", rv_addc.clone())];
+    let mut casc = base.clone();
+    activate(&mut casc, &t_addc, &[rec(&cx, &t_addc)]);
+    let t_rm_ph = p(&cx, rm(&ph.id), sg![a]);
+    activate(&mut casc, &t_rm_ph, &[rec(&cx, &t_rm_ph)]);
+    let hs = vec![
+        head5(&casc, &h1k, DUE0 + 100, Some(4)),
+        head5(&casc, &h2k, DUE0 + 100, Some(4)),
+    ];
+    final_of(&mut casc, 4, hs);
+    grant_agent(&mut casc, &new, &ts(DUE0 + 200), &new);
+    case(
+        o,
+        "t-cascade-final-not-displaced-by-vetoed",
+        &casc,
+        json!({"result": "ok", "seq": 6, "finality": {"3": "final", "4": "final"}}),
+        "The addition at seq 3 is final through the cascade: the `final` at seq 5 of the removal at seq 4 carries heads of both witnesses covering it. A valid `vetoed` of the addition at seq 3 is held too. A final activation is never displaced: the branch stands, and the grant signed by the added key at seq 6 is valid.",
+        &["8.6", "8.7"],
+        veto_objs(),
+        Some(ver(DUE0 + 1000)),
+        vec![("vetoed", vec![(3, addc_vetoed.envs[2].clone())])],
+    );
+    let mut fsc = base.clone();
+    activate(&mut fsc, &t_addc, &[rec(&cx, &t_addc)]);
+    let t_fs = prop(
+        &cx,
+        json!({"keyring": {"add": [ct(&x, AC, "Probe X")]}}),
+        sg![a, ph, b],
+        Pr {
+            adds: sg![x],
+            at: DUE0 + 30,
+            chain: Some(&fsc),
+            ..Pr::default()
+        },
+    );
+    activate_full(&mut fsc, &t_fs, &[rec_at(&cx, &t_fs, DUE0 + 31)]);
+    grant_agent(&mut fsc, &new, &ts(DUE0 + 200), &new);
+    case(
+        o,
+        "t-full-set-final-not-displaced-by-vetoed",
+        &fsc,
+        json!({"result": "ok", "seq": 5, "finality": {"3": "final"}}),
+        "The addition at seq 3 is final because a full set at seq 4 is anchored on it. A valid `vetoed` of the addition is held too. A final activation is never displaced: the unvetoable full set and the grant signed by the added key stay.",
+        &["8.6", "8.7"],
+        veto_objs(),
+        Some(ver(DUE0 + 1000)),
+        vec![("vetoed", vec![(3, addc_vetoed.envs[2].clone())])],
+    );
+
     // Two activations of T with different receipts, with a final covering only the higher digest.
     let cy_t = p(&cx, rm(&b.id), sg![a]);
     let cy_r1 = rec(&cx, &cy_t);

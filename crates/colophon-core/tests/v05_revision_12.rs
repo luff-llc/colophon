@@ -394,3 +394,32 @@ mod swift_stewards {
         }
     }
 }
+
+// ---- Fix round H1: one meaning of "final" ---------------------------------------------------
+
+/// A `vetoed` held beside an activation that is final by the cascade or by a full set changes
+/// nothing, in any order.
+#[test]
+fn h1_a_vetoed_never_rolls_back_a_final_activation() {
+    for (name, len, finals) in [
+        ("t-cascade-final-not-displaced-by-vetoed", 6, vec![3, 4]),
+        ("t-full-set-final-not-displaced-by-vetoed", 5, vec![3]),
+    ] {
+        let (objects, now) = rules(name);
+        let v = verify_history(&objects, &Persisted::default(), now);
+        assert_eq!(
+            (v.code(), v.branch.len()),
+            ("ok".to_string(), len),
+            "{name}"
+        );
+        for sq in &finals {
+            assert!(is_final(&v, *sq), "{name}: seq {sq}");
+        }
+        for rot in 1..objects.entries.len() {
+            let mut shuffled = objects.clone();
+            shuffled.entries.rotate_left(rot);
+            let w = verify_history(&shuffled, &Persisted::default(), now);
+            assert_eq!(w.branch, v.branch, "{name}: rotation {rot}");
+        }
+    }
+}

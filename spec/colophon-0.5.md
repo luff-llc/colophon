@@ -743,13 +743,11 @@ not be transitive, and MUST NOT be folded into a running winner.
 Every recording entry has a **due time**: an `activate`'s or `vetoed`'s is its transition's; a
 `final`'s is its activation's transition's; a `successionVetoed`'s is the succession's.
 
-"A `final` covers" an `activate` when, on the activate's own branch, a valid `final` entry names
-it, or it is final by the fixed point (§8.7: every remaining witness excused, Order met), in the
-state after it or after any valid entry that follows it. An object that no valid branch contains
-covers nothing. A `vetoed` that displaces an activation removes every later entry on that branch
-(§8.7 Rollback), including the revocations that would have excused its witnesses, so the two
-rules cannot disagree: either an activation is final on its branch and no `vetoed` displaces it,
-or it is not and the `vetoed` takes the branch with it.
+"A `final` covers" an `activate` as §8.7 defines under "Final": the activation is final, in any of
+the ways given there, on its own branch. A `vetoed` that displaces an activation removes every later
+entry on that branch (§8.7 Rollback), including any entry that would have made it final, so
+either the activation is final on its branch and no `vetoed` displaces it, or it is not and the
+`vetoed` takes the branch with it.
 
 1. **Activation order.**
    - If X is a recording entry and Y is not, **Y stands only if** the verifier holds a head of the
@@ -871,13 +869,16 @@ from heads it has seen or the order it saw things in.
   whose revocation isn't final yet; a home is excused only once its revocation is final), less the
   homes it revokes itself under the stronger authority. For a
   full set they are those of them that remain after it.
-- An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
+- **Final.** An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering
-  it, or a later full set's anchor follows it.
+  it, or a later full set's anchor is it or follows it.
   After each entry, excuse homes whose removal-only revocation is final and make every activation
   with no remaining witnesses final without a `final` entry, in Order; repeat until no more
-  become final. Finality reached this way is final in every rule that says "a `final` covers"
-  (§8.6 rule 1).
+  become final. **A `final` covers an activation** (§8.6 rule 1) when it is final in any of these
+  ways, in the state after it or after any valid entry that follows it on its branch: its witness
+  set is empty or fully excused, a `final` entry names it, a later `final` carries a head from every
+  one of its witnesses, or a later full set's anchor is it or follows it. This is the one meaning
+  of "final" in §8.6, §8.7 and §15.
 - **Order.** An activation that is not removal-only gets a `final`, or becomes final by excusal,
   only when every earlier activation that is not removal-only is final. Removal-only activations
   are outside this order: they never wait for an earlier provisional activation, and none waits

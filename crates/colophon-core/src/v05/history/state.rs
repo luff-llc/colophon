@@ -2826,26 +2826,19 @@ struct Ctx<'a> {
     now_ms: i64,
 }
 /// Whether a `final` covers the activate `act`, whose state after it is `after` (§8.6 rule 1,
-/// §8.7). Two things cover it, both on the activate's own branch:
-/// - a `final` entry for it that is a valid entry: a chain of `previous` links runs from `act` to
-///   it and every entry on that chain applies in turn;
-/// - finality by the fixed point (every witness excused, Order met) in `after`, or in the state
-///   after any valid entry that follows `act` on its branch, such as the final removal-only
-///   revocation that excuses its last witness.
-///
-/// A parsed object that no branch contains, or one that fails its checks, covers nothing. When a
-/// `vetoed` displaces the activation instead, the entries after it leave with it (§8.7 rollback),
-/// including the revocations that would have excused its witnesses.
+/// §8.7 "Final"): the activation is final, in any of the ways §8.7 gives, in `after` or in the
+/// state after any valid entry that follows it on its own branch. "Final" is `Activation::final_`,
+/// the one predicate the rest of the engine uses, so a `vetoed` never rolls back anything §8.7
+/// calls final. A parsed object that no branch contains, or one that fails its checks, covers
+/// nothing. When a `vetoed` displaces the activation instead, the entries after it leave with it
+/// (§8.7 rollback).
 fn final_covers(ctx: &Ctx, act: &Entry, after: &State) -> bool {
-    let fixed_point_final = |st: &State| {
-        st.activations.iter().any(|a| {
-            a.seq == act.seq
-                && a.digest == act.env.digest
-                && a.final_
-                && a.witnesses.iter().all(|h| st.excused.contains(h))
-        })
+    let is_final = |st: &State| {
+        st.activations
+            .iter()
+            .any(|a| a.seq == act.seq && a.digest == act.env.digest && a.final_)
     };
-    if fixed_point_final(after) {
+    if is_final(after) {
         return true;
     }
     // Entries after `act`, in seq order, each applied to the state of its `previous`. Every step
@@ -2873,14 +2866,7 @@ fn final_covers(ctx: &Ctx, act: &Entry, after: &State) -> bool {
         ) else {
             continue;
         };
-        let is_final_for_act = f.kind == "final"
-            && f.env
-                .value
-                .get("activation")
-                .and_then(|a| a.get("digest"))
-                .and_then(Value::as_str)
-                == Some(act.env.digest.as_str());
-        if is_final_for_act || fixed_point_final(&next) {
+        if is_final(&next) {
             return true;
         }
         states.insert(f.env.digest.as_str(), next);
