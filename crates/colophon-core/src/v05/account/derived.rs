@@ -55,6 +55,9 @@ pub(super) struct Folded {
     pub revision: u64,
     pub fold: Namespace,
     pub admitted: Vec<OperationView>,
+    /// The fold position `(clock, author, id, digest)` of the last operation folded, when this
+    /// fold was built from the judgement (a fold taken from a checkpoint does not know it).
+    pub last_pos: Option<(u64, String, String, String)>,
 }
 
 pub(super) struct Derived {
@@ -69,8 +72,6 @@ pub(super) struct Derived {
     pub keys: EpochKeys,
     pub judgement: Judgement,
     pub windex: WriteIndex,
-    /// Position of each held record's judgement, by path.
-    pub judged_at: BTreeMap<String, usize>,
     /// The judgement of the live-state candidates held (0.3 §5.1).
     pub live: crate::v05::live::LiveJudgement,
     pub folded: BTreeMap<String, Folded>,
@@ -86,7 +87,7 @@ pub(super) struct Derived {
 
 /// What a write needs of the judged records, found once per derivation so that preparing and
 /// finishing one operation does not pass over the held records (§11.2, §11.4, §11.5).
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(super) struct WriteIndex {
     /// Highest clock among records that reserved a slot, by namespace.
     pub highest: BTreeMap<String, u64>,
@@ -97,53 +98,75 @@ pub(super) struct WriteIndex {
     pub tips: BTreeMap<(String, String), Vec<String>>,
     /// `(namespace, epoch, nonce)` of every held header: a nonce is never used twice under a key.
     pub nonces: BTreeSet<(String, u64, Vec<u8>)>,
+    /// `(author, namespace, previous)` named by a verified header of that author: what makes a
+    /// header no tip. Kept so that a merge adds to the index without passing over the records.
+    named: BTreeSet<(String, String, String)>,
+    /// The `(author, id)` pairs counted in `reserved`.
+    reserved_ids: BTreeSet<(String, String)>,
 }
 impl WriteIndex {
-    fn of(j: &Judgement) -> Self {
-        use crate::v05::records::HeaderFormat;
+    /// The index of `j`. An author's chain tip is computed from that author's own headers
+    /// only, and only from headers whose signature a member of the verified history made
+    /// (the rule of [`crate::v05::records::chain_heads`], which the slow path uses): a keyless
+    /// header, and a header by an author the history does not know, name no tip (§11.2).
+    fn of(j: &Judgement, auth: &RecordAuthority) -> Self {
         let mut w = Self::default();
-        let mut ids: BTreeSet<(&str, &str)> = BTreeSet::new();
-        let mut named: BTreeSet<&str> = BTreeSet::new();
-        let mut chain: Vec<&crate::v05::records::Judged> = Vec::new();
-        for r in &j.records {
+        w.add(j.records.iter(), auth);
+        w
+    }
+
+    /// Add judged records to the index: the same code builds the whole index and extends it, so
+    /// an extended index is the one a rebuild gives.
+    fn add<'a>(
+        &mut self,
+        records: impl Iterator<Item = &'a crate::v05::records::Judged>,
+        auth: &RecordAuthority,
+    ) {
+        use crate::v05::records::HeaderFormat;
+        for r in records {
             let (Some(ns), Some(a)) = (r.namespace.as_deref(), r.author.as_deref()) else {
                 continue;
             };
-            w.nonces.insert((ns.to_string(), r.epoch, r.nonce.clone()));
+            self.nonces
+                .insert((ns.to_string(), r.epoch, r.nonce.clone()));
             if r.reserved {
-                let h = w.highest.entry(ns.to_string()).or_default();
+                let h = self.highest.entry(ns.to_string()).or_default();
                 *h = (*h).max(r.clock);
                 if let Some(id) = r.id.as_deref() {
-                    if ids.insert((a, id)) {
-                        *w.reserved.entry(a.to_string()).or_default() += 1;
+                    if self.reserved_ids.insert((a.to_string(), id.to_string())) {
+                        *self.reserved.entry(a.to_string()).or_default() += 1;
                     }
                 }
             }
-            if r.format == Some(HeaderFormat::V5) && !r.live && r.digest.is_some() {
-                if let Some(p) = r.previous.as_deref() {
-                    named.insert(p);
-                }
-                chain.push(r);
+            let signed = !matches!(r.outcome, Outcome::Invalid(_)) && auth.member(a).is_some();
+            if !(signed && r.format == Some(HeaderFormat::V5) && !r.live) {
+                continue;
             }
-        }
-        for r in chain {
-            let (Some(ns), Some(a), Some(d)) =
-                (r.namespace.as_ref(), r.author.as_ref(), r.digest.as_ref())
-            else {
+            let Some(d) = r.digest.as_ref() else {
                 continue;
             };
-            if !named.contains(d.as_str()) {
-                w.tips
-                    .entry((a.clone(), ns.clone()))
-                    .or_default()
-                    .push(d.clone());
+            if let Some(p) = r.previous.as_deref() {
+                self.named
+                    .insert((a.to_string(), ns.to_string(), p.to_string()));
+                // What this header names is no tip, whichever arrived first.
+                if let Some(tips) = self.tips.get_mut(&(a.to_string(), ns.to_string())) {
+                    tips.retain(|t| t != p);
+                }
+            }
+            if !self
+                .named
+                .contains(&(a.to_string(), ns.to_string(), d.clone()))
+            {
+                let tips = self
+                    .tips
+                    .entry((a.to_string(), ns.to_string()))
+                    .or_default();
+                if !tips.contains(d) {
+                    tips.push(d.clone());
+                    tips.sort();
+                }
             }
         }
-        for v in w.tips.values_mut() {
-            v.sort();
-            v.dedup();
-        }
-        w
     }
 }
 
@@ -293,30 +316,14 @@ impl Derived {
             )
         };
         let (effective, verified_pending) = effective_objects(inputs.objects, auth.state());
+        let windex = WriteIndex::of(&judgement, &auth);
         let mut derived = Self {
             effective,
             verified_pending,
             verdict,
             auth,
             keys,
-            windex: WriteIndex::of(&judgement),
-            judged_at: {
-                // Several held byte strings can sit at one path (a garbage twin beside the
-                // real record): the one that is a record at all stands for the path.
-                let mut m: BTreeMap<String, usize> = BTreeMap::new();
-                for (i, j) in judgement.records.iter().enumerate() {
-                    let bad = matches!(j.outcome, Outcome::Invalid(_));
-                    match m.get(&j.path) {
-                        Some(k)
-                            if !matches!(judgement.records[*k].outcome, Outcome::Invalid(_)) => {}
-                        Some(_) if bad => {}
-                        _ => {
-                            m.insert(j.path.clone(), i);
-                        }
-                    }
-                }
-                m
-            },
+            windex,
             judgement,
             live,
             folded: BTreeMap::new(),
@@ -324,11 +331,222 @@ impl Derived {
             cache,
             fold_applied: 0,
         };
-        derived.fold(inputs, prior);
+        derived.fold(inputs, prior.map(|p| (&p.folded, p.print)));
         Ok(derived)
     }
 
-    fn fold(&mut self, inputs: &Inputs<'_>, prior: Option<&Derived>) {
+    /// The fold item of one judged record: its position, its view, its author's kind and its
+    /// header digest; `None` for a record that does not fold (not admitted, not authenticated,
+    /// an unknown payload version, a resolution, or a proposal not accepted). The same code
+    /// serves the whole fold and the extension of one.
+    fn fold_item(
+        &self,
+        j: &crate::v05::records::Judged,
+        accepted: &BTreeMap<(String, String), (u64, String, String)>,
+    ) -> Option<FoldItem> {
+        if j.outcome != Outcome::Admitted {
+            return None;
+        }
+        let (Some(plain), Some(author), Some(id), Some(dg), Some(ns)) = (
+            j.plaintext.as_ref(),
+            j.author.as_ref(),
+            j.id.as_ref(),
+            j.digest.as_ref(),
+            j.namespace.as_ref(),
+        ) else {
+            return None;
+        };
+        if !j.folded {
+            return None;
+        }
+        let kind = plain
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if kind == "colophon.accept" || kind == "colophon.decline" {
+            return None;
+        }
+        // A proposal folds once, at its accept's position (§11.6), and never before.
+        let position = match j.level {
+            Some(Level::Propose) => match accepted.get(&(ns.clone(), id.clone())) {
+                Some((c, a, i)) => (*c, a.clone(), i.clone(), dg.clone()),
+                None => return None,
+            },
+            _ => (j.clock, author.clone(), id.clone(), dg.clone()),
+        };
+        let member = self.auth.member(author);
+        let (mk, label) = member.map_or((MemberKind::Device, String::new()), |m| {
+            (m.request.kind.clone(), m.request.label.clone())
+        });
+        Some((
+            position,
+            OperationView {
+                id: id.clone(),
+                kind: kind.to_string(),
+                author: author.clone(),
+                author_label: label,
+                origin: if mk == MemberKind::Agent {
+                    "ai"
+                } else {
+                    "person"
+                }
+                .into(),
+                clock: plain
+                    .get("clock")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(j.clock),
+                created: plain
+                    .get("created")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                payload: plain.get("payload").cloned().unwrap_or(Value::Null),
+            },
+            mk,
+            dg.clone(),
+        ))
+    }
+
+    fn accepted_proposals(&self) -> BTreeMap<(String, String), (u64, String, String)> {
+        self.judgement
+            .proposals
+            .iter()
+            .filter_map(|p| match &p.state {
+                ProposalState::Accepted { at, .. } => {
+                    Some(((p.namespace.clone(), p.id.clone()), at.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The change token of a fold: a function of the folded operations and their order.
+    fn revision_of(fold: &Namespace) -> u64 {
+        if fold.order.is_empty() {
+            return 0;
+        }
+        let h = fold.hashes.last().copied().unwrap_or([0; 32]);
+        let mut eight = [0u8; 8];
+        eight.copy_from_slice(&h[..8]);
+        u64::from_be_bytes(eight) & crate::v05::encoding::bounds::MAX_INTEGER
+    }
+
+    /// Extend this derivation, in place, by the records now held at `new_at` of `inputs.records`
+    /// (ascending positions in the grown set), the authority objects, the clock, the keys and
+    /// the scope being what they were. Work is proportional to the new records. It returns
+    /// `false`, with nothing changed, when it cannot promise the result a rebuild gives; the
+    /// caller then rebuilds. A derivation made this way equals the rebuilt one (`tests/
+    /// v05_account_engine.rs` compares them after every step of random journeys).
+    pub(super) fn extend(
+        &mut self,
+        inputs: &Inputs<'_>,
+        fresh: &[(usize, &HeldRecord)],
+        total: usize,
+    ) -> bool {
+        let new_at: Vec<usize> = fresh.iter().map(|(at, _)| *at).collect();
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(ext) = crate::v05::records::judge_extend(
+            &self.auth,
+            &self.keys,
+            &mut cache,
+            self.print,
+            &mut self.judgement,
+            fresh,
+            total,
+        ) else {
+            return false;
+        };
+        // The fold needs the new records' items before anything else is touched.
+        let accepted = self.accepted_proposals();
+        let mut by_ns: BTreeMap<String, Vec<FoldItem>> = BTreeMap::new();
+        let mut full_fold = ext.proposals_refolded;
+        for &at in &new_at {
+            let Some(j) = self.judgement.records.get(at) else {
+                continue;
+            };
+            if let (Some(item), Some(ns)) = (self.fold_item(j, &accepted), j.namespace.as_ref()) {
+                by_ns.entry(ns.clone()).or_default().push(item);
+            }
+        }
+        // The write index, from the new judgements.
+        let news: Vec<&crate::v05::records::Judged> = new_at
+            .iter()
+            .filter_map(|at| self.judgement.records.get(*at))
+            .collect();
+        self.windex.add(news.into_iter(), &self.auth);
+        // Live candidates read the admitted records: judged again when there are any.
+        if !inputs.live.is_empty() {
+            let before = format!("{:?}", self.live.heads);
+            self.live = crate::v05::live::judge_live_with(
+                &self.auth,
+                &self.keys,
+                &self.judgement,
+                inputs.live,
+                None,
+                Some(&mut cache),
+            );
+            // The folds take the live heads at their positions: they are folded again only
+            // when the heads are not the ones already folded.
+            if format!("{:?}", self.live.heads) != before {
+                full_fold = true;
+            }
+        }
+        drop(cache);
+        self.fold_applied = 0;
+        // Each namespace's fold takes the new operations when they all come after its last.
+        if !full_fold {
+            for (ns, items) in &mut by_ns {
+                items.sort_by(|a, b| a.0.cmp(&b.0));
+                let Some(f) = self.folded.get_mut(ns) else {
+                    // Not folded here (unreadable, out of scope, no key): nothing to extend.
+                    continue;
+                };
+                let after = match &f.last_pos {
+                    Some(last) => items.first().is_none_or(|i| i.0 > *last),
+                    // An empty fold with a checkpoint's snapshot to reuse: the full path takes it.
+                    None => f.fold.order.is_empty() && !inputs.fold_seed.contains_key(ns),
+                };
+                if !after {
+                    full_fold = true;
+                    break;
+                }
+            }
+        }
+        if full_fold {
+            let old = std::mem::take(&mut self.folded);
+            self.fold(inputs, Some((&old, self.print)));
+            return true;
+        }
+        let account = self.auth.account().clone();
+        let library = account.as_str().chars().take(32).collect::<String>();
+        let policy = CheckpointPolicy {
+            every: 0,
+            retain: 0,
+        };
+        for (ns, items) in by_ns {
+            let Some(f) = self.folded.get_mut(&ns) else {
+                continue;
+            };
+            for (pos, view, mk, dg) in &items {
+                let ctx = self.auth.member(&view.author).map(|m| AuthorContext {
+                    kind: model_kind(mk),
+                    library: library.clone(),
+                    grant: Some(grant_of(m)),
+                });
+                f.fold.append(dg, view, ctx, &policy);
+                f.admitted.push(view.clone());
+                f.last_pos = Some(pos.clone());
+                self.fold_applied += 1;
+            }
+            f.revision = Self::revision_of(&f.fold);
+        }
+        true
+    }
+
+    fn fold(&mut self, inputs: &Inputs<'_>, prior: Option<(&BTreeMap<String, Folded>, [u8; 32])>) {
         let account = self.auth.account().clone();
         let library = account.as_str().chars().take(32).collect::<String>();
         let namespaces: Vec<String> = self.auth.namespaces().to_vec();
@@ -344,78 +562,14 @@ impl Derived {
                 continue;
             }
             let mut ops: Vec<FoldItem> = Vec::new();
-            let accepted: BTreeMap<(String, String), (u64, String, String)> = self
-                .judgement
-                .proposals
-                .iter()
-                .filter_map(|p| match &p.state {
-                    ProposalState::Accepted { at, .. } => {
-                        Some(((p.namespace.clone(), p.id.clone()), at.clone()))
-                    }
-                    _ => None,
-                })
-                .collect();
+            let accepted = self.accepted_proposals();
             for j in &self.judgement.records {
-                if j.namespace.as_deref() != Some(ns.as_str()) || j.outcome != Outcome::Admitted {
+                if j.namespace.as_deref() != Some(ns.as_str()) {
                     continue;
                 }
-                let (Some(plain), Some(author), Some(id), Some(dg)) = (
-                    j.plaintext.as_ref(),
-                    j.author.as_ref(),
-                    j.id.as_ref(),
-                    j.digest.as_ref(),
-                ) else {
-                    continue;
-                };
-                if !j.folded {
-                    continue;
+                if let Some(item) = self.fold_item(j, &accepted) {
+                    ops.push(item);
                 }
-                let kind = plain
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if kind == "colophon.accept" || kind == "colophon.decline" {
-                    continue;
-                }
-                // A proposal folds once, at its accept's position (§11.6), and never before.
-                let position = match j.level {
-                    Some(Level::Propose) => match accepted.get(&(ns.clone(), id.clone())) {
-                        Some((c, a, i)) => (*c, a.clone(), i.clone(), dg.clone()),
-                        None => continue,
-                    },
-                    _ => (j.clock, author.clone(), id.clone(), dg.clone()),
-                };
-                let member = self.auth.member(author);
-                let (mk, label) = member.map_or((MemberKind::Device, String::new()), |m| {
-                    (m.request.kind.clone(), m.request.label.clone())
-                });
-                ops.push((
-                    position,
-                    OperationView {
-                        id: id.clone(),
-                        kind: kind.to_string(),
-                        author: author.clone(),
-                        author_label: label,
-                        origin: if mk == MemberKind::Agent {
-                            "ai"
-                        } else {
-                            "person"
-                        }
-                        .into(),
-                        clock: plain
-                            .get("clock")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(j.clock),
-                        created: plain
-                            .get("created")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        payload: plain.get("payload").cloned().unwrap_or(Value::Null),
-                    },
-                    mk,
-                    dg.clone(),
-                ));
             }
             // Current live heads fold at their `(generation, author, id)` position, as any
             // operation does; the caller of `judge_live` already left out the ones that are an
@@ -461,8 +615,8 @@ impl Derived {
             // build folded exactly the first operations of this one, under the same verified
             // standing of every member, it is extended instead of redone.
             let reuse = prior
-                .filter(|p| p.print == self.print)
-                .and_then(|p| p.folded.get(&ns))
+                .filter(|(_, print)| *print == self.print)
+                .and_then(|(folded, _)| folded.get(&ns))
                 .filter(|f| {
                     f.fold.order.len() <= ops.len()
                         && f.fold.order.iter().zip(&ops).all(|(a, b)| *a == b.3)
@@ -505,20 +659,15 @@ impl Derived {
             }
             // A change token, not a counter: a function of the folded operations and their
             // order, so it is the same however the objects arrived. Zero for no operations.
-            let revision = if fold.order.is_empty() {
-                0
-            } else {
-                let h = fold.hashes.last().copied().unwrap_or([0; 32]);
-                let mut eight = [0u8; 8];
-                eight.copy_from_slice(&h[..8]);
-                u64::from_be_bytes(eight) & crate::v05::encoding::bounds::MAX_INTEGER
-            };
+            let revision = Self::revision_of(&fold);
+            let last_pos = ops.last().map(|o| o.0.clone());
             self.folded.insert(
                 ns,
                 Folded {
                     revision,
                     fold,
                     admitted,
+                    last_pos,
                 },
             );
         }
@@ -637,4 +786,87 @@ pub(super) fn effective_objects(
         .collect();
     out.pending.sort();
     (out, verified)
+}
+
+/// Everything a derivation holds that a rebuild over the same inputs must reproduce, as one
+/// string: the judgement of every record, the proposals, the write index, the live judgement
+/// and each namespace fold. [`super::Account::verify_derivation`] compares it with a rebuild.
+pub(super) fn fingerprint(d: &Derived) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = write!(s, "{:?}|{:?}|{:?}|", d.judgement, d.windex, d.live);
+    for (ns, f) in &d.folded {
+        let _ = write!(
+            s,
+            "{ns}:{}:{:?}:{:?}:{}:{:?};",
+            f.revision,
+            f.fold.order,
+            f.last_pos,
+            serde_json::to_string(&f.fold.state).unwrap_or_default(),
+            serde_json::to_string(&f.admitted).unwrap_or_default(),
+        );
+    }
+    s
+}
+
+/// What a derivation holds in memory per kind, in bytes (see [`super::Account::held_bytes`]).
+pub(super) fn held_bytes(d: &Derived) -> (usize, usize) {
+    let plaintext = d
+        .judgement
+        .records
+        .iter()
+        .filter_map(|j| j.plaintext.as_ref())
+        .map(|p| serde_json::to_vec(p).map_or(0, |b| b.len()))
+        .sum();
+    let folds = d
+        .folded
+        .values()
+        .flat_map(|f| f.admitted.iter())
+        .map(|v| serde_json::to_vec(v).map_or(0, |b| b.len()))
+        .sum();
+    (plaintext, folds)
+}
+
+/// Overwrite every string and number of `v` with zeros and drop its structure.
+pub(crate) fn wipe_value(v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            let mut b = std::mem::take(s).into_bytes();
+            crate::v05::hpke_wiped::wipe(&mut b);
+        }
+        Value::Array(a) => {
+            for x in a.iter_mut() {
+                wipe_value(x);
+            }
+            a.clear();
+        }
+        Value::Object(m) => {
+            for (_, x) in m.iter_mut() {
+                wipe_value(x);
+            }
+            m.clear();
+        }
+        other => *other = Value::Null,
+    }
+}
+
+impl Derived {
+    /// Overwrite the opened plaintext this derivation (and its cache) holds, before it is freed.
+    pub(super) fn wipe_plaintext(&mut self) {
+        for j in &mut self.judgement.records {
+            if let Some(p) = j.plaintext.as_mut() {
+                wipe_value(p);
+            }
+        }
+        for f in self.folded.values_mut() {
+            for v in &mut f.admitted {
+                wipe_value(&mut v.payload);
+            }
+        }
+        let mut c = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        c.wipe_plaintext();
+    }
 }

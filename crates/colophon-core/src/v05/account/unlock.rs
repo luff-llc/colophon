@@ -7,6 +7,7 @@
 //! A seed is installed only when it was opened under this account (it records the account it
 //! was opened under) or is new, and only after the core has checked that it derives a vault of
 //! this account's verified history.
+use super::derived::{Derived, Inputs};
 use super::{Account, Changes};
 use crate::crypto::Entropy;
 use crate::v05::descriptor::Controller;
@@ -18,6 +19,7 @@ use crate::v05::slots::{OpeningInput, OpeningSecret, Slot};
 use crate::v05::vault::{EcdhOutput, SealedBox, VaultPublic, VaultSeed};
 use crate::v05::{malformed, require, Result};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// The vault seeds this account holds in memory: the current one, earlier ones reached through
 /// `previousVault`, and a new one staged by a rotation that has not activated yet.
@@ -326,9 +328,42 @@ impl Account {
     }
 
     /// Forget the seeds (erased on drop). Epoch keys already opened stay: they are what the
-    /// session reads with, as in 0.4.
+    /// session reads with, as in 0.4. [`Account::forget_keys`] forgets those too.
     pub fn lock(&mut self) {
         self.seeds.lock();
+    }
+
+    /// Forget the seeds **and** every epoch key, and rebuild from the held objects: what is
+    /// left is what needs no key (the verified history, its members, the pending objects).
+    /// Namespaces are unreadable until the host unlocks again. The old keys are erased as they
+    /// are dropped.
+    pub fn forget_keys(&mut self) -> Result<Changes> {
+        self.seeds.lock();
+        let d = Derived::build(
+            &Inputs {
+                objects: &self.objects,
+                records: &self.records,
+                live: &self.live,
+                persisted: &self.persisted,
+                now_ms: self.now_ms,
+                seeds: &self.seeds,
+                me: &self.me,
+                scope: &self.scope,
+                fold_seed: &BTreeMap::new(),
+            },
+            None,
+            None,
+        )?;
+        self.fold_seed.clear();
+        // The old derivation's opened plaintext is overwritten before it is freed.
+        self.d.wipe_plaintext();
+        let (o, r, p, n) = (
+            self.objects.clone(),
+            self.records.clone(),
+            self.persisted.clone(),
+            self.now_ms,
+        );
+        Ok(self.commit(d, o, r, p, n))
     }
 
     /// The agreements a member's host performs to open the shares it does not hold yet: one per
