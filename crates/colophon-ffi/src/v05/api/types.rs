@@ -90,7 +90,20 @@ cenum! {
 }
 cenum! {
     /// Whether a home is serving, or its removal has not activated finally.
-    pub enum HomeStatus { Home, RevocationPending }
+    pub enum HomeStatus { Home, RevocationPending, Unknown }
+}
+cenum! {
+    /// Why access was refused (§19 access reasons). `Unknown` is a reason a newer writer made;
+    /// the raw text is in `reason_raw`.
+    pub enum AccountDenialReason { NotGranted, Revoked, Expired, BudgetSpent, NotReadable, Unavailable, Unknown }
+}
+cenum! {
+    /// The check of §4.3 that failed in a WebAuthn assertion, in the order of the spec's steps.
+    pub enum SignatureCheck {
+        Point, RawLength, Scalar, Der, Verify, ClientData, ClientDataBound, UnknownForm, Type,
+        Challenge, Origin, CrossOrigin, RelyingParty, UserPresence, UserVerification, Form,
+        CallOrigin
+    }
 }
 cenum! {
     /// How a threshold counts signers.
@@ -110,7 +123,7 @@ cenum! {
 }
 cenum! {
     /// A member's kind.
-    pub enum AccountMemberKind { Device, App, Agent, Server }
+    pub enum AccountMemberKind { Device, App, Agent, Server, Unknown }
 }
 cenum! {
     /// An HTTP method.
@@ -197,8 +210,8 @@ record! {
     pub struct Store { pub path: String, pub bytes: Vec<u8> }
 }
 record! {
-    /// A listed path with the provider's content-version token (empty for none).
-    pub struct ListedPath { pub path: String, pub version: String }
+    /// A listed path with the provider's content-version token (none for none).
+    pub struct ListedPath { pub path: String, pub version: Option<String> }
 }
 record! {
     /// One byte string (a list of them cannot be a field on every platform).
@@ -317,6 +330,7 @@ record! {
     pub struct SlotInfo {
         pub index: u64,
         pub kind: SlotKind,
+        pub kind_raw: Option<String>,
         pub label: String,
         pub controllers: Vec<SlotController>,
     }
@@ -387,6 +401,8 @@ record! {
         pub id: String,
         pub label: String,
         pub roles: Vec<ControllerRole>,
+        pub roles_raw: Vec<String>,
+        pub key: KeyDescriptorView,
         pub form: SignForm,
         pub verification: bool,
         pub holder: Option<String>,
@@ -411,6 +427,7 @@ record! {
         pub id: String,
         pub label: String,
         pub kind: AccountMemberKind,
+        pub kind_raw: Option<String>,
         pub grant: Option<AccountGrant>,
         pub since: u64,
         pub revoked_at: Option<u64>,
@@ -436,6 +453,7 @@ record! {
         pub id: String,
         pub label: String,
         pub status: HomeStatus,
+        pub status_raw: Option<String>,
         pub endpoints: Vec<String>,
         pub primary: bool,
     }
@@ -516,7 +534,7 @@ record! {
 record! {
     /// A write refused for access reasons: `reason` is one of notGranted, revoked, expired,
     /// budgetSpent, notReadable, unavailable.
-    pub struct AccountDenial { pub reason: String, pub detail: String }
+    pub struct AccountDenial { pub reason: AccountDenialReason, pub reason_raw: Option<String>, pub detail: String }
 }
 record! {
     /// Facts about a prepared action a host may show or follow up on.
@@ -716,8 +734,8 @@ record! {
         pub kind: AccountMemberKind,
         pub terms_json: String,
         pub created: String,
-        pub custody: String,
-        pub operator: String,
+        pub custody: Option<String>,
+        pub operator: Option<String>,
         pub endpoints: Vec<String>,
     }
 }
@@ -728,6 +746,7 @@ record! {
         pub member: String,
         pub label: String,
         pub kind: AccountMemberKind,
+        pub kind_raw: Option<String>,
         pub terms_json: String,
     }
 }
@@ -933,6 +952,7 @@ record! {
     pub struct SwiftSlotInfo {
         pub index: u64,
         pub kind: SlotKind,
+        pub kind_raw: Option<String>,
         pub label: String,
         pub controller: Option<String>,
         pub problem: Option<String>,
@@ -1074,18 +1094,25 @@ pub const MAX_AUTH_JSON: usize = 1 << 20;
 /// translated batch's children.
 pub const MAX_JSON_ITEMS: usize = 4096;
 
-/// A document averages at least this many bytes per structural element (an opener or a comma
-/// outside a string), plus a fixed allowance. A parsed `serde_json::Value` costs up to about a
-/// hundred bytes per element, so this keeps the parse at roughly a dozen times the raw text, not
-/// the forty-eight times a document of one-byte elements reached.
-const BYTES_PER_ELEMENT: usize = 8;
+/// The most a parse may cost, by the count of `within_budget`: 32 MiB. Chosen from the largest legitimate
+/// values: a 1 MiB payload of any shape costs at most about 17 MiB (524,288 one-byte-plus-comma
+/// numbers at 32 bytes each, or 175,000 short-key entries at about 100 bytes each); an import
+/// batch is at most 1 MiB (`MAX_BATCH_BYTES`) and an authority body at most 1 MiB, so the same.
+/// The budget leaves twofold room over those and refuses only a document that costs more than
+/// any legitimate one can, **when the parse reaches that point and never before**: a compact
+/// document of small numbers is as welcome as the same one with spaces.
+pub const PARSE_BUDGET: usize = 32 << 20;
 
-/// Whether `text` has few enough structural elements for its length.
-fn elements_ok(text: &str) -> bool {
-    let allowed = text.len() / BYTES_PER_ELEMENT + 256;
-    let (mut n, mut in_str, mut esc) = (0usize, false, false);
+/// The cost of parsing `text`, counted as the text is scanned and abandoned the moment it passes
+/// the budget: 32 bytes per value (a `serde_json::Value`), a string's bytes, 64 bytes per object
+/// entry (the map node and key). A value is a comma, an opener's container and its first element,
+/// so the count over-estimates a little and never under-estimates. It is a count over the raw
+/// text, not a shape rule: a compact array of small numbers and the same with spaces cost alike.
+fn within_budget(text: &str) -> bool {
+    let (mut cost, mut in_str, mut esc) = (32usize, false, false);
     for &b in text.as_bytes() {
         if in_str {
+            cost += 1;
             if esc {
                 esc = false;
             } else if b == b'\\' {
@@ -1096,20 +1123,21 @@ fn elements_ok(text: &str) -> bool {
         } else {
             match b {
                 b'"' => in_str = true,
-                b',' | b'{' | b'[' => {
-                    n += 1;
-                    if n > allowed {
-                        return false;
-                    }
-                }
+                b',' => cost += 32,
+                b'{' | b'[' => cost += 64,
+                b':' => cost += 64,
                 _ => {}
             }
+        }
+        if cost > PARSE_BUDGET {
+            return false;
         }
     }
     true
 }
-/// Parse a JSON document after its raw length and its element count are checked, before
-/// anything that scales with them is allocated.
+
+/// Parse a JSON document: its raw length is checked first, then its cost under the budget,
+/// which refuses (`Bound`) only a document that costs more than any legitimate one can.
 pub(crate) fn json_doc(text: &str, cap: usize, what: &str) -> R<serde_json::Value> {
     if text.len() > cap {
         return Err(AccountError::bound(&format!(
@@ -1117,10 +1145,19 @@ pub(crate) fn json_doc(text: &str, cap: usize, what: &str) -> R<serde_json::Valu
             cap >> 10
         )));
     }
-    if !elements_ok(text) {
+    if !within_budget(text) {
         return Err(AccountError::bound(&format!(
-            "{what} has more elements than its length allows"
+            "{what} costs more to parse than any legitimate document: over {} MiB",
+            PARSE_BUDGET >> 20
         )));
+    }
+    serde_json::from_str(text).map_err(|_| AccountError::bad(format!("{what} is not JSON")))
+}
+/// A value the core itself produced and the host passes back (a `CopyItem`'s payload): no
+/// host-argument bound applies, only a length ceiling against a corrupted call.
+pub(crate) fn core_json(text: &str, what: &str) -> R<serde_json::Value> {
+    if text.len() > (16 << 20) {
+        return Err(AccountError::bound(&format!("{what} is over 16 MiB")));
     }
     serde_json::from_str(text).map_err(|_| AccountError::bad(format!("{what} is not JSON")))
 }
@@ -1169,4 +1206,62 @@ pub(crate) fn to_json(v: &serde_json::Value) -> R<String> {
 pub(crate) fn wipe(v: &mut [u8]) {
     v.fill(0);
     std::hint::black_box(&*v);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_values_are_accepted_whatever_their_shape() {
+        // 600 small numbers, compact (1.2 KB): the checker's case, refused by the density rule.
+        let nums: Vec<String> = (0..600).map(|i| (i % 10).to_string()).collect();
+        let doc = format!("[{}]", nums.join(","));
+        assert!(doc.len() < 1300);
+        assert!(json(&doc, "x").is_ok());
+        // 100,000 small numbers.
+        let doc = format!("[{}0]", "1,".repeat(99_999));
+        assert!(json(&doc, "x").is_ok());
+        // One long string of the whole 1 MiB.
+        let doc = format!("\"{}\"", "a".repeat(MAX_JSON - 2));
+        assert!(json(&doc, "x").is_ok());
+        // An import batch at the core's own maximum (1 MiB): records of 7 bytes and more.
+        let rec = "{\"id\":\"a1\",\"t\":\"x\"},";
+        let mut batch = String::from("{\"children\":[");
+        while batch.len() + rec.len() + 8 < MAX_JSON {
+            batch.push_str(rec);
+        }
+        batch.push_str("{}]}");
+        assert!(batch.len() <= MAX_JSON);
+        assert!(json(&batch, "x").is_ok());
+        // A document one byte over the length cap is `Bound`; garbage is `Malformed`.
+        assert!(matches!(
+            json(&"a".repeat(MAX_JSON + 1), "x"),
+            Err(AccountError::Bound { .. })
+        ));
+        assert!(matches!(
+            json("{", "x"),
+            Err(AccountError::Malformed { .. })
+        ));
+        assert!(matches!(
+            json("[1] 2", "x"),
+            Err(AccountError::Malformed { .. })
+        ));
+    }
+    #[test]
+    fn a_parse_is_refused_only_once_the_budget_is_passed() {
+        // Under the 1 MiB length cap no document can cost 32 MiB (a 1 MiB array of one-digit
+        // numbers costs 16 MiB), so the budget is a backstop. With a larger cap it bites, and
+        // only when the running cost passes it: 8 MiB of `0,` is 4 million values.
+        let big = format!("[{}0]", "0,".repeat(4 << 20));
+        assert!(matches!(
+            json_doc(&big, 16 << 20, "x"),
+            Err(AccountError::Bound { .. })
+        ));
+        // The same shape at 2 MiB (1 million values, 32 MiB) is within a hair; at 1 MiB it is
+        // well inside.
+        let fits = format!("[{}0]", "0,".repeat(MAX_JSON / 2 - 1));
+        assert!(json_doc(&fits, 2 << 20, "x").is_ok());
+    }
 }

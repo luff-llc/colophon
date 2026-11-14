@@ -246,6 +246,7 @@ pub(crate) fn slots(a: &acc::Account) -> Result<Vec<SlotInfo>, AccountError> {
         .map(|s| SlotInfo {
             index: s.index as u64,
             kind: slot_kind(&s.kind),
+            kind_raw: slot_kind_raw(&s.kind),
             label: s.label,
             controllers: s
                 .controllers
@@ -254,6 +255,9 @@ pub(crate) fn slots(a: &acc::Account) -> Result<Vec<SlotInfo>, AccountError> {
                 .collect(),
         })
         .collect())
+}
+pub(crate) fn slot_kind_raw(s: &str) -> Option<String> {
+    (slot_kind(s) == SlotKind::Unknown).then(|| s.to_string())
 }
 /// A slot's protocol spelling as a typed kind.
 pub(crate) fn slot_kind(s: &str) -> SlotKind {
@@ -456,6 +460,8 @@ pub(crate) fn controller(c: &acc::ControllerInfo) -> Controller {
         id: c.id.clone(),
         label: c.label.clone(),
         roles: c.roles.iter().map(|r| controller_role(r)).collect(),
+        roles_raw: c.roles.clone(),
+        key: descriptor_view(&c.key),
         form: match c.form.as_str() {
             "webauthn" => SignForm::Webauthn,
             "raw" => SignForm::Raw,
@@ -470,22 +476,57 @@ pub(crate) fn controller(c: &acc::ControllerInfo) -> Controller {
 }
 fn member_kind(s: Option<&str>) -> AccountMemberKind {
     match s {
+        Some("device") => AccountMemberKind::Device,
         Some("app") => AccountMemberKind::App,
         Some("agent") => AccountMemberKind::Agent,
         Some("server") => AccountMemberKind::Server,
-        _ => AccountMemberKind::Device,
+        _ => AccountMemberKind::Unknown,
     }
 }
-pub(crate) fn member_kind_of(k: AccountMemberKind) -> &'static str {
-    match k {
+/// The raw text of a kind this reader does not know, else none.
+fn kind_raw(k: AccountMemberKind, s: Option<&str>) -> Option<String> {
+    (k == AccountMemberKind::Unknown).then(|| s.unwrap_or_default().to_string())
+}
+pub(crate) fn member_kind_of(k: AccountMemberKind) -> Result<&'static str, AccountError> {
+    Ok(match k {
         AccountMemberKind::Device => "device",
         AccountMemberKind::App => "app",
         AccountMemberKind::Agent => "agent",
         AccountMemberKind::Server => "server",
-    }
+        AccountMemberKind::Unknown => {
+            return Err(AccountError::bad(
+                "a member of an unknown kind cannot be created",
+            ))
+        }
+    })
 }
 pub(crate) fn member_kind_from(s: &str) -> AccountMemberKind {
     member_kind(Some(s))
+}
+pub(crate) fn member_kind_raw_from(s: &str) -> Option<String> {
+    kind_raw(member_kind(Some(s)), Some(s))
+}
+pub(crate) fn denial_reason(s: &str) -> (AccountDenialReason, Option<String>) {
+    match s {
+        "notGranted" => (AccountDenialReason::NotGranted, None),
+        "revoked" => (AccountDenialReason::Revoked, None),
+        "expired" => (AccountDenialReason::Expired, None),
+        "budgetSpent" => (AccountDenialReason::BudgetSpent, None),
+        "notReadable" => (AccountDenialReason::NotReadable, None),
+        "unavailable" => (AccountDenialReason::Unavailable, None),
+        other => (AccountDenialReason::Unknown, Some(other.to_string())),
+    }
+}
+pub(crate) fn denial_reason_text(r: AccountDenialReason, raw: &Option<String>) -> String {
+    match r {
+        AccountDenialReason::NotGranted => "notGranted".into(),
+        AccountDenialReason::Revoked => "revoked".into(),
+        AccountDenialReason::Expired => "expired".into(),
+        AccountDenialReason::BudgetSpent => "budgetSpent".into(),
+        AccountDenialReason::NotReadable => "notReadable".into(),
+        AccountDenialReason::Unavailable => "unavailable".into(),
+        AccountDenialReason::Unknown => raw.clone().unwrap_or_default(),
+    }
 }
 pub(crate) fn member(m: &acc::MemberInfo) -> Result<AccountMember, AccountError> {
     let v = serde_json::to_value(&m.member)
@@ -518,6 +559,7 @@ pub(crate) fn member(m: &acc::MemberInfo) -> Result<AccountMember, AccountError>
         id: v["id"].as_str().unwrap_or_default().to_string(),
         label: v["label"].as_str().unwrap_or_default().to_string(),
         kind: member_kind(v["kind"].as_str()),
+        kind_raw: kind_raw(member_kind(v["kind"].as_str()), v["kind"].as_str()),
         grant,
         since: v["since"].as_u64().unwrap_or(0),
         revoked_at: v["revokedAt"].as_u64(),
@@ -563,11 +605,13 @@ pub(crate) fn home(h: &acc::HomeInfo) -> Home {
     Home {
         id: h.id.clone(),
         label: h.label.clone(),
-        status: if h.status == "home" {
-            HomeStatus::Home
-        } else {
-            HomeStatus::RevocationPending
+        status: match h.status.as_str() {
+            "home" => HomeStatus::Home,
+            "revocationPending" => HomeStatus::RevocationPending,
+            _ => HomeStatus::Unknown,
         },
+        status_raw: (!matches!(h.status.as_str(), "home" | "revocationPending"))
+            .then(|| h.status.clone()),
         endpoints: h.endpoints.clone(),
         primary: h.primary,
     }
@@ -648,8 +692,10 @@ pub(crate) fn notices(n: &acc::Notices) -> Notices {
     }
 }
 pub(crate) fn denial(d: &colophon_core::model::Denial) -> AccountDenial {
+    let (reason, reason_raw) = denial_reason(&d.reason);
     AccountDenial {
-        reason: d.reason.clone(),
+        reason,
+        reason_raw,
         detail: d.detail.clone(),
     }
 }
@@ -767,6 +813,20 @@ mod tests {
         assert_eq!(v("newerFormat").kind, VerdictKind::NewerFormat);
         assert_eq!(v("malformed").kind, VerdictKind::Malformed);
         assert!(record_verdict(None).is_none());
+        assert_eq!(member_kind(Some("robot")), AccountMemberKind::Unknown);
+        assert_eq!(member_kind_raw_from("robot").as_deref(), Some("robot"));
+        assert_eq!(member_kind_raw_from("agent"), None);
+        assert!(member_kind_of(AccountMemberKind::Unknown).is_err());
+        let (r, raw) = denial_reason("somethingNew");
+        assert_eq!(
+            (r, raw.as_deref()),
+            (AccountDenialReason::Unknown, Some("somethingNew"))
+        );
+        assert_eq!(
+            denial_reason("revoked"),
+            (AccountDenialReason::Revoked, None)
+        );
+        assert_eq!(slot_kind_raw("strange").as_deref(), Some("strange"));
         assert_eq!(slot_kind("combined"), SlotKind::Combined);
         assert_eq!(slot_kind("strange"), SlotKind::Unknown);
         assert_eq!(controller_role("approve"), ControllerRole::Approve);

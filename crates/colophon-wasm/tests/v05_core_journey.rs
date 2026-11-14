@@ -92,8 +92,8 @@ fn the_web_build_creates_verifies_requests_pairs_and_refuses_hostile_input() {
         AccountMemberKind::Device,
         json!({"records": [{"namespace": "notes", "access": "write"}]}).to_string(),
         account_format_date(NOW - 2 * HOUR).unwrap(),
-        String::new(),
-        String::new(),
+        None,
+        None,
         vec![],
     ))
     .unwrap();

@@ -92,8 +92,8 @@ fn round() -> (f64, f64, f64) {
         kind: AccountMemberKind::Device,
         terms_json: terms.to_string(),
         created: account_format_date(T0 + HOUR).unwrap(),
-        custody: String::new(),
-        operator: String::new(),
+        custody: None,
+        operator: None,
         endpoints: vec![],
     })
     .unwrap();

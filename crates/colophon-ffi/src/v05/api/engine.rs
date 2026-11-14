@@ -342,8 +342,8 @@ impl AccountEngine {
             let mut paths = Vec::with_capacity(listing.len());
             if let Ok(mut v) = versions.lock() {
                 for l in listing {
-                    if !l.version.is_empty() {
-                        v.insert(l.path.clone(), l.version);
+                    if let Some(version) = l.version.filter(|v| !v.is_empty()) {
+                        v.insert(l.path.clone(), version);
                     }
                     paths.push(l.path);
                 }
@@ -353,7 +353,7 @@ impl AccountEngine {
             options.batch = usize::try_from(if batch == 0 { DEFAULT_BATCH } else { batch })
                 .map_err(|_| AccountError::bound("batch"))?;
             let saved = saved_in(saved)?;
-            let busy: super::InCallback = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let busy: super::InCallback = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let src = Source::new(host, versions.clone(), fault.clone(), busy.clone());
             let e = match Engine::open(src, paths, me, options, saved.as_ref(), now_ms) {
                 Ok(e) => e,
@@ -417,10 +417,15 @@ impl AccountEngine {
     fn finish_inner(&self, action: &AccountAction, sigs: Vec<Signature>) -> R<Written> {
         guard(|| {
             let sigs = cv::signatures(sigs)?;
-            // A locked engine refuses before the action is taken: it is not consumed.
-            self.ensure_live()?;
-            let p = action.take(self.owner)?;
-            let w = self.run(|e| Ok(e.finish_write(p, sigs)?))?;
+            // Locked is judged, and the action taken, under one hold of the engine: a refusal
+            // (locked, or a call that could not get the engine) never consumes the action.
+            let w = self.run(|e| {
+                if e.is_locked() {
+                    return Err(AccountError::locked());
+                }
+                let p = action.take(self.owner)?;
+                Ok(e.finish_write(p, sigs)?)
+            })?;
             Ok(Written {
                 stores: cv::store_list(&w.stores),
                 changes: cv::changes(&w.changes),
@@ -886,8 +891,8 @@ impl AccountEngine {
                 .map_err(|_| AccountError::internal("versions"))?;
             v.clear();
             for l in listing {
-                if !l.version.is_empty() {
-                    v.insert(l.path.clone(), l.version);
+                if let Some(version) = l.version.filter(|v| !v.is_empty()) {
+                    v.insert(l.path.clone(), version);
                 }
                 paths.push(l.path);
             }
@@ -914,10 +919,13 @@ impl AccountEngine {
                 .lock()
                 .map_err(|_| AccountError::internal("versions"))?;
             for l in paths {
-                if l.version.is_empty() {
-                    v.remove(&l.path);
-                } else {
-                    v.insert(l.path.clone(), l.version);
+                match l.version.filter(|v| !v.is_empty()) {
+                    None => {
+                        v.remove(&l.path);
+                    }
+                    Some(version) => {
+                        v.insert(l.path.clone(), version);
+                    }
                 }
                 listed.push(l.path);
             }

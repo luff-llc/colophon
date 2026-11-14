@@ -82,7 +82,8 @@ impl AccountAction {
     pub fn denial(&self) -> Result<Option<AccountDenial>, AccountError> {
         guard(|| {
             Ok(self.st.lock()?.denial.as_ref().map(|d| AccountDenial {
-                reason: d.reason.clone(),
+                reason: d.reason,
+                reason_raw: d.reason_raw.clone(),
                 detail: d.detail.clone(),
             }))
         })

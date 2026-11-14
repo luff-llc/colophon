@@ -174,6 +174,7 @@ impl SwiftSource {
                 .map(|(i, s)| SwiftSlotInfo {
                     index: i as u64,
                     kind: cv::slot_kind(s.kind()),
+                    kind_raw: cv::slot_kind_raw(s.kind()),
                     label: s.label().to_string(),
                     controller: s.controller().map(str::to_string),
                     problem: s.problem().map(str::to_string),
@@ -555,19 +556,21 @@ fn item_of(i: CopyItem) -> R<CoreItem> {
         namespace: i.namespace,
         source_digest: i.source_digest,
         key: i.key,
-        payload: json(&i.payload_json, "the item payload")?,
+        payload: core_json(&i.payload_json, "the item payload")?,
     })
 }
 fn members_of(m: Vec<MigratedMemberInput>) -> R<Vec<MigratedMember>> {
     list_len(&m, "members")?;
-    Ok(m.into_iter()
-        .map(|x| MigratedMember {
-            id: x.id,
-            label: x.label,
-            kind: cv::member_kind_of(x.kind).to_string(),
-            dropped: x.dropped,
+    m.into_iter()
+        .map(|x| {
+            Ok(MigratedMember {
+                id: x.id,
+                label: x.label,
+                kind: cv::member_kind_of(x.kind)?.to_string(),
+                dropped: x.dropped,
+            })
         })
-        .collect())
+        .collect()
 }
 
 impl AccountEngine {
@@ -819,14 +822,18 @@ object_methods! {
     fn finish_swift_copy_write(self; objs [plan: SwiftCopyPlan, write: AccountCopyWrite]; args [signatures: Vec<Signature>]) -> Written {
         guard(|| {
             let sigs = cv::signatures(signatures)?;
-            self.ensure_live()?;
             if write.owner != self.owner {
                 return Err(AccountError::wrong_object("this write was begun on another session"));
             }
-            let w = write.w.lock()?.take().ok_or_else(|| AccountError::consumed("this write is finished"))?;
-            let mut p = plan.p.lock()?;
-            let plan = p.as_mut().ok_or_else(|| AccountError::consumed("this plan is finished"))?;
-            Ok(self.written(self.run(|e| Ok(e.finish_swift_copy_write(plan, w, sigs)?))?))
+            Ok(self.written(self.run(|e| {
+                if e.is_locked() {
+                    return Err(AccountError::locked());
+                }
+                let w = write.w.lock()?.take().ok_or_else(|| AccountError::consumed("this write is finished"))?;
+                let mut p = plan.p.lock()?;
+                let plan = p.as_mut().ok_or_else(|| AccountError::consumed("this plan is finished"))?;
+                Ok(e.finish_swift_copy_write(plan, w, sigs)?)
+            })?))
         })
     }
     /// Finish a step of the move on this engine (F, a copier's shares, a migration). F is
@@ -834,10 +841,14 @@ object_methods! {
     fn finish_move(self; objs [step: AccountMove]; args [signatures: Vec<Signature>]) -> MoveResult {
         guard(|| {
             let sigs = cv::signatures(signatures)?;
-            // A locked engine refuses before the step is taken: it is not consumed.
-            self.ensure_live()?;
-            let m = step.take_move()?;
-            let moved = self.run(|e| Ok(e.finish_move(m, sigs)?))?;
+            // Locked is judged, and the step taken, under one hold of the engine.
+            let moved = self.run(|e| {
+                if e.is_locked() {
+                    return Err(AccountError::locked());
+                }
+                let m = step.take_move()?;
+                Ok(e.finish_move(m, sigs)?)
+            })?;
             Ok(Self::move_result(moved))
         })
     }

@@ -56,8 +56,8 @@ fn request(
         kind,
         terms_json: terms.to_string(),
         created: account_format_date(NOW - 2 * HOUR).unwrap(),
-        custody: String::new(),
-        operator: String::new(),
+        custody: None,
+        operator: None,
         endpoints,
     })
     .unwrap();
@@ -745,7 +745,7 @@ fn a_hostile_record_source_gets_typed_errors_not_panics_deadlocks_or_wrong_blame
     let mut with_junk = src.listing();
     with_junk.push(ListedPath {
         path: "not/a/path".into(),
-        version: String::new(),
+        version: None,
     });
     assert!(
         bad(DEVICE_KEY.to_vec(), with_junk).is_ok(),

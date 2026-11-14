@@ -7,6 +7,9 @@
 mod v05_support;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
+
+/// The wait limit is process-wide: the two tests that set it take turns.
+static CALLBACK_LIMIT: Mutex<()> = Mutex::new(());
 use v05_support::*;
 
 fn empty() -> SavedState {
@@ -86,8 +89,8 @@ fn world(host: &mut Host) -> (MemSource, String, String, String) {
         kind: AccountMemberKind::Device,
         terms_json: terms.to_string(),
         created: account_format_date(T0 + HOUR).unwrap(),
-        custody: String::new(),
-        operator: String::new(),
+        custody: None,
+        operator: None,
         endpoints: vec![],
     })
     .unwrap();
@@ -168,6 +171,47 @@ fn a_callback_that_waits_on_a_thread_that_calls_the_engine_is_refused_not_deadlo
     assert_eq!(w.outcome.lock().unwrap().as_deref(), Some("Reentered"));
     // The engine is intact.
     assert!(e.is_unlocked().unwrap());
+}
+
+#[test]
+fn an_honest_slow_source_never_fails_a_waiting_thread_only_one_callback_past_the_limit_does() {
+    let mut host = Host::new();
+    let (src, account, d, _m) = world(&mut host);
+    // Many short callbacks (100 ms each), the whole call longer than the 250 ms limit: the
+    // waiter's clock is the CURRENT callback's, so it is never refused.
+    struct Slow(MemSource);
+    impl HostSource for Slow {
+        fn read(&self, p: String) -> Result<Vec<u8>, AccountError> {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            self.0.read(p)
+        }
+        fn read_blob(&self, p: String) -> Result<Vec<u8>, AccountError> {
+            self.0.read_blob(p)
+        }
+    }
+    set_callback_wait_ms(300);
+    let e = open_over(
+        Box::new(Slow(src.clone())),
+        &src,
+        &account,
+        &format!("controller:{d}"),
+    );
+    let ins = e.begin_unlock_slot(0).unwrap();
+    e.finish_unlock_slot(0, host.answer_slot(&ins)).unwrap();
+    let e2 = e.clone();
+    let started = std::time::Instant::now();
+    // `verify_batch` re-reads every held path from the source: several slow callbacks in a row.
+    let holder = std::thread::spawn(move || e2.verify_batch(1000).map(|_| ()));
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let waited = e.status();
+    let total = started.elapsed();
+    holder.join().unwrap().unwrap();
+    set_callback_wait_ms(30_000);
+    assert!(waited.is_ok(), "{:?}", waited.err());
+    assert!(
+        total > std::time::Duration::from_millis(300),
+        "the call outlasted the limit: {total:?}"
+    );
 }
 
 #[test]
@@ -274,6 +318,48 @@ fn identity_kinds_verdicts_status_and_controllers_are_typed() {
     let c = e.controllers().unwrap().remove(0);
     assert_eq!(c.roles, [ControllerRole::Approve, ControllerRole::Control]);
     assert_eq!(c.form, SignForm::Raw);
+    // The controller carries its key descriptor and the raw role strings.
+    assert_eq!((c.key.form, c.key.signing.len()), (SignForm::Raw, 65));
+    assert!(c.key.agreement.is_some());
+    assert_eq!(c.roles_raw, ["approve", "control"]);
+    // A failed WebAuthn check is a typed field beside the code.
+    let bad = account_webauthn_check(
+        KeyDescriptorView {
+            form: SignForm::Raw,
+            signing: vec![1; 65],
+            agreement: None,
+            rp: None,
+            credential: None,
+            origins: vec![],
+            authority_origins: vec![],
+        },
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        WebauthnMode {
+            kind: CheckKind::Call,
+            rule: AuthorityRuleKind::Single,
+            verification: false,
+            sign_controller: false,
+            origins: vec![],
+            uv_required: false,
+        },
+    );
+    assert!(matches!(
+        bad,
+        Err(AccountError::BadSignature { check: Some(_), .. })
+            | Err(AccountError::Malformed { .. })
+    ));
+    assert_eq!(
+        account_map_swift_role("service".into()),
+        Some(AccountMemberKind::Server)
+    );
+    assert_eq!(
+        account_map_swift_role("web".into()),
+        Some(AccountMemberKind::App)
+    );
+    assert!(account_map_swift_role("robot".into()).is_none());
     assert_eq!(e.slots().unwrap()[0].kind, SlotKind::Sealed);
     // The status keeps the protocol's code and splits it.
     let s = e.status().unwrap();

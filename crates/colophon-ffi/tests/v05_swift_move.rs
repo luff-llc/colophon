@@ -159,7 +159,7 @@ fn home_head(w: &World, e: &AccountEngine, at: i64) {
     w.store.put(&p, head_env(w, e, at));
     e.apply_paths(vec![ListedPath {
         path: p,
-        version: String::new(),
+        version: None,
     }])
     .unwrap();
 }
@@ -179,7 +179,7 @@ fn put_apply(w: &World, e: &AccountEngine, path: &str, bytes: Vec<u8>) -> Change
     w.store.put(path, bytes);
     e.apply_paths(vec![ListedPath {
         path: path.into(),
-        version: String::new(),
+        version: None,
     }])
     .unwrap()
 }
@@ -203,8 +203,11 @@ impl SwiftTranslator for Tr {
             children: vec![SwiftChild {
                 key: "c".into(),
                 kind: "capture".into(),
-                payload_json: json!({"id": p["item"], "title": p["title"], "url": p["url"]})
-                    .to_string(),
+                payload_json: json!({"id": p["item"], "title": p["title"], "url": p["url"],
+                    // 600 small numbers, compact: an ordinary app value that a density rule
+                    // once refused (the copy then never drained).
+                    "pages": (0..600).map(|i| i % 10).collect::<Vec<_>>()})
+                .to_string(),
                 baseline: false,
             }],
             alternatives_json: vec![],
@@ -404,8 +407,8 @@ fn build() -> (World, Arc<AccountEngine>) {
         kind: AccountMemberKind::Server,
         terms_json: json!({"serves": ["home"]}).to_string(),
         created: account_format_date(T0).unwrap(),
-        custody: String::new(),
-        operator: String::new(),
+        custody: None,
+        operator: None,
         endpoints: vec!["https://home.example/".into()],
     })
     .unwrap();
@@ -467,8 +470,8 @@ fn build() -> (World, Arc<AccountEngine>) {
         kind: AccountMemberKind::Device,
         terms_json: terms.to_string(),
         created: account_format_date(received).unwrap(),
-        custody: String::new(),
-        operator: String::new(),
+        custody: None,
+        operator: None,
         endpoints: vec![],
     })
     .unwrap();
@@ -513,8 +516,13 @@ fn the_successor_genesis_export_refuses_a_step_out_of_order() {
         })
         .collect();
     let source = SwiftSource::read(entries).unwrap();
-    let mut host = Host::new();
-    let who = host.identity(5);
+    let expected: Value =
+        serde_json::from_slice(&std::fs::read(root.join("expected.json")).unwrap()).unwrap();
+    let who = expected["controllers"]["owner"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stranger = Host::new().identity(5);
     let params = |signers: Vec<String>, handover: Vec<String>| SwiftSuccessorParams {
         label: "Library".into(),
         namespaces: vec!["reading.saved".into()],
@@ -541,6 +549,23 @@ fn the_successor_genesis_export_refuses_a_step_out_of_order() {
         ),
         Err(AccountError::Bound { .. })
     ));
+    // A genesis that cannot succeed is refused BEFORE the person is asked for a passkey
+    // assertion: a signer, or a handover key, that is not a controller; a signer twice.
+    for (signers, handover) in [
+        (vec![stranger.clone()], vec![who.clone()]),
+        (vec![who.clone()], vec![stranger.clone()]),
+        (vec![who.clone(), who.clone()], vec![who.clone()]),
+    ] {
+        let r =
+            SwiftSuccessorCreation::begin(source.clone(), params(signers, handover), T0, ent(64));
+        assert!(
+            matches!(
+                r,
+                Err(AccountError::Malformed { .. } | AccountError::BadSignature { .. })
+            ),
+            "a doomed genesis is refused at begin, before any ceremony"
+        );
+    }
     // Signatures before the passkey ceremony: refused, and the genesis is spent.
     let c = SwiftSuccessorCreation::begin(
         source.clone(),
@@ -595,9 +620,15 @@ fn the_veto_branch() {
     store_all(&w, &done.stores);
     e.apply_paths(vec![ListedPath {
         path: path.clone(),
-        version: String::new(),
+        version: None,
     }])
     .unwrap();
+    // A second veto is not prepared while the first is held, on this engine or a cold one.
+    assert!(e.begin_swift_veto(veto_at, vec![w.owner.clone()]).is_err());
+    let cold = open(&w, &format!("controller:{}", w.owner), veto_at);
+    assert!(cold
+        .begin_swift_veto(veto_at, vec![w.owner.clone()])
+        .is_err());
     let veto_digest = digest(&body_of(&veto));
     assert_eq!(path, format!("vetoes/{veto_digest}.json"));
     // HOME: it receipts the veto and records `successionVetoed`.
@@ -699,6 +730,65 @@ fn the_unvetoed_branch_from_f_to_the_migration() {
         other.accept_predecessor_entry(f.clone(), now).unwrap();
         assert_eq!(other.swift_succession().unwrap().stage, MoveStage::Frozen);
     }
+    // A second successor genesis, made while the first is not yet verified (F is written, the
+    // home's head has not covered it): the first is still live and blocks it, and this is known
+    // before any passkey ceremony (`begin` refuses). Without the first's objects it is refused too.
+    {
+        let mut lib = w.entries.clone();
+        lib.push(f.clone());
+        let src2 = SwiftSource::read(
+            lib.iter()
+                .map(|b| ByteString { bytes: b.clone() })
+                .collect(),
+        )
+        .unwrap();
+        let first: Vec<Store> = w
+            .store
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, b)| Store {
+                path: p.clone(),
+                bytes: b.clone(),
+            })
+            .collect();
+        let (objs, _) = objects_of(&first);
+        let attempt = |attempts: Vec<AuthorityObjects>| {
+            SwiftSuccessorCreation::begin(
+                src2.clone(),
+                SwiftSuccessorParams {
+                    label: "Library".into(),
+                    namespaces: vec!["reading.saved".into()],
+                    include_stewards: false,
+                    authority_origins: vec![],
+                    agreements: vec![],
+                    threshold: None,
+                    recover_threshold: None,
+                    add_threshold: None,
+                    count_by_holders: false,
+                    policy_json: String::new(),
+                    signers: vec![w.owner.clone()],
+                    handover: vec![w.owner.clone()],
+                    issued_ms: issued + 120 * SEC,
+                    earlier_attempts: attempts,
+                },
+                now,
+                ent(64),
+            )
+        };
+        assert!(
+            attempt(vec![]).is_err(),
+            "the earlier attempt's objects are required"
+        );
+        match attempt(vec![authority_objects(&objs)]) {
+            Err(AccountError::Malformed { detail, .. }) => {
+                assert!(detail.contains("still live"), "{detail}")
+            }
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("a live earlier attempt must block a new genesis"),
+        }
+    }
     // HOME: its fresh head covers F, the succession is verified.
     home_head(&w, &e, now);
     assert_eq!(e.swift_succession().unwrap().stage, MoveStage::Verified);
@@ -715,10 +805,29 @@ fn the_unvetoed_branch_from_f_to_the_migration() {
     let mv = e
         .begin_swift_copier_shares(w.copier.clone(), vec![w.owner.clone()], ent(32))
         .unwrap();
+    // A second shares step prepared at the same head (two taps, two devices).
+    let mv_twin = e
+        .begin_swift_copier_shares(w.copier.clone(), vec![w.owner.clone()], ent(32))
+        .unwrap();
     assert_eq!(mv.kind().unwrap(), MoveKind::RenewShares);
+    let head_before = e.head_seq().unwrap();
     let mr = e
         .finish_move(mv.clone(), w.sign(&mv.steps().unwrap()))
         .unwrap();
+    let head_after = e.head_seq().unwrap();
+    assert_eq!(head_after, head_before + 1);
+    // The twin was prepared on a head that has since moved: `refused:fork`, nothing returned,
+    // nothing changed, and the head stays.
+    let twin = e.finish_move(mv_twin.clone(), w.sign(&mv_twin.steps().unwrap()));
+    assert!(
+        matches!(twin, Err(AccountError::Refused { ref reason, .. }) if reason == "fork"),
+        "a second shares step at a superseded head is refused as a fork"
+    );
+    assert_eq!(e.head_seq().unwrap(), head_after);
+    // And once the shares are sealed there is no second shares step to prepare.
+    assert!(e
+        .begin_swift_copier_shares(w.copier.clone(), vec![w.owner.clone()], ent(32))
+        .is_err());
     assert_eq!(mr.stores.len(), 1, "the shares entry");
     assert!(
         mr.stores[0].path.starts_with("authority/"),
@@ -838,9 +947,42 @@ fn the_unvetoed_branch_from_f_to_the_migration() {
         )
         .unwrap();
     assert_eq!(mv.kind().unwrap(), MoveKind::SwiftMigration);
+    // A second migration prepared before the first is finished (a different drain window).
+    let mv_twin = e.begin_swift_migration(
+        result.clone(),
+        vec![],
+        from,
+        until + 60 * SEC,
+        until,
+        vec![w.owner.clone(), w.kit.clone()],
+    );
     let mr = e
         .finish_move(mv.clone(), w.sign(&mv.steps().unwrap()))
         .unwrap();
+    // Once one is pending no second is prepared, and a twin prepared earlier does not finish.
+    assert!(e
+        .begin_swift_migration(
+            result.clone(),
+            vec![],
+            from,
+            until,
+            until,
+            vec![w.owner.clone(), w.kit.clone()]
+        )
+        .is_err());
+    if let Ok(twin) = mv_twin {
+        assert!(e
+            .finish_move(twin.clone(), w.sign(&twin.steps().unwrap()))
+            .is_err());
+    }
+    assert_eq!(
+        e.pending()
+            .unwrap()
+            .iter()
+            .filter(|p| p.components.iter().any(|c| c == "migration"))
+            .count(),
+        1
+    );
     let ch = mr.changes.as_ref().unwrap();
     let t_digest = ch.pending_added[0].clone();
     // The transition is handed to the host at its path, and a restart between the finish and

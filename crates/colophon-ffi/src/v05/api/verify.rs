@@ -35,6 +35,27 @@ fn blobs(v: Vec<ByteString>, what: &str) -> R<Vec<Vec<u8>>> {
         })
         .collect()
 }
+fn check_of(f: SigFailure) -> SignatureCheck {
+    match f {
+        SigFailure::Point => SignatureCheck::Point,
+        SigFailure::RawLength => SignatureCheck::RawLength,
+        SigFailure::Scalar => SignatureCheck::Scalar,
+        SigFailure::Der => SignatureCheck::Der,
+        SigFailure::Verify => SignatureCheck::Verify,
+        SigFailure::ClientData => SignatureCheck::ClientData,
+        SigFailure::ClientDataBound => SignatureCheck::ClientDataBound,
+        SigFailure::UnknownForm => SignatureCheck::UnknownForm,
+        SigFailure::Type => SignatureCheck::Type,
+        SigFailure::Challenge => SignatureCheck::Challenge,
+        SigFailure::Origin => SignatureCheck::Origin,
+        SigFailure::CrossOrigin => SignatureCheck::CrossOrigin,
+        SigFailure::RelyingParty => SignatureCheck::RelyingParty,
+        SigFailure::UserPresence => SignatureCheck::UserPresence,
+        SigFailure::UserVerification => SignatureCheck::UserVerification,
+        SigFailure::Form => SignatureCheck::Form,
+        SigFailure::CallOrigin => SignatureCheck::CallOrigin,
+    }
+}
 /// The stable name of the §4.3 check that failed (the order of the spec's steps).
 fn check_name(f: SigFailure) -> &'static str {
     match f {
@@ -60,6 +81,7 @@ fn check_name(f: SigFailure) -> &'static str {
 fn request_info_of(r: colophon_core::v05::account::AccessRequest) -> RequestInfo {
     RequestInfo {
         kind: cv::member_kind_from(&r.kind),
+        kind_raw: cv::member_kind_raw_from(&r.kind),
         raw: r.raw,
         member: r.member,
         label: r.label,
@@ -106,6 +128,14 @@ free_fn! {
     }
 }
 free_fn! {
+    /// The member kind a Swift predecessor's role migrates to (§15.4), exactly as the core
+    /// maps it: `device`, `app` or `web` (app), `agent`, `service` (server); none for a role
+    /// that has no mapping (the migration refuses it).
+    pub fn account_map_swift_role(role: String) -> Option<AccountMemberKind> {
+        colophon_core::v05::write::succession::map_swift_role(&role).map(cv::member_kind_from)
+    }
+}
+free_fn! {
     /// The standalone WebAuthn check (§17.2): the verified assertion, or `BadSignature` whose
     /// `code` is `badSignature:<check>` with the failed check named in the order of §4.3
     /// (`point rawLength scalar der verify clientData clientDataBound unknownForm type challenge
@@ -148,6 +178,7 @@ free_fn! {
                 Ok(ok) => Ok(WebauthnOk { uv: ok.uv, origin: ok.origin, counter: ok.counter }),
                 Err(f) => Err(AccountError::BadSignature {
                     code: format!("badSignature:{}", check_name(f)),
+                    check: Some(check_of(f)),
                     detail: check_name(f).into(),
                 }),
             }
@@ -256,11 +287,11 @@ impl AccountRequest {
                 signing: &spec.signing,
                 agreement: &spec.agreement,
                 label: &spec.label,
-                kind: cv::member_kind_of(spec.kind),
+                kind: cv::member_kind_of(spec.kind)?,
                 terms,
                 created: &spec.created,
-                custody: (!spec.custody.is_empty()).then_some(spec.custody.as_str()),
-                operator: (!spec.operator.is_empty()).then_some(spec.operator.as_str()),
+                custody: spec.custody.as_deref(),
+                operator: spec.operator.as_deref(),
                 endpoints,
             })?;
             Ok(Self {

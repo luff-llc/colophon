@@ -74,8 +74,27 @@ pub(crate) type Versions = Arc<Mutex<HashMap<String, String>>>;
 /// The first failure a host callback reported during the current call.
 pub(crate) type HostFault = Arc<Mutex<Option<String>>>;
 
-/// Whether the thread that holds an object's lock is inside a host callback right now.
-pub(crate) type InCallback = Arc<std::sync::atomic::AtomicBool>;
+/// When the thread that holds an object's lock entered the host callback it is in now: 0 when it
+/// is in none, else milliseconds since the first callback plus one. A waiter measures **one
+/// callback**, not its own wait: a holder that keeps making progress through many short
+/// callbacks is never refused.
+pub(crate) type InCallback = Arc<AtomicU64>;
+
+/// A monotonic millisecond clock, plus one. `wasm32-unknown-unknown` has no `Instant`, and has
+/// no second thread either, so there the stamp is a constant and no timed wait exists.
+#[cfg(not(target_arch = "wasm32"))]
+fn clock_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+        + 1
+}
+#[cfg(target_arch = "wasm32")]
+fn clock_ms() -> u64 {
+    1
+}
 
 /// The engine's view of the host's source.
 pub(crate) struct Source {
@@ -88,13 +107,13 @@ pub(crate) struct Source {
 struct InHost<'a>(&'a InCallback);
 impl<'a> InHost<'a> {
     fn enter(b: &'a InCallback) -> Self {
-        b.store(true, Ordering::SeqCst);
+        b.store(clock_ms(), Ordering::SeqCst);
         Self(b)
     }
 }
 impl Drop for InHost<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.store(0, Ordering::SeqCst);
     }
 }
 impl Source {
@@ -155,9 +174,10 @@ thread_local! {
     static THREAD: u64 = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
 }
 
-/// How long a call from another thread waits for an object whose holder is inside a host
-/// callback before it fails (milliseconds). A callback is synchronous, so this only bites a
-/// callback that waits for the thread that is waiting: a deadlock the host wrote.
+/// How long ONE host callback may run while another thread waits for its object before that
+/// thread fails (milliseconds). A callback is synchronous and may be slow, so this only bites a
+/// single callback that itself runs past the limit, typically one that waits for the thread that
+/// is waiting: a deadlock the host wrote.
 static CALLBACK_WAIT_MS: AtomicU64 = AtomicU64::new(30_000);
 /// Test support: how long (ms) a call waits for an object whose holder is inside a host
 /// callback. The default is 30,000.
@@ -168,8 +188,9 @@ pub fn set_callback_wait_ms(ms: u64) {
 
 /// A lock that waits for calls from other threads (as 0.4's does) and fails with `Reentered`
 /// when the thread that holds it asks again (a host callback calling into the object that is
-/// calling it), and when it has waited for longer than [`set_callback_wait_ms`] for an object
-/// whose holder is inside a host callback (a callback that waits for the thread that waits).
+/// calling it), and when the holder's current callback has itself run for longer than
+/// [`set_callback_wait_ms`] while this call waited (a callback that waits for the thread that
+/// waits). On `wasm32` there is no second thread and no timed wait.
 pub(crate) struct Cell<T> {
     m: Mutex<T>,
     owner: AtomicU64,
@@ -226,29 +247,29 @@ impl<T> Cell<T> {
             (_, Ok(g)) => g,
             (_, Err(TryLockError::Poisoned(_))) => return Err(poisoned()),
             (None, Err(TryLockError::WouldBlock)) => self.m.lock().map_err(|_| poisoned())?,
-            (Some(busy), Err(TryLockError::WouldBlock)) => {
-                let start = std::time::Instant::now();
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    match self.m.try_lock() {
-                        Ok(g) => break g,
-                        Err(TryLockError::Poisoned(_)) => return Err(poisoned()),
-                        Err(TryLockError::WouldBlock) => {}
-                    }
-                    let limit = CALLBACK_WAIT_MS.load(Ordering::Relaxed);
-                    if busy.load(Ordering::SeqCst)
-                        && start.elapsed() >= std::time::Duration::from_millis(limit)
-                    {
-                        return Err(AccountError::Reentered {
-                            code: "reentered".into(),
-                            detail: "this object's holder has been inside a host callback for \
-                                     longer than the wait allows: a callback must not call the \
-                                     engine and must not wait for a thread that does"
-                                .into(),
-                        });
-                    }
+            #[cfg(target_arch = "wasm32")]
+            (Some(_), Err(TryLockError::WouldBlock)) => self.m.lock().map_err(|_| poisoned())?,
+            #[cfg(not(target_arch = "wasm32"))]
+            (Some(busy), Err(TryLockError::WouldBlock)) => loop {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                match self.m.try_lock() {
+                    Ok(g) => break g,
+                    Err(TryLockError::Poisoned(_)) => return Err(poisoned()),
+                    Err(TryLockError::WouldBlock) => {}
                 }
-            }
+                let since = busy.load(Ordering::SeqCst);
+                if since != 0
+                    && clock_ms().saturating_sub(since) >= CALLBACK_WAIT_MS.load(Ordering::Relaxed)
+                {
+                    return Err(AccountError::Reentered {
+                        code: "reentered".into(),
+                        detail: "one host callback of this object's holder has run longer than \
+                                 the wait allows: a callback must not call the engine and must \
+                                 not wait for a thread that does"
+                            .into(),
+                    });
+                }
+            },
         };
         self.owner.store(me, Ordering::Release);
         Ok(Held {

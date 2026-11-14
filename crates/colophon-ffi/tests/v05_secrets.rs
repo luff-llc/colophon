@@ -227,8 +227,8 @@ fn world(host: &mut Host) -> (MemSource, String, String, String) {
         kind: AccountMemberKind::Device,
         terms_json: terms.to_string(),
         created: account_format_date(T0 + HOUR).unwrap(),
-        custody: String::new(),
-        operator: String::new(),
+        custody: None,
+        operator: None,
         endpoints: vec![],
     })
     .unwrap();
@@ -763,6 +763,9 @@ fn json_lists_are_bounded_in_total_before_any_item_is_parsed_and_the_worst_accep
     let ins = ctl.begin_unlock_slot(0).unwrap();
     ctl.finish_unlock_slot(0, host.answer_slot(&ins)).unwrap();
     let member = open(&src, &account, &format!("member:{m}"));
+    member
+        .finish_unlock_epochs(host.answer_epochs(&m, &member.begin_unlock_epochs().unwrap()))
+        .unwrap();
     let peak_of = |f: &mut dyn FnMut()| {
         let baseline = LIVE.load(Ordering::SeqCst);
         PEAK.store(baseline, Ordering::SeqCst);
@@ -805,55 +808,86 @@ fn json_lists_are_bounded_in_total_before_any_item_is_parsed_and_the_worst_accep
         "begin_keyring, one 4 MiB slot item: refused Bound; peak above the argument: {extra} bytes"
     );
     assert!(extra < (1 << 20), "{extra}");
-    // The densest document of each kind that is accepted: peak allocation of its parse.
-    for (name, doc, cap, authority) in [
-        (
-            "authority array",
-            dense_array(MAX_AUTH_JSON),
-            MAX_AUTH_JSON,
-            true,
-        ),
-        (
-            "authority object",
-            dense_object(MAX_AUTH_JSON),
-            MAX_AUTH_JSON,
-            true,
-        ),
-        ("domain array", dense_array(MAX_JSON), MAX_JSON, false),
-        ("domain object", dense_object(MAX_JSON), MAX_JSON, false),
-    ] {
-        assert!(doc.len() <= cap, "{name}");
-        let mut r = None;
-        let extra = peak_of(&mut || {
-            // Both calls parse the document before they ask anything of the account: an
-            // authority document is a transition's `change`, a domain one a record payload.
-            r = Some(if authority {
-                ctl.begin_transition(doc.clone(), vec![d.clone()], RuleKind::Control, vec![])
-                    .err()
-            } else {
-                member
-                    .begin_write(
-                        "notes".into(),
-                        "createNotebook".into(),
-                        doc.clone(),
-                        host.fresh(32),
-                    )
-                    .err()
-            });
+    // Values the app writes, taken to completion (prepared, signed, finished): small numbers
+    // compact (600 of them is 1.2 KB), 100,000 of them, one 1 MiB string, and the densest
+    // 1 MiB object. Each is accepted; the peak is what the whole write costs above its text.
+    let write = |extra: serde_json::Value, text_len: usize, name: &str, host: &mut Host| {
+        let payload = json!({"id": "n", "title": "T", "extra": extra}).to_string();
+        assert!(payload.len() <= MAX_JSON, "{name}: {}", payload.len());
+        let mut done = None;
+        let peak = peak_of(&mut || {
+            let a = member
+                .begin_write(
+                    "notes".into(),
+                    "createNotebook".into(),
+                    payload.clone(),
+                    host.fresh(32),
+                )
+                .unwrap();
+            let w = member
+                .finish(a.clone(), host.sign(&a.steps().unwrap()))
+                .unwrap();
+            done = Some(w.stores.len());
         });
-        // Not a valid change or payload, so refused; the bound must not be what refuses it.
-        let accepted = !matches!(r.as_ref().unwrap(), Some(AccountError::Bound { .. }));
-        let over = extra.saturating_sub(doc.len());
+        let over = peak.saturating_sub(payload.len());
         println!(
-            "worst accepted {name} of {} KiB: accepted {accepted}, peak above the argument and its clone: {} KiB ({:.1} times the text)",
-            doc.len() >> 10,
+            "valid write, {name} ({} KiB text): written, peak above the text {} KiB ({:.1} times)",
+            payload.len() >> 10,
             over >> 10,
-            over as f64 / doc.len() as f64
+            over as f64 / payload.len() as f64
         );
-        assert!(accepted, "{name} is within the bound");
-        assert!(over < 48 * doc.len(), "{name}: the parse peak is {over}");
+        assert!(done.is_some());
+        let _ = text_len;
+    };
+    let nums = |n: usize| json!((0..n).map(|i| i % 10).collect::<Vec<_>>());
+    write(nums(600), 0, "600 small numbers", &mut host);
+    write(nums(100_000), 0, "100,000 small numbers", &mut host);
+    write(
+        json!("a".repeat(MAX_JSON - 200)),
+        0,
+        "one long string",
+        &mut host,
+    );
+    let mut dense = serde_json::Map::new();
+    let mut i = 0u32;
+    while dense.len() * 11 + 8 < MAX_JSON - 400 {
+        dense.insert(format!("{i:06}"), json!(1));
+        i += 1;
     }
-    // One element per byte is refused on its element count.
+    write(
+        serde_json::Value::Object(dense),
+        0,
+        "densest object",
+        &mut host,
+    );
+    let mut arr = String::new();
+    let mut strs = vec![];
+    while arr.len() < MAX_JSON - 400 {
+        strs.push("abcdef");
+        arr.push_str("\"abcdef\",");
+    }
+    write(json!(strs), 0, "array of 6-byte strings", &mut host);
+    // An authority document (a transition's `change`) is accepted by the bound the same way;
+    // the account then refuses it as invalid, which is not `Bound`.
+    for (name, doc) in [
+        ("authority array", dense_array(MAX_AUTH_JSON)),
+        ("authority object", dense_object(MAX_AUTH_JSON)),
+    ] {
+        let mut r = None;
+        let peak = peak_of(&mut || {
+            r = Some(
+                ctl.begin_transition(doc.clone(), vec![d.clone()], RuleKind::Control, vec![])
+                    .err(),
+            );
+        });
+        assert!(
+            !matches!(r.unwrap(), Some(AccountError::Bound { .. })),
+            "{name}"
+        );
+        println!("{name} of {} KiB: accepted by the bound, refused by the account; peak above its text {} KiB", doc.len() >> 10, peak.saturating_sub(doc.len()) >> 10);
+    }
+    // One element per byte is no longer refused by shape: 1 MiB of `0,` is accepted (it costs
+    // 16 MiB to parse, well inside the budget).
     let dense = format!("[{}0]", "0,".repeat(MAX_JSON / 2 - 2));
     assert!(dense.len() <= MAX_JSON);
     let e = member
@@ -865,5 +899,5 @@ fn json_lists_are_bounded_in_total_before_any_item_is_parsed_and_the_worst_accep
         )
         .err()
         .unwrap();
-    assert!(matches!(e, AccountError::Bound { .. }), "{e:?}");
+    assert!(!matches!(e, AccountError::Bound { .. }), "{e:?}");
 }

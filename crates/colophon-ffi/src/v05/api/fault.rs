@@ -1,4 +1,5 @@
 //! The error every export returns: a typed variant plus the protocol's code string.
+use super::types::{AccountDenialReason, SignatureCheck};
 use colophon_core::v05::Failure;
 
 /// A failed call. `code` is the protocol result code of §1 and §19 (`malformed`, `badSignature`,
@@ -12,8 +13,10 @@ pub enum AccountError {
         code: String,
         detail: String,
     },
+    /// `check` names the failed WebAuthn check of §4.3 when `code` is `badSignature:<check>`.
     BadSignature {
         code: String,
+        check: Option<SignatureCheck>,
         detail: String,
     },
     NewerFormat {
@@ -63,7 +66,8 @@ pub enum AccountError {
     /// budgetSpent, notReadable or unavailable.
     Denied {
         code: String,
-        reason: String,
+        reason: AccountDenialReason,
+        reason_raw: Option<String>,
         detail: String,
     },
     /// The engine found its own source or home inconsistent and is unusable: discard it and
@@ -111,7 +115,10 @@ impl AccountError {
     /// The §19 reason of a `Refused` or `Denied`, else none.
     pub fn reason(&self) -> Option<String> {
         match self {
-            Self::Refused { reason, .. } | Self::Denied { reason, .. } => Some(reason.clone()),
+            Self::Refused { reason, .. } => Some(reason.clone()),
+            Self::Denied {
+                reason, reason_raw, ..
+            } => Some(super::convert::denial_reason_text(*reason, reason_raw)),
             _ => None,
         }
     }
@@ -157,9 +164,11 @@ impl AccountError {
         }
     }
     pub fn denied(reason: &str, detail: &str) -> Self {
+        let (r, raw) = super::convert::denial_reason(reason);
         Self::Denied {
             code: format!("denied:{reason}"),
-            reason: cap(reason),
+            reason: r,
+            reason_raw: raw,
             detail: cap(detail),
         }
     }
@@ -225,7 +234,11 @@ impl From<Failure> for AccountError {
         let detail = cap(f.detail());
         match f {
             Failure::Malformed(_) => Self::Malformed { code, detail },
-            Failure::BadSignature(_) => Self::BadSignature { code, detail },
+            Failure::BadSignature(_) => Self::BadSignature {
+                code,
+                check: None,
+                detail,
+            },
             Failure::NewerFormat(_) => Self::NewerFormat { code, detail },
             Failure::Unavailable(_) => Self::Unavailable { code, detail },
             Failure::Refused(r) => Self::Refused {
