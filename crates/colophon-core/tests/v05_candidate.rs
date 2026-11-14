@@ -909,6 +909,15 @@ fn run_succession(dir: &Path, case: &Value) -> Outcome {
             v.stop
         ));
     }
+    if let Some(code) = case["expected"]["genesis"].as_str() {
+        if v.code() != code || v.seq() != 1 {
+            return Outcome::Fail(format!(
+                "genesis want {code} at 1, got {} at {}",
+                v.code(),
+                v.seq()
+            ));
+        }
+    }
     if let Some(code) = case["expected"]["seq3"].as_str() {
         let wanted = code.rsplit(' ').next().unwrap();
         if v.code() != wanted {

@@ -3268,6 +3268,37 @@ pub fn part3(o: &mut Out) {
         60,
         vec![],
     );
+    // Revision 12, M4 (§8.4 Possession): a carried key is exempt from its possession proof only
+    // when the genesis's `handover` meets the rule that may write F at `head`. The genesis lists
+    // the kit, a predecessor key, and proves its possession in neither case.
+    let mut g = new_genesis(&recs, 2, &[], "No handover");
+    swift_case(
+        o,
+        "swift-no-handover-needs-possession",
+        &recs,
+        &mut g,
+        after,
+        json!({"succession": "unverified", "genesis": "badSignature"}),
+        "The genesis lists the predecessor's kit and carries no `handover`: the kit's possession proof is missing, so the genesis is `badSignature`.",
+        &a,
+        false,
+        60,
+        vec![],
+    );
+    let mut g = new_genesis(&recs, 2, sg![k1], "Handover by the kit");
+    swift_case(
+        o,
+        "swift-handover-below-rule-needs-possession",
+        &recs,
+        &mut g,
+        after,
+        json!({"succession": "unverified", "genesis": "badSignature"}),
+        "The `handover` is signed by the kit alone, which holds `recover` and not the control threshold F needs: it does not meet the rule that may write F, so the kit's possession is still required and the genesis is `badSignature`.",
+        &a,
+        false,
+        60,
+        vec![],
+    );
     // §16.3: a `layout` needs all signers to hold `control`; the kit holds only `recover`.
     let mut g = new_genesis(&recs, 2, sg![a], "Extra cosigner");
     let rg = successor_with_home(&mut g, 60, sr0 - 60);

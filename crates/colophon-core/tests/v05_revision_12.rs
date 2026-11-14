@@ -185,3 +185,29 @@ fn m2_vetoed_displaces_a_provisional_successor_activation_and_the_predecessor_co
         );
     }
 }
+
+// ---- M4 -----------------------------------------------------------------------------------
+
+#[test]
+fn m4_carried_keys_need_possession_unless_the_handover_meets_the_rule() {
+    for name in [
+        "swift-no-handover-needs-possession",
+        "swift-handover-below-rule-needs-possession",
+    ] {
+        let (o, now) = succession(name);
+        let v = verify_history(&o, &Persisted::default(), now);
+        assert_eq!(
+            (v.code(), v.seq()),
+            ("badSignature".to_string(), 1),
+            "{name}"
+        );
+        assert!(v.state.is_none() || v.state.unwrap().verified_succession().is_none());
+    }
+    // The same genesis with a handover that meets the rule is accepted without possession proofs.
+    for name in ["swift-keyring", "swift-root-library"] {
+        let (o, now) = succession(name);
+        let v = verify_history(&o, &Persisted::default(), now);
+        assert!(v.state.is_some(), "{name}: {:?}", v.stop);
+        assert!(v.seq() >= 1, "{name}");
+    }
+}

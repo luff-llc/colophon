@@ -495,10 +495,12 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
     {
         return Err(bad_signature("genesis: control rule not met").into());
     }
+    // A carried key is exempt only when the genesis's `handover` meets the rule that may write
+    // F at `head` (§8.4 Possession, §15.1); otherwise every listed controller proves possession.
     for id in keyring.controllers.keys() {
         let carried = succession
             .as_ref()
-            .is_some_and(|p| p.carried(id, &keyring.controllers[id]));
+            .is_some_and(|p| p.authorized && p.carried(id, &keyring.controllers[id]));
         if id != &e.by && !carried && !e.env.additions.iter().any(|a| &a.signer == id) {
             return Err(bad_signature("genesis: possession proof missing").into());
         }

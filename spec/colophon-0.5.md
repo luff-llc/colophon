@@ -675,8 +675,10 @@ A transition meeting the recovery rule has consent.
 - **Possession:** every controller added, and every controller whose `holder` is set, signs the
   body in `additions`, from an authority origin (a `sign` controller's from any origin its
   descriptor allows). Exempt: `upgrade`, and, at a successor genesis, keys whose descriptors equal
-  predecessor keys current at `head` (an unverified or vetoed succession still confers nothing,
-  §15.1).
+  predecessor keys current at `head`, but only when the genesis's `handover` meets the rule that
+  may write F at `head` (§15.1; for a `/5` predecessor, when F is its `successor` activation naming
+  this account). Without that, every listed controller needs its possession proof, and a genesis
+  lacking one is `badSignature`. An unverified or vetoed succession still confers nothing (§15.1).
 - **UV.** Required on every WebAuthn signature under the control or recovery rule, on immediate
   `keyring` and `vault` entries, and on transitions, vetoes and `handover`. Single-rule,
   `rekey`, `suspend` and possession signatures need UV only when the controller has
