@@ -1996,7 +1996,8 @@ and bytes that were not authenticated are never resumed from. Every item except 
 identically by replay from seq 1, so two verifiers that persist it reach the same verdicts:
 - the high-water `(seq, digest)` and each home's head mark (rollback detection only, §13.3) and
   the folded state there. **Head marks are local memory:** no replay of the history recomputes
-  them, since they record what this verifier accepted and when. They survive a checkpoint format
+  them, since they record what this verifier accepted and when; a replay that has no authenticated
+  blob starts without them. They survive a checkpoint format
   change by being carried over when the checkpoint is rebuilt from the retained objects, and a
   checkpoint whose marks are malformed is refused. Everything else listed here is recomputed: keyring, members (terms, expiry,
   session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
