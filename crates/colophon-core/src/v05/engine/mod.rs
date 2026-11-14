@@ -122,6 +122,17 @@ pub struct EngineStats {
     pub unread_paths: usize,
 }
 
+/// A fault of the record source the host must show: a source gave other bytes at an immutable
+/// path whose bytes a checkpoint had verified. A source never changes those bytes
+/// (0.3 §7.1: changing bytes at a previously verified immutable path is equivocation).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFault {
+    /// The immutable path.
+    pub path: String,
+    /// What happened, in a sentence the host can show.
+    pub what: String,
+}
+
 /// Bounded history result in protocol order. Reset offsets when the revision changes.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -351,6 +362,12 @@ pub struct Engine<S: RecordSource> {
     pub(crate) stats: EngineStats,
     /// Covered paths the open judged again because their bytes changed.
     rejudged: Vec<String>,
+    /// Faults of the source the host must show (see [`SourceFault`]).
+    source_faults: Vec<SourceFault>,
+    /// Paths whose bytes a home should be asked for again: a source changed their bytes. A
+    /// pass pulls such a path from any home that lists it, even when the home's digest is the
+    /// one we last held.
+    pub(crate) repull: BTreeSet<String>,
     ready: bool,
     failure: Option<Failure>,
     verify_cursor: usize,
@@ -524,6 +541,8 @@ impl<S: RecordSource> Engine<S> {
             stale_live: Vec::new(),
             stats,
             rejudged: Vec::new(),
+            source_faults: Vec::new(),
+            repull: BTreeSet::new(),
             ready: false,
             failure: None,
             verify_cursor: 0,
@@ -621,6 +640,17 @@ impl<S: RecordSource> Engine<S> {
                 changed.len(),
                 changed.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
             ));
+            // Show it, and fetch the verified bytes again from a home: a source must never
+            // change them.
+            self.source_faults = changed
+                .iter()
+                .map(|p| SourceFault {
+                    path: p.clone(),
+                    what: "a source changed the bytes of a path it had given and a checkpoint had verified"
+                        .into(),
+                })
+                .collect();
+            self.repull.extend(changed.iter().cloned());
             self.rejudged = changed;
         }
         self.restored.clear();
@@ -937,6 +967,11 @@ impl<S: RecordSource> Engine<S> {
     /// permission to rebuild an empty namespace.
     pub fn missing_covered(&self) -> Vec<String> {
         self.missing.iter().cloned().collect()
+    }
+    /// Faults of the record source the host must show: a source changed bytes it must never
+    /// change. Each path is also fetched again from a home that lists it.
+    pub fn source_faults(&self) -> &[SourceFault] {
+        &self.source_faults
     }
     /// Covered paths whose bytes changed since the checkpoint, which the resumed open judged
     /// again.

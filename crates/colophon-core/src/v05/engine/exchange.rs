@@ -39,6 +39,18 @@ pub const MAX_BODY: usize = 128 * 1024 * 1024;
 pub const MAX_CHANGE_PAGES: u32 = 64;
 /// Change-feed entries read in one pass.
 pub const MAX_CHANGE_ENTRIES: usize = 50_000;
+/// Pending-feed pages read in one pass (§14 bounds a complete listing at 10,368 objects: 163
+/// pages of 64); the rest waits for the next pass (reported as `More`).
+pub const MAX_PENDING_PAGES: u32 = 163;
+/// Pending-feed objects read in one pass.
+pub const MAX_PENDING_ENTRIES: usize = MAX_PENDING_PAGES as usize * PAGE;
+/// Record pulls queued in one pass (the rest waits for the next pass, reported as `More`).
+pub const MAX_PULLS_PER_PASS: usize = MAX_CHANGE_ENTRIES;
+/// Live-slot pulls queued in one pass.
+pub const MAX_LIVE_PULLS_PER_PASS: usize = 16_384;
+/// Pending objects judged together in one merge: the pages of a pass are merged in batches of
+/// this many, so a page of junk costs a parse and not a merge of the account.
+pub const PENDING_MERGE_BATCH: usize = 256;
 /// Digests of junk a home served that the engine remembers.
 pub const MAX_JUNK: usize = 4_096;
 /// Entries, objects or receipts per authority and pending page (§14).
@@ -247,6 +259,14 @@ enum Tag {
     PullPending,
     PushPending {
         digests: Vec<String>,
+        /// SHA-256 hex of the receipts among them (remembered as sent to this home).
+        receipts: Vec<String>,
+    },
+    PullPredecessor {
+        seq: u64,
+    },
+    PutPredecessor {
+        seq: u64,
     },
     Changes,
     PullRecord {
@@ -328,6 +348,16 @@ struct Home {
     pass_entries: usize,
     pass_seen: BTreeSet<(String, String)>,
     seen_cursors: BTreeSet<String>,
+    /// This pass's pending-feed bounds, and the objects waiting for their merge.
+    pend_pages: u32,
+    pend_entries: usize,
+    pend_buf: Vec<Vec<u8>>,
+    /// Receipts (by SHA-256 hex) already submitted to this home.
+    sent_receipts: BTreeSet<String>,
+    /// Predecessor entries pulled this pass.
+    pred_pulled: usize,
+    /// Faults found while planning, reported with the next answer.
+    notes: Vec<Fault>,
     genesis_asked: BTreeSet<String>,
     /// Digests of same-body genesis envelopes the home lists; one body is one object.
     twins: BTreeSet<String>,
@@ -363,6 +393,12 @@ impl Default for Home {
             pass_entries: 0,
             pass_seen: BTreeSet::new(),
             seen_cursors: BTreeSet::new(),
+            pend_pages: 0,
+            pend_entries: 0,
+            pend_buf: Vec::new(),
+            sent_receipts: BTreeSet::new(),
+            pred_pulled: 0,
+            notes: Vec::new(),
             genesis_asked: BTreeSet::new(),
             twins: BTreeSet::new(),
             junk: BTreeSet::new(),
@@ -436,6 +472,21 @@ fn is_public(tag: &Tag) -> bool {
         Tag::Head | Tag::PushAuthority { .. } | Tag::PushPending { .. }
     )
 }
+/// The sequence number of an authority entry's body, for naming a predecessor file.
+fn entry_seq(bytes: &[u8]) -> Option<u64> {
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    let b = crate::v05::encoding::decode_base64(
+        v.get("body")?.as_str()?,
+        crate::v05::encoding::bounds::AUTHORITY_BODY,
+    )
+    .ok()?;
+    serde_json::from_slice::<Value>(&b)
+        .ok()?
+        .get("seq")?
+        .as_u64()
+}
+/// Predecessor entries pulled or pushed in one pass.
+pub const MAX_PREDECESSOR_PER_PASS: usize = 256;
 fn purpose_of(method: Method) -> String {
     if method == Method::Get {
         "colophon.home.read".into()
@@ -585,6 +636,10 @@ impl<S: RecordSource> Engine<S> {
                 h.pass_entries = 0;
                 h.pass_seen.clear();
                 h.seen_cursors.clear();
+                h.pend_pages = 0;
+                h.pend_entries = 0;
+                h.pend_buf.clear();
+                h.pred_pulled = 0;
                 h.genesis_asked.clear();
                 h.verified_live.clear();
             }
@@ -691,6 +746,7 @@ impl<S: RecordSource> Engine<S> {
             Phase::Records => {
                 self.plan_pull_records(home);
                 self.plan_push(home, false)?;
+                self.plan_predecessor(home);
             }
             Phase::Live => self.plan_live(home),
             Phase::LivePush => self.plan_live_push(home),
@@ -762,9 +818,14 @@ impl<S: RecordSource> Engine<S> {
         Ok(())
     }
 
-    /// The transitions and vetoes this account holds that `home` has not receipted.
+    /// What `home` is owed (§14 `POST /pending`, §17.5 "Submitting"): the transitions and vetoes
+    /// this account holds that it has not receipted, while they can still be receipted (300 s
+    /// after their `issued`); a held veto of the succession (it names the successor's genesis,
+    /// §15.1 step 4); and the receipts other homes made of them, so that every home holds the
+    /// quorum's receipts.
     fn plan_push_pending(&mut self, home: &str) -> Result<()> {
-        let mut todo: Vec<(String, Vec<u8>)> = Vec::new();
+        use crate::v05::encoding::bounds;
+        let now = self.account.now_ms();
         // Only what is still pending: a transition with a recording entry on the branch is
         // history now, and its home needs no submission.
         let mut open: BTreeSet<String> = BTreeSet::new();
@@ -772,41 +833,226 @@ impl<S: RecordSource> Engine<S> {
             open.insert(t.digest.clone());
             open.extend(t.vetoes.iter().cloned());
         }
+        let genesis =
+            crate::v05::history::succession_status(self.account.record_authority().state())
+                .map(|s| s.genesis_digest);
+        let sent = self.home_mut(home).sent_receipts.clone();
+        let mut todo: Vec<(String, Vec<u8>, bool)> = Vec::new();
+        let mut receipts: Vec<(String, Vec<u8>, String)> = Vec::new();
         for p in &self.account.objects().pending {
             let Ok(env) = crate::v05::history::envelope::AuthEnvelope::parse(
                 p,
-                crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
-                crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
+                bounds::TRANSITION_ENVELOPE,
+                bounds::TRANSITION_ENVELOPE,
                 true,
             ) else {
                 continue;
             };
-            let proto = env.value.get("protocol").and_then(Value::as_str);
-            if !matches!(proto, Some("colophon/transition/5" | "colophon/veto/5")) {
-                continue;
+            match env.value.get("protocol").and_then(Value::as_str) {
+                Some(proto @ ("colophon/transition/5" | "colophon/veto/5")) => {
+                    let succession_veto = proto == "colophon/veto/5"
+                        && genesis.is_some()
+                        && env.value.get("transition").and_then(Value::as_str)
+                            == genesis.as_deref();
+                    if !(open.contains(&env.digest) || succession_veto) {
+                        continue;
+                    }
+                    // A home refuses what it first sees 300 s after its `issued`.
+                    let issued = env
+                        .value
+                        .get("issued")
+                        .and_then(Value::as_str)
+                        .and_then(crate::v05::encoding::parse_date);
+                    if issued.is_none_or(|i| now > i.saturating_add(300_000)) {
+                        continue;
+                    }
+                    if self.receipted_by(&env.digest).iter().any(|h| h == home) {
+                        continue;
+                    }
+                    todo.push((env.digest, p.clone(), false));
+                }
+                Some("colophon/receipt/5") => {
+                    let sha = super::hex(&super::sha(p));
+                    if sent.contains(&sha) {
+                        continue;
+                    }
+                    // Another home's receipt of an object this home may need: only a receipt
+                    // a current home signed, of an object still pending or of the genesis.
+                    let Some((object, by)) = self.receipt_parts(p) else {
+                        continue;
+                    };
+                    if by == home
+                        || !(open.contains(&object) || genesis.as_deref() == Some(object.as_str()))
+                    {
+                        continue;
+                    }
+                    receipts.push((object, p.clone(), sha));
+                }
+                _ => {}
             }
-            if !open.contains(&env.digest)
-                || self.receipted_by(&env.digest).iter().any(|h| h == home)
-            {
-                continue;
-            }
-            todo.push((env.digest, p.clone()));
         }
-        for chunk in todo.chunks(16) {
+        let mut items: Vec<(String, Vec<u8>, Option<String>)> =
+            todo.into_iter().map(|(d, b, _)| (d, b, None)).collect();
+        items.extend(receipts.into_iter().map(|(d, b, s)| (d, b, Some(s))));
+        for chunk in items.chunks(16) {
             let objs: Vec<Value> = chunk
                 .iter()
-                .filter_map(|(_, b)| serde_json::from_slice(b).ok())
+                .filter_map(|(_, b, _)| serde_json::from_slice(b).ok())
                 .collect();
             let body = canonical(&json!({"objects": objs}))?;
             self.enqueue(
                 home,
                 Tag::PushPending {
-                    digests: chunk.iter().map(|(d, _)| d.clone()).collect(),
+                    digests: chunk.iter().map(|(d, _, _)| d.clone()).collect(),
+                    receipts: chunk.iter().filter_map(|(_, _, s)| s.clone()).collect(),
                 },
                 Method::Post,
                 "/pending".into(),
                 body,
                 json_post(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The history of a Swift predecessor, through its final entry, that this account's homes
+    /// serve (§14): pulled when the account claims a Swift predecessor and holds less than the
+    /// claim needs, and published to a home that does not list it.
+    fn plan_predecessor(&mut self, home: &str) {
+        let Some(s) =
+            crate::v05::history::succession_status(self.account.record_authority().state())
+        else {
+            return;
+        };
+        if s.format != "colophon/swift-keyring/2" {
+            return;
+        }
+        let through = s.head_seq.saturating_add(1);
+        let held: BTreeSet<u64> = self
+            .account
+            .objects()
+            .predecessor
+            .iter()
+            .filter_map(|b| entry_seq(b))
+            .collect();
+        let remote: BTreeSet<String> = self.home_mut(home).remote.keys().cloned().collect();
+        let mut budget = MAX_PREDECESSOR_PER_PASS;
+        // Pull the first entry this account lacks; the answer queues the next.
+        if let Some(seq) = (1..=through).find(|n| !held.contains(n)) {
+            self.enqueue(
+                home,
+                Tag::PullPredecessor { seq },
+                Method::Get,
+                format!("/predecessor/authority/{seq:08}.json"),
+                vec![],
+                vec![],
+            );
+        }
+        // Publish what we hold and the home does not list.
+        let entries: Vec<(u64, Vec<u8>)> = self
+            .account
+            .objects()
+            .predecessor
+            .iter()
+            .filter_map(|b| entry_seq(b).map(|n| (n, b.clone())))
+            .filter(|(n, _)| *n <= through)
+            .collect();
+        for (seq, bytes) in entries {
+            if budget == 0 {
+                break;
+            }
+            let path = format!("predecessor/authority/{seq:08}.json");
+            if remote.contains(&path) {
+                continue;
+            }
+            budget -= 1;
+            self.enqueue(
+                home,
+                Tag::PutPredecessor { seq },
+                Method::Put,
+                format!("/predecessor/authority/{seq:08}.json"),
+                bytes,
+                vec![
+                    ("If-None-Match".into(), "*".into()),
+                    ("Content-Type".into(), "application/json".into()),
+                ],
+            );
+        }
+    }
+
+    fn on_pull_predecessor(
+        &mut self,
+        home: &str,
+        seq: u64,
+        r: &Response,
+        report: &mut Report,
+    ) -> Result<()> {
+        if r.status == 404 {
+            return Ok(());
+        }
+        if r.status != 200 {
+            report.faults.push(Fault::Status {
+                home: home.into(),
+                status: r.status,
+            });
+            return Ok(());
+        }
+        // One entry: it must be the entry the request named, and within the bound.
+        if r.body.len() > crate::v05::encoding::bounds::AUTHORITY_BODY.saturating_mul(2)
+            || entry_seq(&r.body) != Some(seq)
+        {
+            report.faults.push(Fault::BadObject {
+                home: home.into(),
+                code: "notAPredecessorEntry".into(),
+            });
+            return Ok(());
+        }
+        let before = self.account.objects().predecessor.len();
+        self.merge_objects(
+            Objects {
+                predecessor: vec![r.body.clone()],
+                ..Default::default()
+            },
+            report,
+            home,
+        )?;
+        if self.account.objects().predecessor.len() == before {
+            return Ok(());
+        }
+        let path = format!("predecessor/authority/{seq:08}.json");
+        if !self.ix.have.contains_key(&path) {
+            self.ix.have.insert(
+                path.clone(),
+                Have {
+                    sha: super::sha(&r.body),
+                    version: None,
+                },
+            );
+            self.ix.listing.insert(path.clone());
+            report.store.push((path, r.body.clone()));
+        }
+        let h = self.home_mut(home);
+        h.pred_pulled += 1;
+        if h.pred_pulled >= MAX_PREDECESSOR_PER_PASS {
+            report.faults.push(Fault::More {
+                home: home.into(),
+                feed: "predecessor".into(),
+            });
+            return Ok(());
+        }
+        let Some(s) =
+            crate::v05::history::succession_status(self.account.record_authority().state())
+        else {
+            return Ok(());
+        };
+        if seq < s.head_seq.saturating_add(1) {
+            self.enqueue(
+                home,
+                Tag::PullPredecessor { seq: seq + 1 },
+                Method::Get,
+                format!("/predecessor/authority/{:08}.json", seq + 1),
+                vec![],
+                vec![],
             );
         }
         Ok(())
@@ -980,6 +1226,7 @@ impl<S: RecordSource> Engine<S> {
             let h = self.home_mut(home);
             (h.remote.clone(), h.junk.clone())
         };
+        let mut queued = 0usize;
         for (p, sha) in remote {
             let want = matches!(
                 paths::classify(&p),
@@ -992,8 +1239,17 @@ impl<S: RecordSource> Engine<S> {
                 .ix
                 .have
                 .get(&p)
-                .is_none_or(|h| super::hex(&h.sha) != sha);
+                .is_none_or(|h| super::hex(&h.sha) != sha)
+                || self.repull.contains(&p);
             if want && differs && !junk.contains(&sha) {
+                if queued >= MAX_PULLS_PER_PASS {
+                    self.home_mut(home).notes.push(Fault::More {
+                        home: home.into(),
+                        feed: "records".into(),
+                    });
+                    break;
+                }
+                queued += 1;
                 self.enqueue(
                     home,
                     Tag::PullRecord {
@@ -1014,6 +1270,7 @@ impl<S: RecordSource> Engine<S> {
     /// ([`Engine::plan_live_push`]).
     fn plan_live(&mut self, home: &str) {
         let remote = self.home_mut(home).remote.clone();
+        let mut queued = 0usize;
         for (p, sha) in &remote {
             if let Some(paths::Kind::Live { namespace, .. }) = paths::classify(p) {
                 if !super::in_scope(&self.options, &namespace) {
@@ -1021,6 +1278,14 @@ impl<S: RecordSource> Engine<S> {
                 }
                 let ours = self.ix.live_have.get(p).map(|h| super::hex(&h.sha));
                 if ours.as_deref() != Some(sha.as_str()) {
+                    if queued >= MAX_LIVE_PULLS_PER_PASS {
+                        self.home_mut(home).notes.push(Fault::More {
+                            home: home.into(),
+                            feed: "live".into(),
+                        });
+                        break;
+                    }
+                    queued += 1;
                     self.enqueue(
                         home,
                         Tag::PullLive {
@@ -1178,6 +1443,7 @@ impl<S: RecordSource> Engine<S> {
             }
         };
         let mut report = Report::default();
+        let pulls = matches!(tag, Tag::PullRecord { .. });
         // A 401/403: a home that wants a call for this kind of request says so once; the
         // request is asked again with a fresh call. A request that carried a call and was
         // refused, or a public one, ends the pass.
@@ -1208,6 +1474,9 @@ impl<S: RecordSource> Engine<S> {
                 audience,
             });
             self.halt(home);
+            if pulls {
+                self.flush_pulled(home, &mut report)?;
+            }
             return Ok(report);
         }
         match tag {
@@ -1217,8 +1486,24 @@ impl<S: RecordSource> Engine<S> {
                 self.on_push_authority(home, last, &response, &mut report)?
             }
             Tag::PullPending => self.on_pull_pending(home, &response, &mut report)?,
-            Tag::PushPending { digests } => {
-                self.on_push_pending(home, &digests, &response, &mut report)?
+            Tag::PushPending { digests, receipts } => {
+                self.on_push_pending(home, &digests, &receipts, &response, &mut report)?
+            }
+            Tag::PullPredecessor { seq } => {
+                self.on_pull_predecessor(home, seq, &response, &mut report)?
+            }
+            Tag::PutPredecessor { seq } => {
+                if matches!(response.status, 200 | 201 | 412) {
+                    self.home_mut(home).remote.insert(
+                        format!("predecessor/authority/{seq:08}.json"),
+                        String::new(),
+                    );
+                } else {
+                    report.faults.push(Fault::Status {
+                        home: home.into(),
+                        status: response.status,
+                    });
+                }
             }
             Tag::Changes => self.on_changes(home, &response, &mut report)?,
             Tag::PullRecord { path, sha } => {
@@ -1249,6 +1534,21 @@ impl<S: RecordSource> Engine<S> {
             }
             Tag::GenesisCheck { sha } => self.on_genesis(home, &sha, &response, &mut report)?,
         }
+        report
+            .faults
+            .extend(std::mem::take(&mut self.home_mut(home).notes));
+        // What the pulls of this pass fetched and verified is judged and taken on its own
+        // merits once the last queued pull has been answered, whether that answer was a record,
+        // a 404, junk or a wrong digest: one bad answer costs only itself (0.3 §8.4 step 3).
+        if pulls
+            && !self
+                .home_mut(home)
+                .queue
+                .iter()
+                .any(|q| matches!(q.0, Tag::PullRecord { .. }))
+        {
+            self.flush_pulled(home, &mut report)?;
+        }
         Ok(report)
     }
 
@@ -1259,7 +1559,11 @@ impl<S: RecordSource> Engine<S> {
     }
 
     fn merge_objects(&mut self, objects: Objects, report: &mut Report, home: &str) -> Result<()> {
-        if objects.entries.is_empty() && objects.pending.is_empty() && objects.heads.is_empty() {
+        if objects.entries.is_empty()
+            && objects.pending.is_empty()
+            && objects.heads.is_empty()
+            && objects.predecessor.is_empty()
+        {
             return Ok(());
         }
         let now = self.account.now_ms();
@@ -1577,6 +1881,35 @@ impl<S: RecordSource> Engine<S> {
     /// its `received` lies in the object's window (§13.5: not before `issued`, at most 300 s
     /// after). Anything else is not a receipt of it.
     fn receipt_of(&self, e: &[u8]) -> Option<(String, String)> {
+        let (object, by, received) = self.receipt_fields(e)?;
+        // The object's `issued`: from the transition or veto the account holds.
+        let issued = self.account.objects().pending.iter().find_map(|p| {
+            let env = crate::v05::history::envelope::AuthEnvelope::parse(
+                p,
+                crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
+                crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
+                true,
+            )
+            .ok()?;
+            (env.digest == object)
+                .then(|| {
+                    env.value
+                        .get("issued")
+                        .and_then(Value::as_str)
+                        .and_then(crate::v05::encoding::parse_date)
+                })
+                .flatten()
+        })?;
+        (received >= issued && received <= issued.saturating_add(300_000)).then_some((object, by))
+    }
+
+    /// `(object, by)` of a receipt a current home of this account signed, window not checked.
+    fn receipt_parts(&self, e: &[u8]) -> Option<(String, String)> {
+        self.receipt_fields(e).map(|(o, b, _)| (o, b))
+    }
+
+    /// `(object, by, received)` of a receipt of this account that a current home signed.
+    fn receipt_fields(&self, e: &[u8]) -> Option<(String, String, i64)> {
         let raw = crate::v05::signature::RawEnvelope::parse(
             e,
             crate::v05::encoding::bounds::HEAD_BODY,
@@ -1602,25 +1935,7 @@ impl<S: RecordSource> Engine<S> {
             .find(|m| m.request.member_id() == by)
             .map(|m| m.request.signing.clone())?;
         raw.verify(&key).ok()?;
-        // The object's `issued`: from the transition or veto the account holds.
-        let issued = self.account.objects().pending.iter().find_map(|p| {
-            let env = crate::v05::history::envelope::AuthEnvelope::parse(
-                p,
-                crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
-                crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
-                true,
-            )
-            .ok()?;
-            (env.digest == object)
-                .then(|| {
-                    env.value
-                        .get("issued")
-                        .and_then(Value::as_str)
-                        .and_then(crate::v05::encoding::parse_date)
-                })
-                .flatten()
-        })?;
-        (received >= issued && received <= issued.saturating_add(300_000)).then_some((object, by))
+        Some((object, by, received))
     }
 
     fn note_receipts(&mut self, receipts: &[Vec<u8>]) {
@@ -1633,6 +1948,57 @@ impl<S: RecordSource> Engine<S> {
                     .insert(by);
             }
         }
+    }
+
+    /// Whether `b` is shaped like an object of the pending feed of this account: a transition,
+    /// a veto or a receipt that names this account. Cheap (one parse, no merge, no signature):
+    /// what is not is dropped before the account is asked to hold it.
+    fn is_pending_candidate(&self, b: &[u8]) -> bool {
+        let Ok(env) = crate::v05::history::envelope::AuthEnvelope::parse(
+            b,
+            crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
+            crate::v05::encoding::bounds::TRANSITION_ENVELOPE,
+            true,
+        ) else {
+            return false;
+        };
+        matches!(
+            env.value.get("protocol").and_then(Value::as_str),
+            Some("colophon/transition/5" | "colophon/veto/5" | "colophon/receipt/5")
+        ) && env.value.get("account").and_then(Value::as_str) == Some(self.account.id().as_str())
+    }
+
+    /// Merge the pending objects waiting in the home's buffer, in one merge.
+    fn flush_pending(&mut self, home: &str, report: &mut Report) -> Result<()> {
+        let objects = std::mem::take(&mut self.home_mut(home).pend_buf);
+        if objects.is_empty() {
+            return Ok(());
+        }
+        self.merge_objects(
+            Objects {
+                pending: objects.clone(),
+                ..Default::default()
+            },
+            report,
+            home,
+        )?;
+        self.note_receipts(&objects);
+        for b in &objects {
+            if let Some(path) = verified_pending_path(b) {
+                if !self.ix.have.contains_key(&path) {
+                    self.ix.have.insert(
+                        path.clone(),
+                        Have {
+                            sha: super::sha(b),
+                            version: None,
+                        },
+                    );
+                    self.ix.listing.insert(path.clone());
+                    report.store.push((path, b.clone()));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn on_pull_pending(&mut self, home: &str, r: &Response, report: &mut Report) -> Result<()> {
@@ -1662,14 +2028,17 @@ impl<S: RecordSource> Engine<S> {
         };
         let after = self.home_mut(home).pending_after;
         let mut last = after;
-        let mut o = Objects::default();
+        let mut fresh: Vec<Vec<u8>> = Vec::new();
+        let mut entries = 0usize;
+        let mut stop = false;
         for it in list {
             let (Some(seq), Some(env)) = (it["seq"].as_u64(), it.get("envelope")) else {
                 report.faults.push(Fault::Malformed {
                     home: home.into(),
                     why: "an object without seq or envelope".into(),
                 });
-                return Ok(());
+                stop = true;
+                break;
             };
             if seq <= last {
                 // Cursors are the home's own increasing integers and never reused.
@@ -1677,34 +2046,46 @@ impl<S: RecordSource> Engine<S> {
                     home: home.into(),
                     feed: "pending".into(),
                 });
-                return Ok(());
+                stop = true;
+                break;
             }
             last = seq;
+            entries += 1;
             if let Ok(b) = canonical(env) {
-                o.pending.push(b);
-            }
-        }
-        let objects = o.pending.clone();
-        self.merge_objects(o, report, home)?;
-        self.note_receipts(&objects);
-        for b in &objects {
-            if let Some(path) = verified_pending_path(b) {
-                if !self.ix.have.contains_key(&path) {
-                    self.ix.have.insert(
-                        path.clone(),
-                        Have {
-                            sha: super::sha(b),
-                            version: None,
-                        },
-                    );
-                    self.ix.listing.insert(path.clone());
-                    report.store.push((path, b.clone()));
+                if self.is_pending_candidate(&b) {
+                    fresh.push(b);
                 }
             }
         }
-        self.home_mut(home).pending_after = last;
-        if v["more"].as_bool().unwrap_or(false) {
-            if last > after {
+        let (pages, total) = {
+            let h = self.home_mut(home);
+            h.pend_pages += 1;
+            h.pend_entries += entries;
+            h.pend_buf.extend(fresh);
+            (h.pend_pages, h.pend_entries)
+        };
+        let more = v["more"].as_bool().unwrap_or(false);
+        let capped = pages >= MAX_PENDING_PAGES || total >= MAX_PENDING_ENTRIES;
+        // The cursor moves only past what was read in order.
+        if last > after {
+            self.home_mut(home).pending_after = last;
+        }
+        let going = more && !stop && last > after && !capped;
+        if !going || self.home_mut(home).pend_buf.len() >= PENDING_MERGE_BATCH {
+            self.flush_pending(home, report)?;
+        }
+        if more && !stop {
+            if last == after {
+                report.faults.push(Fault::NoProgress {
+                    home: home.into(),
+                    feed: "pending".into(),
+                });
+            } else if capped {
+                report.faults.push(Fault::More {
+                    home: home.into(),
+                    feed: "pending".into(),
+                });
+            } else {
                 self.enqueue(
                     home,
                     Tag::PullPending,
@@ -1713,11 +2094,6 @@ impl<S: RecordSource> Engine<S> {
                     vec![],
                     vec![],
                 );
-            } else {
-                report.faults.push(Fault::NoProgress {
-                    home: home.into(),
-                    feed: "pending".into(),
-                });
             }
         }
         Ok(())
@@ -1727,9 +2103,17 @@ impl<S: RecordSource> Engine<S> {
         &mut self,
         home: &str,
         digests: &[String],
+        receipts: &[String],
         r: &Response,
         report: &mut Report,
     ) -> Result<()> {
+        if matches!(r.status, 200 | 422) {
+            // A receipt the home took, or refused for good, is not sent to it again.
+            let h = self.home_mut(home);
+            if h.sent_receipts.len() < 16_384 {
+                h.sent_receipts.extend(receipts.iter().cloned());
+            }
+        }
         match r.status {
             200 => {
                 if let Ok(v) = body_json(r) {
@@ -1812,8 +2196,10 @@ impl<S: RecordSource> Engine<S> {
             .map(|h| super::hex(&h.sha));
         let mut fresh = 0usize;
         let mut ask: Vec<String> = Vec::new();
+        let mut overflow = false;
         {
-            let h = self.home_mut(home);
+            let options = &self.options;
+            let h = self.exchange.homes.entry(home.to_string()).or_default();
             h.pass_pages += 1;
             for e in entries {
                 let (Some(p), Some(sha)) = (e["path"].as_str(), e["sha256"].as_str()) else {
@@ -1825,16 +2211,32 @@ impl<S: RecordSource> Engine<S> {
                     }
                     continue;
                 };
-                if paths::classify(p).is_none()
-                    || !crate::v05::encoding::is_lower_hex(sha, 64)
-                    || h.remote.len() >= super::MAX_LISTING
+                let Some(kind) = paths::classify(p) else {
+                    continue;
+                };
+                // A record or slot of a namespace this replica does not read is never pulled
+                // or compared with: it is not remembered.
+                if let paths::Kind::Op { namespace, .. } | paths::Kind::Live { namespace, .. } =
+                    &kind
                 {
+                    if !super::in_scope(options, namespace) {
+                        continue;
+                    }
+                }
+                if !crate::v05::encoding::is_lower_hex(sha, 64) {
                     continue;
                 }
                 // An entry repeated as it was is not news, whatever cursor carries it.
-                if !h.pass_seen.insert((p.to_string(), sha.to_string())) {
+                if h.pass_seen.contains(&(p.to_string(), sha.to_string())) {
                     continue;
                 }
+                // The remembered set is full: this entry cannot be remembered, so the cursor
+                // must not move past it. Reported, never skipped silently.
+                if h.remote.len() >= super::MAX_LISTING && !h.remote.contains_key(p) {
+                    overflow = true;
+                    continue;
+                }
+                h.pass_seen.insert((p.to_string(), sha.to_string()));
                 fresh += 1;
                 h.pass_entries += 1;
                 h.remote.insert(p.to_string(), sha.to_string());
@@ -1848,6 +2250,12 @@ impl<S: RecordSource> Engine<S> {
                     ask.push(sha.to_string());
                 }
             }
+        }
+        if overflow {
+            report.faults.push(Fault::More {
+                home: home.into(),
+                feed: "remote".into(),
+            });
         }
         for sha in ask {
             self.enqueue(
@@ -1876,6 +2284,10 @@ impl<S: RecordSource> Engine<S> {
                 feed: "changes".into(),
             });
             self.halt(home);
+            return Ok(());
+        }
+        if overflow {
+            // Not past what could not be remembered: the next pass reads this page again.
             return Ok(());
         }
         if cursor.is_some() {
@@ -1984,19 +2396,23 @@ impl<S: RecordSource> Engine<S> {
                         path: path.into(),
                     });
                 }
+                // Settled: a twin of a record we hold (another envelope of its body, or another
+                // body at its path) is reported once and not fetched again every pass.
+                let h = self.home_mut(home);
+                if h.junk.len() < MAX_JUNK {
+                    h.junk.insert(sha.to_string());
+                }
                 return Ok(());
             }
             // The local bytes are no record: the home's replace them.
             self.ix.have.remove(path);
         }
+        // Held for the batch; `exchange_answer` judges the batch when it is full and when the
+        // last queued pull has been answered, whatever that answer was.
         let batch = self.options.batch;
         let h = self.home_mut(home);
         h.pulled.push((path.to_string(), r.body.clone()));
-        let last = !h
-            .queue
-            .iter()
-            .any(|q| matches!(q.0, Tag::PullRecord { .. }));
-        if h.pulled.len() >= batch || last {
+        if h.pulled.len() >= batch {
             self.flush_pulled(home, report)?;
         }
         Ok(())
@@ -2027,6 +2443,7 @@ impl<S: RecordSource> Engine<S> {
         for (path, bytes) in pulled {
             match self.account.verdict_of(&path, &bytes) {
                 Some(code) if !super::is_not_a_record(&code) => {
+                    self.repull.remove(&path);
                     self.ix.have.insert(
                         path.clone(),
                         Have {
