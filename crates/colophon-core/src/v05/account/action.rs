@@ -748,6 +748,7 @@ impl Account {
         rotate: Option<([u8; 32], [u8; 32])>,
     ) -> Result<PendingAction> {
         self.require_writable()?;
+        self.control_remains(&Change::remove_controllers(remove.to_vec(), keep.to_vec()))?;
         let Some((new_seed, entropy)) = rotate else {
             return self.begin_transition(
                 &Change::remove_controllers(remove.to_vec(), keep.to_vec()),
@@ -980,6 +981,7 @@ impl Account {
         rule: TransitionRule,
     ) -> Result<PendingAction> {
         self.require_writable()?;
+        self.control_remains(change)?;
         let batch = prepare_transition(
             &self.d.effective,
             self.now_ms,
@@ -992,6 +994,44 @@ impl Account {
             },
         )?;
         Ok(self.batch_action("transition", batch))
+    }
+
+    /// §6.2: some controller holds `control`. Refused at prepare when a change removes or
+    /// demotes every one that does (and adds none).
+    fn control_remains(&self, change: &Change) -> Result<()> {
+        let Some(k) = change.0.get("keyring") else {
+            return Ok(());
+        };
+        let mut now: std::collections::BTreeMap<String, bool> = self
+            .d
+            .auth
+            .state()
+            .keyring()
+            .controllers
+            .iter()
+            .map(|(id, c)| (id.clone(), c.has(&Role::Control)))
+            .collect();
+        for id in k
+            .get("remove")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = id.as_str() {
+                now.remove(id);
+            }
+        }
+        for field in ["update", "add"] {
+            for v in k.get(field).and_then(Value::as_array).into_iter().flatten() {
+                if let Ok(c) = Controller::parse(v.clone(), field) {
+                    now.insert(c.id(), c.has(&Role::Control));
+                }
+            }
+        }
+        require(
+            now.values().any(|c| *c),
+            "the change leaves no controller holding control (§6.2)",
+        )
     }
 
     fn pending_bytes(&self, digest: &str) -> Result<Vec<u8>> {
@@ -1147,164 +1187,96 @@ impl Account {
     /// Record everything now determined (§8.6, §8.7): the `activate` of each due transition,
     /// the `vetoed` of each vetoed one, the `final` of each activation witnessed by heads.
     /// These bodies are unsigned and have exactly one possible value, so two homes holding the
-    /// same objects build the same bytes. Returns each recorded entry; applies each.
+    /// same objects build the same bytes.
+    ///
+    /// They are recorded in due-time order, then by transition digest (§8.6 rule 1's order),
+    /// never in the order they are listed: a transition signed by a key that an earlier-due
+    /// removal takes out is not recorded ahead of that removal. The call is **all or nothing**:
+    /// it returns every recording it made, with its bytes, and has applied them all; or it
+    /// returns the error and has applied none.
     pub fn record_due(&mut self) -> Result<Vec<Finished>> {
+        let snapshot = (
+            self.objects.clone(),
+            self.records.clone(),
+            self.persisted.clone(),
+            self.now_ms,
+            self.first_seen.clone(),
+        );
         let mut out = Vec::new();
         // Bounded by the number of held pending objects and activations.
-        for _ in 0..self.objects.pending.len() + self.d.auth.state().activations().len() + 8 {
-            if let Some(batch) = self.next_recording() {
-                let action = self.batch_action("record", batch);
-                out.push(self.finish(action, Vec::new())?);
-            } else if let Some((seq, env)) = self.next_fork_activation() {
-                let finished = Finished {
-                    entries: vec![(seq, env.clone())],
-                    pending: Vec::new(),
-                    records: Vec::new(),
-                    artifact: None,
-                    changes: Changes::default(),
-                    info: ActionInfo {
-                        name: "record".into(),
-                        ..ActionInfo::default()
-                    },
-                };
-                let extra = Incoming {
-                    objects: crate::v05::history::Objects {
-                        entries: vec![env],
-                        ..Default::default()
-                    },
-                    records: Vec::new(),
-                };
-                out.push(self.apply_extra(extra, finished, EpochKeys::new(), None)?);
-            } else {
+        let bound = self.objects.pending.len() + self.d.auth.state().activations().len() + 8;
+        let mut failure = None;
+        for _ in 0..bound {
+            let Some(batch) = self.next_recording() else {
                 break;
-            }
-        }
-        Ok(out)
-    }
-
-    /// While the history stands at a fork, the one entry that can be recorded is the
-    /// `activate` of a due `resolve` transition on the branch it keeps (§8.6 rule 3). The
-    /// write-side builders fold one branch and refuse a forked history, so the body is made
-    /// here from the branch the transition is anchored on, with the same fields `activate`
-    /// has: the receipts §8.7 chooses, `by` the transition's, `issued` the later of its due
-    /// time and the preceding entry's.
-    fn next_fork_activation(&self) -> Option<(u64, Vec<u8>)> {
-        use crate::v05::write::{envelope, Header};
-        if !matches!(self.d.verdict.stop, Some(Stop::Fork { .. })) || self.d.verdict.rollback {
-            return None;
-        }
-        let mut by_digest: std::collections::BTreeMap<String, (u64, Option<String>, Vec<u8>)> =
-            Default::default();
-        for b in &self.d.effective.entries {
-            if let Ok(e) = AuthEnvelope::parse(
-                b,
-                bounds::AUTHORITY_BODY,
-                bounds::AUTHORITY_BODY.saturating_mul(2),
-                false,
-            ) {
-                by_digest.insert(
-                    e.digest.clone(),
-                    (
-                        e.value.get("seq").and_then(Value::as_u64).unwrap_or(0),
-                        e.value
-                            .get("previous")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        b.clone(),
-                    ),
-                );
-            }
-        }
-        let mut transitions: Vec<(AuthEnvelope, Vec<u8>)> = Vec::new();
-        for b in &self.d.effective.pending {
-            if let Ok(e) = AuthEnvelope::parse(
-                b,
-                bounds::TRANSITION_ENVELOPE,
-                bounds::TRANSITION_ENVELOPE,
-                true,
-            ) {
-                if e.value.get("protocol").and_then(Value::as_str) == Some("colophon/transition/5")
-                    && e.value
-                        .get("change")
-                        .and_then(|c| c.get("resolve"))
-                        .is_some()
-                {
-                    transitions.push((e, b.clone()));
+            };
+            let action = self.batch_action("record", batch);
+            match self.finish(action, Vec::new()) {
+                Ok(f) => out.push(f),
+                Err(e) => {
+                    failure = Some(e);
+                    break;
                 }
             }
         }
-        transitions.sort_by(|a, b| a.0.digest.cmp(&b.0.digest));
-        for (t, bytes) in transitions {
-            let anchor = t.value.get("anchor")?;
-            let (a_seq, a_digest) = (
-                anchor.get("seq")?.as_u64()?,
-                anchor.get("digest")?.as_str()?.to_string(),
-            );
-            let mut branch = Vec::new();
-            let mut at = Some(a_digest.clone());
-            while let Some(d) = at {
-                let Some((seq, prev, raw)) = by_digest.get(&d) else {
-                    branch.clear();
-                    break;
-                };
-                branch.push((*seq, raw.clone()));
-                at = prev.clone();
+        match failure {
+            None => Ok(out),
+            Some(e) => {
+                // Put back what was applied: the same inputs rebuild the same account.
+                if !out.is_empty() {
+                    let (o, r, p, n, seen) = snapshot;
+                    if let Ok(d) = self.candidate(&o, &r, &p, n) {
+                        self.d = d;
+                        self.objects = o;
+                        self.records = r;
+                        self.persisted = p;
+                        self.now_ms = n;
+                        self.first_seen = seen;
+                    }
+                }
+                Err(e)
             }
-            branch.reverse();
-            if branch.len() as u64 != a_seq || branch.first().map(|(s, _)| *s) != Some(1) {
-                continue;
-            }
-            let scoped = crate::v05::history::Objects {
-                entries: branch.into_iter().map(|(_, b)| b).collect(),
-                pending: self.d.effective.pending.clone(),
-                heads: self.objects.heads.clone(),
-                predecessor: self.objects.predecessor.clone(),
-            };
-            let verdict = crate::v05::history::verify_history(
-                &scoped,
-                &crate::v05::history::Persisted::default(),
-                self.now_ms,
-            );
-            if verdict.stop.is_some() {
-                continue;
-            }
-            let state = verdict.state?;
-            let issued_t = t
-                .value
-                .get("issued")
-                .and_then(Value::as_str)
-                .and_then(crate::v05::encoding::parse_date)?;
-            let receipts =
-                choose_receipts(&state, &self.d.effective.pending, &t.digest, issued_t, None)
-                    .ok()?;
-            let timing = crate::v05::history::transition_timing(&state, &bytes, &receipts).ok()?;
-            if timing.due_ms > self.now_ms {
-                continue;
-            }
-            let issued = timing.due_ms.max(state.last_issued_ms());
-            let body = Kind::Activate {
-                transition: bytes,
-                receipts,
-            }
-            .body(&Header {
-                seq: a_seq + 1,
-                previous: Some(a_digest),
-                issued: format_date(issued),
-                by: timing.by,
-            })
-            .ok()?;
-            let env = envelope(&body, None, &[], &[], &[]).ok()?;
-            return Some((a_seq + 1, env));
         }
-        None
     }
 
+    /// The next recording to make, in due-time order then digest, or `None`.
     fn next_recording(&self) -> Option<PendingBatch> {
-        if self.require_writable().is_err() {
+        let forked = matches!(self.d.verdict.stop, Some(Stop::Fork { .. }));
+        if !forked && self.require_writable().is_err() {
+            return None;
+        }
+        if self.d.verdict.rollback {
             return None;
         }
         let st = self.d.auth.state();
-        let pending = super::read::pending_transitions(&self.d.effective, st);
+        // Every held transition, with its due time when the held receipts decide it. At a fork
+        // only a `resolve` can be recorded, and its timing is judged on its own branch by
+        // `prepare_activate`.
+        let mut order: Vec<(i64, String)> = if forked {
+            let mut v: Vec<(i64, String)> = Vec::new();
+            for b in &self.d.effective.pending {
+                if let Ok(e) = AuthEnvelope::parse(
+                    b,
+                    bounds::TRANSITION_ENVELOPE,
+                    bounds::TRANSITION_ENVELOPE,
+                    true,
+                ) {
+                    if e.value.get("protocol").and_then(Value::as_str)
+                        == Some("colophon/transition/5")
+                    {
+                        v.push((0, e.digest));
+                    }
+                }
+            }
+            v
+        } else {
+            super::read::pending_transitions(&self.d.effective, st)
+                .into_iter()
+                .map(|t| (t.due_ms.unwrap_or(i64::MAX), t.digest))
+                .collect()
+        };
+        order.sort();
+        order.dedup();
         // The vetoes held for each transition, lowest digest first.
         let mut vetoes: Vec<(String, String)> = Vec::new();
         for b in &self.d.effective.pending {
@@ -1317,20 +1289,25 @@ impl Account {
             }
         }
         vetoes.sort();
-        for t in &pending {
-            for (td, vd) in vetoes.iter().filter(|(td, _)| *td == t.digest) {
-                if let Ok(b) = prepare_vetoed(&self.d.effective, self.now_ms, td, vd) {
-                    return Some(b);
+        vetoes.dedup();
+        for (_, digest) in &order {
+            if !forked {
+                for (td, vd) in vetoes.iter().filter(|(td, _)| td == digest) {
+                    if let Ok(b) = prepare_vetoed(&self.d.effective, self.now_ms, td, vd) {
+                        return Some(b);
+                    }
                 }
             }
-            if let Ok(b) = prepare_activate(&self.d.effective, self.now_ms, &t.digest) {
+            if let Ok(b) = prepare_activate(&self.d.effective, self.now_ms, digest) {
                 return Some(b);
             }
         }
-        for a in st.activations() {
-            if !a.final_ {
-                if let Ok(b) = prepare_final(&self.d.effective, self.now_ms, a.seq) {
-                    return Some(b);
+        if !forked {
+            for a in st.activations() {
+                if !a.final_ {
+                    if let Ok(b) = prepare_final(&self.d.effective, self.now_ms, a.seq) {
+                        return Some(b);
+                    }
                 }
             }
         }
@@ -1649,7 +1626,8 @@ impl Account {
     }
 
     /// Re-verify over the current objects: the candidate must hold and accept the new object.
-    /// Only then does anything in the account change.
+    /// Every check runs before anything changes, whether or not the history was clean; only
+    /// then does the account change (and a seed made by the action is held only with it).
     fn apply_extra(
         &mut self,
         extra: Incoming,
@@ -1661,17 +1639,58 @@ impl Account {
         let mut records = self.records.clone();
         super::union(&mut objects, &extra.objects);
         super::union_records(&mut records, &extra.records);
-        let d = self.candidate_with(
-            &objects,
-            &records,
-            &self.persisted,
-            self.now_ms,
-            Some(&keys),
-        )?;
-        let before_clean = self.d.verdict.stop.is_none();
+        let before_seeds = self.seeds.len();
+        let account = self.d.auth.account().clone();
+        if let Some(s) = seed {
+            self.seeds.install(s, &account)?;
+        }
+        let built = self.apply_checked(&objects, &records, &keys, &finished, &account);
+        let d = match built {
+            Ok(d) => d,
+            Err(e) => {
+                // Nothing was committed: forget a seed that was only staged for the check.
+                self.seeds.truncate(before_seeds);
+                return Err(e);
+            }
+        };
+        let persisted = self.persisted.clone();
+        let now = self.now_ms;
+        finished.changes = self.commit(d, objects, records, persisted, now);
+        Ok(finished)
+    }
+
+    /// The candidate state for `apply_extra`, after every refusal check.
+    fn apply_checked(
+        &mut self,
+        objects: &crate::v05::history::Objects,
+        records: &[HeldRecord],
+        keys: &EpochKeys,
+        finished: &Finished,
+        account: &AccountId,
+    ) -> Result<super::derived::Derived> {
+        let mut d =
+            self.candidate_with(objects, records, &self.persisted, self.now_ms, Some(keys))?;
+        // A seed this action made may open earlier vaults through `previousVault`, and so
+        // more keys: close the chain over the candidate's own history and build again.
+        if self.seeds.len() > 0 {
+            let (publics, boxes) = super::unlock::vault_chain(&objects.entries, &d.verdict.branch);
+            let before = self.seeds.len();
+            self.seeds.close_chain(account, &publics, &boxes);
+            if self.seeds.len() > before {
+                d = self.candidate_with(
+                    objects,
+                    records,
+                    &self.persisted,
+                    self.now_ms,
+                    Some(keys),
+                )?;
+            }
+        }
+        // The history may stand where it stood (held, a fork being resolved, a refusal not
+        // yet cleared) but must not stand somewhere worse.
         match &d.verdict.stop {
             None | Some(Stop::Held { .. }) => {}
-            Some(_) if !before_clean => {}
+            same if *same == self.d.verdict.stop => {}
             Some(Stop::Fork { .. }) => return Err(Failure::Refused(Reason::Fork)),
             Some(Stop::Failed { failure, .. }) => return Err(failure.clone()),
         }
@@ -1687,6 +1706,15 @@ impl Account {
                 "the account's history moved on since this action was prepared",
             )?;
         }
+        // A finished transition or veto must verify against the current history.
+        if d.verdict.stop.is_none() {
+            for b in &finished.pending {
+                require(
+                    d.verified_pending.contains(b),
+                    "the current history does not accept the finished transition or veto",
+                )?;
+            }
+        }
         // A record is returned only if the account's current history admits it.
         for r in &finished.records {
             let j = d
@@ -1701,28 +1729,8 @@ impl Account {
                 }));
             }
         }
-        let persisted = self.persisted.clone();
-        let now = self.now_ms;
-        finished.changes = self.commit(d, objects, records, persisted, now);
-        if let Some(s) = seed {
-            let account = self.d.auth.account().clone();
-            self.seeds.install(s, &account)?;
-            let (publics, boxes) =
-                super::unlock::vault_chain(&self.d.effective.entries, &self.d.verdict.branch);
-            self.seeds.close_chain(&account, &publics, &boxes);
-            let more = self.rebuild_in_place()?;
-            finished.changes = merge_changes(finished.changes, more);
-        }
-        Ok(finished)
+        Ok(d)
     }
-}
-
-fn merge_changes(mut a: Changes, b: Changes) -> Changes {
-    for (k, v) in b.namespaces {
-        a.namespaces.insert(k, v);
-    }
-    a.status = b.status.or(a.status);
-    a
 }
 
 /// An immediate `keyring` entry (§8.4): what to add or tighten.

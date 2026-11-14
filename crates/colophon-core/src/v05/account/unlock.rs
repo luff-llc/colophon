@@ -32,6 +32,10 @@ impl SeedRing {
     pub(super) fn len(&self) -> usize {
         self.seeds.len()
     }
+    /// Forget the seeds added after the first `n` (erased on drop).
+    pub(super) fn truncate(&mut self, n: usize) {
+        self.seeds.truncate(n);
+    }
     pub(super) fn lock(&mut self) {
         self.seeds.clear();
     }
@@ -298,14 +302,19 @@ impl Account {
     /// Hold `seed` (new or opened under this account), close the `previousVault` chain from it
     /// and open the epoch keys it reaches. Candidate first, commit after.
     pub(super) fn adopt_seed(&mut self, seed: VaultSeed, account: &AccountId) -> Result<Changes> {
-        // A seed is installed only after the core checked it derives this account's vault (or
-        // it is a new one the host made); installing it changes no verified fact, and the
-        // keys it opens are derived facts, so the rebuild below either commits them or fails
-        // with the objects unchanged.
-        self.seeds.install(seed, account)?;
-        let (publics, boxes) = vault_chain(&self.objects.entries, &self.d.verdict.branch);
-        self.seeds.close_chain(account, &publics, &boxes);
-        self.rebuild_in_place()
+        // A seed is held only if the rebuild that depends on it succeeds: on any failure the
+        // ring is put back as it was.
+        let before = self.seeds.len();
+        let result = (|| {
+            self.seeds.install(seed, account)?;
+            let (publics, boxes) = vault_chain(&self.objects.entries, &self.d.verdict.branch);
+            self.seeds.close_chain(account, &publics, &boxes);
+            self.rebuild_in_place()
+        })();
+        if result.is_err() {
+            self.seeds.truncate(before);
+        }
+        result
     }
 
     /// True while the current vault's seed is held.

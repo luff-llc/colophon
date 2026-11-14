@@ -2858,52 +2858,47 @@ fn review_explicit_keep_keeps_only_what_it_names() {
     assert!(e.is_err());
 }
 
-/// The last `control` key removed by a transition (§6.2: at least one holds `control`).
+/// The last `control` key removed by a transition (§6.2: at least one holds `control`):
+/// refused at prepare, before a host is asked to sign.
 #[test]
 fn review_removing_every_control_key_is_refused() {
-    let mut f = create(&["notes"]);
-    let r = f.account.begin_remove_controller(
-        &[f.d.clone(), f.p.clone()],
-        &[],
-        &[f.d.clone(), f.p.clone(), f.k.clone()],
-        TransitionRule::Control,
-        None,
-    );
-    match r {
-        Err(e) => eprintln!("prepare refuses: {e}"),
-        Ok(action) => {
-            let sigs = f.host.sign(action.steps());
-            let done = f.account.finish(action, sigs);
-            eprintln!(
-                "finish: {:?}",
-                done.as_ref()
-                    .map(|d| d.pending.len())
-                    .map_err(|e| e.to_string())
-            );
-            if done.is_ok() {
-                let now = f.account.now_ms();
-                f.account.advance(now + 2 * HOUR).unwrap();
-                let rec = f.account.record_due();
-                eprintln!(
-                    "record_due: {:?}",
-                    rec.as_ref().map(|v| v.len()).map_err(|e| e.to_string())
-                );
-                eprintln!(
-                    "controllers now: {:?}",
-                    f.account
-                        .controllers()
-                        .iter()
-                        .map(|c| (c.id.clone(), c.roles.clone()))
-                        .collect::<Vec<_>>()
-                );
-                assert!(f
-                    .account
-                    .controllers()
-                    .iter()
-                    .any(|c| c.roles.iter().any(|r| r == "control")));
-            }
-        }
-    }
+    let f = create(&["notes"]);
+    let e = f
+        .account
+        .begin_remove_controller(
+            &[f.d.clone(), f.p.clone()],
+            &[],
+            &[f.d.clone(), f.p.clone(), f.k.clone()],
+            TransitionRule::Control,
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(e.code(), "malformed", "{e}");
+    assert!(e.detail().contains("control"), "{e}");
+    // Demoting the last two does the same.
+    let demoted_d = f.host.raw_controller(&f.d, "Mac", &["approve"]);
+    let demoted_p = f
+        .host
+        .passkey_controller("Passkey", &["approve", "recover"]);
+    assert!(f
+        .account
+        .begin_transition(
+            &Change::update_controllers(vec![demoted_d, demoted_p]),
+            &[f.d.clone(), f.p.clone(), f.k.clone()],
+            TransitionRule::Control,
+        )
+        .is_err());
+    // Removing one of two is fine.
+    assert!(f
+        .account
+        .begin_remove_controller(
+            &[f.p.clone()],
+            &[],
+            &[f.d.clone(), f.k.clone()],
+            TransitionRule::Control,
+            None
+        )
+        .is_ok());
 }
 
 /// A pending transition whose only signer is removed (by an earlier-due transition) before it
@@ -3141,4 +3136,76 @@ fn review_q1_a_garbage_envelope_over_a_pending_transition_blocks_its_activation(
         1,
         "a keyless envelope must not stop a valid transition"
     );
+}
+
+#[test]
+fn a_finished_veto_of_a_transition_that_was_recorded_meanwhile_is_not_applied() {
+    // Without a home a transition is due when issued. A veto prepared against it is refused at
+    // finish once the transition is recorded: the pending object is checked against the
+    // current history, not only against the history at prepare.
+    let mut f = create(&["notes"]);
+    let action = f
+        .account
+        .begin_transition(
+            &Change::policy(json!({"callWindow": 600})),
+            &[f.d.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+    let done = run(&mut f.account, &f.host, action);
+    let t = pending_digest(&done.pending[0]);
+    let mut p = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Controller(f.p.clone()),
+        f.account.now_ms(),
+    )
+    .unwrap();
+    let veto = p.begin_veto(&t, &[f.p.clone()]).unwrap();
+    let sigs = f.host.sign(veto.steps());
+    let rec = f.account.record_due().unwrap();
+    assert_eq!(rec.len(), 1);
+    p.merge(
+        Incoming {
+            objects: Objects {
+                entries: rec[0].entries.iter().map(|(_, e)| e.clone()).collect(),
+                ..Default::default()
+            },
+            records: vec![],
+        },
+        p.now_ms(),
+    )
+    .unwrap();
+    let held = p.objects().pending.clone();
+    let e = p.finish(veto, sigs).unwrap_err();
+    assert!(e.code() == "malformed" || e.code() == "unavailable", "{e}");
+    assert_eq!(p.objects().pending, held, "nothing was held");
+}
+
+#[test]
+fn record_due_returns_the_bytes_of_everything_it_recorded() {
+    let mut f = create(&["notes"]);
+    for w in [600u64, 700] {
+        let action = f
+            .account
+            .begin_transition(
+                &Change::policy(json!({"callWindow": w})),
+                &[f.d.clone()],
+                TransitionRule::Control,
+            )
+            .unwrap();
+        run(&mut f.account, &f.host, action);
+    }
+    let before = f.account.objects().entries.len();
+    let rec = f.account.record_due().unwrap();
+    let returned: BTreeSet<Vec<u8>> = rec
+        .iter()
+        .flat_map(|r| r.entries.iter().map(|(_, e)| e.clone()))
+        .collect();
+    assert_eq!(rec.len(), 2, "both are due: each is recorded and returned");
+    assert_eq!(f.account.objects().entries.len(), before + returned.len());
+    assert!(returned
+        .iter()
+        .all(|e| f.account.objects().entries.contains(e)));
 }

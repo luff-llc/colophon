@@ -691,8 +691,9 @@ impl Account {
     pub fn records(&self) -> &[HeldRecord] {
         &self.records
     }
-    /// The local revision of a namespace's fold (it rises whenever its admitted operations
-    /// change); 0 when it is not folded here.
+    /// A change token for a namespace's fold: a function of the admitted operations folded and
+    /// their order, so two accounts holding the same objects have the same token however the
+    /// objects arrived. It is not a counter. 0 when nothing is folded here.
     pub fn revision(&self, namespace: &str) -> u64 {
         self.d.folded.get(namespace).map_or(0, |f| f.revision)
     }

@@ -51,6 +51,8 @@ pub(super) struct Folded {
 }
 
 pub(super) struct Derived {
+    /// The pending transitions and vetoes among `effective` that verify against the state.
+    pub verified_pending: BTreeSet<Vec<u8>>,
     /// The held objects with one envelope per pending transition and veto body: several
     /// envelopes over one body are one object (§2.2), and the one used is the first in byte
     /// order that verifies, so a keyless envelope over a real body changes nothing.
@@ -161,9 +163,10 @@ impl Derived {
             }
         }
         let judgement = judge_records(&auth, &keys, inputs.records);
-        let effective = effective_objects(inputs.objects, auth.state());
+        let (effective, verified_pending) = effective_objects(inputs.objects, auth.state());
         let mut derived = Self {
             effective,
+            verified_pending,
             verdict,
             auth,
             keys,
@@ -174,7 +177,7 @@ impl Derived {
         Ok(derived)
     }
 
-    fn fold(&mut self, inputs: &Inputs<'_>, prior: Option<&Derived>) {
+    fn fold(&mut self, inputs: &Inputs<'_>, _prior: Option<&Derived>) {
         let account = self.auth.account().clone();
         let library = account.as_str().chars().take(32).collect::<String>();
         let namespaces: Vec<String> = self.auth.namespaces().to_vec();
@@ -279,11 +282,15 @@ impl Derived {
                 fold.append(dg, view, ctx, &policy);
                 admitted.push(view.clone());
             }
-            let before = prior.and_then(|p| p.folded.get(&ns));
-            let revision = match before {
-                None => u64::from(!ops.is_empty()),
-                Some(b) if b.fold.order == fold.order => b.revision,
-                Some(b) => b.revision.saturating_add(1),
+            // A change token, not a counter: a function of the folded operations and their
+            // order, so it is the same however the objects arrived. Zero for no operations.
+            let revision = if fold.order.is_empty() {
+                0
+            } else {
+                let h = fold.hashes.last().copied().unwrap_or([0; 32]);
+                let mut eight = [0u8; 8];
+                eight.copy_from_slice(&h[..8]);
+                u64::from_be_bytes(eight) & crate::v05::encoding::bounds::MAX_INTEGER
             };
             self.folded.insert(
                 ns,
@@ -315,7 +322,10 @@ pub(super) fn readable(auth: &RecordAuthority, me: &Identity, namespace: &str) -
 /// and veto body, the first envelope in byte order that verifies against `state` (or, when none
 /// does, the first). Receipts are passed through: choosing among them already skips those that
 /// do not verify.
-pub(super) fn effective_objects(objects: &Objects, state: &crate::v05::history::State) -> Objects {
+pub(super) fn effective_objects(
+    objects: &Objects,
+    state: &crate::v05::history::State,
+) -> (Objects, BTreeSet<Vec<u8>>) {
     use crate::v05::encoding::bounds;
     use crate::v05::history::{check_pending_transition, check_pending_veto};
     use crate::v05::write::authority::choose_receipts;
@@ -339,6 +349,7 @@ pub(super) fn effective_objects(objects: &Objects, state: &crate::v05::history::
         }
     }
     let mut chosen: BTreeMap<(String, String), Vec<u8>> = BTreeMap::new();
+    let mut verified: BTreeSet<Vec<u8>> = BTreeSet::new();
     let transition_of = |digest: &str, chosen: &BTreeMap<(String, String), Vec<u8>>| {
         chosen
             .get(&("colophon/transition/5".to_string(), digest.to_string()))
@@ -351,7 +362,7 @@ pub(super) fn effective_objects(objects: &Objects, state: &crate::v05::history::
             }
             let mut list = list.clone();
             list.sort();
-            let pick = list
+            let found = list
                 .iter()
                 .find(|b| {
                     if protocol == "colophon/transition/5" {
@@ -387,8 +398,11 @@ pub(super) fn effective_objects(objects: &Objects, state: &crate::v05::history::
                     choose_receipts(state, &objects.pending, &te.digest, issued, None)
                         .is_ok_and(|r| check_pending_veto(state, &t, &r, b).is_ok())
                 })
-                .or_else(|| list.first())
-                .map(|b| (*b).clone());
+                .map(|b| (**b).clone());
+            if let Some(b) = &found {
+                verified.insert(b.clone());
+            }
+            let pick = found.or_else(|| list.first().map(|b| (**b).clone()));
             if let Some(b) = pick {
                 chosen.insert((p.clone(), digest.clone()), b);
             }
@@ -401,5 +415,5 @@ pub(super) fn effective_objects(objects: &Objects, state: &crate::v05::history::
         .chain(chosen.into_values())
         .collect();
     out.pending.sort();
-    out
+    (out, verified)
 }
