@@ -33,6 +33,10 @@ pub struct Snapshot {
     pub raw_keyring: Value,
     /// Current member namespaces, for the control-only share rule.
     pub members: BTreeMap<String, Vec<String>>,
+    /// Members the Swift fold has revoked. A later grant to one of them is ignored, as the
+    /// shipped fold ignores it (`AuthorityState.swift:292-300`).
+    #[serde(default)]
+    pub revoked: BTreeSet<String>,
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// Exact signed historical record.
@@ -372,6 +376,7 @@ fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
             layout: v["layout"].as_u64().unwrap_or(1),
             raw_keyring: Value::Null,
             members: BTreeMap::new(),
+            revoked: BTreeSet::new(),
         });
         require(
             current
@@ -564,12 +569,18 @@ fn append(out: &History, mut e: Record) -> Result<(Record, Snapshot)> {
                             .to_string(),
                     );
                 }
-                next.members.insert(crate::v05::ids::key_id(&signing), ns);
+                let id = crate::v05::ids::key_id(&signing);
+                // A grant to a revoked key is ignored (`AuthorityState.swift:292-300`).
+                if !next.revoked.contains(&id) {
+                    next.members.insert(id, ns);
+                }
             }
         }
         "revoke" => {
             if let Some(id) = v.get("memberID").and_then(Value::as_str) {
-                next.members.remove(id);
+                if next.members.remove(id).is_some() {
+                    next.revoked.insert(id.to_string());
+                }
             }
         }
         "shareKey" => {}

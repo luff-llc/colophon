@@ -94,3 +94,31 @@ Shipped Swift cannot write them. Paths are Marginalia `packages/Colophon/Sources
   through the drain window). The `migration` entry only reports the counts.
 - Sign a veto with an old Swift key (the veto body builder exists; there is no step for a Swift
   descriptor to sign it).
+
+### After E8 (moving a real library)
+
+Package E8 closes the first three items above and adds the account methods:
+
+- **Old slots and keys.** `v05/swift_slots.rs` opens the Swift `sealed`, `prf` and `combined` slots and
+  the namespace keys sealed to the vault or to a principal, in the begin/finish shape of `v05::slots`.
+  The successor's vault is a **new seed** (§7.1); the opened old seed is a handle that can only open
+  the predecessor's namespace keys. One WebAuthn assertion per passkey, with UV, both opens its old
+  slot and builds its new one (`SwiftLibrary::pair_ceremonies`); the Swift host must pass the old salt
+  as the **second** PRF input and the new one as the first.
+- **The record copy.** `v05/swift_copy.rs` reads the predecessor's `ops/`, authenticates, decrypts and
+  judges each record by the Swift admission rule, and prepares one `colophon.importBatch` per copied
+  record. The namespace set is the migration's own (grants and `shareKey`s up to the head). Each
+  batch is judged against the destination's cumulative projection with `imports.rs`'s validator; a
+  record the destination would mark invalid is omitted with its reason. `CopyPlan::finish` reconciles
+  with what the destination holds, and a plan is rebuilt after a crash from the predecessor plus
+  `Account::swift_copy_destination`. A host `Translator` returns a full `Batch` (children with
+  bindings, alternatives, identities, blobs, outcome, extra evidence); the core binds it to its source.
+- **A Swift-key veto.** `write/swift_veto.rs`.
+- **The account.** `account/moving.rs`: `begin_upgrade`, `swift_succession`, `begin_swift_veto`,
+  `begin_swift_freeze` (once; F is held at once), `begin_swift_copier_shares` (a shares-only `renew`),
+  `begin_swift_copy_write` / `finish_swift_copy_write` (bound to their item), `finish_swift_copy`,
+  `begin_swift_migration`.
+
+Still open: blobs and live-state records (they need the engine package), and a Swift-written F. The
+shipped apps hold the Swift codecs: translating Swift wire kinds into the Rust domain modules'
+operations is the Swift side's job at cutover, through the `Translator` seam.

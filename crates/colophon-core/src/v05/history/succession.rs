@@ -829,6 +829,16 @@ pub struct SuccessionTiming {
     pub keys_needed: usize,
 }
 
+/// The predecessor keys that may veto a Swift succession (§15.1 step 3), with every descriptor
+/// each had in the states the rule names: the verifier's own `eligible`, for the write side to
+/// build a veto's signing steps from. `None` until the succession window has opened.
+pub(crate) fn eligible_veto_keys(s: &State) -> Option<BTreeMap<String, Vec<Controller>>> {
+    let p = s.succession.as_ref()?;
+    let w = p.window.as_ref()?;
+    p.swift.as_ref()?;
+    Some(eligible(p, w))
+}
+
 /// The succession a verified state claims, with its timing; `None` when the account has no
 /// predecessor.
 pub fn succession_status(s: &State) -> Option<SuccessionStatus> {

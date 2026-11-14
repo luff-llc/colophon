@@ -120,8 +120,8 @@
 //! | `KeyProvider::sign_with`, `sign_controller_with`, `HostAction::sign_with` | gone in 0.5: the core never calls into a key provider (§3.4, §17.1). The host reads [`PendingAction::steps`] (each step's exact body, signer and WebAuthn challenge) and passes the signatures to [`Account::finish`] |
 //! | `PendingBatch::record_paths`, `HostAction::record_paths` | [`Finished::record_paths`] (the paths of what a finish produced: `authority/<seq>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`, `ops/…`); before finish, [`SigningStep::path`] |
 //! | `migration.rs`: `import_legacy_batch`, `bind_legacy_import_state` | the upgrade tooling step (plan step 8), not the account: legacy import batches are `import` records written through [`Account::begin_write`] once the account is upgraded |
-//! | the 0.4 → 0.5 in-place `upgrade` entry (§16.1) and the Swift keyring upgrade (§16.2) | **follow-up, package E7** (`v05/write/upgrade.rs`, in progress). The account already opens, merges and reads an upgraded account (the verifier folds the 0.4 prefix). Once E7 merges, the account gets `begin_upgrade` (and the Swift form), each a thin composition like the other `begin_*`; not built here |
-//! | §15 succession (`successor` transition, `handover`, the freezing `layout`, `migration` entry) and §16.2 Swift succession | **follow-up, package E7** (`v05/write/succession.rs`): `begin_successor`, `begin_succession_*`, listed for when it merges; not built here. The account reads a succession's `successor` and `migration` through the verifier's state already |
+//! | the 0.4 → 0.5 in-place `upgrade` entry (§16.1) and the Swift keyring upgrade (§16.2) | `moving.rs` (package E8): [`Account::begin_upgrade`] (an associated function: a plain 0.4 history is not an account yet) and the Swift succession steps [`Account::swift_succession`], [`Account::begin_swift_veto`], [`Account::begin_swift_freeze`] and [`Account::finish_move`], [`Account::accept_predecessor_entry`], [`Account::begin_swift_copy_write`] and [`Account::finish_swift_copy_write`], [`Account::begin_swift_migration`] |
+//! | §15 succession (`successor` transition, `handover`, the freezing `layout`, `migration` entry) and §16.2 Swift succession | the Swift form is `moving.rs` (above); the `/5` form (`begin_successor`, `begin_succession_*`) is still not built here. The account reads a succession's `successor` and `migration` through the verifier's state |
 //! | §15 exit and the clean copy (§15.3, the drain window) | the copying itself is the engine's and a home's (**E6**, §13–§14); the account's part is the `successor` and `migration` entries above |
 //! | (new) pending transitions | [`Account::pending`], [`Account::begin_transition`], [`Account::begin_veto`], [`Account::begin_suspend`], [`Account::record_due`] (the determined `activate`, `vetoed` and `final`), [`Account::begin_resolve`] and [`Account::fork_candidates`] |
 //! | (new) notices (§17.5) | [`Account::pending`], [`Account::notices`] |
@@ -130,6 +130,7 @@
 mod action;
 mod create;
 mod derived;
+mod moving;
 mod read;
 mod stored;
 mod unlock;
@@ -139,6 +140,7 @@ pub use action::{
     RevokeKeep, SignerChoice,
 };
 pub use create::{default_policy, CreateParams, CreateProgress, Creation};
+pub use moving::{MoveStage, Moved, PendingMove, SwiftSuccession};
 pub use read::Standing;
 pub use read::{
     ControllerInfo, HomeInfo, LedgerLine, MemberInfo, Notices, OwedInfo, PendingTransition, Policy,

@@ -17,6 +17,7 @@ pub mod authority;
 pub mod calls;
 pub mod records;
 pub mod succession;
+pub mod swift_veto;
 pub mod upgrade;
 
 use crate::v05::encoding::{bounds, canonical, encode_base64};
