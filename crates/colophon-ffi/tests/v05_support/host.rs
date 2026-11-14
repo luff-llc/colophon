@@ -56,20 +56,44 @@ impl Host {
         self.passkey = Some((a, id.clone()));
         id
     }
-    /// A raw controller object (protocol JSON, §6.1).
-    pub fn raw_controller(&self, id: &str, label: &str, roles: &[&str]) -> String {
-        let b = colophon_core::v05::encoding::encode_base64;
+    /// A raw controller, typed (§6.1).
+    pub fn raw_controller(&self, id: &str, label: &str, roles: &[&str]) -> ControllerSpec {
         let p = self.keys[id].public();
-        serde_json::json!({"key": {"form": "raw", "signing": b(&p.signing), "agreement": b(&p.agreement)},
-               "label": label, "roles": roles})
-        .to_string()
+        ControllerSpec {
+            key: KeyDescriptorView {
+                form: SignForm::Raw,
+                signing: p.signing,
+                agreement: Some(p.agreement),
+                rp: None,
+                credential: None,
+                origins: vec![],
+                authority_origins: vec![],
+            },
+            label: label.into(),
+            roles: roles_of(roles),
+            verification: false,
+            holder: None,
+            audiences: vec![],
+        }
     }
-    pub fn passkey_controller(&self, label: &str, roles: &[&str]) -> String {
-        let b = colophon_core::v05::encoding::encode_base64;
+    pub fn passkey_controller(&self, label: &str, roles: &[&str]) -> ControllerSpec {
         let (a, _) = self.passkey.as_ref().unwrap();
-        serde_json::json!({"key": {"form": "webauthn", "signing": b(&passkey_point(a)), "rp": RP, "credential": "AQ=="},
-               "label": label, "roles": roles, "verification": true})
-        .to_string()
+        ControllerSpec {
+            key: KeyDescriptorView {
+                form: SignForm::Webauthn,
+                signing: passkey_point(a),
+                agreement: None,
+                rp: Some(RP.into()),
+                credential: Some(vec![1]),
+                origins: vec![],
+                authority_origins: vec![],
+            },
+            label: label.into(),
+            roles: roles_of(roles),
+            verification: true,
+            holder: None,
+            audiences: vec![],
+        }
     }
     pub fn fresh(&mut self, n: usize) -> Vec<u8> {
         self.counter += 1;
@@ -157,6 +181,30 @@ impl Host {
                 shared: self.keys[member].agree(&a.peer).unwrap(),
             })
             .collect()
+    }
+}
+pub fn roles_of(roles: &[&str]) -> Vec<ControllerRole> {
+    roles
+        .iter()
+        .map(|r| match *r {
+            "approve" => ControllerRole::Approve,
+            "control" => ControllerRole::Control,
+            "recover" => ControllerRole::Recover,
+            "sign" => ControllerRole::Sign,
+            other => panic!("{other}"),
+        })
+        .collect()
+}
+/// An identity from the text the tests write (`controller:<id>` or `member:<id>`).
+pub fn ident(text: &str) -> AccountIdentity {
+    let (k, id) = text.split_once(':').unwrap();
+    AccountIdentity {
+        kind: if k == "controller" {
+            AccountIdentityKind::Controller
+        } else {
+            AccountIdentityKind::Member
+        },
+        id: id.into(),
     }
 }
 fn passkey_point(a: &SyntheticAuthenticator) -> Vec<u8> {

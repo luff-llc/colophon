@@ -45,8 +45,13 @@ fn the_web_build_creates_verifies_requests_pairs_and_refuses_hostile_input() {
         vec![d.clone()],
         vec![d.clone()],
     );
-    let creation =
-        AccountCreation::begin(params, format!("controller:{d}"), T0, host.fresh(96)).unwrap();
+    let creation = AccountCreation::begin(
+        params,
+        ident(&format!("controller:{d}")),
+        T0,
+        host.fresh(96),
+    )
+    .unwrap();
     let reqs = creation.prf_requests().unwrap();
     assert_eq!(reqs.len(), 2);
     creation.provide_prf(host.answer_prf(&reqs)).unwrap();

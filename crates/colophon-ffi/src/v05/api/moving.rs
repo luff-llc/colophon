@@ -67,9 +67,12 @@ impl AccountMove {
                 legacy.insert(r.path, r.bytes);
             }
             let up = CoreUpgrade {
-                policy: json(&params.policy_json, "the policy")?,
+                policy: auth_json(&params.policy_json, "the policy")?,
                 add_threshold: params.add_threshold,
-                count_by: params.count_by,
+                count_by: match params.count_by {
+                    CountBy::Keys => "keys".into(),
+                    CountBy::Holders => "holders".into(),
+                },
                 issued_ms: params.issued_ms,
                 signers: names(params.signers, "signers")?,
             };
@@ -108,19 +111,17 @@ impl AccountMove {
 #[cfg_attr(feature = "native05", uniffi::export)]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 impl AccountMove {
-    /// What this step is: `upgrade`, `swiftVeto`, `swiftFreeze`, `swiftMigration`, `renewShares`
-    /// (empty once finished).
-    pub fn kind(&self) -> Result<String, AccountError> {
+    /// What this step is (`Finished` once it was finished or consumed).
+    pub fn kind(&self) -> Result<MoveKind, AccountError> {
         guard(|| {
             Ok(match self.st.lock()?.as_ref() {
-                None => "",
-                Some(Prepared::Upgrade(_)) => "upgrade",
-                Some(Prepared::Veto(_)) => "swiftVeto",
-                Some(Prepared::Move(PendingMove::Freeze(_))) => "swiftFreeze",
-                Some(Prepared::Move(PendingMove::Migration(_))) => "swiftMigration",
-                Some(Prepared::Move(PendingMove::Shares(_))) => "renewShares",
-            }
-            .into())
+                None => MoveKind::Finished,
+                Some(Prepared::Upgrade(_)) => MoveKind::Upgrade,
+                Some(Prepared::Veto(_)) => MoveKind::SwiftVeto,
+                Some(Prepared::Move(PendingMove::Freeze(_))) => MoveKind::SwiftFreeze,
+                Some(Prepared::Move(PendingMove::Migration(_))) => MoveKind::SwiftMigration,
+                Some(Prepared::Move(PendingMove::Shares(_))) => MoveKind::RenewShares,
+            })
         })
     }
     /// The exact bodies to sign.
@@ -137,10 +138,10 @@ impl AccountMove {
             }))
         })
     }
-    /// Finish with the host's signatures. `stores` are to be stored as given. An upgrade's entry
-    /// goes to `authority/<seq>.json` beside the 0.4 entries. A veto returns `veto`. F returns
-    /// `frozen_entry`: the exact Swift bytes the host appends to the predecessor and then gives
-    /// the account (`todo`: `accept_predecessor_entry`).
+    /// Finish with the host's signatures (an upgrade or a veto; F, a copier's shares and a
+    /// migration finish on the engine, `finish_move`). `stores` are to be stored as given: an
+    /// upgrade's entry goes to `authority/<seq>.json` beside the 0.4 entries, and a veto goes to
+    /// `vetoes/<digest>.json` (`veto` is the same bytes, `veto_path` the path).
     pub fn finish(&self, signatures: Vec<Signature>) -> Result<MoveResult, AccountError> {
         guard(|| {
             let sigs = cv::signatures(signatures)?;
@@ -148,6 +149,7 @@ impl AccountMove {
             let none = |stores| MoveResult {
                 stores,
                 veto: None,
+                veto_path: None,
                 frozen_entry: None,
                 frozen_seq: None,
                 succession_verified: false,
@@ -158,10 +160,15 @@ impl AccountMove {
                     let r = u.finish(sigs)?;
                     Ok(none(entries_stores(&r.entries, &r.pending)?))
                 }
-                Some(Prepared::Veto(v)) => Ok(MoveResult {
-                    veto: Some(v.finish(sigs)?),
-                    ..none(vec![])
-                }),
+                Some(Prepared::Veto(v)) => {
+                    let bytes = v.finish(sigs)?;
+                    let path = pending_path(&bytes)?;
+                    Ok(MoveResult {
+                        veto_path: Some(path.clone()),
+                        veto: Some(bytes.clone()),
+                        ..none(vec![Store { path, bytes }])
+                    })
+                }
                 Some(m @ Prepared::Move(_)) => {
                     *g = Some(m);
                     Err(AccountError::bad(

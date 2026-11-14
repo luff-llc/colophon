@@ -33,7 +33,7 @@ pub(crate) fn descriptor_view(d: &KeyDescriptor) -> KeyDescriptorView {
                 .map(<[String]>::to_vec)
                 .unwrap_or_default(),
         ),
-        CoreForm::Unknown(_) => (SignForm::Raw, None, None, None, vec![], vec![]),
+        CoreForm::Unknown(_) => (SignForm::Unknown, None, None, None, vec![], vec![]),
     };
     KeyDescriptorView {
         form,
@@ -48,6 +48,11 @@ pub(crate) fn descriptor_view(d: &KeyDescriptor) -> KeyDescriptorView {
 pub(crate) fn descriptor_from_view(v: &KeyDescriptorView) -> Result<KeyDescriptor, AccountError> {
     bytes_ok(&v.signing, 65, "a signing point")?;
     Ok(match v.form {
+        SignForm::Unknown => {
+            return Err(AccountError::bad(
+                "a key of an unknown form cannot be created or checked here",
+            ))
+        }
         SignForm::Raw => KeyDescriptor::new_raw(v.signing.clone(), v.agreement.clone())?,
         SignForm::Webauthn => {
             let opt = |l: &Vec<String>| (!l.is_empty()).then(|| l.clone());
@@ -212,10 +217,10 @@ pub(crate) fn agreements(a: Vec<acc::EpochAgreement>) -> Vec<EpochAgreement> {
 /// Match the host's answers to the account's own request, then consume and wipe them.
 pub(crate) fn epoch_secrets(
     want: Vec<acc::EpochAgreement>,
-    mut v: Vec<EpochAnswer>,
+    v: &mut [EpochAnswer],
 ) -> Result<Vec<acc::EpochSecret>, AccountError> {
     let r = (|| {
-        list_len(&v, "answers")?;
+        list_len(v, "answers")?;
         v.iter()
             .map(|a| {
                 let step = want
@@ -230,7 +235,7 @@ pub(crate) fn epoch_secrets(
             })
             .collect()
     })();
-    for a in &mut v {
+    for a in v.iter_mut() {
         wipe(&mut a.shared);
     }
     r
@@ -240,7 +245,7 @@ pub(crate) fn slots(a: &acc::Account) -> Result<Vec<SlotInfo>, AccountError> {
         .into_iter()
         .map(|s| SlotInfo {
             index: s.index as u64,
-            kind: s.kind,
+            kind: slot_kind(&s.kind),
             label: s.label,
             controllers: s
                 .controllers
@@ -250,10 +255,152 @@ pub(crate) fn slots(a: &acc::Account) -> Result<Vec<SlotInfo>, AccountError> {
         })
         .collect())
 }
+/// A slot's protocol spelling as a typed kind.
+pub(crate) fn slot_kind(s: &str) -> SlotKind {
+    match s {
+        "sealed" => SlotKind::Sealed,
+        "prf" => SlotKind::Prf,
+        "combined" => SlotKind::Combined,
+        _ => SlotKind::Unknown,
+    }
+}
+/// The §1 result code split into its kind and the reason after `refused:`.
+pub(crate) fn status_parts(code: &str) -> (StatusKind, Option<String>) {
+    match code {
+        "ok" => (StatusKind::Ok, None),
+        "held" => (StatusKind::Held, None),
+        "malformed" => (StatusKind::Malformed, None),
+        "badSignature" => (StatusKind::BadSignature, None),
+        "newerFormat" => (StatusKind::NewerFormat, None),
+        "unavailable" => (StatusKind::Unavailable, None),
+        c => match c.strip_prefix("refused:") {
+            Some(r) => (StatusKind::Refused, Some(r.to_string())),
+            None => (StatusKind::Unavailable, Some(c.to_string())),
+        },
+    }
+}
+/// A record verdict (`admitted`, `held:<why>`, `refused:<reason>`, a failure code) as a typed
+/// value.
+pub(crate) fn record_verdict(v: Option<String>) -> Option<RecordVerdict> {
+    let v = v?;
+    Some(match v.as_str() {
+        "admitted" => RecordVerdict {
+            kind: VerdictKind::Admitted,
+            reason: None,
+        },
+        "malformed" => RecordVerdict {
+            kind: VerdictKind::Malformed,
+            reason: None,
+        },
+        "badSignature" => RecordVerdict {
+            kind: VerdictKind::BadSignature,
+            reason: None,
+        },
+        "newerFormat" => RecordVerdict {
+            kind: VerdictKind::NewerFormat,
+            reason: None,
+        },
+        "unavailable" => RecordVerdict {
+            kind: VerdictKind::Unavailable,
+            reason: None,
+        },
+        other => match (other.strip_prefix("held:"), other.strip_prefix("refused:")) {
+            (Some(r), _) => RecordVerdict {
+                kind: VerdictKind::Held,
+                reason: Some(r.to_string()),
+            },
+            (_, Some(r)) => RecordVerdict {
+                kind: VerdictKind::Refused,
+                reason: Some(r.to_string()),
+            },
+            _ => RecordVerdict {
+                kind: VerdictKind::Unavailable,
+                reason: Some(other.to_string()),
+            },
+        },
+    })
+}
+pub(crate) fn controller_role(r: &str) -> ControllerRole {
+    match r {
+        "approve" => ControllerRole::Approve,
+        "control" => ControllerRole::Control,
+        "recover" => ControllerRole::Recover,
+        "sign" => ControllerRole::Sign,
+        _ => ControllerRole::Unknown,
+    }
+}
+fn role_text(r: ControllerRole) -> Result<&'static str, AccountError> {
+    Ok(match r {
+        ControllerRole::Approve => "approve",
+        ControllerRole::Control => "control",
+        ControllerRole::Recover => "recover",
+        ControllerRole::Sign => "sign",
+        ControllerRole::Unknown => {
+            return Err(AccountError::bad(
+                "a controller is created with a known role",
+            ))
+        }
+    })
+}
+/// A typed controller to its protocol JSON (§6.1); the core validates it again.
+pub(crate) fn controller_value(c: &ControllerSpec) -> Result<Value, AccountError> {
+    use colophon_core::v05::encoding::encode_base64;
+    let d = descriptor_from_view(&c.key)?;
+    let mut key = serde_json::Map::new();
+    key.insert("signing".into(), Value::String(encode_base64(d.signing())));
+    match d.form() {
+        CoreForm::Raw { agreement } => {
+            key.insert("form".into(), "raw".into());
+            if let Some(a) = agreement {
+                key.insert("agreement".into(), Value::String(encode_base64(a)));
+            }
+        }
+        CoreForm::WebAuthn(w) => {
+            key.insert("form".into(), "webauthn".into());
+            key.insert("rp".into(), w.rp().into());
+            key.insert(
+                "credential".into(),
+                Value::String(encode_base64(w.credential())),
+            );
+            if !w.origins().is_empty() {
+                key.insert("origins".into(), serde_json::json!(w.origins()));
+            }
+            if let Some(o) = w.authority_origins() {
+                key.insert("authorityOrigins".into(), serde_json::json!(o));
+            }
+        }
+        CoreForm::Unknown(_) => {
+            return Err(AccountError::bad("an unknown key form cannot be created"))
+        }
+    }
+    let mut roles: Vec<&'static str> = c
+        .roles
+        .iter()
+        .map(|r| role_text(*r))
+        .collect::<Result<_, _>>()?;
+    roles.sort_unstable();
+    let mut o = serde_json::Map::new();
+    o.insert("key".into(), Value::Object(key));
+    o.insert("label".into(), c.label.clone().into());
+    o.insert("roles".into(), serde_json::json!(roles));
+    if c.verification {
+        o.insert("verification".into(), Value::Bool(true));
+    }
+    if let Some(h) = &c.holder {
+        o.insert("holder".into(), h.clone().into());
+    }
+    if !c.audiences.is_empty() {
+        o.insert("audiences".into(), serde_json::json!(c.audiences));
+    }
+    Ok(Value::Object(o))
+}
 pub(crate) fn status(s: &acc::Status) -> Status {
+    let (kind, reason) = status_parts(&s.code);
     Status {
         seq: s.seq,
         code: s.code.clone(),
+        kind,
+        reason,
         stop_seq: s.stop_seq,
         detail: s.detail.clone(),
         rollback: s.rollback,
@@ -308,11 +455,11 @@ pub(crate) fn controller(c: &acc::ControllerInfo) -> Controller {
     Controller {
         id: c.id.clone(),
         label: c.label.clone(),
-        roles: c.roles.clone(),
-        form: if c.form == "webauthn" {
-            SignForm::Webauthn
-        } else {
-            SignForm::Raw
+        roles: c.roles.iter().map(|r| controller_role(r)).collect(),
+        form: match c.form.as_str() {
+            "webauthn" => SignForm::Webauthn,
+            "raw" => SignForm::Raw,
+            _ => SignForm::Unknown,
         },
         verification: c.verification,
         holder: c.holder.clone(),
@@ -416,7 +563,11 @@ pub(crate) fn home(h: &acc::HomeInfo) -> Home {
     Home {
         id: h.id.clone(),
         label: h.label.clone(),
-        status: h.status.clone(),
+        status: if h.status == "home" {
+            HomeStatus::Home
+        } else {
+            HomeStatus::RevocationPending
+        },
         endpoints: h.endpoints.clone(),
         primary: h.primary,
     }
@@ -540,4 +691,85 @@ pub(crate) fn slot_plan(p: SlotPlan) -> Result<sl::SlotPlan, AccountError> {
         controllers: names(p.controllers, "slot controllers")?,
         label: p.label,
     })
+}
+
+/// The authority objects of one attempt (genesis, entries, receipts, heads), as the core holds
+/// them. Every list and the total are bounded before anything is copied.
+pub(crate) fn authority_objects(
+    o: AuthorityObjects,
+) -> Result<colophon_core::v05::history::Objects, AccountError> {
+    let mut total = 0usize;
+    let mut take = |v: Vec<ByteString>, what: &str| -> Result<Vec<Vec<u8>>, AccountError> {
+        list_len(&v, what)?;
+        v.into_iter()
+            .map(|b| {
+                bytes_ok(&b.bytes, MAX_BYTES, what)?;
+                total = total.saturating_add(b.bytes.len());
+                if total > MAX_BYTES {
+                    return Err(AccountError::bound("the objects are over 40 MiB in all"));
+                }
+                Ok(b.bytes)
+            })
+            .collect()
+    };
+    Ok(colophon_core::v05::history::Objects {
+        entries: take(o.entries, "an entry")?,
+        pending: take(o.pending, "a pending object")?,
+        heads: take(o.heads, "a head")?,
+        predecessor: take(o.predecessor, "a predecessor entry")?,
+    })
+}
+pub(crate) fn earlier_attempts(
+    v: Vec<AuthorityObjects>,
+) -> Result<Vec<colophon_core::v05::history::Objects>, AccountError> {
+    if v.len() > MAX_NAMES {
+        return Err(AccountError::bound("too many earlier attempts"));
+    }
+    v.into_iter().map(authority_objects).collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_result_code_splits_into_its_kind_and_reason() {
+        let cases = [
+            ("ok", StatusKind::Ok, None),
+            ("held", StatusKind::Held, None),
+            ("refused:fork", StatusKind::Refused, Some("fork")),
+            ("refused:rollback", StatusKind::Refused, Some("rollback")),
+            ("malformed", StatusKind::Malformed, None),
+            ("badSignature", StatusKind::BadSignature, None),
+            ("newerFormat", StatusKind::NewerFormat, None),
+            ("unavailable", StatusKind::Unavailable, None),
+        ];
+        for (code, kind, reason) in cases {
+            let (k, r) = status_parts(code);
+            assert_eq!((k, r.as_deref()), (kind, reason), "{code}");
+        }
+    }
+    #[test]
+    fn a_record_verdict_splits_into_its_kind_and_reason() {
+        let v = |s: &str| record_verdict(Some(s.to_string())).unwrap();
+        assert_eq!(v("admitted").kind, VerdictKind::Admitted);
+        let held = v("held:waitingForParent");
+        assert_eq!(
+            (held.kind, held.reason.as_deref()),
+            (VerdictKind::Held, Some("waitingForParent"))
+        );
+        let refused = v("refused:revoked");
+        assert_eq!(
+            (refused.kind, refused.reason.as_deref()),
+            (VerdictKind::Refused, Some("revoked"))
+        );
+        assert_eq!(v("newerFormat").kind, VerdictKind::NewerFormat);
+        assert_eq!(v("malformed").kind, VerdictKind::Malformed);
+        assert!(record_verdict(None).is_none());
+        assert_eq!(slot_kind("combined"), SlotKind::Combined);
+        assert_eq!(slot_kind("strange"), SlotKind::Unknown);
+        assert_eq!(controller_role("approve"), ControllerRole::Approve);
+        assert_eq!(controller_role("strange"), ControllerRole::Unknown);
+    }
 }

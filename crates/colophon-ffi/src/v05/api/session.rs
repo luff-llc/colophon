@@ -45,8 +45,33 @@ pub trait SwiftTranslator {
 fn json_of(text: &str, what: &str) -> R<Value> {
     json_or_null(text, what)
 }
+/// What a translated batch may hold, in total: its payloads, alternatives, blob manifests and
+/// evidence together are at most 1 MiB of JSON (the size of an import batch), checked on the raw
+/// lengths before any is parsed.
 fn batch_of(b: SwiftBatch) -> R<Batch> {
-    list_len(&b.children, "children")?;
+    if b.children.len() > MAX_JSON_ITEMS
+        || b.identities.len() > MAX_LIST
+        || b.alternatives_json.len() > MAX_JSON_ITEMS
+        || b.blobs_json.len() > MAX_JSON_ITEMS
+    {
+        return Err(AccountError::bound(
+            "a translated batch holds too many items",
+        ));
+    }
+    let total = b
+        .children
+        .iter()
+        .map(|c| c.payload_json.len())
+        .chain(b.alternatives_json.iter().map(String::len))
+        .chain(b.blobs_json.iter().map(String::len))
+        .chain(std::iter::once(b.evidence_json.len()))
+        .try_fold(0usize, usize::checked_add)
+        .ok_or_else(|| AccountError::bound("a translated batch is too large"))?;
+    if total > MAX_JSON {
+        return Err(AccountError::bound(
+            "a translated batch is over 1 MiB of JSON in all",
+        ));
+    }
     let mut identities = BTreeMap::new();
     for i in b.identities {
         identities.insert(i.source_key, (i.category, i.destination_id));
@@ -88,6 +113,7 @@ pub struct SwiftSource {
     st: Cell<SourceState>,
 }
 struct SourceState {
+    entries: Vec<Vec<u8>>,
     lib: SwiftLibrary,
     vault: Option<PredecessorVault>,
     keys: Vec<SwiftEpochKey>,
@@ -104,10 +130,23 @@ impl SwiftSource {
             Ok(Self {
                 st: Cell::new(SourceState {
                     lib: SwiftLibrary::read(&raw)?,
+                    entries: raw,
                     vault: None,
                     keys: vec![],
                 }),
             })
+        })
+    }
+}
+impl SwiftSource {
+    /// Run `f` over the library and the authority entries it was read from.
+    pub(crate) fn with_library<T>(
+        &self,
+        f: impl FnOnce(&SwiftLibrary, &[Vec<u8>]) -> R<T>,
+    ) -> R<T> {
+        guard(|| {
+            let g = self.st.lock()?;
+            f(&g.lib, &g.entries)
         })
     }
 }
@@ -134,7 +173,7 @@ impl SwiftSource {
                 .enumerate()
                 .map(|(i, s)| SwiftSlotInfo {
                     index: i as u64,
-                    kind: s.kind().to_string(),
+                    kind: cv::slot_kind(s.kind()),
                     label: s.label().to_string(),
                     controller: s.controller().map(str::to_string),
                     problem: s.problem().map(str::to_string),
@@ -540,9 +579,11 @@ impl AccountEngine {
         }
     }
     fn move_result(m: Moved) -> MoveResult {
+        let stores = cv::store_list(&m.stores());
         let none = |changes: Option<Changes>| MoveResult {
             stores: vec![],
             veto: None,
+            veto_path: None,
             frozen_entry: None,
             frozen_seq: None,
             succession_verified: false,
@@ -550,12 +591,16 @@ impl AccountEngine {
         };
         match m {
             Moved::Frozen(f) => MoveResult {
+                stores,
                 frozen_entry: Some(f.entry),
                 frozen_seq: Some(f.seq),
                 succession_verified: f.succession_verified,
                 ..none(None)
             },
-            Moved::Migration(c) | Moved::Shares(c) => none(Some(cv::changes(&c))),
+            Moved::Migration(c, _) | Moved::Shares(c, _) => MoveResult {
+                stores,
+                ..none(Some(cv::changes(&c)))
+            },
         }
     }
     fn move_step(&self, p: colophon_core::v05::account::PendingMove) -> AccountMove {
@@ -597,6 +642,7 @@ impl AccountEngine {
         now_ms: i64,
     ) -> Result<Changes, AccountError> {
         bytes_ok(&entry, 3 << 20, "an entry")?;
+        self.ensure_live()?;
         self.run(|e| Ok(cv::changes(&e.accept_predecessor_entry(entry, now_ms)?)))
     }
     /// Where the Swift succession this account claims stands (§15.1).
@@ -746,6 +792,7 @@ object_methods! {
         let mut entropy = entropy;
         let r = guard(|| {
             let seed = fixed::<32>(&entropy, "entropy")?;
+            self.ensure_live()?;
             pairing.with_confirmed(|p| {
                 let b = self.run(|e| Ok(e.transfer_seed(p, seed)?))?;
                 Ok(SealedSeed { enc: b.enc, ciphertext: b.ciphertext })
@@ -772,6 +819,7 @@ object_methods! {
     fn finish_swift_copy_write(self; objs [plan: SwiftCopyPlan, write: AccountCopyWrite]; args [signatures: Vec<Signature>]) -> Written {
         guard(|| {
             let sigs = cv::signatures(signatures)?;
+            self.ensure_live()?;
             if write.owner != self.owner {
                 return Err(AccountError::wrong_object("this write was begun on another session"));
             }
@@ -786,6 +834,8 @@ object_methods! {
     fn finish_move(self; objs [step: AccountMove]; args [signatures: Vec<Signature>]) -> MoveResult {
         guard(|| {
             let sigs = cv::signatures(signatures)?;
+            // A locked engine refuses before the step is taken: it is not consumed.
+            self.ensure_live()?;
             let m = step.take_move()?;
             let moved = self.run(|e| Ok(e.finish_move(m, sigs)?))?;
             Ok(Self::move_result(moved))
@@ -813,12 +863,21 @@ object_returning! {
     /// Prepare the owner's veto of this account's Swift succession (§15.1 step 3).
     fn begin_swift_veto(self; objs []; args [issued_ms: i64, signers: Vec<String>]) -> AccountMove {
         let s = names(signers, "signers")?;
-        guard(|| self.run(|e| Ok(AccountMove::of_veto(e.begin_swift_veto(&SwiftVetoParams { issued_ms, signers: s })?))))
+        guard(|| {
+            self.ensure_live()?;
+            self.run(|e| Ok(AccountMove::of_veto(e.begin_swift_veto(&SwiftVetoParams { issued_ms, signers: s })?)))
+        })
     }
     /// Prepare F (§15.1 step 5): the freezing `layout` entry of the Swift predecessor.
-    fn begin_swift_freeze(self; objs []; args [signers: Vec<String>, issued_ms: i64]) -> AccountMove {
+    /// `earlier_attempts` is, for each freezing entry already in the predecessor, the objects
+    /// of the successor it named (§15.1 "Competing attempts"); empty when there is none.
+    fn begin_swift_freeze(self; objs []; args [signers: Vec<String>, issued_ms: i64, earlier_attempts: Vec<AuthorityObjects>]) -> AccountMove {
         let s = names(signers, "signers")?;
-        guard(|| self.run(|e| Ok(self.move_step(e.begin_swift_freeze(Vec::new(), s, issued_ms)?))))
+        guard(|| {
+            let attempts = cv::earlier_attempts(earlier_attempts)?;
+            self.ensure_live()?;
+            self.run(|e| Ok(self.move_step(e.begin_swift_freeze(attempts, s, issued_ms)?)))
+        })
     }
     /// Seal the epochs a copying member is owed (§9.4). 32 fresh bytes (wiped).
     fn begin_swift_copier_shares(self; objs []; args [member: String, signers: Vec<String>, entropy: Vec<u8>]) -> AccountMove {
@@ -826,6 +885,7 @@ object_returning! {
         let r = guard(|| {
             let seed = fixed::<32>(&entropy, "entropy")?;
             let s = names(signers, "signers")?;
+            self.ensure_live()?;
             self.run(|e| Ok(self.move_step(e.begin_swift_copier_shares(&member, &s, seed)?)))
         });
         wipe(&mut entropy);
@@ -836,6 +896,7 @@ object_returning! {
         guard(|| {
             let m = members_of(members)?;
             let s = names(signers, "signers")?;
+            self.ensure_live()?;
             self.run(|e| Ok(self.move_step(e.begin_swift_migration(&copy.r, m, drain_from_ms, drain_until_ms, issued_ms, s)?)))
         })
     }
@@ -846,6 +907,7 @@ object_returning! {
         let r = guard(|| {
             let seed = fixed::<32>(&entropy, "entropy")?;
             let item = item_of(item)?;
+            self.ensure_live()?;
             let p = plan.p.lock()?;
             let plan = p.as_ref().ok_or_else(|| AccountError::consumed("this plan is finished"))?;
             let w = self.run(|e| Ok(e.begin_swift_copy_write(plan, &item, seed)?))?;
@@ -869,12 +931,13 @@ impl AccountEngine {
         guard(|| {
             list_len(&prior, "prior links")?;
             let prior: Vec<Vec<u8>> = prior.into_iter().map(|b| b.bytes).collect();
-            let terms = json(&terms_json, "terms")?;
+            let terms = auth_json(&terms_json, "terms")?;
+            self.ensure_live()?;
             let p = self.run(|e| {
                 Ok(e.account()
                     .begin_link(&prior, &to_signing, terms, not_before_ms, expires_ms)?)
             })?;
-            Ok(AccountAction::ready(p, self.owner, "link"))
+            Ok(AccountAction::ready(p, self.owner, ActionKind::Link))
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -895,11 +958,12 @@ impl AccountEngine {
             let links: Vec<Vec<u8>> = links.into_iter().map(|b| b.bytes).collect();
             let args = json_or_null(&args_json, "args")?;
             let t = target_of(target)?;
+            self.ensure_live()?;
             let p = self.run(|e| {
                 Ok(e.account()
                     .begin_call(&key, &links, &audience, &purpose, args, sd[0], t)?)
             })?;
-            Ok(AccountAction::ready(p, self.owner, "call"))
+            Ok(AccountAction::ready(p, self.owner, ActionKind::Call))
         });
         wipe(&mut entropy);
         r

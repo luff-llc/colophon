@@ -63,8 +63,50 @@ cenum! {
     pub enum StepRole { Primary, Cosignature, Possession, Handover }
 }
 cenum! {
-    /// The signature form a signer uses.
-    pub enum SignForm { Raw, Webauthn }
+    /// The signature form a signer uses. `Unknown` is a form a newer writer made: it can be
+    /// shown and counted, never created or checked here.
+    pub enum SignForm { Raw, Webauthn, Unknown }
+}
+cenum! {
+    /// A controller's role (§6.1). `Unknown` is a role a newer writer made.
+    pub enum ControllerRole { Approve, Control, Recover, Sign, Unknown }
+}
+cenum! {
+    /// What kind of action a prepared action is.
+    pub enum ActionKind {
+        Approve, Renew, RenewShares, Revoke, EndSessions, EndMySessions, Rekey, Keyring,
+        AddController, AddSlot, RotateVault, RemoveController, Transition, Veto, Suspend, Resolve,
+        Write, Propose, Resolution, Import, Link, Call
+    }
+}
+cenum! {
+    /// What step of moving an old library a prepared move is. `Finished` once it was finished or
+    /// consumed.
+    pub enum MoveKind { Upgrade, SwiftVeto, SwiftFreeze, SwiftMigration, RenewShares, Finished }
+}
+cenum! {
+    /// How a vault slot opens. `Unknown` is a Swift slot of a form this reader does not know.
+    pub enum SlotKind { Sealed, Prf, Combined, Unknown }
+}
+cenum! {
+    /// Whether a home is serving, or its removal has not activated finally.
+    pub enum HomeStatus { Home, RevocationPending }
+}
+cenum! {
+    /// How a threshold counts signers.
+    pub enum CountBy { Keys, Holders }
+}
+cenum! {
+    /// The kind of an identity: a session is a controller or a member.
+    pub enum AccountIdentityKind { Controller, Member }
+}
+cenum! {
+    /// The §1 result of a verification, without the refusal's reason.
+    pub enum StatusKind { Ok, Held, Refused, Malformed, BadSignature, NewerFormat, Unavailable }
+}
+cenum! {
+    /// What the engine judged a record to be (§11.5), without the reason.
+    pub enum VerdictKind { Admitted, Held, Refused, NewerFormat, Malformed, BadSignature, Unavailable }
 }
 cenum! {
     /// A member's kind.
@@ -176,6 +218,28 @@ record! {
     }
 }
 record! {
+    /// Who a session is: a controller of the keyring or a member, with its 32-hex key ID.
+    pub struct AccountIdentity { pub kind: AccountIdentityKind, pub id: String }
+}
+record! {
+    /// A controller to add, in the typed form (§6.1): the key as a descriptor, never base64
+    /// protocol JSON. `verification` is only for a `webauthn` key; `audiences` only for a `sign`
+    /// controller (a `sign` role is alone); `holder` is optional text.
+    pub struct ControllerSpec {
+        pub key: KeyDescriptorView,
+        pub label: String,
+        pub roles: Vec<ControllerRole>,
+        pub verification: bool,
+        pub holder: Option<String>,
+        pub audiences: Vec<String>,
+    }
+}
+record! {
+    /// The verdict on a record the engine holds or would hold: its kind, and the reason after
+    /// `held:` or `refused:` when there is one.
+    pub struct RecordVerdict { pub kind: VerdictKind, pub reason: Option<String> }
+}
+record! {
     /// The exact body and signer of one signature the host makes.
     pub struct AccountSigningStep {
         pub path: String,
@@ -252,7 +316,7 @@ record! {
     /// One slot of the current vault, as a chooser shows it.
     pub struct SlotInfo {
         pub index: u64,
-        pub kind: String,
+        pub kind: SlotKind,
         pub label: String,
         pub controllers: Vec<SlotController>,
     }
@@ -266,6 +330,8 @@ record! {
     pub struct Status {
         pub seq: u64,
         pub code: String,
+        pub kind: StatusKind,
+        pub reason: Option<String>,
         pub stop_seq: Option<u64>,
         pub detail: Option<String>,
         pub rollback: bool,
@@ -320,7 +386,7 @@ record! {
     pub struct Controller {
         pub id: String,
         pub label: String,
-        pub roles: Vec<String>,
+        pub roles: Vec<ControllerRole>,
         pub form: SignForm,
         pub verification: bool,
         pub holder: Option<String>,
@@ -369,7 +435,7 @@ record! {
     pub struct Home {
         pub id: String,
         pub label: String,
-        pub status: String,
+        pub status: HomeStatus,
         pub endpoints: Vec<String>,
         pub primary: bool,
     }
@@ -620,12 +686,12 @@ record! {
     pub struct RevokeKeep { pub mode: KeepMode, pub kept: Vec<String>, pub heads: Vec<HeadRef> }
 }
 record! {
-    /// What to create. `controllers_json` holds one protocol controller object (§6.1) per item;
+    /// What to create. `controllers` are typed (§6.1);
     /// `policy_json` the §6.3 policy document (empty: the §18 person default).
     pub struct CreateParams {
         pub label: String,
         pub namespaces: Vec<String>,
-        pub controllers_json: Vec<String>,
+        pub controllers: Vec<ControllerSpec>,
         pub slots: Vec<SlotPlan>,
         pub threshold: Option<u64>,
         pub recover_threshold: Option<u64>,
@@ -682,6 +748,8 @@ record! {
     /// The history verifier's verdict, with no host identity.
     pub struct HistoryReport {
         pub code: String,
+        pub kind: StatusKind,
+        pub reason: Option<String>,
         pub seq: u64,
         pub detail: Option<String>,
         pub rollback: bool,
@@ -726,7 +794,7 @@ record! {
     pub struct UpgradeParams {
         pub policy_json: String,
         pub add_threshold: u64,
-        pub count_by: String,
+        pub count_by: CountBy,
         pub issued_ms: i64,
         pub signers: Vec<String>,
     }
@@ -776,11 +844,62 @@ record! {
     }
 }
 record! {
-    /// What a finished step of a move produced: bytes to store, and for F the exact Swift
-    /// entry (`frozen_entry`) the host appends to the predecessor.
+    /// The `authorityOrigins` of one carried WebAuthn controller (1 to 32 strictly ascending
+    /// origins).
+    pub struct OriginsFor { pub controller: String, pub origins: Vec<String> }
+}
+record! {
+    /// The agreement point of one carried raw controller whose agreement key the predecessor
+    /// does not show.
+    pub struct AgreementFor { pub controller: String, pub agreement: Vec<u8> }
+}
+record! {
+    /// What the host chooses for the genesis of the account that succeeds a Swift library
+    /// (§15.1, §16.2). The predecessor's controllers are carried with the roles they held.
+    pub struct SwiftSuccessorParams {
+        pub label: String,
+        pub namespaces: Vec<String>,
+        pub include_stewards: bool,
+        pub authority_origins: Vec<OriginsFor>,
+        pub agreements: Vec<AgreementFor>,
+        pub threshold: Option<u64>,
+        pub recover_threshold: Option<u64>,
+        pub add_threshold: Option<u64>,
+        pub count_by_holders: bool,
+        pub policy_json: String,
+        pub signers: Vec<String>,
+        pub handover: Vec<String>,
+        pub issued_ms: i64,
+        pub earlier_attempts: Vec<AuthorityObjects>,
+    }
+}
+record! {
+    /// One passkey ceremony that rebuilds one slot (§7.2): ONE WebAuthn assertion over
+    /// `challenge` that evaluates `new_salt` first and `old_salt` second. Its first PRF output
+    /// answers `prf_requests[request]`; its second opens the Swift slot `old_slot` through
+    /// `SwiftSource.finish_open_slot`. `user_verification` is required.
+    pub struct SwiftCeremony {
+        pub request: u64,
+        pub old_slot: u64,
+        pub controller: String,
+        pub rp: String,
+        pub credential: Vec<u8>,
+        pub old_salt: Vec<u8>,
+        pub new_salt: Vec<u8>,
+        pub challenge: Vec<u8>,
+        pub user_verification: bool,
+    }
+}
+record! {
+    /// What a finished move step produced. `stores` are to be stored in the account's store as
+    /// given: F at `predecessor/authority/<seq>.json`, a copier's shares at
+    /// `authority/<seq>.json`, the migration at `transitions/<digest>.json`, a veto at
+    /// `vetoes/<digest>.json` (`veto_path`). For F, `frozen_entry` is also the exact Swift bytes
+    /// the Swift side appends to the predecessor.
     pub struct MoveResult {
         pub stores: Vec<Store>,
         pub veto: Option<Vec<u8>>,
+        pub veto_path: Option<String>,
         pub frozen_entry: Option<Vec<u8>>,
         pub frozen_seq: Option<u64>,
         pub succession_verified: bool,
@@ -813,7 +932,7 @@ record! {
     /// One slot of a Swift keyring. `controller` is the one it names, `problem` why it cannot be read.
     pub struct SwiftSlotInfo {
         pub index: u64,
-        pub kind: String,
+        pub kind: SlotKind,
         pub label: String,
         pub controller: Option<String>,
         pub problem: Option<String>,
@@ -915,9 +1034,12 @@ pub const MAX_LIST: usize = 262_144;
 pub const MAX_NAMES: usize = 256;
 /// Largest binary argument: 40 MiB.
 pub const MAX_BYTES: usize = 40 << 20;
-/// Largest JSON text argument: 4 MiB (a document the host edits: policy, terms, controller,
-/// a record payload). Checked on the raw length before it is parsed.
-pub const MAX_JSON: usize = 4 << 20;
+/// Largest domain JSON document: 1 MiB (a record payload, an import batch, a translated batch).
+/// Chosen from the core's own bounds: a record payload is at most 1 MiB canonical
+/// (`domains/saved` validation, `Engine::begin_import`) and an import batch is at most
+/// `MAX_BATCH_BYTES` = 1 MiB, so no legitimate value needs more. It was 4 MiB, which let one
+/// item peak at 192 MiB. Checked on the raw length before anything is parsed.
+pub const MAX_JSON: usize = 1 << 20;
 
 pub(crate) type R<T> = Result<T, AccountError>;
 
@@ -944,12 +1066,94 @@ pub(crate) fn fixed<const N: usize>(b: &[u8], what: &str) -> R<[u8; N]> {
     b.try_into()
         .map_err(|_| AccountError::bound(&format!("{what} must be exactly {N} bytes")))
 }
-/// Parse a JSON argument after its raw length is checked against the cap.
-pub(crate) fn json(text: &str, what: &str) -> R<serde_json::Value> {
-    if text.len() > MAX_JSON {
-        return Err(AccountError::bound(&format!("{what} is over 4 MiB")));
+/// Largest authority-protocol JSON document (policy, terms, a `change`, a slot): 1 MiB, the
+/// authority body bound of §2.4 (`bounds::AUTHORITY_BODY`). Nothing that goes into one authority
+/// entry can be larger, so no legitimate value of this kind needs more.
+pub const MAX_AUTH_JSON: usize = 1 << 20;
+/// Most items in a list of JSON documents (slots, alternatives, blob manifests) and in a
+/// translated batch's children.
+pub const MAX_JSON_ITEMS: usize = 4096;
+
+/// A document averages at least this many bytes per structural element (an opener or a comma
+/// outside a string), plus a fixed allowance. A parsed `serde_json::Value` costs up to about a
+/// hundred bytes per element, so this keeps the parse at roughly a dozen times the raw text, not
+/// the forty-eight times a document of one-byte elements reached.
+const BYTES_PER_ELEMENT: usize = 8;
+
+/// Whether `text` has few enough structural elements for its length.
+fn elements_ok(text: &str) -> bool {
+    let allowed = text.len() / BYTES_PER_ELEMENT + 256;
+    let (mut n, mut in_str, mut esc) = (0usize, false, false);
+    for &b in text.as_bytes() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b',' | b'{' | b'[' => {
+                    n += 1;
+                    if n > allowed {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+/// Parse a JSON document after its raw length and its element count are checked, before
+/// anything that scales with them is allocated.
+pub(crate) fn json_doc(text: &str, cap: usize, what: &str) -> R<serde_json::Value> {
+    if text.len() > cap {
+        return Err(AccountError::bound(&format!(
+            "{what} is over {} KiB",
+            cap >> 10
+        )));
+    }
+    if !elements_ok(text) {
+        return Err(AccountError::bound(&format!(
+            "{what} has more elements than its length allows"
+        )));
     }
     serde_json::from_str(text).map_err(|_| AccountError::bad(format!("{what} is not JSON")))
+}
+/// A domain document (a record payload, an import batch, a translated child): at most 1 MiB.
+pub(crate) fn json(text: &str, what: &str) -> R<serde_json::Value> {
+    json_doc(text, MAX_JSON, what)
+}
+/// An authority-protocol document (policy, terms, a `change`, a slot): at most 1 MiB.
+pub(crate) fn auth_json(text: &str, what: &str) -> R<serde_json::Value> {
+    json_doc(text, MAX_AUTH_JSON, what)
+}
+/// A list of JSON documents, bounded in total before any item is parsed: at most `max_items`
+/// items whose raw lengths sum to at most `cap` (each item is then at most `cap` too).
+pub(crate) fn json_list(
+    items: &[String],
+    cap: usize,
+    max_items: usize,
+    what: &str,
+) -> R<Vec<serde_json::Value>> {
+    if items.len() > max_items {
+        return Err(AccountError::bound(&format!("{what}: too many items")));
+    }
+    let total = items
+        .iter()
+        .try_fold(0usize, |t, i| t.checked_add(i.len()))
+        .ok_or_else(|| AccountError::bound(&format!("{what} is too large")))?;
+    if total > cap {
+        return Err(AccountError::bound(&format!(
+            "{what}: the items together are over {} KiB",
+            cap >> 10
+        )));
+    }
+    items.iter().map(|i| json_doc(i, cap, what)).collect()
 }
 pub(crate) fn json_or_null(text: &str, what: &str) -> R<serde_json::Value> {
     if text.is_empty() {

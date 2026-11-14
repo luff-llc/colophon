@@ -4,7 +4,7 @@ use super::fault::AccountError;
 use super::types::*;
 use super::{guard, Cell};
 use colophon_core::v05::account::{finish_request, prepare_request, request_info};
-use colophon_core::v05::history::{swift, verify_history, Objects, Persisted, Stop};
+use colophon_core::v05::history::{swift, verify_history, Persisted, Stop};
 use colophon_core::v05::ids::{key_id, AccountId};
 use colophon_core::v05::signature::{
     webauthn_check, AssertionBytes, AuthorityRule, CheckMode, SigFailure,
@@ -73,20 +73,19 @@ free_fn! {
     /// decided. It needs and keeps no state.
     pub fn account_verify_history(objects: AuthorityObjects, now_ms: i64) -> Result<HistoryReport, AccountError> {
         guard(|| {
-            let o = Objects {
-                entries: blobs(objects.entries, "an entry")?,
-                pending: blobs(objects.pending, "a pending object")?,
-                heads: blobs(objects.heads, "a head")?,
-                predecessor: blobs(objects.predecessor, "a predecessor entry")?,
-            };
+            let o = cv::authority_objects(objects)?;
             let v = verify_history(&o, &Persisted::default(), now_ms);
             let detail = match &v.stop {
                 Some(Stop::Failed { failure, .. }) => Some(failure.detail().to_string()),
                 Some(Stop::Held { why, .. }) => Some(why.clone()),
                 _ => None,
             };
+            let code = v.code();
+            let (kind, reason) = cv::status_parts(&code);
             Ok(HistoryReport {
-                code: v.code(),
+                code,
+                kind,
+                reason,
                 seq: v.seq(),
                 detail,
                 rollback: v.rollback,

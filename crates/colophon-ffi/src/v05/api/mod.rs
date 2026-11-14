@@ -27,6 +27,7 @@ mod fault;
 mod moving;
 mod pairing;
 mod session;
+mod successor;
 mod types;
 mod verify;
 
@@ -40,6 +41,7 @@ pub use session::{
     AccountCopyWrite, SwiftCopyDestination, SwiftCopyPlan, SwiftCopyResult, SwiftSource,
     SwiftTranslator,
 };
+pub use successor::SwiftSuccessorCreation;
 pub use types::*;
 pub use verify::*;
 
@@ -72,18 +74,41 @@ pub(crate) type Versions = Arc<Mutex<HashMap<String, String>>>;
 /// The first failure a host callback reported during the current call.
 pub(crate) type HostFault = Arc<Mutex<Option<String>>>;
 
+/// Whether the thread that holds an object's lock is inside a host callback right now.
+pub(crate) type InCallback = Arc<std::sync::atomic::AtomicBool>;
+
 /// The engine's view of the host's source.
 pub(crate) struct Source {
     host: Box<dyn HostSource>,
     versions: Versions,
     fault: HostFault,
+    busy: InCallback,
+}
+/// Marks the engine as inside a host callback for as long as it lives.
+struct InHost<'a>(&'a InCallback);
+impl<'a> InHost<'a> {
+    fn enter(b: &'a InCallback) -> Self {
+        b.store(true, Ordering::SeqCst);
+        Self(b)
+    }
+}
+impl Drop for InHost<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 impl Source {
-    pub(crate) fn new(host: Box<dyn HostSource>, versions: Versions, fault: HostFault) -> Self {
+    pub(crate) fn new(
+        host: Box<dyn HostSource>,
+        versions: Versions,
+        fault: HostFault,
+        busy: InCallback,
+    ) -> Self {
         Self {
             host,
             versions,
             fault,
+            busy,
         }
     }
     fn note(&self, e: &AccountError) {
@@ -96,6 +121,7 @@ impl Source {
 }
 impl colophon_core::engine::RecordSource for Source {
     fn read(&self, path: &str) -> colophon_core::Result<Vec<u8>> {
+        let _in = InHost::enter(&self.busy);
         self.host.read(path.to_string()).map_err(|e| {
             self.note(&e);
             colophon_core::Error(e.detail_text())
@@ -110,6 +136,7 @@ impl colophon_core::engine::RecordSource for Source {
             .filter(|v| !v.is_empty()))
     }
     fn read_blob(&self, path: &str) -> colophon_core::Result<colophon_core::blobs::BlobRead> {
+        let _in = InHost::enter(&self.busy);
         match self.host.read_blob(path.to_string()) {
             Ok(b) if b.is_empty() => Ok(colophon_core::blobs::BlobRead::Missing),
             Ok(b) => Ok(colophon_core::blobs::BlobRead::Available(b)),
@@ -128,12 +155,25 @@ thread_local! {
     static THREAD: u64 = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
 }
 
+/// How long a call from another thread waits for an object whose holder is inside a host
+/// callback before it fails (milliseconds). A callback is synchronous, so this only bites a
+/// callback that waits for the thread that is waiting: a deadlock the host wrote.
+static CALLBACK_WAIT_MS: AtomicU64 = AtomicU64::new(30_000);
+/// Test support: how long (ms) a call waits for an object whose holder is inside a host
+/// callback. The default is 30,000.
+#[doc(hidden)]
+pub fn set_callback_wait_ms(ms: u64) {
+    CALLBACK_WAIT_MS.store(ms, Ordering::SeqCst);
+}
+
 /// A lock that waits for calls from other threads (as 0.4's does) and fails with `Reentered`
-/// only when the thread that holds it asks again: a host callback calling into the object that
-/// is calling it.
+/// when the thread that holds it asks again (a host callback calling into the object that is
+/// calling it), and when it has waited for longer than [`set_callback_wait_ms`] for an object
+/// whose holder is inside a host callback (a callback that waits for the thread that waits).
 pub(crate) struct Cell<T> {
     m: Mutex<T>,
     owner: AtomicU64,
+    busy: Option<InCallback>,
 }
 pub(crate) struct Held<'a, T> {
     g: std::sync::MutexGuard<'a, T>,
@@ -160,18 +200,56 @@ impl<T> Cell<T> {
         Self {
             m: Mutex::new(v),
             owner: AtomicU64::new(0),
+            busy: None,
+        }
+    }
+    /// A cell whose holder is known to be inside a host callback while `busy` is set.
+    pub(crate) fn watched(v: T, busy: InCallback) -> Self {
+        Self {
+            m: Mutex::new(v),
+            owner: AtomicU64::new(0),
+            busy: Some(busy),
         }
     }
     pub(crate) fn lock(&self) -> Result<Held<'_, T>, AccountError> {
+        use std::sync::TryLockError;
         let me = THREAD.with(|t| *t);
         if self.owner.load(Ordering::Acquire) == me {
             return Err(AccountError::reentered());
         }
-        let g = self.m.lock().map_err(|_| {
+        let poisoned = || {
             AccountError::internal(
                 "an earlier call panicked; discard this object and open a new one",
             )
-        })?;
+        };
+        let g = match (&self.busy, self.m.try_lock()) {
+            (_, Ok(g)) => g,
+            (_, Err(TryLockError::Poisoned(_))) => return Err(poisoned()),
+            (None, Err(TryLockError::WouldBlock)) => self.m.lock().map_err(|_| poisoned())?,
+            (Some(busy), Err(TryLockError::WouldBlock)) => {
+                let start = std::time::Instant::now();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    match self.m.try_lock() {
+                        Ok(g) => break g,
+                        Err(TryLockError::Poisoned(_)) => return Err(poisoned()),
+                        Err(TryLockError::WouldBlock) => {}
+                    }
+                    let limit = CALLBACK_WAIT_MS.load(Ordering::Relaxed);
+                    if busy.load(Ordering::SeqCst)
+                        && start.elapsed() >= std::time::Duration::from_millis(limit)
+                    {
+                        return Err(AccountError::Reentered {
+                            code: "reentered".into(),
+                            detail: "this object's holder has been inside a host callback for \
+                                     longer than the wait allows: a callback must not call the \
+                                     engine and must not wait for a thread that does"
+                                .into(),
+                        });
+                    }
+                }
+            }
+        };
         self.owner.store(me, Ordering::Release);
         Ok(Held {
             g,

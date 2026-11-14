@@ -2,9 +2,9 @@
 //! account), reads the host's record source, and exposes reads, writes, live state, blobs,
 //! imports, checkpoints and the exchange with a home as typed values the host performs.
 //!
-//! `todo` until the core's engine forwards them (branch `engine-0.5-e9`): `record_due`,
-//! `set_read_scope`, `lock`, `accept_seed_transfer`, `accept_predecessor_entry`, the artifact of
-//! a link or call, and the key wipe on drop. They are not routed through a second object.
+//! `record_due`, `set_read_scope`, `lock`, `accept_seed_transfer`, `accept_predecessor_entry`
+//! and the artifact of a link or call are forwards of the core's engine (see `session.rs`); a
+//! session is one object.
 use super::action::{next_owner, AccountAction};
 use super::convert as cv;
 use super::fault::AccountError;
@@ -40,17 +40,41 @@ pub struct AccountEngine {
     fault: HostFault,
 }
 
-pub(crate) fn seeds32(entropy: &[u8], n: usize) -> R<Vec<[u8; 32]>> {
+/// The 32-byte seeds cut from a call's entropy: held in one exact-size heap block that is
+/// overwritten with zeros when this value drops, on every path (a refusal included).
+pub(crate) struct Seeds(Vec<[u8; 32]>);
+impl std::ops::Index<usize> for Seeds {
+    type Output = [u8; 32];
+    fn index(&self, i: usize) -> &[u8; 32] {
+        &self.0[i]
+    }
+}
+impl Drop for Seeds {
+    fn drop(&mut self) {
+        for s in &mut self.0 {
+            wipe(s);
+        }
+    }
+}
+pub(crate) fn seeds32(entropy: &[u8], n: usize) -> R<Seeds> {
     if entropy.len() != 32 * n {
         return Err(AccountError::bound(&format!(
             "this call takes {} bytes of fresh entropy",
             32 * n
         )));
     }
-    entropy
-        .chunks(32)
-        .map(|c| fixed::<32>(c, "entropy"))
-        .collect()
+    let mut out = Seeds(Vec::with_capacity(n));
+    for c in entropy.chunks(32) {
+        out.0.push(fixed::<32>(c, "entropy")?);
+    }
+    Ok(out)
+}
+/// A list of typed controllers as protocol JSON (at most 64: §6.2).
+fn controller_values(v: &[ControllerSpec]) -> R<Vec<Value>> {
+    if v.len() > 64 {
+        return Err(AccountError::bound("a keyring has at most 64 controllers"));
+    }
+    v.iter().map(cv::controller_value).collect()
 }
 fn no_entropy(entropy: &[u8]) -> R<()> {
     if entropy.is_empty() {
@@ -213,25 +237,20 @@ pub(crate) enum Prepared {
 fn done(p: colophon_core::v05::Result<colophon_core::v05::account::PendingAction>) -> R<Prepared> {
     Ok(Prepared::Action(p?))
 }
-fn parse_identity(text: &str) -> R<colophon_core::v05::account::Identity> {
+pub(crate) fn identity_of(i: &AccountIdentity) -> R<colophon_core::v05::account::Identity> {
     use colophon_core::v05::account::Identity;
-    let (kind, id) = text
-        .split_once(':')
-        .ok_or_else(|| AccountError::bad("identity is `controller:<id>` or `member:<id>`"))?;
-    if id.len() != 32
-        || !id
+    if i.id.len() != 32
+        || !i
+            .id
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Err(AccountError::bad("identity names a 32-hex key ID"));
+        return Err(AccountError::bad("an identity names a 32-hex key ID"));
     }
-    match kind {
-        "controller" => Ok(Identity::Controller(id.into())),
-        "member" => Ok(Identity::Member(id.into())),
-        _ => Err(AccountError::bad(
-            "identity is `controller:<id>` or `member:<id>`",
-        )),
-    }
+    Ok(match i.kind {
+        AccountIdentityKind::Controller => Identity::Controller(i.id.clone()),
+        AccountIdentityKind::Member => Identity::Member(i.id.clone()),
+    })
 }
 fn saved_in(s: SavedState) -> R<Option<Saved>> {
     if s.verifier.is_empty() && s.checkpoint.is_empty() {
@@ -262,9 +281,25 @@ impl AccountEngine {
                 *h = None;
             }
             let mut g = self.eng.lock()?;
+            // An engine that became unusable (its source or home was inconsistent) answers
+            // nothing more, reads included.
+            if let Err(poisoned) = g.advance(0) {
+                return Err(AccountError::integrity(format!(
+                    "{}: {}",
+                    poisoned.code(),
+                    poisoned.detail()
+                )));
+            }
             match f(&mut g) {
                 Ok(v) => Ok(v),
                 Err(e) => {
+                    // The core says a locked engine refuses by a plain refusal: say it typed.
+                    if g.is_locked()
+                        && matches!(e, AccountError::Malformed { .. })
+                        && e.detail_text().contains("the engine is locked")
+                    {
+                        return Err(AccountError::locked());
+                    }
                     if let Err(poisoned) = g.advance(0) {
                         return Err(AccountError::integrity(format!(
                             "{}: {}",
@@ -289,7 +324,7 @@ impl AccountEngine {
     pub(crate) fn open_inner(
         host: Box<dyn HostSource>,
         listing: Vec<ListedPath>,
-        identity: String,
+        identity: AccountIdentity,
         account: String,
         namespaces: Vec<String>,
         batch: u64,
@@ -300,7 +335,7 @@ impl AccountEngine {
         let r = guard(|| {
             let k = fixed::<32>(&key, "the sealed-state key")?;
             list_len(&listing, "the listing")?;
-            let me = parse_identity(&identity)?;
+            let me = identity_of(&identity)?;
             let ns = names(namespaces, "namespaces")?;
             let versions: Versions = Arc::new(Mutex::new(HashMap::new()));
             let fault: HostFault = Arc::new(Mutex::new(None));
@@ -318,7 +353,8 @@ impl AccountEngine {
             options.batch = usize::try_from(if batch == 0 { DEFAULT_BATCH } else { batch })
                 .map_err(|_| AccountError::bound("batch"))?;
             let saved = saved_in(saved)?;
-            let src = Source::new(host, versions.clone(), fault.clone());
+            let busy: super::InCallback = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let src = Source::new(host, versions.clone(), fault.clone(), busy.clone());
             let e = match Engine::open(src, paths, me, options, saved.as_ref(), now_ms) {
                 Ok(e) => e,
                 Err(f) => {
@@ -332,7 +368,7 @@ impl AccountEngine {
                 }
             };
             Ok(Self {
-                eng: Cell::new(e),
+                eng: Cell::watched(e, busy),
                 owner: next_owner(),
                 versions,
                 fault,
@@ -341,12 +377,27 @@ impl AccountEngine {
         wipe(&mut key);
         r
     }
+    /// Refuse (typed `Locked`) once `lock` was called. A prepared action, a new one and a
+    /// finish all stop here; reads of the verified history keep answering.
+    pub(crate) fn ensure_live(&self) -> R<()> {
+        self.run(|e| {
+            if e.is_locked() {
+                Err(AccountError::locked())
+            } else {
+                Ok(())
+            }
+        })
+    }
     pub(crate) fn prepare(
         &self,
-        kind: &str,
+        kind: ActionKind,
         mut entropy: Vec<u8>,
         f: impl FnOnce(&Engine<Source>, &[u8]) -> R<Prepared>,
     ) -> R<AccountAction> {
+        if let Err(e) = self.ensure_live() {
+            wipe(&mut entropy);
+            return Err(e);
+        }
         let r = self.run(|e| f(e, &entropy));
         wipe(&mut entropy);
         Ok(match r? {
@@ -357,6 +408,7 @@ impl AccountEngine {
     fn provide_prf_inner(&self, action: &AccountAction, results: Vec<PrfAnswer>) -> R<()> {
         guard(|| {
             let r = cv::prf_answers(results)?;
+            self.ensure_live()?;
             let p = action.take(self.owner)?;
             let next = self.run(|e| Ok(e.account().provide_prf(p, r)?))?;
             action.put_back(next)
@@ -365,6 +417,8 @@ impl AccountEngine {
     fn finish_inner(&self, action: &AccountAction, sigs: Vec<Signature>) -> R<Written> {
         guard(|| {
             let sigs = cv::signatures(sigs)?;
+            // A locked engine refuses before the action is taken: it is not consumed.
+            self.ensure_live()?;
             let p = action.take(self.owner)?;
             let w = self.run(|e| Ok(e.finish_write(p, sigs)?))?;
             Ok(Written {
@@ -381,16 +435,18 @@ impl AccountEngine {
         entropy: Vec<u8>,
     ) -> R<AccountBlobWriter> {
         let mut entropy = entropy;
-        let r = self.run(|e| {
-            let seed = fixed::<32>(&entropy, "entropy")?;
-            match e.begin_blob(&namespace, media_type, seed)? {
-                Outcome::Success { value, .. } => Ok(AccountBlobWriter {
-                    w: Cell::new(Some(value)),
-                }),
-                Outcome::Failure { reason, detail, .. } => {
-                    Err(AccountError::denied(&reason, &detail))
+        let r = self.ensure_live().and_then(|()| {
+            self.run(|e| {
+                let seed = fixed::<32>(&entropy, "entropy")?;
+                match e.begin_blob(&namespace, media_type, seed)? {
+                    Outcome::Success { value, .. } => Ok(AccountBlobWriter {
+                        w: Cell::new(Some(value)),
+                    }),
+                    Outcome::Failure { reason, detail, .. } => {
+                        Err(AccountError::denied(&reason, &detail))
+                    }
                 }
-            }
+            })
         });
         wipe(&mut entropy);
         r
@@ -403,16 +459,18 @@ impl AccountEngine {
         entropy: Vec<u8>,
     ) -> R<AccountLiveWrite> {
         let mut entropy = entropy;
-        let r = self.run(|e| {
-            let seed = fixed::<32>(&entropy, "entropy")?;
-            let p = json(&payload_json, "payload")?;
-            match e.begin_live_write(&namespace, &kind, p, seed)? {
-                Ok(pl) => Ok(AccountLiveWrite {
-                    st: Cell::new(Some(pl)),
-                    owner: self.owner,
-                }),
-                Err(d) => Err(AccountError::denied(&d.reason, &d.detail)),
-            }
+        let r = self.ensure_live().and_then(|()| {
+            self.run(|e| {
+                let seed = fixed::<32>(&entropy, "entropy")?;
+                let p = json(&payload_json, "payload")?;
+                match e.begin_live_write(&namespace, &kind, p, seed)? {
+                    Ok(pl) => Ok(AccountLiveWrite {
+                        st: Cell::new(Some(pl)),
+                        owner: self.owner,
+                    }),
+                    Err(d) => Err(AccountError::denied(&d.reason, &d.detail)),
+                }
+            })
         });
         wipe(&mut entropy);
         r
@@ -423,6 +481,7 @@ impl AccountEngine {
                 cv::signatures(vec![signature])?
                     .try_into()
                     .map_err(|_| AccountError::bad("a live write has exactly one signature"))?;
+            self.ensure_live()?;
             let pl = {
                 let mut s = live.st.lock()?;
                 if live.owner != self.owner {
@@ -448,7 +507,7 @@ impl AccountEngine {
 macro_rules! begin_methods {
     ($(
         $(#[$m:meta])*
-        fn $name:ident($($arg:ident : $t:ty),*) $kind:literal |$eng:ident, $ent:ident| $body:block
+        fn $name:ident($($arg:ident : $t:ty),*) $kind:ident |$eng:ident, $ent:ident| $body:block
     )*) => {
         #[cfg(feature = "native05")]
         #[uniffi::export]
@@ -456,7 +515,7 @@ macro_rules! begin_methods {
             $(
                 $(#[$m])*
                 pub fn $name(&self $(, $arg: $t)*, entropy: Vec<u8>) -> Result<Arc<AccountAction>, AccountError> {
-                    self.prepare($kind, entropy, |$eng, $ent| $body).map(Arc::new)
+                    self.prepare(ActionKind::$kind, entropy, |$eng, $ent| $body).map(Arc::new)
                 }
             )*
         }
@@ -466,7 +525,7 @@ macro_rules! begin_methods {
             $(
                 $(#[$m])*
                 pub fn $name(&self $(, $arg: $t)*, entropy: Vec<u8>) -> Result<AccountAction, AccountError> {
-                    self.prepare($kind, entropy, |$eng, $ent| $body)
+                    self.prepare(ActionKind::$kind, entropy, |$eng, $ent| $body)
                 }
             )*
         }
@@ -475,23 +534,23 @@ macro_rules! begin_methods {
 
 begin_methods! {
     /// Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
-    fn begin_approve(request: Vec<u8>, terms_json: String, signers: Vec<String>) "approve" |e, s| {
+    fn begin_approve(request: Vec<u8>, terms_json: String, signers: Vec<String>) Approve |e, s| {
         let sd = seeds32(s, 1)?;
-        let terms = json(&terms_json, "terms")?;
+        let terms = auth_json(&terms_json, "terms")?;
         done(e.account().begin_approve(&request, terms, &names(signers, "signers")?, sd[0]))
     }
     /// Renew a member's expiry. 32 bytes of entropy.
-    fn begin_renew(member: String, expires_ms: i64, signers: Vec<String>) "renew" |e, s| {
+    fn begin_renew(member: String, expires_ms: i64, signers: Vec<String>) Renew |e, s| {
         let sd = seeds32(s, 1)?;
         done(e.account().begin_renew(&member, expires_ms, &names(signers, "signers")?, sd[0]))
     }
     /// Seal the shares a member is owed (§9.4). 32 bytes of entropy.
-    fn begin_renew_shares(member: String, signers: Vec<String>) "renew_shares" |e, s| {
+    fn begin_renew_shares(member: String, signers: Vec<String>) RenewShares |e, s| {
         let sd = seeds32(s, 1)?;
         done(e.account().begin_renew_shares(&member, &names(signers, "signers")?, sd[0]))
     }
     /// Revoke a member, keeping what `keep` says (§9.5). 32 bytes of entropy.
-    fn begin_revoke(member: String, keep: RevokeKeep, signers: Vec<String>) "revoke" |e, s| {
+    fn begin_revoke(member: String, keep: RevokeKeep, signers: Vec<String>) Revoke |e, s| {
         let sd = seeds32(s, 1)?;
         let k = match keep.mode {
             KeepMode::Everything => CoreKeep::Everything,
@@ -504,35 +563,34 @@ begin_methods! {
         done(e.account().begin_revoke(&member, &k, &names(signers, "signers")?, sd[0]))
     }
     /// End a member's sessions. No entropy.
-    fn begin_end_sessions(member: String, signers: Vec<String>) "end_sessions" |e, s| {
+    fn begin_end_sessions(member: String, signers: Vec<String>) EndSessions |e, s| {
         no_entropy(s)?;
         done(e.account().begin_end_sessions(&member, &names(signers, "signers")?))
     }
     /// End this device's own sessions. No entropy.
-    fn begin_end_my_sessions() "end_my_sessions" |e, s| {
+    fn begin_end_my_sessions() EndMySessions |e, s| {
         no_entropy(s)?;
         done(e.account().begin_end_my_sessions())
     }
     /// A new epoch for the namespaces. 32 bytes of entropy.
-    fn begin_rekey(namespaces: Vec<String>, signers: Vec<String>) "rekey" |e, s| {
+    fn begin_rekey(namespaces: Vec<String>, signers: Vec<String>) Rekey |e, s| {
         let sd = seeds32(s, 1)?;
         done(e.account().begin_rekey(&names(namespaces, "namespaces")?, &names(signers, "signers")?, sd[0]))
     }
-    /// An immediate additive `keyring` entry: controllers (protocol JSON each), already-built
-    /// slots (JSON each) and policy fields (JSON, or empty). No entropy.
-    fn begin_keyring(add_controllers_json: Vec<String>, add_slots_json: Vec<String>, policy_json: String, signers: Vec<String>) "keyring" |e, s| {
+    /// An immediate additive `keyring` entry: controllers (typed), already-built slots (JSON
+    /// each, at most 1 MiB in all) and policy fields (JSON, or empty). No entropy.
+    fn begin_keyring(add_controllers: Vec<ControllerSpec>, add_slots_json: Vec<String>, policy_json: String, signers: Vec<String>) Keyring |e, s| {
         no_entropy(s)?;
-        let parse_all = |v: &[String], w: &str| -> R<Vec<Value>> { v.iter().map(|x| json(x, w)).collect() };
         let edit = KeyringEdit {
-            add_controllers: parse_all(&add_controllers_json, "a controller")?,
-            add_slots: parse_all(&add_slots_json, "a slot")?,
-            policy: if policy_json.is_empty() { None } else { Some(json(&policy_json, "policy")?) },
+            add_controllers: controller_values(&add_controllers)?,
+            add_slots: json_list(&add_slots_json, MAX_AUTH_JSON, MAX_NAMES, "a slot")?,
+            policy: if policy_json.is_empty() { None } else { Some(auth_json(&policy_json, "policy")?) },
         };
         done(e.account().begin_keyring(&edit, &names(signers, "signers")?))
     }
-    /// Add a controller (protocol JSON): at once for `approve`/`sign` roles, or as a pending
+    /// Add a controller (typed): at once for `approve`/`sign` roles, or as a pending
     /// transition under `rule` for `control`/`recover`. No entropy.
-    fn begin_add_controller(controller_json: String, mode: AddMode, signers: Vec<String>, rule: RuleKind) "add_controller" |e, s| {
+    fn begin_add_controller(controller: ControllerSpec, mode: AddMode, signers: Vec<String>, rule: RuleKind) AddController |e, s| {
         no_entropy(s)?;
         let signers = names(signers, "signers")?;
         let m = match mode {
@@ -540,17 +598,17 @@ begin_methods! {
             AddMode::Transition => CoreAdd::Transition { signers, rule: cv::rule(rule) },
         };
         done(e.account().begin_add_controller(&AddController {
-            controller: json(&controller_json, "the controller")?,
+            controller: cv::controller_value(&controller)?,
             mode: m,
         }))
     }
     /// A self-slot (§8.4). 32 bytes of entropy.
-    fn begin_add_slot(signer: String, plan: SlotPlan) "add_slot" |e, s| {
+    fn begin_add_slot(signer: String, plan: SlotPlan) AddSlot |e, s| {
         let sd = seeds32(s, 1)?;
         done(e.account().begin_add_slot(&signer, cv::slot_plan(plan)?, sd[0]))
     }
     /// A `vault` entry from a new seed. 64 bytes: the new seed, then the entropy.
-    fn begin_rotate_vault(signer: String, has_plans: bool, plans: Vec<SlotPlan>) "rotate_vault" |e, s| {
+    fn begin_rotate_vault(signer: String, has_plans: bool, plans: Vec<SlotPlan>) RotateVault |e, s| {
         let sd = seeds32(s, 2)?;
         let plans = if has_plans {
             Some(plans.into_iter().map(cv::slot_plan).collect::<R<Vec<_>>>()?)
@@ -559,7 +617,7 @@ begin_methods! {
     }
     /// Remove controllers, keeping some a removed key planted; with `rotate`, 64 bytes of
     /// entropy (new seed, seal entropy), else none.
-    fn begin_remove_controller(remove: Vec<String>, keep: Vec<String>, signers: Vec<String>, rule: RuleKind, rotate: bool) "remove_controller" |e, s| {
+    fn begin_remove_controller(remove: Vec<String>, keep: Vec<String>, signers: Vec<String>, rule: RuleKind, rotate: bool) RemoveController |e, s| {
         let rotation = if rotate {
             let sd = seeds32(s, 2)?;
             Some((sd[0], sd[1]))
@@ -571,24 +629,24 @@ begin_methods! {
             &names(remove, "remove")?, &names(keep, "keep")?, &names(signers, "signers")?, cv::rule(rule), rotation))
     }
     /// A pending transition; `change_json` is the §8.7 `change` object. No entropy.
-    fn begin_transition(change_json: String, signers: Vec<String>, rule: RuleKind) "transition" |e, s| {
+    fn begin_transition(change_json: String, signers: Vec<String>, rule: RuleKind) Transition |e, s| {
         no_entropy(s)?;
-        let c = json(&change_json, "the change")?;
+        let c = auth_json(&change_json, "the change")?;
         let Value::Object(map) = c else { return Err(AccountError::bad("the change is an object")) };
         done(e.account().begin_transition(&Change(map), &names(signers, "signers")?, cv::rule(rule)))
     }
     /// A veto of a pending transition. No entropy.
-    fn begin_veto(transition: String, signers: Vec<String>) "veto" |e, s| {
+    fn begin_veto(transition: String, signers: Vec<String>) Veto |e, s| {
         no_entropy(s)?;
         done(e.account().begin_veto(&transition, &names(signers, "signers")?))
     }
     /// Suspend a controller while a transition is pending. No entropy.
-    fn begin_suspend(key: String, transition: String, signer: String) "suspend" |e, s| {
+    fn begin_suspend(key: String, transition: String, signer: String) Suspend |e, s| {
         no_entropy(s)?;
         done(e.account().begin_suspend(&key, &transition, &signer))
     }
     /// Resolve a fork: the anchor and the kept candidate, each `(seq, digest)`. No entropy.
-    fn begin_resolve(anchor_seq: u64, anchor_digest: String, kept_seq: u64, kept_digest: String, signers: Vec<String>, rule: RuleKind) "resolve" |e, s| {
+    fn begin_resolve(anchor_seq: u64, anchor_digest: String, kept_seq: u64, kept_digest: String, signers: Vec<String>, rule: RuleKind) Resolve |e, s| {
         no_entropy(s)?;
         done(e.account().begin_resolve((anchor_seq, anchor_digest), (kept_seq, kept_digest),
             &names(signers, "signers")?, cv::rule(rule)))
@@ -596,7 +654,7 @@ begin_methods! {
     /// A record write; `payload_json` is the domain payload. The engine retains the live heads
     /// the write supersedes. 32 bytes of entropy. A write refused for access reasons returns an
     /// action whose `denial` is set.
-    fn begin_write(namespace: String, kind: String, payload_json: String) "write" |e, s| {
+    fn begin_write(namespace: String, kind: String, payload_json: String) Write |e, s| {
         let sd = seeds32(s, 1)?;
         let p = json(&payload_json, "payload")?;
         Ok(match e.begin_write(&namespace, &kind, p, Level::Write, sd[0])? {
@@ -605,7 +663,7 @@ begin_methods! {
         })
     }
     /// A proposal (§11.6). 32 bytes of entropy.
-    fn begin_propose(namespace: String, kind: String, payload_json: String) "propose" |e, s| {
+    fn begin_propose(namespace: String, kind: String, payload_json: String) Propose |e, s| {
         let sd = seeds32(s, 1)?;
         let p = json(&payload_json, "payload")?;
         Ok(match e.begin_write(&namespace, &kind, p, Level::Propose, sd[0])? {
@@ -614,12 +672,12 @@ begin_methods! {
         })
     }
     /// Accept or decline proposals. 32 bytes of entropy.
-    fn begin_resolution(namespace: String, accept: bool, proposals: Vec<String>) "resolution" |e, s| {
+    fn begin_resolution(namespace: String, accept: bool, proposals: Vec<String>) Resolution |e, s| {
         let sd = seeds32(s, 1)?;
         done(e.account().begin_resolution(&namespace, accept, &names(proposals, "proposals")?, sd[0]))
     }
     /// An import batch (the 0.4 batch JSON) under a grant that carries `import`. 32 bytes.
-    fn begin_import(namespace: String, batch_json: String) "import" |e, s| {
+    fn begin_import(namespace: String, batch_json: String) Import |e, s| {
         let sd = seeds32(s, 1)?;
         let v = json(&batch_json, "the import batch")?;
         let b: colophon_core::imports::ImportBatch = serde_json::from_value(v)
@@ -638,12 +696,18 @@ impl AccountEngine {
     pub fn id(&self) -> Result<String, AccountError> {
         self.acct(|a| Ok(a.id().as_str().to_string()))
     }
-    /// This session's identity: `controller:<id>` or `member:<id>`.
-    pub fn identity(&self) -> Result<String, AccountError> {
+    /// This session's identity: a controller or a member, with its ID.
+    pub fn identity(&self) -> Result<AccountIdentity, AccountError> {
         self.acct(|a| {
             Ok(match a.identity() {
-                colophon_core::v05::account::Identity::Controller(i) => format!("controller:{i}"),
-                colophon_core::v05::account::Identity::Member(i) => format!("member:{i}"),
+                colophon_core::v05::account::Identity::Controller(i) => AccountIdentity {
+                    kind: AccountIdentityKind::Controller,
+                    id: i.clone(),
+                },
+                colophon_core::v05::account::Identity::Member(i) => AccountIdentity {
+                    kind: AccountIdentityKind::Member,
+                    id: i.clone(),
+                },
             })
         })
     }
@@ -744,13 +808,17 @@ impl AccountEngine {
         self.acct(|a| Ok(a.write_denial(&namespace).as_ref().map(cv::denial)))
     }
     /// The verdict on a record the engine holds at `path`, or none.
-    pub fn record_verdict(&self, path: String) -> Result<Option<String>, AccountError> {
-        self.acct(|a| Ok(a.record_verdict(&path)))
+    pub fn record_verdict(&self, path: String) -> Result<Option<RecordVerdict>, AccountError> {
+        self.acct(|a| Ok(cv::record_verdict(a.record_verdict(&path))))
     }
     /// The verdict the engine would give `bytes` at `path`, without holding them.
-    pub fn verdict_of(&self, path: String, bytes: Vec<u8>) -> Result<Option<String>, AccountError> {
+    pub fn verdict_of(
+        &self,
+        path: String,
+        bytes: Vec<u8>,
+    ) -> Result<Option<RecordVerdict>, AccountError> {
         bytes_ok(&bytes, MAX_BYTES, "a record")?;
-        self.acct(|a| Ok(a.verdict_of(&path, &bytes)))
+        self.acct(|a| Ok(cv::record_verdict(a.verdict_of(&path, &bytes))))
     }
     /// The live heads the verifier accepted.
     pub fn live_heads(&self) -> Result<Vec<LiveHead>, AccountError> {
@@ -875,11 +943,18 @@ impl AccountEngine {
     /// A member opens its shares with the host's answers, then the records are read once. The
     /// secrets are consumed and wiped.
     pub fn finish_unlock_epochs(&self, answers: Vec<EpochAnswer>) -> Result<Changes, AccountError> {
-        self.run(|e| {
+        // The shares are wiped after the call on every path: a failure before the engine is
+        // reached (a call from inside a callback, a poisoned lock) included.
+        let mut answers = answers;
+        let r = self.run(|e| {
             let want = e.begin_unlock_epochs();
-            let s = cv::epoch_secrets(want, answers)?;
+            let s = cv::epoch_secrets(want, &mut answers)?;
             Ok(cv::changes(&e.finish_unlock_epochs(s)?))
-        })
+        });
+        for a in &mut answers {
+            wipe(&mut a.shared);
+        }
+        r
     }
     /// Paths a checkpoint covered that the listing no longer names.
     pub fn missing_covered(&self) -> Result<Vec<String>, AccountError> {
@@ -1237,7 +1312,7 @@ impl AccountEngine {
 #[uniffi::export]
 impl AccountEngine {
     /// Open an engine over the host's source. `listing` is every path the source holds, with
-    /// its content version (empty for none); `identity` is `controller:<id>` or `member:<id>`;
+    /// its content version (empty for none); `identity` is a controller or a member with its ID;
     /// `account` the 64-hex account ID; `namespaces` the read scope (empty: all); `batch` the
     /// records judged per step (0: the default); `saved` what `save` returned (an empty record
     /// for none); `key` the 32-byte device-held key (wiped from the argument; the core's
@@ -1246,7 +1321,7 @@ impl AccountEngine {
     pub fn open(
         source: Box<dyn HostSource>,
         listing: Vec<ListedPath>,
-        identity: String,
+        identity: AccountIdentity,
         account: String,
         namespaces: Vec<String>,
         batch: u64,
