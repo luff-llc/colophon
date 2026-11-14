@@ -463,7 +463,9 @@ domain-separation label, unchanged in 0.5.
 **Each newly introduced epoch MUST be sealed to exactly the current vault and the active,
 unexpired members with any access to its namespace (§10.2), at the introducing entry.**
 Historical seals stay valid; epochs sealed to an earlier vault are reached through
-`previousVault` (§8.3). Later `shares` add only recipients this document authorizes.
+`previousVault` (§8.3). Later `shares` add only recipients this document authorizes. A member that
+is provisional (§8.7) or expired when an epoch is made is not sealed to it; it gets its shares by
+a `renew` (§9.4) once its activation is final or it is current again.
 
 After opening any slot the core MUST check the plaintext is 32 bytes, derive the identity and
 compare both public keys with the keyring's `vault`; a mismatch is `refused:vaultLocked` and
@@ -627,8 +629,9 @@ its seed. While the vault is retiring:
   (§8.4). Hosts MUST warn (§6.4) while a remaining controller has no slot. The old seed is
   retired once every remaining controller that had an old slot has a new one; until then it opens
   only what it opened before.
-- Hosts MUST NOT introduce epochs, and a `revoke` MAY carry empty `epochs`; the `rekey` after the
-  rotation covers them.
+- Hosts MUST NOT introduce epochs, and a `revoke` carries empty `epochs` (§9.5); the `rekey` after
+  the rotation covers them. A verifier refuses a `rekey`, or a `revoke` with non-empty `epochs`,
+  while the vault is retiring.
 - **What the removed key can still read:** everything sealed to the retiring vault, which is every
   epoch introduced before the `vault` entry and every record under them, including records written
   while the vault was retiring. Nothing introduced after the `vault` entry is sealed to it.
@@ -1098,20 +1101,29 @@ was expired. Nothing else changes.
 ### 9.5 Revoke
 
 `revoke` ends `member`. `epochs` introduces a new epoch in every namespace the member could read
-(empty if none). A record by the member is **kept** exactly when:
+(every namespace of its `records` entries; empty if none): for each, the namespace's current epoch
+plus one, at most one per namespace, as a `rekey`'s (§8.4). A verifier refuses a `revoke` that
+omits a namespace the member could read. **While the vault is retiring (§8.3), `epochs` is empty**
+(a new epoch would be readable by the removed key), a verifier refuses a `revoke` with non-empty
+`epochs`, and a `rekey` for those namespaces is owed once the new vault is in place. A record by
+the member is **kept** exactly when:
 
 - its header-body digest is in `kept` (sorted, distinct; any header digest, `/3` or `/5`, live
   or not); or
 - it is reached by the **walk**: start at each item of `heads`, an array of
   `{"namespace","digest"}` objects sorted by namespace then digest, at most 16 per namespace, each
   naming a header of this member in that namespace, and follow
-  `previous` from header to header, through any header whose body digest matches, whether or not
-  that header is itself admitted.
+  `previous` from header to header, through any held header whose body digest matches, whether or not
+  that header is itself admitted and whatever its author or namespace.
+  An item that names a held header of another author or another namespace starts no walk and is
+  not an error; an item whose digest no held header has makes the walk incomplete (below).
 
 A kept record still passes every other admission check, and a kept record citing the revocation
-seq or later is refused `revoked`. A reader that cannot complete a walk because an intermediate
-header is missing holds the records it would decide as *held* (`unavailable`), never as not
-kept. The approver's host computes `kept` and `heads` from every record it holds, including
+seq or later is refused `revoked`. A reader that cannot complete a walk, because a `heads` item or an intermediate
+header is not held, is **incomplete** for that revocation: it holds as *held* (`unavailable`)
+every record of the member that is neither in `kept` nor reached by a walk it completed (the
+missing header could have reached any of them), never as not kept. A record that cites the
+revocation seq or later is refused `revoked` whatever the walk says (§11.5 step 3). The approver's host computes `kept` and `heads` from every record it holds, including
 every fork head (up to 16) so no branch is lost. A kept record whose payload doesn't
 authenticate is refused `invalidPayload`, not preserved (§11.8).
 
@@ -1216,7 +1228,9 @@ At `ops/<author>/<namespace>/<clock, 12 digits>-<id>.json`:
   **author chain**), or `null` for its first. A member key MUST have exactly one writing process.
   A writer MUST persist its chain head before publishing, rebuild it from the store after any
   restore, and, if it finds more than one maximal head in a namespace, MUST stop writing there;
-  the account then revokes the member (keeping every head, §9.5) and grants a new key.
+  the account then revokes the member (keeping every head, §9.5) and grants a new key. A
+  `previous` that names no header the verifier holds does not keep the header from being
+  admitted: only the §9.5 walk follows `previous`.
 - Optional `live` stamp `{"account","slot","generation","operationID"}` (§11.8); a live-stamped
   header has `level` `write` and `previous` `null`.
 - AAD: canonical JSON of `{account, author, authority, clock, created, epoch, id, level,
@@ -1231,7 +1245,10 @@ Plaintext ID, clock, authority and date MUST match the header; the ID MUST verif
 
 ### 11.4 Fold order and clocks
 
-Fold order is `(clock, author, id)`, never `created`. Clocks are positive integers at most
+Fold order is `(clock, author, id)`, never `created`. Two headers by one author with the same
+operation ID and clock (they can differ in `level` or `previous`, which the ID does not cover)
+are ordered by body digest, lowest first, so the verdict is a function of the set held; the second
+to authenticate is `duplicateID` (0.3 §5). Clocks are positive integers at most
 2^53−1; a writer increments past the highest admitted clock in the namespace; an otherwise
 admissible header more than 1,024 above the highest earlier admitted clock is refused `clockJump`.
 
@@ -1240,7 +1257,11 @@ admissible header more than 1,024 above the highest earlier admitted clock is re
 After the header's signature, account binding, format and path:
 
 1. Author is a member with a `records` entry for the namespace covering `level`, at the verified
-   authority (latest verified for a future claim): else refused `notGranted`.
+   authority (the member's grant as it stands at the seq the header cites, so a cite before the
+   grant is `notGranted`; the latest verified state for a seq beyond the replica): else refused
+   `notGranted`. An author that is not a
+   member of the verified history is `notGranted` as well, without a signature check (there is
+   no key to check one with).
 2. `created` later than the member's latest verified expiry: refused `expired`.
 3. Author revoked and record not kept (§9.5): refused `revoked` if it cites the revocation or
    later, else held `revokedBackdated`; walk incomplete: held `unavailable`.
@@ -1265,7 +1286,10 @@ A `propose` record is admitted like a write and not folded as one.
 
 - `colophon.accept` and `colophon.decline` have payload `{"proposals":["<operation ID>", …]}`
   (1–64). Each is a `write` record in the proposals' namespace and resolves a proposal only if
-  its author may `write` the proposal's kind and **its clock exceeds the proposal's**.
+  its author may `write` the proposal's kind and **its clock exceeds the proposal's**. A resolution
+  is a record of its own kind, so a resolver whose grant lists `kinds` for the namespace MUST list
+  `colophon.accept` and `colophon.decline`, or its resolution is refused `outOfScope`: there is
+  no implicit right to resolve.
 - For each proposal the first valid resolution in fold order wins; later ones are evidence.
 - An accepted proposal is folded once, at its accept's position, attributed to the proposer with
   `acceptedBy`; it counts once against the proposer's `writes`, the accept once against the
