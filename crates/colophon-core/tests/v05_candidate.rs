@@ -355,7 +355,11 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
             Outcome::Fail(format!("transition: expected {want}, got {got}"))
         };
     }
-    if let Some(want) = exp.get("standsAtSeq3").and_then(Value::as_str) {
+    if let Some(want) = exp
+        .get("standsAtSeq3")
+        .and_then(Value::as_str)
+        .filter(|_| exp.get("result").is_none())
+    {
         let v = verify_history(&objects_of(dir), &Persisted::default(), now_of(case));
         let got = v.branch.get(2).cloned().unwrap_or_default();
         return if got == want {
@@ -407,6 +411,14 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
         ));
     }
     // Extra structured expectations this verifier can check.
+    if let Some(want) = exp.get("standsAtSeq3").and_then(Value::as_str) {
+        if verdict.branch.get(2).map(String::as_str) != Some(want) {
+            return Outcome::Fail(format!(
+                "seq 3 stands {:?}, want {want}",
+                verdict.branch.get(2)
+            ));
+        }
+    }
     if let Some(st) = &verdict.state {
         if let Some(cs) = exp
             .get("controllers")

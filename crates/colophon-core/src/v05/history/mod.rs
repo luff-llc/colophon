@@ -358,12 +358,10 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         held_until: None,
     };
     let mut st: Option<State> = None;
-    let mut seq = 1u64;
     if let Some(result) = upgrade::bootstrap(objects, now_ms) {
         match result {
             Ok(saved) => {
                 verdict.branch = saved.history().to_vec();
-                seq = verdict.branch.len() as u64 + 1;
                 st = Some(saved);
             }
             Err(stop) => {
@@ -394,105 +392,18 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
             if safe {
                 verdict.branch = saved.history().to_vec();
                 st = Some(saved.clone());
-                seq = verdict.branch.len() as u64 + 1;
             }
         }
     }
-    loop {
-        let prev = verdict.branch.last().cloned();
-        let candidates: Vec<&Entry> = by_seq
-            .get(&seq)
-            .map(|l| {
-                l.iter()
-                    .filter_map(|r| r.as_ref().ok())
-                    .filter(|e| e.previous == prev)
-                    .collect()
-            })
-            .unwrap_or_default();
-        if candidates.is_empty() {
-            if let Some((_, f)) = parse_failures.get(&seq) {
-                verdict.stop = Some(Stop::Failed {
-                    seq,
-                    failure: f.clone(),
-                });
-            }
-            break;
-        }
-        // Judge every candidate against the state before it.
-        let mut valid: Vec<(&Entry, State)> = Vec::new();
-        let mut first_failure: Option<(Stop, &Entry)> = None;
-        let mut held_at: Option<i64> = None;
-        for e in &candidates {
-            let r = match &st {
-                None => state::genesis(e, now_ms, &objects.predecessor),
-                Some(s) => state::apply(s, e, &pending, &heads, by_seq_all(&by_seq), now_ms),
-            };
-            match r {
-                Ok(next) => valid.push((e, next)),
-                Err(state::Outcome::Fail(f)) => {
-                    if first_failure.is_none() {
-                        first_failure = Some((Stop::Failed { seq, failure: f }, e));
-                    }
-                }
-                Err(state::Outcome::Held(why)) => {
-                    let t = state::release_time(st.as_ref(), e);
-                    held_at = Some(held_at.map_or(t, |h| h.min(t)));
-                    if first_failure.is_none()
-                        || matches!(first_failure, Some((Stop::Failed { .. }, _)))
-                    {
-                        first_failure = Some((Stop::Held { seq, why }, e));
-                    }
-                }
-            }
-        }
-        if !valid.is_empty() {
-            if let Some(t) = held_at {
-                verdict.held_until = Some(verdict.held_until.map_or(t, |h| h.min(t)));
-            }
-        }
-        let chosen = match valid.len() {
-            0 => {
-                verdict.stop = first_failure.map(|(s, _)| s);
-                break;
-            }
-            1 => valid.pop(),
-            _ => match &st {
-                Some(s) => match state::resolve_conflict(
-                    s,
-                    &valid,
-                    &heads,
-                    by_seq_all(&by_seq),
-                    &pending,
-                    now_ms,
-                ) {
-                    Some(i) => {
-                        let losers = valid
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, _)| *j != i)
-                            .map(|(_, (e, _))| e.env.digest.clone())
-                            .collect();
-                        verdict
-                            .conflicts
-                            .push((seq, valid[i].0.env.digest.clone(), losers));
-                        Some(valid.swap_remove(i))
-                    }
-                    None => {
-                        verdict.stop = Some(Stop::Fork { seq });
-                        break;
-                    }
-                },
-                None => {
-                    verdict.stop = Some(Stop::Fork { seq });
-                    break;
-                }
-            },
-        };
-        let Some((e, next)) = chosen else { break };
-        verdict.branch.push(e.env.digest.clone());
-        st = Some(next);
-        seq += 1;
-    }
+    let folder = Folder {
+        by_seq: &by_seq,
+        parse_failures: &parse_failures,
+        pending: &pending,
+        heads: &heads,
+        predecessor: &objects.predecessor,
+        now_ms,
+    };
+    let mut st = folder.run(st, &mut verdict, true);
     if let Some((hw_seq, hw_digest)) = &persisted.high_water {
         let on_branch = usize::try_from(hw_seq.saturating_sub(1))
             .ok()
@@ -506,6 +417,199 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
     }
     verdict.state = st;
     verdict
+}
+
+/// What a fold over the held entries needs: the candidates by seq, the held objects and the clock.
+struct Folder<'a> {
+    by_seq: &'a BTreeMap<u64, Vec<Result<Entry, Failure>>>,
+    parse_failures: &'a BTreeMap<u64, (String, Failure)>,
+    pending: &'a state::Pending,
+    heads: &'a state::HeadSet,
+    predecessor: &'a [Vec<u8>],
+    now_ms: i64,
+}
+
+impl Folder<'_> {
+    /// Extend `verdict.branch` (the verified prefix, whose folded state is `st`) as far as the
+    /// held entries allow. With `lookahead`, an unresolved fork is first offered to the
+    /// `resolve` activations on its branches (§8.6 rule 3).
+    fn run(&self, mut st: Option<State>, verdict: &mut Verdict, lookahead: bool) -> Option<State> {
+        let now_ms = self.now_ms;
+        let mut seq = verdict.branch.len() as u64 + 1;
+        loop {
+            let prev = verdict.branch.last().cloned();
+            let candidates: Vec<&Entry> = self
+                .by_seq
+                .get(&seq)
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|r| r.as_ref().ok())
+                        .filter(|e| e.previous == prev)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if candidates.is_empty() {
+                if let Some((_, f)) = self.parse_failures.get(&seq) {
+                    verdict.stop = Some(Stop::Failed {
+                        seq,
+                        failure: f.clone(),
+                    });
+                }
+                break;
+            }
+            // Judge every candidate against the state before it.
+            let mut valid: Vec<(&Entry, State)> = Vec::new();
+            let mut first_failure: Option<(Stop, &Entry)> = None;
+            let mut held_at: Option<i64> = None;
+            for e in &candidates {
+                let r = match &st {
+                    None => state::genesis(e, now_ms, self.predecessor),
+                    Some(s) => state::apply(
+                        s,
+                        e,
+                        self.pending,
+                        self.heads,
+                        by_seq_all(self.by_seq),
+                        now_ms,
+                    ),
+                };
+                match r {
+                    Ok(next) => valid.push((e, next)),
+                    Err(state::Outcome::Fail(f)) => {
+                        if first_failure.is_none() {
+                            first_failure = Some((Stop::Failed { seq, failure: f }, e));
+                        }
+                    }
+                    Err(state::Outcome::Held(why)) => {
+                        let t = state::release_time(st.as_ref(), e);
+                        held_at = Some(held_at.map_or(t, |h| h.min(t)));
+                        if first_failure.is_none()
+                            || matches!(first_failure, Some((Stop::Failed { .. }, _)))
+                        {
+                            first_failure = Some((Stop::Held { seq, why }, e));
+                        }
+                    }
+                }
+            }
+            if !valid.is_empty() {
+                if let Some(t) = held_at {
+                    verdict.held_until = Some(verdict.held_until.map_or(t, |h| h.min(t)));
+                }
+            }
+            let chosen = match valid.len() {
+                0 => {
+                    verdict.stop = first_failure.map(|(s, _)| s);
+                    break;
+                }
+                1 => valid.pop(),
+                _ => match &st {
+                    Some(s) => {
+                        let standing = state::resolve_conflict(
+                            s,
+                            &valid,
+                            self.heads,
+                            by_seq_all(self.by_seq),
+                            self.pending,
+                            now_ms,
+                        )
+                        .or_else(|| {
+                            if lookahead {
+                                self.resolved_by_activation(s, &mut valid, verdict, seq)
+                            } else {
+                                None
+                            }
+                        });
+                        match standing {
+                            Some(i) => {
+                                let losers = valid
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(j, _)| *j != i)
+                                    .map(|(_, (e, _))| e.env.digest.clone())
+                                    .collect();
+                                verdict.conflicts.push((
+                                    seq,
+                                    valid[i].0.env.digest.clone(),
+                                    losers,
+                                ));
+                                Some(valid.swap_remove(i))
+                            }
+                            None => {
+                                verdict.stop = Some(Stop::Fork { seq });
+                                break;
+                            }
+                        }
+                    }
+                    None => {
+                        verdict.stop = Some(Stop::Fork { seq });
+                        break;
+                    }
+                },
+            };
+            let Some((e, next)) = chosen else { break };
+            verdict.branch.push(e.env.digest.clone());
+            st = Some(next);
+            seq += 1;
+        }
+        st
+    }
+
+    /// §8.6 rule 3: a fork stays unresolved "until a `resolve` transition activates on one
+    /// branch". Fold each valid candidate's own branch forward (no nested look-ahead, so a
+    /// later unresolved conflict ends that branch) with the fork in view, and find the
+    /// candidate whose branch holds a `resolve` activation that discards every other candidate.
+    /// If two candidates both do, or none does, there is no choice and the fork stands. The
+    /// chosen candidate's state keeps the fork in view so the same activation applies when the
+    /// main fold reaches it.
+    fn resolved_by_activation(
+        &self,
+        s: &State,
+        valid: &mut [(&Entry, State)],
+        verdict: &Verdict,
+        seq: u64,
+    ) -> Option<usize> {
+        let candidates: Vec<String> = valid.iter().map(|(e, _)| e.env.digest.clone()).collect();
+        let ctx = state::ForkCtx {
+            seq,
+            keyring: s.keyring.clone(),
+            candidates: candidates.clone(),
+        };
+        let mut discards: Vec<std::collections::BTreeSet<String>> = Vec::new();
+        for (e, next) in valid.iter_mut() {
+            next.fork = Some(ctx.clone());
+            let mut sub = Verdict {
+                branch: verdict.branch.clone(),
+                state: None,
+                stop: None,
+                rollback: false,
+                conflicts: Vec::new(),
+                held_until: None,
+            };
+            sub.branch.push(e.env.digest.clone());
+            let end = self.run(Some(next.clone()), &mut sub, false);
+            discards.push(
+                end.map(|n| {
+                    n.resolved_forks()
+                        .iter()
+                        .filter(|(q, d)| *q == seq && candidates.contains(d))
+                        .map(|(_, d)| d.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            );
+        }
+        let with: Vec<usize> = (0..valid.len())
+            .filter(|i| !discards[*i].is_empty())
+            .collect();
+        match with.as_slice() {
+            [i] if (0..valid.len())
+                .all(|j| j == *i || discards[*i].contains(&valid[j].0.env.digest)) =>
+            {
+                Some(*i)
+            }
+            _ => None,
+        }
+    }
 }
 
 fn by_seq_all(by_seq: &BTreeMap<u64, Vec<Result<Entry, Failure>>>) -> Vec<&Entry> {

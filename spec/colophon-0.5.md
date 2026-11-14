@@ -662,7 +662,7 @@ doubt. Each needs the control rule unless stated:
 | Appoint or renew a home; `primaryHome`, `headQuorum` | The recovery rule may also propose these when `recoverThreshold ≥ threshold`, or in a full set |
 | A grant with `import`; `recoveryDelay`; raising `rate` | — |
 | Raise `headMaxAge`, `callWindow`, `linkMaxAge`; `memberRule` to `single`; `history` to `public` | — |
-| `layout`; `migration` (only with a `predecessor`); `successor`; `resolve` (control rule of the keyring before the fork) | — |
+| `layout`; `migration` (only with a `predecessor`); `successor`; `resolve` (control rule of the keyring before the fork, §8.6 "Resolving a fork") | — |
 
 **Recovery-set consent.** When the state before activation has `recoverThreshold ≥ 1`, a
 transition also needs `recoverThreshold` `recover` units if any component:
@@ -782,6 +782,31 @@ either the activation is final on its branch and no `vetoed` displaces it, or it
 
 Records citing a seq at or after an unresolved fork are held.
 
+**Resolving a fork.** A `resolve` transition (§8.7) is built on **one branch**: its anchor is an
+entry of that branch at or after the forked seq, and `discarded` names `{seq, digest}` of the
+entry another candidate holds at the forked seq. It is signed under the **control rule of the
+keyring in force before the fork** (the state after seq `discarded.seq − 1`, §8.4): only the
+`control` units that keyring holds count, up to its `threshold`, so a controller that a branch
+added after the fork adds nothing. The recovery-set consent §8.4 requires is judged in the state
+before the entry that records it, and every signer must be current there (§8.7 validity 1).
+It is recorded as any transition is: an `activate` entry on the branch it was built on, with
+receipts, due time and veto as §8.7 says; it has no veto deadline of its own beyond them.
+- **Choosing the branch.** A verifier that holds a valid `resolve` activation on one candidate's
+  branch, whose `discarded` names every other valid candidate at the forked seq, stands that
+  candidate at the forked seq. The activation, not its finality, resolves the fork. A `vetoed`
+  that displaces it (§8.7) leaves the fork open again, as the objects held say. The verifier
+  looks for the activation along each candidate's own branch up to the first later unresolved
+  conflict on it.
+- **The losing branch.** Its entry at the forked seq and everything after it on that branch are
+  not part of the account's history; they stay equivocation evidence under rule 3, and nobody
+  appends them again. Transitions anchored on them are void.
+- **Two `resolve`s.** Nothing orders resolves. If a valid activation that discards the other
+  candidate is held on each of two branches, neither resolves the fork and rule 3 stands; no
+  candidate is dropped.
+- **Only a held fork.** A `resolve` whose `discarded` is not a valid entry the verifier holds at
+  that seq, other than the one on the activation's own branch, changes nothing, so its
+  activation is void (§8.7 "Delta at activation") until the verifier holds that entry.
+
 ### 8.7 Pending transitions
 
 ```json
@@ -798,7 +823,7 @@ Records citing a seq at or after an unresolved fork are held.
   `addThreshold`, `countBy`), `policy` (fields to set; `primaryHome: null` unsets it), `vault`
   (§8.3), `homes` (`appoint: [{request, terms}]`, `revoke`), `grant` (`{request, terms}` with
   `import`), `layout`, `migration` (§15.4), `successor` (`{account}`), `resolve`
-  (`{discarded: {seq, digest}}`).
+  (`{discarded: {seq, digest}}`, `seq` at least 2; §8.6 "Resolving a fork").
 - **Composite rule.** One signer set meets, for every component, a rule that component allows,
   using the same rule (control or recovery) for all; consent if any component needs it;
   escalation and the full set judged once over the whole. It activates atomically or not at all.
@@ -1814,7 +1839,8 @@ from seq 1, so two verifiers that persist it reach the same verdicts:
 - the high-water `(seq, digest)` (rollback detection only, §13.3) and the folded state there: keyring, members (terms, expiry,
   session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
   is retiring;
-- the digests of transitions with an `activate` or `vetoed` on the branch;
+- the digests of transitions with an `activate` or `vetoed` on the branch, and the forks a
+  `resolve` activation on it discarded (`seq`, `digest`);
 - each activation not yet final, with its witness set and whether it is removal-only; the
   `final` entries; the homes excused by final removals;
 - v(u) per unit and, per unit, the seq of its last compliant activation;

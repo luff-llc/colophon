@@ -165,6 +165,23 @@ pub struct State {
     #[serde(default)]
     /// Owner asserted migration manifest, when recorded.
     pub migration: Option<Value>,
+    /// The unresolved fork this branch was chosen over, while a `resolve` activation may
+    /// still name it (§8.6 rule 3). Set only by the verifier's look-ahead.
+    #[serde(default)]
+    pub(super) fork: Option<ForkCtx>,
+    /// `(seq, digest)` of each entry a `resolve` activation on this branch discarded.
+    #[serde(default)]
+    pub(super) resolved: Vec<(u64, String)>,
+}
+
+/// What a `resolve` transition is judged against (§8.6 rule 3, §8.7): the seq of the fork,
+/// the keyring in force before it (the rule's keyring, §8.4) and the digests of the valid
+/// candidates there.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(super) struct ForkCtx {
+    pub seq: u64,
+    pub keyring: Keyring,
+    pub candidates: Vec<String>,
 }
 
 impl State {
@@ -195,7 +212,22 @@ impl State {
         crate::v05::require(
             serde_json::to_value(parsed).ok() == serde_json::to_value(&self.keyring).ok(),
             "checkpoint keyring differs from its validated representation",
-        )
+        )?;
+        if let Some(f) = &self.fork {
+            let parsed = Keyring::parse(f.keyring.raw.clone(), 0)?;
+            crate::v05::require(
+                serde_json::to_value(parsed).ok() == serde_json::to_value(&f.keyring).ok()
+                    && f.seq >= 2
+                    && f.seq <= len as u64 + 1,
+                "checkpoint fork differs from its validated representation",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The `(seq, digest)` of each entry a `resolve` activation on this branch discarded.
+    pub fn resolved_forks(&self) -> &[(u64, String)] {
+        &self.resolved
     }
 
     /// The account.
@@ -622,6 +654,8 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         successor: None,
         successor_seq: None,
         migration: None,
+        fork: None,
+        resolved: Vec::new(),
     })
 }
 
@@ -893,7 +927,18 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
                 c.recovery_ok = false;
                 c.recovery_ok_if_full = false;
             }
-            "layout" | "migration" | "successor" | "resolve" => {
+            "resolve" => {
+                let (_, _, extra) = resolve_target(comp)?;
+                for f in extra {
+                    c.unknown.push(format!("change.resolve.{f}"));
+                }
+                c.consent = true;
+                c.removal_only = false;
+                c.adds_anything = true;
+                c.recovery_ok = false;
+                c.recovery_ok_if_full = false;
+            }
+            "layout" | "migration" | "successor" => {
                 c.consent = true;
                 c.removal_only = false;
                 c.adds_anything = true;
@@ -914,6 +959,32 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
         ));
     }
     Ok(c)
+}
+
+/// A `resolve` component (§8.7): `{discarded: {seq, digest}}`, the entry at a forked seq that
+/// the activation's branch discards. Returns its seq, its digest and any unknown member names.
+fn resolve_target(comp: &Value) -> Result<(u64, String, Vec<String>)> {
+    let m = comp
+        .as_object()
+        .ok_or_else(|| malformed("resolve component"))?;
+    let d = m
+        .get("discarded")
+        .and_then(Value::as_object)
+        .ok_or_else(|| malformed("resolve.discarded"))?;
+    let seq = d
+        .get("seq")
+        .and_then(Value::as_u64)
+        .filter(|n| (2..=crate::v05::encoding::bounds::MAX_INTEGER).contains(n))
+        .ok_or_else(|| malformed("resolve.discarded.seq"))?;
+    let digest = d
+        .get("digest")
+        .and_then(Value::as_str)
+        .filter(|x| x.len() == 64 && x.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .ok_or_else(|| malformed("resolve.discarded.digest"))?
+        .to_string();
+    crate::v05::require(d.len() == 2, "resolve.discarded has other members")?;
+    let extra = m.keys().filter(|k| *k != "discarded").cloned().collect();
+    Ok((seq, digest, extra))
 }
 
 fn delay_at(s: &State, seq: u64) -> u64 {
@@ -1074,6 +1145,29 @@ pub(crate) fn check_transition(
     } else {
         return Err(bad_signature("the transition's rule or consent is not met"));
     };
+    // `resolve` is judged by the control rule of the keyring before the fork (§8.4): the
+    // control units that count are those the pre-fork keyring holds, up to its threshold.
+    // The signers must still be current in S (validity 1).
+    if let Some(comp) = change.get("resolve") {
+        let (seq, _, _) = resolve_target(comp)?;
+        if let Some(f) = s.fork.as_ref().filter(|f| f.seq == seq) {
+            let pre = units(&f.keyring, &signers, &Role::Control);
+            let held: Vec<&String> = signers
+                .iter()
+                .filter(|id| {
+                    f.keyring
+                        .controllers
+                        .get(*id)
+                        .is_some_and(|c| c.has(&Role::Control))
+                })
+                .collect();
+            if (pre.len() as u64) < f.keyring.threshold || held.is_empty() {
+                return Err(bad_signature(
+                    "resolve: the control rule of the keyring before the fork is not met",
+                ));
+            }
+        }
+    }
     let full_set = match rule {
         Rule::Recovery => full_a,
         Rule::Control => full_b,
@@ -1206,6 +1300,17 @@ fn embedded_list(v: &Value, field: &str, bound: usize) -> Result<Vec<Vec<u8>>> {
 // Applying deltas.
 
 pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> {
+    apply_delta_at(s, t, act_seq, false)
+}
+
+/// `at_admission`: a home or builder judging a held `resolve` sees one branch only, so the fork
+/// it names is checked for shape, not for being held (the activation checks that).
+pub(super) fn apply_delta_at(
+    s: &State,
+    t: &TCheck,
+    act_seq: u64,
+    at_admission: bool,
+) -> Result<State> {
     let mut n = s.clone();
     let k = &s.keyring;
     let mut raw = k.raw_controllers();
@@ -1426,6 +1531,31 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     }
     if t.change.contains_key("layout") {
         changed = true;
+    }
+    if let Some(comp) = t.change.get("resolve") {
+        let (seq, digest, _) = resolve_target(comp)?;
+        match &s.fork {
+            Some(f)
+                if f.seq == seq
+                    && f.candidates.contains(&digest)
+                    && s.digests.get((seq - 1) as usize) != Some(&digest) =>
+            {
+                n.fork = None;
+                n.resolved.push((seq, digest));
+                changed = true;
+            }
+            _ if at_admission
+                && seq <= s.seq()
+                && s.digests.get((seq - 1) as usize) != Some(&digest) =>
+            {
+                changed = true;
+            }
+            _ => {
+                return Err(malformed(
+                    "void: the resolve names no fork this branch was chosen over",
+                ))
+            }
+        }
     }
     if !changed {
         return Err(malformed("void: the transition changes nothing"));
@@ -3095,7 +3225,7 @@ pub(super) fn admission_transition(s: &State, bytes: &[u8]) -> Result<TCheck> {
     if s.recorded.contains(&t.digest) {
         return Err(malformed("transition is already recorded"));
     }
-    apply_delta(s, &t, s.seq() + 1)?;
+    apply_delta_at(s, &t, s.seq() + 1, true)?;
     Ok(t)
 }
 
@@ -3287,5 +3417,7 @@ pub(super) fn from_upgrade(
         successor: None,
         successor_seq: None,
         migration: None,
+        fork: None,
+        resolved: Vec::new(),
     })
 }

@@ -2273,6 +2273,47 @@ pub fn part3(o: &mut Out) {
          Some(json!({"now": ts(R0 + 100), "variants": [{"highWater": {"seq": 3, "digest": sha(&body_of(&y1.envs[2]))}},
                                                       {"highWater": {"seq": 3, "digest": sha(&body_of(&y2.envs[2]))}}]})),
          vec![("y1", vec![(3, y1.envs[2].clone())]), ("y2", vec![(3, y2.envs[2].clone())])]);
+    // Revision 13 (§8.6 rule 3, §8.7): the way out of a fork. A `resolve` transition built on one
+    // branch, signed under the control rule with consent, activates there (no head covers either
+    // branch, so the fork is rule 3), and the verifier then stands that branch.
+    let d_y1 = sha(&body_of(&y1.envs[2]));
+    let d_y2 = sha(&body_of(&y2.envs[2]));
+    let resolve_on = |chain: &Chain, lost: &str, signers: Sl| {
+        let t = prop(
+            &cx,
+            json!({"resolve": {"discarded": {"seq": 3, "digest": lost}}}),
+            signers,
+            Pr {
+                chain: Some(chain),
+                ..Pr::default()
+            },
+        );
+        let r = rec(&cx, &t);
+        let mut c = chain.clone();
+        activate(&mut c, &t, std::slice::from_ref(&r));
+        (t, r, c)
+    };
+    let (t_r1, r_r1, y1r) = resolve_on(&y1, &d_y2, sg![a, k1]);
+    case(o, "t-resolve-fork", base,
+         json!({"result": "ok", "seq": 4, "standsAtSeq3": d_y1}),
+         "Two valid conflicting entries at seq 3 and no home head for either. A `resolve` transition built on the first branch, signed by Mac (control) and a security key (recover, for consent), activates at seq 4 on that branch: the branch stands, the other is discarded, and every verifier holding these objects reaches the same verdict.",
+         &["8.4", "8.6", "8.7"], vec![("transition", t_r1.clone()), ("receipt", r_r1.clone())],
+         Some(ver(DUE0 + 60)),
+         vec![("y1", vec![(3, y1.envs[2].clone()), (4, y1r.envs[3].clone())]), ("y2", vec![(3, y2.envs[2].clone())])]);
+    let (t_r2, r_r2, y2r) = resolve_on(&y2, &d_y1, sg![a, k1]);
+    case(o, "t-resolve-two", base,
+         json!({"result": "refused:fork", "seq": 3}),
+         "Each branch activates a `resolve` that discards the other. Nothing orders two resolves, so neither resolves the fork: no candidate is dropped.",
+         &["8.6", "8.7"], vec![("transition-1", t_r1), ("receipt-1", r_r1), ("transition-2", t_r2), ("receipt-2", r_r2)],
+         Some(ver(DUE0 + 60)),
+         vec![("y1", vec![(3, y1.envs[2].clone()), (4, y1r.envs[3].clone())]), ("y2", vec![(3, y2.envs[2].clone()), (4, y2r.envs[3].clone())])]);
+    let (t_r3, r_r3, y1s) = resolve_on(&y1, &d_y2, sg![k1]);
+    case(o, "t-resolve-below-rule", base,
+         json!({"result": "refused:fork", "seq": 3}),
+         "The same resolve signed by the security key alone, which holds `recover` only: the control rule is not met and `resolve` has no recovery rule (§8.4), so its activation is `badSignature` on its branch and the fork stands.",
+         &["8.4", "8.6", "8.7"], vec![("transition", t_r3), ("receipt", r_r3)],
+         Some(ver(DUE0 + 60)),
+         vec![("y1", vec![(3, y1.envs[2].clone()), (4, y1s.envs[3].clone())]), ("y2", vec![(3, y2.envs[2].clone())])]);
     let kr_q2 = keyring(
         kr5["controllers"].as_array().unwrap().clone(),
         Kr {
