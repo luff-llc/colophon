@@ -720,3 +720,29 @@ fn a_write_budget_that_spans_unread_namespaces_refuses_local_writes_on_a_partial
         json!({"id": "show", "url": "https://example.org/f", "title": "T"}),
     );
 }
+
+#[test]
+fn an_immutable_action_on_an_episode_retains_the_live_head_it_relies_on() {
+    let mut s = shared(&[LISTEN]);
+    let id = s.admit(31, terms_for(&[(LISTEN, "write")]));
+    let mut e = s.engine(&id);
+    engine_write(&mut e, &mut s.host, &s.src, LISTEN, "follow",
+        json!({"id": "show", "url": "https://example.org/f", "title": "T"}));
+    let live = s.live(&mut e, position("e1", 10.0));
+    let (slot_path, slot_bytes) = live.stores.last().unwrap().clone();
+    // A deliberate seek on the same episode is immutable and relies on the head: it is
+    // retained exactly, first.
+    let w = engine_write(&mut e, &mut s.host, &s.src, LISTEN, "position",
+        json!({"id": "e1", "show": "show", "seconds": 50.0, "seek": true}));
+    let (ops, bytes) = &w.stores[0];
+    assert!(ops.starts_with("ops/"), "{:?}", w.stores.iter().map(|x| &x.0).collect::<Vec<_>>());
+    assert_eq!(bytes, &slot_bytes, "the exact signed bytes of the head");
+    assert_ne!(ops, &slot_path);
+    let mut r = s.engine(&id);
+    r.refresh(s.src.listing()).unwrap();
+    assert_eq!(r.account().record_verdict(ops).as_deref(), Some("admitted"));
+    // An action on another episode retains nothing.
+    let w2 = engine_write(&mut e, &mut s.host, &s.src, LISTEN, "position",
+        json!({"id": "e2", "show": "show", "seconds": 5.0, "seek": true}));
+    assert_eq!(w2.stores.len(), 1);
+}

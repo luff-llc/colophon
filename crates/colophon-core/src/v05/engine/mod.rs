@@ -355,6 +355,8 @@ pub struct Engine<S: RecordSource> {
     failure: Option<Failure>,
     verify_cursor: usize,
     pub(crate) exchange: exchange::State,
+    /// Live heads the next immutable write retains (0.3 §5.1), found by `begin_write`.
+    retain: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
 }
 
 impl<S: RecordSource> std::fmt::Debug for Engine<S> {
@@ -529,6 +531,7 @@ impl<S: RecordSource> Engine<S> {
             failure: None,
             verify_cursor: 0,
             exchange: exchange::State::default(),
+            retain: std::sync::Mutex::new(Vec::new()),
         };
         let verified = e.account.head().0;
         e.exchange.import(saved_exchange, verified);
@@ -1074,8 +1077,53 @@ impl<S: RecordSource> Engine<S> {
         if let Some(d) = self.partial_budget_denial() {
             return Ok(Err(d));
         }
-        self.account
-            .begin_write(namespace, kind, payload, level, seed)
+        // An immutable action on an episode that has a live head retains the exact signed head
+        // under `ops/` before it relies on it (0.3 §5.1; also the 1,024-bound anchor).
+        let retain = self.heads_to_retain(namespace, &payload)?;
+        let r = self
+            .account
+            .begin_write(namespace, kind, payload, level, seed)?;
+        if r.is_ok() {
+            *self
+                .retain
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = retain;
+        }
+        Ok(r)
+    }
+
+    /// The live heads of the target episode that are not retained yet: `(ops path, exact bytes)`,
+    /// each fetched from the store and matched to the verified bytes first.
+    fn heads_to_retain(&self, namespace: &str, payload: &Value) -> Result<Vec<(String, Vec<u8>)>> {
+        let Some(id) = payload.get("id").and_then(Value::as_str) else {
+            return Ok(Vec::new());
+        };
+        if namespace != "listening.podcasts" {
+            return Ok(Vec::new());
+        }
+        let slot = crate::protocol::live_slot_name(id);
+        let mut out = Vec::new();
+        for h in self.account.live_heads() {
+            if h.namespace != namespace || h.slot != slot {
+                continue;
+            }
+            let ops = crate::v05::records::operation_path(&h.author, &h.namespace, h.generation, &h.id);
+            if self.ix.have.contains_key(&ops)
+                || self.account.records().iter().any(|r| r.path == ops)
+            {
+                continue;
+            }
+            let fetched = self
+                .source
+                .read(&h.path)
+                .map_err(|e| Failure::Unavailable(format!("{}: {}", h.path, e.0)))?;
+            require(
+                sha(&fetched) == sha(&h.bytes),
+                "the live head's stored bytes are not the verified ones: fail the write",
+            )?;
+            out.push((ops, fetched));
+        }
+        Ok(out)
     }
 
     /// Finish a prepared action. The account verifies the exact bytes it returns before it
@@ -1087,7 +1135,40 @@ impl<S: RecordSource> Engine<S> {
         signatures: Vec<SignatureResult>,
     ) -> Result<Written> {
         self.check_ready()?;
+        let retained = std::mem::take(
+            &mut *self
+                .retain
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         let f = self.account.finish(action, signatures)?;
+        let mut retained_stores: Vec<(String, Vec<u8>)> = Vec::new();
+        if !retained.is_empty() {
+            let now = self.account.now_ms();
+            self.account.merge(
+                Incoming {
+                    objects: Objects::default(),
+                    records: retained
+                        .iter()
+                        .map(|(p, b)| HeldRecord {
+                            path: p.clone(),
+                            bytes: b.clone(),
+                        })
+                        .collect(),
+                },
+                now,
+            )?;
+            for (p, b) in retained {
+                self.ix.have.insert(
+                    p.clone(),
+                    Have {
+                        sha: sha(&b),
+                        version: None,
+                    },
+                );
+                retained_stores.push((p, b));
+            }
+        }
         let paths = f.record_paths();
         let mut bytes: Vec<Vec<u8>> = Vec::new();
         bytes.extend(f.entries.iter().map(|(_, b)| b.clone()));
@@ -1098,6 +1179,7 @@ impl<S: RecordSource> Engine<S> {
         } else {
             Vec::new()
         };
+        let stores: Vec<(String, Vec<u8>)> = retained_stores.into_iter().chain(stores).collect();
         for (p, b) in &stores {
             self.ix.have.insert(
                 p.clone(),
