@@ -878,6 +878,65 @@ pub fn part3(o: &mut Out) {
         Some(ver(DUE0 + 60)),
     );
 
+    // Revision 13 (§8.7 "Choosing receipts"): a veto's receipts are the valid ones received at or
+    // before the veto deadline, lowest home ID first, each home's lowest body digest.
+    let (lo_k, hi_k) = if h1k.id < h2k.id {
+        (&h1k, &h2k)
+    } else {
+        (&h2k, &h1k)
+    };
+    let v_c = veto(&acct, &t1, sg![b], &ts(R0 + 600));
+    let (lo_r, hi_r) = (
+        receipt_of(&acct, &v_c, lo_k, &ts(R0 + 601)),
+        receipt_of(&acct, &v_c, hi_k, &ts(R0 + 602)),
+    );
+    let vobjs = |extra: Vec<(&'static str, Value)>| {
+        let mut v = vec![("transition", t1.clone()), ("veto", v_c.clone())];
+        v.extend(extra);
+        v
+    };
+    let mut c = base.clone();
+    record_veto(
+        &mut c,
+        &t1,
+        std::slice::from_ref(&r1),
+        &v_c,
+        &[lo_r.clone(), hi_r.clone()],
+    );
+    case(o, "t-vetoed-choice-right", &c, ok_at(3),
+         "Both homes receipted the veto in time; the entry carries the lowest home ID's receipt, the chosen one.",
+         &["8.7"], vobjs(vec![("receipt-low", lo_r.clone()), ("receipt-high", hi_r.clone())]),
+         Some(ver(DUE0 + 60)), vec![]);
+    let v_l = veto(&acct, &t1, sg![b], &ts(DL0 - 100));
+    let (lo_late, hi_ok) = (
+        receipt_of(&acct, &v_l, lo_k, &ts(DL0 + 50)),
+        receipt_of(&acct, &v_l, hi_k, &ts(DL0 - 90)),
+    );
+    let mut c = base.clone();
+    record_veto(
+        &mut c,
+        &t1,
+        std::slice::from_ref(&r1),
+        &v_l,
+        std::slice::from_ref(&hi_ok),
+    );
+    case(o, "t-vetoed-late-receipt-skipped", &c, ok_at(3),
+         "The lowest home ID's receipt of the veto is after the veto deadline, so it is not chosen; the entry carries the other home's timely receipt. The late receipt does not block it.",
+         &["8.7"], vec![("transition", t1.clone()), ("veto", v_l.clone()), ("receipt-low-late", lo_late), ("receipt-high", hi_ok.clone())],
+         Some(ver(DUE0 + 60)), vec![]);
+    let mut c = base.clone();
+    record_veto(
+        &mut c,
+        &t1,
+        std::slice::from_ref(&r1),
+        &v_c,
+        std::slice::from_ref(&hi_r),
+    );
+    case(o, "t-vetoed-other-valid-receipt-accepted", &c, ok_at(3),
+         "Both homes receipted the veto in time and the verifier holds both; the entry carries the higher home ID's receipt, not the one a recorder would choose. The entry is still valid: a verifier judges the receipts an entry carries, never the ones it could have carried, so verdicts do not depend on which objects a verifier holds.",
+         &["8.7"], vobjs(vec![("receipt-low", lo_r), ("receipt-high", hi_r)]),
+         Some(ver(DUE0 + 60)), vec![]);
+
     // 4. Ordering at one seq (§8.6 rule 1), finality.
     let mut y_before = base.clone();
     grant_agent(&mut y_before, &a, &ts(R0 + 120), &a);
@@ -1015,6 +1074,46 @@ pub fn part3(o: &mut Out) {
         &["8.7"],
         Some(ver(DUE0 + 200)),
     );
+    // Revision 13 (§8.7 "Choosing heads"): per witness, the covering head with the lowest body
+    // digest among the usable ones (not more than 60 s ahead of the clock).
+    let mut pc = base.clone();
+    activate(&mut pc, &t_addc, &[rec(&cx, &t_addc)]);
+    let h2_head = head5(&pc, &h2k, DUE0 + 60, Some(3));
+    let mut two = [
+        head5(&pc, &h1k, DUE0 + 50, Some(3)),
+        head5(&pc, &h1k, DUE0 + 55, Some(3)),
+    ];
+    two.sort_by_key(|h| sha(&body_of(h)));
+    let [h1_low, h1_high] = two;
+    let head_objs = |hs: Vec<(&'static str, Value)>| {
+        let mut v = vec![("head-H2", h2_head.clone())];
+        v.extend(hs);
+        v
+    };
+    let mut right = pc.clone();
+    final_of(&mut right, 3, vec![h1_low.clone(), h2_head.clone()]);
+    case(o, "t-final-head-choice-right", &right, ok_at(4),
+         "H1 signed two heads covering the activation. The `final` carries the one with the lower body digest.",
+         &["8.7", "13.3"], head_objs(vec![("head-H1-low", h1_low.clone()), ("head-H1-high", h1_high.clone())]),
+         Some(ver(DUE0 + 200)), vec![]);
+    let mut wrong = pc.clone();
+    final_of(&mut wrong, 3, vec![h1_high.clone(), h2_head.clone()]);
+    case(o, "t-final-head-other-valid-head-accepted", &wrong, ok_at(4),
+         "The same two heads of H1, both held; the `final` carries the higher body digest, not the one a recorder would choose. It is still valid (one valid covering head per witness): a verifier never refuses an entry for a different valid head it holds.",
+         &["8.7", "13.3"], head_objs(vec![("head-H1-low", h1_low.clone()), ("head-H1-high", h1_high.clone())]),
+         Some(ver(DUE0 + 200)), vec![]);
+    // A head dated 1000 s ahead of the verifier's clock is not usable, however low its digest.
+    let usable = head5(&pc, &h1k, DUE0 + 50, Some(3));
+    let ahead = (0..200)
+        .map(|n| head5(&pc, &h1k, DUE0 + 1000 + n, Some(3)))
+        .find(|h| sha(&body_of(h)) < sha(&body_of(&usable)))
+        .expect("a lower digest among 200 heads");
+    let mut skip = pc.clone();
+    final_of(&mut skip, 3, vec![usable.clone(), h2_head.clone()]);
+    case(o, "t-final-head-ahead-ignored", &skip, ok_at(4),
+         "H1 also signed a head dated 1000 s past the verifier's clock whose body digest is lower. It is not usable (§13.3), so it is not chosen and the `final` carrying the usable head stands.",
+         &["8.7", "13.3"], head_objs(vec![("head-H1-usable", usable.clone()), ("head-H1-ahead", ahead)]),
+         Some(ver(DUE0 + 200)), vec![]);
     let mut pm = base.clone();
     activate(&mut pm, &t_addc, &[rec(&cx, &t_addc)]);
     let hs = vec![head5(&pm, &h1k, DUE0 + 50, Some(3))];
@@ -1489,6 +1588,42 @@ pub fn part3(o: &mut Out) {
         &["8.4"],
         None,
     );
+    // Revision 13 (§7.2 at replay): a slot's shape is checked by the verifier, not only by the
+    // builders. A sealed box of 47 bytes where 48 are required is `malformed`.
+    let short = |slot: &Value| {
+        let mut s = slot.clone();
+        s["sealed"]["ciphertext"] = json!(b64(&[7u8; 47]));
+        s
+    };
+    let base_slot = kr5["slots"][0].clone();
+    let mut bad_genesis = Chain::new();
+    genesis(
+        &mut bad_genesis,
+        &change(&kr5, &[("slots", json!([short(&base_slot)]))]),
+        sg![a],
+        Gen {
+            opt: Opt {
+                adds: sg![ph, b, k1, k2],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    case_v(o, "t-slot-wrong-length-genesis", &bad_genesis, bad("malformed", 1),
+           "A genesis whose only slot has a 47-byte sealed ciphertext (§7.2 requires 48): the slot's shape is checked at replay.",
+           &["7.2", "8.5"], None);
+    let phone_slot = sealed_slot("r13", &ph, "Phone");
+    for (name, slot, want, why) in [
+        ("i-slot-add-valid", phone_slot.clone(), ok_at(3),
+         "A `keyring` entry that adds a well-formed slot for an existing controller (the Phone key)."),
+        ("i-slot-add-wrong-length", short(&phone_slot), bad("malformed", 3),
+         "The same entry with a 47-byte sealed ciphertext: `malformed` at replay (§7.2)."),
+    ] {
+        let mut c = base.clone();
+        c.add("keyring", &a, &ts(R0), &a, Opt::default(),
+              json!({"keyring": change(&kr5, &[("slots", json!([base_slot.clone(), slot]))])}));
+        case_v(o, name, &c, want, why, &["7.2", "8.4"], None);
+    }
     let mut c = base.clone();
     c.add("keyring", &a, &ts(R0), &a, Opt { adds: sg![new], ..Opt::default() },
           json!({"keyring": kr_with_ctrls(&kr5, add_ctrl(&kr5, vec![ct(&new, &["approve"], "Tablet")]))}));
@@ -2273,6 +2408,241 @@ pub fn part3(o: &mut Out) {
          Some(json!({"now": ts(R0 + 100), "variants": [{"highWater": {"seq": 3, "digest": sha(&body_of(&y1.envs[2]))}},
                                                       {"highWater": {"seq": 3, "digest": sha(&body_of(&y2.envs[2]))}}]})),
          vec![("y1", vec![(3, y1.envs[2].clone())]), ("y2", vec![(3, y2.envs[2].clone())])]);
+    // Revision 13 (§8.6 rule 3, §8.7): the way out of a fork. A `resolve` transition built on one
+    // branch keeps that branch's entry at the forked seq; signed under the control rule with
+    // consent, it activates there (no head covers either branch, so the fork is rule 3), and the
+    // verifier then stands that branch, discarding every other candidate.
+    let d_y1 = sha(&body_of(&y1.envs[2]));
+    let d_y2 = sha(&body_of(&y2.envs[2]));
+    let kv = AGENT_K.clone();
+    let _ = kv;
+    let resolve_at = |chain: &Chain, seq: i64, kept: &str, signers: Sl, at: i64| {
+        let t = prop(
+            &cx,
+            json!({"resolve": {"kept": {"seq": seq, "digest": kept}}}),
+            signers,
+            Pr {
+                at,
+                chain: Some(chain),
+                ..Pr::default()
+            },
+        );
+        let r = rec_at(&cx, &t, at + 1);
+        let mut c = chain.clone();
+        activate(&mut c, &t, std::slice::from_ref(&r));
+        (t, r, c)
+    };
+    let resolve_on =
+        |chain: &Chain, kept: &str, signers: Sl| resolve_at(chain, 3, kept, signers, R0);
+    let (t_r1, r_r1, y1r) = resolve_on(&y1, &d_y1, sg![a, k1]);
+    case(o, "t-resolve-fork", base,
+         json!({"result": "ok", "seq": 4, "standsAtSeq3": d_y1}),
+         "Two valid conflicting entries at seq 3 and no home head for either. A `resolve` transition built on the first branch, keeping that branch's seq 3 entry and signed by Mac (control) and a security key (recover, for consent), activates at seq 4 on that branch: the branch stands, the other candidate is discarded, and every verifier holding these objects reaches the same verdict.",
+         &["8.4", "8.6", "8.7"], vec![("transition", t_r1.clone()), ("receipt", r_r1.clone())],
+         Some(ver(DUE0 + 60)),
+         vec![("y1", vec![(3, y1.envs[2].clone()), (4, y1r.envs[3].clone())]), ("y2", vec![(3, y2.envs[2].clone())])]);
+    let (t_r2, r_r2, y2r) = resolve_on(&y2, &d_y2, sg![a, k1]);
+    case(o, "t-resolve-two", base,
+         json!({"result": "refused:fork", "seq": 3}),
+         "Each branch activates a `resolve` that keeps its own entry. Nothing orders two resolves keeping different entries, so neither resolves the fork: no candidate is dropped.",
+         &["8.6", "8.7"], vec![("transition-1", t_r1.clone()), ("receipt-1", r_r1.clone()), ("transition-2", t_r2), ("receipt-2", r_r2)],
+         Some(ver(DUE0 + 60)),
+         vec![("y1", vec![(3, y1.envs[2].clone()), (4, y1r.envs[3].clone())]), ("y2", vec![(3, y2.envs[2].clone()), (4, y2r.envs[3].clone())])]);
+    let (t_r3, r_r3, y1s) = resolve_on(&y1, &d_y1, sg![k1]);
+    case(o, "t-resolve-below-rule", base,
+         json!({"result": "refused:fork", "seq": 3}),
+         "The same resolve signed by the security key alone, which holds `recover` only: the control rule is not met and `resolve` has no recovery rule (§8.4), so its activation is `badSignature` on its branch and the fork stands.",
+         &["8.4", "8.6", "8.7"], vec![("transition", t_r3), ("receipt", r_r3)],
+         Some(ver(DUE0 + 60)),
+         vec![("y1", vec![(3, y1.envs[2].clone()), (4, y1s.envs[3].clone())]), ("y2", vec![(3, y2.envs[2].clone())])]);
+    // Three candidates, one resolve (H6).
+    let mut y3c = base.clone();
+    grant_agent_with(
+        &mut y3c,
+        &a,
+        &ts(R0),
+        &a,
+        &derived("r13/y3c"),
+        &derived("r13/y3c/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    case(o, "t-resolve-three-candidates", base,
+         json!({"result": "ok", "seq": 4, "standsAtSeq3": d_y1}),
+         "Three valid entries at seq 3. One `resolve` keeping the first branch's entry settles the fork: every other candidate, however many, is discarded.",
+         &["8.6", "8.7"], vec![("transition", t_r1.clone()), ("receipt", r_r1.clone())],
+         Some(ver(DUE0 + 60)),
+         vec![("y1", vec![(3, y1.envs[2].clone()), (4, y1r.envs[3].clone())]), ("y2", vec![(3, y2.envs[2].clone())]), ("y3", vec![(3, y3c.envs[2].clone())])]);
+    // A verifier that never held the losing branch continues (H5).
+    let mut y1w = y1r.clone();
+    grant_agent_with(
+        &mut y1w,
+        &a,
+        &ts(DUE0 + 100),
+        &a,
+        &derived("r13/w5"),
+        &derived("r13/w5/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    case(o, "t-resolve-no-losing-branch", &y1w, ok_at(5),
+         "The resolved branch and the owner's next entry, with no trace of the losing entry: a `resolve` with no other candidate held is valid and changes nothing, so a verifier that was never shown the loser is not stopped.",
+         &["8.6", "8.7"], vec![("transition", t_r1.clone()), ("receipt", r_r1.clone())],
+         Some(ver(DUE0 + 200)), vec![]);
+    // A second fork later on a branch that already holds a resolve (M1).
+    let mut z1c = y1r.clone();
+    grant_agent_with(
+        &mut z1c,
+        &a,
+        &ts(DUE0 + 100),
+        &a,
+        &derived("r13/z1"),
+        &derived("r13/z1/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    let mut z2c = y1r.clone();
+    grant_agent_with(
+        &mut z2c,
+        &a,
+        &ts(DUE0 + 100),
+        &a,
+        &derived("r13/z2"),
+        &derived("r13/z2/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    let d_z1 = sha(&body_of(&z1c.envs[4]));
+    let (t_z, r_z, z1r) = resolve_at(&z1c, 5, &d_z1, sg![a, k1], DUE0 + 200);
+    case(o, "t-resolve-second-fork", &y1r, ok_at(6),
+         "The resolved branch forks again at seq 5; a second `resolve`, built on a branch that already holds the first, keeps one of the two seq 5 entries and settles it the same way. The seq 3 loser is held as well.",
+         &["8.6", "8.7"], vec![("transition-1", t_r1.clone()), ("receipt-1", r_r1.clone()), ("transition-2", t_z), ("receipt-2", r_z)],
+         Some(ver(DUE0 + 200 + W + D + 60)),
+         vec![("y2", vec![(3, y2.envs[2].clone())]), ("z1", vec![(5, z1c.envs[4].clone()), (6, z1r.envs[5].clone())]), ("z2", vec![(5, z2c.envs[4].clone())])]);
+    // The limit and the rule (§8.6 rule 3, §13): a late fork by a former controller.
+    // Homed: the honest branch holds an activation after the fork point that the homes
+    // witnessed with a `final`; the late fork's own `resolve` (even receipted by a colluding
+    // home) does not win.
+    let mut hx = base.clone();
+    grant_agent_with(
+        &mut hx,
+        &a,
+        &ts(R0),
+        &a,
+        &derived("r13/hx3"),
+        &derived("r13/hx3/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    let t_rm = prop(
+        &cx,
+        rm(&b.id),
+        sg![a],
+        Pr {
+            at: R0 + 10,
+            chain: Some(&hx),
+            ..Pr::default()
+        },
+    );
+    let r_rm = rec_at(&cx, &t_rm, R0 + 11);
+    activate(&mut hx, &t_rm, std::slice::from_ref(&r_rm));
+    let hs = vec![
+        head5(&hx, &h1k, DUE0 + 200, Some(4)),
+        head5(&hx, &h2k, DUE0 + 210, Some(4)),
+    ];
+    final_of(&mut hx, 4, hs);
+    let mut hy = base.clone();
+    grant_agent_with(
+        &mut hy,
+        &b,
+        &ts(R0),
+        &b,
+        &derived("r13/hy3"),
+        &derived("r13/hy3/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    let d_hy = sha(&body_of(&hy.envs[2]));
+    let (t_hy, r_hy, hyr) = resolve_at(&hy, 3, &d_hy, sg![b, k1], R0 + 20);
+    case(o, "t-resolve-late-fork-witnessed", &hx,
+         json!({"result": "refused:fork", "seq": 3}),
+         "Two homes. The honest branch (grant, then Mac removes the passkey, then a `final` with both homes' heads) holds an activation after seq 3 that homes witnessed. The passkey, a former controller, signs a late entry at seq 3 and a `resolve` keeping it, receipted by a home. A `resolve` never discards a witnessed branch: the fork stands, and the late fork does not win.",
+         &["8.6", "13.3"], vec![("transition-removal", t_rm.clone()), ("receipt-removal", r_rm.clone()), ("transition-resolve", t_hy), ("receipt-resolve", r_hy)],
+         Some(ver(DUE0 + 300)),
+         vec![("late", vec![(3, hy.envs[2].clone()), (4, hyr.envs[3].clone())])]);
+    // Homeless: no witness of time or order. Everything is final at once on every branch, and
+    // the same late fork by a former controller wins for a new verifier. This is the stated limit
+    // of an account without a home (§13.1, §18): nothing in the objects tells the two apart.
+    let mut hl = Chain::new();
+    genesis(
+        &mut hl,
+        &kr5,
+        sg![a],
+        Gen {
+            opt: Opt {
+                adds: sg![ph, b, k1, k2],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    let cx_hl = Cx {
+        base: hl.clone(),
+        acct: account_id(&hl),
+        h1k: h1k.clone(),
+    };
+    let mut lx = hl.clone();
+    grant_agent_with(
+        &mut lx,
+        &a,
+        &ts(R0),
+        &a,
+        &derived("r13/lx2"),
+        &derived("r13/lx2/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    let t_lrm = prop(
+        &cx_hl,
+        rm(&b.id),
+        sg![a],
+        Pr {
+            at: R0 + 10,
+            chain: Some(&lx),
+            ..Pr::default()
+        },
+    );
+    activate(&mut lx, &t_lrm, &[]);
+    grant_agent_with(
+        &mut lx,
+        &a,
+        &ts(R0 + 100),
+        &a,
+        &derived("r13/lx4"),
+        &derived("r13/lx4/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    let mut ly = hl.clone();
+    grant_agent_with(
+        &mut ly,
+        &b,
+        &ts(R0),
+        &b,
+        &derived("r13/ly2"),
+        &derived("r13/ly2/agreement"),
+        "2026-11-18T08:00:00Z",
+    );
+    let d_ly = sha(&body_of(&ly.envs[1]));
+    let t_lres = prop(
+        &cx_hl,
+        json!({"resolve": {"kept": {"seq": 2, "digest": d_ly}}}),
+        sg![b, k1],
+        Pr {
+            at: R0 + 20,
+            chain: Some(&ly),
+            ..Pr::default()
+        },
+    );
+    activate(&mut ly, &t_lres, &[]);
+    case(o, "t-resolve-homeless-late-fork", &lx,
+         json!({"result": "ok", "seq": 3}),
+         "STATED LIMIT, not a defence (§13.1, §18). An account with no home: the honest history removes the passkey at seq 3 and carries on to seq 4, and every activation is final at once. The passkey, a former controller, signs a late entry at seq 2 and a `resolve` keeping it; with no home there is no receipt, no delay and no witness of time or order, so a new verifier gets the late branch (the passkey is a controller again) and nothing in the objects tells the two histories apart. A verifier with persisted state reports rollback, and a host MUST refuse and show it. Accounts need a home.",
+         &["8.6", "13.1", "18"], vec![("transition-removal", t_lrm.clone()), ("transition-resolve", t_lres.clone())],
+         Some(ver(DUE0 + 300)),
+         vec![("late", vec![(2, ly.envs[1].clone()), (3, ly.envs[2].clone())])]);
     let kr_q2 = keyring(
         kr5["controllers"].as_array().unwrap().clone(),
         Kr {

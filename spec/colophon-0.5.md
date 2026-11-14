@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 12, for review, 2026-11-14.** Not frozen, not
+**Status: final candidate, revision 13, for review, 2026-11-14.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -14,7 +14,12 @@ the object set only; revision 9 keeps a revoked home current until its revocatio
 one-recovery-key stall and narrows the liveness claim; revision 11 states recovery conditions in
 units; revision 12 answers the engine check of the 0.5 history verifier and its own check: one
 meaning of "final", final successions, possession under handover, the proposer cap, the chain
-bound and the Swift steward threshold. The
+bound and the Swift steward threshold; revision 13 answers the checks of the write side (the
+authority builders, the vault, slots and pairing, the homes and calls): resolving a fork,
+per-home head rollback, determined veto receipts and `final` heads, a late veto at a home,
+two heads for one seq, the §7.2 slot shape at replay, equivocation evidence, and the text
+gaps the builders found (notices, link `created`, the kit derivation, the restricted open, the
+PRF assertion, the QR bytes, the seed guarantee). The
 mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
@@ -239,7 +244,8 @@ know as a member of any account.
 The core holds no platform private key. Every signature, ECDH and PRF evaluation is
 two-phase: `begin_*` returns the exact input, `finish_*` verifies the result before using it.
 The vault seed is an account secret: the core MAY hold it in memory for a session and MUST NOT
-persist it; the host persists it only inside slots.
+persist it; the host persists it only inside slots. The core never returns seed bytes or a raw
+ECDH output (§17.1 states what an opened seed can be sealed to).
 
 ### 3.5 COSE_Key at registration
 
@@ -497,7 +503,10 @@ selects the UV-associated secret. Missing PRF fails explicitly; there is no fall
 
 **Building a PRF route.** The PRF output for a new slot or part MUST come from an assertion
 restricted to that slot's credential, evaluating its salt over a fresh random 32-byte core
-challenge (never a body digest), never from registration. The core verifies that assertion
+challenge (never a body digest), never from registration. The assertion's origin is judged by
+the general origin rule of §4.3 for that credential's `rp` and `origins` (the authority-origin
+restriction does not apply: this is not an authority signature), and UV is required exactly
+when the controller has `verification: true` (§4.3 step 3). The core verifies that assertion
 against the new controller's key, builds the slot, opens it again with the same output and
 checks the vault before it is published. The host is trusted to pass PRF bytes unchanged.
 
@@ -520,7 +529,13 @@ retry starts again with new nonces, and H MUST allow no more than 5 failed sessi
 relay that substitutes `E` must commit before it sees `nA`, so it matches the code with
 probability one in a million per attempt. **QR alternative:** H scans from J's screen a QR code
 carrying `accountID`, `E` and `nB`, checks `E` directly, and still sends `nA` to J, so that
-§7.4's label has both nonces; no code is compared.
+§7.4's label has both nonces; no code is compared. **QR payload bytes:** the canonical JSON of
+§2.1, as UTF-8, of the closed object
+`{"account":"<64 hex>","e":"<base64>","nB":"<base64>","protocol":"colophon/pair-qr/5"}`: `account`
+is `accountID`, `e` the 65-byte point and `nB` the 32-byte nonce, standard padded base64
+(§2.2), keys sorted as §2.1 says (`account`, `e`, `nB`, `protocol`). A reader parses strictly
+(§2.3), refuses any other member, protocol, length or non-canonical byte, and an `E` that is
+not a valid point.
 
 ### 7.4 Moving the seed to a new device
 
@@ -536,8 +551,11 @@ session ends. Offered only to a device about to become a controller with a slot.
 A software identity is expanded from a 32-byte seed with HKDF-SHA256, salt
 `colophon/entropy/3`, info the eight-byte big-endian counter from zero, 32 bytes: the first
 valid scalar signs, the next valid scalar agrees; invalid scalars consume a counter. A recovery
-kit is a software identity from 32 secret bytes the host prints or stores; it is a `raw`
-controller with `agreement`, usually `recover` only.
+kit is a software identity from 32 secret bytes `K` the host prints or stores, with **one**
+derivation, the one 0.3 and 0.4 use: `s' = HKDF-SHA256(IKM = K, salt = "colophon/recovery/3",
+info = "identity", 32 bytes)`, then the expansion above on `s'`. A kit made under 0.4 therefore
+keeps its keys after an in-place upgrade (§16.1). It is a `raw` controller with `agreement`,
+usually `recover` only.
 
 ## 8. Authority history
 
@@ -662,7 +680,7 @@ doubt. Each needs the control rule unless stated:
 | Appoint or renew a home; `primaryHome`, `headQuorum` | The recovery rule may also propose these when `recoverThreshold ≥ threshold`, or in a full set |
 | A grant with `import`; `recoveryDelay`; raising `rate` | — |
 | Raise `headMaxAge`, `callWindow`, `linkMaxAge`; `memberRule` to `single`; `history` to `public` | — |
-| `layout`; `migration` (only with a `predecessor`); `successor`; `resolve` (control rule of the keyring before the fork) | — |
+| `layout`; `migration` (only with a `predecessor`); `successor`; `resolve` (control rule in the recording state and control rule of the keyring before the fork, §8.6 "Resolving a fork") | — |
 
 **Recovery-set consent.** When the state before activation has `recoverThreshold ≥ 1`, a
 transition also needs `recoverThreshold` `recover` units if any component:
@@ -717,7 +735,7 @@ For seq > 1 the verifier MUST, in this order (the pipeline of §1):
 3. Decide the rule (§8.4; unknown kinds use the control rule), and for `suspend` and recording
    entries the checks of §8.7's state table.
 4. Only now look for unknown content anywhere in the body (`newerFormat`).
-5. Apply the typed schema, bounds and the rules of §6, §8.2, §8.3, §9, §13, §15 and §16, and the
+5. Apply the typed schema, bounds and the rules of §6, §7.2 (every slot's shape, kind fields and sizes), §8.2, §8.3, §9, §13, §15 and §16, and the
    rate limit (§13.1).
 
 Genesis follows the same order with its own keyring. No verifier may be stricter or more
@@ -733,7 +751,7 @@ lenient than this section for authority entries. **Every failure has exactly one
 | Every other failure of an embedded object: receipts (missing, wrong homes, wrong count or choice, outside their window), anchor, veto unit count, disjointness, vetoer role or currency, deadline, determined fields, once only, the 7-day bound, heads in `final`, one suspension per unit, a void delta | `malformed` |
 | Unknown content after steps 1–3 pass | `newerFormat` |
 | A transition that revokes a home and adds anything; a `final` with no heads | `malformed` |
-| Schema, §6 and §8.3 violations, the rate limit | `malformed` |
+| Schema, §6, §7.2 (slot shape) and §8.3 violations, the rate limit | `malformed` |
 | `issued` ahead; an `activate` whose objects are all valid and whose due time is after the clock | *held* |
 
 ### 8.6 Conflicting entries
@@ -765,6 +783,10 @@ either the activation is final on its branch and no `vetoed` displaces it, or it
      dated more than 300 s before their clock (§13.1), so an honest primary covers no backdated Y.
    - Between an `activate` and a `vetoed` of one transition, the `vetoed` stands if its veto is
      valid, unless a `final` covers the `activate` (§8.7).
+   - A recording entry whose activation is **final on its branch** (§8.7 "Final": an `activate`
+     that is final, or a `final` entry) stands against a recording entry of **another object**
+     whose activation is not; nothing displaces a final activation. If both are final, or the
+     objects are the same, the order below applies.
    - Between other recording entries the order is total, comparing in turn: the earlier due time;
      the lower **object digest** (the transition body's for `activate`, `vetoed` and `final`, the
      genesis body's for `successionVetoed`); the kind rank (`activate` 0, `vetoed` 1, `final` 2,
@@ -774,13 +796,53 @@ either the activation is final on its branch and no `vetoed` displaces it, or it
    home. A signed entry that loses is not re-appended by anyone else: its signer's host is told
    (409, §14) and MUST offer to sign it again at the new head.
 2. **Equivocation.** Otherwise, if X is covered by heads of `headQuorum` current homes and no
-   current home's head covers Y, Y is equivocation evidence against its signers (§13.3).
+   current home's head covers Y, X and Y are equivocation evidence (§13.3) against the signer
+   units present on **both** entries; a signer of only one of them may have raced honestly and
+   is not convicted.
 3. **Fork.** Otherwise — no head evidence for either, heads for both, or an account without homes
-   — both entries are equivocation evidence against their signers, and every verifier answers
+   — both entries are equivocation evidence (§13.3) against the signer units present on both, and
+   every verifier answers
    `refused:fork` for everything that depends on either branch until a `resolve` transition
    activates on one branch. A transition anchored on a losing branch is void.
 
 Records citing a seq at or after an unresolved fork are held.
+
+**Resolving a fork.** A `resolve` transition (§8.7) carries `kept: {seq, digest}`, an entry at the
+forked seq. It is built on the branch that holds the kept entry: its anchor is an entry of that
+branch, and it is **valid when the kept entry is on the branch its `activate` is recorded on**.
+Its effect: every other candidate at that seq, held now or shown later, is discarded for a
+verifier following this branch. A verifier that holds no other candidate treats the `resolve` as
+valid and changing nothing, so no honest verifier is ever stopped by it, whether or not homes
+serve the losing entry.
+- **Who signs.** Both rules hold: the ordinary control rule (§8.4) in the state the entry is
+  recorded in (the kept branch's own keyring and threshold), consent and currency included; and
+  the control rule of the keyring before the fork (the state after seq `kept.seq − 1`): the
+  signers that held `control` there must reach that keyring's `threshold`, so a controller that a
+  branch added after the fork adds nothing. It is recorded as any transition is, an `activate`
+  entry with receipts, due time and veto as §8.7 says.
+- **Choosing the branch.** At a conflict §8.6 rules 1 and 2 leave open, a candidate **keeps
+  itself** when its branch holds a valid `resolve` activation whose `kept` is that candidate's
+  entry at the seq. It stands if it is the only candidate that keeps itself and no other
+  candidate's branch holds an activation after the fork that homes witnessed (below). One
+  `resolve` settles a fork of any number of candidates. A `vetoed` that displaces the activation
+  (§8.7) leaves the fork open again. The verifier looks for the activation along each candidate's
+  own branch up to the first later unresolved conflict on it; a later fork on a branch that
+  already holds a `resolve` is resolved the same way, by its own `resolve`.
+- **Two `resolve`s.** Nothing orders resolves. If two candidates each keep themselves, neither
+  resolves the fork and rule 3 stands; no candidate is dropped.
+- **Witnessed branches are never discarded.** A `resolve`, and rule 3 generally, never discards a
+  branch on which an activation after the fork point is final **as witnessed by homes**: made
+  final by a `final` entry with the witnesses' heads (a full set counts once its own `final`
+  carries heads). Finality by excusal, an empty witness set or a later full set's anchor is not
+  witnessed. A late fork by a former controller therefore cannot win in an account with homes;
+  the owner's own `resolve` keeping the witnessed branch settles it.
+- **The losing branch.** Its entry at the forked seq and everything after it on that branch are
+  not part of the account's history; they stay equivocation evidence under rule 3, and nobody
+  appends them again. Transitions anchored on them are void.
+- **The limit.** An account with no home has no witness of time or order: everything on it is
+  final at once on every branch alike, so a former controller can show a new verifier a different
+  history from before its removal (a late entry and a `resolve` keeping it), and nothing in the
+  objects tells the two apart (§13.1, §18).
 
 ### 8.7 Pending transitions
 
@@ -798,7 +860,7 @@ Records citing a seq at or after an unresolved fork are held.
   `addThreshold`, `countBy`), `policy` (fields to set; `primaryHome: null` unsets it), `vault`
   (§8.3), `homes` (`appoint: [{request, terms}]`, `revoke`), `grant` (`{request, terms}` with
   `import`), `layout`, `migration` (§15.4), `successor` (`{account}`), `resolve`
-  (`{discarded: {seq, digest}}`).
+  (`{kept: {seq, digest}}`, `seq` at least 2; §8.6 "Resolving a fork").
 - **Composite rule.** One signer set meets, for every component, a rule that component allows,
   using the same rule (control or recovery) for all; consent if any component needs it;
   escalation and the full set judged once over the whole. It activates atomically or not at all.
@@ -812,9 +874,20 @@ Records citing a seq at or after an unresolved fork are held.
   it, each a `control` or `recover` controller current in the state before the entry recording
   it; a key the transition would remove may sign.
 - **Receipt** (§13.5): by a current home, `received` within 300 s after the object's `issued`.
-  **Choosing receipts:** an entry carries exactly `headQuorum` receipts for an object, from the
-  homes with the lowest member IDs whose valid receipts it holds, for each home its receipt with
-  the lowest body digest, sorted by home ID.
+  **Choosing receipts (a rule for a recorder):** an entry carries exactly `headQuorum` receipts for
+  an object, from the homes with the lowest member IDs whose valid receipts the recorder holds,
+  for each home its receipt with the lowest body digest, sorted by home ID, so honest recorders
+  holding the same receipts build the same entry. For a veto the receipts that may be chosen are
+  those valid under §13.5 and **received at or before the transition's veto deadline**; a later
+  receipt is skipped, never chosen, and never blocks the entry. **A verifier judges only the
+  receipts the entry carries, for validity:** `headQuorum` receipts (at most the current homes)
+  from distinct current homes, sorted by home ID, each valid under §13.5, in window and, for a
+  veto, at or before the deadline. It never refuses an entry because a different valid receipt
+  exists or is held: a verdict that depended on which objects a verifier holds would let one
+  home split verifiers. Two `vetoed` (or two `activate`) entries for one object that differ only
+  in receipts are ordered by §8.6 rule 1 (the lower body digest stands, the other is dropped). A
+  home that signed two receipts for one object is a matter for equivocation evidence, never a
+  reason to refuse an entry.
 
 **Times.** For a transition T judged in state S:
 - the delay is the larger of `recoveryDelay` at T's anchor and in S;
@@ -831,6 +904,9 @@ before E:
 3. its anchor is on E's branch (`malformed`).
 
 A transition whose only receipting homes are revoked before activation is dead.
+
+A home admits a transition (receipts it) by judging it at the home's **current head**, not at a
+later state (§13.1); validity at an entry is judged at that entry, as above.
 
 **Escalation.** v(u) is the number of distinct transitions signed by unit u with a `vetoed` on the
 branch since the last `activate` of a transition u signed that met the escalation rule then. T
@@ -888,6 +964,17 @@ from heads it has seen or the order it saw things in.
   set is empty or fully excused, a `final` entry names it, a later `final` carries a head from every
   one of its witnesses, or a later full set's anchor is it or follows it. This is the one meaning
   of "final" in §8.6, §8.7 and §15.
+- **Choosing heads (a rule for a recorder).** A `final` carries, for each witness, one head: among
+  the heads valid for it (signed by that home's key in the state before the activation, covering
+  the activation on this branch, not necessarily fresh) and usable (not dated more than 60 s
+  ahead of the recorder's clock, §13.3), the one with the lowest body digest, and its `issued` is
+  the latest head's, so honest recorders converge. **A verifier judges only the heads the entry
+  carries:** exactly one valid covering head per non-excused witness, signed under that home's key
+  in the state before the activation, not dated after the entry's own `issued` (the measure is
+  the entry's `issued`, not the verifier's clock, so a recorded `final` never changes verdict as
+  time passes). It never refuses a `final` because a different valid head exists or is held; two
+  `final` entries of one activation are ordered by §8.6 rule 1. A home with two heads at one seq
+  is a matter for equivocation evidence (§13.3), never a reason to refuse an entry.
 - **Order.** An activation that is not removal-only gets a `final`, or becomes final by excusal,
   only when every earlier activation that is not removal-only is final. Removal-only activations
   are outside this order: they never wait for an earlier provisional activation, and none waits
@@ -939,7 +1026,7 @@ with the result shown, and an entry that fails changes nothing. Every recording 
 | **`suspend` (key K, T, receipts)** | §8.5 steps 1–2; signer is a signer of T (`badSignature`); T valid at E; T not recorded on the branch; T removes or demotes K; T's delta not void; the signer's unit has no outstanding suspension (`malformed`) | K suspended until the earliest of: T's `activate` or `vetoed`; the first entry after which T is no longer valid at a hypothetical `activate`; the first entry, or the verifier's clock, past T's due time + 7 days. |
 | **`activate` (T, receipts)**, T not a full set | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); delta not void (`malformed`) | Apply the delta (with `keep`, §8.3's slot drops, retiring, and the drop of keys the removed key added); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set; it becomes final when every witness is excused, in Order (the fixed point). |
 | **Full-set `activate`** | As `activate`, with the full set's due time; no veto | As `activate`; every activation before T's anchor becomes final. |
-| **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts chosen, each within 300 s of V's `issued` and before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
+| **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts: `headQuorum` from distinct current homes, sorted, each valid, within 300 s of V's `issued` and at or before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
 | **`final` (activation A, heads)** | A is an `activate` on the branch, not yet final; if A is not removal-only, every earlier activation that is not removal-only is final; `heads` is non-empty and has exactly one head per witness of A, each signed by that home's key in the state before A, covering A on this branch (not necessarily fresh); `by` = A's `by`; `issued` = max(latest head's `issued`, previous `issued`) (`malformed`) | A is final, and so is every earlier activation whose witnesses all have a head here covering it; what they added counts. A removal-only A that revoked homes excuses them from every other activation's witnesses. |
 | **`successionVetoed`** | §15.1 step 4 (`malformed`; a veto signature by an ineligible key `badSignature`) | The succession is never verified. |
 | **Conflict at one seq** | §8.6 | The standing entry is on the branch; rollback as above. |
@@ -1240,7 +1327,9 @@ Substitutions:
 
 Signed `raw` by `from`'s key: the member for the first link, the previous link's `to` after.
 `session` only on the first link. `notBefore` ≤ `expires`, else `malformed` (§12.3 step 1);
-`expires` ≤ `notBefore` + `policy.linkMaxAge`, else `refused:expired` (step 6).
+`expires` ≤ `notBefore` + `policy.linkMaxAge`, else `refused:expired` (step 6). A link's `created`
+is informational: it carries no rule, is compared with neither `notBefore`, `expires` nor any
+clock, and no verifier refuses a link for its value (it must still be a well-formed date).
 
 ### 12.2 Call
 
@@ -1373,7 +1462,11 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   another current home, within 300 s after the transition's `issued`, or it was not serving for any
   part of that window. Otherwise it refuses that `activate` for ever and notifies the controllers,
   and it **still stores and serves the transition and its receipts** (§14), so the owner can veto
-  it before its deadline; a late transition with a valid veto is vetoed like any other. A home
+  it before its deadline; a late transition with a valid veto is vetoed like any other. A veto that
+  reaches a home more than 300 s after its `issued` is stored and served when it comes with at
+  least one receipt of it from another current home that is in window (§13.5) and that the home
+  already holds, as a forwarded transition is; the home signs no receipt of its own for it.
+  Without such a receipt it is `refused:late` and not stored. A home
   persists, per object, when it first saw it, its own serving intervals over the object's window,
   and its decision, and reuses that decision after a restart.
 - **Clock.** A home refuses an entry more than 60 s ahead of its clock (`refused:early`), and an
@@ -1409,12 +1502,22 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   can check that `issued` is the admission time (the clock rule), which is what stops a dormant
   account's history being filled in one sitting. A hostile primary can still admit backdated
   entries (changes §H). Transitions and vetoes are bounded by the admission caps above.
+- **An account with no home has no witness of time or order.** Everything on it is final at
+  once, on every branch alike, so a former controller can show a **new** verifier a different
+  history from before its own removal (a late entry at an old seq and a `resolve` keeping it),
+  and nothing in the objects can tell the two apart. This is a limit, not a defence (§8.6, §8.7
+  "No home"). A verifier with persisted state whose high-water entry is not on the branch it would
+  now follow reports `refused:rollback`, and a host MUST treat that as a refusal and show it. Hosts
+  MUST create accounts with at least one home by default (§18) and MUST warn when an account has
+  none.
 - **Honest bulk work** fits the defaults: a first import is records, not authority entries;
   onboarding twenty people is twenty grants. A clean copy with more than 64 members to re-admit
   needs a second approver or a day's pause (§15.3), or a transition raising `rate`.
 - **Notices.** On receipting a transition, a veto or a `suspend`, a home MUST push a notice to
   every delivery route registered with it, and MUST support at least one out-of-band route (for
-  example e-mail) the owner configures (§17.5).
+  example e-mail) the owner configures (§17.5). A notice has no signed body and no wire format in
+  0.5: it is home and host behaviour over the routes registered at setup, and nothing in this
+  document defines a notice object.
 - **First upload.** A genesis may be followed in one upload by the transition appointing a home
   and its `activate` (due when issued, since the state before it has no home).
 
@@ -1439,8 +1542,13 @@ is not fresh is never used as evidence of the current state. Heads embedded in a
 verified as §8.7 says (the home's key in the state before the activation, freshness not needed).
 
 - **High-water mark.** A verifier persists per account its highest accepted `(seq, digest)` and
-  the folded state there. It only detects rollback: a history that stops before that seq, or a
-  head behind it, is `refused:rollback`. It never selects a branch: a conflict is decided by §8.6
+  the folded state there, and **per home** the highest `(seq, digest)` of a head it accepted from
+  that home. It only detects rollback: a history that stops before the account's seq, or a head
+  behind its home's mark, is `refused:rollback`. A head is judged behind its home's mark only
+  while the marked entry is still on the verifier's history; if a displaced provisional
+  activation (§8.7) took it off, the mark names another branch and a lower head is no rollback.
+  A head is checked for its signature, clock and held history first (`refused:fork`,
+  `unavailable`), then against the mark. It never selects a branch: a conflict is decided by §8.6
   from the objects held, including the entries the verifier keeps, so a verifier that saw one
   branch first reaches the same verdict as one that saw the other.
 - **Incremental verification.** A verifier MAY resume from its persisted state: it fetches entries
@@ -1449,22 +1557,43 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   history from seq 1, in pages; it MUST NOT accept a suffix it can't link to a state it verified.
 - **Quorum.** Heads from different homes are compared by ancestry: a lower seq is behind, not
   wrong; divergent histories are a fork.
-- **Equivocation.** Two heads by one home with the same `seq` and different digests prove that
-  home misbehaved, unless the later head's entry at that seq displaced the earlier one under §8.6
-  rule 1. A verifier holding such proof MUST keep an evidence object, MUST stop counting that home
-  for this account, and SHOULD send the evidence to the account's controllers. Each form is
-  verifiable from the keys it names alone:
-  - two heads: `{"protocol":"colophon/equivocation/5","account","heads":[…]}`, sorted by body
-    digest;
-  - two conflicting entries (§8.6 rule 2): the same with `entries` in place of `heads`;
-  - a veto against a final activation (§8.7): `{"protocol","account","veto","receipt","final"}`,
-    the veto envelope, the home's receipt of it before the deadline, and the `final` entry whose
-    heads include that home's.
+- **Equivocation.** A verifier holding proof that a home misbehaved MUST keep an evidence object,
+  MUST stop counting that home for this account, and SHOULD send the evidence to the account's
+  controllers. Every form is judged against the account's history the verifier holds, and
+  none is checkable from the keys it names alone: what a verifier needs to hold is stated per form.
+  - **Heads:** `{"protocol":"colophon/equivocation/5","account","heads":[…]}`, two heads by one
+    home with the same `seq` and different digests, sorted by body digest. Let h1 be the head
+    with the earlier `issued` and h2 the later. Follow the two covered entries back to the seq
+    where their branches first differ. If §8.6 rule 1 decides that divergence (a recording entry
+    against another entry) and h2's entry is on the side that stands, it is **not** equivocation,
+    at any seq at or after the divergence: an honest home signs over an entry and later over the
+    one that displaced it. If the two `issued` are equal and the divergence is a rule 1
+    displacement, it is not equivocation either. Otherwise it is. The verifier needs the
+    history, and both entries, back to the divergence; without them the answer is `unavailable`,
+    never a conviction. A home MUST give its heads strictly increasing `issued` (§13.3 below).
+  - **Entries:** the same with `entries` in place of `heads`: two signed entries with the same
+    `seq` and `previous` and different digests, each valid in its place (§8.5). It convicts
+    their signers: exactly the signer units present on both entries. A recording entry has no
+    signer and convicts nobody, so an `activate` against an ordinary entry is §8.6 rule 1, not
+    evidence. Where §8.6 rule 2 asks for head evidence, the heads are held as well.
+  - **Veto against a final activation** (§8.7):
+    `{"protocol","account","activation","veto","receipt","final"}`: the `activate` entry (which
+    embeds the transition and its receipts, so the veto's deadline can be computed), the veto
+    envelope, the home's receipt of the veto, and the `final` entry whose heads include that
+    home's. The verifier needs the history up to the activation, to judge the veto's signers
+    and the home's key in that state.
 - What freshness gives, and doesn't, is explained in the guide §3. A brand-new verifier fetches
   the history from any source, verifies it from seq 1, asks every home the history names, and
   applies §12.3 step 4.
 - A home SHOULD sign a new head at least every `policy.headMaxAge` / 2 and MUST NOT sign a head for
-  an entry it hasn't verified.
+  an entry it hasn't verified. It MUST give its heads strictly increasing `issued`, and MUST NOT
+  sign a head for a second digest at a seq unless its own verdict shows the first displaced under
+  §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
+  second head's side; the Equivocation rule above). The guard belongs to home admission, which holds the history: the host
+  that drafts a home's head calls the home's guard first and signs only what it passes (in the
+  reference core `HomeState::guard_head` returns a token that `prepare_head` requires, so a head
+  cannot be prepared for signing without it). A home keeps only what the guard needs: the latest
+  `issued` and the digests at seqs not yet settled by a final activation.
 
 ### 13.4 Who may read the history
 
@@ -1801,20 +1930,35 @@ predecessor reads `successor` from F's body.
 
 The core prepares every body the host signs (entries, transitions, vetoes, `suspend`, links,
 calls, heads, receipts) as exact bytes, and verifies §4 and §8 before returning a record; nothing
-is written on failure. New PRF slots need PRF before the body (§7.2). The host alone may open a
-non-`colophon/` HPKE seal to the vault for its own registered formats. The core never exports the
-seed or a raw ECDH output. The host interface and the history verifier's report are described in
+is written on failure. New PRF slots need PRF before the body (§7.2).
+
+**The seed.** The core never returns seed bytes or a raw ECDH output through its interface. An
+opened seed can be sealed only to controllers of its own account's verified keyring (slots), to
+a new vault the host creates at a rotation, or to a device the person confirmed by pairing
+(§7.4). The host is trusted with the seed during rotation and transfer: it supplies the
+entropy of a new vault and performs the scan or code comparison.
+
+**Restricted open.** The host alone may ask the core to open an HPKE seal to the vault for its
+own registered formats. The seal is `{"enc","ciphertext"}` as §11.1 (`enc` a valid 65-byte
+uncompressed P-256 point, `ciphertext` 16 to 65,536 bytes); `info` equals the AAD and is at most
+1,024 bytes. An `info` that begins with `colophon/` belongs to the core's own labels and is
+refused `refused:outOfScope`, whatever the seal holds. The host interface and the history verifier's report are described in
 [colophon-0.5-guide.md](colophon-0.5-guide.md) §4.
 
 ### 17.2 Persisted verifier state
 
 A verifier that resumes (§13.3) MUST persist, per account, atomically and with a format version.
-Every item is a function of the history and the objects held, recomputed identically by replay
-from seq 1, so two verifiers that persist it reach the same verdicts:
-- the high-water `(seq, digest)` (rollback detection only, §13.3) and the folded state there: keyring, members (terms, expiry,
+Every item except the head marks is a function of the history and the objects held, recomputed
+identically by replay from seq 1, so two verifiers that persist it reach the same verdicts:
+- the high-water `(seq, digest)` and each home's head mark (rollback detection only, §13.3) and
+  the folded state there. **Head marks are local memory:** no replay of the history recomputes
+  them, since they record what this verifier accepted and when. They survive a checkpoint format
+  change by being carried over when the checkpoint is rebuilt from the retained objects, and a
+  checkpoint whose marks are malformed is refused. Everything else listed here is recomputed: keyring, members (terms, expiry,
   session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
   is retiring;
-- the digests of transitions with an `activate` or `vetoed` on the branch;
+- the digests of transitions with an `activate` or `vetoed` on the branch, and the forks a
+  `resolve` activation on it kept (`seq`, `digest`), and the activations that homes witnessed;
 - each activation not yet final, with its witness set and whether it is removal-only; the
   `final` entries; the homes excused by final removals;
 - v(u) per unit and, per unit, the seq of its last compliant activation;
@@ -1853,7 +1997,10 @@ account exists, and to 32 random bytes otherwise. Verifiers find a controller by
 
 ### 17.5 Notices
 
-The mechanism is only as safe as people's knowledge of pending transitions, so:
+A notice is not an object of this specification: it has no signed body and no wire format in 0.5.
+It is behaviour of homes and hosts over the delivery routes registered at setup (§13.1), and
+nobody should build a signed notice object. The mechanism is only as safe as people's
+knowledge of pending transitions, so:
 
 - **Routes.** At setup, hosts MUST register at least two delivery routes with every home, on
   different devices or services (for example push to a second device, and e-mail).
@@ -1901,7 +2048,7 @@ ranges.
 | `policy.primaryHome` | absent | a current home | transition with consent |
 | `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | lowering immediate; raising by transition with consent |
 | Member `expires`, `depth` | 7 days and 1 for `agent`; none and 0 otherwise | §10.1 | approver; `renew` extends |
-| Homes | **two, run by different operators (one may be the owner's own machine), before any recovery key** | 0–8 | transition with consent |
+| Homes | **two, run by different operators (one may be the owner's own machine), before any recovery key; a host MUST create every account with at least one and MUST warn when an account has none (§13.1: without a home there is no witness of time or order)** | 0–8 | transition with consent |
 | Drain window | 7 days | 0–30 days | the copying host |
 
 **Reference setup for new accounts:**
@@ -1947,7 +2094,7 @@ check as an optional diagnostic.
 
 **Versions.** 0.5 accepts exactly these markers: `colophon/authority/5`, `/request/5`, `/link/5`,
 `/call/5`, `/head/5`, `/receipt/5`, `/transition/5`, `/veto/5`, `/equivocation/5`,
-`/operation/5`, the legacy markers of an upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
+`/operation/5`, `colophon/pair-qr/5` (the QR payload, §7.3), the legacy markers of an upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
 `colophon/relay/3`, and `colophon/swift-keyring/2` for predecessors. A verifier MUST NOT read a
 0.5 account under 0.4 rules, and MUST NOT accept a `/3` or `/4` object where §11.5 or §16.1 fences
 it out. A later version that adds markers will say which 0.5 markers it retires and how an account

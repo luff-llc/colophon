@@ -552,15 +552,16 @@ fn mb_nothing_else_is_admitted_after_a_provisional_f() {
     assert_eq!(v.branch.len(), 3);
 }
 
-// ---- Fix round, Low: checkpoint format 3 ---------------------------------------------------
+// ---- Fix round, Low: a previous checkpoint format is refused (3 then, 4 now) ---------------------------------------------------
 
 #[test]
 fn a_format_2_checkpoint_is_refused_and_the_account_is_rebuilt_from_its_objects() {
     let (objects, now) = rules("t-excusal-final-not-displaced-by-vetoed");
     let cp = Persisted::checkpoint(&objects, &Persisted::default(), now);
     let mut value: Value = serde_json::from_slice(&cp.to_bytes().unwrap()).unwrap();
-    assert_eq!(value["version"], 3);
-    value["version"] = Value::from(2);
+    // Revision 13 raised the format to 4 (per-home head marks); the previous format is refused.
+    assert_eq!(value["version"], 4);
+    value["version"] = Value::from(3);
     assert!(Persisted::from_bytes(&serde_json::to_vec(&value).unwrap()).is_err());
     // Rebuilt from the objects with no saved state, the verdict is the same.
     let rebuilt = verify_history(&objects, &Persisted::default(), now);

@@ -1,0 +1,1 @@
+{"description":"The resolved branch and the owner's next entry, with no trace of the losing entry: a `resolve` with no other candidate held is valid and changes nothing, so a verifier that was never shown the loser is not stopped.","expected":{"result":"ok","seq":5},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-14T09:08:20Z"}}

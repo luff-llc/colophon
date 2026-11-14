@@ -1950,3 +1950,56 @@ fn vault_locked_is_a_reason() {
     let err = VaultSeed::check(&[1; 31], &vault_of(70), &default_account()).unwrap_err();
     assert_eq!(err, f);
 }
+
+/// §7.3 (revision 13): the QR payload is the canonical JSON of the closed object
+/// `{"account","e","nB","protocol"}`; a reader refuses anything else.
+#[test]
+fn the_qr_payload_round_trips_as_canonical_json_and_refuses_everything_else() {
+    use colophon_core::v05::pairing::QrPayload;
+    let acct = account(1);
+    let t = TransferKey::new([21; 32]).unwrap();
+    let qr = QrJoiner::begin(&acct, &t.public(), [0xb1; 32])
+        .unwrap()
+        .payload();
+    let bytes = qr.to_bytes().unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(text.starts_with(&format!("{{\"account\":\"{}\",\"e\":\"", acct.as_str())));
+    assert!(text.ends_with("\",\"protocol\":\"colophon/pair-qr/5\"}"));
+    assert!(text.contains(",\"nB\":\""));
+    assert_eq!(QrPayload::from_bytes(&bytes).unwrap(), qr);
+    // Refusals: another protocol, an extra or missing member, wrong lengths, a bad point,
+    // non-canonical bytes, an account ID that is not 64 hex characters, and plain garbage.
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    let with = |f: &dyn Fn(&mut Value)| {
+        let mut x = v.clone();
+        f(&mut x);
+        colophon_core::v05::encoding::canonical(&x).unwrap()
+    };
+    let bads: Vec<Vec<u8>> = vec![
+        with(&|x| x["protocol"] = json!("colophon/pair-qr/4")),
+        with(&|x| x["extra"] = json!(1)),
+        with(&|x| {
+            x.as_object_mut().unwrap().remove("nB");
+        }),
+        with(&|x| x["nB"] = json!(b64(&[1u8; 31]))),
+        with(&|x| x["e"] = json!(b64(&[4u8; 65]))),
+        with(&|x| x["e"] = json!(b64(&[4u8; 64]))),
+        with(&|x| x["account"] = json!("ab")),
+        // Same members, keys out of order: not canonical.
+        format!(
+            "{{\"protocol\":\"colophon/pair-qr/5\",\"account\":\"{}\",\"e\":\"{}\",\"nB\":\"{}\"}}",
+            acct.as_str(),
+            v["e"].as_str().unwrap(),
+            v["nB"].as_str().unwrap()
+        )
+        .into_bytes(),
+        b"not json".to_vec(),
+        b"[]".to_vec(),
+    ];
+    for (i, b) in bads.iter().enumerate() {
+        assert!(
+            QrPayload::from_bytes(b).is_err(),
+            "bad payload {i} accepted"
+        );
+    }
+}

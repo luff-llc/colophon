@@ -149,6 +149,12 @@ whether it is final and which homes it still needs; and per unit, v(u).
 > two services: if one is down, removals still work and new keys wait; if one turns dishonest
 > while someone also has one of your keys, you can lose the account.
 
+**An account with no home.** Tell the person: "Nothing keeps a record of when things happened on
+this account. Someone who once held one of your keys can later show a new device a different
+history, from before you removed that key, and nothing can tell the two apart. Add a home." Hosts
+MUST create accounts with at least one home (§18), MUST warn when an account has none, and MUST
+refuse and show a rollback a verifier with saved state reports (§13.1).
+
 **One recovery unit.** Have none or at least two recovery units. A unit is a key when the account
 counts keys (the person reference does, so your two security keys are two units), and a holder
 when it counts holders (the company reference): then two security keys that are both yours are
@@ -208,3 +214,5 @@ without stopping either thief. What protects the owner is the veto window.
 | 2026-11-12 | Confirmation review of revision 10 | units, not controllers; sufficient not necessary; stale wording | Revision 11; changes §G.14 |
 | 2026-11-14 | Claude, engine check of the 0.5 history verifier (PRs #5 and #6) | 3 High, 4 Medium, 6 Low | Revision 12 answers M1, M2, M4, L2, L5 and the chain bound; changes §A.8, §G.16 |
 | 2026-11-14 | Claude, independent check of revision 12 (PR #7) | 3 High, 5 Medium, 4 Low | Revision 12 (fix round); changes §A.8, §G.17 |
+| 2026-11-14 | Claude, checks of the write side: authority builders (E1), vault, slots and pairing (E2), homes and calls (E3), and the integrated write side | resolve, rollback, receipt and head choices, late veto, two heads, slot shape, equivocation evidence, seven text gaps | Revision 13; changes §A.9, §G.18 |
+| 2026-11-14 | Claude, independent check of revision 13 (PR #10) | 6 High, 5 Medium, 4 Low | Revision 13 (fix round); changes §A.9, §G.19 |

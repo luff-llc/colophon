@@ -125,6 +125,9 @@ pub struct HomeState {
     drafts: BTreeMap<String, ReceiptToSign>,
     serving: Vec<ServingInterval>,
     unmatched_receipts: Vec<ObservedReceipt>,
+    /// Heads this home has had drafted for signing: `(seq, digest, issued ms)`, oldest first.
+    #[serde(default)]
+    signed_heads: Vec<(u64, String, i64)>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ObservedReceipt {
@@ -176,6 +179,7 @@ impl HomeState {
             drafts: BTreeMap::new(),
             serving,
             unmatched_receipts: Vec::new(),
+            signed_heads: Vec::new(),
         })
     }
     /// Update serving history supplied by the host, without rewriting past per-object facts.
@@ -205,6 +209,88 @@ impl HomeState {
             "invalid pending cursors",
         )?;
         Ok(state)
+    }
+    /// The guard of §13.3 for signing a head, run by the host **before** it prepares or signs one
+    /// (`write::calls::prepare_head` knows nothing of a home's history, so the check lives here,
+    /// where the history is). The home must not sign a head for an entry it has not verified on
+    /// its own branch, must give its heads strictly increasing `issued`, and must not sign a
+    /// head for a second digest at a seq unless its own verdict shows the first displaced under
+    /// §8.6 rule 1: following both entries back to where their branches first differ, the
+    /// divergence is decided by rule 1 (a recording entry against another entry) in favour of
+    /// this head's side. Returns the state to persist, which records the head as drafted (a
+    /// draft counts as signed, so a retry of the same head is allowed and a different one is not).
+    pub fn guard_head(
+        &self,
+        seq: u64,
+        digest: &str,
+        issued: &str,
+        now: &str,
+    ) -> Result<(HomeState, HeadGuard)> {
+        let now_ms = date(now, "home clock")?;
+        let issued_ms = date(issued, "issued")?;
+        let (persisted, st) = self.context(now_ms)?;
+        require(
+            st.on_branch_digest(seq, digest),
+            "a head for an entry this home has not verified on its branch",
+        )?;
+        let token = || HeadGuard {
+            home: self.home.clone(),
+            seq,
+            digest: digest.to_string(),
+            issued: issued.to_string(),
+        };
+        let mut next = self.clone();
+        if next
+            .signed_heads
+            .iter()
+            .any(|(s, d, i)| *s == seq && d == digest && *i == issued_ms)
+        {
+            return Ok((next, token()));
+        }
+        require(
+            next.signed_heads.iter().all(|(_, _, i)| issued_ms > *i),
+            "heads must have strictly increasing issued",
+        )?;
+        let prior: Vec<String> = next
+            .signed_heads
+            .iter()
+            .filter(|(s, d, _)| *s == seq && d != digest)
+            .map(|(_, d, _)| d.clone())
+            .collect();
+        if !prior.is_empty() {
+            let verdict = verify_history(&Objects::default(), &persisted, now_ms);
+            let entries: BTreeMap<String, super::Entry> = persisted
+                .objects()
+                .map(|o| {
+                    o.entries
+                        .iter()
+                        .filter_map(|b| parse_entry(b).ok())
+                        .map(|e| (e.env.digest.clone(), e))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for first in prior {
+                require(
+                    displaced_by_rule_1(&entries, &verdict.conflicts, &first, digest),
+                    "a second head at this seq, and the first is not displaced under §8.6 rule 1",
+                )?;
+            }
+        }
+        next.signed_heads.push((seq, digest.to_string(), issued_ms));
+        // Prune what the guard no longer needs: nothing at or before the highest final
+        // activation can be displaced (§8.6 rule 1), so only the latest `issued` (for the
+        // strictly increasing rule) and the digests at seqs not yet settled stay.
+        let settled = st
+            .activations()
+            .iter()
+            .filter(|a| a.final_)
+            .map(|a| a.seq)
+            .max()
+            .unwrap_or(0);
+        let latest = next.signed_heads.iter().map(|(_, _, i)| *i).max();
+        next.signed_heads
+            .retain(|(q, _, i)| *q > settled || Some(*i) == latest);
+        Ok((next, token()))
     }
     fn context(&self, now_ms: i64) -> Result<(Persisted, State)> {
         let p = Persisted::from_bytes(&self.checkpoint)?;
@@ -286,6 +372,70 @@ impl HomeState {
         }))
     }
 }
+/// What [`HomeState::guard_head`] returns when a head may be drafted: `write::calls::prepare_head`
+/// takes it, so a host cannot prepare a head for signing without having passed the guard. Only
+/// `guard_head` makes one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadGuard {
+    home: String,
+    seq: u64,
+    digest: String,
+    issued: String,
+}
+impl HeadGuard {
+    /// The home member ID the guard was issued to.
+    pub fn home(&self) -> &str {
+        &self.home
+    }
+    /// The seq it permits.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+    /// The digest it permits.
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+    /// The `issued` it permits.
+    pub fn issued(&self) -> &str {
+        &self.issued
+    }
+}
+
+/// Whether the entry `first` is displaced by `second` under §8.6 rule 1: walk both back to the
+/// seq where their branches first differ; the verdict decided that conflict for `second`'s side,
+/// and at least one of the two entries there is a recording entry.
+fn displaced_by_rule_1(
+    entries: &BTreeMap<String, super::Entry>,
+    conflicts: &[(u64, String, Vec<String>)],
+    first: &str,
+    second: &str,
+) -> bool {
+    let (mut a, mut b) = (first.to_string(), second.to_string());
+    loop {
+        let (Some(x), Some(y)) = (entries.get(&a), entries.get(&b)) else {
+            return false;
+        };
+        if x.seq != y.seq {
+            return false;
+        }
+        if x.previous == y.previous {
+            let recording = |e: &super::Entry| {
+                ["activate", "vetoed", "final", "successionVetoed"].contains(&e.kind.as_str())
+            };
+            return a != b
+                && (recording(x) || recording(y))
+                && conflicts.iter().any(|(s, standing, losers)| {
+                    *s == x.seq && *standing == b && losers.contains(&a)
+                });
+        }
+        let (Some(pa), Some(pb)) = (x.previous.clone(), y.previous.clone()) else {
+            return false;
+        };
+        a = pa;
+        b = pb;
+    }
+}
+
 fn check_intervals(intervals: &[ServingInterval]) -> Result<()> {
     require(
         intervals
@@ -589,7 +739,17 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                 if now_ms < at {
                     return Err(Refusal::Early);
                 }
-                if now_ms > at.saturating_add(WINDOW) || now_ms > t.deadline_ms {
+                // A veto that reaches the home after its own window is stored only when it comes
+                // with at least one in-window receipt from another current home, held already
+                // as for a forwarded transition (§13.1); the home signs no receipt of its own.
+                let late = now_ms > at.saturating_add(WINDOW) || now_ms > t.deadline_ms;
+                if late
+                    && !next.unmatched_receipts.iter().any(|r| {
+                        check_receipt(&st, &r.envelope, &env.digest, at).is_ok_and(
+                            |(by, received)| by != home.home && received <= t.deadline_ms,
+                        )
+                    })
+                {
                     return Err(Refusal::Late);
                 }
                 next.add(
@@ -607,6 +767,9 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                     at,
                     Some(t.due_ms.saturating_add(WEEK)),
                 )?;
+                if late {
+                    return Ok(());
+                }
                 let draft = ReceiptToSign {
                     object: env.digest.clone(),
                     body: canonical(

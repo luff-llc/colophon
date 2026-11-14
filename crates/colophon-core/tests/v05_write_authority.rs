@@ -1202,22 +1202,67 @@ fn entries_evidence_from_fabricated_entries_convicts_nobody() {
     ));
 }
 
-#[test]
-fn resolve_finish_returns_nothing_while_the_verifier_cannot_apply_it() {
-    // Verifier gap (checker M3): `resolve` changes nothing under `apply_delta`, so it is void
-    // at activation and admission refuses it. finish runs that admission check and returns
-    // nothing. Not E1's to fix; this records the behaviour.
-    let f = fixture();
-    let (chain, host, branches) = two_grants_at_seq_two(&f);
-    let (dx, dy) = (
-        body_digest_of_env(&branches[0]),
-        body_digest_of_env(&branches[1]),
-    );
+/// The determined `activate` of a held transition on the branch ending at `previous`, built
+/// by hand: the builders fold one branch of a fork and cannot see the other.
+fn activate_on(seq: u64, previous: &str, transition: &[u8], issued_ms: i64, by: &str) -> Vec<u8> {
+    use colophon_core::v05::write::{envelope, Header, Kind};
+    let header = Header {
+        seq,
+        previous: Some(previous.to_string()),
+        issued: format_date(issued_ms),
+        by: by.to_string(),
+    };
+    let body = Kind::Activate {
+        transition: transition.to_vec(),
+        receipts: vec![],
+    }
+    .body(&header)
+    .unwrap();
+    envelope(&body, None, &[], &[], &[]).unwrap()
+}
+
+/// A resolve transition keeping `kept` (its branch's entry at seq 2), signed by `signers`,
+/// finished by the builder; and its activation at the next seq of that branch.
+fn resolved(
+    f: &Fixture,
+    chain: &Chain,
+    host: &Host,
+    kept: &[u8],
+    _other: &[u8],
+    signers: &[&Key],
+) -> Result<(Vec<u8>, Vec<u8>), Failure> {
+    let dk = body_digest_of_env(kept);
     let batch = prepare_resolve(
         &chain.objects,
         chain.now,
-        (2, dx),
-        (2, dy),
+        (2, dk.clone()),
+        (2, dk.clone()),
+        T0 + 10 * SEC,
+        signers.iter().map(|k| k.id.clone()).collect(),
+        TransitionRule::Control,
+    )
+    .unwrap();
+    let sigs = host.sign(batch.steps());
+    let r = batch.finish(sigs)?;
+    let t = r.pending[0].clone();
+    let _ = f;
+    let act = activate_on(3, &dk, &t, T0 + 10 * SEC, &signers[0].id);
+    Ok((t, act))
+}
+
+#[test]
+fn resolve_finish_returns_the_transition_and_the_verifier_applies_its_activation() {
+    // §8.6 rule 3, §8.7: a resolve built on one branch, signed under the control rule with
+    // consent, finishes; held with its activation on that branch beside both branches, the
+    // verifier chooses that branch and reports the fork resolved. (Revision 13: before, the
+    // verifier answered `refused:fork` and the activation was void.)
+    let f = fixture();
+    let (chain, host, branches) = two_grants_at_seq_two(&f);
+    let batch = prepare_resolve(
+        &chain.objects,
+        chain.now,
+        (2, body_digest_of_env(&branches[0])),
+        (2, body_digest_of_env(&branches[0])),
         T0 + 10 * SEC,
         vec![f.a.id.clone()],
         TransitionRule::Control,
@@ -1227,25 +1272,280 @@ fn resolve_finish_returns_nothing_while_the_verifier_cannot_apply_it() {
         batch.finish(vec![]).is_err(),
         "no signatures: nothing returned"
     );
-    let (dx, dy) = (
-        body_digest_of_env(&branches[0]),
-        body_digest_of_env(&branches[1]),
+    let (t, act) = resolved(&f, &chain, &host, &branches[0], &branches[1], &[&f.a]).unwrap();
+    let mut objects = chain.objects.clone();
+    objects.pending.push(t);
+    // Without the activation the fork stands.
+    assert_eq!(
+        verify_history(&objects, &Persisted::default(), chain.now).code(),
+        "refused:fork"
     );
+    objects.entries.push(act);
+    let v = verify_history(&objects, &Persisted::default(), chain.now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+    assert_eq!(v.branch.len(), 3);
+    assert_eq!(v.branch[1], body_digest_of_env(&branches[0]));
+    assert_eq!(
+        v.conflicts,
+        vec![(
+            2,
+            body_digest_of_env(&branches[0]),
+            vec![body_digest_of_env(&branches[1])]
+        )]
+    );
+    assert_eq!(
+        v.state.unwrap().resolved_forks(),
+        &[(2, body_digest_of_env(&branches[0]))]
+    );
+    // The same verdict whichever order the objects came in, and from a saved checkpoint.
+    let mut reversed = objects.clone();
+    reversed.entries.reverse();
+    let r = verify_history(&reversed, &Persisted::default(), chain.now);
+    assert_eq!((r.code(), r.branch.len()), ("ok".to_string(), 3));
+    let saved = Persisted::checkpoint(&objects, &Persisted::default(), chain.now);
+    let saved = Persisted::from_bytes(&saved.to_bytes().unwrap()).unwrap();
+    let again = verify_history(&Objects::default(), &saved, chain.now + SEC);
+    assert_eq!((again.code(), again.branch.len()), ("ok".to_string(), 3));
+}
+
+#[test]
+fn two_resolves_one_on_each_branch_leave_the_fork() {
+    // §8.6 rule 3 gives no order between resolves: when each branch activates one that
+    // discards the other, neither is "the" resolution and the fork stands.
+    let f = fixture();
+    let (chain, host, branches) = two_grants_at_seq_two(&f);
+    let (t1, act1) = resolved(&f, &chain, &host, &branches[0], &branches[1], &[&f.a]).unwrap();
+    let (t2, act2) = resolved(&f, &chain, &host, &branches[1], &branches[0], &[&f.a]).unwrap();
+    let mut objects = chain.objects.clone();
+    objects.pending.extend([t1, t2]);
+    objects.entries.extend([act1.clone(), act2]);
+    let v = verify_history(&objects, &Persisted::default(), chain.now);
+    assert_eq!(v.code(), "refused:fork");
+    assert_eq!(v.seq(), 2);
+    // With one of the two held, that one resolves.
+    objects.entries.pop();
+    let v = verify_history(&objects, &Persisted::default(), chain.now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+    assert_eq!(v.branch[1], body_digest_of_env(&branches[0]));
+}
+
+#[test]
+fn a_resolve_is_judged_by_the_keyring_before_the_fork() {
+    // §8.4: `resolve` needs the control rule of the keyring before the fork. Threshold 2 (A and
+    // B). Branch X adds N as a control key and activates it (no home: final at once), then a
+    // resolve signed by A and N meets the rule in X's own keyring but not in the pre-fork one:
+    // the fork stands. Signed by A and B it resolves.
+    let (a, b, n) = (key(1), key(3), key(60));
+    let mut host = Host::default();
+    for k in [&a, &b, &n] {
+        host.add(k);
+    }
+    let kr = keyring(
+        vec![
+            raw_controller(&a, &key(2), "A", &["approve", "control", "recover"]),
+            raw_controller(&b, &key(4), "B", &["control"]),
+        ],
+        vec![slot_for(&a.id, "A"), slot_for(&b.id, "B")],
+        2,
+        1,
+    );
+    let mut chain = Chain::new(T0 + 3_600 * SEC);
+    chain.genesis(&host, "Pre-fork", &[], kr, &[a.id.clone(), b.id.clone()]);
+    let account = chain.account();
+    let grant = |objects: &Objects, n: u8| {
+        let (m, magree) = (key(n), key(n + 1));
+        let req = request(&account, &m, &magree, "Agent", "agent", agent_terms());
+        let batch = prepare_signed(
+            objects,
+            chain.now,
+            Kind::Grant {
+                request: req,
+                terms: granted_terms("2026-11-18T08:00:00Z"),
+                shares: vec![],
+            },
+            T0 + SEC,
+            std::slice::from_ref(&a.id),
+        )
+        .unwrap();
+        let sigs = host.sign(batch.steps());
+        batch.finish(sigs).unwrap().entries[0].1.clone()
+    };
+    let x2 = grant(&chain.objects, 20);
+    let y2 = grant(&chain.objects, 22);
+    let mut on_x = chain.objects.clone();
+    on_x.entries.push(x2.clone());
+    // X adds N with the control role, signed by both control keys.
+    let add_n = json!({"keyring": {"add": [raw_controller(&n, &key(61), "N", &["control"])]}});
+    let mut cx = Chain::new(chain.now);
+    cx.objects = on_x.clone();
+    let batch = prepare_transition(
+        &cx.objects,
+        cx.now,
+        &transition_params(&cx, T0 + 5 * SEC, &[&a, &b], add_n),
+    )
+    .unwrap();
+    let r = cx.run(&host, batch);
+    let t_add = body_digest_of_env(&r.pending[0]);
+    let act = prepare_activate(&cx.objects, cx.now, &t_add).unwrap();
+    cx.run(&host, act);
+    assert_eq!(cx.seq(), 3);
+    assert!(cx.state().keyring().controllers.contains_key(&n.id));
+    let tip = cx.objects.entries.last().unwrap().clone();
+    let try_resolve = |signers: &[&Key]| {
+        let batch = prepare_resolve(
+            &cx.objects,
+            cx.now,
+            (3, body_digest_of_env(&tip)),
+            (2, body_digest_of_env(&x2)),
+            T0 + 20 * SEC,
+            signers.iter().map(|k| k.id.clone()).collect(),
+            TransitionRule::Control,
+        )
+        .unwrap();
+        let sigs = host.sign(batch.steps());
+        let r = match batch.finish(sigs) {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
+        let act = activate_on(
+            4,
+            &body_digest_of_env(&tip),
+            &r.pending[0],
+            T0 + 20 * SEC,
+            &signers[0].id,
+        );
+        let mut all = cx.objects.clone();
+        all.entries.push(y2.clone());
+        all.entries.push(act);
+        all.pending.push(r.pending[0].clone());
+        Ok(verify_history(&all, &Persisted::default(), cx.now))
+    };
+    // Signed by A and N: the ordinary control rule in X's own keyring holds (threshold 2), the
+    // rule of the keyring before the fork does not (N was added after it): refused at finish.
+    assert!(matches!(
+        try_resolve(&[&a, &n]),
+        Err(Failure::BadSignature(_))
+    ));
+    let v = try_resolve(&[&a, &b]).unwrap();
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+    assert_eq!(v.branch.len(), 4);
+    assert_eq!(v.branch[1], body_digest_of_env(&x2));
+}
+
+#[test]
+fn a_verifier_without_the_losing_branch_follows_the_resolved_one() {
+    // H5: a `resolve` with no other candidate held is valid and changes nothing, so a verifier
+    // that never saw the losing entry is not stopped, and the owner's later entries verify.
+    let f = fixture();
+    let (chain, host, branches) = two_grants_at_seq_two(&f);
+    let (t, act) = resolved(&f, &chain, &host, &branches[0], &branches[1], &[&f.a]).unwrap();
+    let account = chain.account_of_genesis();
+    let mut all = chain.objects.clone();
+    all.pending.push(t);
+    all.entries.push(act);
+    let e4 = grant_entry(&all, chain.now, &host, &account, 30, T0 + 20 * SEC, &f.a);
+    all.entries.push(e4);
+    let with = verify_history(&all, &Persisted::default(), chain.now);
+    assert_eq!(
+        (with.code().as_str(), with.branch.len()),
+        ("ok", 4),
+        "{:?}",
+        with.stop
+    );
+    let mut without = all.clone();
+    without.entries.retain(|e| e != &branches[1]);
+    let v = verify_history(&without, &Persisted::default(), chain.now);
+    assert_eq!(
+        (v.code().as_str(), v.branch.len()),
+        ("ok", 4),
+        "{:?}",
+        v.stop
+    );
+    assert_eq!(v.branch, with.branch);
+}
+
+#[test]
+fn one_resolve_settles_a_fork_of_three_candidates() {
+    // H6: `kept` names the entry to keep, so one resolve settles any number of candidates.
+    let f = fixture();
+    let (chain, mut host, branches) = two_grants_at_seq_two(&f);
+    let account = chain.account_of_genesis();
+    host.add(&key(24));
+    let g = Objects {
+        entries: vec![chain.objects.entries[0].clone()],
+        ..Default::default()
+    };
+    let z2 = grant_entry(&g, chain.now, &host, &account, 24, T0 + SEC, &f.a);
+    let mut all = chain.objects.clone();
+    all.entries.push(z2.clone());
+    assert_eq!(
+        verify_history(&all, &Persisted::default(), chain.now).code(),
+        "refused:fork"
+    );
+    let (t, act) = resolved(&f, &chain, &host, &branches[0], &branches[1], &[&f.a]).unwrap();
+    all.pending.push(t);
+    all.entries.push(act);
+    let v = verify_history(&all, &Persisted::default(), chain.now);
+    assert_eq!(
+        (v.code().as_str(), v.branch.len()),
+        ("ok", 3),
+        "{:?}",
+        v.stop
+    );
+    assert_eq!(v.branch[1], body_digest_of_env(&branches[0]));
+    assert_eq!(v.conflicts[0].2.len(), 2, "both other candidates lose");
+}
+
+#[test]
+fn a_second_fork_later_on_a_resolved_branch_is_resolved_the_same_way() {
+    // M1: prepare_resolve folds a branch that already holds a resolve, and the verifier
+    // resolves the later fork the same way.
+    let f = fixture();
+    let (chain, mut host, branches) = two_grants_at_seq_two(&f);
+    let account = chain.account_of_genesis();
+    for n in [24u8, 26] {
+        host.add(&key(n));
+    }
+    let (t1, act1) = resolved(&f, &chain, &host, &branches[0], &branches[1], &[&f.a]).unwrap();
+    let mut base = chain.objects.clone();
+    base.pending.push(t1);
+    base.entries.push(act1.clone());
+    // A second fork at seq 4 on the resolved branch.
+    let p4 = grant_entry(&base, chain.now, &host, &account, 24, T0 + 20 * SEC, &f.a);
+    let q4 = grant_entry(&base, chain.now, &host, &account, 26, T0 + 20 * SEC, &f.a);
+    let mut all = base.clone();
+    all.entries.extend([p4.clone(), q4.clone()]);
+    let v = verify_history(&all, &Persisted::default(), chain.now);
+    assert_eq!((v.code().as_str(), v.seq()), ("refused:fork", 4));
     let batch = prepare_resolve(
-        &chain.objects,
+        &all.clone(),
         chain.now,
-        (2, dx),
-        (2, dy),
-        T0 + 10 * SEC,
+        (4, body_digest_of_env(&p4)),
+        (4, body_digest_of_env(&p4)),
+        T0 + 30 * SEC,
         vec![f.a.id.clone()],
         TransitionRule::Control,
     )
     .unwrap();
     let sigs = host.sign(batch.steps());
-    match batch.finish(sigs) {
-        Err(Failure::Malformed(m)) => assert!(m.contains("void"), "{m}"),
-        other => panic!("expected a void refusal: {other:?}"),
-    }
+    let t2 = batch.finish(sigs).unwrap().pending[0].clone();
+    all.pending.push(t2.clone());
+    all.entries.push(activate_on(
+        5,
+        &body_digest_of_env(&p4),
+        &t2,
+        T0 + 30 * SEC,
+        &f.a.id,
+    ));
+    let v = verify_history(&all, &Persisted::default(), chain.now);
+    assert_eq!(
+        (v.code().as_str(), v.branch.len()),
+        ("ok", 5),
+        "{:?}",
+        v.stop
+    );
+    assert_eq!(v.branch[3], body_digest_of_env(&p4));
+    assert_eq!(v.state.unwrap().resolved_forks().len(), 2);
 }
 
 /// A transition T2 (A removes B) receipted by H, vetoed by B; the veto receipted by H.
@@ -3125,4 +3425,348 @@ mod seed_paths {
         assert!(full.permit(10).is_err());
         assert!(FailureLimiter::new().permit(10).is_ok());
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Revision 13 fix round: the checker's probes (r13 check), ported with their corrected outcomes.
+
+fn grant_entry(
+    objects: &Objects,
+    now: i64,
+    host: &Host,
+    account: &str,
+    n: u8,
+    issued: i64,
+    by: &Key,
+) -> Vec<u8> {
+    let (m, magree) = (key(n), key(n + 1));
+    let req = request(account, &m, &magree, "Agent", "agent", agent_terms());
+    let batch = prepare_signed(
+        objects,
+        now,
+        Kind::Grant {
+            request: req,
+            terms: granted_terms("2026-11-18T08:00:00Z"),
+            shares: vec![],
+        },
+        issued,
+        std::slice::from_ref(&by.id),
+    )
+    .unwrap();
+    let sigs = host.sign(batch.steps());
+    batch.finish(sigs).unwrap().entries[0].1.clone()
+}
+
+#[test]
+fn a_second_receipt_of_one_veto_never_makes_a_recorded_vetoed_refused() {
+    // H3: a home signs a second, lower-digest receipt of a veto after the `vetoed` was
+    // recorded. Before the fix a verifier holding it answered `malformed`, one without it `ok`.
+    let f = fixture();
+    let (mut chain, h, host) = account_with_home(&f);
+    let account = chain.account();
+    let t2_issued = T0 + 100 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t2_issued,
+            &[&f.a],
+            json!({"keyring": {"remove": [f.b.id]}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t2 = r.pending[0].clone();
+    let t2_digest = body_digest_of_env(&t2);
+    let r2 = receipt(&account, &h, &t2_digest, t2_issued + 10 * SEC);
+    chain.objects.pending.push(r2.clone());
+    let v_issued = t2_issued + 30 * SEC;
+    let batch = prepare_veto(
+        &chain.objects,
+        chain.now,
+        &VetoParams {
+            transition: t2.clone(),
+            transition_receipts: vec![r2.clone()],
+            issued_ms: v_issued,
+            signers: vec![f.b.id.clone()],
+        },
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let veto = r.pending[0].clone();
+    let v_digest = body_digest_of_env(&veto);
+    let honest_receipt = receipt(&account, &h, &v_digest, v_issued + 5 * SEC);
+    chain.objects.pending.push(honest_receipt.clone());
+    let act = prepare_activate(&chain.objects, chain.now, &t2_digest)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let batch = prepare_vetoed(&chain.objects, chain.now, &t2_digest, &v_digest).unwrap();
+    chain.run(&host, batch);
+    let honest_d = body_digest_of_env(&honest_receipt);
+    let forged = (0..5_000)
+        .map(|ms| receipt(&account, &h, &v_digest, v_issued + ms))
+        .find(|r| body_digest_of_env(r) < honest_d)
+        .expect("a lower digest within 5,000 tries");
+    let mut split = chain.objects.clone();
+    split.pending.push(forged);
+    split
+        .entries
+        .extend(act.entries.iter().map(|(_, b)| b.clone()));
+    let v = verify_history(&split, &Persisted::default(), chain.now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+    assert!(
+        v.state.unwrap().keyring().controllers.contains_key(&f.b.id),
+        "the veto holds whichever receipts a verifier holds: B stays"
+    );
+}
+
+#[test]
+fn a_second_head_of_a_witness_never_makes_a_recorded_final_refused() {
+    // H4: a witness's routine refresh head, held by a verifier but not the recorder.
+    let f = fixture();
+    let (mut chain, h, host) = account_with_home(&f);
+    let account = chain.account();
+    let t3_issued = T0 + 200 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t3_issued,
+            &[&f.a],
+            json!({"policy": {"callWindow": 600}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t3_digest = body_digest_of_env(&r.pending[0]);
+    chain
+        .objects
+        .pending
+        .push(receipt(&account, &h, &t3_digest, t3_issued + 10 * SEC));
+    let act = prepare_activate(&chain.objects, chain.now, &t3_digest).unwrap();
+    chain.run(&host, act);
+    let a = chain.state().activations().last().unwrap().clone();
+    let h1 = head(&account, &h, a.seq, &a.digest, T0 + 5_000 * SEC);
+    chain.objects.heads.push(h1.clone());
+    let fin = prepare_final(&chain.objects, chain.now, a.seq).unwrap();
+    chain.run(&host, fin);
+    let d1 = body_digest_of_env(&h1);
+    let other = (1..5_000)
+        .map(|s| head(&account, &h, a.seq, &a.digest, T0 + 5_000 * SEC - s))
+        .find(|h2| body_digest_of_env(h2) < d1)
+        .unwrap();
+    let mut split = chain.objects.clone();
+    split.heads.push(other);
+    let v = verify_history(&split, &Persisted::default(), chain.now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+}
+
+/// `activate` of a held transition with its receipts, by hand (the builders fold one branch).
+fn activate_with(
+    seq: u64,
+    previous: &str,
+    transition: &[u8],
+    receipts: Vec<Vec<u8>>,
+    issued_ms: i64,
+    by: &str,
+) -> Vec<u8> {
+    use colophon_core::v05::write::{envelope, Header, Kind};
+    let header = Header {
+        seq,
+        previous: Some(previous.to_string()),
+        issued: format_date(issued_ms),
+        by: by.to_string(),
+    };
+    let body = Kind::Activate {
+        transition: transition.to_vec(),
+        receipts,
+    }
+    .body(&header)
+    .unwrap();
+    envelope(&body, None, &[], &[], &[]).unwrap()
+}
+
+fn chain_of(base: &Chain) -> Chain {
+    let mut c = Chain::new(base.now);
+    c.objects = base.objects.clone();
+    c
+}
+
+#[test]
+fn a_final_activation_stands_against_an_earlier_due_activate_of_another_transition() {
+    // H2 (§8.6 rule 1): with homes, X's activation of T1 is final on its branch (a `final`
+    // with the home's head). Y activates a different transition T2 whose due time is earlier.
+    // Before the fix the earlier due time displaced the final activation.
+    let f = fixture();
+    let (base, h, host) = account_with_home(&f);
+    let account = base.account();
+    let policy_t = |chain: &mut Chain, issued: i64, cw: u64| -> String {
+        let batch = prepare_transition(
+            &chain.objects,
+            chain.now,
+            &transition_params(
+                chain,
+                issued,
+                &[&f.a],
+                json!({"policy": {"callWindow": cw}}),
+            ),
+        )
+        .unwrap();
+        let r = chain.run(&host, batch);
+        let t = body_digest_of_env(&r.pending[0]);
+        chain
+            .objects
+            .pending
+            .push(receipt(&account, &h, &t, issued + 10 * SEC));
+        t
+    };
+    let mut cx = chain_of(&base);
+    let t1 = policy_t(&mut cx, T0 + 200 * SEC, 600);
+    let act = prepare_activate(&cx.objects, cx.now, &t1).unwrap();
+    cx.run(&host, act);
+    let a3 = cx.state().activations().last().unwrap().clone();
+    cx.objects
+        .heads
+        .push(head(&account, &h, a3.seq, &a3.digest, T0 + 5_000 * SEC));
+    let fin = prepare_final(&cx.objects, cx.now, a3.seq).unwrap();
+    cx.run(&host, fin);
+    assert!(cx.state().activations().last().unwrap().final_);
+    let mut cy = chain_of(&base);
+    let t2 = policy_t(&mut cy, T0 + 100 * SEC, 700);
+    let act = prepare_activate(&cy.objects, cy.now, &t2).unwrap();
+    cy.run(&host, act);
+    let (x3, y3) = (cx.objects.entries[2].clone(), cy.objects.entries[2].clone());
+    let mut all = cx.objects.clone();
+    all.heads.clear();
+    all.pending.extend(cy.objects.pending.iter().cloned());
+    all.entries.push(y3);
+    let v = verify_history(&all, &Persisted::default(), cx.now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+    assert_eq!(
+        v.branch[2],
+        body_digest_of_env(&x3),
+        "the final activation stands"
+    );
+}
+
+#[test]
+fn a_resolve_never_discards_a_branch_whose_later_activation_homes_witnessed() {
+    // H1(a): the honest branch X holds an activation after the fork point that a `final` with
+    // the home's head witnessed. A late fork Y and a `resolve` on it (even receipted by the
+    // home) does not win; the owner's own `resolve` keeping X does.
+    let f = fixture();
+    let (base, h, host) = account_with_home(&f);
+    let account = base.account();
+    let mut host = host;
+    for n in [20u8, 22] {
+        host.add(&key(n));
+    }
+    let mut cx = chain_of(&base);
+    let x3 = grant_entry(
+        &cx.objects,
+        cx.now,
+        &host,
+        &account,
+        20,
+        T0 + 20 * SEC,
+        &f.a,
+    );
+    cx.objects.entries.push(x3.clone());
+    let batch = prepare_transition(
+        &cx.objects,
+        cx.now,
+        &transition_params(
+            &cx,
+            T0 + 200 * SEC,
+            &[&f.a],
+            json!({"policy": {"callWindow": 600}}),
+        ),
+    )
+    .unwrap();
+    let r = cx.run(&host, batch);
+    let t = body_digest_of_env(&r.pending[0]);
+    cx.objects
+        .pending
+        .push(receipt(&account, &h, &t, T0 + 210 * SEC));
+    let act = prepare_activate(&cx.objects, cx.now, &t).unwrap();
+    cx.run(&host, act);
+    let a4 = cx.state().activations().last().unwrap().clone();
+    cx.objects
+        .heads
+        .push(head(&account, &h, a4.seq, &a4.digest, T0 + 5_000 * SEC));
+    let fin = prepare_final(&cx.objects, cx.now, a4.seq).unwrap();
+    cx.run(&host, fin);
+    assert_eq!(cx.seq(), 5);
+    assert!(cx.state().activations().last().unwrap().witnessed);
+    // The late fork: Y3 by A beside X3, then a resolve keeping Y3, receipted by the home.
+    let y3 = grant_entry(
+        &base.objects,
+        cx.now,
+        &host,
+        &account,
+        22,
+        T0 + 21 * SEC,
+        &f.a,
+    );
+    let mut all = cx.objects.clone();
+    all.heads.clear();
+    all.entries.push(y3.clone());
+    let dy = body_digest_of_env(&y3);
+    let resolve_on = |all: &Objects, anchor: (u64, String), kept: (u64, String), at: i64| {
+        let batch = prepare_resolve(
+            all,
+            cx.now,
+            anchor.clone(),
+            kept,
+            at,
+            vec![f.a.id.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+        let sigs = host.sign(batch.steps());
+        let t = batch.finish(sigs).unwrap().pending[0].clone();
+        let td = body_digest_of_env(&t);
+        let rc = receipt(&account, &h, &td, at + 10 * SEC);
+        let issued = at + 300 * SEC + 3_600 * SEC;
+        let act = activate_with(
+            anchor.0 + 1,
+            &anchor.1,
+            &t,
+            vec![rc.clone()],
+            issued,
+            &f.a.id,
+        );
+        (t, rc, act)
+    };
+    let (t, rc, act) = resolve_on(&all, (3, dy.clone()), (3, dy.clone()), T0 + 400 * SEC);
+    all.pending.extend([t, rc]);
+    all.entries.push(act);
+    let v = verify_history(&all, &Persisted::default(), cx.now);
+    assert_eq!(
+        (v.code().as_str(), v.seq()),
+        ("refused:fork", 3),
+        "{:?}",
+        v.stop
+    );
+    // The owner's resolve on X keeping X3: X stands, Y3 and its resolve lose.
+    let tip = body_digest_of_env(cx.objects.entries.last().unwrap());
+    let (t, rc, act) = resolve_on(
+        &all,
+        (5, tip),
+        (3, body_digest_of_env(&x3)),
+        T0 + 6_000 * SEC,
+    );
+    all.pending.extend([t, rc]);
+    all.entries.push(act);
+    let v = verify_history(&all, &Persisted::default(), cx.now);
+    assert_eq!(
+        (v.code().as_str(), v.branch.len()),
+        ("ok", 6),
+        "{:?}",
+        v.stop
+    );
+    assert_eq!(v.branch[2], body_digest_of_env(&x3));
 }

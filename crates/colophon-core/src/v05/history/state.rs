@@ -82,6 +82,10 @@ pub struct Activation {
     pub removal_only: bool,
     /// Final.
     pub final_: bool,
+    /// Final through a `final` entry's heads, not by excusal, an empty witness set or a later
+    /// full set: witnessed by homes (§8.6 rule 3, `resolve`).
+    #[serde(default)]
+    pub witnessed: bool,
     /// The transition's due time.
     pub due_ms: i64,
     /// Homes it revokes.
@@ -165,6 +169,13 @@ pub struct State {
     #[serde(default)]
     /// Owner asserted migration manifest, when recorded.
     pub migration: Option<Value>,
+    /// `(seq, digest)` of the entry each `resolve` activation on this branch kept.
+    #[serde(default)]
+    pub(super) resolved: Vec<(u64, String)>,
+    /// The control rule in force after each seq: `(threshold, countBy holders)`, so the keyring
+    /// before a fork can be judged (§8.4 `resolve`).
+    #[serde(default)]
+    pub(super) rule_at: Vec<(u64, bool)>,
 }
 
 impl State {
@@ -195,7 +206,22 @@ impl State {
         crate::v05::require(
             serde_json::to_value(parsed).ok() == serde_json::to_value(&self.keyring).ok(),
             "checkpoint keyring differs from its validated representation",
-        )
+        )?;
+        crate::v05::require(
+            self.rule_at.len() == len && self.rule_at.iter().all(|(t, _)| (1..=64).contains(t)),
+            "checkpoint rule history differs from the entries",
+        )?;
+        Ok(())
+    }
+
+    /// Whether the verified branch holds `digest` at `seq`.
+    pub(super) fn on_branch_digest(&self, seq: u64, digest: &str) -> bool {
+        self.on_branch(seq, digest)
+    }
+
+    /// The `(seq, digest)` of the entry each `resolve` activation on this branch discarded.
+    pub fn resolved_forks(&self) -> &[(u64, String)] {
+        &self.resolved
     }
 
     /// The account.
@@ -594,6 +620,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         );
     }
     let delay = keyring.policy.recovery_delay();
+    let rule0 = (keyring.threshold, keyring.holders);
     let policy = keyring.policy.clone();
     let epochs = namespaces.iter().map(|n| (n.clone(), 0)).collect();
     Ok(State {
@@ -603,6 +630,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         keyring,
         keyring_at: vec![ids],
         delay_at: vec![delay],
+        rule_at: vec![rule0],
         policies: vec![(1, policy)],
         meta,
         ever,
@@ -622,6 +650,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         successor: None,
         successor_seq: None,
         migration: None,
+        resolved: Vec::new(),
     })
 }
 
@@ -893,7 +922,18 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
                 c.recovery_ok = false;
                 c.recovery_ok_if_full = false;
             }
-            "layout" | "migration" | "successor" | "resolve" => {
+            "resolve" => {
+                let (_, _, extra) = resolve_target(comp)?;
+                for f in extra {
+                    c.unknown.push(format!("change.resolve.{f}"));
+                }
+                c.consent = true;
+                c.removal_only = false;
+                c.adds_anything = true;
+                c.recovery_ok = false;
+                c.recovery_ok_if_full = false;
+            }
+            "layout" | "migration" | "successor" => {
                 c.consent = true;
                 c.removal_only = false;
                 c.adds_anything = true;
@@ -914,6 +954,63 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
         ));
     }
     Ok(c)
+}
+
+/// A `resolve` component (§8.7): `{kept: {seq, digest}}`, the entry at a forked seq that the
+/// activation's own branch keeps. Returns its seq, its digest and any unknown member names.
+fn resolve_target(comp: &Value) -> Result<(u64, String, Vec<String>)> {
+    let m = comp
+        .as_object()
+        .ok_or_else(|| malformed("resolve component"))?;
+    let d = m
+        .get("kept")
+        .and_then(Value::as_object)
+        .ok_or_else(|| malformed("resolve.kept"))?;
+    let seq = d
+        .get("seq")
+        .and_then(Value::as_u64)
+        .filter(|n| (2..=crate::v05::encoding::bounds::MAX_INTEGER).contains(n))
+        .ok_or_else(|| malformed("resolve.kept.seq"))?;
+    let digest = d
+        .get("digest")
+        .and_then(Value::as_str)
+        .filter(|x| x.len() == 64 && x.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .ok_or_else(|| malformed("resolve.kept.digest"))?
+        .to_string();
+    crate::v05::require(d.len() == 2, "resolve.kept has other members")?;
+    let extra = m.keys().filter(|k| *k != "kept").cloned().collect();
+    Ok((seq, digest, extra))
+}
+
+/// The signer units that held `control` in the keyring before seq `fork_seq` (the state after
+/// seq `fork_seq − 1`), and that keyring's threshold.
+fn control_units_before(
+    s: &State,
+    fork_seq: u64,
+    signers: &[String],
+) -> Option<(BTreeSet<String>, u64)> {
+    let idx = usize::try_from(fork_seq.checked_sub(2)?).ok()?;
+    let (threshold, holders) = *s.rule_at.get(idx)?;
+    let ids = s.keyring_at.get(idx)?;
+    let before = fork_seq - 1;
+    let mut units = BTreeSet::new();
+    for id in signers.iter().filter(|id| ids.contains(*id)) {
+        let c = s
+            .ever
+            .get(id)?
+            .iter()
+            .rev()
+            .find(|(q, _)| *q <= before)
+            .and_then(|(_, c)| c.as_ref());
+        if let Some(c) = c.filter(|c| c.has(&Role::Control)) {
+            units.insert(if holders {
+                format!("holder:{}", c.holder().unwrap_or_default())
+            } else {
+                c.id()
+            });
+        }
+    }
+    Some((units, threshold))
 }
 
 fn delay_at(s: &State, seq: u64) -> u64 {
@@ -1074,6 +1171,20 @@ pub(crate) fn check_transition(
     } else {
         return Err(bad_signature("the transition's rule or consent is not met"));
     };
+    // `resolve` needs BOTH the ordinary control rule in S (above: the keyring of the branch the
+    // activation is recorded on) AND the control rule of the keyring before the fork (§8.4):
+    // the signers that held `control` then must reach that keyring's threshold, so a controller
+    // added after the fork adds nothing.
+    if let Some(comp) = change.get("resolve") {
+        let (seq, _, _) = resolve_target(comp)?;
+        if let Some((pre, threshold)) = control_units_before(s, seq, &signers) {
+            if (pre.len() as u64) < threshold {
+                return Err(bad_signature(
+                    "resolve: the control rule of the keyring before the fork is not met",
+                ));
+            }
+        }
+    }
     let full_set = match rule {
         Rule::Recovery => full_a,
         Rule::Control => full_b,
@@ -1427,6 +1538,19 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     if t.change.contains_key("layout") {
         changed = true;
     }
+    if let Some(comp) = t.change.get("resolve") {
+        // Valid when the kept entry is on this branch. It discards every other candidate at
+        // that seq for a verifier following this branch; with none held it changes nothing but
+        // is still valid, so no honest verifier is stopped by it (§8.6 "Resolving a fork").
+        let (seq, digest, _) = resolve_target(comp)?;
+        if !s.on_branch(seq, &digest) {
+            return Err(malformed(
+                "void: the resolve keeps an entry not on this branch",
+            ));
+        }
+        n.resolved.push((seq, digest));
+        changed = true;
+    }
     if !changed {
         return Err(malformed("void: the transition changes nothing"));
     }
@@ -1723,6 +1847,7 @@ pub(crate) fn apply(
     n.keyring_at
         .push(n.keyring.controllers.keys().cloned().collect());
     n.delay_at.push(n.keyring.policy.recovery_delay());
+    n.rule_at.push((n.keyring.threshold, n.keyring.holders));
     if n.policies.last().map(|(_, p)| p) != Some(&n.keyring.policy) {
         let p = n.keyring.policy.clone();
         n.policies.push((e.seq, p));
@@ -1806,6 +1931,7 @@ fn activate(s: &State, e: &Entry, now_ms: i64) -> Step<State> {
         witnesses: witnesses.clone(),
         removal_only: t.removal_only,
         final_: false,
+        witnessed: false,
         due_ms: t.due_ms,
         revokes: t
             .change
@@ -2070,6 +2196,7 @@ fn final_entry(s: &State, e: &Entry, all: &[&Entry]) -> Step<State> {
     let _ = all;
     let mut n = s.clone();
     make_final(&mut n, a.seq);
+    mark_witnessed(&mut n, a.seq);
     // Earlier activations whose witnesses all have a head here covering them.
     let earlier: Vec<(u64, BTreeSet<String>)> = n
         .activations
@@ -2084,9 +2211,17 @@ fn final_entry(s: &State, e: &Entry, all: &[&Entry]) -> Step<State> {
             .all(|h| by_home.get(h).is_some_and(|hs| *hs >= sq))
         {
             make_final(&mut n, sq);
+            mark_witnessed(&mut n, sq);
         }
     }
     Ok(n)
+}
+
+/// An activation made final by a `final` entry's heads was witnessed by homes (§8.6 rule 3).
+fn mark_witnessed(n: &mut State, seq: u64) {
+    if let Some(a) = n.activations.iter_mut().find(|a| a.seq == seq && a.final_) {
+        a.witnessed = true;
+    }
 }
 
 fn suspend(s: &State, e: &Entry) -> Step<State> {
@@ -3026,6 +3161,20 @@ fn pair(s: &State, valid: &[(&Entry, State)], i: usize, j: usize, ctx: &Ctx) -> 
                     vi
                 });
             }
+            // A recording entry whose activation is final on its branch stands and is not
+            // displaced by a recording entry of another object (§8.6 rule 1): final means
+            // witnessed or excused, never undone. If both are final the order below decides.
+            let finals = |e: &Entry, st: &State| match e.kind.as_str() {
+                "activate" => final_covers(ctx, e, st),
+                "final" => true,
+                _ => false,
+            };
+            let (fx, fy) = (finals(x, &valid[i].1), finals(y, &valid[j].1));
+            // Entries for one transition that differ only in receipts or heads keep the order
+            // below (the lower digest stands, the other is dropped).
+            if ox != oy && fx != fy {
+                return Some(if fx { i } else { j });
+            }
             let kx = (dx, ox, kind_rank(&x.kind), x.env.digest.clone());
             let ky = (dy, oy, kind_rank(&y.kind), y.env.digest.clone());
             Some(if kx <= ky { i } else { j })
@@ -3263,6 +3412,7 @@ pub(super) fn from_upgrade(
         issued,
         keyring_at: historical_sets,
         delay_at: vec![keyring.policy.recovery_delay(); len],
+        rule_at: vec![(keyring.threshold, keyring.holders); len],
         policies: vec![(seq, keyring.policy.clone())],
         keyring,
         meta,
@@ -3287,5 +3437,6 @@ pub(super) fn from_upgrade(
         successor: None,
         successor_seq: None,
         migration: None,
+        resolved: Vec::new(),
     })
 }

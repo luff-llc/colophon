@@ -624,3 +624,183 @@ fn early_is_refused_before_the_caps() {
     let (_, results, _) = admit_pending_batch(&home, &proposals, &stamp(at + 10)).unwrap();
     assert_eq!(results, vec![Ok(()), Ok(()), Err(Refusal::Early)]);
 }
+
+#[test]
+fn a_late_veto_is_stored_with_an_in_window_receipt_from_another_home_and_signs_none() {
+    // §13.1 (revision 13): a veto that reaches a home more than 300 s after its `issued` is
+    // stored when it comes with at least one in-window receipt from another current home, as a
+    // forwarded transition is; the home signs no receipt of its own for it.
+    let recording = body(&fixture(
+        "t-vetoed-by-target",
+        "records/authority/00000003.json",
+    ));
+    let dec = |f: &str| STANDARD.decode(recording[f].as_str().unwrap()).unwrap();
+    let (t, v) = (dec("transition"), dec("veto"));
+    let tr = STANDARD
+        .decode(recording["transitionReceipts"][0].as_str().unwrap())
+        .unwrap();
+    let vr = STANDARD
+        .decode(recording["receipts"][0].as_str().unwrap())
+        .unwrap();
+    let (at, va) = (time(&t), time(&v));
+    let ready = |forward_veto_receipt: bool| {
+        // The second home; the receipts are the first home's.
+        let home = setup("t-vetoed-by-target", true, always(), at);
+        let home = admit(&home, &t, &stamp(at + 1)).state;
+        let home = admit(&home, &tr, &stamp(at + 2)).state;
+        if forward_veto_receipt {
+            // Held before the veto: its object is not here yet (`unavailable`).
+            let a = admit(&home, &vr, &stamp(va + 1));
+            assert!(a.result.is_err());
+            a.state
+        } else {
+            home
+        }
+    };
+    let late = stamp(va + 300_001);
+    // With the receipt held: stored, served, and no receipt of its own.
+    let with = admit(&ready(true), &v, &late);
+    assert_eq!(with.result, Ok(()));
+    assert!(with.receipts.is_empty());
+    let digest_v = digest(
+        &STANDARD
+            .decode(
+                serde_json::from_slice::<Value>(&v).unwrap()["body"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+    );
+    let detail = with
+        .state
+        .pending_object(&digest_v, va + 300_001)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.receipts.len(), 1, "the forwarded receipt now counts");
+    // Without any receipt: refused and not stored, as before.
+    let without = admit(&ready(false), &v, &late);
+    assert_eq!(without.result, Err(Refusal::Late));
+    assert!(without
+        .state
+        .pending_object(&digest_v, va + 300_001)
+        .unwrap()
+        .is_none());
+    // On time it still gets the home's own receipt.
+    let on_time = admit(&ready(false), &v, &stamp(va + 1_000));
+    assert_eq!(on_time.result, Ok(()));
+    assert_eq!(on_time.receipts.len(), 1);
+}
+
+#[test]
+fn a_home_signs_one_head_per_seq_unless_the_first_was_displaced_under_rule_1() {
+    // §13.3 (revision 13), guard before signing. `t-activate-after-covered-entry`: an ordinary
+    // grant Y at seq 3 that the primary's head covers stands over the activation X that is also
+    // held at seq 3 (`branch-activate-first`): rule 1 displaces X.
+    let dir = root().join("conformance/0.5/candidate/rules/t-activate-after-covered-entry");
+    let read = |p: PathBuf| fs::read(p).unwrap();
+    let rec = |n: usize| read(dir.join(format!("records/authority/{n:08}.json")));
+    let x_env = read(dir.join("branch-activate-first/authority/00000003.json"));
+    let dg = |env: &[u8]| {
+        digest(
+            &STANDARD
+                .decode(
+                    serde_json::from_slice::<Value>(env).unwrap()["body"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap(),
+        )
+    };
+    let (y, x) = (dg(&rec(3)), dg(&x_env));
+    let case: Value = serde_json::from_slice(&read(dir.join("case.json"))).unwrap();
+    let clock = case["verifier"]["now"].as_str().unwrap().to_string();
+    let now = parse_date(&clock).unwrap();
+    let head = read(dir.join("objects/head-H1-primary.json"));
+    let entries = |extra: Vec<Vec<u8>>| {
+        let mut e: Vec<Vec<u8>> = vec![rec(1), rec(2)];
+        e.extend(extra);
+        e
+    };
+    let before = Objects {
+        entries: entries(vec![x_env.clone()]),
+        ..Default::default()
+    };
+    let after = Objects {
+        entries: entries(vec![rec(3), rec(4), x_env.clone()]),
+        heads: vec![head],
+        ..Default::default()
+    };
+    let st = verify_history(&after, &Persisted::default(), now);
+    assert_eq!(st.code(), "ok");
+    assert_eq!(st.branch[2], y, "the covered grant stands");
+    let id = st.state.unwrap().current_homes()[0].request.member_id();
+    let (t1, t2, t3) = (
+        "2026-11-14T09:00:00Z",
+        "2026-11-14T09:00:10Z",
+        "2026-11-14T09:00:20Z",
+    );
+    // On its own branch X may be signed once; the same head again is a retry.
+    let a = HomeState::new(id.clone(), &before, always(), now).unwrap();
+    let a = a.guard_head(3, &x, t1, &clock).unwrap().0;
+    assert!(a.guard_head(3, &x, t1, &clock).is_ok());
+    // The home now holds Y and its head too, with the earlier signing kept.
+    let mut b: Value = serde_json::from_slice(
+        &HomeState::new(id.clone(), &after, always(), now)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    let a_json: Value = serde_json::from_slice(&a.to_bytes().unwrap()).unwrap();
+    b["signed_heads"] = a_json["signed_heads"].clone();
+    let b = HomeState::from_bytes(&serde_json::to_vec(&b).unwrap()).unwrap();
+    // X is no longer on the home's branch: no head over it.
+    assert!(b.guard_head(3, &x, t2, &clock).is_err());
+    // Y displaced X under rule 1: a second head at seq 3 is allowed, once `issued` increases.
+    assert!(
+        b.guard_head(3, &y, t1, &clock).is_err(),
+        "issued must increase"
+    );
+    let b2 = b.guard_head(3, &y, t2, &clock).unwrap().0;
+    // Having signed over Y, a head over anything else at seq 3 is refused.
+    assert!(b2.guard_head(3, &x, t3, &clock).is_err());
+    // Without displacement: signed over Y first, a different digest is refused outright.
+    let c = HomeState::new(id, &after, always(), now).unwrap();
+    let c = c.guard_head(3, &y, t1, &clock).unwrap().0;
+    assert!(c.guard_head(3, &"ab".repeat(32), t2, &clock).is_err());
+    assert!(c.guard_head(3, &x, t2, &clock).is_err());
+}
+
+#[test]
+fn signed_heads_are_pruned_to_what_the_guard_needs() {
+    // L2: the guard keeps the latest `issued` and the digests at seqs not yet settled. In the
+    // account vector the activation at seq 3 is final, so nothing at or before it can be
+    // displaced and only the latest signing stays.
+    let cand = root().join("conformance/0.5/candidate/account/records/authority");
+    let objects = Objects {
+        entries: (1..=3)
+            .map(|n| fs::read(cand.join(format!("{n:08}.json"))).unwrap())
+            .collect(),
+        ..Default::default()
+    };
+    let clock = "2026-11-11T09:01:00Z";
+    let now = parse_date(clock).unwrap();
+    let st = verify_history(&objects, &Persisted::default(), now)
+        .state
+        .unwrap();
+    let id = st.current_homes()[0].request.member_id();
+    let mut home = HomeState::new(id, &objects, always(), now).unwrap();
+    for n in 0..6 {
+        let issued = format!("2026-11-11T09:00:{:02}Z", 10 + n);
+        home = home
+            .guard_head(3, &st.history()[2], &issued, clock)
+            .unwrap()
+            .0;
+    }
+    let json: Value = serde_json::from_slice(&home.to_bytes().unwrap()).unwrap();
+    assert_eq!(json["signed_heads"].as_array().unwrap().len(), 1);
+    // Strictly increasing `issued` still holds against the kept entry.
+    assert!(home
+        .guard_head(3, &st.history()[2], "2026-11-11T09:00:14Z", clock)
+        .is_err());
+}

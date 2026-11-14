@@ -1,7 +1,9 @@
 //! Heads (§13.2–§13.3): parsing and verification against a held history.
 //!
-//! Not here: the persisted high-water mark and `refused:rollback`, equivocation evidence
-//! objects, and quorum across forks (§13.3 persistence and §8.6, outside this step).
+//! The per-home high-water mark and `refused:rollback` (§13.3) are applied here by
+//! [`verify_head_with_mark`]; the mark itself is persisted by
+//! [`history::Persisted`](super::history::Persisted). Not here: equivocation evidence objects,
+//! and quorum across forks (§8.6).
 use super::encoding::{bounds, Obj};
 use super::ids::AccountId;
 use super::signature::RawEnvelope;
@@ -35,6 +37,21 @@ pub struct HeadContext<'a> {
 /// history contains `authority.seq` with that digest (different: `refused:fork`; not held:
 /// `unavailable`). Freshness is [`Head::fresh`].
 pub fn verify_head(envelope: &[u8], ctx: HeadContext<'_>) -> Result<Head> {
+    verify_head_with_mark(envelope, ctx, None)
+}
+
+/// [`verify_head`] with the verifier's high-water mark for the head's home: the highest
+/// `(seq, digest)` it accepted from that home (§13.3). A head behind the mark, while the marked
+/// entry is still on the held history, is `refused:rollback`: the home is serving something
+/// older than it showed. If the held history no longer contains the marked entry (a provisional
+/// activation was displaced, §8.7), the mark names another branch and a lower head is not a
+/// rollback. Checked after the signature, the clock and the held history (a head the history
+/// contradicts is `refused:fork`, one it doesn't reach is `unavailable`).
+pub fn verify_head_with_mark(
+    envelope: &[u8],
+    ctx: HeadContext<'_>,
+    mark: Option<(u64, &str)>,
+) -> Result<Head> {
     let env = RawEnvelope::parse(envelope, bounds::HEAD_BODY, false)?;
     let mut o = Obj::new(env.value.clone(), "head")?;
     require(
@@ -71,6 +88,17 @@ pub fn verify_head(envelope: &[u8], ctx: HeadContext<'_>) -> Result<Head> {
             "history not held up to the head".into(),
         )),
         Some(d) if d != &digest => Err(Failure::Refused(Reason::Fork)),
+        Some(_)
+            if mark.is_some_and(|(m_seq, m_digest)| {
+                seq < m_seq
+                    && usize::try_from(m_seq - 1)
+                        .ok()
+                        .and_then(|i| ctx.history.get(i))
+                        .is_some_and(|d| d == m_digest)
+            }) =>
+        {
+            Err(Failure::Refused(Reason::Rollback))
+        }
         Some(_) => Ok(Head {
             by,
             seq,
@@ -105,4 +133,11 @@ impl Head {
     pub fn fresh(&self, now_ms: i64, head_max_age_s: u64) -> bool {
         i128::from(now_ms) - i128::from(self.issued_ms) <= i128::from(head_max_age_s) * 1_000
     }
+}
+
+/// The `by` of a head envelope, parsed leniently, to look up the verifier's mark before the
+/// head is verified (the mark only ever makes a verification stricter).
+pub fn head_by(envelope: &[u8]) -> Option<String> {
+    let env = RawEnvelope::parse(envelope, bounds::HEAD_BODY, false).ok()?;
+    env.value.get("by")?.as_str().map(str::to_string)
 }

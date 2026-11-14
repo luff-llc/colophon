@@ -192,8 +192,8 @@ impl ConfirmedPairing {
     }
 }
 
-/// The content of the QR code J shows (§7.3): `accountID`, `E` and `nB`. The byte format of the
-/// QR itself is not specified.
+/// The content of the QR code J shows (§7.3): `accountID`, `E` and `nB`, as the canonical JSON
+/// bytes of [`QrPayload::to_bytes`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QrPayload {
     /// The account.
@@ -202,6 +202,51 @@ pub struct QrPayload {
     pub e: Vec<u8>,
     /// `nB`.
     pub nb: [u8; 32],
+}
+
+/// The `protocol` marker of the QR payload (§7.3, §20).
+pub const QR_PROTOCOL: &str = "colophon/pair-qr/5";
+
+impl QrPayload {
+    /// The bytes the QR code carries (§7.3): canonical JSON of the closed object
+    /// `{"account","e","nB","protocol"}`, `e` and `nB` standard padded base64.
+    pub fn to_bytes(&self) -> VResult<Vec<u8>> {
+        super::encoding::canonical(&serde_json::json!({
+            "account": self.account.as_str(),
+            "e": super::encoding::encode_base64(&self.e),
+            "nB": super::encoding::encode_base64(&self.nb),
+            "protocol": QR_PROTOCOL,
+        }))
+    }
+
+    /// Read a QR payload strictly (§7.3): canonical bytes, exactly the four members, the
+    /// protocol marker, a valid account ID, `e` a valid 65-byte point and `nB` 32 bytes; anything
+    /// else is `malformed`.
+    pub fn from_bytes(bytes: &[u8]) -> VResult<Self> {
+        let v = super::encoding::canonical_body(bytes, 1_024)?;
+        let m = v.as_object().ok_or_else(|| malformed("QR payload"))?;
+        if m.len() != 4 {
+            return Err(malformed("QR payload members"));
+        }
+        let text = |k: &str| {
+            m.get(k)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| malformed(format!("QR payload {k}")))
+        };
+        if text("protocol")? != QR_PROTOCOL {
+            return Err(malformed("QR payload protocol"));
+        }
+        let account =
+            AccountId::parse(text("account")?).map_err(|_| malformed("QR payload account"))?;
+        let e = super::encoding::decode_base64(text("e")?, 65)?;
+        if e.len() != 65 || !valid_point(&e) {
+            return Err(malformed("QR payload e"));
+        }
+        let nb: [u8; 32] = super::encoding::decode_base64(text("nB")?, 32)?
+            .try_into()
+            .map_err(|_| malformed("QR payload nB"))?;
+        Ok(Self { account, e, nb })
+    }
 }
 
 // --- The joining side J ------------------------------------------------------------------

@@ -979,19 +979,22 @@ pub fn prepare_transition(
     transition_batch(objects, &state, now_ms, p)
 }
 
-/// The `change` of a `resolve` transition (§8.7).
-pub fn resolve_change(discarded_seq: u64, discarded_digest: &str) -> Value {
-    json!({"resolve": {"discarded": {"seq": discarded_seq, "digest": discarded_digest}}})
+/// The `change` of a `resolve` transition (§8.7): `kept` is the entry at the forked seq that
+/// the branch the activation is recorded on keeps.
+pub fn resolve_change(kept_seq: u64, kept_digest: &str) -> Value {
+    json!({"resolve": {"kept": {"seq": kept_seq, "digest": kept_digest}}})
 }
 
-/// Prepare a `resolve` transition (§8.4, §8.7) on the branch ending at `anchor`: the held
-/// entries that follow `previous` links back from the anchor are the branch the state is
-/// folded over, so the other branch of an unresolved fork does not stop the preparation.
+/// Prepare a `resolve` transition (§8.4, §8.7) on the branch ending at `anchor`, keeping the
+/// entry `kept` of that branch: the held entries that follow `previous` links back from the
+/// anchor are the branch the state is folded over, so the other branches of a fork do not stop
+/// the preparation, and a branch that already holds an earlier `resolve` folds as it does for a
+/// verifier (a `resolve` with no other candidate held is valid and changes nothing).
 pub fn prepare_resolve(
     objects: &Objects,
     now_ms: i64,
     anchor: (u64, String),
-    discarded: (u64, String),
+    kept: (u64, String),
     issued_ms: i64,
     signers: Vec<String>,
     rule: TransitionRule,
@@ -1043,7 +1046,7 @@ pub fn prepare_resolve(
             issued_ms,
             signers,
             rule,
-            change: resolve_change(discarded.0, &discarded.1),
+            change: resolve_change(kept.0, &kept.1),
         },
     )
 }
