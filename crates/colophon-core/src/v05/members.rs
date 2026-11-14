@@ -412,8 +412,8 @@ impl Grant {
 pub struct Renew {
     /// The member.
     pub member: String,
-    /// The new expiry, ms.
-    pub expires_ms: i64,
+    /// The new expiry, ms; `None` for the shares-only form, which leaves the expiry as it is.
+    pub expires_ms: Option<i64>,
     /// Shares.
     pub shares: Vec<EpochSeals>,
     /// Unknown content.
@@ -421,8 +421,11 @@ pub struct Renew {
 }
 impl Renew {
     /// Validate `renew` fields. `current_expiry` is the member's expiry now (`None` for none);
-    /// the member must be current (`is_current`). A member with no expiry can't be renewed:
-    /// nothing is later than "never" (see the implementation notes).
+    /// the member must be current (`is_current`: not revoked, not provisional).
+    ///
+    /// With `expires`, the member must have an expiry and `expires` must be later than the entry's
+    /// `issued` and than that expiry. Without `expires` (the shares-only form), the expiry is left
+    /// exactly as it is, including none, and `shares` must not be empty.
     pub fn parse(
         mut fields: Obj,
         issued_ms: i64,
@@ -432,20 +435,37 @@ impl Renew {
         let mut sink = Unknown::default();
         let unknown = &mut sink;
         let member = fields.key_id("member")?;
-        let (_, expires_ms) = fields.date("expires")?;
+        let expires = match fields.opt_string("expires")? {
+            Some(s) => Some(crate::v05::encoding::date(&s, "expires")?),
+            None => None,
+        };
         let shares = parse_epochs(fields.array("shares")?, "shares", unknown)?;
         fields.finish(unknown);
         require(is_current, "renew of a member that isn't current")?;
-        require(
-            expires_ms > issued_ms,
-            "renew expires must be later than issued",
-        )?;
-        let current =
-            current_expiry.ok_or_else(|| malformed("renew of a member with no expiry"))?;
-        require(expires_ms > current, "renew must extend the expiry")?;
+        match expires {
+            Some(expires_ms) => {
+                require(
+                    expires_ms > issued_ms,
+                    "renew expires must be later than issued",
+                )?;
+                let current =
+                    current_expiry.ok_or_else(|| malformed("renew of a member with no expiry"))?;
+                require(expires_ms > current, "renew must extend the expiry")?;
+            }
+            None => {
+                require(
+                    !shares.is_empty(),
+                    "a renew without expires must carry shares",
+                )?;
+                require(
+                    current_expiry.is_none_or(|e| issued_ms <= e),
+                    "a renew without expires of an expired member",
+                )?;
+            }
+        }
         Ok(Self {
             member,
-            expires_ms,
+            expires_ms: expires,
             shares,
             unknown: sink,
         })

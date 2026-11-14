@@ -10,7 +10,10 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use colophon_core::v05::encoding::{canonical, digest, parse_date};
 use colophon_core::v05::history::{verify_history, Objects, Persisted, State};
 use colophon_core::v05::ids::key_id;
+use colophon_core::v05::records::{EpochKeys, RecordAuthority};
+use colophon_core::v05::vault::EcdhOutput;
 use colophon_core::v05::write::authority::*;
+use colophon_core::v05::write::records::{prepare_rekey, prepare_renew_shares};
 use colophon_core::v05::write::*;
 use colophon_core::v05::Failure;
 use p256::ecdsa::{signature::Signer, Signature as P256Signature, SigningKey};
@@ -476,7 +479,7 @@ fn immediate_entries_each_verify() {
         &host,
         Kind::Renew {
             member: m.id.clone(),
-            expires: "2026-11-25T08:00:00Z".into(),
+            expires: Some("2026-11-25T08:00:00Z".into()),
             shares: vec![],
         },
         T0 + 2 * SEC,
@@ -1068,6 +1071,174 @@ impl Chain {
         let batch = prepare_suspend(&self.objects, self.now, &f.b.id, t, issued, &f.a.id).unwrap();
         self.run(host, batch);
     }
+}
+
+/// A member added by a transition is provisional until its activation is final, so an epoch made
+/// meanwhile is not sealed to it (§7.1); a transition's `grant` carries no shares at all. Once the
+/// activation is final it catches up with the shares-only `renew` (§9.4), which leaves its expiry
+/// (none) as it is.
+#[test]
+fn a_member_provisional_when_an_epoch_was_made_catches_up_by_a_shares_only_renew() {
+    let f = fixture();
+    let a = [f.a.id.clone()];
+    let mut chain = Chain::new(T0 + 10 * 86_400 * SEC);
+    chain.genesis(&f.host, "Shares", &["notes"], fixture_keyring(&f), &a);
+    let account = chain.account();
+    let mut keys = EpochKeys::new();
+    let absorb = |keys: &mut EpochKeys, from: EpochKeys, chain: &Chain| {
+        let acct = RecordAuthority::from_objects(&chain.objects, chain.now)
+            .unwrap()
+            .account()
+            .clone();
+        for e in 1..=4 {
+            if let Some(k) = from.get(&acct, "notes", e) {
+                keys.insert(k.clone()).unwrap();
+            }
+        }
+    };
+    let (batch, k) = prepare_rekey(
+        &chain.objects,
+        chain.now,
+        &a,
+        T0 + 5 * SEC,
+        &["notes".into()],
+        [1; 32],
+    )
+    .unwrap();
+    chain.run(&f.host, batch);
+    absorb(&mut keys, k, &chain);
+    // A home, appointed by an activated transition (no witness exists yet, so it is final).
+    let (h, hagree) = (key(40), key(41));
+    let req = request(&account, &h, &hagree, "Home", "server", home_terms());
+    let change = json!({"homes": {"appoint": [{"request": b64(&req), "terms": home_terms()}]}});
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(&chain, T0 + 10 * SEC, &[&f.a], change),
+    )
+    .unwrap();
+    let r = chain.run(&f.host, batch);
+    let t = body_digest_of_env(&r.pending[0]);
+    let act = prepare_activate(&chain.objects, chain.now, &t).unwrap();
+    chain.run(&f.host, act);
+    // A transition admits a member with records on `notes`: provisional, witnessed by the home.
+    let (m, magree) = (key(50), key(51));
+    let mterms = json!({"records": [{"namespace": "notes", "access": "write"}]});
+    let req = request(&account, &m, &magree, "Dev", "device", mterms.clone());
+    let change = json!({"grant": {"request": b64(&req), "terms": mterms}});
+    let t_issued = T0 + 200 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(&chain, t_issued, &[&f.a], change),
+    )
+    .unwrap();
+    let r = chain.run(&f.host, batch);
+    let td = body_digest_of_env(&r.pending[0]);
+    chain
+        .objects
+        .pending
+        .push(receipt(&account, &h, &td, t_issued + 10 * SEC));
+    let act = prepare_activate(&chain.objects, chain.now, &td).unwrap();
+    let rec = act.finish(vec![]).unwrap();
+    chain.hold(&rec);
+    let st = chain.state();
+    let member = |chain: &Chain| {
+        chain
+            .state()
+            .members()
+            .iter()
+            .find(|x| x.request.member_id() == m.id)
+            .unwrap()
+            .clone()
+    };
+    assert!(member(&chain).provisional.is_some());
+    let act_info = st.activations().last().unwrap().clone();
+    assert!(!act_info.final_);
+    // An epoch made now is not sealed to the provisional member.
+    let (batch, k) = prepare_rekey(
+        &chain.objects,
+        chain.now,
+        &a,
+        T0 + 6_000 * SEC,
+        &["notes".into()],
+        [2; 32],
+    )
+    .unwrap();
+    chain.run(&f.host, batch);
+    absorb(&mut keys, k, &chain);
+    let auth = RecordAuthority::from_objects(&chain.objects, chain.now).unwrap();
+    assert!(!auth.sealed_to("notes", 2).contains(&m.id));
+    let owed = auth.owed_shares();
+    assert_eq!(
+        owed.len(),
+        2,
+        "epochs 1 and 2: a transition's grant carries no shares"
+    );
+    assert!(owed.iter().all(|o| o.provisional && o.shares_only));
+    // While provisional, the shares-only renew is refused (the member is not current).
+    let batch = prepare_renew_shares(
+        &chain.objects,
+        chain.now,
+        &a,
+        T0 + 6_100 * SEC,
+        &m.id,
+        &keys,
+        [3; 32],
+    )
+    .unwrap();
+    let sigs = f.host.sign(batch.steps());
+    let e = batch.finish(sigs).map(|_| ()).unwrap_err().to_string();
+    assert!(e.contains("isn't current"), "{e}");
+    // The home's head over the activation; the `final` makes the member current.
+    chain.objects.heads.push(head(
+        &account,
+        &h,
+        act_info.seq,
+        &act_info.digest,
+        T0 + 7_000 * SEC,
+    ));
+    let fin = prepare_final(&chain.objects, chain.now, act_info.seq).unwrap();
+    chain.run(&f.host, fin);
+    assert!(member(&chain).provisional.is_none());
+    // Shares-only renew: epochs 1 and 2, no `expires`.
+    let batch = prepare_renew_shares(
+        &chain.objects,
+        chain.now,
+        &a,
+        T0 + 7_100 * SEC,
+        &m.id,
+        &keys,
+        [4; 32],
+    )
+    .unwrap();
+    chain.run(&f.host, batch);
+    let after = member(&chain);
+    assert_eq!(after.expires_ms, None, "the expiry is left as it was: none");
+    assert!(after.renewals.is_empty());
+    let auth = RecordAuthority::from_objects(&chain.objects, chain.now).unwrap();
+    assert!(auth.owed_shares().is_empty());
+    for e in [1u64, 2] {
+        assert!(auth.sealed_to("notes", e).contains(&m.id));
+        let r = auth.epoch_seal_request("notes", e, &m.id).unwrap();
+        let sk = p256::SecretKey::from_slice(&[51u8; 32]).unwrap();
+        let pk = p256::PublicKey::from_sec1_bytes(&r.enc).unwrap();
+        let dh = p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine());
+        let ecdh = EcdhOutput::from_host(dh.raw_secret_bytes().as_slice()).unwrap();
+        let opened = auth.open_epoch("notes", e, &m.id, &ecdh).unwrap();
+        assert_eq!(opened.epoch(), e);
+    }
+    // Nothing is owed any more: a second shares-only renew carries an epoch it already has.
+    let again = prepare_renew_shares(
+        &chain.objects,
+        chain.now,
+        &a,
+        T0 + 7_200 * SEC,
+        &m.id,
+        &keys,
+        [5; 32],
+    );
+    assert!(again.is_err());
 }
 
 #[test]
@@ -2658,7 +2829,7 @@ fn kind_of(b: &Value) -> Option<(Kind, &'static [&'static str])> {
         "renew" => (
             Kind::Renew {
                 member: b["member"].as_str()?.into(),
-                expires: b["expires"].as_str()?.into(),
+                expires: b.get("expires").and_then(|x| x.as_str()).map(String::from),
                 shares: vals(&b["shares"])?,
             },
             &["member", "expires", "shares"],

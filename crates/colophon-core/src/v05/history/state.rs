@@ -52,6 +52,11 @@ pub struct MemberRecord {
     pub revoked_seq: Option<u64>,
     /// Seq of the activation that added it, when that activation isn't final yet.
     pub provisional: Option<u64>,
+    /// `(namespace, epoch)` of every epoch an entry of the verified history sealed to this
+    /// member (a grant's or renew's `shares`, a `rekey`'s or `revoke`'s `epochs`): what a
+    /// shares-only `renew` (§9.4) may not repeat.
+    #[serde(default)]
+    pub sealed: BTreeSet<(String, u64)>,
     /// Home status.
     pub home: HomeStatus,
 }
@@ -1629,6 +1634,7 @@ fn member_from(s: &State, v: &Value, seq: u64, home: bool) -> Result<MemberRecor
         home: if home {
             HomeStatus::Home
         } else {
+        sealed: Default::default(),
             HomeStatus::NotHome
         },
     })
@@ -2589,8 +2595,17 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 home: HomeStatus::NotHome,
             });
         }
+                sealed: Default::default(),
         "renew" => {
             super::prescan("renew", v).check()?;
+            let id = n.members.last().map(|m| m.request.member_id());
+            if let (Some(id), Some(m)) = (id, n.members.last_mut()) {
+                for sh in &g.shares {
+                    if sh.recipients.contains(&id) {
+                        m.sealed.insert((sh.namespace.clone(), sh.epoch));
+                    }
+                }
+            }
             let (_, fields) = AuthorityHeader::split(v.clone())?;
             let member = fields_member(v)?;
             let m = s.members.iter().find(|m| m.request.member_id() == member);
@@ -2602,11 +2617,58 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
             charge_rate(&mut n, e, true)?;
             if let Some(m) = n
                 .members
+            if r.expires_ms.is_none() {
+                // The shares-only form (§9.4): each share is for an epoch of the member's scope
+                // that exists, that it lacks, once, and sealed to the member.
+                let m = m.ok_or_else(|| malformed("renew of an unknown member"))?;
+                let scope: BTreeSet<&str> = m
+                    .terms
+                    .records()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|r| r.namespace.as_str())
+                    .collect();
+                let mut seen = BTreeSet::new();
+                for sh in &r.shares {
+                    crate::v05::require(
+                        scope.contains(sh.namespace.as_str()),
+                        "renew: a share outside the member's scope",
+                    )
+                    .map_err(Outcome::from)?;
+                    crate::v05::require(
+                        s.epochs.get(&sh.namespace).is_some_and(|l| sh.epoch <= *l),
+                        "renew: a share for an epoch that does not exist",
+                    )
+                    .map_err(Outcome::from)?;
+                    crate::v05::require(
+                        !m.sealed.contains(&(sh.namespace.clone(), sh.epoch)),
+                        "renew: a share for an epoch the member already has",
+                    )
+                    .map_err(Outcome::from)?;
+                    crate::v05::require(
+                        seen.insert((sh.namespace.clone(), sh.epoch)),
+                        "renew: one share per epoch",
+                    )
+                    .map_err(Outcome::from)?;
+                    crate::v05::require(
+                        sh.recipients.contains(&r.member),
+                        "renew: a share not sealed to the member",
+                    )
+                    .map_err(Outcome::from)?;
+                }
+            }
                 .iter_mut()
                 .find(|m| m.request.member_id() == r.member)
             {
-                m.expires_ms = Some(r.expires_ms);
-                m.renewals.push((e.seq, r.expires_ms));
+                if let Some(x) = r.expires_ms {
+                    m.expires_ms = Some(x);
+                    m.renewals.push((e.seq, x));
+                }
+                for sh in &r.shares {
+                    if sh.recipients.contains(&r.member) {
+                        m.sealed.insert((sh.namespace.clone(), sh.epoch));
+                    }
+                }
             }
         }
         "revoke" => {
@@ -2680,6 +2742,11 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
             }
         }
         "endSessions" => {
+                for m in n.members.iter_mut() {
+                    if ep.recipients.contains(&m.request.member_id()) {
+                        m.sealed.insert((ep.namespace.clone(), ep.epoch));
+                    }
+                }
             super::prescan("endSessions", v).check()?;
             let member = fields_member(v)?;
             crate::v05::require(
@@ -2751,6 +2818,13 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
                 }
             }
         }
+                    if let Some(seals) = ep.get("seals").and_then(Value::as_object) {
+                        for m in n.members.iter_mut() {
+                            if seals.contains_key(&m.request.member_id()) {
+                                m.sealed.insert((ns.to_string(), no));
+                            }
+                        }
+                    }
         "keyring" => keyring_entry(s, &mut n, e, &signers, &mut undecidable)?,
         other => {
             // Unknown kind: control rule passed; now its content is unknown.
@@ -3403,6 +3477,7 @@ pub(super) fn from_upgrade(
             home: HomeStatus::NotHome,
         });
     }
+            sealed: Default::default(),
     let mut ever: BTreeMap<String, Vec<(u64, Option<Controller>)>> = BTreeMap::new();
     let mut points = BTreeSet::new();
     let mut historical_sets = Vec::new();
