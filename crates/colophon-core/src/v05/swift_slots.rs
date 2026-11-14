@@ -139,8 +139,24 @@ pub struct SwiftSlot {
     controller: Option<String>,
     routes: Vec<Route>,
     boxed: Option<Vec<u8>>,
+    /// Why this slot could not be parsed; such a slot opens nothing and fails only itself.
+    invalid: Option<String>,
 }
 impl SwiftSlot {
+    fn invalid(why: String) -> Self {
+        Self {
+            kind: "invalid",
+            label: String::new(),
+            controller: None,
+            routes: Vec::new(),
+            boxed: None,
+            invalid: Some(why),
+        }
+    }
+    /// Why the slot could not be read, when it could not.
+    pub fn problem(&self) -> Option<&str> {
+        self.invalid.as_deref()
+    }
     /// `sealed`, `prf` or `combined`.
     pub fn kind(&self) -> &'static str {
         self.kind
@@ -255,6 +271,7 @@ fn slot_of(v: &Value) -> VResult<SwiftSlot> {
         controller,
         routes,
         boxed,
+        invalid: None,
     })
 }
 
@@ -275,6 +292,8 @@ pub struct SwiftLibrary {
     shares: BTreeMap<(String, u64), BTreeMap<String, SwiftSealed>>,
     /// `namespace -> [(epoch, seq of the introducing entry)]` (`AuthorityState.swift:308-310`).
     epochs: BTreeMap<String, Vec<(u64, u64)>>,
+    /// Slots and shares that could not be read: each fails only itself.
+    problems: Vec<String>,
 }
 
 fn collect_signing(v: &Value, out: &mut BTreeMap<String, Vec<u8>>) {
@@ -311,7 +330,9 @@ impl SwiftLibrary {
                 .and_then(Value::as_array)
                 .ok_or_else(|| malformed("Swift keyring: slots"))?
             {
-                slots.push(slot_of(s)?);
+                slots.push(
+                    slot_of(s).unwrap_or_else(|e| SwiftSlot::invalid(e.detail().to_string())),
+                );
             }
             for (id, c) in &last.controllers {
                 if let Some(w) = c.key().webauthn() {
@@ -322,6 +343,11 @@ impl SwiftLibrary {
         let mut signing = BTreeMap::new();
         let mut shares: BTreeMap<(String, u64), BTreeMap<String, SwiftSealed>> = BTreeMap::new();
         let mut epochs: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
+        let mut problems: Vec<String> = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s): (usize, &SwiftSlot)| s.problem().map(|p| format!("slot {i}: {p}")))
+            .collect();
         for (i, e) in history.entries.iter().enumerate() {
             let v = &e.value;
             for f in ["root", "recovery", "member", "vault"] {
@@ -358,11 +384,19 @@ impl SwiftLibrary {
             ) else {
                 continue; // Swift's `apply` ignores a shareKey with a missing field (`:306`).
             };
-            let sealed = sealed_of(key)?;
-            shares
-                .entry((ns.to_string(), epoch))
-                .or_default()
-                .insert(id.to_string(), sealed);
+            match sealed_of(key) {
+                Ok(sealed) => {
+                    shares
+                        .entry((ns.to_string(), epoch))
+                        .or_default()
+                        .insert(id.to_string(), sealed);
+                }
+                Err(e) => problems.push(format!(
+                    "share of {ns} epoch {epoch} to {id} (entry {}): {}",
+                    i + 1,
+                    e.detail()
+                )),
+            }
             let list = epochs.entry(ns.to_string()).or_default();
             if !list.iter().any(|(n, _)| *n == epoch) {
                 list.push((epoch, i as u64 + 1));
@@ -377,9 +411,15 @@ impl SwiftLibrary {
             signing,
             shares,
             epochs,
+            problems,
         })
     }
 
+    /// What could not be read, each item failing only itself: a slot that does not parse, a
+    /// `shareKey` whose key is not a valid point and a 60-byte box.
+    pub fn problems(&self) -> &[String] {
+        &self.problems
+    }
     /// The library ID: the first 32 hex of SHA-256 of entry 1's body.
     pub fn library(&self) -> &str {
         &self.library
@@ -442,6 +482,7 @@ impl SwiftLibrary {
             .slots
             .get(index)
             .ok_or_else(|| malformed("no such Swift slot"))?;
+        require(slot.invalid.is_none(), "this Swift slot could not be read")?;
         Ok(slot.routes.iter().map(|r| self.input_of(r)).collect())
     }
 
@@ -458,6 +499,7 @@ impl SwiftLibrary {
             .slots
             .get(index)
             .ok_or_else(|| malformed("no such Swift slot"))?;
+        require(slot.invalid.is_none(), "this Swift slot could not be read")?;
         let vault = self.vault.as_ref().ok_or_else(locked)?;
         if secrets.len() != slot.routes.len() {
             return Err(locked());
@@ -718,7 +760,13 @@ impl std::fmt::Debug for SwiftEpochKey {
 
 /// One assertion that rebuilds one passkey's slot: the old slot's PRF input and the new slot's
 /// PRF request (§7.2), for the host to answer with a single WebAuthn assertion over the core's
-/// challenge that evaluates both inputs.
+/// challenge that evaluates both inputs, **with user verification** (the new route is verified
+/// against the controller, and a carried passkey has `verification: true`).
+///
+/// The Swift host passes only one PRF input (`SystemWebAuthnCeremonies.swift:33`, `:77`), so a
+/// host that rebuilds a slot with one assertion must pass the **new** salt as the first input
+/// (§7.2: the slot's `salt` is `prf.eval.first`) and the **old** salt as the **second** input, and
+/// read the outputs from `results.first` and `results.second`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MoveCeremony {
     /// The controller whose credential is asserted.
@@ -727,46 +775,58 @@ pub struct MoveCeremony {
     pub rp: String,
     /// The credential to assert.
     pub credential: Vec<u8>,
-    /// The old slot's salt: the PRF output for it opens the Swift slot.
+    /// The old slot's salt, to pass as the second PRF input: its output opens the Swift slot.
     pub old_salt: Vec<u8>,
-    /// The new slot's request: its salt and the core's challenge.
+    /// The new slot's request: its salt (the first PRF input) and the core's challenge.
     pub new_request: PrfRequest,
+    /// The assertion must carry user verification.
+    pub user_verification: bool,
 }
 
-/// Pair the old PRF inputs of the Swift slots being opened with the new PRF requests of the
-/// slots being built, by controller, so that each passkey is asked once. A new request with no
-/// old input (a controller that had no PRF slot) or an old input with no new request (a PRF
-/// route the successor does not rebuild) is returned in `unpaired`.
-pub fn pair_ceremonies(
-    old: &[OpeningInput],
-    new: &[PrfRequest],
-) -> (Vec<MoveCeremony>, Vec<String>) {
-    let mut paired = Vec::new();
-    let mut used = vec![false; old.len()];
-    let mut unpaired = Vec::new();
-    for r in new {
-        let hit = old.iter().enumerate().find(|(i, o)| {
-            !used[*i]
-                && matches!(o, OpeningInput::Prf { controller, .. } if *controller == r.controller)
-        });
-        match hit {
-            Some((i, OpeningInput::Prf { salt, .. })) => {
-                used[i] = true;
-                paired.push(MoveCeremony {
-                    controller: r.controller.clone(),
-                    rp: r.rp.clone(),
-                    credential: r.credential.clone(),
-                    old_salt: salt.clone(),
-                    new_request: r.clone(),
-                });
+impl SwiftLibrary {
+    /// Pair the PRF route of slot `index` with the new PRF requests, by controller ID **and**
+    /// credential, so that each passkey is asked once. A new request with no old route of the
+    /// same controller and credential, and an old PRF route with no new request, are returned
+    /// in `unpaired` (the controller's ID, or `credential:<hex>`).
+    pub fn pair_ceremonies(
+        &self,
+        index: usize,
+        new: &[PrfRequest],
+    ) -> VResult<(Vec<MoveCeremony>, Vec<String>)> {
+        let slot = self
+            .slots
+            .get(index)
+            .ok_or_else(|| malformed("no such Swift slot"))?;
+        let mut paired = Vec::new();
+        let mut unpaired = Vec::new();
+        let mut used = vec![false; slot.routes.len()];
+        for r in new {
+            let hit = slot.routes.iter().enumerate().find(|(i, route)| {
+                !used[*i]
+                    && matches!(route, Route::Prf { credential, .. }
+                        if *credential == r.credential
+                            && self.controller_of_credential(credential) == r.controller)
+            });
+            match hit {
+                Some((i, Route::Prf { salt, .. })) => {
+                    used[i] = true;
+                    paired.push(MoveCeremony {
+                        controller: r.controller.clone(),
+                        rp: r.rp.clone(),
+                        credential: r.credential.clone(),
+                        old_salt: salt.clone(),
+                        new_request: r.clone(),
+                        user_verification: true,
+                    });
+                }
+                _ => unpaired.push(r.controller.clone()),
             }
-            _ => unpaired.push(r.controller.clone()),
         }
-    }
-    for (i, o) in old.iter().enumerate() {
-        if let (false, OpeningInput::Prf { controller, .. }) = (used[i], o) {
-            unpaired.push(controller.clone());
+        for (i, route) in slot.routes.iter().enumerate() {
+            if let (false, Route::Prf { credential, .. }) = (used[i], route) {
+                unpaired.push(self.controller_of_credential(credential));
+            }
         }
+        Ok((paired, unpaired))
     }
-    (paired, unpaired)
 }
