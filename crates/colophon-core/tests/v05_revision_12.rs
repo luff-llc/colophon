@@ -559,9 +559,10 @@ fn a_format_2_checkpoint_is_refused_and_the_account_is_rebuilt_from_its_objects(
     let (objects, now) = rules("t-excusal-final-not-displaced-by-vetoed");
     let cp = Persisted::checkpoint(&objects, &Persisted::default(), now);
     let mut value: Value = serde_json::from_slice(&cp.to_bytes().unwrap()).unwrap();
-    // Revision 13 raised the format to 4 (per-home head marks); the previous format is refused.
-    assert_eq!(value["version"], 4);
-    value["version"] = Value::from(3);
+    // Revision 14 raised the format to 5 (the epochs sealed to each member); the previous format
+    // is refused.
+    assert_eq!(value["version"], 5);
+    value["version"] = Value::from(4);
     assert!(Persisted::from_bytes(&serde_json::to_vec(&value).unwrap()).is_err());
     // Rebuilt from the objects with no saved state, the verdict is the same.
     let rebuilt = verify_history(&objects, &Persisted::default(), now);
