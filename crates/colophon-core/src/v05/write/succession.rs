@@ -73,6 +73,21 @@ fn stop_error(stop: &Option<Stop>) -> Result<()> {
     }
 }
 
+/// The verified state of the held objects. An entry that fails to verify is malformed evidence
+/// (§8.5) and the accepted history ends before it, so a stop that is `Failed` leaves the state
+/// before it and does not stop a builder; a held entry (a time in the future) or an unresolved
+/// fork does, and so does a history with no state at all.
+fn state_of(objects: &Objects, now_ms: i64) -> Result<crate::v05::history::State> {
+    let verdict = verify_history(objects, &Persisted::default(), now_ms);
+    match &verdict.stop {
+        None | Some(Stop::Failed { .. }) => {}
+        other => stop_error(other)?,
+    }
+    verdict
+        .state
+        .ok_or_else(|| malformed("the held objects hold no genesis"))
+}
+
 fn role_name(r: &Role) -> Option<&'static str> {
     match r {
         Role::Approve => Some("approve"),
@@ -344,6 +359,7 @@ pub struct PendingSuccession {
     predecessor: Vec<Vec<u8>>,
     now_ms: i64,
     swift: bool,
+    held_ok: bool,
 }
 
 impl PendingSuccession {
@@ -392,6 +408,22 @@ impl PendingSuccession {
             ..Objects::default()
         };
         let verdict = verify_history(&objects, &Persisted::default(), self.now_ms);
+        // A genesis that leans on the carried-key exemption of a `/5` predecessor is held until F
+        // is final (§8.4, revision 12). That, and only that, is accepted for such a genesis: the
+        // objects must then verify as soon as the predecessor's F is final, which the verifier
+        // decides.
+        if self.held_ok {
+            if let Some(Stop::Held { why, .. }) = &verdict.stop {
+                require(
+                    why.contains("possession proof missing") && verdict.state.is_none(),
+                    "the genesis is held for a reason other than a carried key's proof",
+                )?;
+                return Ok(Records {
+                    entries: vec![(1, env)],
+                    ..Records::default()
+                });
+            }
+        }
         stop_error(&verdict.stop)?;
         let state = verdict
             .state
@@ -562,6 +594,7 @@ pub fn prepare_swift_genesis(p: &SwiftGenesisParams, now_ms: i64) -> Result<Pend
         predecessor: p.predecessor.clone(),
         now_ms,
         swift: true,
+        held_ok: false,
     })
 }
 
@@ -581,14 +614,18 @@ pub struct Authority5GenesisParams {
     pub predecessor: Objects,
     /// The genesis's signers: the first is `by`; they meet the control rule over the new keyring.
     pub signers: Vec<String>,
+    /// Leave out the possession proof of every controller that is also a current controller of
+    /// the predecessor (§8.4 "Possession": exempt once F is final). The genesis is then **held**
+    /// by every verifier until F is final (revision 12), and `finish` accepts that, and only
+    /// that, as its result. When false, every controller gives a proof and the genesis verifies
+    /// at once.
+    pub omit_carried_proofs: bool,
 }
 
 /// Prepare the successor genesis for a native `/5` predecessor (§15.1). It carries no
-/// `handover`: the waiting and vetoing happen in the predecessor. Every controller other than the
-/// primary signer gives a possession proof, carried keys included, so the genesis verifies at
-/// once. (§8.4 lets a genesis omit a carried key's proof once F is final; such a genesis is held
-/// until then, and is not built here.) The genesis names the predecessor's current head, which F
-/// must follow directly, so the predecessor must not append another entry before F.
+/// `handover`: the waiting and vetoing happen in the predecessor. The genesis names the
+/// predecessor's current head, which F must follow directly, so the predecessor must not append
+/// another entry before F.
 pub fn prepare_authority5_genesis(
     p: &Authority5GenesisParams,
     now_ms: i64,
@@ -624,7 +661,19 @@ pub fn prepare_authority5_genesis(
         issued: format_date(p.issued_ms),
         by: p.signers[0].clone(),
     })?;
-    let steps = new_genesis_steps(&k, &body, &p.signers, &|_, _| true);
+    let carried = |id: &str, c: &Controller| {
+        p.omit_carried_proofs
+            && state
+                .keyring()
+                .controllers
+                .get(id)
+                .is_some_and(|old| old.key() == c.key())
+    };
+    let steps = new_genesis_steps(&k, &body, &p.signers, &|id, c| !carried(id, c));
+    let held_ok = p.omit_carried_proofs
+        && k.controllers
+            .iter()
+            .any(|(id, c)| id != &p.signers[0] && carried(id, c));
     // The set a verifier is given: the predecessor's entries and its own predecessors'.
     let mut set = p.predecessor.entries.clone();
     set.extend(p.predecessor.predecessor.iter().cloned());
@@ -634,6 +683,7 @@ pub fn prepare_authority5_genesis(
         predecessor: set,
         now_ms,
         swift: false,
+        held_ok,
     })
 }
 
@@ -739,7 +789,7 @@ pub fn prepare_swift_freeze(p: &SwiftFreezeParams, now_ms: i64) -> Result<Pendin
     let snap = head.snapshot()?;
     let mut objects = p.successor.clone();
     objects.predecessor = p.predecessor.clone();
-    let state = head_state(&objects, now_ms)?;
+    let state = state_of(&objects, now_ms)?;
     let status = succession_status(&state)
         .ok_or_else(|| malformed("the successor holds no genesis with a predecessor"))?;
     require(
@@ -893,7 +943,10 @@ impl PendingFreeze {
         let mut objects = self.successor.clone();
         objects.predecessor = all;
         let verdict = verify_history(&objects, &Persisted::default(), self.now_ms);
-        stop_error(&verdict.stop)?;
+        match &verdict.stop {
+            None | Some(Stop::Failed { .. }) => {}
+            other => stop_error(other)?,
+        }
         let verified = verdict
             .state
             .as_ref()
@@ -921,7 +974,7 @@ pub fn prepare_succession_vetoed(
     now_ms: i64,
     veto_digest: &str,
 ) -> Result<PendingBatch> {
-    let state = head_state(objects, now_ms)?;
+    let state = state_of(objects, now_ms)?;
     let status =
         succession_status(&state).ok_or_else(|| malformed("this account has no predecessor"))?;
     let t = status
@@ -1076,7 +1129,7 @@ pub fn prepare_migration(
         predecessor: p.predecessor.clone(),
         ..objects.clone()
     };
-    let state = head_state(&held, now_ms)?;
+    let state = state_of(&held, now_ms)?;
     let status =
         succession_status(&state).ok_or_else(|| malformed("migration needs a predecessor"))?;
     require(
