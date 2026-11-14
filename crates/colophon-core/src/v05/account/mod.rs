@@ -3,8 +3,16 @@
 //! then finish*, merges incoming objects, and answers views and queries.
 //!
 //! It is sans-IO: no storage, no network, no clock, no RNG. Seeds, nonces and the time are
-//! arguments. The storage engine, record sources, on-disk checkpoints, blobs and relay cursors
-//! are the next package (E6).
+//! arguments. The storage engine, record sources, on-disk checkpoints, blobs and home exchange
+//! are [`crate::v05::engine`] (E6), built on this account.
+//!
+//! **Incremental judgement (E6).** A merge of records that sort after everything held resumes
+//! the walk of [`judge_records`](crate::v05::records::judge_records) from its last state; a merge
+//! of earlier ones walks again without repeating a signature check or a decryption
+//! ([`records::JudgeCache`](crate::v05::records::JudgeCache)); a namespace fold is extended, not
+//! redone, when the operations it folded are the first of those it folds now. Each answer is
+//! the one a full judgement gives (`tests/v05_account_engine.rs`). Authority changes, new keys
+//! and a changed standing of any member rebuild from the memo, as before.
 //!
 //! # What the core guarantees, exactly, and what the host is trusted with
 //!
@@ -93,7 +101,7 @@
 //! | `set_read_scope` | [`Account::set_read_scope`] |
 //! | `merge`, `merge_with_changes`, `changes`, `finish_with_changes` | [`Account::merge`] returns [`Changes`]; [`Account::finish`] returns it too |
 //! | `revision`, `applied_operations` | [`Account::revision`] |
-//! | `checkpoint`, `restore_checkpoint`, `set_checkpoint_policy` | E6 for on-disk namespace checkpoints. The verifier's persisted state (§17.2), authenticated under a device-held key as 0.4 protects its checkpoints: [`Account::export_persisted`] and the stored bytes and key given to [`Account::open`] |
+//! | `checkpoint`, `restore_checkpoint`, `set_checkpoint_policy` | [`engine::Engine::save`](crate::v05::engine::Engine::save) for the on-disk namespace checkpoint (E6). The verifier's persisted state (§17.2), authenticated under a device-held key as 0.4 protects its checkpoints: [`Account::export_persisted`] and the stored bytes and key given to [`Account::open`] |
 //! | `query`, `view` | [`Account::query`], [`Account::view`] |
 //! | `finish`, `finish_authority` | [`Account::finish`] (one call; WebAuthn assertions travel in [`SignatureResult`]) |
 //! | `begin_unlock_slot`, `finish_unlock_slot`, `begin_unlock_slots` | [`Account::slots`], [`Account::begin_unlock_slot`], [`Account::finish_unlock_slot`] |
@@ -107,22 +115,22 @@
 //! | `begin_add_controller`, `begin_recovery_add`, `begin_add_passkey` | [`Account::begin_add_controller`] (immediate `approve`/`sign`, or a transition for `control`/`recover`), with [`Account::transfer_seed`] and [`Account::accept_seed_transfer`] for §7.4 |
 //! | `begin_remove_controller` | [`Account::begin_remove_controller`] (`plan_rotation`, the `vault` component) and [`Account::begin_rotate_vault`] (the `vault` entry) |
 //! | `select_controller`, `eligible_signers`, `prepare_authority` | gone in 0.5: the caller names the signers (controller IDs) and the write side checks the rule of §8.4 and refuses a set that does not meet it. [`Account::suggest_signers`] picks a set that meets a rule from the keys a host can sign with |
-//! | `begin_import_grant`, `begin_import`, `import_*`, `reconcile_import_prefix` | `import` is a `terms` field in 0.5 (§9.3, §10.1): [`Account::begin_approve`] carries it; import batches belong to E6 |
-//! | `begin_write`, `written_operation*`, `live_generation` | [`Account::begin_write`] (a `/5` operation); live stamps and live generations belong to E6 |
+//! | `begin_import_grant`, `begin_import`, `import_*`, `reconcile_import_prefix` | `import` is a `terms` field in 0.5 (§9.3, §10.1): [`Account::begin_approve`] carries it; import batches: [`engine::Engine::begin_import`](crate::v05::engine::Engine::begin_import) |
+//! | `begin_write`, `written_operation*`, `live_generation` | [`Account::begin_write`] (a `/5` operation); live stamps and live generations are the engine's: [`engine::Engine::begin_live_write`](crate::v05::engine::Engine::begin_live_write), judged by [`live`](crate::v05::live) |
 //! | `begin_layout` | gone in 0.5: a `/5` account is at layout 2 from genesis (§11.8) |
 //! | `members`, `me` | [`Account::members`], [`Account::me`], [`Account::controllers`] |
 //! | `tools`, `begin_call` | [`Account::tools`]; calls: [`Account::begin_link`], [`Account::begin_call`] (§12) |
 //! | `ledger` | [`Account::ledger`] |
-//! | `begin_blob`, `open_blob_chunk`, `read_blob_chunk`, `NativeBlobWriter` | E6 (blobs) |
-//! | `NativeEngine::*`, `RecordSource`, `verify_batch`, `records_at`, `update_versions` | E6 (the storage engine) |
-//! | `NativeCheckpoint*` | E6 |
+//! | `begin_blob`, `open_blob_chunk`, `read_blob_chunk`, `NativeBlobWriter` | [`engine::Engine::begin_blob`](crate::v05::engine::Engine::begin_blob), [`read_blob`](crate::v05::engine::Engine::read_blob) (E6) |
+//! | `NativeEngine::*`, `RecordSource`, `verify_batch`, `records_at`, `update_versions` | [`engine::Engine`](crate::v05::engine::Engine) (E6) |
+//! | `NativeCheckpoint*` | [`engine::Engine::save`](crate::v05::engine::Engine::save) seals under the host's device-held key; there is no member-signed ticket (see `engine::seal`) |
 //! | `vault_public`, `webauthn_prf_input`, `parse_registration` | already in `v05::vault`, `v05::slots` and `keys` |
 //! | `KeyProvider::sign_with`, `sign_controller_with`, `HostAction::sign_with` | gone in 0.5: the core never calls into a key provider (§3.4, §17.1). The host reads [`PendingAction::steps`] (each step's exact body, signer and WebAuthn challenge) and passes the signatures to [`Account::finish`] |
 //! | `PendingBatch::record_paths`, `HostAction::record_paths` | [`Finished::record_paths`] (the paths of what a finish produced: `authority/<seq>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`, `ops/…`); before finish, [`SigningStep::path`] |
 //! | `migration.rs`: `import_legacy_batch`, `bind_legacy_import_state` | the upgrade tooling step (plan step 8), not the account: legacy import batches are `import` records written through [`Account::begin_write`] once the account is upgraded |
 //! | the 0.4 → 0.5 in-place `upgrade` entry (§16.1) and the Swift keyring upgrade (§16.2) | **follow-up, package E7** (`v05/write/upgrade.rs`, in progress). The account already opens, merges and reads an upgraded account (the verifier folds the 0.4 prefix). Once E7 merges, the account gets `begin_upgrade` (and the Swift form), each a thin composition like the other `begin_*`; not built here |
 //! | §15 succession (`successor` transition, `handover`, the freezing `layout`, `migration` entry) and §16.2 Swift succession | **follow-up, package E7** (`v05/write/succession.rs`): `begin_successor`, `begin_succession_*`, listed for when it merges; not built here. The account reads a succession's `successor` and `migration` through the verifier's state already |
-//! | §15 exit and the clean copy (§15.3, the drain window) | the copying itself is the engine's and a home's (**E6**, §13–§14); the account's part is the `successor` and `migration` entries above |
+//! | §15 exit and the clean copy (§15.3, the drain window) | the copying itself is the engine's and a home's ([`engine::exchange`](crate::v05::engine::exchange), §13–§14); the account's part is the `successor` and `migration` entries above |
 //! | (new) pending transitions | [`Account::pending`], [`Account::begin_transition`], [`Account::begin_veto`], [`Account::begin_suspend`], [`Account::record_due`] (the determined `activate`, `vetoed` and `final`), [`Account::begin_resolve`] and [`Account::fork_candidates`] |
 //! | (new) notices (§17.5) | [`Account::pending`], [`Account::notices`] |
 //! | (new) shares owed | [`Account::owed_shares`], [`Account::begin_renew`] |

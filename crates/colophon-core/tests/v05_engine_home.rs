@@ -2,7 +2,11 @@
 //! against hostile ones: stale, forked, withholding, replaying, serving another account's
 //! objects, serving a rollback, tampering with bytes. A hostile home never changes verified
 //! state and is reported; an honest one is followed in the order the spec gives.
-#![allow(clippy::unwrap_used, clippy::too_many_arguments, clippy::cloned_ref_to_slice_refs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_arguments,
+    clippy::cloned_ref_to_slice_refs
+)]
 #[path = "v05_engine_support/mod.rs"]
 mod support;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -266,8 +270,7 @@ fn state_of(e: &Engine<MemSource>) -> (u64, String, String) {
 fn an_honest_pass_runs_authority_then_records_then_live_then_blobs_and_is_idempotent() {
     let mut w = world();
     let reqs = w.s.sim.requests.clone();
-    let first =
-        |pred: &dyn Fn(&String) -> bool| reqs.iter().position(pred).unwrap_or(usize::MAX);
+    let first = |pred: &dyn Fn(&String) -> bool| reqs.iter().position(pred).unwrap_or(usize::MAX);
     let pull_auth = first(&|r| r.starts_with("Get /authority"));
     let head = first(&|r| r == "Get /head");
     let pending = first(&|r| r.starts_with("Get /pending"));

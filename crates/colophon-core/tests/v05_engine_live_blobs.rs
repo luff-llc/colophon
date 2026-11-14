@@ -1,8 +1,13 @@
 //! Live state (0.3 §5.1), blobs (0.3 §7.2) and imports (§9.3, §10.1) through the engine: the
 //! mechanics, and the attack each security property needs, asserted by reason.
-#![allow(clippy::unwrap_used, clippy::too_many_arguments, clippy::cloned_ref_to_slice_refs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_arguments,
+    clippy::cloned_ref_to_slice_refs
+)]
 #[path = "v05_engine_support/mod.rs"]
 mod support;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use colophon_core::blobs::BlobRead;
 use colophon_core::model::Outcome;
 use colophon_core::v05::account::{Identity, RevokeKeep};
@@ -618,4 +623,100 @@ fn an_import_batch_needs_the_import_term_in_the_engine_and_in_the_fold() {
         o => panic!("{o:?}"),
     };
     assert!(!nb.contains("imported"), "no import role, no effect: {nb}");
+}
+
+#[test]
+fn a_forged_live_signature_and_a_live_record_at_the_wrong_path_supply_nothing() {
+    let mut s = shared(&[LISTEN]);
+    let id = s.admit(31, terms_for(&[(LISTEN, "write")]));
+    let other = s.admit(32, terms_for(&[(LISTEN, "write")]));
+    let mut r = s.engine(&id);
+    let mut e = s.engine(&id);
+    let w = s.live(&mut e, position("e1", 10.0));
+    let (path, bytes) = w.stores.last().unwrap().clone();
+    let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+    let mut sig = STANDARD.decode(v["signature"].as_str().unwrap()).unwrap();
+    sig[7] ^= 1;
+    v["signature"] = json!(b64(&sig));
+    let forged = colophon_core::v05::encoding::canonical(&v).unwrap();
+    let slot_name = path.rsplit('/').next().unwrap().to_string();
+    let elsewhere = path.replace(&slot_name, &format!("{}.json", "ab".repeat(32)));
+    let as_other = path.replace(&id, &other);
+    r.apply_live(vec![HeldRecord {
+        path: path.clone(),
+        bytes: forged,
+    }])
+    .unwrap();
+    assert!(
+        r.account().live_heads().is_empty(),
+        "a forged signature is no live record"
+    );
+    for bad in [elsewhere, as_other] {
+        r.apply_live(vec![HeldRecord {
+            path: bad,
+            bytes: bytes.clone(),
+        }])
+        .unwrap();
+        assert!(
+            r.account().live_heads().is_empty(),
+            "a slot, a path and a stamp must agree"
+        );
+    }
+    assert!(
+        r.live_verdicts()
+            .iter()
+            .all(|(_, v)| matches!(v, LiveVerdict::Invalid(_) | LiveVerdict::Refused(_))),
+        "{:?}",
+        r.live_verdicts()
+    );
+    // The real one is a head.
+    r.apply_live(vec![HeldRecord { path, bytes }]).unwrap();
+    assert_eq!(r.account().live_heads().len(), 1);
+}
+
+#[test]
+fn a_write_budget_that_spans_unread_namespaces_refuses_local_writes_on_a_partial_replica() {
+    let mut s = shared(&[LISTEN, NOTES]);
+    let capped = s.admit(
+        31,
+        json!({"records": [{"namespace": LISTEN, "access": "write"}, {"namespace": NOTES, "access": "write"}], "writes": 50}),
+    );
+    let mut partial_opts = EngineOptions::new(s.f.account.id().as_str(), DEVICE_KEY);
+    partial_opts.namespaces = vec![LISTEN.to_string()];
+    let mut e = Engine::open(
+        s.src.clone(),
+        s.src.listing(),
+        Identity::Member(capped.clone()),
+        partial_opts,
+        None,
+        NOW,
+    )
+    .unwrap();
+    let steps = e.begin_unlock_epochs();
+    e.finish_unlock_epochs(s.host.answer_epochs(&capped, steps))
+        .unwrap();
+    assert_eq!(e.budget_scope_unavailable(), vec![capped.clone()]);
+    let seed = s.host.fresh();
+    let d = e
+        .begin_write(
+            LISTEN,
+            "follow",
+            json!({"id": "show", "url": "https://example.org/f", "title": "T"}),
+            colophon_core::v05::records::Level::Write,
+            seed,
+        )
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(d.reason, "budgetScopeUnavailable");
+    // The complete scope may write.
+    let mut full = s.engine(&capped);
+    assert!(full.budget_scope_unavailable().is_empty());
+    engine_write(
+        &mut full,
+        &mut s.host,
+        &s.src,
+        LISTEN,
+        "follow",
+        json!({"id": "show", "url": "https://example.org/f", "title": "T"}),
+    );
 }

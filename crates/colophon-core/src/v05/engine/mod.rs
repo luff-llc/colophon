@@ -845,6 +845,42 @@ impl<S: RecordSource> Engine<S> {
     pub fn status(&self) -> Status {
         self.account.status()
     }
+    /// Members whose `writes` budget spans namespaces this replica does not read (0.3 §4,
+    /// `budgetScopeUnavailable`): a budget is counted across all of a member's namespaces, so
+    /// a partial replica cannot tell how much of it is spent. This replica refuses local
+    /// writes under such a grant; the host should show these members' contributions as
+    /// unevaluated. (The fold here still counts what it reads: the engine does not yet refuse
+    /// the contributions themselves, which the report lists as not done.)
+    pub fn budget_scope_unavailable(&self) -> Vec<String> {
+        if self.options.namespaces.is_empty() {
+            return Vec::new();
+        }
+        self.account
+            .record_authority()
+            .state()
+            .members()
+            .iter()
+            .filter(|m| {
+                m.revoked_seq.is_none()
+                    && m.terms.writes().is_some()
+                    && m.terms
+                        .records()
+                        .is_some_and(|r| r.iter().any(|e| !in_scope(&self.options, &e.namespace)))
+            })
+            .map(|m| m.request.member_id())
+            .collect()
+    }
+    fn partial_budget_denial(&self) -> Option<Denial> {
+        let crate::v05::account::Standing::Member(me) = self.account.me() else {
+            return None;
+        };
+        self.budget_scope_unavailable()
+            .contains(&me.member.id)
+            .then(|| Denial {
+                reason: "budgetScopeUnavailable".into(),
+                detail: "this replica reads only part of the grant a write budget spans".into(),
+            })
+    }
     /// Paths a checkpoint covered that the latest listing does not name: unavailable, never
     /// permission to rebuild an empty namespace.
     pub fn missing_covered(&self) -> Vec<String> {
@@ -978,6 +1014,9 @@ impl<S: RecordSource> Engine<S> {
         seed: [u8; 32],
     ) -> Result<std::result::Result<crate::v05::account::PendingAction, Denial>> {
         self.check_ready()?;
+        if let Some(d) = self.partial_budget_denial() {
+            return Ok(Err(d));
+        }
         self.account
             .begin_write(namespace, kind, payload, level, seed)
     }

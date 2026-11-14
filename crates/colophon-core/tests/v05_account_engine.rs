@@ -768,3 +768,45 @@ fn the_bounds_hold_for_a_hostile_listing_and_hostile_bytes() {
     let _ = Objects::default();
     let _ = Admission::Admitted;
 }
+
+#[test]
+fn the_path_grammar_accepts_the_store_and_nothing_else() {
+    use colophon_core::v05::engine::paths::{classify, Kind};
+    let a = "ab".repeat(16);
+    let d = "cd".repeat(32);
+    let ok = [
+        "authority/00000001.json".to_string(),
+        "predecessor/authority/00000007.json".to_string(),
+        format!("transitions/{d}.json"),
+        format!("vetoes/{d}.json"),
+        format!("heads/{a}.json"),
+        format!("receipts/{d}/{a}.receipt.json"),
+        format!("ops/{a}/notes/000000000007-{a}.json"),
+        format!("state/{a}/listening.podcasts/{d}.json"),
+        format!("history/{a}/notes/000000000007-{a}.json"),
+        format!("blobs/{d}"),
+    ];
+    for p in &ok {
+        assert!(classify(p).is_some(), "{p}");
+    }
+    assert!(matches!(classify(&ok[0]), Some(Kind::Authority(1))));
+    let bad = [
+        "authority/1.json".to_string(),
+        "authority/00000000.json".to_string(),
+        "authority/../00000001.json".to_string(),
+        "/authority/00000001.json".to_string(),
+        format!("ops/{a}/notes/7-{a}.json"),
+        format!("ops/{a}/Notes/000000000007-{a}.json"),
+        format!("ops/{a}/notes/000000000007-{a}.json/"),
+        format!("ops/{a}/notes/.hidden/000000000007-{a}.json"),
+        format!("blobs/{}", "CD".repeat(32)),
+        format!("blobs/{d}x"),
+        "ops\\x".to_string(),
+        "x".repeat(600),
+        String::new(),
+        "state/a/b/c.json".to_string(),
+    ];
+    for p in &bad {
+        assert!(classify(p).is_none(), "{p}");
+    }
+}

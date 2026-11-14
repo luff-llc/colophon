@@ -7,7 +7,11 @@
 //! 2. A reading app (Later): save an item with a retained original as a required blob and an
 //!    image as an optional one, read it on a second device, revoke a third device with its
 //!    records kept.
-#![allow(clippy::unwrap_used, clippy::too_many_arguments, clippy::cloned_ref_to_slice_refs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::too_many_arguments,
+    clippy::cloned_ref_to_slice_refs
+)]
 #[path = "v05_engine_support/mod.rs"]
 mod support;
 use colophon_core::blobs::BlobRead;
