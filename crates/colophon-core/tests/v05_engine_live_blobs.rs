@@ -898,3 +898,37 @@ fn an_import_grant_is_made_through_the_account_and_its_batch_folds() {
         "the batch folds for a member whose terms carry import: {nb}"
     );
 }
+
+/// The verifier's caveat rule for live state (0.3 §5.1 as §11.8 reads it) is decided per
+/// namespace: `kinds` on the namespace, a condition, a budget or an expiry caveat the writer,
+/// and `kinds` on another namespace do not. `judge_candidate` refuses a live-stamped record under
+/// `ops/` of a caveated writer (`refused:caveatedLive`) by this one function.
+#[test]
+fn the_verifiers_live_caveat_is_decided_per_namespace() {
+    use colophon_core::v05::records::{live_caveated, RecordAuthority};
+    let mut s = shared(&[LISTEN, NOTES]);
+    let plain = s.admit(31, terms_for(&[(LISTEN, "write")]));
+    let kinded_here = s.admit(
+        32,
+        json!({"records": [{"namespace": LISTEN, "access": "write", "kinds": ["position"]}]}),
+    );
+    let kinded_there = s.admit(
+        33,
+        json!({"records": [{"namespace": LISTEN, "access": "write"},
+                           {"namespace": NOTES, "access": "write", "kinds": ["createNotebook"]}]}),
+    );
+    let budget = s.admit(
+        34,
+        json!({"records": [{"namespace": LISTEN, "access": "write"}], "writes": 10}),
+    );
+    let auth = RecordAuthority::from_objects(s.f.account.objects(), NOW).unwrap();
+    let caveated = |id: &str, ns: &str| live_caveated(auth.member(id).unwrap(), ns);
+    assert!(!caveated(&plain, LISTEN));
+    assert!(caveated(&kinded_here, LISTEN), "`kinds` on the namespace");
+    assert!(
+        !caveated(&kinded_there, LISTEN),
+        "`kinds` on another namespace is no caveat on this one"
+    );
+    assert!(caveated(&kinded_there, NOTES));
+    assert!(caveated(&budget, LISTEN), "a write budget");
+}

@@ -1801,3 +1801,381 @@ fn begin_renew_shares_seals_what_a_member_is_owed_and_leaves_its_expiry() {
         })
         .is_err());
 }
+
+// ---- second independent check (2026-11-14), E9 ----
+
+/// The same item written twice (two plans over one destination: a second device, or a write
+/// whose file arrived late after a crash) is a no-op the second time: the second write is
+/// recognised by its evidence, the copy is the batch the destination took, and the plan
+/// finishes. A plan rebuilt from the destination reconciles with what it holds.
+#[test]
+fn an_item_written_twice_finishes_and_a_rebuilt_plan_reconciles() {
+    let (mut j, keys, _f, _fz) = through_f(false);
+    let lib = SwiftLibrary::read(&j.f.entries).unwrap();
+    let mut c = copier_session(&mut j);
+    let dest = c.swift_copy_destination(lib.library()).unwrap();
+    let mut a = CopyPlan::read(&lib, &j.f.files, &keys, Some(&translate), &dest).unwrap();
+    let mut b = CopyPlan::read(&lib, &j.f.files, &keys, Some(&translate), &dest).unwrap();
+    // Plan A writes the first item.
+    let item = a.next_batch(1).remove(0);
+    let w = c.begin_swift_copy_write(&a, &item, [0x61; 32]).unwrap();
+    let sigs = sign(&j.host, w.steps());
+    c.finish_swift_copy_write(&mut a, w, sigs).unwrap();
+    // Plan B, read before A's write landed, writes the same item and then everything else.
+    write_items(&j, &mut c, &mut b, usize::MAX, 0x70);
+    let first = c.finish_swift_copy(b).expect("the second plan finishes");
+    // A plan rebuilt from the destination holds every item as written.
+    let dest = c.swift_copy_destination(lib.library()).unwrap();
+    let r = CopyPlan::read(&lib, &j.f.files, &keys, Some(&translate), &dest).unwrap();
+    assert_eq!(r.pending(), 0, "the destination holds the whole copy");
+    let again = c.finish_swift_copy(r).expect("the rebuilt plan finishes");
+    assert_eq!(first.namespaces().len(), again.namespaces().len());
+    assert_eq!(first.omitted(), again.omitted());
+}
+
+/// A translator that returns no children copies nothing: the record is omitted with a reason,
+/// never counted as copied. The core's evidence names the real author and source either way.
+#[test]
+fn a_translator_batch_with_no_children_is_omitted_and_cannot_rewrite_the_evidence() {
+    let (mut j, keys, _f, _fz) = through_f(false);
+    let lib = SwiftLibrary::read(&j.f.entries).unwrap();
+    let liar = |op: &SwiftOp<'_>| -> colophon_core::v05::Result<Batch> {
+        let mut b = translate(op)?;
+        b.evidence = json!({"bodyDigest": "00".repeat(32), "authorID": "ff".repeat(16),
+            "sourceLibrary": "someone-else"});
+        if op.kind == "capture.link" {
+            b.children.clear();
+        }
+        Ok(b)
+    };
+    let c = copier_session(&mut j);
+    let dest = c.swift_copy_destination(lib.library()).unwrap();
+    let plan = CopyPlan::read(&lib, &j.f.files, &keys, Some(&liar), &dest).unwrap();
+    for it in plan.next_batch(16) {
+        assert_ne!(it.payload["evidence"]["bodyDigest"], json!("00".repeat(32)));
+        assert_eq!(
+            it.payload["evidence"]["sourceLibrary"],
+            json!(lib.library())
+        );
+        assert_eq!(
+            it.payload["evidence"]["translation"]["authorID"],
+            json!("ff".repeat(16))
+        );
+        assert!(!it.payload["children"].as_array().unwrap().is_empty());
+    }
+    assert!(
+        plan.omissions()
+            .iter()
+            .any(|o| o.2.contains("no child record")),
+        "{:?}",
+        plan.omissions()
+    );
+}
+
+/// A held, valid Swift succession veto is sent to the successor's home (§15.1 step 4, §14
+/// `POST /pending`): it names the successor's genesis, which is no pending transition, and the
+/// engine still submits it. Only a home that holds the veto can record `successionVetoed`.
+#[test]
+fn the_engine_sends_a_held_succession_veto_to_the_successors_home() {
+    use colophon_core::model::Records;
+    use colophon_core::v05::engine::exchange::{Method, Response, Step};
+    use colophon_core::v05::engine::{Engine, EngineOptions};
+    let (mut j, _keys) = start(false);
+    let veto_at = j.now;
+    let pending = j
+        .acct
+        .begin_swift_veto(&SwiftVetoParams {
+            issued_ms: veto_at,
+            signers: vec![j.f.passkey_id.clone()],
+        })
+        .unwrap();
+    let veto_digest = pending.digest();
+    let sigs = passkey_sign(&j.f.passkey_key, pending.steps(), &j.host);
+    let veto = pending.finish(sigs).unwrap();
+    give(
+        &mut j,
+        Objects {
+            pending: vec![veto.clone()],
+            ..Objects::default()
+        },
+        veto_at + SEC,
+    );
+    // The device's folder: the authority entries, the predecessor, the veto.
+    let mut files = Records::new();
+    for (i, e) in j.acct.objects().entries.iter().enumerate() {
+        files.insert(format!("authority/{:08}.json", i + 1), e.clone());
+    }
+    for (i, e) in j.acct.objects().predecessor.iter().enumerate() {
+        files.insert(
+            format!("predecessor/authority/{:08}.json", i + 1),
+            e.clone(),
+        );
+    }
+    let vbody = {
+        let v: Value = serde_json::from_slice(&veto).unwrap();
+        STANDARD.decode(v["body"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(digest(&vbody), veto_digest);
+    files.insert(format!("vetoes/{veto_digest}.json"), veto.clone());
+    let listing: Vec<String> = files.keys().cloned().collect();
+    let mut e = Engine::open(
+        files,
+        listing,
+        Identity::Controller(j.ctl.clone()),
+        EngineOptions::new(j.acct.id().as_str(), [7; 32]),
+        None,
+        veto_at + SEC,
+    )
+    .unwrap();
+    e.load().unwrap();
+    assert!(
+        e.account().objects().pending.contains(&veto),
+        "the engine holds the veto"
+    );
+    let homes = e.exchange_homes();
+    assert!(!homes.is_empty(), "the successor names its home");
+    let home = homes[0].id.clone();
+    let mut posts: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        match e.exchange_next(&home).unwrap() {
+            Step::Done => break,
+            Step::Request(r) => {
+                let path = r.url.split(".example").nth(1).unwrap_or("").to_string();
+                if r.method == Method::Post && path.starts_with("/pending") {
+                    posts.push(String::from_utf8_lossy(&r.body).to_string());
+                }
+                let body = if path.starts_with("/authority") && r.method == Method::Get {
+                    json!({"entries": [], "receipts": [], "more": false})
+                } else if path.starts_with("/pending") && r.method == Method::Get {
+                    json!({"objects": [], "more": false})
+                } else if path.starts_with("/changes") {
+                    json!({"entries": [], "cursor": "0", "more": false})
+                } else {
+                    json!({"receipts": []})
+                };
+                let status = if path == "/head" { 404 } else { 200 };
+                e.exchange_answer(
+                    &home,
+                    r.ticket,
+                    Response {
+                        status,
+                        headers: vec![],
+                        body: serde_json::to_vec(&body).unwrap(),
+                    },
+                )
+                .unwrap();
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    println!("POST /pending bodies: {}", posts.len());
+    assert!(e
+        .account()
+        .swift_succession()
+        .is_ok_and(|s| s.stage == MoveStage::Waiting));
+    assert!(
+        posts.iter().any(|b| b.contains(&STANDARD.encode(&vbody))),
+        "the held succession veto must be submitted to the home"
+    );
+}
+
+/// Hostile source files and translator answers: no panic, every one omitted with a reason or
+/// refused, and the omission bound holds.
+#[test]
+fn hostile_copy_inputs_never_panic() {
+    let (mut j, keys, _f, _fz) = through_f(false);
+    let lib = SwiftLibrary::read(&j.f.entries).unwrap();
+    let real = j.f.files.clone();
+    let author = real
+        .iter()
+        .find(|f| f.path.starts_with("ops/"))
+        .map(|f| f.path.split('/').nth(1).unwrap().to_string())
+        .unwrap();
+    let mut files = real.clone();
+    let junk: Vec<(String, Vec<u8>)> = vec![
+        (
+            format!("ops/{author}/notes/000000000001-x.json"),
+            b"".to_vec(),
+        ),
+        (
+            format!("ops/{author}/notes/000000000002-y.json"),
+            b"{\"body\":\"!!\",\"signature\":\"\"}".to_vec(),
+        ),
+        (
+            format!("ops/{author}/notes/000000000003-z.json"),
+            "[".repeat(100_000).into_bytes(),
+        ),
+        (format!("ops/{author}/../../etc"), b"{}".to_vec()),
+        ("ops/".to_string(), b"{}".to_vec()),
+        ("ops/a/b/c/d/e/f.json".to_string(), b"{}".to_vec()),
+        (
+            format!("ops/{author}/notes/999999999999999999999-q.json"),
+            b"{}".to_vec(),
+        ),
+        ("state/x/notes/slot.json".to_string(), vec![0xff; 10]),
+        ("blobs/zz".to_string(), vec![1; 3]),
+    ];
+    for (p, b) in junk {
+        files.push(SourceFile { path: p, bytes: b });
+    }
+    // A real record copied to another path (its `id` and author no longer match the path).
+    if let Some(f) = real.iter().find(|f| f.path.starts_with("ops/")) {
+        files.push(SourceFile {
+            path: f.path.replace("ops/", "ops/aa/"),
+            bytes: f.bytes.clone(),
+        });
+    }
+    let failing = |op: &SwiftOp<'_>| -> colophon_core::v05::Result<Batch> {
+        if op.kind == "capture.link" {
+            return Err(colophon_core::v05::Failure::Malformed(
+                "translator refuses".into(),
+            ));
+        }
+        let mut b = translate(op)?;
+        b.outcome = "x".repeat(500);
+        Ok(b)
+    };
+    let c = copier_session(&mut j);
+    let dest = c.swift_copy_destination(lib.library()).unwrap();
+    for t in [
+        Some(&translate as &Translator<'_>),
+        Some(&failing as &Translator<'_>),
+        None,
+    ] {
+        match CopyPlan::read(&lib, &files, &keys, t, &dest) {
+            Ok(p) => {
+                let om = p.omissions();
+                println!("pending {}, omitted {}", p.pending(), om.len());
+                assert!(om.iter().all(|o| !o.2.is_empty()));
+            }
+            Err(e) => println!("refused: {e:?}"),
+        }
+    }
+}
+
+/// The engine pulls the Swift predecessor's history from a successor's home (§14
+/// `GET {base}/predecessor/authority/<n>.json`) when it does not hold it, and publishes what it
+/// holds to a home that does not list it.
+#[test]
+fn the_engine_pulls_and_pushes_predecessor_history() {
+    use colophon_core::model::Records;
+    use colophon_core::v05::engine::exchange::{Method, Response, Step};
+    use colophon_core::v05::engine::{Engine, EngineOptions};
+    let (j, _keys, _f, _fz) = through_f(false);
+    let predecessor: Vec<Vec<u8>> = j.acct.objects().predecessor.clone();
+    assert!(!predecessor.is_empty());
+    let by_path: std::collections::BTreeMap<String, Vec<u8>> = predecessor
+        .iter()
+        .map(|b| {
+            let v: Value = serde_json::from_slice(b).unwrap();
+            let body: Value =
+                serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap())
+                    .unwrap();
+            (
+                format!(
+                    "/predecessor/authority/{:08}.json",
+                    body["seq"].as_u64().unwrap()
+                ),
+                b.clone(),
+            )
+        })
+        .collect();
+    // A device that holds the successor's authority entries and the predecessor's history but
+    // its last entry.
+    let missing = by_path.keys().last().unwrap().clone();
+    let mut files = Records::new();
+    for (i, e) in j.acct.objects().entries.iter().enumerate() {
+        files.insert(format!("authority/{:08}.json", i + 1), e.clone());
+    }
+    for (path, b) in &by_path {
+        if *path != missing {
+            files.insert(path.trim_start_matches('/').to_string(), b.clone());
+        }
+    }
+    let listing: Vec<String> = files.keys().cloned().collect();
+    let mut e = Engine::open(
+        files,
+        listing,
+        Identity::Controller(j.ctl.clone()),
+        EngineOptions::new(j.acct.id().as_str(), [7; 32]),
+        None,
+        j.now,
+    )
+    .unwrap();
+    e.load().unwrap();
+    let held_before = e.account().objects().predecessor.len();
+    assert_eq!(held_before + 1, predecessor.len());
+    let home = e.exchange_homes()[0].id.clone();
+    let mut puts: Vec<String> = Vec::new();
+    let mut pulled: Vec<String> = Vec::new();
+    for _ in 0..400 {
+        match e.exchange_next(&home).unwrap() {
+            Step::Done => break,
+            Step::Request(r) => {
+                let path = r.url.split(".example").nth(1).unwrap_or("").to_string();
+                if r.method == Method::Put && path.starts_with("/predecessor/") {
+                    puts.push(path.clone());
+                }
+                let (status, body) = if let (Method::Get, Some(b)) = (
+                    r.method,
+                    by_path
+                        .get(&path)
+                        .filter(|_| path.starts_with("/predecessor/")),
+                ) {
+                    pulled.push(path.clone());
+                    (200, b.clone())
+                } else if path.starts_with("/authority") && r.method == Method::Get {
+                    (
+                        200,
+                        serde_json::to_vec(&json!({"entries": [], "receipts": [], "more": false}))
+                            .unwrap(),
+                    )
+                } else if path.starts_with("/pending") && r.method == Method::Get {
+                    (
+                        200,
+                        serde_json::to_vec(&json!({"objects": [], "more": false})).unwrap(),
+                    )
+                } else if path.starts_with("/changes") {
+                    (
+                        200,
+                        serde_json::to_vec(&json!({"entries": [], "cursor": "0", "more": false}))
+                            .unwrap(),
+                    )
+                } else if path == "/head" {
+                    (404, b"{}".to_vec())
+                } else if path.starts_with("/predecessor/") && r.method == Method::Put {
+                    (201, b"{}".to_vec())
+                } else {
+                    (200, serde_json::to_vec(&json!({"receipts": []})).unwrap())
+                };
+                e.exchange_answer(
+                    &home,
+                    r.ticket,
+                    Response {
+                        status,
+                        headers: vec![],
+                        body,
+                    },
+                )
+                .unwrap();
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(
+        pulled,
+        vec![missing.clone()],
+        "the entry the device lacks is pulled"
+    );
+    assert_eq!(
+        e.account().objects().predecessor.len(),
+        predecessor.len(),
+        "and held"
+    );
+    puts.sort();
+    assert_eq!(
+        puts,
+        by_path.keys().filter(|k| **k != missing).cloned().collect::<Vec<_>>(),
+        "every predecessor entry held when the pass was planned is published to a home that does not list it"
+    );
+}
