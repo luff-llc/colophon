@@ -1044,6 +1044,7 @@ impl Account {
     ) -> Result<PendingAction> {
         self.require_writable()?;
         self.control_remains(change)?;
+        self.check_grant_component(change)?;
         let batch = prepare_transition(
             &self.d.effective,
             self.now_ms,
@@ -1056,6 +1057,35 @@ impl Account {
             },
         )?;
         Ok(self.batch_action("transition", batch))
+    }
+
+    /// A `grant` component follows every rule of an immediate grant (§9.2, §9.3), by the same
+    /// function the verifier applies at activation: refused at prepare, not found void later.
+    fn check_grant_component(&self, change: &Change) -> Result<()> {
+        let Some(g) = change.0.get("grant") else {
+            return Ok(());
+        };
+        let bytes = crate::v05::encoding::decode_base64(
+            g.get("request")
+                .and_then(Value::as_str)
+                .ok_or_else(|| malformed("a grant needs its request"))?,
+            crate::v05::encoding::bounds::REQUEST_BODY * 2 + 4_096,
+        )?;
+        let request = crate::v05::members::Request::parse(&bytes, true)?;
+        let terms = crate::v05::terms::Terms::parse(
+            g.get("terms").cloned().unwrap_or(Value::Null),
+            crate::v05::terms::TermsKind::Member,
+        )?;
+        require(
+            terms.covered_by(&request.terms),
+            "the granted terms are not covered by the request",
+        )?;
+        crate::v05::members::check_granted_terms(
+            &request,
+            &terms,
+            self.d.auth.namespaces(),
+            self.now_ms,
+        )
     }
 
     /// §6.2: some controller holds `control`. Refused at prepare when a change removes or
@@ -1710,6 +1740,51 @@ impl Account {
         keys: EpochKeys,
         seed: Option<VaultSeed>,
     ) -> Result<Finished> {
+        // A finished record alone (no entry, no seed, no new key): the derivation is extended by
+        // it, and the account's history must admit it or nothing changes.
+        let records_only = seed.is_none()
+            && keys.is_empty()
+            && finished.entries.is_empty()
+            && finished.pending.is_empty()
+            && extra.objects.entries.is_empty()
+            && extra.objects.pending.is_empty()
+            && extra.objects.heads.is_empty()
+            && extra.objects.predecessor.is_empty()
+            && !extra.records.is_empty()
+            && !finished.records.is_empty();
+        if records_only {
+            if let Some(before) = self.extend_records(&extra.records, self.now_ms) {
+                let refusal = finished.records.iter().find_map(|r| {
+                    match self.judged_exact(&r.path, &r.bytes) {
+                        Some(j)
+                            if j.outcome == crate::v05::records::Outcome::Admitted
+                                && j.plaintext.is_some() =>
+                        {
+                            None
+                        }
+                        Some(j) => Some(j.outcome.failure().unwrap_or_else(|| {
+                            malformed("the account's history does not admit the finished record")
+                        })),
+                        None => Some(malformed("the finished record was not judged")),
+                    }
+                });
+                let Some(why) = refusal else {
+                    finished.changes = self.changes_since(&before);
+                    return Ok(finished);
+                };
+                // Not admitted: take the records back out and rebuild what was there, so that
+                // the account is as it was.
+                let gone: BTreeSet<(&str, &[u8])> = extra
+                    .records
+                    .iter()
+                    .map(|r| (r.path.as_str(), r.bytes.as_slice()))
+                    .collect();
+                self.records
+                    .retain(|r| !gone.contains(&(r.path.as_str(), r.bytes.as_slice())));
+                self.rebuild_in_place()?;
+                return Err(why);
+            }
+        }
         let mut objects = self.objects.clone();
         let mut records = self.records.clone();
         super::union(&mut objects, &extra.objects);
@@ -1792,11 +1867,15 @@ impl Account {
         }
         // A record is returned only if the account's current history admits it.
         for r in &finished.records {
-            let j = d
-                .judgement
-                .records
-                .iter()
-                .find(|j| j.path == r.path)
+            // The finished bytes themselves, not whatever else is held at the path (a junk twin
+            // beside it must not fail an honest finish).
+            let j = records
+                .binary_search_by(|h| {
+                    (h.path.as_str(), h.bytes.as_slice())
+                        .cmp(&(r.path.as_str(), r.bytes.as_slice()))
+                })
+                .ok()
+                .and_then(|i| d.judgement.records.get(i))
                 .ok_or_else(|| malformed("the finished record was not judged"))?;
             if j.outcome != crate::v05::records::Outcome::Admitted || j.plaintext.is_none() {
                 return Err(j.outcome.failure().unwrap_or_else(|| {

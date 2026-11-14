@@ -1502,7 +1502,7 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
             .into_iter()
             .flatten()
         {
-            new_members.push(member_from(s, a, act_seq, true)?);
+            new_members.push(member_from(s, a, act_seq, true, t.issued_ms)?);
             changed = true;
         }
         for id in hc
@@ -1526,7 +1526,7 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
         }
     }
     if let Some(g) = t.change.get("grant") {
-        new_members.push(member_from(s, g, act_seq, false)?);
+        new_members.push(member_from(s, g, act_seq, false, t.issued_ms)?);
         changed = true;
     }
     if let Some(m) = t.change.get("migration") {
@@ -1593,7 +1593,7 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     Ok(n)
 }
 
-fn member_from(s: &State, v: &Value, seq: u64, home: bool) -> Result<MemberRecord> {
+fn member_from(s: &State, v: &Value, seq: u64, home: bool, issued_ms: i64) -> Result<MemberRecord> {
     let req_bytes = embedded_bytes(
         v.get("request").unwrap_or(&Value::Null),
         "request",
@@ -1612,6 +1612,8 @@ fn member_from(s: &State, v: &Value, seq: u64, home: bool) -> Result<MemberRecor
         terms.covered_by(&request.terms),
         "granted terms not covered by the request",
     )?;
+    // The rules of an immediate grant (§9.2, §9.3), by the same function.
+    crate::v05::members::check_granted_terms(&request, &terms, &s.namespaces, issued_ms)?;
     if home {
         crate::v05::require(terms.serves_home(), "an appointed home must serve home")?;
         crate::v05::require(

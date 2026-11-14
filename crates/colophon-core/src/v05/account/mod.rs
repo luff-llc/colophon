@@ -138,6 +138,7 @@
 mod action;
 mod create;
 mod derived;
+pub(crate) use derived::wipe_value;
 mod moving;
 mod read;
 mod stored;
@@ -148,7 +149,7 @@ pub use action::{
     RevokeKeep, SignerChoice,
 };
 pub use create::{default_policy, CreateParams, CreateProgress, Creation};
-pub use moving::{MoveStage, Moved, PendingMove, SwiftSuccession};
+pub use moving::{CopyWrite, MoveStage, Moved, PendingMove, SwiftSuccession};
 pub use read::Standing;
 pub use read::{
     ControllerInfo, HomeInfo, LedgerLine, MemberInfo, Notices, OwedInfo, PendingTransition, Policy,
@@ -343,6 +344,17 @@ pub struct HeadChanges {
     pub refused: Vec<(String, String)>,
 }
 
+/// What an account holds in memory, in bytes (computed, not measured).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeldBytes {
+    /// The record envelopes and their paths.
+    pub records: usize,
+    /// The opened plaintexts the judgement keeps (as JSON).
+    pub plaintext: usize,
+    /// The operation views the namespace folds keep (as JSON).
+    pub folds: usize,
+}
+
 /// The 0.5 account. See the module documentation.
 pub struct Account {
     me: Identity,
@@ -521,7 +533,13 @@ impl Account {
             )?;
         }
         let verified = stored.and_then(|(b, k)| stored::unprotect(b, k, &me));
-        if let Some((persisted, account)) = verified {
+        if let Some((kept, account)) = verified {
+            let persisted = match kept {
+                stored::Stored::Readable(p) => *p,
+                // A format change made the saved state unreadable: replay from the objects, and
+                // carry over the head marks (local memory no replay can recompute).
+                stored::Stored::Unreadable(old) => Persisted::rebuild(&given.objects, &old, now_ms),
+            };
             let tried = Self::open_with(&given, persisted, &me, now_ms)
                 .ok()
                 .filter(|a| a.d.auth.account().as_str() == account);
@@ -611,6 +629,141 @@ impl Account {
         };
         a.note_pending();
         Ok(a)
+    }
+
+    /// Hold `new` records by extending the derivation in place, when that gives exactly what a
+    /// rebuild over the grown set would (see [`Derived::extend`]): the clock is the one the
+    /// derivation was made at, no record already held at a path is junk the new ones would
+    /// replace, and every new record parses and binds to the account. Work is proportional to
+    /// the new records (and a search for each), not to the records held. Returns the
+    /// namespace revisions before, or `None` with nothing changed when it cannot.
+    pub(super) fn extend_records(
+        &mut self,
+        new: &[HeldRecord],
+        now: i64,
+    ) -> Option<BTreeMap<String, u64>> {
+        if now != self.now_ms {
+            return None;
+        }
+        let mut fresh: Vec<&HeldRecord> = Vec::new();
+        let mut seen: BTreeSet<(&str, &[u8])> = BTreeSet::new();
+        for r in new {
+            let key = (r.path.as_str(), r.bytes.as_slice());
+            let held = self
+                .records
+                .binary_search_by(|h| (h.path.as_str(), h.bytes.as_slice()).cmp(&key))
+                .is_ok();
+            if !held && seen.insert(key) {
+                fresh.push(r);
+            }
+        }
+        let before: BTreeMap<String, u64> = self
+            .d
+            .folded
+            .iter()
+            .map(|(k, f)| (k.clone(), f.revision))
+            .collect();
+        if fresh.is_empty() {
+            return Some(before);
+        }
+        fresh.sort_by(|a, b| (&a.path, &a.bytes).cmp(&(&b.path, &b.bytes)));
+        let placed: Vec<(usize, &HeldRecord)> = fresh
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let at = self.records.partition_point(|h| {
+                    (h.path.as_str(), h.bytes.as_slice()) < (r.path.as_str(), r.bytes.as_slice())
+                });
+                (at + i, *r)
+            })
+            .collect();
+        // A held byte string at one of these paths that is no record at all would be dropped
+        // by the rebuild once a record is held beside it: leave that to the rebuild.
+        for (_, r) in &placed {
+            let from = self
+                .records
+                .partition_point(|h| h.path.as_str() < r.path.as_str());
+            for (i, h) in self.records.iter().enumerate().skip(from) {
+                if h.path != r.path {
+                    break;
+                }
+                let junk =
+                    self.d.judgement.records.get(i).is_none_or(|j| {
+                        matches!(j.outcome, crate::v05::records::Outcome::Invalid(_))
+                    });
+                if junk {
+                    return None;
+                }
+            }
+        }
+        let total = self.records.len() + placed.len();
+        let ok = self.d.extend(
+            &Inputs {
+                objects: &self.objects,
+                records: &self.records,
+                live: &self.live,
+                persisted: &self.persisted,
+                now_ms: now,
+                seeds: &self.seeds,
+                me: &self.me,
+                scope: &self.scope,
+                fold_seed: &self.fold_seed,
+            },
+            &placed,
+            total,
+        );
+        if !ok {
+            return None;
+        }
+        if placed.len() <= 16 {
+            for (pos, r) in &placed {
+                self.records.insert(*pos, (*r).clone());
+            }
+        } else {
+            let old = std::mem::take(&mut self.records);
+            let mut merged: Vec<HeldRecord> = Vec::with_capacity(total);
+            let mut old_it = old.into_iter();
+            let mut at = 0usize;
+            for (pos, r) in &placed {
+                while at < *pos {
+                    if let Some(o) = old_it.next() {
+                        merged.push(o);
+                    }
+                    at += 1;
+                }
+                merged.push((*r).clone());
+                at += 1;
+            }
+            merged.extend(old_it);
+            self.records = merged;
+        }
+        Some(before)
+    }
+
+    /// The judgement of exactly these bytes at `path`, when they are held.
+    pub(super) fn judged_exact(
+        &self,
+        path: &str,
+        bytes: &[u8],
+    ) -> Option<&crate::v05::records::Judged> {
+        let i = self
+            .records
+            .binary_search_by(|r| (r.path.as_str(), r.bytes.as_slice()).cmp(&(path, bytes)))
+            .ok()?;
+        self.d.judgement.records.get(i)
+    }
+
+    /// What changed when `before` (namespace revisions) became what the derivation holds, the
+    /// objects and the verified history being as they were.
+    pub(super) fn changes_since(&self, before: &BTreeMap<String, u64>) -> Changes {
+        let mut c = self.diff(&self.d, &self.objects);
+        for (name, f) in &self.d.folded {
+            if before.get(name) != Some(&f.revision) {
+                c.namespaces.insert(name.clone(), f.revision);
+            }
+        }
+        c.status = Some(Status::of(&self.d.verdict));
+        c
     }
 
     /// Rebuild a candidate from candidate inputs without touching `self`.
@@ -814,6 +967,45 @@ impl Account {
     pub fn objects(&self) -> &Objects {
         &self.objects
     }
+    /// What this account holds in memory, computed: the record envelopes, the opened plaintexts
+    /// the judgement keeps, and the operation views the namespace folds keep.
+    pub fn held_bytes(&self) -> HeldBytes {
+        let (plaintext, folds) = derived::held_bytes(&self.d);
+        HeldBytes {
+            records: self
+                .records
+                .iter()
+                .map(|r| r.path.len() + r.bytes.len())
+                .sum(),
+            plaintext,
+            folds,
+        }
+    }
+    /// Rebuild the derivation from nothing over the inputs held and require it to equal the one
+    /// maintained incrementally: the judgement of every record, the proposals, the write index,
+    /// the live judgement and every namespace fold. A diagnostic for hosts and tests; it costs
+    /// as much as a cold open.
+    pub fn verify_derivation(&self) -> Result<()> {
+        let fresh = Derived::build(
+            &Inputs {
+                objects: &self.objects,
+                records: &self.records,
+                live: &self.live,
+                persisted: &self.persisted,
+                now_ms: self.now_ms,
+                seeds: &self.seeds,
+                me: &self.me,
+                scope: &self.scope,
+                fold_seed: &BTreeMap::new(),
+            },
+            None,
+            Some(&self.d.keys),
+        )?;
+        require(
+            derived::fingerprint(&self.d) == derived::fingerprint(&fresh),
+            "the maintained derivation differs from a rebuild over the same inputs",
+        )
+    }
     /// The held record headers: public bytes an engine stores.
     pub fn records(&self) -> &[HeldRecord] {
         &self.records
@@ -958,10 +1150,32 @@ impl Account {
         self.live = live;
         Ok(c)
     }
+    /// The position of the judgement that stands for `path`: several held byte strings can sit at
+    /// one path (a garbage twin beside the real record), and the first that is a record at all
+    /// stands for it (the first of all when none is). The held records are sorted by path, so
+    /// this is a search and not a pass.
+    fn judged_index(&self, path: &str) -> Option<usize> {
+        let from = self.records.partition_point(|r| r.path.as_str() < path);
+        let mut first = None;
+        for (i, r) in self.records.iter().enumerate().skip(from) {
+            if r.path != path {
+                break;
+            }
+            let bad = matches!(
+                self.d.judgement.records.get(i)?.outcome,
+                crate::v05::records::Outcome::Invalid(_)
+            );
+            if !bad {
+                return Some(i);
+            }
+            first.get_or_insert(i);
+        }
+        first
+    }
     /// The verdict on the held record at `path`, as the §11.5 spelling (`admitted`,
     /// `refused:…`, `held:…`), or `None` when no held record is at that path.
     pub fn record_verdict(&self, path: &str) -> Option<String> {
-        let i = *self.d.judged_at.get(path)?;
+        let i = self.judged_index(path)?;
         self.d.judgement.records.get(i).map(|j| j.outcome.code())
     }
     /// Whether `bytes` at `path` would be a record of this account (see
@@ -1092,6 +1306,7 @@ impl Account {
                         revision: 0,
                         fold,
                         admitted: s.admitted,
+                        last_pos: None,
                     },
                 ),
             );
@@ -1161,8 +1376,6 @@ impl Account {
         crate::v05::write::check_issued(now_ms)?;
         check_bounds(&self.objects, &self.records, &incoming)?;
         let now = now_ms.max(self.now_ms);
-        let mut objects = self.objects.clone();
-        let mut records = self.records.clone();
         // Another account's genesis is not part of this account's object set.
         let mut incoming = incoming;
         let ours = self.d.verdict.branch.first().cloned();
@@ -1180,6 +1393,21 @@ impl Account {
             !genesis || Some(&e.digest) == ours.as_ref()
         });
         let foreign = before - incoming.objects.entries.len();
+        let only_records = incoming.objects.entries.is_empty()
+            && incoming.objects.pending.is_empty()
+            && incoming.objects.heads.is_empty()
+            && incoming.objects.predecessor.is_empty();
+        if only_records {
+            // New records after nothing else: the derivation is extended, not rebuilt, and no
+            // held record or object is copied.
+            if let Some(before) = self.extend_records(&incoming.records, now) {
+                let mut c = self.changes_since(&before);
+                c.foreign = foreign;
+                return Ok(c);
+            }
+        }
+        let mut objects = self.objects.clone();
+        let mut records = self.records.clone();
         union(&mut objects, &incoming.objects);
         union_records(&mut records, &incoming.records);
         let mut d = self.candidate(&objects, &records, &self.persisted, now)?;

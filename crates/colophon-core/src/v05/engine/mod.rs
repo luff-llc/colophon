@@ -77,6 +77,29 @@ impl EngineOptions {
         }
     }
 }
+/// A copy of the device key held on the stack for the length of one call, wiped when it goes
+/// out of scope (on every return, errors included).
+struct KeyCopy([u8; 32]);
+impl Drop for KeyCopy {
+    fn drop(&mut self) {
+        crate::v05::hpke_wiped::wipe(&mut self.0);
+    }
+}
+
+impl EngineOptions {
+    /// Erase the device key held here.
+    fn wipe_key(&mut self) {
+        for b in self.checkpoint_key.iter_mut() {
+            *b = 0;
+        }
+        std::hint::black_box(&self.checkpoint_key);
+    }
+}
+impl Drop for EngineOptions {
+    fn drop(&mut self) {
+        self.wipe_key();
+    }
+}
 impl std::fmt::Debug for EngineOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -122,6 +145,17 @@ pub struct EngineStats {
     pub unread_paths: usize,
 }
 
+/// A fault of the record source the host must show: a source gave other bytes at an immutable
+/// path whose bytes a checkpoint had verified. A source never changes those bytes
+/// (0.3 §7.1: changing bytes at a previously verified immutable path is equivocation).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFault {
+    /// The immutable path.
+    pub path: String,
+    /// What happened, in a sentence the host can show.
+    pub what: String,
+}
+
 /// Bounded history result in protocol order. Reset offsets when the revision changes.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,6 +182,8 @@ pub struct Written {
     pub stores: Vec<(String, Vec<u8>)>,
     /// What the write changed.
     pub changes: Changes,
+    /// The envelope of a link or a call (§12), which is not stored: for the host to use.
+    pub artifact: Option<Vec<u8>>,
 }
 
 /// The sealed state a host stores between sessions: the account's verifier state, the engine's
@@ -351,7 +387,16 @@ pub struct Engine<S: RecordSource> {
     pub(crate) stats: EngineStats,
     /// Covered paths the open judged again because their bytes changed.
     rejudged: Vec<String>,
+    /// Faults of the source the host must show (see [`SourceFault`]).
+    source_faults: Vec<SourceFault>,
+    /// Paths whose bytes a home should be asked for again: a source changed their bytes. A
+    /// pass pulls such a path from any home that lists it, even when the home's digest is the
+    /// one we last held.
+    pub(crate) repull: BTreeSet<String>,
     ready: bool,
+    locked: bool,
+    /// Source versions the host gave for this refresh in one batch.
+    version_hint: BTreeMap<String, Option<String>>,
     failure: Option<Failure>,
     verify_cursor: usize,
     pub(crate) exchange: exchange::State,
@@ -415,14 +460,14 @@ impl<S: RecordSource> Engine<S> {
             let version = source.content_version(p).unwrap_or(None);
             hold_object(&mut ix, &mut objects, k, p, bytes, version);
         }
-        let key = options.checkpoint_key;
+        let key = KeyCopy(options.checkpoint_key);
         let mut scope = options.namespaces.clone();
         scope.sort();
         scope.dedup();
         let mut mode = OpenMode::Cold;
         let mut body = None;
         if let Some(s) = saved {
-            match seal::open(&s.checkpoint, &options.account, &me, &scope, &key)
+            match seal::open(&s.checkpoint, &options.account, &me, &scope, &key.0)
                 .and_then(|plain| serde_json::from_slice::<checkpoint::Body>(&plain).ok())
             {
                 Some(b) if b.format == checkpoint::FORMAT => {
@@ -443,7 +488,7 @@ impl<S: RecordSource> Engine<S> {
         let mut account = Account::open(
             objects,
             Vec::new(),
-            saved.map(|s| (s.verifier.as_slice(), &key)),
+            saved.map(|s| (s.verifier.as_slice(), &key.0)),
             me.clone(),
             now_ms,
         )?;
@@ -472,7 +517,7 @@ impl<S: RecordSource> Engine<S> {
                 for (ns, bytes) in &sv.parts {
                     let mut ps = scope.clone();
                     ps.push(format!("ns:{ns}"));
-                    let part = seal::open(bytes, &options.account, &me, &ps, &key)
+                    let part = seal::open(bytes, &options.account, &me, &ps, &key.0)
                         .and_then(|p| serde_json::from_slice::<checkpoint::NsPart>(&p).ok())
                         .filter(|p| p.namespace == *ns);
                     let Some(part) = part else {
@@ -524,7 +569,11 @@ impl<S: RecordSource> Engine<S> {
             stale_live: Vec::new(),
             stats,
             rejudged: Vec::new(),
+            source_faults: Vec::new(),
+            repull: BTreeSet::new(),
             ready: false,
+            locked: false,
+            version_hint: BTreeMap::new(),
             failure: None,
             verify_cursor: 0,
             exchange: exchange::State::default(),
@@ -579,6 +628,7 @@ impl<S: RecordSource> Engine<S> {
     /// Idempotent.
     pub fn load(&mut self) -> Result<Changes> {
         self.check_usable()?;
+        require(!self.locked, "the engine is locked: open a new one")?;
         let paths: Vec<String> = self.ix.unread.iter().cloned().collect();
         let c = self.ingest(paths)?;
         self.ready = true;
@@ -621,6 +671,17 @@ impl<S: RecordSource> Engine<S> {
                 changed.len(),
                 changed.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
             ));
+            // Show it, and fetch the verified bytes again from a home: a source must never
+            // change them.
+            self.source_faults = changed
+                .iter()
+                .map(|p| SourceFault {
+                    path: p.clone(),
+                    what: "a source changed the bytes of a path it had given and a checkpoint had verified"
+                        .into(),
+                })
+                .collect();
+            self.repull.extend(changed.iter().cloned());
             self.rejudged = changed;
         }
         self.restored.clear();
@@ -643,7 +704,7 @@ impl<S: RecordSource> Engine<S> {
         )?;
         let mut todo: Vec<String> = Vec::new();
         for (p, k) in &kinds {
-            let now = || self.source.content_version(p).unwrap_or(None);
+            let now = || self.version_of(p);
             match k {
                 Kind::Live { namespace, .. } if in_scope(&self.options, namespace) => {
                     let was = self.ix.live_have.get(p);
@@ -688,6 +749,41 @@ impl<S: RecordSource> Engine<S> {
         self.ingest(todo)
     }
 
+    /// The paths whose provider versions a [`Engine::refresh_batched`] wants: every path held or
+    /// listed that a refresh compares. The host asks its provider for all of them in one call.
+    pub fn version_paths(&self, listing: &[String]) -> Vec<String> {
+        self.ix
+            .have
+            .keys()
+            .chain(self.ix.live_have.keys())
+            .chain(listing.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// [`Engine::refresh`] with the provider versions of the paths the host asked for in one
+    /// batch ([`Engine::version_paths`]), not one source call per record. A path missing from
+    /// `versions` is asked of the source as before.
+    pub fn refresh_batched(
+        &mut self,
+        listing: Vec<String>,
+        versions: BTreeMap<String, Option<String>>,
+    ) -> Result<Changes> {
+        self.version_hint = versions;
+        let r = self.refresh(listing);
+        self.version_hint = BTreeMap::new();
+        r
+    }
+
+    fn version_of(&self, path: &str) -> Option<String> {
+        match self.version_hint.get(path) {
+            Some(v) => v.clone(),
+            None => self.source.content_version(path).unwrap_or(None),
+        }
+    }
+
     /// Read exactly `paths` (the host says they changed) and merge them. The paths join the
     /// listing.
     pub fn apply_paths(&mut self, paths: Vec<String>) -> Result<Changes> {
@@ -725,7 +821,7 @@ impl<S: RecordSource> Engine<S> {
                     else {
                         continue;
                     };
-                    let version = self.source.content_version(&p).unwrap_or(None);
+                    let version = self.version_of(&p);
                     hold_object(&mut self.ix, &mut objects, &kind, &p, bytes, version);
                     self.ix.unread.remove(&p);
                 }
@@ -766,7 +862,7 @@ impl<S: RecordSource> Engine<S> {
                     else {
                         continue;
                     };
-                    let version = self.source.content_version(p).unwrap_or(None);
+                    let version = self.version_of(p);
                     let digest = sha(&bytes);
                     if self.ix.have.get(p).is_some_and(|h| h.sha != digest) {
                         // Different bytes where a record was verified are equivocation
@@ -840,6 +936,7 @@ impl<S: RecordSource> Engine<S> {
         secrets: &[crate::v05::slots::OpeningSecret],
     ) -> Result<Changes> {
         self.check_usable()?;
+        require(!self.locked, "the engine is locked: open a new one")?;
         let mut c = self.account.finish_unlock_slot(index, secrets)?;
         let l = self.load()?;
         absorb(&mut c, l);
@@ -855,6 +952,7 @@ impl<S: RecordSource> Engine<S> {
         results: Vec<crate::v05::account::EpochSecret>,
     ) -> Result<Changes> {
         self.check_usable()?;
+        require(!self.locked, "the engine is locked: open a new one")?;
         let mut c = self.account.finish_unlock_epochs(results)?;
         let l = self.load()?;
         absorb(&mut c, l);
@@ -937,6 +1035,11 @@ impl<S: RecordSource> Engine<S> {
     /// permission to rebuild an empty namespace.
     pub fn missing_covered(&self) -> Vec<String> {
         self.missing.iter().cloned().collect()
+    }
+    /// Faults of the record source the host must show: a source changed bytes it must never
+    /// change. Each path is also fetched again from a home that lists it.
+    pub fn source_faults(&self) -> &[SourceFault] {
+        &self.source_faults
     }
     /// Covered paths whose bytes changed since the checkpoint, which the resumed open judged
     /// again.
@@ -1193,7 +1296,304 @@ impl<S: RecordSource> Engine<S> {
         Ok(Written {
             stores,
             changes: f.changes,
+            artifact: f.artifact,
         })
+    }
+
+    /// The stores of a finished action, held as read (they are not read again), and the
+    /// result in the shape a write returns.
+    fn written_of(&mut self, f: crate::v05::account::Finished) -> Written {
+        let paths = f.record_paths();
+        let mut bytes: Vec<Vec<u8>> = Vec::new();
+        bytes.extend(f.entries.iter().map(|(_, b)| b.clone()));
+        bytes.extend(f.pending.iter().cloned());
+        bytes.extend(f.records.iter().map(|r| r.bytes.clone()));
+        let stores: Vec<(String, Vec<u8>)> = if paths.len() == bytes.len() {
+            paths.into_iter().zip(bytes).collect()
+        } else {
+            Vec::new()
+        };
+        for (p, b) in &stores {
+            self.ix.have.insert(
+                p.clone(),
+                Have {
+                    sha: sha(b),
+                    version: None,
+                },
+            );
+            self.ix.listing.insert(p.clone());
+            self.ix.unread.remove(p);
+        }
+        self.refresh_stats();
+        Written {
+            stores,
+            changes: f.changes,
+            artifact: f.artifact,
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Forwards to the account the engine owns: a session needs no second object over the same
+    // stores. Each applies its result to the engine's own state (what it stores is held as read,
+    // the counters move), so nothing is fed back through `apply_paths`.
+
+    /// Record every transition that is due (§8.7, §17.5), in the account's order: all or none.
+    /// Each recording is returned as a write: its bytes and paths for the host to store.
+    pub fn record_due(&mut self) -> Result<Vec<Written>> {
+        self.check_ready()?;
+        let done = self.account.record_due()?;
+        Ok(done.into_iter().map(|f| self.written_of(f)).collect())
+    }
+
+    /// Restrict the namespaces this engine reads (as [`Account::set_read_scope`]); the records
+    /// of a namespace newly in scope are read from the source now. An empty list reads every
+    /// namespace.
+    pub fn set_read_scope(&mut self, namespaces: Vec<String>) -> Result<Changes> {
+        self.check_usable()?;
+        let all = self.account.record_authority().namespaces().to_vec();
+        let wanted = if namespaces.is_empty() {
+            all
+        } else {
+            namespaces.clone()
+        };
+        let mut c = self.account.set_read_scope(wanted)?;
+        self.options.namespaces = namespaces;
+        let listing: Vec<String> = self.ix.listing.iter().cloned().collect();
+        classify_listing(
+            &self.options,
+            &mut self.ix,
+            &mut self.stats.ignored_paths,
+            listing,
+        )?;
+        if self.ready {
+            let todo: Vec<String> = self.ix.unread.iter().cloned().collect();
+            let more = self.ingest(todo)?;
+            absorb(&mut c, more);
+        }
+        self.refresh_stats();
+        Ok(c)
+    }
+
+    /// See [`Account::transfer_seed`].
+    pub fn transfer_seed(
+        &self,
+        pairing: &crate::v05::pairing::ConfirmedPairing,
+        entropy_seed: [u8; 32],
+    ) -> Result<crate::v05::vault::SealedBox> {
+        self.check_usable()?;
+        self.account.transfer_seed(pairing, entropy_seed)
+    }
+
+    /// See [`Account::accept_seed_transfer`]. The seed is held by the engine's account only.
+    pub fn accept_seed_transfer(
+        &mut self,
+        key: &crate::v05::pairing::TransferKey,
+        sealed: &crate::v05::vault::SealedBox,
+        pairing: &crate::v05::pairing::ConfirmedPairing,
+    ) -> Result<Changes> {
+        self.check_usable()?;
+        require(!self.locked, "the engine is locked: open a new one")?;
+        let mut c = self.account.accept_seed_transfer(key, sealed, pairing)?;
+        if self.ready {
+            let more = self.load()?;
+            absorb(&mut c, more);
+        }
+        self.refresh_stats();
+        Ok(c)
+    }
+
+    /// Take a predecessor entry the host holds (F, or any) into the account (§15.1), and hold
+    /// it as read.
+    pub fn accept_predecessor_entry(&mut self, entry: Vec<u8>, now_ms: i64) -> Result<Changes> {
+        self.check_usable()?;
+        let c = self
+            .account
+            .accept_predecessor_entry(entry.clone(), now_ms)?;
+        self.hold_predecessor(&entry);
+        self.refresh_stats();
+        Ok(c)
+    }
+    fn hold_predecessor(&mut self, entry: &[u8]) {
+        let seq = serde_json::from_slice::<Value>(entry).ok().and_then(|v| {
+            let b = crate::v05::encoding::decode_base64(
+                v.get("body")?.as_str()?,
+                crate::v05::encoding::bounds::AUTHORITY_BODY,
+            )
+            .ok()?;
+            serde_json::from_slice::<Value>(&b)
+                .ok()?
+                .get("seq")?
+                .as_u64()
+        });
+        if let Some(seq) = seq {
+            let path = format!("predecessor/authority/{seq:08}.json");
+            self.ix.have.insert(
+                path.clone(),
+                Have {
+                    sha: sha(entry),
+                    version: None,
+                },
+            );
+            self.ix.listing.insert(path);
+        }
+    }
+
+    /// §16.1: prepare the in-place upgrade of a 0.4 account (no engine state is involved).
+    pub fn begin_upgrade(
+        history: &crate::model::Records,
+        params: &crate::v05::write::upgrade::UpgradeParams,
+        now_ms: i64,
+    ) -> Result<crate::v05::write::upgrade::PendingUpgrade> {
+        Account::begin_upgrade(history, params, now_ms)
+    }
+    /// See [`Account::swift_succession`].
+    pub fn swift_succession(&self) -> Result<crate::v05::account::SwiftSuccession> {
+        self.check_usable()?;
+        self.account.swift_succession()
+    }
+    /// See [`Account::begin_swift_veto`].
+    pub fn begin_swift_veto(
+        &self,
+        params: &crate::v05::write::swift_veto::SwiftVetoParams,
+    ) -> Result<crate::v05::write::swift_veto::PendingSwiftVeto> {
+        self.check_usable()?;
+        self.account.begin_swift_veto(params)
+    }
+    /// See [`Account::begin_swift_freeze`].
+    pub fn begin_swift_freeze(
+        &self,
+        earlier_attempts: Vec<Objects>,
+        signers: Vec<String>,
+        issued_ms: i64,
+    ) -> Result<crate::v05::account::PendingMove> {
+        self.check_usable()?;
+        self.account
+            .begin_swift_freeze(earlier_attempts, signers, issued_ms)
+    }
+    /// See [`Account::begin_swift_copy_write`].
+    pub fn begin_swift_copy_write(
+        &self,
+        plan: &crate::v05::swift_copy::CopyPlan,
+        item: &crate::v05::swift_copy::CopyItem,
+        seed: [u8; 32],
+    ) -> Result<crate::v05::account::CopyWrite> {
+        self.check_ready()?;
+        self.account.begin_swift_copy_write(plan, item, seed)
+    }
+    /// Finish an import write of a copy plan (see [`Account::finish_swift_copy_write`]); what it
+    /// wrote is returned for the host to store and held as read.
+    pub fn finish_swift_copy_write(
+        &mut self,
+        plan: &mut crate::v05::swift_copy::CopyPlan,
+        write: crate::v05::account::CopyWrite,
+        signatures: Vec<SignatureResult>,
+    ) -> Result<Written> {
+        self.check_ready()?;
+        let f = self
+            .account
+            .finish_swift_copy_write(plan, write, signatures)?;
+        Ok(self.written_of(f))
+    }
+    /// See [`Account::swift_copy_destination`].
+    pub fn swift_copy_destination(
+        &self,
+        library: &str,
+    ) -> Result<crate::v05::swift_copy::Destination> {
+        self.check_ready()?;
+        self.account.swift_copy_destination(library)
+    }
+    /// See [`Account::finish_swift_copy`].
+    pub fn finish_swift_copy(
+        &self,
+        plan: crate::v05::swift_copy::CopyPlan,
+    ) -> Result<crate::v05::swift_copy::CopyResult> {
+        self.check_ready()?;
+        self.account.finish_swift_copy(plan)
+    }
+    /// See [`Account::begin_swift_copier_shares`].
+    pub fn begin_swift_copier_shares(
+        &self,
+        member: &str,
+        signers: &[String],
+        seed: [u8; 32],
+    ) -> Result<crate::v05::account::PendingMove> {
+        self.check_ready()?;
+        self.account
+            .begin_swift_copier_shares(member, signers, seed)
+    }
+    /// See [`Account::begin_swift_migration`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_swift_migration(
+        &self,
+        copy: &crate::v05::swift_copy::CopyResult,
+        members: Vec<crate::v05::write::succession::MigratedMember>,
+        drain_from_ms: i64,
+        drain_until_ms: i64,
+        issued_ms: i64,
+        signers: Vec<String>,
+    ) -> Result<crate::v05::account::PendingMove> {
+        self.check_ready()?;
+        self.account.begin_swift_migration(
+            copy,
+            members,
+            drain_from_ms,
+            drain_until_ms,
+            issued_ms,
+            signers,
+        )
+    }
+    /// Finish a step of the move (see [`Account::finish_move`]). F is held as read.
+    pub fn finish_move(
+        &mut self,
+        pending: crate::v05::account::PendingMove,
+        signatures: Vec<SignatureResult>,
+    ) -> Result<crate::v05::account::Moved> {
+        self.check_usable()?;
+        let m = self.account.finish_move(pending, signatures)?;
+        if let crate::v05::account::Moved::Frozen(f) = &m {
+            let entry = f.entry.clone();
+            self.hold_predecessor(&entry);
+        }
+        self.refresh_stats();
+        Ok(m)
+    }
+
+    /// The current live heads (0.3 §5.1): verified, current, folded.
+    pub fn live_heads(&self) -> &[crate::v05::live::LiveHead] {
+        self.account.live_heads()
+    }
+
+    /// The verdict on the record the host stored at `path`: `admitted`, `held:<why>` or
+    /// `refused:<reason>` (§11.5), or `None` when the engine holds no record there.
+    pub fn record_verdict(&self, path: &str) -> Option<String> {
+        self.account.record_verdict(path)
+    }
+
+    /// Forget the vault seed, every epoch key and the device key (all erased as they are
+    /// dropped), overwrite with zeros the opened plaintext the account keeps (its judgement,
+    /// its operation views and the memo of opened payloads), and rebuild what needs no key.
+    ///
+    /// **What cannot be guaranteed:** copies the allocator or the stack may still hold (a buffer
+    /// that grew leaves its old block; a value moved by the compiler leaves its old place), the
+    /// folded domain state of each namespace (a typed value, freed but not overwritten), and
+    /// secrets the host keeps. After `lock` the engine refuses to unlock, load or save again. The engine stays open for the verified history,
+    /// its members and pending objects; every namespace is unreadable, and it can no longer
+    /// [`Engine::save`], until the host opens a new engine with its device key.
+    pub fn lock(&mut self) -> Result<Changes> {
+        self.check_usable()?;
+        let c = self.account.forget_keys()?;
+        self.options.wipe_key();
+        self.locked = true;
+        self.retain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.refresh_stats();
+        Ok(c)
+    }
+    /// Whether [`Engine::lock`] was called.
+    pub fn is_locked(&self) -> bool {
+        self.locked
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1240,6 +1640,10 @@ impl<S: RecordSource> Engine<S> {
     /// checkpoint, both caches under the device-held key. `nonce_seed` is fresh host entropy.
     pub fn save(&mut self, nonce_seed: [u8; 32]) -> Result<Saved> {
         self.check_ready()?;
+        require(
+            !self.locked,
+            "the engine is locked: its device key was forgotten",
+        )?;
         // Never persist over a replacement that waits for an epoch key this member can open
         // (0.3 §5.1).
         if self
@@ -1254,8 +1658,8 @@ impl<S: RecordSource> Engine<S> {
                     .into(),
             ));
         }
-        let key = self.options.checkpoint_key;
-        let verifier = self.account.export_persisted(&key, nonce_seed)?;
+        let key = KeyCopy(self.options.checkpoint_key);
+        let verifier = self.account.export_persisted(&key.0, nonce_seed)?;
         let mut index: Vec<checkpoint::IndexEntry> = self
             .ix
             .have
@@ -1281,7 +1685,14 @@ impl<S: RecordSource> Engine<S> {
         h.update(b"colophon/engine-checkpoint-nonce");
         let seed2: [u8; 32] = h.finalize().into();
         let scope = self.scope();
-        let checkpoint = seal::seal(&plain, &self.options.account, &self.me, &scope, &key, seed2)?;
+        let checkpoint = seal::seal(
+            &plain,
+            &self.options.account,
+            &self.me,
+            &scope,
+            &key.0,
+            seed2,
+        )?;
         // One sealed part per namespace: the memo of its records and its fold.
         let mut memos: BTreeMap<String, Vec<crate::v05::records::RecordMemo>> = BTreeMap::new();
         for m in self.account.export_judge_memo() {
@@ -1316,7 +1727,7 @@ impl<S: RecordSource> Engine<S> {
                     &self.options.account,
                     &self.me,
                     &ps,
-                    &key,
+                    &key.0,
                     hh.finalize().into(),
                 )?,
             );

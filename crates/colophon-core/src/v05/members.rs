@@ -302,6 +302,47 @@ pub struct Grant {
     /// Unknown content (the request's, the terms', the fields').
     pub unknown: Unknown,
 }
+/// The rules a granted `terms` must meet whichever way it is granted, by an immediate `grant`
+/// entry (§9.2) or by the `grant` component of a transition (§8.7): every granted namespace is
+/// declared, and an `import` term (§9.3) goes only to a device or app, with `write` in every
+/// `records` entry and an `expires` later than `issued`. One function, so the two paths cannot
+/// disagree.
+pub(crate) fn check_granted_terms(
+    request: &Request,
+    terms: &Terms,
+    namespaces: &[String],
+    issued_ms: i64,
+) -> Result<()> {
+    if let Some(records) = terms.records() {
+        for r in records {
+            require(
+                namespaces.contains(&r.namespace),
+                "granted namespace not declared",
+            )?;
+        }
+    }
+    if terms.import() {
+        require(
+            matches!(request.kind, MemberKind::Device | MemberKind::App),
+            "import is granted only to a device or app",
+        )?;
+        let records = terms
+            .records()
+            .ok_or_else(|| malformed("import needs records"))?;
+        require(
+            records
+                .iter()
+                .all(|r| r.access == super::terms::Access::Write),
+            "import needs write in every records entry",
+        )?;
+        require(
+            terms.expires_ms().is_some_and(|e| e > issued_ms),
+            "import needs expires later than issued",
+        )?;
+    }
+    Ok(())
+}
+
 impl Grant {
     /// The member ID.
     pub fn member_id(&self) -> String {
@@ -337,14 +378,7 @@ impl Grant {
                 "member key ID already used by a principal (§3.3)",
             )?;
         }
-        if let Some(records) = terms.records() {
-            for r in records {
-                require(
-                    ctx.namespaces.contains(&r.namespace),
-                    "granted namespace not declared",
-                )?;
-            }
-        }
+        check_granted_terms(&request, &terms, ctx.namespaces, ctx.issued_ms)?;
         if terms.records().is_none() {
             require(shares.is_empty(), "shares must be empty without records")?;
         }
@@ -377,25 +411,6 @@ impl Grant {
             require(
                 request.kind != MemberKind::Agent,
                 "serves is never granted to an agent",
-            )?;
-        }
-        if terms.import() {
-            require(
-                matches!(request.kind, MemberKind::Device | MemberKind::App),
-                "import is granted only to a device or app",
-            )?;
-            let records = terms
-                .records()
-                .ok_or_else(|| malformed("import needs records"))?;
-            require(
-                records
-                    .iter()
-                    .all(|r| r.access == super::terms::Access::Write),
-                "import needs write in every records entry",
-            )?;
-            require(
-                terms.expires_ms().is_some_and(|e| e > ctx.issued_ms),
-                "import needs expires later than issued",
             )?;
         }
         Ok(Self {

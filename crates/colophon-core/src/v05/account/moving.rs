@@ -329,18 +329,35 @@ impl Account {
             header.digest() == body_digest && header.namespace == item.namespace,
             "the signed write is not the one prepared for this item",
         )?;
-        let taken = match self.query(&item.namespace, "importReceipt", json!({"key": item.key})) {
-            Ok(crate::model::Outcome::Success { value, .. }) => !value.is_null(),
-            _ => true,
-        };
-        if taken {
-            plan.record_written(&item.source_digest, &header)?;
-        } else {
-            plan.record_omitted(
+        // The item is copied when the destination's import fold took *this* write: its receipt
+        // names this operation. A receipt that names another operation means the same item was
+        // written before (another plan, or a file that arrived late): this write was a no-op
+        // and the earlier one is the copy.
+        let publication =
+            match self.query(&item.namespace, "importReceipt", json!({"key": item.key})) {
+                Ok(crate::model::Outcome::Success { value, .. }) => {
+                    value["publication"].as_str().map(str::to_string)
+                }
+                _ => None,
+            };
+        match publication {
+            Some(p) if p == header.id => plan.record_written(&item.source_digest, &header)?,
+            Some(_) => {
+                let dest = self.swift_copy_destination(plan.library())?;
+                match dest.taken(&item.namespace, &item.key) {
+                    Some(d) => plan.record_existing(&item.namespace, &item.source_digest, d)?,
+                    None => plan.record_omitted(
+                        &item.namespace,
+                        &item.source_digest,
+                        "importInvalid: the destination did not take the batch",
+                    )?,
+                }
+            }
+            None => plan.record_omitted(
                 &item.namespace,
                 &item.source_digest,
                 "importInvalid: the destination did not take the batch",
-            )?;
+            )?,
         }
         Ok(done)
     }

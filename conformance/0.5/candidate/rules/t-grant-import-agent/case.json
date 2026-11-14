@@ -1,0 +1,1 @@
+{"description":"A transition granting `import` to an agent, read only, with no expiry: §9.3 allows import only to a device or app, with write everywhere and an expiry; the `activate` is not a valid entry and the history stops before it.","expected":{"result":"malformed","seq":4},"sections":["8.7","9.2","9.3"],"verifier":{"now":"2026-11-14T09:06:00Z"}}
