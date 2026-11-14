@@ -2962,3 +2962,167 @@ fn state_aware_builders_reproduce_vector_entries_from_held_objects() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The seed (the checker's N3). The core never returns seed bytes or a raw ECDH output. An
+// opened seed is sealed only to controllers of its own account's verified keyring, to a new
+// vault the host itself creates at rotation, or to a device the person confirmed by pairing.
+// The host is trusted with the seed during rotation and transfer: it supplies the new seed's
+// entropy and performs the QR scan, so paths 2 and 3 below are its own powers, not leaks.
+
+mod seed_paths {
+    use super::*;
+    use colophon_core::crypto::Entropy;
+    use colophon_core::hpke::SealedKey;
+    use colophon_core::v05::ids::AccountId;
+    use colophon_core::v05::pairing::{
+        seal_seed_for_transfer, FailureLimiter, QrPayload, ScannedQr,
+    };
+    use colophon_core::v05::slots::{Slot, SlotBuild, SlotPlan, SlotTarget};
+    use colophon_core::v05::vault::VaultSeed;
+
+    fn dh(scalar: [u8; 32], peer: &[u8]) -> Vec<u8> {
+        let k = p256::SecretKey::from_slice(&scalar).unwrap();
+        let peer = p256::PublicKey::from_sec1_bytes(peer).unwrap();
+        p256::ecdh::diffie_hellman(k.to_nonzero_scalar(), peer.as_affine())
+            .raw_secret_bytes()
+            .to_vec()
+    }
+    fn victim_account() -> AccountId {
+        AccountId::parse(&"cd".repeat(32)).unwrap()
+    }
+    /// Stands for a seed opened from a slot of the victim's account in this session.
+    fn opened_victim() -> (VaultSeed, Vec<u8>) {
+        let bytes = [0x42u8; 32];
+        let public = VaultSeed::from_host_random(bytes).public().unwrap();
+        let opened = VaultSeed::check(&bytes, &public, &victim_account()).unwrap();
+        assert!(!opened.is_new());
+        assert_eq!(opened.account(), Some(&victim_account()));
+        (opened, bytes.to_vec())
+    }
+
+    /// Path 1, fixed. An attacker's genesis copies the victim vault's public keys; it verifies,
+    /// but it is another account, so the opened seed is not sealed to its controller.
+    #[test]
+    fn an_opened_seed_is_not_sealed_to_a_genesis_of_another_account() {
+        let (opened, _) = opened_victim();
+        let vault = opened.public().unwrap();
+        let x = key(50);
+        let mut host = Host::default();
+        host.add(&x);
+        let ctrl = raw_controller(&x, &key(51), "X", &["approve", "control", "recover"]);
+        let kr = json!({
+            "controllers": [ctrl], "threshold": 1, "recoverThreshold": 1, "addThreshold": 1,
+            "countBy": "keys", "policy": policy(), "vault": vault.to_value(),
+            "slots": [slot_for(&x.id, "X")],
+        });
+        let mut chain = Chain::new(T0 + 3_600 * SEC);
+        chain.genesis(
+            &host,
+            "Not the victim",
+            &[],
+            kr,
+            std::slice::from_ref(&x.id),
+        );
+        let state = chain.state();
+        assert_ne!(state.account(), &victim_account());
+        let r = SlotTarget::verified(&state, &opened);
+        assert!(
+            matches!(r, Err(Failure::Malformed(ref m)) if m.contains("another account")),
+            "{r:?}"
+        );
+        // Neither a rotation nor an addition lets it in.
+        let new_seed = VaultSeed::from_host_random([0x77; 32]);
+        assert!(SlotTarget::rotation(&state, &new_seed, &opened).is_err());
+        // The same genesis does accept a seed opened under its own account.
+        let own = VaultSeed::check(&[0x42; 32], &vault, state.account()).unwrap();
+        let target = SlotTarget::verified(&state, &own).unwrap();
+        let slot = SlotBuild::begin(
+            &SlotPlan {
+                controllers: vec![x.id.clone()],
+                label: "x".into(),
+            },
+            &target,
+            [3; 32],
+        )
+        .unwrap()
+        .finish(&own, &[])
+        .unwrap();
+        assert!(matches!(slot, Slot::Sealed { .. }));
+        // A seed opened under the victim's account is refused again at `finish`.
+        let target_own = SlotTarget::verified(&state, &own).unwrap();
+        let b = SlotBuild::begin(
+            &SlotPlan {
+                controllers: vec![x.id.clone()],
+                label: "x".into(),
+            },
+            &target_own,
+            [3; 32],
+        )
+        .unwrap();
+        assert!(b.finish(&opened, &[]).is_err());
+    }
+
+    /// Path 2, by design. `seal_previous` seals the old seed to a new seed made from bytes the
+    /// host chose: the host that creates the new vault at rotation can read the old seed.
+    #[test]
+    fn the_host_that_makes_the_new_seed_can_read_the_old_one() {
+        let (opened, want) = opened_victim();
+        let mine = [0x99u8; 32];
+        let my_new = VaultSeed::from_host_random(mine);
+        let my_public = my_new.public().unwrap();
+        let sealed = opened
+            .seal_previous(&my_new, &mut Entropy::new([1; 32]))
+            .unwrap();
+        let keys = colophon_core::vault::derive(mine).unwrap();
+        let info = format!(
+            "colophon/vault-previous/5\n{}\n{}",
+            my_public.id(),
+            opened.public().unwrap().id()
+        );
+        let shared = keys.agree(&sealed.enc).unwrap();
+        let plain = SealedKey {
+            enc: sealed.enc.clone(),
+            ciphertext: sealed.ciphertext.clone(),
+        }
+        .finish_open(&my_public.agreement, &shared, info.as_bytes())
+        .unwrap();
+        assert_eq!(plain, want);
+    }
+
+    /// Path 3, by design. The host performs the QR scan, so a payload it built is a pairing it
+    /// confirmed; the transfer then goes to the key it named.
+    #[test]
+    fn the_host_that_performs_the_scan_can_name_the_transfer_key() {
+        let (opened, want) = opened_victim();
+        let acct = victim_account();
+        let mut lim = FailureLimiter::new();
+        let payload = QrPayload {
+            account: acct.clone(),
+            e: key(52).point.clone(),
+            nb: [0; 32],
+        };
+        let (pairing, _) = ScannedQr::scan(&acct, &payload, lim.permit(0).unwrap())
+            .unwrap()
+            .send_nonce([0; 32]);
+        let sealed = seal_seed_for_transfer(&opened, &pairing, &mut Entropy::new([2; 32])).unwrap();
+        let plain = SealedKey {
+            enc: sealed.enc.clone(),
+            ciphertext: sealed.ciphertext.clone(),
+        }
+        .finish_open(
+            &key(52).point,
+            &dh([52; 32], &sealed.enc),
+            &pairing.transfer_info(),
+        )
+        .unwrap();
+        assert_eq!(plain, want);
+        // The failure limiter is the host's ledger: a fresh one always grants a permit.
+        let mut full = FailureLimiter::new();
+        for t in 0..6 {
+            full.record_failure(t);
+        }
+        assert!(full.permit(10).is_err());
+        assert!(FailureLimiter::new().permit(10).is_ok());
+    }
+}

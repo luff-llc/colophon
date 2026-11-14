@@ -134,8 +134,29 @@ fn locked<T: std::fmt::Debug>(r: Result<T, Failure>) {
 fn failed<T: std::fmt::Debug>(r: Result<T, Failure>) -> Failure {
     r.unwrap_err()
 }
+fn default_account() -> AccountId {
+    AccountId::parse(&"ab".repeat(32)).unwrap()
+}
 /// Open a slot completely: kit/device software identities answer ECDH, `prf_n` answers PRF.
 fn open(
+    slot: &Slot,
+    vault: &VaultPublic,
+    controllers: &BTreeMap<String, Controller>,
+    identities: &[&SoftwareIdentity],
+    prf_n: u8,
+) -> Result<VaultSeed, Failure> {
+    open_as(
+        &default_account(),
+        slot,
+        vault,
+        controllers,
+        identities,
+        prf_n,
+    )
+}
+/// [`open`], recording the seed as opened under `account`.
+fn open_as(
+    account: &AccountId,
     slot: &Slot,
     vault: &VaultPublic,
     controllers: &BTreeMap<String, Controller>,
@@ -153,7 +174,7 @@ fn open(
             OpeningInput::Prf { .. } => OpeningSecret::Prf(prf(prf_n)),
         })
         .collect();
-    slot.finish_open(vault, controllers, &secrets)
+    slot.finish_open(account, vault, controllers, &secrets)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -208,7 +229,7 @@ fn software_identity_expansion_matches_the_published_software_keys() {
 fn the_seed_check_is_vault_locked_and_leaves_the_session_alone() {
     let vault = vault_of(70);
     for bad in [vec![], vec![70; 31], vec![70; 33], vec![71; 32]] {
-        locked(VaultSeed::check(&bad, &vault));
+        locked(VaultSeed::check(&bad, &vault, &default_account()));
     }
     // Both public keys must match, not only one.
     let other = vault_of(71);
@@ -222,17 +243,17 @@ fn the_seed_check_is_vault_locked_and_leaves_the_session_alone() {
             agreement: other.agreement.clone(),
         },
     ] {
-        locked(VaultSeed::check(&[70; 32], &expected));
+        locked(VaultSeed::check(&[70; 32], &expected, &default_account()));
     }
     let mut session = VaultSession::new();
     assert!(!session.is_unlocked());
     session
-        .install(VaultSeed::check(&[70; 32], &vault))
+        .install(VaultSeed::check(&[70; 32], &vault, &default_account()))
         .unwrap();
     assert_eq!(session.seed().unwrap().public().unwrap(), vault);
     // A failed open does not replace or clear the unlocked seed.
     assert_eq!(
-        session.install(VaultSeed::check(&[71; 32], &vault)),
+        session.install(VaultSeed::check(&[71; 32], &vault, &default_account())),
         Err(Failure::Refused(Reason::VaultLocked))
     );
     assert_eq!(session.seed().unwrap().public().unwrap(), vault);
@@ -607,11 +628,27 @@ fn a_combined_slot_needs_every_part_in_order() {
             OpeningInput::Prf { .. } => OpeningSecret::Prf(prf(7)),
         }
     };
-    slot.finish_open(&f.vault, &f.controllers, &[right(0), right(1), right(2)])
-        .unwrap();
-    locked(slot.finish_open(&f.vault, &f.controllers, &[right(1), right(0), right(2)]));
-    locked(slot.finish_open(&f.vault, &f.controllers, &[right(0), right(1)]));
+    slot.finish_open(
+        &default_account(),
+        &f.vault,
+        &f.controllers,
+        &[right(0), right(1), right(2)],
+    )
+    .unwrap();
     locked(slot.finish_open(
+        &default_account(),
+        &f.vault,
+        &f.controllers,
+        &[right(1), right(0), right(2)],
+    ));
+    locked(slot.finish_open(
+        &default_account(),
+        &f.vault,
+        &f.controllers,
+        &[right(0), right(1)],
+    ));
+    locked(slot.finish_open(
+        &default_account(),
         &f.vault,
         &f.controllers,
         &[
@@ -1309,7 +1346,9 @@ fn previous_vault_is_sealed_to_the_new_vault_under_its_label() {
     let (old_pub, new_pub) = (old.public().unwrap(), new.public().unwrap());
     let sealed = old.seal_previous(&new, &mut Entropy::new([3; 32])).unwrap();
     // Whoever opens the new vault opens this.
-    let reached = new.open_previous(&sealed, &old_pub).unwrap();
+    let reached = new
+        .open_previous(&sealed, &old_pub, &default_account())
+        .unwrap();
     assert_eq!(reached.public().unwrap(), old_pub);
     // The HPKE `info` and AAD are exactly the §8.3 label (checked with the 0.4 HPKE).
     let info = format!(
@@ -1329,8 +1368,8 @@ fn previous_vault_is_sealed_to_the_new_vault_under_its_label() {
     .unwrap();
     assert_eq!(plain, vec![70; 32]);
     // Any other old vault, any other new seed, and a swapped label fail as vaultLocked.
-    locked(new.open_previous(&sealed, &vault_of(72)));
-    locked(seed(72).open_previous(&sealed, &old_pub));
+    locked(new.open_previous(&sealed, &vault_of(72), &default_account()));
+    locked(seed(72).open_previous(&sealed, &old_pub, &default_account()));
     assert!(SealedKey {
         enc: sealed.enc.clone(),
         ciphertext: sealed.ciphertext.clone()
@@ -1352,7 +1391,7 @@ fn previous_vault_is_sealed_to_the_new_vault_under_its_label() {
         .seal_previous(&old, &mut Entropy::new([4; 32]))
         .unwrap();
     let step2 = reached
-        .open_previous(&hop, &older.public().unwrap())
+        .open_previous(&hop, &older.public().unwrap(), &default_account())
         .unwrap();
     assert_eq!(step2.public().unwrap(), older.public().unwrap());
     // H1 (the checker's first way in): the target is a seed the core holds, never a bare
@@ -1614,7 +1653,8 @@ fn the_qr_alternative_is_a_separate_session_with_both_nonces_and_no_code() {
 
 #[test]
 fn the_seed_moves_to_a_new_device_under_the_transfer_label() {
-    let acct = account(1);
+    let state = account_state();
+    let acct = state.account().clone();
     let vault = vault_of(70);
     let device = TransferKey::new([21; 32]).unwrap();
     let e = device.public();
@@ -1673,17 +1713,20 @@ fn the_seed_moves_to_a_new_device_under_the_transfer_label() {
     locked(device.open_seed(&wrong, &pairing, &vault));
     // The new device then builds a slot with the opened seed, for a controller of the
     // verified keyring (here the account vector's device), and opens it with that key.
-    let state = account_state();
     let device_key = soft(11);
     let cid = device_key.id();
     let plan = SlotPlan {
         controllers: vec![cid.clone()],
         label: "Mac".into(),
     };
-    let slot = SlotBuild::begin(&plan, &SlotTarget::verified(&state), [31; 32])
-        .unwrap()
-        .finish(&got, &[])
-        .unwrap();
+    let slot = SlotBuild::begin(
+        &plan,
+        &SlotTarget::verified(&state, &got).unwrap(),
+        [31; 32],
+    )
+    .unwrap()
+    .finish(&got, &[])
+    .unwrap();
     open(
         &slot,
         &vault,
@@ -1700,11 +1743,11 @@ fn the_seed_moves_to_a_new_device_under_the_transfer_label() {
 #[test]
 fn an_opened_seed_is_only_sealed_to_controllers_of_the_verified_keyring() {
     let state = account_state();
-    let verified = SlotTarget::verified(&state);
     // An opened seed: unlock the account's own slot with the device key.
     let device = soft(11);
     let slot = Slot::from_value(&state.keyring().slots[0]).unwrap();
-    let opened = open(
+    let opened = open_as(
+        state.account(),
         &slot,
         &VaultPublic::from_pair(&state.keyring().vault),
         &state.keyring().controllers,
@@ -1713,6 +1756,7 @@ fn an_opened_seed_is_only_sealed_to_controllers_of_the_verified_keyring() {
     )
     .unwrap();
     assert!(!opened.is_new());
+    let verified = SlotTarget::verified(&state, &opened).unwrap();
     // The attacker's raw key is not in the verified keyring: refused at `begin`.
     let mine = soft(0x99);
     let attacker = raw_controller(&mine, &["approve"], "mine");
@@ -1736,11 +1780,11 @@ fn an_opened_seed_is_only_sealed_to_controllers_of_the_verified_keyring() {
     );
     // The rotation route likewise needs the new seed, and keeps the verified controllers.
     assert_eq!(
-        failed(SlotTarget::rotation(&state, &opened)).code(),
+        failed(SlotTarget::rotation(&state, &opened, &opened)).code(),
         "malformed"
     );
     let new_seed = seed(71);
-    let rotation = SlotTarget::rotation(&state, &new_seed).unwrap();
+    let rotation = SlotTarget::rotation(&state, &new_seed, &opened).unwrap();
     assert_eq!(
         failed(SlotBuild::begin(&plan, &rotation, [3; 32])).code(),
         "malformed"
@@ -1903,6 +1947,6 @@ fn vault_locked_is_a_reason() {
     let f = Failure::Refused(Reason::VaultLocked);
     assert_eq!(f.code(), "refused:vaultLocked");
     assert_eq!(Reason::VaultLocked.as_str(), "vaultLocked");
-    let err = VaultSeed::check(&[1; 31], &vault_of(70)).unwrap_err();
+    let err = VaultSeed::check(&[1; 31], &vault_of(70), &default_account()).unwrap_err();
     assert_eq!(err, f);
 }

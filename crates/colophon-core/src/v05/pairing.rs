@@ -1,19 +1,32 @@
 //! Pairing (§7.3) and moving the seed to a new device (§7.4).
 //!
-//! **No secret crosses this module.** Pairing handles only public values (the account ID, the
-//! point `E` and the two nonces). The seed moves only as an HPKE ciphertext: the seed holder
-//! seals it through [`VaultSeed`]'s sealing method (the seed bytes are never read here), and
-//! the new device opens it with a [`TransferKey`], whose private scalar lives inside an opaque
-//! [`AgreementKey`] of [`super::vault`] and is never exposed; the result is a [`VaultSeed`]
-//! handle, checked against the keyring's vault. No raw ECDH result is formed here.
+//! **What the core guarantees, exactly.** The core never returns seed bytes or a raw ECDH
+//! output through its API. An opened seed can be sealed only to controllers of its own account's
+//! verified keyring (it records the account it was opened under, and a state of another account
+//! is refused), to a new vault the host itself creates at rotation, or to a device the person
+//! confirmed by pairing. The host is trusted with the seed during rotation and transfer: it
+//! supplies the new seed's entropy and so can read what is sealed to it, and it performs the
+//! QR scan, so a payload it builds is a pairing it confirmed. The core does not, and cannot,
+//! stop a host that performs the ECDH and PRF work from computing a seed it was never meant to
+//! hold; it bounds what the *core's own functions* will seal.
+//!
+//! Pairing handles only public values (the account ID, the point `E` and the two nonces). The
+//! seed moves only as an HPKE ciphertext: the seed holder seals it through [`VaultSeed`]'s
+//! sealing method (the seed bytes are never read here), and the new device opens it with a
+//! [`TransferKey`], whose private scalar lives inside an opaque [`AgreementKey`] of
+//! [`super::vault`] and is never exposed; the result is a [`VaultSeed`] handle, checked against
+//! the keyring's vault and recorded as opened under the pairing's account. No raw ECDH result
+//! is formed here.
 //!
 //! **Sessions are typed.** The code path (`Joiner`, `ExistingWaiting`, `PairingCode`) and the QR
 //! path (`QrJoiner`, `ScannedQr`) are different types: a commitment-bearing `Joiner` cannot show
 //! `nB`, and each step consumes its state. A `ConfirmedPairing`, which a seed transfer needs, has
 //! no public constructor: it comes only from a compared code or the QR path. On the QR path what
 //! authenticates `E` is the scan of the joining device's screen (§7.3); the core cannot see a
-//! scan, so the host attests it by calling `ScannedQr::scan`. Starting a session on H takes a
-//! `Permit` from the `FailureLimiter`.
+//! scan, so the host attests it by calling `ScannedQr::scan`: a payload the host builds is a
+//! scan it claims to have made. Starting a session on H takes a `Permit` from the
+//! `FailureLimiter`, which is plain data the host keeps: a fresh one always grants a permit, so
+//! the five-per-hour limit holds only while the host keeps its ledger.
 //!
 //! The core has no clock and no RNG: nonces, the ephemeral key's seed and the time of every
 //! failure come in as arguments. The state machine consumes itself at each step, so a
@@ -498,6 +511,8 @@ impl TransferKey {
         if pairing.e() != self.public().as_slice() {
             return Err(malformed("the pairing is not for this transfer key"));
         }
-        self.0.open_seed(sealed, &pairing.transfer_info(), vault)
+        self.0
+            .open_seed(sealed, &pairing.transfer_info(), vault)
+            .map(|s| s.bound_to(pairing.account()))
     }
 }

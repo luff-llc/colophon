@@ -1,37 +1,40 @@
 //! The vault (§7.1), software identities and kits (§7.5), and the restricted vault HPKE open
 //! (§17.1) under Colophon 0.5.
 //!
-//! **How "the core never exports the seed or a raw ECDH output" is enforced here (§3.4,
-//! §17.1).** Every secret is an opaque type with private fields and no accessor of any
-//! visibility: [`VaultSeed`], [`EcdhOutput`], [`PrfOutput`], [`PartSecret`], [`BoxKey`],
-//! [`AgreementKey`] and [`SoftwareIdentity`]. They have no `Clone`, no `Copy`, no `Serialize`
-//! and a redacted `Debug`. Anything that must read their bytes is a function or method *in this
-//! file*; the `pub(super)` ones take and return only other opaque secrets, ciphertext or
-//! public points. Nothing returns the seed, a raw ECDH result, a PRF output, a part secret or a
-//! derived key. Secrets enter only through `from_host_*` constructors (the host's inputs) and
-//! leave only sealed.
+//! **What the core guarantees, exactly.** The core never returns seed bytes or a raw ECDH
+//! output through its API. An opened seed can be sealed only to controllers of its own account's
+//! verified keyring (it records the account it was opened under, and a state of another account
+//! is refused), to a new vault the host itself creates at rotation, or to a device the person
+//! confirmed by pairing. The host is trusted with the seed during rotation and transfer: it
+//! supplies the new seed's entropy and so can read what is sealed to it, and it performs the
+//! QR scan, so a payload it builds is a pairing it confirmed. The core does not, and cannot,
+//! stop a host that performs the ECDH and PRF work from computing a seed it was never meant to
+//! hold; it bounds what the *core's own functions* will seal.
 //!
-//! **Where the seed can be sealed to, and why each target is bounded.** The core hands out
-//! ciphertext of the seed, so "never exported" holds only if the *targets* are bounded. A seed
-//! is **new** (made from host entropy in this session: a genesis, or the new vault of a
-//! rotation) or **opened** (obtained by unlocking a slot, a transfer or `previousVault`).
-//! The only paths that seal a seed are:
-//! 1. `slots::SlotBuild` to controllers of a verified `v05::history::State` (an opened or new
-//!    seed). A controller the verifier has not seen is refused; `pub(crate)` additions are for
-//!    the account layer, which builds them from the transition it is preparing (§17.3).
+//! **How the secrets are kept inside the core (§3.4, §17.1).** Every secret is an opaque type
+//! with private fields and no accessor of any visibility: [`VaultSeed`], [`EcdhOutput`],
+//! [`PrfOutput`], [`PartSecret`], [`BoxKey`], [`AgreementKey`] and [`SoftwareIdentity`]. They
+//! have no `Clone`, no `Copy`, no `Serialize` and a redacted `Debug`. Anything that must read
+//! their bytes is a function or method *in this file*; the `pub(super)` ones take and return
+//! only other opaque secrets, ciphertext or public points. Secrets enter only through
+//! `from_host_*` constructors (the host's inputs) and leave only sealed.
+//!
+//! **The paths that seal a seed.** A seed is **new** (made from host entropy in this session:
+//! a genesis, or the new vault of a rotation) or **opened** (obtained by unlocking a slot, a
+//! transfer or `previousVault`, and recorded as opened under that account). The only paths:
+//! 1. `slots::SlotBuild` to controllers of a verified `v05::history::State`. An opened seed is
+//!    sealed only if the state is of the account it was opened under; a controller the
+//!    verifier has not seen is refused. `pub(crate)` additions are for the account layer.
 //! 2. `slots::SlotBuild` for a genesis or a rotation: only a **new** seed, to the controllers
 //!    of the genesis being prepared, or of the verified state for a rotation.
 //! 3. [`VaultSeed::seal_previous`]: the old seed (any) to the **new seed** the core holds
-//!    (new only), never to a bare public vault.
+//!    (new only). The new seed is made from host-chosen bytes, so the host that creates the new
+//!    vault can open `previousVault` and read the old seed. That is the host's power at
+//!    rotation, by design.
 //! 4. `pairing::seal_seed_for_transfer` to the ephemeral `E` of a [`ConfirmedPairing`], which
 //!    exists only after a compared six-digit code or a QR scanned from the joining device's
-//!    screen (§7.3). This is the one path that seals an opened seed to a key the host named, and
-//!    §7.4 requires it; it is bounded by the person's confirmation, which the core cannot
-//!    check beyond the commit-then-reveal order and the single reveal.
-//!
-//! A host that can call the API with an unlocked session is trusted with what the person
-//! trusts it with: it can start path 4 and the person confirms or not. The core still never
-//! returns the seed's bytes.
+//!    screen (§7.3). §7.4 requires it. The core cannot check the scan or the comparison beyond
+//!    the commit-then-reveal order and the single reveal; the host attests them.
 //!
 //! **Erasure is best effort.** The crate forbids `unsafe` and has no zeroizing dependency, so
 //! overwriting uses ordinary writes that `std::hint::black_box` only discourages the
@@ -44,7 +47,7 @@
 //! purpose (§7.1: "unchanged in 0.5").
 use super::descriptor::{valid_point, KeyDescriptor};
 use super::encoding::{decode_base64, encode_base64};
-use super::ids::key_id;
+use super::ids::{key_id, AccountId};
 use super::{Failure, Reason};
 use crate::crypto::Entropy;
 use crate::hpke::SealedKey;
@@ -558,6 +561,8 @@ pub fn kit_identity(secret: &[u8; 32]) -> VResult<SoftwareIdentity> {
 pub struct VaultSeed {
     seed: [u8; 32],
     new: bool,
+    /// The account whose keyring this seed was opened under; `None` for a new seed.
+    account: Option<AccountId>,
 }
 impl VaultSeed {
     /// A fresh vault seed: 32 random bytes from the host (§7.1).
@@ -569,7 +574,21 @@ impl VaultSeed {
         Self {
             seed: bytes,
             new: true,
+            account: None,
         }
+    }
+    /// The account this opened seed was opened under (the account of the keyring whose slot,
+    /// transfer or `previousVault` it came from); `None` for a new seed. An opened seed can be
+    /// sealed to controllers only of this account's verified keyring.
+    pub fn account(&self) -> Option<&AccountId> {
+        self.account.as_ref()
+    }
+    /// Record the account an opened seed was opened under (set once, by the open paths).
+    pub(super) fn bound_to(mut self, account: &AccountId) -> Self {
+        if !self.new {
+            self.account = Some(account.clone());
+        }
+        self
     }
     /// True for a seed made from host entropy in this session, false for an opened one.
     pub fn is_new(&self) -> bool {
@@ -590,10 +609,20 @@ impl VaultSeed {
     /// keys of the keyring's `vault`. Anything else is `refused:vaultLocked`. The caller
     /// replaces its session seed only on `Ok`.
     ///
-    /// The result is an **opened** seed ([`VaultSeed::is_new`] is false).
-    pub fn check(plaintext: &[u8], expected: &VaultPublic) -> VResult<Self> {
+    /// The result is an **opened** seed ([`VaultSeed::is_new`] is false), recorded as opened
+    /// under `account`.
+    pub fn check(plaintext: &[u8], expected: &VaultPublic, account: &AccountId) -> VResult<Self> {
+        Self::check_unbound(plaintext, expected).map(|s| s.bound_to(account))
+    }
+    /// [`VaultSeed::check`] without recording an account: crate-internal, for the open paths
+    /// that bind the result themselves and for re-opening a slot being built.
+    pub(super) fn check_unbound(plaintext: &[u8], expected: &VaultPublic) -> VResult<Self> {
         let seed = <[u8; 32]>::try_from(plaintext).map_err(|_| locked())?;
-        let this = Self { seed, new: false };
+        let this = Self {
+            seed,
+            new: false,
+            account: None,
+        };
         let public = this.public().map_err(|_| locked())?;
         if public != *expected {
             return Err(locked());
@@ -603,7 +632,7 @@ impl VaultSeed {
     /// [`VaultSeed::check`] on a plaintext buffer the core owns: the buffer is overwritten
     /// before it is dropped (best effort, see the file header).
     pub(super) fn check_owned(mut plain: Vec<u8>, expected: &VaultPublic) -> VResult<Self> {
-        let r = Self::check(&plain, expected);
+        let r = Self::check_unbound(&plain, expected);
         erase(&mut plain);
         r
     }
@@ -633,9 +662,10 @@ impl VaultSeed {
     /// `"colophon/vault-previous/5\n" ‖ newVaultID ‖ "\n" ‖ oldVaultID`. `self` is the old seed.
     ///
     /// The target is the **new seed itself**, which must be a new seed ([`VaultSeed::is_new`]):
-    /// one the core's host made from entropy in this session for this rotation. A caller
-    /// cannot name a bare public vault, and an opened seed is refused as a target, so the old
-    /// seed is only ever sealed to a vault whose seed the core holds.
+    /// one the host made from entropy in this session for this rotation. A caller cannot name
+    /// a bare public vault, and an opened seed is refused as a target. The new seed's bytes are
+    /// the host's own choice, so the host that creates the new vault can open `previousVault`
+    /// and read the old seed: the host is trusted with the seed during rotation.
     ///
     /// ```compile_fail
     /// use colophon_core::{crypto::Entropy, v05::vault::VaultSeed};
@@ -662,11 +692,12 @@ impl VaultSeed {
         &self,
         previous: &SealedBox,
         old_vault: &VaultPublic,
+        account: &AccountId,
     ) -> VResult<VaultSeed> {
         let new = self.public()?;
         let info = previous_info(&new.id(), &old_vault.id());
         let plain = self.identity()?.agreement.open_hpke(previous, &info)?;
-        Self::check_owned(plain, old_vault)
+        Self::check_owned(plain, old_vault).map(|s| s.bound_to(account))
     }
     /// Open an HPKE seal to the vault for a format the **host** registered (§17.1). The seal's
     /// `info` (also its AAD) is the host's label. A label beginning with `colophon/` is

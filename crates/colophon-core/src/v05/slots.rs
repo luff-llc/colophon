@@ -1,12 +1,23 @@
 //! Vault slots under Colophon 0.5 (§7.2): the value type, structural validation, opening,
 //! building, and rotation analysis (§8.3, §8.4).
 //!
-//! **No secret crosses this module.** Every secret it handles (the seed, a raw ECDH result, a
+//! **What the core guarantees, exactly.** The core never returns seed bytes or a raw ECDH
+//! output through its API. An opened seed can be sealed only to controllers of its own account's
+//! verified keyring (it records the account it was opened under, and a state of another account
+//! is refused), to a new vault the host itself creates at rotation, or to a device the person
+//! confirmed by pairing. The host is trusted with the seed during rotation and transfer: it
+//! supplies the new seed's entropy and so can read what is sealed to it, and it performs the
+//! QR scan, so a payload it builds is a pairing it confirmed. The core does not, and cannot,
+//! stop a host that performs the ECDH and PRF work from computing a seed it was never meant to
+//! hold; it bounds what the *core's own functions* will seal.
+//!
+//! This file never reads secret bytes. Every secret it handles (the seed, a raw ECDH result, a
 //! PRF output, a part secret, a box key) is an opaque type of [`super::vault`] with private
-//! fields; this file never reads their bytes. Hosts hand secrets in as [`EcdhOutput`] and
-//! [`PrfOutput`] (from the host's bytes) and get back only a [`VaultSeed`] handle, a [`Slot`]
-//! (ciphertext) or a [`SlotBuild`] request. The slot labels `colophon/vault-slot/4` and
-//! `colophon/vault-part/4` are kept on purpose (§7.1).
+//! fields. Hosts hand secrets in as [`EcdhOutput`] and [`PrfOutput`] (from the host's bytes)
+//! and get back only a [`VaultSeed`] handle, a [`Slot`] (ciphertext) or a [`SlotBuild`]
+//! request. A seed opened from a slot is recorded as opened under the account the host names
+//! at [`Slot::finish_open`]; [`SlotTarget`] refuses a state of any other account. The slot
+//! labels `colophon/vault-slot/4` and `colophon/vault-part/4` are kept on purpose (§7.1).
 //!
 //! The shape follows the 0.4 library: a *begin* that returns exactly what the host must do
 //! (an ECDH against a point, a PRF evaluation of a salt, an assertion over a core challenge),
@@ -16,6 +27,7 @@ use super::descriptor::{general_origin_allowed, Controller, KeyForm, Role};
 use super::encoding::{bounds, encode_base64url, is_lower_hex, strict_parse};
 use super::history::keyring::Keyring;
 use super::history::State;
+use super::ids::AccountId;
 use super::signature::parse_der;
 pub use super::vault::SealedBox;
 use super::vault::{
@@ -286,6 +298,16 @@ impl Slot {
     /// leaves the caller's session seed unchanged: replace it only on `Ok`.
     pub fn finish_open(
         &self,
+        account: &AccountId,
+        vault: &VaultPublic,
+        controllers: &BTreeMap<String, Controller>,
+        secrets: &[OpeningSecret],
+    ) -> VResult<VaultSeed> {
+        self.open_unbound(vault, controllers, secrets)
+            .map(|s| s.bound_to(account))
+    }
+    fn open_unbound(
+        &self,
         vault: &VaultPublic,
         controllers: &BTreeMap<String, Controller>,
         secrets: &[OpeningSecret],
@@ -472,6 +494,7 @@ pub struct SlotBuild {
     vault: VaultPublic,
     controllers: BTreeMap<String, Controller>,
     needs_new_seed: bool,
+    account: Option<AccountId>,
     ids: Vec<String>,
     label: String,
     requests: Vec<PrfRequest>,
@@ -497,17 +520,35 @@ pub struct SlotTarget {
     vault: VaultPublic,
     controllers: BTreeMap<String, Controller>,
     needs_new_seed: bool,
+    /// The account whose verified keyring the controllers come from; an opened seed must have
+    /// been opened under it. `None` for a genesis.
+    account: Option<AccountId>,
+}
+
+/// An opened seed is bound to the account it was opened under; a state of another account is
+/// refused. A new seed is bound to nothing.
+fn same_account(state: &State, seed: &VaultSeed) -> VResult<()> {
+    require(
+        seed.is_new() || seed.account() == Some(state.account()),
+        "the seed was opened under another account",
+    )
 }
 impl SlotTarget {
     /// A slot of the account's current vault for a controller of its verified keyring
     /// (`v05::history::State`, from `verify_history`). Any seed that opens that vault may be
     /// sealed to it, opened or new.
-    pub fn verified(state: &State) -> Self {
-        Self {
+    ///
+    /// `seed` is the seed that will be sealed. An opened seed records the account it was
+    /// opened under, and a state of any other account is refused: a genesis an attacker signs
+    /// with the victim's vault public keys is a verified state of another account.
+    pub fn verified(state: &State, seed: &VaultSeed) -> VResult<Self> {
+        same_account(state, seed)?;
+        Ok(Self {
             vault: VaultPublic::from_pair(&state.keyring().vault),
             controllers: state.keyring().controllers.clone(),
             needs_new_seed: false,
-        }
+            account: Some(state.account().clone()),
+        })
     }
     /// The slots of a genesis being prepared: no verified state exists yet, so the controllers
     /// are those of the genesis. Only the **new** seed of that genesis can be sealed this way;
@@ -521,17 +562,23 @@ impl SlotTarget {
             vault: new_seed.public()?,
             controllers: controllers.clone(),
             needs_new_seed: true,
+            account: None,
         })
     }
     /// The slots of a rotation (a `vault` entry, or a vault change in a transition): the
     /// controllers of the verified state under the **new** seed's vault. Only that new seed can
     /// be sealed this way.
-    pub fn rotation(state: &State, new_seed: &VaultSeed) -> VResult<Self> {
+    ///
+    /// `old_seed` is the seed being rotated away from: an opened one must have been opened
+    /// under this state's account, or the state is refused.
+    pub fn rotation(state: &State, new_seed: &VaultSeed, old_seed: &VaultSeed) -> VResult<Self> {
         require(new_seed.is_new(), "a rotation's slots need the new seed")?;
+        same_account(state, old_seed)?;
         Ok(Self {
             vault: new_seed.public()?,
             controllers: state.keyring().controllers.clone(),
             needs_new_seed: true,
+            account: None,
         })
     }
     /// The current vault's slot for a controller that a transition or entry now being
@@ -539,16 +586,22 @@ impl SlotTarget {
     /// verified keyring). The account layer builds `added` from that body; hosts cannot call
     /// this.
     #[allow(dead_code)] // constructed by the account layer (E1, E5)
-    pub(crate) fn with_additions(state: &State, added: &[Controller]) -> Self {
+    pub(crate) fn with_additions(
+        state: &State,
+        added: &[Controller],
+        seed: &VaultSeed,
+    ) -> VResult<Self> {
+        same_account(state, seed)?;
         let mut controllers = state.keyring().controllers.clone();
         for c in added {
             controllers.insert(c.id(), c.clone());
         }
-        Self {
+        Ok(Self {
             vault: VaultPublic::from_pair(&state.keyring().vault),
             controllers,
             needs_new_seed: false,
-        }
+            account: Some(state.account().clone()),
+        })
     }
 }
 impl std::fmt::Debug for SlotBuild {
@@ -653,6 +706,7 @@ impl SlotBuild {
             vault: vault.clone(),
             controllers: controllers.clone(),
             needs_new_seed: target.needs_new_seed,
+            account: target.account.clone(),
             ids: plan.controllers.clone(),
             label: plan.label.clone(),
             requests,
@@ -677,6 +731,10 @@ impl SlotBuild {
         require(
             seed.is_new() || !self.needs_new_seed,
             "an opened seed is sealed only to the controllers of the verified keyring",
+        )?;
+        require(
+            seed.is_new() || (self.account.is_some() && seed.account() == self.account.as_ref()),
+            "an opened seed is sealed only to controllers of the account it was opened under",
         )?;
         // Resume the entropy after the draws `begin` made.
         let mut entropy = Entropy::new(self.entropy_seed);
