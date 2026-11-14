@@ -237,7 +237,14 @@ impl World {
         self.run(batch);
     }
     /// Write as `p`: prepare, host-sign, finish; hold the header.
-    fn write(&mut self, p: &Person, ns: &str, level: Level, kind: &str, payload: Value) -> HeldRecord {
+    fn write(
+        &mut self,
+        p: &Person,
+        ns: &str,
+        level: Level,
+        kind: &str,
+        payload: Value,
+    ) -> HeldRecord {
         let seed = self.seed();
         let prepared = prepare_operation(
             &self.objects,
@@ -333,7 +340,7 @@ fn the_first_rekey_must_name_every_namespace() {
     let r = prepare_rekey(
         &objects,
         w.now,
-        &[c.sign.id.clone()],
+        std::slice::from_ref(&c.sign.id),
         T0 + 20 * SEC,
         &["notes".into()],
         [9; 32],
@@ -355,8 +362,15 @@ fn a_new_epoch_goes_to_the_vault_and_every_member_with_any_access_and_nobody_els
     );
     let seed = w.seed();
     let issued = w.issued();
-    let (batch, keys) = prepare_rekey(&w.objects, w.now, &w.cids(), issued, &["notes".into()], seed)
-        .unwrap();
+    let (batch, keys) = prepare_rekey(
+        &w.objects,
+        w.now,
+        &w.cids(),
+        issued,
+        &["notes".into()],
+        seed,
+    )
+    .unwrap();
     w.run(batch);
     w.absorb(keys);
     let auth = w.auth();
@@ -398,12 +412,13 @@ fn a_seal_opens_for_its_recipient_and_only_to_its_account_namespace_and_epoch() 
     assert!(other.get(auth.account(), "journal", 1).is_none());
     assert!(other.get(auth.account(), "notes", 2).is_none());
     let rec = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "x"}));
-    let (hdr, _) =
-        colophon_core::v05::records::OperationHeader::parse(&rec.bytes).unwrap();
+    let (hdr, _) = colophon_core::v05::records::OperationHeader::parse(&rec.bytes).unwrap();
     key.open(&hdr).unwrap();
     let wrong_ns = EpochKey::clone(&w.keys.get(auth.account(), "journal", 1).unwrap().clone());
     let r = wrong_ns.open(&hdr);
-    assert!(matches!(r, Err(Failure::Malformed(m)) if m.contains("another account, namespace or epoch")));
+    assert!(
+        matches!(r, Err(Failure::Malformed(m)) if m.contains("another account, namespace or epoch"))
+    );
 }
 
 fn key_for_test(n: u8) -> Key {
@@ -442,8 +457,15 @@ fn a_grant_seals_every_historical_epoch_to_the_member_and_needs_the_keys() {
     // A second epoch, then a grant: shares must cover epochs 1 and 2.
     let seed = w.seed();
     let issued = w.issued();
-    let (batch, keys) = prepare_rekey(&w.objects, w.now, &w.cids(), issued, &["notes".into()], seed)
-        .unwrap();
+    let (batch, keys) = prepare_rekey(
+        &w.objects,
+        w.now,
+        &w.cids(),
+        issued,
+        &["notes".into()],
+        seed,
+    )
+    .unwrap();
     w.run(batch);
     w.absorb(keys);
     let wr = person(10);
@@ -465,7 +487,10 @@ fn a_grant_seals_every_historical_epoch_to_the_member_and_needs_the_keys() {
     w.grant(&wr, "device", terms("write"));
     let auth = w.auth();
     for e in [1, 2] {
-        assert!(auth.sealed_to("notes", e).contains(&wr.sign.id), "epoch {e}");
+        assert!(
+            auth.sealed_to("notes", e).contains(&wr.sign.id),
+            "epoch {e}"
+        );
         let r = auth.epoch_seal_request("notes", e, &wr.sign.id).unwrap();
         let k = auth
             .open_epoch("notes", e, &wr.sign.id, &wr.agree.ecdh(&r.enc))
@@ -489,8 +514,15 @@ fn renew_seals_the_epochs_the_member_lacks_including_one_introduced_while_expire
     w.now = T0 + 600 * SEC;
     let seed = w.seed();
     let issued = T0 + 400 * SEC;
-    let (batch, keys) = prepare_rekey(&w.objects, w.now, &w.cids(), issued, &["notes".into()], seed)
-        .unwrap();
+    let (batch, keys) = prepare_rekey(
+        &w.objects,
+        w.now,
+        &w.cids(),
+        issued,
+        &["notes".into()],
+        seed,
+    )
+    .unwrap();
     w.run(batch);
     w.absorb(keys);
     assert!(!w.auth().sealed_to("notes", 2).contains(&wr.sign.id));
@@ -514,7 +546,13 @@ fn renew_seals_the_epochs_the_member_lacks_including_one_introduced_while_expire
     auth.open_epoch("notes", 2, &wr.sign.id, &wr.agree.ecdh(&req.enc))
         .unwrap();
     // The renewed writer can write again.
-    w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "back"}));
+    w.write(
+        &wr,
+        "notes",
+        Level::Write,
+        "addNote",
+        json!({"text": "back"}),
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -540,7 +578,10 @@ fn an_operation_prepares_signs_finishes_and_is_admitted_with_the_exact_bytes() {
     let done = prepared.finish(sig).unwrap();
     // The returned envelope carries exactly the body the host was asked to sign.
     let env: Value = serde_json::from_slice(&done.envelope).unwrap();
-    assert_eq!(STANDARD.decode(env["body"].as_str().unwrap()).unwrap(), body);
+    assert_eq!(
+        STANDARD.decode(env["body"].as_str().unwrap()).unwrap(),
+        body
+    );
     assert_eq!(done.digest, digest(&body));
     // A reader judging it from the history alone admits and opens it.
     let rec = HeldRecord {
@@ -659,7 +700,13 @@ fn prepare_refuses_what_finish_would_refuse() {
         "unavailable",
     );
     // An explicit clock that is not above the highest admitted, and one that jumps.
-    w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "one"}));
+    w.write(
+        &wr,
+        "notes",
+        Level::Write,
+        "addNote",
+        json!({"text": "one"}),
+    );
     for clock in [1, 1 + 1_025] {
         let mut sp = spec("notes", &wr.sign.id, Level::Write);
         sp.clock = Some(clock);
@@ -724,7 +771,10 @@ fn author_chains_link_by_previous_and_a_fork_stops_the_writer() {
     assert_eq!(ia.previous, None);
     assert_eq!(ib.previous.as_deref(), Some(ia.digest.as_str()));
     assert_eq!(ic.previous.as_deref(), Some(ib.digest.as_str()));
-    assert_eq!(chain_heads(&infos, &wr.sign.id, "notes"), vec![ic.digest.clone()]);
+    assert_eq!(
+        chain_heads(&infos, &wr.sign.id, "notes"),
+        vec![ic.digest.clone()]
+    );
     // A second prepare from a stale store forks the chain: two headers share `previous`.
     let stale: Vec<HeldRecord> = w.held[..2].to_vec();
     let seed = w.seed();
@@ -788,8 +838,8 @@ fn a_reader_refuses_a_header_with_a_forged_author_a_tampered_path_and_a_wrong_ac
     // A body re-signed by a key that is not the author's.
     let v: Value = serde_json::from_slice(&rec.bytes).unwrap();
     let body = STANDARD.decode(v["body"].as_str().unwrap()).unwrap();
-    let forged = canonical(&json!({"body": b64(&body), "signature": b64(&other.sign.sign(&body))}))
-        .unwrap();
+    let forged =
+        canonical(&json!({"body": b64(&body), "signature": b64(&other.sign.sign(&body))})).unwrap();
     let j = judge_records(
         &w.auth(),
         &w.keys,
@@ -798,12 +848,16 @@ fn a_reader_refuses_a_header_with_a_forged_author_a_tampered_path_and_a_wrong_ac
             bytes: forged,
         }],
     );
-    assert_eq!(j.records[0].outcome, Outcome::Invalid("badSignature".into()));
+    assert_eq!(
+        j.records[0].outcome,
+        Outcome::Invalid("badSignature".into())
+    );
     // A header for another account (same bytes, account field changed and re-signed).
     let mut bv: Value = serde_json::from_slice(&body).unwrap();
     bv["account"] = json!("0".repeat(64));
     let nb = canonical(&bv).unwrap();
-    let foreign = canonical(&json!({"body": b64(&nb), "signature": b64(&wr.sign.sign(&nb))})).unwrap();
+    let foreign =
+        canonical(&json!({"body": b64(&nb), "signature": b64(&wr.sign.sign(&nb))})).unwrap();
     let j = judge_records(
         &w.auth(),
         &w.keys,
@@ -859,7 +913,14 @@ fn revoke(w: &mut World, member: &Person, keep: &Keep) -> PreparedRevoke {
     let seed = w.seed();
     let issued = w.issued();
     prepare_revoke(
-        &w.objects, &w.held, w.now, &w.cids(), issued, &member.sign.id, keep, seed,
+        &w.objects,
+        &w.held,
+        w.now,
+        &w.cids(),
+        issued,
+        &member.sign.id,
+        keep,
+        seed,
     )
     .unwrap()
 }
@@ -876,7 +937,15 @@ fn revoke_keeps_the_chain_by_head_and_new_epoch_excludes_the_member() {
     w.grant(&wr, "device", terms("write"));
     w.grant(&rd, "app", terms("read"));
     let recs: Vec<HeldRecord> = (0..3)
-        .map(|i| w.write(&wr, "notes", Level::Write, "addNote", json!({"text": format!("{i}")})))
+        .map(|i| {
+            w.write(
+                &wr,
+                "notes",
+                Level::Write,
+                "addNote",
+                json!({"text": format!("{i}")}),
+            )
+        })
         .collect();
     let p = revoke(&mut w, &wr, &Keep::Everything);
     let heads = p.heads().to_vec();
@@ -889,7 +958,9 @@ fn revoke_keeps_the_chain_by_head_and_new_epoch_excludes_the_member() {
     let auth = w.auth();
     assert_eq!(auth.latest_epoch("notes"), 2);
     let to = auth.sealed_to("notes", 2);
-    assert!(!to.contains(&wr.sign.id) && to.contains(&rd.sign.id) && to.contains(&auth.vault().id()));
+    assert!(
+        !to.contains(&wr.sign.id) && to.contains(&rd.sign.id) && to.contains(&auth.vault().id())
+    );
     // All three records are reached by the walk from the head: admitted.
     let j = w.judge();
     for r in &recs {
@@ -906,7 +977,12 @@ fn nothing_kept_holds_backdated_records_and_a_kept_record_citing_the_revocation_
     let a = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "a"}));
     let b = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "b"}));
     let infos = verified_headers(&w.auth(), &w.held);
-    let a_digest = infos.iter().find(|i| i.path == a.path).unwrap().digest.clone();
+    let a_digest = infos
+        .iter()
+        .find(|i| i.path == a.path)
+        .unwrap()
+        .digest
+        .clone();
     // Keep only `a`, by digest.
     let p = revoke(
         &mut w,
@@ -918,7 +994,14 @@ fn nothing_kept_holds_backdated_records_and_a_kept_record_citing_the_revocation_
     );
     finish_revoke(&mut w, p);
     let j = w.judge();
-    let out = |r: &HeldRecord| j.records.iter().find(|x| x.path == r.path).unwrap().outcome.clone();
+    let out = |r: &HeldRecord| {
+        j.records
+            .iter()
+            .find(|x| x.path == r.path)
+            .unwrap()
+            .outcome
+            .clone()
+    };
     assert_eq!(out(&a), Outcome::Admitted);
     assert_eq!(out(&b), Outcome::Held("revokedBackdated"));
 }
@@ -929,8 +1012,8 @@ fn a_walk_goes_through_a_refused_header_and_the_refused_header_stays_refused() {
     let wr = person(10);
     w.grant(&wr, "device", terms("write"));
     let a = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "a"}));
-    let b = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "b"}));
-    let c = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "c"}));
+    let _b = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "b"}));
+    let _c = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "c"}));
     // The chain a, b, c is intact; build a second chain by hand whose middle header is
     // refused: it cites a wrong epoch (5) but is signed by the author and names `a` as previous.
     let infos = verified_headers(&w.auth(), &w.held);
@@ -945,11 +1028,17 @@ fn a_walk_goes_through_a_refused_header_and_the_refused_header_stays_refused() {
         bv["id"] = json!("b".repeat(32));
         canonical(&bv).unwrap()
     };
-    let bad_path = format!("ops/{}/notes/000000000002-{}.json", wr.sign.id, "b".repeat(32));
+    let bad_path = format!(
+        "ops/{}/notes/000000000002-{}.json",
+        wr.sign.id,
+        "b".repeat(32)
+    );
     let bad = HeldRecord {
         path: bad_path,
-        bytes: canonical(&json!({"body": b64(&bad_body), "signature": b64(&wr.sign.sign(&bad_body))}))
-            .unwrap(),
+        bytes: canonical(
+            &json!({"body": b64(&bad_body), "signature": b64(&wr.sign.sign(&bad_body))}),
+        )
+        .unwrap(),
     };
     // A fourth header chained after the bad one.
     let bad_digest = digest(&bad_body);
@@ -961,11 +1050,17 @@ fn a_walk_goes_through_a_refused_header_and_the_refused_header_stays_refused() {
         bv["id"] = json!("c".repeat(32));
         canonical(&bv).unwrap()
     };
-    let tail_path = format!("ops/{}/notes/000000000003-{}.json", wr.sign.id, "c".repeat(32));
+    let tail_path = format!(
+        "ops/{}/notes/000000000003-{}.json",
+        wr.sign.id,
+        "c".repeat(32)
+    );
     let tail = HeldRecord {
         path: tail_path,
-        bytes: canonical(&json!({"body": b64(&tail_body), "signature": b64(&wr.sign.sign(&tail_body))}))
-            .unwrap(),
+        bytes: canonical(
+            &json!({"body": b64(&tail_body), "signature": b64(&wr.sign.sign(&tail_body))}),
+        )
+        .unwrap(),
     };
     w.held.push(bad.clone());
     w.held.push(tail.clone());
@@ -984,7 +1079,14 @@ fn a_walk_goes_through_a_refused_header_and_the_refused_header_stays_refused() {
     assert!(!p.walk_incomplete());
     finish_revoke(&mut w, p);
     let j = w.judge();
-    let out = |r: &HeldRecord| j.records.iter().find(|x| x.path == r.path).unwrap().outcome.clone();
+    let out = |r: &HeldRecord| {
+        j.records
+            .iter()
+            .find(|x| x.path == r.path)
+            .unwrap()
+            .outcome
+            .clone()
+    };
     // The walk reached `a` through the refused header: `a` is kept and admitted. The refused
     // header is reached but still fails its own check (wrongEpoch): kept records pass every
     // other admission check.
@@ -1007,7 +1109,14 @@ fn a_missing_intermediate_header_holds_records_unavailable_not_as_not_kept() {
     // A reader that holds a and c but not b.
     let reader: Vec<HeldRecord> = vec![a.clone(), c.clone()];
     let j = judge_records(&w.auth(), &w.keys, &reader);
-    let out = |r: &HeldRecord| j.records.iter().find(|x| x.path == r.path).unwrap().outcome.clone();
+    let out = |r: &HeldRecord| {
+        j.records
+            .iter()
+            .find(|x| x.path == r.path)
+            .unwrap()
+            .outcome
+            .clone()
+    };
     assert_eq!(out(&c), Outcome::Admitted, "the head itself is reached");
     assert_eq!(out(&a), Outcome::Held("unavailable"));
     // With `b` present the same reader admits `a`.
@@ -1021,7 +1130,13 @@ fn a_revoke_keeps_every_fork_head_and_refuses_more_than_sixteen_in_one_namespace
     let mut w = World::new(T0 + 120 * SEC);
     let wr = person(10);
     w.grant(&wr, "device", terms("write"));
-    let root = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "root"}));
+    let root = w.write(
+        &wr,
+        "notes",
+        Level::Write,
+        "addNote",
+        json!({"text": "root"}),
+    );
     // Two forks from the root, each prepared from the same stale store.
     let stale = vec![root.clone()];
     let mut forks = Vec::new();
@@ -1041,14 +1156,27 @@ fn a_revoke_keeps_every_fork_head_and_refuses_more_than_sixteen_in_one_namespace
     assert_eq!(p.heads().len(), 2, "both fork heads are kept");
     finish_revoke(&mut w, p);
     let j = w.judge();
-    assert!(j.records.iter().all(|r| r.outcome == Outcome::Admitted), "{:?}", j.records.iter().map(|r| r.outcome.code()).collect::<Vec<_>>());
+    assert!(
+        j.records.iter().all(|r| r.outcome == Outcome::Admitted),
+        "{:?}",
+        j.records
+            .iter()
+            .map(|r| r.outcome.code())
+            .collect::<Vec<_>>()
+    );
 
     // 17 maximal heads: `Everything` is refused (the entry cannot name them); an explicit
     // list of 17 heads is refused too.
     let mut w = World::new(T0 + 120 * SEC);
     let wr = person(10);
     w.grant(&wr, "device", terms("write"));
-    let root = w.write(&wr, "notes", Level::Write, "addNote", json!({"text": "root"}));
+    let root = w.write(
+        &wr,
+        "notes",
+        Level::Write,
+        "addNote",
+        json!({"text": "root"}),
+    );
     let stale = vec![root];
     for i in 0..17u8 {
         let seed = [0x90 + i; 32];
@@ -1064,7 +1192,14 @@ fn a_revoke_keeps_every_fork_head_and_refuses_more_than_sixteen_in_one_namespace
     let seed = w.seed();
     let issued = w.issued();
     let r = prepare_revoke(
-        &w.objects, &w.held, w.now, &w.cids(), issued, &wr.sign.id, &Keep::Everything, seed,
+        &w.objects,
+        &w.held,
+        w.now,
+        &w.cids(),
+        issued,
+        &wr.sign.id,
+        &Keep::Everything,
+        seed,
     );
     match r {
         Err(Failure::Malformed(m)) => assert!(m.contains("more than 16"), "{m}"),
@@ -1081,8 +1216,16 @@ fn a_revoke_keeps_every_fork_head_and_refuses_more_than_sixteen_in_one_namespace
         })
         .collect();
     let r = prepare_revoke(
-        &w.objects, &w.held, w.now, &w.cids(), issued, &wr.sign.id,
-        &Keep::Explicit { kept: vec![], heads },
+        &w.objects,
+        &w.held,
+        w.now,
+        &w.cids(),
+        issued,
+        &wr.sign.id,
+        &Keep::Explicit {
+            kept: vec![],
+            heads,
+        },
         [0xAA; 32],
     );
     match r {
@@ -1100,7 +1243,12 @@ fn a_head_that_names_no_held_header_is_refused_at_prepare() {
     let seed = w.seed();
     let issued = w.issued();
     let r = prepare_revoke(
-        &w.objects, &w.held, w.now, &w.cids(), issued, &wr.sign.id,
+        &w.objects,
+        &w.held,
+        w.now,
+        &w.cids(),
+        issued,
+        &wr.sign.id,
         &Keep::Explicit {
             kept: vec![],
             heads: vec![colophon_core::v05::write::KeptHead {
@@ -1125,7 +1273,10 @@ fn records_citing_the_revocation_or_later_are_refused_revoked() {
     // The revoked member can no longer prepare (refused up front) ...
     prepared_is_err(
         prepare_operation(
-            &w.objects, &w.held, &w.keys, w.now,
+            &w.objects,
+            &w.held,
+            &w.keys,
+            w.now,
             &spec("notes", &wr.sign.id, Level::Write),
             [0xB0; 32],
         ),
@@ -1157,12 +1308,26 @@ fn op_id(w: &World, rec: &HeldRecord) -> String {
 #[test]
 fn an_accept_folds_the_proposal_once_attributed_to_the_proposer() {
     let (mut w, proposer, owner) = proposal_world();
-    let p = w.write(&proposer, "notes", Level::Propose, "addNote", json!({"text": "idea"}));
+    let p = w.write(
+        &proposer,
+        "notes",
+        Level::Propose,
+        "addNote",
+        json!({"text": "idea"}),
+    );
     let pid = op_id(&w, &p);
     let seed = w.seed();
     let prepared = prepare_resolution(
-        &w.objects, &w.held, &w.keys, w.now, &owner.sign.id, "notes", true,
-        &[pid.clone()], None, seed,
+        &w.objects,
+        &w.held,
+        &w.keys,
+        w.now,
+        &owner.sign.id,
+        "notes",
+        true,
+        std::slice::from_ref(&pid),
+        None,
+        seed,
     )
     .unwrap();
     let sig = signature_of(&owner.sign, prepared.step());
@@ -1188,13 +1353,27 @@ fn an_accept_folds_the_proposal_once_attributed_to_the_proposer() {
 #[test]
 fn a_decline_and_a_later_accept_the_first_in_fold_order_wins() {
     let (mut w, proposer, owner) = proposal_world();
-    let p = w.write(&proposer, "notes", Level::Propose, "addNote", json!({"text": "idea"}));
+    let p = w.write(
+        &proposer,
+        "notes",
+        Level::Propose,
+        "addNote",
+        json!({"text": "idea"}),
+    );
     let pid = op_id(&w, &p);
     for accept in [false, true] {
         let seed = w.seed();
         let prepared = prepare_resolution(
-            &w.objects, &w.held, &w.keys, w.now, &owner.sign.id, "notes", accept,
-            &[pid.clone()], None, seed,
+            &w.objects,
+            &w.held,
+            &w.keys,
+            w.now,
+            &owner.sign.id,
+            "notes",
+            accept,
+            std::slice::from_ref(&pid),
+            None,
+            seed,
         )
         .unwrap();
         let sig = signature_of(&owner.sign, prepared.step());
@@ -1205,30 +1384,60 @@ fn a_decline_and_a_later_accept_the_first_in_fold_order_wins() {
         });
     }
     let j = w.judge();
-    assert!(matches!(j.proposals[0].state, ProposalState::Declined { .. }));
-    assert_eq!(j.proposals[0].evidence.len(), 1, "the later accept is evidence");
+    assert!(matches!(
+        j.proposals[0].state,
+        ProposalState::Declined { .. }
+    ));
+    assert_eq!(
+        j.proposals[0].evidence.len(),
+        1,
+        "the later accept is evidence"
+    );
 }
 
 #[test]
 fn prepare_refuses_a_resolution_the_fold_would_not_count() {
     let (mut w, proposer, owner) = proposal_world();
-    let p = w.write(&proposer, "notes", Level::Propose, "addNote", json!({"text": "idea"}));
+    let p = w.write(
+        &proposer,
+        "notes",
+        Level::Propose,
+        "addNote",
+        json!({"text": "idea"}),
+    );
     let pid = op_id(&w, &p);
     let go = |w: &World, author: &Person, ids: &[String], clock: Option<u64>| {
         prepare_resolution(
-            &w.objects, &w.held, &w.keys, w.now, &author.sign.id, "notes", true, ids, clock,
+            &w.objects,
+            &w.held,
+            &w.keys,
+            w.now,
+            &author.sign.id,
+            "notes",
+            true,
+            ids,
+            clock,
             [0xC0; 32],
         )
     };
     // A clock that is not higher than the proposal's (the proposal's clock is 1).
-    prepared_is_err(go(&w, &owner, &[pid.clone()], Some(1)), "malformed");
+    prepared_is_err(
+        go(&w, &owner, std::slice::from_ref(&pid), Some(1)),
+        "malformed",
+    );
     // The proposer holds only propose: it may not write the kind, so it cannot resolve.
-    prepared_is_err(go(&w, &proposer, &[pid.clone()], None), "refused:notGranted");
+    prepared_is_err(
+        go(&w, &proposer, std::slice::from_ref(&pid), None),
+        "refused:notGranted",
+    );
     // A proposal the host does not hold.
     prepared_is_err(go(&w, &owner, &["d".repeat(32)], None), "unavailable");
     // No proposals, a duplicate.
     prepared_is_err(go(&w, &owner, &[], None), "malformed");
-    prepared_is_err(go(&w, &owner, &[pid.clone(), pid.clone()], None), "malformed");
+    prepared_is_err(
+        go(&w, &owner, &[pid.clone(), pid.clone()], None),
+        "malformed",
+    );
     // Fine.
     go(&w, &owner, &[pid], None).unwrap();
 }
@@ -1241,7 +1450,13 @@ fn the_builder_never_makes_a_header_the_verifier_would_not_admit_at_its_own_stat
     let wr = person(10);
     w.grant(&wr, "device", terms("write"));
     for i in 0..5 {
-        w.write(&wr, "notes", Level::Write, "addNote", json!({"text": format!("{i}")}));
+        w.write(
+            &wr,
+            "notes",
+            Level::Write,
+            "addNote",
+            json!({"text": format!("{i}")}),
+        );
     }
     let v = verify_history(&w.objects, &Persisted::default(), w.now);
     assert_eq!(v.code(), "ok");
@@ -1253,4 +1468,54 @@ fn the_builder_never_makes_a_header_the_verifier_would_not_admit_at_its_own_stat
     clocks.sort();
     assert_eq!(clocks, vec![1, 2, 3, 4, 5]);
     let _ = (parse_date("2026-11-11T08:00:00Z"), Reason::Fork);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Legacy `/3` headers (§11.5, §16.1): the fence and the signature, end to end.
+
+/// A `/3` header by `p` for the account of `w`, signed by `signer`.
+fn legacy_header(
+    w: &World,
+    p: &Person,
+    signer: &Person,
+    library: &str,
+    authority: u64,
+) -> HeldRecord {
+    let body = canonical(&json!({
+        "protocol": "colophon/operation/3", "library": library, "namespace": "notes",
+        "author": p.sign.id, "epoch": 1, "id": "a".repeat(32), "clock": 1, "authority": authority,
+        "created": "2026-11-11T08:10:00.000Z", "nonce": b64(&[1u8; 12]), "ciphertext": b64(&[2u8; 32]),
+    }))
+    .unwrap();
+    let _ = w;
+    HeldRecord {
+        path: format!(
+            "ops/{}/notes/000000000001-{}.json",
+            p.sign.id,
+            "a".repeat(32)
+        ),
+        bytes: canonical(&json!({"body": b64(&body), "signature": b64(&signer.sign.sign(&body))}))
+            .unwrap(),
+    }
+}
+
+#[test]
+fn a_legacy_header_in_a_native_account_is_fenced_out_by_format() {
+    // §20: a verifier MUST NOT accept a `/3` object where §11.5 fences it out. A native `/5`
+    // account was never upgraded, so no `/3` header is admitted, whoever signed it.
+    let mut w = World::new(T0 + 120 * SEC);
+    let wr = person(10);
+    w.grant(&wr, "device", terms("write"));
+    let library = w.auth().account().legacy_library_id().to_string();
+    let rec = legacy_header(&w, &wr, &wr, &library, 3);
+    let j = judge_records(&w.auth(), &w.keys, &[rec]);
+    assert_eq!(j.records[0].outcome, Outcome::Refused("wrongFormat"));
+    assert!(!j.records[0].reserved, "a fenced header reserves no slot");
+    // A `/3` header whose signature is by another key is not a record at all.
+    let rec = legacy_header(&w, &wr, &person(40), &library, 3);
+    let j = judge_records(&w.auth(), &w.keys, &[rec]);
+    assert_eq!(
+        j.records[0].outcome,
+        Outcome::Invalid("badSignature".into())
+    );
 }

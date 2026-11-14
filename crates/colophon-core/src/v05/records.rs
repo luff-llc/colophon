@@ -744,13 +744,7 @@ impl RecordAuthority {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    revokes.insert(
-                        member.to_string(),
-                        RevokeInfo {
-                            kept,
-                            heads,
-                        },
-                    );
+                    revokes.insert(member.to_string(), RevokeInfo { kept, heads });
                 }
             }
         }
@@ -827,12 +821,7 @@ impl RecordAuthority {
     /// (§7.1, §10.2): the current vault, and every member that is not revoked, not provisional,
     /// not expired at `at_ms` and has any `records` entry for the namespace, except `exclude`.
     /// Sorted by ID.
-    pub fn recipients(
-        &self,
-        namespace: &str,
-        at_ms: i64,
-        exclude: Option<&str>,
-    ) -> Vec<Recipient> {
+    pub fn recipients(&self, namespace: &str, at_ms: i64, exclude: Option<&str>) -> Vec<Recipient> {
         let vault = self.vault();
         let mut out = BTreeMap::new();
         out.insert(
@@ -880,7 +869,8 @@ impl RecordAuthority {
         if vault.id() == recipient_id {
             return Some(vault.agreement);
         }
-        self.member(recipient_id).map(|m| m.request.agreement.clone())
+        self.member(recipient_id)
+            .map(|m| m.request.agreement.clone())
     }
     /// Begin opening the seal of `(namespace, epoch)` addressed to `recipient_id`: the point
     /// the host agrees with its key for that recipient (§11.1: "decapsulation takes raw ECDH
@@ -891,7 +881,10 @@ impl RecordAuthority {
         epoch: u64,
         recipient_id: &str,
     ) -> Option<SealRequest> {
-        let sb = self.sealed.get(&(namespace.to_string(), epoch))?.get(recipient_id)?;
+        let sb = self
+            .sealed
+            .get(&(namespace.to_string(), epoch))?
+            .get(recipient_id)?;
         Some(SealRequest {
             enc: sb.enc.clone(),
             recipient: self.recipient_point(recipient_id)?,
@@ -919,7 +912,12 @@ impl RecordAuthority {
         let mut plain = super::vault::open_core_seal_with_dh(sb, &recipient, dh, &info)?;
         let key = <[u8; 32]>::try_from(plain.as_slice()).map_err(|_| super::vault::locked());
         erase(&mut plain);
-        Ok(EpochKey::from_secret(self.account(), namespace, epoch, key?))
+        Ok(EpochKey::from_secret(
+            self.account(),
+            namespace,
+            epoch,
+            key?,
+        ))
     }
     /// Open the seal addressed to the vault with the vault seed. The seed must derive this
     /// account's keyring `vault`.
@@ -942,7 +940,12 @@ impl RecordAuthority {
         let mut plain = seed.open_core_seal(sb, &info)?;
         let key = <[u8; 32]>::try_from(plain.as_slice()).map_err(|_| super::vault::locked());
         erase(&mut plain);
-        Ok(EpochKey::from_secret(self.account(), namespace, epoch, key?))
+        Ok(EpochKey::from_secret(
+            self.account(),
+            namespace,
+            epoch,
+            key?,
+        ))
     }
 }
 
@@ -1297,7 +1300,10 @@ fn resolution_targets(plaintext: &Value) -> Option<Vec<String>> {
         if !is_key_id(id) {
             return None;
         }
-        out.push(id.to_string());
+        // A proposal named twice is named once (the text counts 1-64 IDs, not distinct ones).
+        if !out.iter().any(|x| x == id) {
+            out.push(id.to_string());
+        }
     }
     Some(out)
 }
@@ -1329,12 +1335,7 @@ enum Stage {
     /// Parsed, bound, path-checked and signature-checked.
     Ready(Box<Cand>),
 }
-fn stage_one(
-    auth: &RecordAuthority,
-    idx: usize,
-    h: &HeldRecord,
-    skip_signature: bool,
-) -> Stage {
+fn stage_one(auth: &RecordAuthority, idx: usize, h: &HeldRecord, skip_signature: bool) -> Stage {
     let account = auth.account();
     let c = match parse_candidate(idx, h) {
         Ok(c) => c,
@@ -1561,7 +1562,8 @@ pub(crate) fn judge_core(
                                         if !authentic.insert((hd.author.clone(), hd.id.clone())) {
                                             j.outcome = Outcome::Refused("duplicateID");
                                         } else {
-                                            j.folded = pt.get("v").and_then(Value::as_u64) == Some(1);
+                                            j.folded =
+                                                pt.get("v").and_then(Value::as_u64) == Some(1);
                                             j.plaintext = Some(pt);
                                         }
                                     }
@@ -1602,8 +1604,11 @@ fn fold_proposals(
         .filter(|r| r.outcome == Outcome::Admitted && r.plaintext.is_some() && r.folded)
         .collect();
     live.sort_by(|a, b| {
-        (a.clock, a.author.as_deref(), a.id.as_deref())
-            .cmp(&(b.clock, b.author.as_deref(), b.id.as_deref()))
+        (a.clock, a.author.as_deref(), a.id.as_deref()).cmp(&(
+            b.clock,
+            b.author.as_deref(),
+            b.id.as_deref(),
+        ))
     });
     let mut proposals: Vec<ProposalStatus> = Vec::new();
     for r in &live {
@@ -1763,14 +1768,9 @@ pub fn verified_headers(auth: &RecordAuthority, held: &[HeldRecord]) -> Vec<Head
 pub fn chain_heads(headers: &[HeaderInfo], author: &str, namespace: &str) -> Vec<String> {
     let mine: Vec<&HeaderInfo> = headers
         .iter()
-        .filter(|h| {
-            h.author == author && h.namespace == namespace && h.format == HeaderFormat::V5
-        })
+        .filter(|h| h.author == author && h.namespace == namespace && h.format == HeaderFormat::V5)
         .collect();
-    let named: BTreeSet<&str> = mine
-        .iter()
-        .filter_map(|h| h.previous.as_deref())
-        .collect();
+    let named: BTreeSet<&str> = mine.iter().filter_map(|h| h.previous.as_deref()).collect();
     let mut heads: Vec<String> = mine
         .iter()
         .filter(|h| !named.contains(h.digest.as_str()))

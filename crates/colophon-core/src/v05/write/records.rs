@@ -23,7 +23,7 @@
 //!
 //! No RNG and no clock: seeds and the time are arguments.
 use super::authority::{prepare_signed, PendingBatch};
-use super::{format_date, Kind, KeptHead, SignatureResult, SigningStep};
+use super::{format_date, KeptHead, Kind, SignatureResult, SigningStep};
 use crate::crypto::Entropy;
 use crate::v05::encoding::{bounds, canonical, encode_base64};
 use crate::v05::history::Objects;
@@ -31,7 +31,7 @@ use crate::v05::ids::AccountId;
 use crate::v05::members::Request;
 use crate::v05::records::{
     chain_heads, epoch_info, judge_core, operation_id, revocation_reach, verified_headers,
-    EpochKey, EpochKeys, HeldRecord, HeaderFormat, Judgement, Level, RecordAuthority,
+    EpochKey, EpochKeys, HeaderFormat, HeldRecord, Judgement, Level, RecordAuthority,
 };
 use crate::v05::terms::{Access, Terms, TermsKind};
 use crate::v05::vault::SealedBox;
@@ -161,6 +161,7 @@ pub fn prepare_rekey(
 /// `grant` (§9.2): `shares` seal every historical epoch of every granted namespace to the
 /// member's agreement key, taken from the verified request. `keys` must hold each of those
 /// epoch keys (opened with [`RecordAuthority::open_epoch`] or made by this account's builders).
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_grant(
     objects: &Objects,
     now_ms: i64,
@@ -185,14 +186,7 @@ pub fn prepare_grant(
             wanted.insert((entry.namespace.clone(), e));
         }
     }
-    let shares = shares_for(
-        &auth,
-        keys,
-        &req.member_id(),
-        &req.agreement,
-        &wanted,
-        seed,
-    )?;
+    let shares = shares_for(&auth, keys, &req.member_id(), &req.agreement, &wanted, seed)?;
     prepare_signed(
         objects,
         now_ms,
@@ -497,7 +491,7 @@ pub fn prepare_operation(
     let account = auth.account().clone();
     let member = auth
         .member(spec.author)
-        .ok_or_else(|| Failure::Refused(Reason::NotGranted))?;
+        .ok_or(Failure::Refused(Reason::NotGranted))?;
     let signing = member.request.signing.clone();
     require(
         crate::v05::terms::valid_namespace(spec.namespace),
@@ -525,7 +519,10 @@ pub fn prepare_operation(
             .checked_add(1)
             .ok_or_else(|| malformed("clock overflow"))?,
         Some(c) => {
-            require(c > highest, "an explicit clock must exceed the highest admitted")?;
+            require(
+                c > highest,
+                "an explicit clock must exceed the highest admitted",
+            )?;
             require(
                 c - highest <= 1_024,
                 "an explicit clock more than 1,024 above the highest admitted is refused (clockJump)",
@@ -652,7 +649,10 @@ impl PreparedOperation {
         if signature.assertion.is_some() {
             return Err(malformed("an operation header is signed raw"));
         }
-        require(signature.signature.len() == 64, "a raw signature is 64 bytes")?;
+        require(
+            signature.signature.len() == 64,
+            "a raw signature is 64 bytes",
+        )?;
         let envelope = canonical(
             &json!({"body": encode_base64(&self.body), "signature": encode_base64(&signature.signature)}),
         )?;
@@ -702,7 +702,7 @@ pub fn prepare_resolution(
     let judgement = judge_core(&auth, keys, held, None);
     let member = auth
         .member(author)
-        .ok_or_else(|| Failure::Refused(Reason::NotGranted))?;
+        .ok_or(Failure::Refused(Reason::NotGranted))?;
     let mut highest_named = 0;
     for id in proposals {
         let p = judgement

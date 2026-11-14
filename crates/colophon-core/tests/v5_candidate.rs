@@ -21,6 +21,8 @@
 mod kit;
 #[path = "v5_candidate/cases_a.rs"]
 mod cases_a;
+#[path = "v5_candidate/cases_records.rs"]
+mod cases_records;
 #[path = "v5_candidate/cases_v8.rs"]
 mod cases_v8;
 #[path = "v5_candidate/swift.rs"]
@@ -34,6 +36,7 @@ fn build() -> (Out, usize) {
     let mut out = Out::new();
     let (_p1, summary) = cases_a::part1(&mut out);
     cases_v8::part3(&mut out);
+    cases_records::part(&mut out);
     let honest = self_check(&out);
     eprintln!(
         "{} files built; {} 0.4 bodies re-canonicalized; {honest} call/link signatures verified",

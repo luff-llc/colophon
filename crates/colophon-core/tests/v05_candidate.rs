@@ -863,6 +863,7 @@ fn candidate_conformance() {
         "account",
         "calls",
         "heads",
+        "records",
         "rules",
         "succession",
         "upgrade",
@@ -906,6 +907,8 @@ fn candidate_conformance() {
                     v.stop
                 ))
             }
+        } else if rel.starts_with("records/") {
+            run_records(&dir, &case)
         } else if rel.starts_with("succession/") {
             run_succession(&dir, &case)
         } else if rel == "account" {
@@ -1114,5 +1117,193 @@ fn run_succession(dir: &Path, case: &Value) -> Outcome {
         if verified { "verified" } else { "unverified" },
         v.code(),
         v.seq()
+    ))
+}
+
+/// The namespace vectors (`records/*`): the authority history through the history verifier, the
+/// holders' seals opened with their agreement scalars (public test secrets) through the
+/// record layer, then every held header judged end to end (`/5` and legacy `/3`), in the given
+/// order and in reverse (the verdict is a function of the set), against the outcomes the
+/// vector states; plus proposals, chains and the opened set.
+fn run_records(dir: &Path, case: &Value) -> Outcome {
+    use colophon_core::v05::records::{
+        chain_heads, judge_records, verified_headers, EpochKeys, HeldRecord, ProposalState,
+        RecordAuthority,
+    };
+    use colophon_core::v05::vault::EcdhOutput;
+    let exp = &case["expected"];
+    let now = ms(case["verifier"]["now"].as_str().unwrap());
+    let objects = Objects {
+        entries: files_in(&dir.join("records/authority")),
+        ..Default::default()
+    };
+    if exp["history"].is_object() {
+        let v = verify_history(&objects, &Persisted::default(), now);
+        let want = exp["history"]["result"].as_str().unwrap();
+        let seq = exp["history"]["seq"].as_u64().unwrap();
+        return if v.code() == want && v.seq() == seq {
+            Outcome::Pass(format!("history {want} at {seq}"))
+        } else {
+            Outcome::Fail(format!(
+                "history: want {want} at {seq}, got {} at {}",
+                v.code(),
+                v.seq()
+            ))
+        };
+    }
+    let auth = match RecordAuthority::from_objects(&objects, now) {
+        Ok(a) => a,
+        Err(f) => return Outcome::Fail(format!("history: {f}")),
+    };
+    if let Err(f) = auth.require_clean() {
+        return Outcome::Fail(format!("history is not clean: {f}"));
+    }
+    let mut keys = EpochKeys::new();
+    for h in case["holders"].as_array().into_iter().flatten() {
+        let id = h["member"].as_str().unwrap();
+        let sk = p256::SecretKey::from_slice(&b64(h["agreement"].as_str().unwrap())).unwrap();
+        for ns in auth.namespaces() {
+            for epoch in 1..=auth.latest_epoch(ns) {
+                let Some(req) = auth.epoch_seal_request(ns, epoch, id) else {
+                    continue;
+                };
+                let pk = p256::PublicKey::from_sec1_bytes(&req.enc).unwrap();
+                let dh = p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine());
+                let dh = EcdhOutput::from_host(dh.raw_secret_bytes().as_slice()).unwrap();
+                match auth.open_epoch(ns, epoch, id, &dh) {
+                    Ok(k) => keys.insert(k),
+                    Err(f) => return Outcome::Fail(format!("seal {ns}/{epoch} for {id}: {f}")),
+                }
+            }
+        }
+    }
+    let mut held = Vec::new();
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<HeldRecord>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        let mut entries: Vec<PathBuf> = rd.map(|e| e.unwrap().path()).collect();
+        entries.sort();
+        for p in entries {
+            if p.is_dir() {
+                walk(base, &p, out);
+            } else {
+                let rel = p
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push(HeldRecord {
+                    path: rel,
+                    bytes: fs::read(&p).unwrap(),
+                });
+            }
+        }
+    }
+    walk(dir, &dir.join("ops"), &mut held);
+    let want = exp["records"].as_object().unwrap();
+    for h in &held {
+        if !want.contains_key(&h.path) {
+            return Outcome::Fail(format!("{}: no expected outcome in the vector", h.path));
+        }
+    }
+    let j = judge_records(&auth, &keys, &held);
+    for r in &j.records {
+        let want = want[&r.path].as_str().unwrap();
+        if r.outcome.code() != want {
+            return Outcome::Fail(format!("{}: want {want}, got {}", r.path, r.outcome.code()));
+        }
+    }
+    for p in exp["opened"].as_array().unwrap() {
+        let p = p.as_str().unwrap();
+        if j.records
+            .iter()
+            .find(|r| r.path == p)
+            .is_none_or(|r| r.plaintext.is_none())
+        {
+            return Outcome::Fail(format!(
+                "{p}: admitted but did not authenticate under its epoch key"
+            ));
+        }
+    }
+    // The verdict is a function of the set, not of the order records arrive in.
+    let mut rev = held.clone();
+    rev.reverse();
+    let jr = judge_records(&auth, &keys, &rev);
+    for r in &j.records {
+        let other = jr.records.iter().find(|x| x.path == r.path).unwrap();
+        if other.outcome != r.outcome {
+            return Outcome::Fail(format!("{}: depends on arrival order", r.path));
+        }
+    }
+    if let Some(list) = exp["proposals"].as_array() {
+        let mut got: Vec<Value> = j
+            .proposals
+            .iter()
+            .map(|p| {
+                let state = match &p.state {
+                    ProposalState::Pending => serde_json::json!("pending"),
+                    ProposalState::Accepted { resolution, by, at } => {
+                        serde_json::json!({"accepted": {
+                        "by": by, "resolution": resolution, "at": [at.0, at.1, at.2]}})
+                    }
+                    ProposalState::Declined { resolution, by } => {
+                        serde_json::json!({"declined": {"by": by, "resolution": resolution}})
+                    }
+                };
+                serde_json::json!({"id": p.id, "proposer": p.proposer, "kind": p.kind,
+                                   "state": state, "evidence": p.evidence, "ignored": p.ignored})
+            })
+            .collect();
+        got.sort_by_key(|v| v["id"].as_str().unwrap().to_string());
+        let mut want_p = list.clone();
+        want_p.sort_by_key(|v| v["id"].as_str().unwrap().to_string());
+        if got != want_p {
+            return Outcome::Fail(format!("proposals: want {want_p:?}, got {got:?}"));
+        }
+        let held_res: Vec<Value> = j
+            .held_resolutions
+            .iter()
+            .map(|h| serde_json::json!({"resolution": h.resolution, "proposal": h.proposal}))
+            .collect();
+        if Value::Array(held_res.clone()) != exp["heldResolutions"] {
+            return Outcome::Fail(format!("held resolutions: got {held_res:?}"));
+        }
+        // A proposal folds once however the order of arrival.
+        let mut rp: Vec<_> = jr
+            .proposals
+            .iter()
+            .map(|p| (p.id.clone(), p.state.clone()))
+            .collect();
+        let mut gp: Vec<_> = j
+            .proposals
+            .iter()
+            .map(|p| (p.id.clone(), p.state.clone()))
+            .collect();
+        rp.sort_by(|a, b| a.0.cmp(&b.0));
+        gp.sort_by(|a, b| a.0.cmp(&b.0));
+        if rp != gp {
+            return Outcome::Fail("proposal fold depends on arrival order".into());
+        }
+    }
+    if let Some(chains) = exp["chains"].as_object() {
+        let infos = verified_headers(&auth, &held);
+        for (key, heads) in chains {
+            let (author, ns) = key.split_once('/').unwrap();
+            let got = chain_heads(&infos, author, ns);
+            let want_h: Vec<String> = heads
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            if got != want_h {
+                return Outcome::Fail(format!(
+                    "chain heads of {key}: want {want_h:?}, got {got:?}"
+                ));
+            }
+        }
+    }
+    Outcome::Pass(format!(
+        "{} headers judged as the vector states",
+        held.len()
     ))
 }
