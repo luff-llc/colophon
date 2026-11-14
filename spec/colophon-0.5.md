@@ -717,7 +717,7 @@ For seq > 1 the verifier MUST, in this order (the pipeline of §1):
 3. Decide the rule (§8.4; unknown kinds use the control rule), and for `suspend` and recording
    entries the checks of §8.7's state table.
 4. Only now look for unknown content anywhere in the body (`newerFormat`).
-5. Apply the typed schema, bounds and the rules of §6, §8.2, §8.3, §9, §13, §15 and §16, and the
+5. Apply the typed schema, bounds and the rules of §6, §7.2 (every slot's shape, kind fields and sizes), §8.2, §8.3, §9, §13, §15 and §16, and the
    rate limit (§13.1).
 
 Genesis follows the same order with its own keyring. No verifier may be stricter or more
@@ -733,7 +733,7 @@ lenient than this section for authority entries. **Every failure has exactly one
 | Every other failure of an embedded object: receipts (missing, wrong homes, wrong count or choice, outside their window), anchor, veto unit count, disjointness, vetoer role or currency, deadline, determined fields, once only, the 7-day bound, heads in `final`, one suspension per unit, a void delta | `malformed` |
 | Unknown content after steps 1–3 pass | `newerFormat` |
 | A transition that revokes a home and adds anything; a `final` with no heads | `malformed` |
-| Schema, §6 and §8.3 violations, the rate limit | `malformed` |
+| Schema, §6, §7.2 (slot shape) and §8.3 violations, the rate limit | `malformed` |
 | `issued` ahead; an `activate` whose objects are all valid and whose due time is after the clock | *held* |
 
 ### 8.6 Conflicting entries

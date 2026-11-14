@@ -458,3 +458,10 @@ test of revision 13 was replayed by the Swift source.**
   new `#[serde(default)]` field of `HomeState` (version unchanged). `prepare_head` is not edited:
   nothing in the write module enforces that a host calls the guard. Test
   `a_home_signs_one_head_per_seq_unless_the_first_was_displaced_under_rule_1`.
+- **Slot shape at replay (§7.2; coordinator item A).** `Keyring::parse` now also calls
+  `slots::validate_slots`, the same structural validation the write side uses, so a slot with a
+  wrong-length sealed box, a bad salt, wrong parts and the rest is `malformed` at replay in
+  genesis, `keyring` and `vault` entries, activations and checkpoints. No existing vector
+  changed (314 in scope all pass). Vectors `t-slot-wrong-length-genesis`, `i-slot-add-valid`,
+  `i-slot-add-wrong-length` (the last two differ only in the 47-byte ciphertext). Only the
+  wrong-length case is vectored; the other shapes are covered by the slot module's own tests.

@@ -151,6 +151,9 @@ impl Keyring {
         for s in &self.slots {
             self.check_slot(s)?;
         }
+        // §7.2 exactly: every kind's own fields and sizes, the salts, the parts and the bytes a
+        // slot's controllers must be able to open (the slot module's structural validation).
+        crate::v05::slots::validate_slots(&self.controllers, &self.slots, 0)?;
         Ok(())
     }
     fn check_slot(&self, s: &Value) -> Result<()> {

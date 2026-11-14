@@ -1588,6 +1588,42 @@ pub fn part3(o: &mut Out) {
         &["8.4"],
         None,
     );
+    // Revision 13 (§7.2 at replay): a slot's shape is checked by the verifier, not only by the
+    // builders. A sealed box of 47 bytes where 48 are required is `malformed`.
+    let short = |slot: &Value| {
+        let mut s = slot.clone();
+        s["sealed"]["ciphertext"] = json!(b64(&[7u8; 47]));
+        s
+    };
+    let base_slot = kr5["slots"][0].clone();
+    let mut bad_genesis = Chain::new();
+    genesis(
+        &mut bad_genesis,
+        &change(&kr5, &[("slots", json!([short(&base_slot)]))]),
+        sg![a],
+        Gen {
+            opt: Opt {
+                adds: sg![ph, b, k1, k2],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    case_v(o, "t-slot-wrong-length-genesis", &bad_genesis, bad("malformed", 1),
+           "A genesis whose only slot has a 47-byte sealed ciphertext (§7.2 requires 48): the slot's shape is checked at replay.",
+           &["7.2", "8.5"], None);
+    let phone_slot = sealed_slot("r13", &ph, "Phone");
+    for (name, slot, want, why) in [
+        ("i-slot-add-valid", phone_slot.clone(), ok_at(3),
+         "A `keyring` entry that adds a well-formed slot for an existing controller (the Phone key)."),
+        ("i-slot-add-wrong-length", short(&phone_slot), bad("malformed", 3),
+         "The same entry with a 47-byte sealed ciphertext: `malformed` at replay (§7.2)."),
+    ] {
+        let mut c = base.clone();
+        c.add("keyring", &a, &ts(R0), &a, Opt::default(),
+              json!({"keyring": change(&kr5, &[("slots", json!([base_slot.clone(), slot]))])}));
+        case_v(o, name, &c, want, why, &["7.2", "8.4"], None);
+    }
     let mut c = base.clone();
     c.add("keyring", &a, &ts(R0), &a, Opt { adds: sg![new], ..Opt::default() },
           json!({"keyring": kr_with_ctrls(&kr5, add_ctrl(&kr5, vec![ct(&new, &["approve"], "Tablet")]))}));
