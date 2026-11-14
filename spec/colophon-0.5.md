@@ -239,7 +239,8 @@ know as a member of any account.
 The core holds no platform private key. Every signature, ECDH and PRF evaluation is
 two-phase: `begin_*` returns the exact input, `finish_*` verifies the result before using it.
 The vault seed is an account secret: the core MAY hold it in memory for a session and MUST NOT
-persist it; the host persists it only inside slots.
+persist it; the host persists it only inside slots. The core never returns seed bytes or a raw
+ECDH output (§17.1 states what an opened seed can be sealed to).
 
 ### 3.5 COSE_Key at registration
 
@@ -497,7 +498,10 @@ selects the UV-associated secret. Missing PRF fails explicitly; there is no fall
 
 **Building a PRF route.** The PRF output for a new slot or part MUST come from an assertion
 restricted to that slot's credential, evaluating its salt over a fresh random 32-byte core
-challenge (never a body digest), never from registration. The core verifies that assertion
+challenge (never a body digest), never from registration. The assertion's origin is judged by
+the general origin rule of §4.3 for that credential's `rp` and `origins` (the authority-origin
+restriction does not apply: this is not an authority signature), and UV is required exactly
+when the controller has `verification: true` (§4.3 step 3). The core verifies that assertion
 against the new controller's key, builds the slot, opens it again with the same output and
 checks the vault before it is published. The host is trusted to pass PRF bytes unchanged.
 
@@ -520,7 +524,13 @@ retry starts again with new nonces, and H MUST allow no more than 5 failed sessi
 relay that substitutes `E` must commit before it sees `nA`, so it matches the code with
 probability one in a million per attempt. **QR alternative:** H scans from J's screen a QR code
 carrying `accountID`, `E` and `nB`, checks `E` directly, and still sends `nA` to J, so that
-§7.4's label has both nonces; no code is compared.
+§7.4's label has both nonces; no code is compared. **QR payload bytes:** the canonical JSON of
+§2.1, as UTF-8, of the closed object
+`{"account":"<64 hex>","e":"<base64>","nB":"<base64>","protocol":"colophon/pair-qr/5"}`: `account`
+is `accountID`, `e` the 65-byte point and `nB` the 32-byte nonce, standard padded base64
+(§2.2), keys sorted as §2.1 says (`account`, `e`, `nB`, `protocol`). A reader parses strictly
+(§2.3), refuses any other member, protocol, length or non-canonical byte, and an `E` that is
+not a valid point.
 
 ### 7.4 Moving the seed to a new device
 
@@ -536,8 +546,11 @@ session ends. Offered only to a device about to become a controller with a slot.
 A software identity is expanded from a 32-byte seed with HKDF-SHA256, salt
 `colophon/entropy/3`, info the eight-byte big-endian counter from zero, 32 bytes: the first
 valid scalar signs, the next valid scalar agrees; invalid scalars consume a counter. A recovery
-kit is a software identity from 32 secret bytes the host prints or stores; it is a `raw`
-controller with `agreement`, usually `recover` only.
+kit is a software identity from 32 secret bytes `K` the host prints or stores, with **one**
+derivation, the one 0.3 and 0.4 use: `s' = HKDF-SHA256(IKM = K, salt = "colophon/recovery/3",
+info = "identity", 32 bytes)`, then the expansion above on `s'`. A kit made under 0.4 therefore
+keeps its keys after an in-place upgrade (§16.1). It is a `raw` controller with `agreement`,
+usually `recover` only.
 
 ## 8. Authority history
 
@@ -1287,7 +1300,9 @@ Substitutions:
 
 Signed `raw` by `from`'s key: the member for the first link, the previous link's `to` after.
 `session` only on the first link. `notBefore` ≤ `expires`, else `malformed` (§12.3 step 1);
-`expires` ≤ `notBefore` + `policy.linkMaxAge`, else `refused:expired` (step 6).
+`expires` ≤ `notBefore` + `policy.linkMaxAge`, else `refused:expired` (step 6). A link's `created`
+is informational: it carries no rule, is compared with neither `notBefore`, `expires` nor any
+clock, and no verifier refuses a link for its value (it must still be a well-formed date).
 
 ### 12.2 Call
 
@@ -1465,7 +1480,9 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   needs a second approver or a day's pause (§15.3), or a transition raising `rate`.
 - **Notices.** On receipting a transition, a veto or a `suspend`, a home MUST push a notice to
   every delivery route registered with it, and MUST support at least one out-of-band route (for
-  example e-mail) the owner configures (§17.5).
+  example e-mail) the owner configures (§17.5). A notice has no signed body and no wire format in
+  0.5: it is home and host behaviour over the routes registered at setup, and nothing in this
+  document defines a notice object.
 - **First upload.** A genesis may be followed in one upload by the transition appointing a home
   and its `activate` (due when issued, since the state before it has no home).
 
@@ -1505,17 +1522,31 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   history from seq 1, in pages; it MUST NOT accept a suffix it can't link to a state it verified.
 - **Quorum.** Heads from different homes are compared by ancestry: a lower seq is behind, not
   wrong; divergent histories are a fork.
-- **Equivocation.** Two heads by one home with the same `seq` and different digests prove that
-  home misbehaved, unless the later head's entry at that seq displaced the earlier one under §8.6
-  rule 1. A verifier holding such proof MUST keep an evidence object, MUST stop counting that home
-  for this account, and SHOULD send the evidence to the account's controllers. Each form is
-  verifiable from the keys it names alone:
-  - two heads: `{"protocol":"colophon/equivocation/5","account","heads":[…]}`, sorted by body
-    digest;
-  - two conflicting entries (§8.6 rule 2): the same with `entries` in place of `heads`;
-  - a veto against a final activation (§8.7): `{"protocol","account","veto","receipt","final"}`,
-    the veto envelope, the home's receipt of it before the deadline, and the `final` entry whose
-    heads include that home's.
+- **Equivocation.** A verifier holding proof that a home misbehaved MUST keep an evidence object,
+  MUST stop counting that home for this account, and SHOULD send the evidence to the account's
+  controllers. Every form is judged against the account's history the verifier holds, and
+  none is checkable from the keys it names alone: what a verifier needs to hold is stated per form.
+  - **Heads:** `{"protocol":"colophon/equivocation/5","account","heads":[…]}`, two heads by one
+    home with the same `seq` and different digests, sorted by body digest. Let h1 be the head
+    with the earlier `issued` and h2 the later. Follow the two covered entries back to the seq
+    where their branches first differ. If §8.6 rule 1 decides that divergence (a recording entry
+    against another entry) and h2's entry is on the side that stands, it is **not** equivocation,
+    at any seq at or after the divergence: an honest home signs over an entry and later over the
+    one that displaced it. If the two `issued` are equal and the divergence is a rule 1
+    displacement, it is not equivocation either. Otherwise it is. The verifier needs the
+    history, and both entries, back to the divergence; without them the answer is `unavailable`,
+    never a conviction. A home MUST give its heads strictly increasing `issued` (§13.3 below).
+  - **Entries:** the same with `entries` in place of `heads`: two signed entries with the same
+    `seq` and `previous` and different digests, each valid in its place (§8.5). It convicts
+    their signers: exactly the signer units present on both entries. A recording entry has no
+    signer and convicts nobody, so an `activate` against an ordinary entry is §8.6 rule 1, not
+    evidence. Where §8.6 rule 2 asks for head evidence, the heads are held as well.
+  - **Veto against a final activation** (§8.7):
+    `{"protocol","account","activation","veto","receipt","final"}`: the `activate` entry (which
+    embeds the transition and its receipts, so the veto's deadline can be computed), the veto
+    envelope, the home's receipt of the veto, and the `final` entry whose heads include that
+    home's. The verifier needs the history up to the activation, to judge the veto's signers
+    and the home's key in that state.
 - What freshness gives, and doesn't, is explained in the guide §3. A brand-new verifier fetches
   the history from any source, verifies it from seq 1, asks every home the history names, and
   applies §12.3 step 4.
@@ -1523,7 +1554,7 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   an entry it hasn't verified. It MUST give its heads strictly increasing `issued`, and MUST NOT
   sign a head for a second digest at a seq unless its own verdict shows the first displaced under
   §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
-  second head's side). The guard belongs to home admission, which holds the history: the host
+  second head's side; the Equivocation rule above). The guard belongs to home admission, which holds the history: the host
   that drafts a home's head calls the home's guard first (`HomeState::guard_head` in the
   reference core) and signs only what it passes.
 
@@ -1862,9 +1893,19 @@ predecessor reads `successor` from F's body.
 
 The core prepares every body the host signs (entries, transitions, vetoes, `suspend`, links,
 calls, heads, receipts) as exact bytes, and verifies §4 and §8 before returning a record; nothing
-is written on failure. New PRF slots need PRF before the body (§7.2). The host alone may open a
-non-`colophon/` HPKE seal to the vault for its own registered formats. The core never exports the
-seed or a raw ECDH output. The host interface and the history verifier's report are described in
+is written on failure. New PRF slots need PRF before the body (§7.2).
+
+**The seed.** The core never returns seed bytes or a raw ECDH output through its interface. An
+opened seed can be sealed only to controllers of its own account's verified keyring (slots), to
+a new vault the host creates at a rotation, or to a device the person confirmed by pairing
+(§7.4). The host is trusted with the seed during rotation and transfer: it supplies the
+entropy of a new vault and performs the scan or code comparison.
+
+**Restricted open.** The host alone may ask the core to open an HPKE seal to the vault for its
+own registered formats. The seal is `{"enc","ciphertext"}` as §11.1 (`enc` a valid 65-byte
+uncompressed P-256 point, `ciphertext` 16 to 65,536 bytes); `info` equals the AAD and is at most
+1,024 bytes. An `info` that begins with `colophon/` belongs to the core's own labels and is
+refused `refused:outOfScope`, whatever the seal holds. The host interface and the history verifier's report are described in
 [colophon-0.5-guide.md](colophon-0.5-guide.md) §4.
 
 ### 17.2 Persisted verifier state
@@ -1916,7 +1957,10 @@ account exists, and to 32 random bytes otherwise. Verifiers find a controller by
 
 ### 17.5 Notices
 
-The mechanism is only as safe as people's knowledge of pending transitions, so:
+A notice is not an object of this specification: it has no signed body and no wire format in 0.5.
+It is behaviour of homes and hosts over the delivery routes registered at setup (§13.1), and
+nobody should build a signed notice object. The mechanism is only as safe as people's
+knowledge of pending transitions, so:
 
 - **Routes.** At setup, hosts MUST register at least two delivery routes with every home, on
   different devices or services (for example push to a second device, and e-mail).
