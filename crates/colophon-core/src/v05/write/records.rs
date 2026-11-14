@@ -377,6 +377,23 @@ impl PreparedRevoke {
 }
 
 /// `revoke` (§9.5): the member's readable namespaces get a new epoch sealed without it, and
+/// Most digests a `revoke` entry can list in `kept`: each costs 67 bytes of canonical JSON and
+/// the entry body is bounded at [`bounds::AUTHORITY_BODY`]; 16,384 bytes are left for the rest
+/// of the entry (the epoch seals of a rekey and the heads).
+pub const MAX_KEPT_DIGESTS: usize = (bounds::AUTHORITY_BODY - 16_384) / 67;
+
+/// A `kept` list that cannot fit in one entry is refused at prepare, naming the bound, instead
+/// of building an entry the verifier will refuse.
+fn check_kept_fits(n: usize) -> Result<()> {
+    require(
+        n <= MAX_KEPT_DIGESTS,
+        &format!(
+            "the revocation would list {n} kept records, and one entry holds at most {MAX_KEPT_DIGESTS} (its body is bounded at {} bytes): choose what to keep explicitly",
+            bounds::AUTHORITY_BODY
+        ),
+    )
+}
+
 /// `kept` and `heads` are computed from `held` under `keep`.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_revoke(
@@ -434,6 +451,7 @@ pub fn prepare_revoke(
                 .collect();
             kept.sort();
             kept.dedup();
+            check_kept_fits(kept.len())?;
             (kept, heads)
         }
         Keep::Explicit { kept, heads } => {
@@ -461,6 +479,7 @@ pub fn prepare_revoke(
                 per.values().all(|n| *n <= 16),
                 "more than 16 heads in a namespace",
             )?;
+            check_kept_fits(kept.len())?;
             (kept, heads)
         }
     };
