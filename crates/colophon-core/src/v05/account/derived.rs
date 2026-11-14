@@ -99,11 +99,16 @@ pub(super) struct WriteIndex {
     pub nonces: BTreeSet<(String, u64, Vec<u8>)>,
 }
 impl WriteIndex {
-    fn of(j: &Judgement) -> Self {
+    /// The index of `j`. An author's chain tip is computed from that author's own headers
+    /// only, and only from headers whose signature a member of the verified history made
+    /// (the rule of [`crate::v05::records::chain_heads`], which the slow path uses): a keyless
+    /// header, and a header by an author the history does not know, name no tip (§11.2).
+    fn of(j: &Judgement, auth: &RecordAuthority) -> Self {
         use crate::v05::records::HeaderFormat;
         let mut w = Self::default();
         let mut ids: BTreeSet<(&str, &str)> = BTreeSet::new();
-        let mut named: BTreeSet<&str> = BTreeSet::new();
+        // `(author, namespace, previous)` named by a verified header of that author.
+        let mut named: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
         let mut chain: Vec<&crate::v05::records::Judged> = Vec::new();
         for r in &j.records {
             let (Some(ns), Some(a)) = (r.namespace.as_deref(), r.author.as_deref()) else {
@@ -119,9 +124,10 @@ impl WriteIndex {
                     }
                 }
             }
-            if r.format == Some(HeaderFormat::V5) && !r.live && r.digest.is_some() {
+            let signed = !matches!(r.outcome, Outcome::Invalid(_)) && auth.member(a).is_some();
+            if signed && r.format == Some(HeaderFormat::V5) && !r.live && r.digest.is_some() {
                 if let Some(p) = r.previous.as_deref() {
-                    named.insert(p);
+                    named.insert((a, ns, p));
                 }
                 chain.push(r);
             }
@@ -132,7 +138,7 @@ impl WriteIndex {
             else {
                 continue;
             };
-            if !named.contains(d.as_str()) {
+            if !named.contains(&(a.as_str(), ns.as_str(), d.as_str())) {
                 w.tips
                     .entry((a.clone(), ns.clone()))
                     .or_default()
@@ -293,13 +299,14 @@ impl Derived {
             )
         };
         let (effective, verified_pending) = effective_objects(inputs.objects, auth.state());
+        let windex = WriteIndex::of(&judgement, &auth);
         let mut derived = Self {
             effective,
             verified_pending,
             verdict,
             auth,
             keys,
-            windex: WriteIndex::of(&judgement),
+            windex,
             judged_at: {
                 // Several held byte strings can sit at one path (a garbage twin beside the
                 // real record): the one that is a record at all stands for the path.
