@@ -90,7 +90,9 @@ impl colophon_core::engine::RecordSource for Source {
     fn content_version(&self, path: &str) -> colophon_core::Result<Option<String>> {
         let v = self.host.version(path.to_string()).map_err(host_err)?;
         if v.len() > 256 {
-            return Err(colophon_core::Error("a content version over 256 bytes".into()));
+            return Err(colophon_core::Error(
+                "a content version over 256 bytes".into(),
+            ));
         }
         Ok((!v.is_empty()).then_some(v))
     }
@@ -98,7 +100,9 @@ impl colophon_core::engine::RecordSource for Source {
         match self.host.read_blob(path.to_string()) {
             Ok(b) if b.is_empty() => Ok(colophon_core::blobs::BlobRead::Missing),
             Ok(b) => Ok(colophon_core::blobs::BlobRead::Available(b)),
-            Err(e) => Ok(colophon_core::blobs::BlobRead::Inaccessible(e.detail_text())),
+            Err(e) => Ok(colophon_core::blobs::BlobRead::Inaccessible(
+                e.detail_text(),
+            )),
         }
     }
 }

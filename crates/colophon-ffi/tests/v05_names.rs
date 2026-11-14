@@ -8,13 +8,28 @@ fn the_native_surface_is_the_shared_list() {
 }
 #[test]
 fn every_refusal_reason_is_a_typed_code() {
-    use colophon_ffi::v05::api::{AccountError, REFUSAL_REASONS};
     use colophon_core::v05::{Failure, Reason};
+    use colophon_ffi::v05::api::{AccountError, REFUSAL_REASONS};
     let all = [
-        Reason::Audience, Reason::Window, Reason::Replay, Reason::Conflict, Reason::Fork,
-        Reason::Revoked, Reason::Expired, Reason::Ended, Reason::NotNarrower, Reason::OutOfScope,
-        Reason::Origin, Reason::Rollback, Reason::NotGranted, Reason::WrongEpoch, Reason::ClockJump,
-        Reason::BudgetSpent, Reason::WrongFormat, Reason::InvalidPayload, Reason::CaveatedLive,
+        Reason::Audience,
+        Reason::Window,
+        Reason::Replay,
+        Reason::Conflict,
+        Reason::Fork,
+        Reason::Revoked,
+        Reason::Expired,
+        Reason::Ended,
+        Reason::NotNarrower,
+        Reason::OutOfScope,
+        Reason::Origin,
+        Reason::Rollback,
+        Reason::NotGranted,
+        Reason::WrongEpoch,
+        Reason::ClockJump,
+        Reason::BudgetSpent,
+        Reason::WrongFormat,
+        Reason::InvalidPayload,
+        Reason::CaveatedLive,
         Reason::VaultLocked,
     ];
     assert_eq!(all.len(), REFUSAL_REASONS.len());

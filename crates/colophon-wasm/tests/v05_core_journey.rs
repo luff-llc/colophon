@@ -20,7 +20,10 @@ fn objects_of(stores: &Value) -> (String, String) {
         let path = it["path"].as_str().unwrap();
         let key = if path.starts_with("authority/") {
             "entries"
-        } else if path.starts_with("transitions/") || path.starts_with("vetoes/") || path.starts_with("receipts/") {
+        } else if path.starts_with("transitions/")
+            || path.starts_with("vetoes/")
+            || path.starts_with("receipts/")
+        {
             "pending"
         } else {
             records.push(it.clone());
@@ -67,7 +70,8 @@ fn the_web_build_creates_approves_writes_pairs_and_refuses_hostile_input() {
         "slots": [{"controllers": [d], "label": "Mac"}, {"controllers": [k], "label": "Kit"},
                   {"controllers": [p], "label": "Passkey"}, {"controllers": [d, p], "label": "Both"}],
         "policy": policy, "signers": [d], "rekeySigners": [d]});
-    let creation = AccountCreation::begin(s(&params), format!("controller:{d}"), T0, host.fresh(96)).unwrap();
+    let creation =
+        AccountCreation::begin(s(&params), format!("controller:{d}"), T0, host.fresh(96)).unwrap();
     let reqs = creation.prf_requests().unwrap();
     assert_eq!(j(&reqs).as_array().unwrap().len(), 2);
     creation.provide_prf(host.answer_prf(&reqs)).unwrap();
@@ -87,40 +91,97 @@ fn the_web_build_creates_approves_writes_pairs_and_refuses_hostile_input() {
     // Approve a member, who reads and writes through its own shares.
     let terms = json!({"records": [{"namespace": "notes", "access": "write"}]});
     let r = request(&host, &account, &m1, terms.clone());
-    run(&core, &mut host, json!({"action": "approve", "request": r["raw"], "terms": terms, "signers": [d]}), 32);
+    run(
+        &core,
+        &mut host,
+        json!({"action": "approve", "request": r["raw"], "terms": terms, "signers": [d]}),
+        32,
+    );
     let (o, rec) = objects_of(&j(&core.stores().unwrap()));
     let member = AccountCore::open(o, rec, vec![], vec![], format!("member:{m1}"), NOW).unwrap();
-    member.finish_unlock_epochs(host.answer_epochs(&m1, &member.begin_unlock_epochs().unwrap())).unwrap();
+    member
+        .finish_unlock_epochs(host.answer_epochs(&m1, &member.begin_unlock_epochs().unwrap()))
+        .unwrap();
     assert_eq!(member.access("notes".into()).unwrap(), "");
-    run(&member, &mut host, json!({"action": "write", "namespace": "notes", "kind": "createNotebook",
-        "payload": {"id": "n", "title": "Web"}}), 32);
+    run(
+        &member,
+        &mut host,
+        json!({"action": "write", "namespace": "notes", "kind": "createNotebook",
+        "payload": {"id": "n", "title": "Web"}}),
+        32,
+    );
     let view = j(&member.view("notes".into()).unwrap());
     assert_eq!(view["value"]["admitted"].as_array().unwrap().len(), 1);
     // A second device pairs and receives the seed.
     let laptop = host.raw_controller(&d2, "Laptop", &["approve"]);
-    run(&core, &mut host, json!({"action": "add_controller", "mode": "immediate", "signers": [d], "controller": laptop}), 0);
+    run(
+        &core,
+        &mut host,
+        json!({"action": "add_controller", "mode": "immediate", "signers": [d], "controller": laptop}),
+        0,
+    );
     let tk = PairingTransferKey::create(host.fresh(32)).unwrap();
     let joiner = AccountPairing::join(account.clone(), tk.public(), host.fresh(32)).unwrap();
     let limiter = PairingFailureLimiter::from_json(String::new()).unwrap();
-    let existing = AccountPairing::existing_receive_commitment(account.clone(), joiner.commitment().unwrap(), &limiter, NOW).unwrap();
+    let existing = AccountPairing::existing_receive_commitment(
+        account.clone(),
+        joiner.commitment().unwrap(),
+        &limiter,
+        NOW,
+    )
+    .unwrap();
     let na = existing.send_nonce(host.fresh(32)).unwrap();
     let reveal = j(&joiner.receive_nonce(na).unwrap());
-    let shown = existing.receive_reveal(unb64(reveal["e"].as_str().unwrap()), unb64(reveal["nb"].as_str().unwrap()), &limiter, NOW).unwrap();
+    let shown = existing
+        .receive_reveal(
+            unb64(reveal["e"].as_str().unwrap()),
+            unb64(reveal["nb"].as_str().unwrap()),
+            &limiter,
+            NOW,
+        )
+        .unwrap();
     assert_eq!(shown, joiner.digits().unwrap());
     existing.confirm().unwrap();
     joiner.confirm().unwrap();
     assert!(existing.confirm().is_err());
     let sealed = core.transfer_seed(&existing, host.fresh(32)).unwrap();
     let (o, rec) = objects_of(&j(&core.stores().unwrap()));
-    let second = AccountCore::open(o, rec, vec![], vec![], format!("controller:{d2}"), NOW).unwrap();
+    let second =
+        AccountCore::open(o, rec, vec![], vec![], format!("controller:{d2}"), NOW).unwrap();
     assert!(!second.is_unlocked().unwrap());
     second.accept_seed_transfer(&tk, sealed, &joiner).unwrap();
     assert!(second.is_unlocked().unwrap());
     // Hostile input is a typed error.
-    let a = core.begin(s(&json!({"action": "rekey", "namespaces": ["notes"], "signers": [d]})), host.fresh(32)).unwrap();
-    assert!(matches!(core.finish(&a, "[{\"signature\":\"AAAA\"}]".into()), Err(AccountError::BadSignature { .. })));
-    assert!(matches!(core.finish(&a, "[]".into()), Err(AccountError::Consumed { .. })));
-    assert!(matches!(core.begin("x".into(), vec![]), Err(AccountError::Malformed { .. })));
-    assert!(matches!(core.begin(s(&json!({"action": "rekey", "namespaces": [], "signers": []})), vec![1; 3]), Err(AccountError::Bound { .. })));
-    assert_eq!(AccountError::from(colophon_core::v05::Failure::Refused(colophon_core::v05::Reason::Audience)).code(), "refused:audience");
+    let a = core
+        .begin(
+            s(&json!({"action": "rekey", "namespaces": ["notes"], "signers": [d]})),
+            host.fresh(32),
+        )
+        .unwrap();
+    assert!(matches!(
+        core.finish(&a, "[{\"signature\":\"AAAA\"}]".into()),
+        Err(AccountError::BadSignature { .. })
+    ));
+    assert!(matches!(
+        core.finish(&a, "[]".into()),
+        Err(AccountError::Consumed { .. })
+    ));
+    assert!(matches!(
+        core.begin("x".into(), vec![]),
+        Err(AccountError::Malformed { .. })
+    ));
+    assert!(matches!(
+        core.begin(
+            s(&json!({"action": "rekey", "namespaces": [], "signers": []})),
+            vec![1; 3]
+        ),
+        Err(AccountError::Bound { .. })
+    ));
+    assert_eq!(
+        AccountError::from(colophon_core::v05::Failure::Refused(
+            colophon_core::v05::Reason::Audience
+        ))
+        .code(),
+        "refused:audience"
+    );
 }

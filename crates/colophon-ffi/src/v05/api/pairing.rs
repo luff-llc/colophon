@@ -122,11 +122,7 @@ impl AccountPairing {
     fn new(s: Stage) -> Self {
         Self { st: Mutex::new(s) }
     }
-    fn step<T>(
-        &self,
-        allowed: &[&str],
-        f: impl FnOnce(Stage) -> R<(Stage, T)>,
-    ) -> R<T> {
+    fn step<T>(&self, allowed: &[&str], f: impl FnOnce(Stage) -> R<(Stage, T)>) -> R<T> {
         guard(|| {
             let mut g = lock(&self.st)?;
             if !allowed.contains(&g.name()) {
@@ -169,16 +165,16 @@ impl AccountPairing {
     ) -> R<Self> {
         guard(|| {
             let c = fixed::<32>(&commitment, "commitment")?;
-            let permit = lock(&limiter.l)?.permit(now_ms).map_err(|e| AccountError::Refused {
-                code: "pairing:limit".into(),
-                reason: "pairingLimit".into(),
-                detail: e.to_string(),
-            })?;
-            Ok(Self::new(Stage::Waiting(ExistingWaiting::receive_commitment(
-                &account_id(&account)?,
-                c,
-                permit,
-            ))))
+            let permit = lock(&limiter.l)?
+                .permit(now_ms)
+                .map_err(|e| AccountError::Refused {
+                    code: "pairing:limit".into(),
+                    reason: "pairingLimit".into(),
+                    detail: e.to_string(),
+                })?;
+            Ok(Self::new(Stage::Waiting(
+                ExistingWaiting::receive_commitment(&account_id(&account)?, c, permit),
+            )))
         })
     }
     fn scan_qr_inner(
@@ -190,11 +186,13 @@ impl AccountPairing {
         guard(|| {
             bounded(&payload, 4096, "a QR payload")?;
             let p = QrPayload::from_bytes(&payload)?;
-            let permit = lock(&limiter.l)?.permit(now_ms).map_err(|e| AccountError::Refused {
-                code: "pairing:limit".into(),
-                reason: "pairingLimit".into(),
-                detail: e.to_string(),
-            })?;
+            let permit = lock(&limiter.l)?
+                .permit(now_ms)
+                .map_err(|e| AccountError::Refused {
+                    code: "pairing:limit".into(),
+                    reason: "pairingLimit".into(),
+                    detail: e.to_string(),
+                })?;
             match ScannedQr::scan(&account_id(&account)?, &p, permit) {
                 Ok(s) => Ok(Self::new(Stage::Scanned(s))),
                 Err(e) => {
@@ -247,7 +245,9 @@ impl AccountPairing {
     pub fn commitment(&self) -> Result<Vec<u8>, AccountError> {
         guard(|| match &*lock(&self.st)? {
             Stage::Joiner(_, c) => Ok(c.to_vec()),
-            _ => Err(AccountError::consumed("only a code-path joiner has a commitment")),
+            _ => Err(AccountError::consumed(
+                "only a code-path joiner has a commitment",
+            )),
         })
     }
     /// The QR payload a joiner shows.
@@ -461,9 +461,7 @@ impl PairingTransferKey {
 /// Moving the seed (§7.4): the existing device seals it, the new device opens it.
 #[cfg_attr(feature = "native05", uniffi::export)]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
-impl AccountCore {
-
-}
+impl AccountCore {}
 
 #[cfg(feature = "native05")]
 #[uniffi::export]
@@ -533,7 +531,8 @@ impl AccountCore {
             };
             b.validate_secret_box()?;
             let mut a = lock(&self.acc)?;
-            let c: Changes = pairing.with_confirmed(|p| Ok(a.accept_seed_transfer(&key.k, &b, p)?))?;
+            let c: Changes =
+                pairing.with_confirmed(|p| Ok(a.accept_seed_transfer(&key.k, &b, p)?))?;
             ser!(c)
         })
     }

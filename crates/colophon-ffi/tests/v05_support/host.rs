@@ -19,7 +19,9 @@ pub const DEVICE_KEY: [u8; 32] = [0x77; 32];
 /// SHA-256 as bytes (the core's digest function is hex text).
 pub fn sha(b: &[u8]) -> Vec<u8> {
     let h = digest(b);
-    (0..32).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap()).collect()
+    (0..32)
+        .map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap())
+        .collect()
 }
 pub fn b64(b: &[u8]) -> String {
     encode_base64(b)
@@ -181,4 +183,3 @@ fn passkey_point(a: &SyntheticAuthenticator) -> Vec<u8> {
         _ => panic!("a synthetic authenticator is webauthn"),
     }
 }
-

@@ -2,23 +2,24 @@
 //! account), reads the host's record source, and exposes reads, writes, live state, blobs,
 //! imports, checkpoints and the exchange with a home as values the host performs.
 use super::account::{
-    account_reads, account_stores, opening_inputs_json, slots_json, agreements_json, changes_json, denial_json, epoch_secrets, finished_json,
-    identity, opening_secrets, records, stores_of,
+    account_reads, account_stores, agreements_json, changes_json, denial_json, epoch_secrets,
+    finished_json, identity, opening_inputs_json, opening_secrets, records, slots_json, stores_of,
 };
 use super::action::{
-    signer_choice, begin, next_owner, prf_results, signatures, step_json, AccountAction, EngineWrites, Prepared,
+    begin, next_owner, prf_results, signatures, signer_choice, step_json, AccountAction,
+    EngineWrites, Prepared,
 };
 use super::fault::AccountError;
 use super::json::*;
 use super::{guard, lock, HostSource, Source};
 use colophon_core::blobs::BlobRead;
-use colophon_core::model::Outcome;
 use colophon_core::blobs::BlobWriter;
+use colophon_core::model::Outcome;
+use colophon_core::v05::account::Identity;
 use colophon_core::v05::engine::blobs::BlobAvailability;
 use colophon_core::v05::engine::exchange::{Fault, Method, Report, Request, Response, Step};
 use colophon_core::v05::engine::live::PendingLive;
 use colophon_core::v05::engine::{Engine, EngineOptions, OpenMode, Saved};
-use colophon_core::v05::account::Identity;
 use colophon_core::v05::records::HeldRecord;
 use colophon_core::v05::write::SignatureResult;
 use serde_json::{json, Value};
@@ -102,7 +103,9 @@ fn fault_json(f: &Fault) -> Value {
             home,
             purpose,
             audience,
-        } => json!({"kind": "unauthorized", "home": home, "purpose": purpose, "audience": audience}),
+        } => {
+            json!({"kind": "unauthorized", "home": home, "purpose": purpose, "audience": audience})
+        }
         Fault::Redirect { home, endpoints } => {
             json!({"kind": "redirect", "home": home, "endpoints": endpoints})
         }
@@ -122,7 +125,10 @@ fn report_json(r: &Report) -> R<String> {
 }
 
 impl AccountEngine {
-    fn with_account<T>(&self, f: impl FnOnce(&colophon_core::v05::account::Account) -> R<T>) -> R<T> {
+    fn with_account<T>(
+        &self,
+        f: impl FnOnce(&colophon_core::v05::account::Account) -> R<T>,
+    ) -> R<T> {
         guard(|| f(lock(&self.eng)?.account()))
     }
     pub(crate) fn open_inner(
@@ -196,8 +202,8 @@ impl AccountEngine {
             let seed = fixed::<32>(&entropy, "entropy")?;
             entropy.fill(0);
             let v = parse(&batch, "the import batch")?;
-            let b: colophon_core::imports::ImportBatch = serde_json::from_value(v)
-                .map_err(|_| AccountError::bad("not an import batch"))?;
+            let b: colophon_core::imports::ImportBatch =
+                serde_json::from_value(v).map_err(|_| AccountError::bad("not an import batch"))?;
             let g = lock(&self.eng)?;
             Ok(match g.begin_import(&namespace, &b, seed)? {
                 Ok(p) => AccountAction::ready(p, self.owner, "import"),
@@ -235,7 +241,9 @@ impl AccountEngine {
                 Outcome::Success { value, .. } => Ok(AccountBlobWriter {
                     w: Mutex::new(Some(value)),
                 }),
-                Outcome::Failure { reason, detail, .. } => Err(AccountError::denied(&reason, &detail)),
+                Outcome::Failure { reason, detail, .. } => {
+                    Err(AccountError::denied(&reason, &detail))
+                }
             }
         })
     }
@@ -303,10 +311,12 @@ impl AccountEngine {
     pub fn stats(&self) -> Result<String, AccountError> {
         guard(|| {
             let s = lock(&self.eng)?.stats();
-            to_string(&json!({"recordsRead": s.records_read, "signaturesVerified": s.signatures_verified,
+            to_string(
+                &json!({"recordsRead": s.records_read, "signaturesVerified": s.signatures_verified,
                 "payloadsDecrypted": s.payloads_decrypted, "walkedLast": s.walked_last,
                 "foldsAppliedLast": s.folds_applied_last, "ignoredPaths": s.ignored_paths,
-                "heldPaths": s.held_paths, "unreadPaths": s.unread_paths}))
+                "heldPaths": s.held_paths, "unreadPaths": s.unread_paths}),
+            )
         })
     }
     /// Read every listed record not yet read and judge them. Called after unlock; also by
@@ -457,8 +467,10 @@ impl AccountEngine {
         let r = guard(|| {
             let n = fixed::<32>(&nonce_seed, "the nonce seed")?;
             let s = lock(&self.eng)?.save(n)?;
-            to_string(&json!({"verifier": enc(&s.verifier), "checkpoint": enc(&s.checkpoint),
-                "parts": s.parts.iter().map(|(k, v)| (k.clone(), json!(enc(v)))).collect::<serde_json::Map<_, _>>()}))
+            to_string(
+                &json!({"verifier": enc(&s.verifier), "checkpoint": enc(&s.checkpoint),
+                "parts": s.parts.iter().map(|(k, v)| (k.clone(), json!(enc(v)))).collect::<serde_json::Map<_, _>>()}),
+            )
         });
         nonce_seed.fill(0);
         r
@@ -489,7 +501,9 @@ impl AccountEngine {
             let i = usize::try_from(index).map_err(|_| AccountError::bound("index"))?;
             match lock(&self.eng)?.open_blob_chunk(&namespace, &digest, i, &ciphertext)? {
                 Outcome::Success { value, .. } => Ok(value),
-                Outcome::Failure { reason, detail, .. } => Err(AccountError::denied(&reason, &detail)),
+                Outcome::Failure { reason, detail, .. } => {
+                    Err(AccountError::denied(&reason, &detail))
+                }
             }
         })
     }
@@ -516,14 +530,18 @@ impl AccountEngine {
         digest: String,
     ) -> Result<String, AccountError> {
         guard(|| {
-            to_string(&match lock(&self.eng)?.blob_availability(&namespace, &digest)? {
-                BlobAvailability::Complete => json!({"state": "complete"}),
-                BlobAvailability::Partial { present, total } => {
-                    json!({"state": "partial", "present": present, "total": total})
-                }
-                BlobAvailability::Missing => json!({"state": "missing"}),
-                BlobAvailability::Inaccessible(d) => json!({"state": "inaccessible", "detail": d}),
-            })
+            to_string(
+                &match lock(&self.eng)?.blob_availability(&namespace, &digest)? {
+                    BlobAvailability::Complete => json!({"state": "complete"}),
+                    BlobAvailability::Partial { present, total } => {
+                        json!({"state": "partial", "present": present, "total": total})
+                    }
+                    BlobAvailability::Missing => json!({"state": "missing"}),
+                    BlobAvailability::Inaccessible(d) => {
+                        json!({"state": "inaccessible", "detail": d})
+                    }
+                },
+            )
         })
     }
     /// Chunk paths of required blobs this device does not hold.
@@ -595,7 +613,10 @@ impl AccountEngine {
             }
             let mut hs = Vec::new();
             for h in arr {
-                match (h.get(0).and_then(Value::as_str), h.get(1).and_then(Value::as_str)) {
+                match (
+                    h.get(0).and_then(Value::as_str),
+                    h.get(1).and_then(Value::as_str),
+                ) {
                     (Some(k), Some(v)) => hs.push((k.to_string(), v.to_string())),
                     _ => return Err(AccountError::bad("a header is [name, value]")),
                 }
@@ -741,7 +762,11 @@ impl AccountEngine {
     pub fn provide_prf(&self, action: &AccountAction, results: String) -> Result<(), AccountError> {
         self.provide_prf_inner(action, results)
     }
-    pub fn finish(&self, action: &AccountAction, signatures: String) -> Result<String, AccountError> {
+    pub fn finish(
+        &self,
+        action: &AccountAction,
+        signatures: String,
+    ) -> Result<String, AccountError> {
         self.finish_inner(action, signatures)
     }
     pub fn begin_live_write(

@@ -22,9 +22,16 @@ fn exported(window: &[String], feature: &str) -> bool {
     let (attr, plain) = if feature == "native05" {
         ("uniffi::export", "#[uniffi::export]")
     } else {
-        ("wasm_bindgen::prelude::wasm_bindgen", "#[wasm_bindgen::prelude::wasm_bindgen]")
+        (
+            "wasm_bindgen::prelude::wasm_bindgen",
+            "#[wasm_bindgen::prelude::wasm_bindgen]",
+        )
     };
-    let other = if feature == "native05" { "web05" } else { "native05" };
+    let other = if feature == "native05" {
+        "web05"
+    } else {
+        "native05"
+    };
     let has = |s: &str| window.iter().any(|l| l.contains(s));
     if has(&format!("#[cfg(feature = \"{other}\")]")) {
         return false;
@@ -69,7 +76,10 @@ fn scan_text(text: &str, feature: &str, out: &mut BTreeSet<String>) {
             }
         }
         if let Some(name) = ty.as_ref().filter(|_| line.starts_with("    pub fn ")) {
-            let n = line["    pub fn ".len()..].split(['(', '<']).next().unwrap();
+            let n = line["    pub fn ".len()..]
+                .split(['(', '<'])
+                .next()
+                .unwrap();
             out.insert(format!("{name}.{n}"));
         }
         if line == "}" {
@@ -78,7 +88,10 @@ fn scan_text(text: &str, feature: &str, out: &mut BTreeSet<String>) {
             in_error = false;
         }
         if in_free && line.starts_with("    pub fn ") {
-            let n = line["    pub fn ".len()..].split(['(', '<']).next().unwrap();
+            let n = line["    pub fn ".len()..]
+                .split(['(', '<'])
+                .next()
+                .unwrap();
             out.insert(format!("fn:{n}"));
         }
         if in_error && line.starts_with("    ") && !line.starts_with("     ") {
@@ -102,7 +115,10 @@ fn scan_text(text: &str, feature: &str, out: &mut BTreeSet<String>) {
             window.clear();
         } else if let Some(rest) = t.strip_prefix("pub struct ") {
             if object(&window, feature) {
-                out.insert(format!("object:{}", rest.split([' ', '{', ';']).next().unwrap()));
+                out.insert(format!(
+                    "object:{}",
+                    rest.split([' ', '{', ';']).next().unwrap()
+                ));
             }
             window.clear();
         } else if t.starts_with("pub fn ") && exported(&window, feature) {
@@ -138,7 +154,11 @@ pub fn scan(feature: &str, glue: Option<&Path>) -> BTreeSet<String> {
         let text = std::fs::read_to_string(g).unwrap();
         let mut glue_names = BTreeSet::new();
         scan_text(&text, feature, &mut glue_names);
-        out.extend(glue_names.into_iter().filter(|n| !n.starts_with("AccountFault.")));
+        out.extend(
+            glue_names
+                .into_iter()
+                .filter(|n| !n.starts_with("AccountFault.")),
+        );
         for line in text.lines() {
             let t = line.trim_start();
             if t.starts_with("fn ") && t.contains("this: &JsSource") {

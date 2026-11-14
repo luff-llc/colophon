@@ -25,7 +25,11 @@ pub(crate) fn identity(text: &str) -> R<Identity> {
     let (kind, id) = text
         .split_once(':')
         .ok_or_else(|| AccountError::bad("identity is `controller:<id>` or `member:<id>`"))?;
-    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+    if id.len() != 32
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return Err(AccountError::bad("identity names a 32-hex key ID"));
     }
     match kind {
@@ -179,7 +183,9 @@ pub(crate) fn opening_secrets(text_in: &str) -> R<Vec<OpeningSecret>> {
             "ecdh" => Ok(OpeningSecret::Ecdh(EcdhOutput::from_host(&b64(
                 s, "secret",
             )?)?)),
-            "prf" => Ok(OpeningSecret::Prf(PrfOutput::from_host(&b64(s, "output")?)?)),
+            "prf" => Ok(OpeningSecret::Prf(PrfOutput::from_host(&b64(
+                s, "output",
+            )?)?)),
             _ => Err(AccountError::bad("a secret is `ecdh` or `prf`")),
         })
         .collect()
@@ -417,13 +423,7 @@ impl AccountCore {
                 Some(fixed::<32>(&key, "the sealed-state key")?)
             };
             key.fill(0);
-            let a = Account::open(
-                o,
-                r,
-                k.as_ref().map(|k| (stored.as_slice(), k)),
-                me,
-                now_ms,
-            )?;
+            let a = Account::open(o, r, k.as_ref().map(|k| (stored.as_slice(), k)), me, now_ms)?;
             Ok(Self::from(a))
         })
     }
@@ -620,7 +620,11 @@ impl AccountCore {
     pub fn provide_prf(&self, action: &AccountAction, results: String) -> Result<(), AccountError> {
         self.provide_prf_inner(action, results)
     }
-    pub fn finish(&self, action: &AccountAction, signatures: String) -> Result<String, AccountError> {
+    pub fn finish(
+        &self,
+        action: &AccountAction,
+        signatures: String,
+    ) -> Result<String, AccountError> {
         self.finish_inner(action, signatures)
     }
 }

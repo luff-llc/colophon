@@ -109,9 +109,7 @@ impl AccountMove {
                         "evidence": bytes_list(&r.evidence),
                     }))
                 }
-                Some(Prepared::Veto(v)) => {
-                    to_string(&json!({"veto": enc(&v.finish(sigs)?)}))
-                }
+                Some(Prepared::Veto(v)) => to_string(&json!({"veto": enc(&v.finish(sigs)?)})),
                 Some(other) => {
                     *g = Some(other);
                     Err(AccountError::bad(
@@ -189,7 +187,12 @@ impl AccountCore {
             Ok(self.wrap_move(Prepared::Move(p)))
         })
     }
-    fn shares_inner(&self, member: String, signers: String, mut entropy: Vec<u8>) -> R<AccountMove> {
+    fn shares_inner(
+        &self,
+        member: String,
+        signers: String,
+        mut entropy: Vec<u8>,
+    ) -> R<AccountMove> {
         guard(|| {
             let seed = fixed::<32>(&entropy, "entropy")?;
             entropy.fill(0);
@@ -219,8 +222,12 @@ impl AccountCore {
                     "moved": "frozen", "entry": enc(&f.entry), "seq": f.seq,
                     "successionVerified": f.succession_verified,
                 })),
-                Moved::Migration(c) => to_string(&json!({"moved": "migration", "changes": ser_value!(*c)?})),
-                Moved::Shares(c) => to_string(&json!({"moved": "shares", "changes": ser_value!(*c)?})),
+                Moved::Migration(c) => {
+                    to_string(&json!({"moved": "migration", "changes": ser_value!(*c)?}))
+                }
+                Moved::Shares(c) => {
+                    to_string(&json!({"moved": "shares", "changes": ser_value!(*c)?}))
+                }
             }
         })
     }
@@ -255,14 +262,20 @@ impl AccountCore {
     pub fn swift_predecessor(&self) -> Result<String, AccountError> {
         guard(|| {
             let h = lock(&self.acc)?.swift_predecessor()?;
-            to_string(&json!({"account": h.account, "entries": h.entries.iter().map(|r| json!({
+            to_string(
+                &json!({"account": h.account, "entries": h.entries.iter().map(|r| json!({
                 "seq": r.value.get("seq"), "digest": r.digest, "issuedMs": r.issued_ms,
-                "layout": r.value.get("layout")})).collect::<Vec<_>>()}))
+                "layout": r.value.get("layout")})).collect::<Vec<_>>()}),
+            )
         })
     }
     /// Take F (or any predecessor entry) the Swift side wrote into this account's predecessor
     /// objects; the verifier then judges the succession over it.
-    pub fn accept_predecessor_entry(&self, entry: Vec<u8>, now_ms: i64) -> Result<String, AccountError> {
+    pub fn accept_predecessor_entry(
+        &self,
+        entry: Vec<u8>,
+        now_ms: i64,
+    ) -> Result<String, AccountError> {
         guard(|| {
             bounded(&entry, 3 << 20, "an entry")?;
             changes_json(&lock(&self.acc)?.accept_predecessor_entry(entry, now_ms)?)
@@ -288,7 +301,8 @@ impl AccountCore {
         signers: String,
         issued_ms: i64,
     ) -> Result<std::sync::Arc<AccountMove>, AccountError> {
-        self.freeze_inner(signers, issued_ms).map(std::sync::Arc::new)
+        self.freeze_inner(signers, issued_ms)
+            .map(std::sync::Arc::new)
     }
     /// Seal the epochs a copying member is owed (§9.4), without touching its expiry.
     pub fn begin_swift_copier_shares(
@@ -297,7 +311,8 @@ impl AccountCore {
         signers: String,
         entropy: Vec<u8>,
     ) -> Result<std::sync::Arc<AccountMove>, AccountError> {
-        self.shares_inner(member, signers, entropy).map(std::sync::Arc::new)
+        self.shares_inner(member, signers, entropy)
+            .map(std::sync::Arc::new)
     }
     /// Finish a step of the move on this account. F is returned as bytes and held at once.
     pub fn finish_move(
@@ -312,10 +327,18 @@ impl AccountCore {
 #[cfg(feature = "web05")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 impl AccountCore {
-    pub fn begin_swift_veto(&self, issued_ms: i64, signers: String) -> Result<AccountMove, AccountError> {
+    pub fn begin_swift_veto(
+        &self,
+        issued_ms: i64,
+        signers: String,
+    ) -> Result<AccountMove, AccountError> {
         self.veto_inner(issued_ms, signers)
     }
-    pub fn begin_swift_freeze(&self, signers: String, issued_ms: i64) -> Result<AccountMove, AccountError> {
+    pub fn begin_swift_freeze(
+        &self,
+        signers: String,
+        issued_ms: i64,
+    ) -> Result<AccountMove, AccountError> {
         self.freeze_inner(signers, issued_ms)
     }
     pub fn begin_swift_copier_shares(
@@ -326,7 +349,11 @@ impl AccountCore {
     ) -> Result<AccountMove, AccountError> {
         self.shares_inner(member, signers, entropy)
     }
-    pub fn finish_move(&self, step: &AccountMove, signatures: String) -> Result<String, AccountError> {
+    pub fn finish_move(
+        &self,
+        step: &AccountMove,
+        signatures: String,
+    ) -> Result<String, AccountError> {
         self.finish_move_inner(step, signatures)
     }
 }

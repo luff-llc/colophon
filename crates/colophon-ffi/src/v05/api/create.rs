@@ -118,10 +118,10 @@ impl AccountCreation {
                 Stage::Open(c) => {
                     if !c.prf_requests().is_empty() {
                         "prf"
-                    } else if c.steps().len() > 1 || format!("{c:?}").contains("genesis") {
-                        "genesis"
-                    } else {
+                    } else if format!("{c:?}").contains("rekey") {
                         "rekey"
+                    } else {
+                        "genesis"
                     }
                 }
                 Stage::Done(_) => "done",

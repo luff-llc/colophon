@@ -43,6 +43,7 @@ impl HostSource for JsHost {
 #[wasm_bindgen]
 impl AccountEngine {
     /// Open an engine over the host's source (see `docs/bindings-05.md`).
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         source: JsSource,
         listing: String,

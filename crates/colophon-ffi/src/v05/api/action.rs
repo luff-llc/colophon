@@ -302,14 +302,11 @@ fn done(p: colophon_core::v05::Result<PendingAction>) -> R<Prepared> {
 
 /// The writes an engine prepares itself (its live heads, its import and budget checks) are
 /// passed in as closures; everything else is the account's.
+pub(crate) type WriteResult =
+    colophon_core::v05::Result<Result<PendingAction, colophon_core::model::Denial>>;
+pub(crate) type WriteFn<'a> = dyn Fn(&str, &str, Value, Level, [u8; 32]) -> WriteResult + 'a;
 pub(crate) struct EngineWrites<'a> {
-    pub write: &'a dyn Fn(
-        &str,
-        &str,
-        Value,
-        Level,
-        [u8; 32],
-    ) -> colophon_core::v05::Result<Result<PendingAction, colophon_core::model::Denial>>,
+    pub write: &'a WriteFn<'a>,
 }
 
 /// Prepare the action `spec` names over `acc`. `entropy` is the host's fresh entropy, in 32-byte
@@ -318,7 +315,7 @@ pub(crate) fn begin(
     acc: &Account,
     engine: Option<&EngineWrites<'_>>,
     spec: &Value,
-    entropy: &mut Vec<u8>,
+    entropy: &mut [u8],
 ) -> R<(String, Prepared)> {
     let out = begin_inner(acc, engine, spec, entropy);
     entropy.fill(0);
@@ -345,7 +342,12 @@ fn begin_inner(
         }
         "renew" => {
             let s = seeds32(entropy, 1)?;
-            done(acc.begin_renew(text(spec, "member")?, int(spec, "expiresMs")?, &signers()?, s[0]))?
+            done(acc.begin_renew(
+                text(spec, "member")?,
+                int(spec, "expiresMs")?,
+                &signers()?,
+                s[0],
+            ))?
         }
         "renew_shares" => {
             let s = seeds32(entropy, 1)?;
@@ -361,13 +363,22 @@ fn begin_inner(
                     kept: names(k, "kept")?,
                     heads: list(k, "heads")?
                         .iter()
-                        .map(|h| match (h.get(0).and_then(Value::as_str), h.get(1).and_then(Value::as_str)) {
-                            (Some(n), Some(d)) => Ok((n.to_string(), d.to_string())),
-                            _ => Err(AccountError::bad("heads are [namespace, digest]")),
+                        .map(|h| {
+                            match (
+                                h.get(0).and_then(Value::as_str),
+                                h.get(1).and_then(Value::as_str),
+                            ) {
+                                (Some(n), Some(d)) => Ok((n.to_string(), d.to_string())),
+                                _ => Err(AccountError::bad("heads are [namespace, digest]")),
+                            }
                         })
                         .collect::<R<Vec<_>>>()?,
                 },
-                _ => return Err(AccountError::bad("keep is `everything`, `nothing` or an object")),
+                _ => {
+                    return Err(AccountError::bad(
+                        "keep is `everything`, `nothing` or an object",
+                    ))
+                }
             };
             done(acc.begin_revoke(text(spec, "member")?, &keep, &signers()?, s[0]))?
         }
@@ -404,13 +415,15 @@ fn begin_inner(
                 },
                 _ => return Err(AccountError::bad("mode is `immediate` or `transition`")),
             };
-            done(acc.begin_add_controller(&AddController {
-                controller: spec
-                    .get("controller")
-                    .cloned()
-                    .ok_or_else(|| AccountError::bad("`controller` is required"))?,
-                mode,
-            }))?
+            done(
+                acc.begin_add_controller(&AddController {
+                    controller: spec
+                        .get("controller")
+                        .cloned()
+                        .ok_or_else(|| AccountError::bad("`controller` is required"))?,
+                    mode,
+                }),
+            )?
         }
         "add_slot" => {
             let s = seeds32(entropy, 1)?;
@@ -531,10 +544,9 @@ fn begin_inner(
                         return Err(AccountError::bound("too many call origins"));
                     }
                     for (rp, v) in o {
-                        target.call_origins.insert(
-                            rp.clone(),
-                            names_of(v, "callOrigins")?,
-                        );
+                        target
+                            .call_origins
+                            .insert(rp.clone(), names_of(v, "callOrigins")?);
                     }
                 }
             }

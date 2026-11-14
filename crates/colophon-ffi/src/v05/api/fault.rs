@@ -8,26 +8,64 @@ use colophon_core::v05::Failure;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "native05", derive(uniffi::Error))]
 pub enum AccountError {
-    Malformed { code: String, detail: String },
-    BadSignature { code: String, detail: String },
-    NewerFormat { code: String, detail: String },
-    Unavailable { code: String, detail: String },
+    Malformed {
+        code: String,
+        detail: String,
+    },
+    BadSignature {
+        code: String,
+        detail: String,
+    },
+    NewerFormat {
+        code: String,
+        detail: String,
+    },
+    Unavailable {
+        code: String,
+        detail: String,
+    },
     /// `reason` is the §19 spelling without the prefix (`audience`, `window`, `replay`, ...).
-    Refused { code: String, reason: String, detail: String },
+    Refused {
+        code: String,
+        reason: String,
+        detail: String,
+    },
     /// A host callback failed or returned something unusable.
-    Host { code: String, detail: String },
+    Host {
+        code: String,
+        detail: String,
+    },
     /// A callback called back into the object that was calling it.
-    Reentered { code: String, detail: String },
+    Reentered {
+        code: String,
+        detail: String,
+    },
     /// A prepared action or one-shot object was already used.
-    Consumed { code: String, detail: String },
+    Consumed {
+        code: String,
+        detail: String,
+    },
     /// An object of another session or account was passed.
-    WrongObject { code: String, detail: String },
+    WrongObject {
+        code: String,
+        detail: String,
+    },
     /// An argument exceeded a bound or had the wrong length.
-    Bound { code: String, detail: String },
-    Internal { code: String, detail: String },
+    Bound {
+        code: String,
+        detail: String,
+    },
+    Internal {
+        code: String,
+        detail: String,
+    },
     /// The grant or key does not allow it now: `reason` is notGranted, revoked, expired,
     /// budgetSpent, notReadable or unavailable.
-    Denied { code: String, reason: String, detail: String },
+    Denied {
+        code: String,
+        reason: String,
+        detail: String,
+    },
 }
 impl std::fmt::Display for AccountError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -193,3 +231,12 @@ pub const REFUSAL_REASONS: [&str; 20] = [
     "caveatedLive",
     "vaultLocked",
 ];
+
+/// A foreign exception that is not an `AccountError` (a Swift or Kotlin callback that threw
+/// something else) is a host failure, not a crash.
+#[cfg(feature = "native05")]
+impl From<uniffi::UnexpectedUniFFICallbackError> for AccountError {
+    fn from(e: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::host(e.to_string())
+    }
+}

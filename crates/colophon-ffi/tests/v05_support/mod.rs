@@ -2,7 +2,6 @@
 //! a record source implementing the callback, and a simulated home.
 #![allow(dead_code, clippy::unwrap_used, clippy::too_many_arguments)]
 mod host;
-pub use host::*;
 use colophon_core::v05::encoding::{canonical, digest};
 use colophon_core::v05::history::home::{
     admit as home_admit, admit_pending_batch, HomeState, ServingInterval,
@@ -11,6 +10,7 @@ use colophon_core::v05::history::Objects;
 use colophon_core::v05::write::calls::{finish_receipt, prepare_receipt};
 use colophon_core::v05::write::{format_date, SignatureResult};
 use colophon_ffi::v05::api::*;
+pub use host::*;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -33,11 +33,19 @@ impl MemSource {
         self.files.lock().unwrap().get(path).cloned()
     }
     pub fn listing(&self) -> String {
-        s(&json!(self.files.lock().unwrap().keys().collect::<Vec<_>>()))
+        s(&json!(self
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>()))
     }
     pub fn store(&self, stores_json: &Value) {
         for it in stores_json.as_array().unwrap() {
-            self.put(it["path"].as_str().unwrap(), unb64(it["bytes"].as_str().unwrap()));
+            self.put(
+                it["path"].as_str().unwrap(),
+                unb64(it["bytes"].as_str().unwrap()),
+            );
         }
     }
     pub fn copy_of(&self) -> MemSource {
@@ -184,15 +192,22 @@ impl SimHome {
                 None => resp(404, json!({})),
             },
             ("GET", "/authority") => {
-                let after: u64 = q_get(query, "after").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let limit: usize = q_get(query, "limit").and_then(|s| s.parse().ok()).unwrap_or(64);
+                let after: u64 = q_get(query, "after")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let limit: usize = q_get(query, "limit")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(64);
                 let all: Vec<&Vec<u8>> = self.entries.range(after + 1..).map(|(_, e)| e).collect();
                 let page: Vec<Value> = all
                     .iter()
                     .take(limit.min(64))
                     .map(|e| serde_json::from_slice(e).unwrap())
                     .collect();
-                resp(200, json!({"entries": page, "receipts": [], "more": all.len() > limit.min(64)}))
+                resp(
+                    200,
+                    json!({"entries": page, "receipts": [], "more": all.len() > limit.min(64)}),
+                )
             }
             ("POST", "/authority") => {
                 let v: Value = serde_json::from_slice(&body).unwrap();
@@ -227,13 +242,23 @@ impl SimHome {
                 resp(200, json!({"head": head, "receipts": receipts}))
             }
             ("GET", "/pending") => {
-                let after: u64 = q_get(query, "after").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let limit: usize = q_get(query, "limit").and_then(|s| s.parse().ok()).unwrap_or(64);
-                let page = self.state.pending_page(after, limit.min(64), now_ms).unwrap();
-                resp(200, json!({
+                let after: u64 = q_get(query, "after")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let limit: usize = q_get(query, "limit")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(64);
+                let page = self
+                    .state
+                    .pending_page(after, limit.min(64), now_ms)
+                    .unwrap();
+                resp(
+                    200,
+                    json!({
                     "objects": page.objects.iter().map(|o| json!({"seq": o.seq, "digest": o.digest, "kind": o.kind,
                         "envelope": serde_json::from_slice::<Value>(&o.envelope).unwrap()})).collect::<Vec<_>>(),
-                    "more": page.more}))
+                    "more": page.more}),
+                )
             }
             ("POST", "/pending") => {
                 let v: Value = serde_json::from_slice(&body).unwrap();
@@ -243,7 +268,8 @@ impl SimHome {
                     .iter()
                     .map(|o| canonical(o).unwrap())
                     .collect();
-                let (next, results, receipts) = admit_pending_batch(&self.state, &objs, &now).unwrap();
+                let (next, results, receipts) =
+                    admit_pending_batch(&self.state, &objs, &now).unwrap();
                 self.state = next;
                 let refused: Vec<Value> = results
                     .iter()
@@ -256,8 +282,13 @@ impl SimHome {
                 resp(200, json!({"receipts": rs}))
             }
             ("GET", "/changes") => {
-                let after: usize = q_get(query, "after").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let limit: usize = q_get(query, "limit").and_then(|s| s.parse().ok()).unwrap_or(500).min(500);
+                let after: usize = q_get(query, "after")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let limit: usize = q_get(query, "limit")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(500)
+                    .min(500);
                 if after > self.log.len() {
                     return resp(410, json!({}));
                 }
@@ -265,15 +296,22 @@ impl SimHome {
                 let page: Vec<&String> = slice.iter().take(limit).collect();
                 let entries: Vec<Value> = page
                     .iter()
-                    .map(|p| json!({"path": p, "size": self.files[*p].len(),
-                        "sha256": digest(&self.files[*p])}))
+                    .map(|p| {
+                        json!({"path": p, "size": self.files[*p].len(),
+                        "sha256": digest(&self.files[*p])})
+                    })
                     .collect();
-                resp(200, json!({"entries": entries, "cursor": (after + page.len()).to_string(), "more": slice.len() > limit}))
+                resp(
+                    200,
+                    json!({"entries": entries, "cursor": (after + page.len()).to_string(), "more": slice.len() > limit}),
+                )
             }
-            ("GET", p) if p.starts_with("/records/") => match self.files.get(&p["/records/".len()..]) {
-                Some(b) => (200, b.clone()),
-                None => resp(404, json!({})),
-            },
+            ("GET", p) if p.starts_with("/records/") => {
+                match self.files.get(&p["/records/".len()..]) {
+                    Some(b) => (200, b.clone()),
+                    None => resp(404, json!({})),
+                }
+            }
             ("PUT", p) if p.starts_with("/records/") => {
                 let rec = p["/records/".len()..].to_string();
                 if let Some(name) = rec.strip_prefix("blobs/") {
@@ -282,13 +320,21 @@ impl SimHome {
                     }
                 }
                 let live = rec.starts_with("state/");
-                match (self.files.get(&rec).cloned(), headers("If-None-Match"), headers("If-Match")) {
+                match (
+                    self.files.get(&rec).cloned(),
+                    headers("If-None-Match"),
+                    headers("If-Match"),
+                ) {
                     (None, Some(_), None) => {
                         self.store(&rec, body);
                         resp(201, json!({}))
                     }
                     (Some(old), Some(_), None) if !live => {
-                        if old == body { resp(200, json!({})) } else { resp(412, json!({})) }
+                        if old == body {
+                            resp(200, json!({}))
+                        } else {
+                            resp(412, json!({}))
+                        }
                     }
                     (Some(old), None, Some(m)) if live => {
                         if format!("\"{}\"", digest(&old)) == m {
@@ -299,7 +345,11 @@ impl SimHome {
                         }
                     }
                     (Some(old), Some(_), None) if live => {
-                        if old == body { resp(200, json!({})) } else { resp(412, json!({})) }
+                        if old == body {
+                            resp(200, json!({}))
+                        } else {
+                            resp(412, json!({}))
+                        }
                     }
                     _ => resp(428, json!({})),
                 }

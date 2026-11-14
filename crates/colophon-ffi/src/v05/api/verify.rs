@@ -7,9 +7,7 @@ use colophon_core::v05::descriptor::KeyDescriptor;
 use colophon_core::v05::encoding::{encode_base64, strict_parse};
 use colophon_core::v05::history::{swift, verify_history, Persisted};
 use colophon_core::v05::ids::{key_id, AccountId};
-use colophon_core::v05::signature::{
-    webauthn_check, AssertionBytes, AuthorityRule, CheckMode,
-};
+use colophon_core::v05::signature::{webauthn_check, AssertionBytes, AuthorityRule, CheckMode};
 use colophon_core::v05::slots::webauthn_prf_input;
 use colophon_core::v05::vault::VaultSeed;
 use colophon_core::v05::write::calls::{PreparedRequest, RequestSpec};
@@ -252,8 +250,10 @@ impl AccountRequest {
                 .ok_or_else(|| AccountError::consumed("this request is finished"))?;
             let r = finish_request(&p, &sig)?;
             let _ = strict_parse;
-            to_string(&json!({"raw": encode_base64(&r.raw), "member": r.member, "label": r.label,
-                "kind": r.kind, "terms": r.terms}))
+            to_string(
+                &json!({"raw": encode_base64(&r.raw), "member": r.member, "label": r.label,
+                "kind": r.kind, "terms": r.terms}),
+            )
         })
     }
 }
