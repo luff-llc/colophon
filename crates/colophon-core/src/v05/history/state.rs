@@ -2098,6 +2098,7 @@ fn receipt_key(s: &State, bytes: &[u8], object: &str, issued: i64) -> Option<(St
 /// the veto deadline, each home's receipt with the lowest body digest. A verifier judges this
 /// over the receipts it holds together with the entry's own, so a receipt the recorder held and
 /// the verifier does not cannot make a correct entry fail: the entry brings the ones it chose.
+#[allow(clippy::too_many_arguments)]
 fn veto_choice_is_determined(
     s: &State,
     pending: &Pending,
