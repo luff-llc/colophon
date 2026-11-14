@@ -219,7 +219,13 @@ impl HomeState {
     /// divergence is decided by rule 1 (a recording entry against another entry) in favour of
     /// this head's side. Returns the state to persist, which records the head as drafted (a
     /// draft counts as signed, so a retry of the same head is allowed and a different one is not).
-    pub fn guard_head(&self, seq: u64, digest: &str, issued: &str, now: &str) -> Result<HomeState> {
+    pub fn guard_head(
+        &self,
+        seq: u64,
+        digest: &str,
+        issued: &str,
+        now: &str,
+    ) -> Result<(HomeState, HeadGuard)> {
         let now_ms = date(now, "home clock")?;
         let issued_ms = date(issued, "issued")?;
         let (persisted, st) = self.context(now_ms)?;
@@ -227,13 +233,19 @@ impl HomeState {
             st.on_branch_digest(seq, digest),
             "a head for an entry this home has not verified on its branch",
         )?;
+        let token = || HeadGuard {
+            home: self.home.clone(),
+            seq,
+            digest: digest.to_string(),
+            issued: issued.to_string(),
+        };
         let mut next = self.clone();
         if next
             .signed_heads
             .iter()
             .any(|(s, d, i)| *s == seq && d == digest && *i == issued_ms)
         {
-            return Ok(next);
+            return Ok((next, token()));
         }
         require(
             next.signed_heads.iter().all(|(_, _, i)| issued_ms > *i),
@@ -265,7 +277,20 @@ impl HomeState {
             }
         }
         next.signed_heads.push((seq, digest.to_string(), issued_ms));
-        Ok(next)
+        // Prune what the guard no longer needs: nothing at or before the highest final
+        // activation can be displaced (§8.6 rule 1), so only the latest `issued` (for the
+        // strictly increasing rule) and the digests at seqs not yet settled stay.
+        let settled = st
+            .activations()
+            .iter()
+            .filter(|a| a.final_)
+            .map(|a| a.seq)
+            .max()
+            .unwrap_or(0);
+        let latest = next.signed_heads.iter().map(|(_, _, i)| *i).max();
+        next.signed_heads
+            .retain(|(q, _, i)| *q > settled || Some(*i) == latest);
+        Ok((next, token()))
     }
     fn context(&self, now_ms: i64) -> Result<(Persisted, State)> {
         let p = Persisted::from_bytes(&self.checkpoint)?;
@@ -347,6 +372,35 @@ impl HomeState {
         }))
     }
 }
+/// What [`HomeState::guard_head`] returns when a head may be drafted: `write::calls::prepare_head`
+/// takes it, so a host cannot prepare a head for signing without having passed the guard. Only
+/// `guard_head` makes one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadGuard {
+    home: String,
+    seq: u64,
+    digest: String,
+    issued: String,
+}
+impl HeadGuard {
+    /// The home member ID the guard was issued to.
+    pub fn home(&self) -> &str {
+        &self.home
+    }
+    /// The seq it permits.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+    /// The digest it permits.
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+    /// The `issued` it permits.
+    pub fn issued(&self) -> &str {
+        &self.issued
+    }
+}
+
 /// Whether the entry `first` is displaced by `second` under §8.6 rule 1: walk both back to the
 /// seq where their branches first differ; the verdict decided that conflict for `second`'s side,
 /// and at least one of the two entries there is a recording entry.

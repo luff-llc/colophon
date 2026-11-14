@@ -1590,8 +1590,10 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   sign a head for a second digest at a seq unless its own verdict shows the first displaced under
   §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
   second head's side; the Equivocation rule above). The guard belongs to home admission, which holds the history: the host
-  that drafts a home's head calls the home's guard first (`HomeState::guard_head` in the
-  reference core) and signs only what it passes.
+  that drafts a home's head calls the home's guard first and signs only what it passes (in the
+  reference core `HomeState::guard_head` returns a token that `prepare_head` requires, so a head
+  cannot be prepared for signing without it). A home keeps only what the guard needs: the latest
+  `issued` and the digests at seqs not yet settled by a final activation.
 
 ### 13.4 Who may read the history
 

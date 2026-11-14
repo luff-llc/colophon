@@ -500,3 +500,9 @@ test of revision 13 was replayed by the Swift source.**
   Entries of one object that differ only in receipts or heads keep the digest order, which the
   three-candidate cycle vector needs. Without homes every activation is final at once, so the
   rule changes nothing there (that is the H1 (b) limit).
+- **L1, L2 (§13.3).** `guard_head` returns `(HomeState, HeadGuard)`; `write::calls::prepare_head`
+  takes the `HeadGuard` and refuses one issued for another home, seq, digest or `issued`, so a head
+  cannot be prepared for signing without the guard (edited, `write/calls.rs`; the builder tests now
+  reproduce the two vector heads the home may sign and show the guard refusing the rest).
+  `signed_heads` keeps the latest `issued` and the digests at seqs above the highest final
+  activation (`signed_heads_are_pruned_to_what_the_guard_needs`).

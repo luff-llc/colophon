@@ -815,6 +815,11 @@ fn a_webauthn_controller_call_carries_its_challenge_and_verifies() {
 
 #[test]
 fn the_4_head_cases_reproduce_and_refuse() {
+    // §13.3 (revision 13 fix round): `prepare_head` takes the guard `HomeState::guard_head`
+    // returns, so only heads the home may sign reach a signature. The two vector heads the home
+    // may sign are reproduced byte for byte; the other two are refused by the guard (a non-home
+    // has no home state, a digest the home has not verified) and still judged by the verifier,
+    // through `finish_head`, from the bytes the vectors ship.
     let acct = account();
     let home = candidate_key("home/signing");
     let agent = candidate_key("agent/signing");
@@ -825,91 +830,91 @@ fn the_4_head_cases_reproduce_and_refuse() {
         homes: &acct.homes,
         now_ms: now,
     };
+    let mut objects = Objects::default();
+    for seq in 1..=3 {
+        objects.entries.push(read(
+            cand().join(format!("account/records/authority/{seq:08}.json")),
+        ));
+    }
+    let home_state =
+        || HomeState::new(home_id(&home).to_string(), &objects, always(), now).unwrap();
     let seq3 = &acct.history[2];
-    let cases: Vec<(&str, &K, &str, &str, String, &str)> = vec![
-        (
-            "valid",
-            &home,
-            home_id(&home),
-            "2026-11-11T09:00:00Z",
-            seq3.clone(),
-            "ok",
-        ),
-        (
-            "stale",
-            &home,
-            home_id(&home),
-            "2026-11-11T08:50:00Z",
-            seq3.clone(),
-            "ok",
-        ),
-        (
-            "not-a-home",
-            &agent,
-            home_id(&agent),
-            "2026-11-11T09:00:00Z",
-            seq3.clone(),
-            "badSignature",
-        ),
-        (
-            "fork",
-            &home,
-            home_id(&home),
-            "2026-11-11T09:00:00Z",
-            "1".repeat(64),
-            "refused:fork",
-        ),
-    ];
     let mut reproduced = Vec::new();
-    for (name, signer, by, issued, dg, want) in cases {
+    for (name, issued) in [
+        ("valid", "2026-11-11T09:00:00Z"),
+        ("stale", "2026-11-11T08:50:00Z"),
+    ] {
         let vector = read(cand().join("heads").join(name).join("head.json"));
-        let prepared = prepare_head(&HeadSpec {
-            account: &acct.id,
-            seq: 3,
-            digest: &dg,
-            issued,
-            by,
-        })
+        let (_, guard) = home_state().guard_head(3, seq3, issued, NOW).unwrap();
+        let prepared = prepare_head(
+            &HeadSpec {
+                account: &acct.id,
+                seq: 3,
+                digest: seq3,
+                issued,
+                by: home_id(&home),
+            },
+            &guard,
+        )
         .unwrap();
-        assert_eq!(prepared.step().signer(), by);
+        assert_eq!(prepared.step().signer(), home_id(&home));
         assert_eq!(prepared.step().body(), body_of(&vector), "{name}: body");
-        let sig = signer.sign(prepared.step().body());
+        let sig = home.sign(prepared.step().body());
         assert_eq!(raw_of(&sig), sig_of(&vector), "{name}: signature");
-        let r = finish_head(&prepared, &sig, ctx());
-        assert_eq!(code(&r), want, "{name}");
-        match r {
-            Ok(bytes) => {
-                assert_eq!(bytes, trim(&vector), "{name}: envelope");
-                reproduced.push(name);
-            }
-            Err(_) => assert_eq!(
-                envelope(prepared.step().body(), &raw_of(&sig)),
-                trim(&vector)
-            ),
-        }
+        let bytes = finish_head(&prepared, &sig, ctx()).unwrap();
+        assert_eq!(bytes, trim(&vector), "{name}: envelope");
+        reproduced.push(name);
     }
     assert_eq!(reproduced, vec!["valid", "stale"]);
-    // A head for an entry the home has not verified is `unavailable`, never signed.
-    let ahead = prepare_head(&HeadSpec {
-        account: &acct.id,
-        seq: 4,
-        digest: &"2".repeat(64),
-        issued: "2026-11-11T09:00:00Z",
-        by: home_id(&home),
-    })
-    .unwrap();
-    assert_eq!(
-        code(&finish_head(&ahead, &home.sign(ahead.step().body()), ctx())),
-        "unavailable"
-    );
-    // A head issued more than 60 s ahead of the clock waits.
-    let future = prepare_head(&HeadSpec {
-        account: &acct.id,
-        seq: 3,
-        digest: seq3,
-        issued: "2026-11-11T09:02:30Z",
-        by: home_id(&home),
-    })
+    // A non-home key has no home state; a fork digest and a head for an entry the home has not
+    // verified are refused by the guard before anything is prepared.
+    assert!(HomeState::new(home_id(&agent).to_string(), &objects, always(), now).is_err());
+    assert!(home_state()
+        .guard_head(3, &"1".repeat(64), "2026-11-11T09:00:00Z", NOW)
+        .is_err());
+    assert!(home_state()
+        .guard_head(4, &"2".repeat(64), "2026-11-11T09:00:00Z", NOW)
+        .is_err());
+    // Shape refusals at the guard: seq 0, bad digest, bad date.
+    for (seq, dg, at) in [
+        (0, seq3.as_str(), "2026-11-11T09:00:00Z"),
+        (3, "xyz", "2026-11-11T09:00:00Z"),
+        (3, seq3.as_str(), "yesterday"),
+    ] {
+        assert!(home_state().guard_head(seq, dg, at, NOW).is_err());
+    }
+    // A guard for one head does not prepare another, or one by another home.
+    let (_, guard) = home_state()
+        .guard_head(3, seq3, "2026-11-11T09:00:00Z", NOW)
+        .unwrap();
+    let other = |issued: &'static str, by: &str| {
+        prepare_head(
+            &HeadSpec {
+                account: &acct.id,
+                seq: 3,
+                digest: seq3,
+                issued,
+                by,
+            },
+            &guard,
+        )
+    };
+    assert!(other("2026-11-11T09:00:01Z", home_id(&home)).is_err());
+    assert!(other("2026-11-11T09:00:00Z", home_id(&agent)).is_err());
+    // A head issued more than 60 s ahead of the clock waits at the verifier (`unavailable`).
+    let (_, g) = home_state()
+        .guard_head(3, seq3, "2026-11-11T09:02:30Z", NOW)
+        .unwrap();
+    let future = prepare_head(
+        &HeadSpec {
+            account: &acct.id,
+            seq: 3,
+            digest: seq3,
+            issued: "2026-11-11T09:02:30Z",
+            by: home_id(&home),
+        },
+        &g,
+    )
     .unwrap();
     assert_eq!(
         code(&finish_head(
@@ -919,21 +924,6 @@ fn the_4_head_cases_reproduce_and_refuse() {
         )),
         "unavailable"
     );
-    // Shape refusals at prepare: seq 0, bad digest, bad date.
-    for (seq, dg, at) in [
-        (0, seq3.as_str(), "2026-11-11T09:00:00Z"),
-        (3, "xyz", "2026-11-11T09:00:00Z"),
-        (3, seq3.as_str(), "yesterday"),
-    ] {
-        assert!(prepare_head(&HeadSpec {
-            account: &acct.id,
-            seq,
-            digest: dg,
-            issued: at,
-            by: home_id(&home),
-        })
-        .is_err());
-    }
 }
 fn home_id(k: &K) -> &'static str {
     Box::leak(k.id().into_boxed_str())
@@ -1257,14 +1247,17 @@ fn prepare_refuses_integers_beyond_2_53_and_hostile_receipt_bodies() {
     let acct = account();
     let big = 1u64 << 53;
     let home = candidate_key("home/signing");
-    assert!(prepare_head(&HeadSpec {
-        account: &acct.id,
-        seq: big,
-        digest: &acct.history[0],
-        issued: NOW,
-        by: &home.id(),
-    })
-    .is_err());
+    // The guard refuses a seq beyond 2^53 - 1 (it is no entry of the home's history).
+    let mut objects = Objects::default();
+    for seq in 1..=3 {
+        objects.entries.push(read(
+            cand().join(format!("account/records/authority/{seq:08}.json")),
+        ));
+    }
+    let home_state = HomeState::new(home.id(), &objects, always(), ms(NOW)).unwrap();
+    assert!(home_state
+        .guard_head(big, &acct.history[0], NOW, NOW)
+        .is_err());
     let agent = candidate_key("agent/signing");
     for seq in [big, u64::MAX, 0] {
         assert!(prepare_call(&CallSpec {
@@ -1488,13 +1481,21 @@ fn home_admission_end_to_end_with_builder_receipts_and_heads() {
         .collect();
     let head_at = stamp(at);
     let head = |seq: u64, dg: &str, by: &K| {
-        let p = prepare_head(&HeadSpec {
-            account: st.account(),
-            seq,
-            digest: dg,
-            issued: &head_at,
-            by: &by.id(),
-        })
+        // The home's own guard first (§13.3): a head for an entry it has not verified never
+        // reaches a signature.
+        let (_, guard) = home1_next
+            .guard_head(seq, dg, &head_at, &stamp(at))
+            .unwrap();
+        let p = prepare_head(
+            &HeadSpec {
+                account: st.account(),
+                seq,
+                digest: dg,
+                issued: &head_at,
+                by: &by.id(),
+            },
+            &guard,
+        )
         .unwrap();
         let sig = by.sign(p.step().body());
         (p, sig)
@@ -1509,8 +1510,9 @@ fn home_admission_end_to_end_with_builder_receipts_and_heads() {
     let head_env = finish_head(&p, &sig, ctx).unwrap();
     let admitted_head = admit(&home1_next, &head_env, &stamp(at + 30_000));
     assert_eq!(admitted_head.result, Ok(()));
-    let (p, sig) = head(2, &"3".repeat(64), &key1);
-    assert_eq!(code(&finish_head(&p, &sig, ctx)), "refused:fork");
+    assert!(home1_next
+        .guard_head(2, &"3".repeat(64), &head_at, &stamp(at))
+        .is_err());
     let (p, _) = head(2, &history[1], &key1);
     let wrong_signer = envelope(
         p.step().body(),
