@@ -1044,6 +1044,7 @@ impl Account {
     ) -> Result<PendingAction> {
         self.require_writable()?;
         self.control_remains(change)?;
+        self.check_grant_component(change)?;
         let batch = prepare_transition(
             &self.d.effective,
             self.now_ms,
@@ -1056,6 +1057,35 @@ impl Account {
             },
         )?;
         Ok(self.batch_action("transition", batch))
+    }
+
+    /// A `grant` component follows every rule of an immediate grant (§9.2, §9.3), by the same
+    /// function the verifier applies at activation: refused at prepare, not found void later.
+    fn check_grant_component(&self, change: &Change) -> Result<()> {
+        let Some(g) = change.0.get("grant") else {
+            return Ok(());
+        };
+        let bytes = crate::v05::encoding::decode_base64(
+            g.get("request")
+                .and_then(Value::as_str)
+                .ok_or_else(|| malformed("a grant needs its request"))?,
+            crate::v05::encoding::bounds::REQUEST_BODY * 2 + 4_096,
+        )?;
+        let request = crate::v05::members::Request::parse(&bytes, true)?;
+        let terms = crate::v05::terms::Terms::parse(
+            g.get("terms").cloned().unwrap_or(Value::Null),
+            crate::v05::terms::TermsKind::Member,
+        )?;
+        require(
+            terms.covered_by(&request.terms),
+            "the granted terms are not covered by the request",
+        )?;
+        crate::v05::members::check_granted_terms(
+            &request,
+            &terms,
+            self.d.auth.namespaces(),
+            self.now_ms,
+        )
     }
 
     /// §6.2: some controller holds `control`. Refused at prepare when a change removes or
