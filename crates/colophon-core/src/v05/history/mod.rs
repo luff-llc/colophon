@@ -99,11 +99,14 @@ pub struct Persisted {
     /// The highest accepted `(seq, digest)`.
     pub high_water: Option<(u64, String)>,
     checkpoint: Option<Checkpoint>,
+    /// Per home member ID, the highest `(seq, digest)` of a head accepted from it (§13.3).
+    head_marks: BTreeMap<String, (u64, String)>,
 }
 
-/// Checkpoint format. 2 added `held_until`; a format 1 checkpoint is refused, and the caller
-/// rebuilds it from its retained objects.
-const CHECKPOINT_VERSION: u32 = 3;
+/// Checkpoint format. 2 added `held_until`; 3 added the successor fields; 4 added the per-home
+/// head high-water marks and the fork a `resolve` names. A checkpoint of another format is
+/// refused, and the caller rebuilds it from its retained objects.
+const CHECKPOINT_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Checkpoint {
@@ -115,6 +118,8 @@ struct Checkpoint {
     /// Earliest time a candidate held at a decided seq comes due (format 2).
     held_until: Option<i64>,
     high_water: Option<(u64, String)>,
+    /// Per home, the highest accepted head (format 4).
+    head_marks: BTreeMap<String, (u64, String)>,
 }
 
 impl Persisted {
@@ -123,7 +128,52 @@ impl Persisted {
         Self {
             high_water: Some((seq, digest)),
             checkpoint: None,
+            head_marks: BTreeMap::new(),
         }
+    }
+
+    /// This verifier's high-water mark for `home`: the highest head `(seq, digest)` it accepted.
+    pub fn head_mark(&self, home: &str) -> Option<(u64, &str)> {
+        self.head_marks.get(home).map(|(s, d)| (*s, d.as_str()))
+    }
+
+    /// Set the mark for `home` (the verifier's own storage; never taken from a peer).
+    pub fn with_head_mark(mut self, home: &str, seq: u64, digest: &str) -> Self {
+        self.head_marks.insert(home.into(), (seq, digest.into()));
+        self
+    }
+
+    /// Verify a head (§13.3) against the held history and this verifier's mark for its home,
+    /// without recording it: a head behind the mark is `refused:rollback`.
+    pub fn check_head(
+        &self,
+        envelope: &[u8],
+        ctx: crate::v05::heads::HeadContext<'_>,
+    ) -> crate::v05::Result<crate::v05::heads::Head> {
+        let by = crate::v05::heads::head_by(envelope);
+        let mark = by.as_deref().and_then(|b| self.head_mark(b));
+        crate::v05::heads::verify_head_with_mark(envelope, ctx, mark)
+    }
+
+    /// [`Persisted::check_head`], then raise the mark for the head's home when it is higher.
+    /// Persist the result with the checkpoint.
+    pub fn accept_head(
+        &mut self,
+        envelope: &[u8],
+        ctx: crate::v05::heads::HeadContext<'_>,
+    ) -> crate::v05::Result<crate::v05::heads::Head> {
+        let head = self.check_head(envelope, ctx)?;
+        let higher = self
+            .head_marks
+            .get(head.by())
+            .is_none_or(|(seq, _)| head.seq() > *seq);
+        if higher {
+            self.head_marks.insert(
+                head.by().to_string(),
+                (head.seq(), head.digest().to_string()),
+            );
+        }
+        Ok(head)
     }
 
     /// Save a verdict and the exact objects used to obtain it. Verification is repeated here
@@ -143,6 +193,7 @@ impl Persisted {
             });
         Self {
             high_water: high_water.clone(),
+            head_marks: previous.head_marks.clone(),
             checkpoint: Some(Checkpoint {
                 version: CHECKPOINT_VERSION,
                 now_ms,
@@ -152,6 +203,7 @@ impl Persisted {
                     || matches!(verdict.stop, Some(Stop::Fork { .. })),
                 held_until: verdict.held_until,
                 high_water,
+                head_marks: previous.head_marks.clone(),
             }),
         }
     }
@@ -164,6 +216,7 @@ impl Persisted {
             .ok_or_else(|| crate::v05::malformed("no folded checkpoint"))?;
         let mut cp = cp.clone();
         cp.high_water = self.high_water.clone();
+        cp.head_marks = self.head_marks.clone();
         serde_json::to_vec(&cp).map_err(|e| crate::v05::malformed(e.to_string()))
     }
 
@@ -180,6 +233,7 @@ impl Persisted {
         }
         Ok(Self {
             high_water: cp.high_water.clone(),
+            head_marks: cp.head_marks.clone(),
             checkpoint: Some(cp),
         })
     }

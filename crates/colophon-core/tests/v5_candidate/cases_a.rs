@@ -879,7 +879,8 @@ fn part2(o: &mut Out, p1: &P1, _attacker: &Key) {
         "rules/rollback/case.json",
         &json!({"description": "A fresh head over seq 2 after the verifier accepted seq 3.",
         "sections": ["13.3"], "expected": {"head": "refused:rollback"},
-        "verifier": {"now": p1.now, "highWater": {"seq": 3, "digest": sha(&body_of(&p1.gh_env))}}}),
+        "verifier": {"now": p1.now, "history": "conformance/0.5/candidate/account/records",
+                     "highWater": {"seq": 3, "digest": sha(&body_of(&p1.gh_env))}}}),
     );
 
     // Canonical encodings (§2.1, §2.2).

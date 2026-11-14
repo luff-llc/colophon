@@ -1464,8 +1464,13 @@ is not fresh is never used as evidence of the current state. Heads embedded in a
 verified as §8.7 says (the home's key in the state before the activation, freshness not needed).
 
 - **High-water mark.** A verifier persists per account its highest accepted `(seq, digest)` and
-  the folded state there. It only detects rollback: a history that stops before that seq, or a
-  head behind it, is `refused:rollback`. It never selects a branch: a conflict is decided by §8.6
+  the folded state there, and **per home** the highest `(seq, digest)` of a head it accepted from
+  that home. It only detects rollback: a history that stops before the account's seq, or a head
+  behind its home's mark, is `refused:rollback`. A head is judged behind its home's mark only
+  while the marked entry is still on the verifier's history; if a displaced provisional
+  activation (§8.7) took it off, the mark names another branch and a lower head is no rollback.
+  A head is checked for its signature, clock and held history first (`refused:fork`,
+  `unavailable`), then against the mark. It never selects a branch: a conflict is decided by §8.6
   from the objects held, including the entries the verifier keeps, so a verifier that saw one
   branch first reaches the same verdict as one that saw the other.
 - **Incremental verification.** A verifier MAY resume from its persisted state: it fetches entries
@@ -1836,7 +1841,8 @@ seed or a raw ECDH output. The host interface and the history verifier's report 
 A verifier that resumes (§13.3) MUST persist, per account, atomically and with a format version.
 Every item is a function of the history and the objects held, recomputed identically by replay
 from seq 1, so two verifiers that persist it reach the same verdicts:
-- the high-water `(seq, digest)` (rollback detection only, §13.3) and the folded state there: keyring, members (terms, expiry,
+- the high-water `(seq, digest)` and each home's head mark (rollback detection only, §13.3) and
+  the folded state there: keyring, members (terms, expiry,
   session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
   is retiring;
 - the digests of transitions with an `activate` or `vetoed` on the branch, and the forks a

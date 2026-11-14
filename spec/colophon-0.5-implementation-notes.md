@@ -404,3 +404,13 @@ test of revision 13 was replayed by the Swift source.**
     applies_its_activation`, `two_resolves_one_on_each_branch_leave_the_fork`,
     `a_resolve_is_judged_by_the_keyring_before_the_fork`, `a_resolve_activation_names_a_fork_the_
     verifier_holds`); vectors `t-resolve-fork`, `t-resolve-two`, `t-resolve-below-rule`.
+- **Head rollback (§13.3, §17.2; E1 gap).** The mark is per home, as the decision says, kept in
+  `Persisted` (`head_mark`, `accept_head`, `check_head`) and checked by `heads::verify_head_with_mark`
+  after the signature, clock and held-history checks. A head behind its home's mark is
+  `refused:rollback` only while the marked entry is still on the held history, so a displaced
+  activation (§8.7 rollback) does not make an honest home's later, lower head a rollback.
+  `verify_head` itself is unchanged (no mark), so `calls.rs` and the write side are untouched.
+  Checkpoint format 4 (marks, and the fork a `resolve` names): a format 3 checkpoint is refused and
+  rebuilt (test `marks_survive_a_checkpoint_and_a_previous_format_is_refused`). `rules/rollback` is
+  now run (`run_rollback`); its `case.json` gained `verifier.history` (the account records), its
+  expectation is unchanged. Tests: `tests/v05_head_marks.rs`.
