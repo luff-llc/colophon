@@ -1491,6 +1491,22 @@ fn stage_one(
     Stage::Ready(Arc::new(c))
 }
 
+/// Whether `member` is caveated for live state in `namespace` (0.3 §5.1 as §11.8 reads it,
+/// decided per namespace): its terms for that namespace carry a `kinds` list, a condition, a
+/// budget or an expiry. A caveat on another namespace does not count.
+pub fn live_caveated(member: &MemberRecord, namespace: &str) -> bool {
+    let kinds = member
+        .terms
+        .records()
+        .and_then(|r| r.iter().find(|e| e.namespace == namespace))
+        .is_none_or(|e| e.kinds.is_some());
+    kinds
+        || member.terms.conditions().is_some()
+        || member.terms.writes().is_some()
+        || member.expires_ms.is_some()
+        || member.terms.expires_ms().is_some()
+}
+
 /// Whether `h` is a record of this account at all: it parses, binds to the account and its
 /// path, and (when its author is a member) carries a valid signature. An author the verified
 /// history does not know yet is not junk (the grant may arrive later). Pure, one signature check.
@@ -1606,6 +1622,22 @@ fn judge_candidate(
             _ => Kept::NotKept,
         },
     };
+    // A live-stamped record under `ops/` (a retained copy) from a caveated writer is refused
+    // (0.3 §5.1: "including retained copies under `ops/`"), and its stamp must say what the
+    // header says.
+    if let Some(stamp) = &hd.live {
+        if live_caveated(member, &hd.namespace) {
+            j.outcome = Outcome::Refused(Reason::CaveatedLive.as_str());
+            return j;
+        }
+        if stamp.account != env.account.as_str()
+            || stamp.generation != hd.clock
+            || stamp.operation_id != hd.id
+        {
+            j.outcome = Outcome::Refused(Reason::InvalidPayload.as_str());
+            return j;
+        }
+    }
     let spent = st.reserved.get(&hd.author);
     let writes_left = match member.terms.writes() {
         None => None,
@@ -1684,6 +1716,18 @@ fn judge_candidate(
                     };
                     match opened {
                         None => j.outcome = Outcome::Refused("invalidPayload"),
+                        Some(pt) if hd.live.as_ref().is_some_and(|st| {
+                            crate::protocol::live_slot(
+                                &hd.namespace,
+                                pt.get("kind").and_then(Value::as_str).unwrap_or_default(),
+                                pt.get("payload").unwrap_or(&Value::Null),
+                            )
+                            .as_deref()
+                                != Some(st.slot.as_str())
+                        }) =>
+                        {
+                            j.outcome = Outcome::Refused(Reason::InvalidPayload.as_str());
+                        }
                         Some(pt) => {
                             let scope = match entry {
                                 Some(e) => admit_opened(&pt, e, &member.terms),
@@ -2355,7 +2399,7 @@ pub fn revocation_reach(
 impl Outcome {
     /// The refusal as a [`Failure`], or `None` for `Admitted`.
     pub fn failure(&self) -> Option<Failure> {
-        const REASONS: [Reason; 11] = [
+        const REASONS: [Reason; 12] = [
             Reason::NotGranted,
             Reason::Expired,
             Reason::Revoked,
@@ -2367,6 +2411,7 @@ impl Outcome {
             Reason::OutOfScope,
             Reason::Fork,
             Reason::Rollback,
+            Reason::CaveatedLive,
         ];
         match self {
             Self::Admitted => None,

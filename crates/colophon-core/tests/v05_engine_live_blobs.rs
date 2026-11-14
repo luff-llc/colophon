@@ -199,6 +199,8 @@ fn two_bodies_at_one_generation_are_equivocation_and_neither_is_current() {
     // A member key with two writing processes: two engines, one key.
     let mut a = s.engine(&id);
     let mut b = s.engine(&id);
+    let mut r = s.engine(&id);
+    let mut r2 = s.engine(&id);
     let wa = s.live(&mut a, position("e1", 10.0));
     let wb = engine_live(&mut b, &mut s.host, &MemSource::new(), position("e1", 99.0));
     assert_eq!(
@@ -207,7 +209,6 @@ fn two_bodies_at_one_generation_are_equivocation_and_neither_is_current() {
         "one slot path"
     );
     assert_ne!(wa.stores.last().unwrap().1, wb.stores.last().unwrap().1);
-    let mut r = s.engine(&id);
     r.apply_live(vec![
         HeldRecord {
             path: wa.stores.last().unwrap().0.clone(),
@@ -231,7 +232,6 @@ fn two_bodies_at_one_generation_are_equivocation_and_neither_is_current() {
         2
     );
     // The order they arrive in does not matter.
-    let mut r2 = s.engine(&id);
     r2.apply_live(vec![
         HeldRecord {
             path: wb.stores.last().unwrap().0.clone(),

@@ -3,6 +3,16 @@
 //! never read.
 use crate::v05::encoding::is_lower_hex;
 
+// The store layout §14 adopts (the spec owner writes it into §14). One place for the names.
+/// Directory of pending transitions: `transitions/<digest>.json`.
+pub const TRANSITIONS: &str = "transitions";
+/// Directory of vetoes: `vetoes/<digest>.json`.
+pub const VETOES: &str = "vetoes";
+/// Directory of receipts: `receipts/<object digest>/<home id>.receipt.json`.
+pub const RECEIPTS: &str = "receipts";
+/// Directory of heads: `heads/<home id>.json`.
+pub const HEADS: &str = "heads";
+
 /// What a path names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -83,7 +93,7 @@ pub fn classify(path: &str) -> Option<Kind> {
             let d = f.strip_suffix(".json")?;
             is_lower_hex(d, 64).then_some(Kind::Pending)
         }
-        ["transitions" | "vetoes" | "receipts", obj, f] => {
+        ["receipts", obj, f] => {
             let by = f.strip_suffix(".receipt.json")?;
             (is_lower_hex(obj, 64) && key_id(by)).then_some(Kind::Receipt)
         }
@@ -138,13 +148,13 @@ pub fn pending_path(protocol_is_veto: bool, digest: &str) -> String {
     format!(
         "{}/{digest}.json",
         if protocol_is_veto {
-            "vetoes"
+            VETOES
         } else {
-            "transitions"
+            TRANSITIONS
         }
     )
 }
 /// Where the engine keeps a home's receipt of an object it fetched.
 pub fn receipt_path(object: &str, by: &str) -> String {
-    format!("receipts/{object}/{by}.receipt.json")
+    format!("{RECEIPTS}/{object}/{by}.receipt.json")
 }

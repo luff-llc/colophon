@@ -75,6 +75,9 @@ pub enum Reason {
     WrongFormat,
     /// §11.5, 0.3 §5: the payload doesn't authenticate or doesn't match its header.
     InvalidPayload,
+    /// 0.3 §5.1 (§11.8): a live-stamped record of a writer whose terms for the namespace carry a
+    /// caveat (`kinds`, a condition, a budget or an expiry). The spec owner adds the code to §19.
+    CaveatedLive,
     /// §7.1, §7.2, §19: a slot's secret is wrong or missing, or an opened seed does not
     /// derive the keyring's vault.
     VaultLocked,
@@ -101,6 +104,7 @@ impl Reason {
             Self::BudgetSpent => "budgetSpent",
             Self::WrongFormat => "wrongFormat",
             Self::InvalidPayload => "invalidPayload",
+            Self::CaveatedLive => "caveatedLive",
             Self::VaultLocked => "vaultLocked",
         }
     }

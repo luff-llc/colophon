@@ -150,7 +150,7 @@ fn judge_one(
         .terms
         .records()
         .and_then(|r| r.iter().find(|e| e.namespace == hd.namespace));
-    let Some(entry) = entry.filter(|e| e.access >= Access::Write) else {
+    let Some(_) = entry.filter(|e| e.access >= Access::Write) else {
         return Err(LiveVerdict::Refused("notGranted"));
     };
     if hd.authority < member.granted_seq {
@@ -159,13 +159,8 @@ fn judge_one(
     if member.revoked_seq.is_some() {
         return Err(LiveVerdict::Refused("revoked"));
     }
-    if member.expires_ms.is_some()
-        || member.terms.expires_ms().is_some()
-        || member.terms.writes().is_some()
-        || entry.kinds.is_some()
-        || member.terms.conditions().is_some()
-    {
-        return Err(LiveVerdict::Refused("caveatedLive"));
+    if super::records::live_caveated(member, &hd.namespace) {
+        return Err(LiveVerdict::Refused(super::Reason::CaveatedLive.as_str()));
     }
     if hd.authority > auth.authority_seq() || auth.fork_seq().is_some_and(|f| hd.authority >= f) {
         return Err(LiveVerdict::Quarantined("authorityBehind"));

@@ -680,12 +680,11 @@ fn check_keep_everything_revocation_loses_retained_live_copies() {
         "the chained record is kept"
     );
     let after = r.account().record_verdict(&retained);
-    assert_ne!(
+    assert_eq!(
         after.as_deref(),
         Some("admitted"),
-        "the retained live copy is not kept: {after:?}"
+        "a keep-everything revocation keeps the retained live copy: {after:?}"
     );
-    eprintln!("retained copy after keep-everything revocation: {after:?}");
 }
 
 /// Q2 (live): a `kinds` on another `records` entry does not make the writer caveated in the

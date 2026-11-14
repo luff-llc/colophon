@@ -416,9 +416,19 @@ pub fn prepare_revoke(
                     digest,
                 }));
             }
+            // Retained live-stamped copies are outside the author chain (they are `previous:
+            // null` by rule), so the walk from `heads` does not reach them: the entry names
+            // them, or a keep-everything revocation would lose them (§9.5).
+            let pairs0: Vec<(String, String)> = heads
+                .iter()
+                .map(|h| (h.namespace.clone(), h.digest.clone()))
+                .collect();
+            let (reached, _) = revocation_reach(&headers, member, &[], &pairs0);
             let mut kept: Vec<String> = headers
                 .iter()
-                .filter(|h| h.format == HeaderFormat::V3)
+                .filter(|h| {
+                    h.format == HeaderFormat::V3 || (h.live && !reached.contains(&h.digest))
+                })
                 .map(|h| h.digest.clone())
                 .collect();
             kept.sort();

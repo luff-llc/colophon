@@ -68,7 +68,7 @@ impl<S: RecordSource> Engine<S> {
         Ok(Outcome::success(
             BlobWriter::new(
                 key.expose().to_vec(),
-                auth.account().as_str().to_string(),
+                auth.account().as_str().chars().take(32).collect(),
                 namespace.to_string(),
                 epoch,
                 media_type,
@@ -128,7 +128,7 @@ impl<S: RecordSource> Engine<S> {
         };
         let bytes = crate::blobs::open_chunk(
             key.expose(),
-            account.as_str(),
+            &account.as_str().chars().take(32).collect::<String>(),
             namespace,
             &manifest,
             index,
