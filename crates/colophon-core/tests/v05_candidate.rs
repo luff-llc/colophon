@@ -750,32 +750,46 @@ fn trimmed(path: &Path) -> Vec<u8> {
     b
 }
 
-/// §13.3: two heads by one home at one seq with different digests are evidence; the evidence
-/// verifies from the home's key in the account's history.
+/// §13.3: two heads by one home at one seq with different digests are evidence when the held
+/// history holds the entry each covers and §8.6 rule 1 does not explain the pair. The vector
+/// ships the account's history and the second entry under `branch-ordinary/`. `rules/equivocation`
+/// convicts; `rules/equivocation-displaced` is an honest home whose later head covers the entry
+/// that displaced the earlier head's, and does not.
 fn run_equivocation(dir: &Path) -> Outcome {
     use colophon_core::v05::write::authority::{verify_evidence, Evidence, EvidenceContext};
-    let objects = objects_of(&cand().join("account"));
+    let mut objects = objects_of(&cand().join("account"));
+    let account_entries = objects.entries.len();
+    objects
+        .entries
+        .extend(files_in(&dir.join("branch-ordinary/authority")));
+    if objects.entries.len() == account_entries {
+        return Outcome::Fail("the vector ships no entries for its heads".into());
+    }
     let now_ms = ms("2026-11-11T09:01:00Z");
     let verdict = verify_history(&objects, &Persisted::default(), now_ms);
     let Some(st) = verdict.state else {
-        return Outcome::Fail("the account history does not verify".into());
+        return Outcome::Fail(format!(
+            "the held history does not verify: {:?}",
+            verdict.stop
+        ));
     };
+    if verdict.stop.is_some() || verdict.branch.len() != 3 {
+        return Outcome::Fail("the held history should stand at seq 3 with no fork".into());
+    }
     let ev = trimmed(&dir.join("evidence.json"));
-    // The evidence's two heads are at seq 3. Whether they convict depends on §8.6 rule 1, which
-    // needs the entries the heads cover as held objects; the vector ships none, and the
-    // verifier answers `unavailable`, never a conviction.
     let ctx = EvidenceContext {
         objects: &objects,
         now_ms,
     };
-    match verify_evidence(&ev, st.account().as_str(), &ctx) {
-        Ok(Evidence::Heads { home, seq }) => {
+    let displaced = dir.ends_with("equivocation-displaced");
+    match (verify_evidence(&ev, st.account().as_str(), &ctx), displaced) {
+        (Ok(Evidence::Heads { home, seq }), false) => {
             Outcome::Pass(format!("evidence ok: home {home} at seq {seq}"))
         }
-        Err(Failure::Unavailable(_)) => Outcome::NotImplemented(
-            "heads evidence needs the entries the heads cover as held objects; the vector ships none",
-        ),
-        other => Outcome::Fail(format!("{other:?}")),
+        (Err(Failure::Malformed(m)), true) if m.contains("rule 1") => {
+            Outcome::Pass(format!("not equivocation: {m}"))
+        }
+        (other, _) => Outcome::Fail(format!("{other:?}")),
     }
 }
 
@@ -836,6 +850,7 @@ fn is_history_case(rel: &str) -> bool {
                 || name.starts_with("i-")
                 || name.starts_with("row-")
                 || name == "equivocation"
+                || name == "equivocation-displaced"
                 || name == "rollback"))
 }
 
@@ -904,7 +919,7 @@ fn candidate_conformance() {
             } else {
                 Outcome::Fail(format!("{} at {}", v.code(), v.seq()))
             }
-        } else if rel == "rules/equivocation" {
+        } else if rel == "rules/equivocation" || rel == "rules/equivocation-displaced" {
             run_equivocation(&dir)
         } else if rel == "rules/t-activate-identical-bytes" {
             run_identical_activation(&dir)
