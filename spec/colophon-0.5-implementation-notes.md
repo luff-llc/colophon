@@ -414,3 +414,17 @@ test of revision 13 was replayed by the Swift source.**
   rebuilt (test `marks_survive_a_checkpoint_and_a_previous_format_is_refused`). `rules/rollback` is
   now run (`run_rollback`); its `case.json` gained `verifier.history` (the account records), its
   expectation is unchanged. Tests: `tests/v05_head_marks.rs`.
+- **`vetoed` choosing rule (§8.7; E1 H4).** The verifier takes the veto's receipts it holds
+  (`Pending.receipts`) together with the entry's own, keeps those valid under §13.5 and received at
+  or before the deadline, takes each home's lowest body digest and the `headQuorum` lowest home IDs,
+  and requires the entry's receipts to equal that. Partial views: adding the entry's own receipts
+  to the held set means a verifier that lacks a receipt the recorder held still accepts a correct
+  entry (test `a_verifier_missing_a_receipt_the_recorder_held_does_not_refuse`). Activation's
+  receipt choice is *not* enforced this way (question 1 above: differing choices are decided by
+  §8.6 digest order); the veto rule is stricter because the checker found two bodies for one
+  `vetoed`. **Risk for the spec owner:** a hostile low-ID home that signs a second, lower-digest
+  receipt in time and shows it only to some verifiers makes those verifiers refuse an otherwise
+  correct `vetoed` (an entry the recorder built without that receipt). A home signs one receipt per
+  object, so this needs a home that equivocates. Vectors `t-vetoed-choice-right`,
+  `t-vetoed-late-receipt-skipped`, `t-vetoed-wrong-choice`; tests in `v05_vetoed_choice.rs`.
+  Text item D (admission at the home's current head) is in §8.7 with this item.

@@ -364,11 +364,29 @@ pub(crate) fn raw_seq(bytes: &[u8]) -> Option<u64> {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Pending {
     pub transitions: BTreeMap<String, Vec<u8>>,
+    /// Held receipts, in canonical bytes.
+    pub receipts: Vec<Vec<u8>>,
 }
 impl Pending {
     pub fn parse(objs: &[Vec<u8>]) -> Self {
         let mut p = Self::default();
         for o in objs {
+            if let Some(c) = crate::v05::encoding::strict_parse(o)
+                .ok()
+                .and_then(|v| crate::v05::encoding::canonical(&v).ok())
+            {
+                if RawEnvelope::parse_bounded(
+                    &c,
+                    bounds::RECEIPT_BODY,
+                    bounds::RECEIPT_ENVELOPE,
+                    true,
+                )
+                .is_ok_and(|r| {
+                    r.value.get("protocol").and_then(Value::as_str) == Some("colophon/receipt/5")
+                }) {
+                    p.receipts.push(c);
+                }
+            }
             if let Ok(e) = AuthEnvelope::parse(
                 o,
                 bounds::TRANSITION_ENVELOPE,
@@ -1784,7 +1802,6 @@ pub(crate) fn apply(
     all: Vec<&Entry>,
     now_ms: i64,
 ) -> Step<State> {
-    let _ = (pending, heads);
     // After a `successor` activation F the account admits only the entries that settle it
     // (§8.7, §15.1): a `final`, or, as a conflicting candidate at F's seq, a `vetoed` that
     // displaces F while it is provisional. Once F is final the account is closed.
@@ -1804,6 +1821,7 @@ pub(crate) fn apply(
     if e.issued > now_ms.saturating_add(60 * SEC) {
         return Err(Outcome::Held("issued more than 60 s ahead".into()));
     }
+    let _ = heads;
     let mut n = match e.kind.as_str() {
         "activate" => {
             let n = activate(s, e, now_ms)?;
@@ -1821,7 +1839,7 @@ pub(crate) fn apply(
             }
             n
         }
-        "vetoed" => vetoed(s, e)?,
+        "vetoed" => vetoed(s, e, pending)?,
         "final" => final_entry(s, e, &all)?,
         "suspend" => suspend(s, e)?,
         "vault" => vault_entry(s, e)?,
@@ -2062,7 +2080,64 @@ fn check_veto(
     Ok((latest, undecidable))
 }
 
-fn vetoed(s: &State, e: &Entry) -> Step<State> {
+/// `(home, body digest)` of a receipt that is valid for `object` under §13.5 in state `s`.
+fn receipt_key(s: &State, bytes: &[u8], object: &str, issued: i64) -> Option<(String, String)> {
+    let (by, _) = check_receipt(s, bytes, object, issued).ok()?;
+    let env =
+        RawEnvelope::parse_bounded(bytes, bounds::RECEIPT_BODY, bounds::RECEIPT_ENVELOPE, true)
+            .ok()?;
+    Some((by, crate::v05::encoding::digest(&env.body)))
+}
+
+/// §8.7 "Choosing receipts" for a veto's receipts: the entry carries, for the `quorum` homes with
+/// the lowest member IDs among those whose valid receipts of the veto were received at or before
+/// the veto deadline, each home's receipt with the lowest body digest. A verifier judges this
+/// over the receipts it holds together with the entry's own, so a receipt the recorder held and
+/// the verifier does not cannot make a correct entry fail: the entry brings the ones it chose.
+fn veto_choice_is_determined(
+    s: &State,
+    pending: &Pending,
+    veto: &AuthEnvelope,
+    v_issued: i64,
+    deadline_ms: i64,
+    chosen: &[Vec<u8>],
+    quorum: usize,
+) -> bool {
+    let mut best: BTreeMap<String, String> = BTreeMap::new();
+    let mut note = |bytes: &[u8]| {
+        let Some((by, d)) = receipt_key(s, bytes, &veto.digest, v_issued) else {
+            return;
+        };
+        let Ok((_, received)) = check_receipt(s, bytes, &veto.digest, v_issued) else {
+            return;
+        };
+        if received > deadline_ms {
+            return;
+        }
+        match best.get(&by) {
+            Some(old) if *old <= d => {}
+            _ => {
+                best.insert(by, d);
+            }
+        }
+    };
+    for r in pending
+        .receipts
+        .iter()
+        .map(Vec::as_slice)
+        .chain(chosen.iter().map(Vec::as_slice))
+    {
+        note(r);
+    }
+    let want: Vec<(String, String)> = best.into_iter().take(quorum).collect();
+    let got: Vec<(String, String)> = chosen
+        .iter()
+        .filter_map(|r| receipt_key(s, r, &veto.digest, v_issued))
+        .collect();
+    want == got
+}
+
+fn vetoed(s: &State, e: &Entry, pending: &Pending) -> Step<State> {
     unsigned(e)?;
     let v = &e.env.value;
     let t_bytes = embedded_bytes(
@@ -2093,6 +2168,24 @@ fn vetoed(s: &State, e: &Entry) -> Step<State> {
     }
     let t = check_transition(s, &t_bytes, &t_receipts, true, true)?;
     let (latest, undecidable) = check_veto(s, &t, &veto, &receipts, true)?;
+    let v_issued = veto
+        .value
+        .get("issued")
+        .and_then(Value::as_str)
+        .and_then(crate::v05::encoding::parse_date)
+        .ok_or_else(|| malformed("veto issued"))?;
+    let quorum = (s.keyring.policy.head_quorum() as usize).min(s.current_homes().len());
+    if !veto_choice_is_determined(
+        s,
+        pending,
+        &veto,
+        v_issued,
+        t.deadline_ms,
+        &receipts,
+        quorum,
+    ) {
+        return Err(malformed("vetoed: the veto receipts are not the determined choice").into());
+    }
     let want = recorded_issued(s.last_issued(), latest);
     if e.issued != want || want > latest.saturating_add(7 * DAY) {
         return Err(malformed("vetoed: issued is not determined").into());

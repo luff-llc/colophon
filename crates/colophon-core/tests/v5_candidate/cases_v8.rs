@@ -878,6 +878,65 @@ pub fn part3(o: &mut Out) {
         Some(ver(DUE0 + 60)),
     );
 
+    // Revision 13 (§8.7 "Choosing receipts"): a veto's receipts are the valid ones received at or
+    // before the veto deadline, lowest home ID first, each home's lowest body digest.
+    let (lo_k, hi_k) = if h1k.id < h2k.id {
+        (&h1k, &h2k)
+    } else {
+        (&h2k, &h1k)
+    };
+    let v_c = veto(&acct, &t1, sg![b], &ts(R0 + 600));
+    let (lo_r, hi_r) = (
+        receipt_of(&acct, &v_c, lo_k, &ts(R0 + 601)),
+        receipt_of(&acct, &v_c, hi_k, &ts(R0 + 602)),
+    );
+    let vobjs = |extra: Vec<(&'static str, Value)>| {
+        let mut v = vec![("transition", t1.clone()), ("veto", v_c.clone())];
+        v.extend(extra);
+        v
+    };
+    let mut c = base.clone();
+    record_veto(
+        &mut c,
+        &t1,
+        std::slice::from_ref(&r1),
+        &v_c,
+        &[lo_r.clone(), hi_r.clone()],
+    );
+    case(o, "t-vetoed-choice-right", &c, ok_at(3),
+         "Both homes receipted the veto in time; the entry carries the lowest home ID's receipt, the chosen one.",
+         &["8.7"], vobjs(vec![("receipt-low", lo_r.clone()), ("receipt-high", hi_r.clone())]),
+         Some(ver(DUE0 + 60)), vec![]);
+    let v_l = veto(&acct, &t1, sg![b], &ts(DL0 - 100));
+    let (lo_late, hi_ok) = (
+        receipt_of(&acct, &v_l, lo_k, &ts(DL0 + 50)),
+        receipt_of(&acct, &v_l, hi_k, &ts(DL0 - 90)),
+    );
+    let mut c = base.clone();
+    record_veto(
+        &mut c,
+        &t1,
+        std::slice::from_ref(&r1),
+        &v_l,
+        std::slice::from_ref(&hi_ok),
+    );
+    case(o, "t-vetoed-late-receipt-skipped", &c, ok_at(3),
+         "The lowest home ID's receipt of the veto is after the veto deadline, so it is not chosen; the entry carries the other home's timely receipt. The late receipt does not block it.",
+         &["8.7"], vec![("transition", t1.clone()), ("veto", v_l.clone()), ("receipt-low-late", lo_late), ("receipt-high", hi_ok.clone())],
+         Some(ver(DUE0 + 60)), vec![]);
+    let mut c = base.clone();
+    record_veto(
+        &mut c,
+        &t1,
+        std::slice::from_ref(&r1),
+        &v_c,
+        std::slice::from_ref(&hi_r),
+    );
+    case(o, "t-vetoed-wrong-choice", &c, bad("malformed", 3),
+         "Both homes receipted the veto in time and the verifier holds both; the entry carries the higher home ID's receipt, not the chosen one.",
+         &["8.7"], vobjs(vec![("receipt-low", lo_r), ("receipt-high", hi_r)]),
+         Some(ver(DUE0 + 60)), vec![]);
+
     // 4. Ordering at one seq (§8.6 rule 1), finality.
     let mut y_before = base.clone();
     grant_agent(&mut y_before, &a, &ts(R0 + 120), &a);

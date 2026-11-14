@@ -1,0 +1,1 @@
+{"description":"Both homes receipted the veto in time and the verifier holds both; the entry carries the higher home ID's receipt, not the chosen one.","expected":{"result":"malformed","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

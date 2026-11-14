@@ -839,7 +839,12 @@ receipts, due time and veto as §8.7 says; it has no veto deadline of its own be
 - **Receipt** (§13.5): by a current home, `received` within 300 s after the object's `issued`.
   **Choosing receipts:** an entry carries exactly `headQuorum` receipts for an object, from the
   homes with the lowest member IDs whose valid receipts it holds, for each home its receipt with
-  the lowest body digest, sorted by home ID.
+  the lowest body digest, sorted by home ID. For a veto, the receipts that may be chosen are those
+  valid under §13.5 **and received at or before the transition's veto deadline**: a later receipt
+  is skipped, never chosen, and never blocks the entry. A verifier enforces the choice over the
+  receipts it holds together with the entry's own: a `vetoed` whose receipts are not the choice
+  among those is `malformed`. A receipt the verifier lacks cannot make a correct entry fail, since
+  the entry carries the ones it chose.
 
 **Times.** For a transition T judged in state S:
 - the delay is the larger of `recoveryDelay` at T's anchor and in S;
@@ -856,6 +861,9 @@ before E:
 3. its anchor is on E's branch (`malformed`).
 
 A transition whose only receipting homes are revoked before activation is dead.
+
+A home admits a transition (receipts it) by judging it at the home's **current head**, not at a
+later state (§13.1); validity at an entry is judged at that entry, as above.
 
 **Escalation.** v(u) is the number of distinct transitions signed by unit u with a `vetoed` on the
 branch since the last `activate` of a transition u signed that met the escalation rule then. T
@@ -964,7 +972,7 @@ with the result shown, and an entry that fails changes nothing. Every recording 
 | **`suspend` (key K, T, receipts)** | §8.5 steps 1–2; signer is a signer of T (`badSignature`); T valid at E; T not recorded on the branch; T removes or demotes K; T's delta not void; the signer's unit has no outstanding suspension (`malformed`) | K suspended until the earliest of: T's `activate` or `vetoed`; the first entry after which T is no longer valid at a hypothetical `activate`; the first entry, or the verifier's clock, past T's due time + 7 days. |
 | **`activate` (T, receipts)**, T not a full set | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); delta not void (`malformed`) | Apply the delta (with `keep`, §8.3's slot drops, retiring, and the drop of keys the removed key added); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set; it becomes final when every witness is excused, in Order (the fixed point). |
 | **Full-set `activate`** | As `activate`, with the full set's due time; no veto | As `activate`; every activation before T's anchor becomes final. |
-| **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts chosen, each within 300 s of V's `issued` and before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
+| **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts chosen as §8.7 "Choosing receipts" says, each within 300 s of V's `issued` and at or before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
 | **`final` (activation A, heads)** | A is an `activate` on the branch, not yet final; if A is not removal-only, every earlier activation that is not removal-only is final; `heads` is non-empty and has exactly one head per witness of A, each signed by that home's key in the state before A, covering A on this branch (not necessarily fresh); `by` = A's `by`; `issued` = max(latest head's `issued`, previous `issued`) (`malformed`) | A is final, and so is every earlier activation whose witnesses all have a head here covering it; what they added counts. A removal-only A that revoked homes excuses them from every other activation's witnesses. |
 | **`successionVetoed`** | §15.1 step 4 (`malformed`; a veto signature by an ineligible key `badSignature`) | The succession is never verified. |
 | **Conflict at one seq** | §8.6 | The standing entry is on the branch; rollback as above. |
