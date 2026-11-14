@@ -740,6 +740,14 @@ impl Account {
             fold_applied: self.d.fold_applied,
         }
     }
+    /// Move the verifier's resume point to the current verified state, in memory (the sealed
+    /// export is [`Account::export_persisted`]). Later merges then verify only the entries
+    /// after it instead of the whole history (§13.3, §17.2). Crate-private: the engine calls it
+    /// after it has loaded, and it changes no verdict (the account tests show a resumed
+    /// verifier and a replaying one agree).
+    pub(crate) fn checkpoint_verifier(&mut self) {
+        self.persisted = Persisted::checkpoint(&self.objects, &self.persisted, self.now_ms);
+    }
     /// What this device may remember of the held records' crypto, for the engine's sealed
     /// checkpoint (crate-private: a caller could not tell it from verified state).
     pub(crate) fn export_judge_memo(&self) -> Vec<crate::v05::records::RecordMemo> {
@@ -767,9 +775,10 @@ impl Account {
     }
     /// Hold live-state candidates (`state/<author>/<namespace>/<slot>.json` envelopes) and
     /// judge them with the history (0.3 §5.1). They are held as a set, so the heads are a
-    /// function of what is held. At most [`crate::v05::live::MAX_CANDIDATES_PER_PATH`]
-    /// different byte strings are held per path and 16,384 in all; a merge past either bound
-    /// is refused whole. Nothing changes on failure.
+    /// function of what is held. What is held is pruned as a function of the set (see the
+    /// code): never more than [`crate::v05::live::MAX_CANDIDATES_PER_PATH`] byte strings per
+    /// path and 16,384 in all; a merge past either bound is refused whole. Nothing changes on
+    /// failure.
     pub fn merge_live(&mut self, candidates: Vec<HeldRecord>, now_ms: i64) -> Result<Changes> {
         crate::v05::write::check_issued(now_ms)?;
         require(
@@ -781,32 +790,63 @@ impl Account {
         )?;
         let mut live = self.live.clone();
         union_records(&mut live, &candidates);
+        require(live.len() <= 32_768, "too many live candidates")?;
+        let now = now_ms.max(self.now_ms);
+        let build = |this: &Self, live: &[HeldRecord]| {
+            Derived::build(
+                &Inputs {
+                    objects: &this.objects,
+                    records: &this.records,
+                    live,
+                    persisted: &this.persisted,
+                    now_ms: now,
+                    seeds: &this.seeds,
+                    me: &this.me,
+                    scope: &this.scope,
+                },
+                Some(&this.d),
+                None,
+            )
+        };
+        let mut d = build(self, &live)?;
+        // Keep what can still matter, as a function of the set: a candidate that is no live
+        // record at all is dropped, and of the valid ones a slot keeps its two highest
+        // generations (the head, and the one that takes over if the head stops being valid).
+        let mut keep: Vec<HeldRecord> = Vec::new();
+        let mut superseded: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
+        for (i, (c, (_, v))) in live.iter().zip(&d.live.verdicts).enumerate() {
+            match v {
+                crate::v05::live::LiveVerdict::Invalid(_) => {}
+                crate::v05::live::LiveVerdict::Superseded => {
+                    let g = crate::v05::records::OperationHeader::parse(&c.bytes)
+                        .map_or(0, |(h, _)| h.clock);
+                    superseded.entry(c.path.clone()).or_default().push((g, i));
+                }
+                _ => keep.push(c.clone()),
+            }
+        }
+        for list in superseded.values_mut() {
+            list.sort_by(|a, b| b.cmp(a));
+            for (_, i) in list.iter().take(2) {
+                keep.push(live[*i].clone());
+            }
+        }
+        keep.sort_by(|a, b| (&a.path, &a.bytes).cmp(&(&b.path, &b.bytes)));
         let mut per: BTreeMap<&str, usize> = BTreeMap::new();
-        for c in &live {
+        for c in &keep {
             *per.entry(c.path.as_str()).or_default() += 1;
         }
         require(
-            live.len() <= 16_384
+            keep.len() <= 16_384
                 && per
                     .values()
                     .all(|n| *n <= crate::v05::live::MAX_CANDIDATES_PER_PATH),
             "too many live candidates",
         )?;
-        let now = now_ms.max(self.now_ms);
-        let d = Derived::build(
-            &Inputs {
-                objects: &self.objects,
-                records: &self.records,
-                live: &live,
-                persisted: &self.persisted,
-                now_ms: now,
-                seeds: &self.seeds,
-                me: &self.me,
-                scope: &self.scope,
-            },
-            Some(&self.d),
-            None,
-        )?;
+        if keep.len() != live.len() {
+            live = keep;
+            d = build(self, &live)?;
+        }
         let (o, r, p) = (
             self.objects.clone(),
             self.records.clone(),
@@ -815,6 +855,12 @@ impl Account {
         let c = self.commit(d, o, r, p, now);
         self.live = live;
         Ok(c)
+    }
+    /// The verdict on the held record at `path`, as the §11.5 spelling (`admitted`,
+    /// `refused:…`, `held:…`), or `None` when no held record is at that path.
+    pub fn record_verdict(&self, path: &str) -> Option<String> {
+        let i = *self.d.judged_at.get(path)?;
+        self.d.judgement.records.get(i).map(|j| j.outcome.code())
     }
     /// The highest clock of an admitted, authenticated operation in `namespace` (0 if none): a
     /// writer's next clock is one past it (§11.4).
@@ -829,6 +875,19 @@ impl Account {
                     && j.namespace.as_deref() == Some(namespace)
             })
             .map(|j| j.clock)
+            .max()
+            .unwrap_or(0)
+    }
+    /// The highest generation among the live candidates held for `author`'s `slot` in
+    /// `namespace` that are live records at all (0 if none): a new sample goes above it, so a
+    /// writer never reuses a generation an equivocation spoiled.
+    pub fn live_generation_floor(&self, author: &str, namespace: &str, slot: &str) -> u64 {
+        let path = crate::v05::live::live_path(author, namespace, slot);
+        self.live
+            .iter()
+            .filter(|c| c.path == path)
+            .filter_map(|c| crate::v05::records::OperationHeader::parse(&c.bytes).ok())
+            .map(|(h, _)| h.clock)
             .max()
             .unwrap_or(0)
     }

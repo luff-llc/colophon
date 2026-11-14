@@ -41,7 +41,7 @@ pub fn b64(b: &[u8]) -> String {
 pub struct Host {
     pub ids: BTreeMap<String, SoftwareIdentity>,
     pub passkey: Option<(SyntheticAuthenticator, String)>,
-    pub counter: u8,
+    pub counter: u32,
 }
 impl Host {
     pub fn new() -> Self {
@@ -94,7 +94,9 @@ impl Host {
     }
     pub fn fresh(&mut self) -> [u8; 32] {
         self.counter += 1;
-        [self.counter; 32]
+        let mut seed = [self.counter as u8; 32];
+        seed[..4].copy_from_slice(&self.counter.to_le_bytes());
+        seed
     }
     pub fn sign(&self, steps: &[SigningStep]) -> Vec<SignatureResult> {
         steps
@@ -238,7 +240,7 @@ pub fn create(namespaces: &[&str]) -> Fixture {
 /// The same, with every key different (`v`): another account.
 pub fn create_v(namespaces: &[&str], v: u8) -> Fixture {
     let mut host = Host::new();
-    host.counter = v.wrapping_mul(50);
+    host.counter = u32::from(v) * 50;
     let d = host.identity(10 + v);
     let k = host.kit(20 + v);
     let p = host.passkey();
@@ -528,6 +530,7 @@ pub trait Wire {
     fn call(&mut self, host: &Host, req: &Request, now_ms: i64) -> Response;
 }
 
+#[derive(Clone)]
 pub struct SimHome {
     pub id: String,
     pub base: String,
@@ -969,4 +972,48 @@ pub fn engine_blob(
     }
     engine_write(e, host, src, ns, "colophon.blobPublish", payload);
     descriptor
+}
+
+/// An account with a home, and the home simulated.
+pub struct Setup {
+    pub f: Fixture,
+    pub home: String,
+    pub sim: SimHome,
+    pub authority: MemSource,
+}
+pub fn setup(ns: &str, members: &[(&str, u8, &str)]) -> (Setup, Vec<String>) {
+    let mut f = create(&[ns]);
+    let home = appoint_home(&mut f);
+    let mut ids = Vec::new();
+    for (label, seed, access) in members {
+        let id = f.host.identity(*seed);
+        admit(
+            &mut f,
+            &id,
+            label,
+            "device",
+            terms_for(&[(ns, access)]),
+            terms_for(&[(ns, access)]),
+        );
+        ids.push(id);
+    }
+    let authority = MemSource::new();
+    authority.store_account(&f.account);
+    let sim = SimHome::new(&f, &home, "https://home.example", f.account.now_ms());
+    (
+        Setup {
+            f,
+            home,
+            sim,
+            authority,
+        },
+        ids,
+    )
+}
+pub fn device_source(s: &Setup) -> MemSource {
+    let src = MemSource::new();
+    for p in s.authority.listing() {
+        src.put(&p, s.authority.get(&p).unwrap());
+    }
+    src
 }

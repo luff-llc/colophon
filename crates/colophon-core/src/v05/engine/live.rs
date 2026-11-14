@@ -213,6 +213,7 @@ impl<S: RecordSource> Engine<S> {
             .find(|h| h.author == author && h.namespace == namespace && h.slot == slot);
         let generation = durable
             .max(prior.map_or(0, |h| h.generation))
+            .max(self.account.live_generation_floor(&author, namespace, &slot))
             .checked_add(1)
             .ok_or_else(|| malformed("clock overflow"))?;
         require(

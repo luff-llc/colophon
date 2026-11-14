@@ -1514,15 +1514,27 @@ impl<S: RecordSource> Engine<S> {
             now,
         )?;
         super::absorb(&mut report.changes, c);
-        self.ix.have.insert(
-            path.to_string(),
-            Have {
-                sha: super::sha(&r.body),
-                version: None,
-            },
-        );
-        self.ix.listing.insert(path.to_string());
-        report.store.push((path.to_string(), r.body.clone()));
+        // What is not a record at all (it does not parse, its signature or its path is wrong)
+        // is not stored over the immutable path it names: a home must not plant garbage where
+        // the real record belongs. A record that parses and is held, refused or out of scope
+        // is evidence and is kept like any other.
+        match self.account.record_verdict(path) {
+            Some(code) if !is_not_a_record(&code) => {
+                self.ix.have.insert(
+                    path.to_string(),
+                    Have {
+                        sha: super::sha(&r.body),
+                        version: None,
+                    },
+                );
+                self.ix.listing.insert(path.to_string());
+                report.store.push((path.to_string(), r.body.clone()));
+            }
+            code => report.faults.push(Fault::BadObject {
+                home: home.into(),
+                code: code.unwrap_or_else(|| "malformed".into()),
+            }),
+        }
         Ok(())
     }
 
@@ -1613,6 +1625,15 @@ impl<S: RecordSource> Engine<S> {
         }
         Ok(())
     }
+}
+
+/// The result codes of a header that never became a record (`Outcome::Invalid`): the failure
+/// codes of §1, none of which is an admission verdict.
+fn is_not_a_record(code: &str) -> bool {
+    !(code == "admitted"
+        || code.starts_with("refused:")
+        || code.starts_with("held:")
+        || code == "newerFormat")
 }
 
 /// The path of a pending object, or `None` for what the engine does not store.

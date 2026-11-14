@@ -64,6 +64,8 @@ pub(super) struct Derived {
     pub auth: RecordAuthority,
     pub keys: EpochKeys,
     pub judgement: Judgement,
+    /// Position of each held record's judgement, by path.
+    pub judged_at: BTreeMap<String, usize>,
     /// The judgement of the live-state candidates held (0.3 §5.1).
     pub live: crate::v05::live::LiveJudgement,
     pub folded: BTreeMap<String, Folded>,
@@ -210,6 +212,12 @@ impl Derived {
             verdict,
             auth,
             keys,
+            judged_at: judgement
+                .records
+                .iter()
+                .enumerate()
+                .map(|(i, j)| (j.path.clone(), i))
+                .collect(),
             judgement,
             live,
             folded: BTreeMap::new(),

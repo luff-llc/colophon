@@ -563,6 +563,7 @@ impl<S: RecordSource> Engine<S> {
             }
         }
         self.restored.clear();
+        self.account.checkpoint_verifier();
         Ok(c)
     }
 
