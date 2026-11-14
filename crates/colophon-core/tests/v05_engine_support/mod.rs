@@ -1,6 +1,12 @@
 //! The host side of the 0.5 journeys: software and synthetic-WebAuthn keys, an account creation
 //! fixture, an in-memory record source, a simulated home.
-#![allow(dead_code, unused_imports, clippy::unwrap_used, clippy::cloned_ref_to_slice_refs)]
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::unwrap_used,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::too_many_arguments
+)]
 use base64::{engine::general_purpose::STANDARD, Engine};
 use colophon_core::keys::testing::SyntheticAuthenticator;
 use colophon_core::v05::account::*;
@@ -518,7 +524,9 @@ pub fn shuffled<T: Clone>(items: &[T], mut seed: u64) -> Vec<T> {
 
 use colophon_core::v05::engine::exchange::{Fault, Method, Request, Response, Step};
 use colophon_core::v05::engine::Engine as AccountEngine;
-use colophon_core::v05::history::home::{admit as home_admit, admit_pending_batch, HomeState, ServingInterval};
+use colophon_core::v05::history::home::{
+    admit as home_admit, admit_pending_batch, HomeState, ServingInterval,
+};
 use colophon_core::v05::write::calls::prepare_receipt;
 use colophon_core::v05::write::format_date;
 
@@ -621,7 +629,12 @@ impl SimHome {
             .unwrap(),
         )
     }
-    fn sign_receipts(&mut self, host: &Host, reqs: Vec<colophon_core::v05::history::home::ReceiptToSign>, now_ms: i64) -> Vec<Value> {
+    fn sign_receipts(
+        &mut self,
+        host: &Host,
+        reqs: Vec<colophon_core::v05::history::home::ReceiptToSign>,
+        now_ms: i64,
+    ) -> Vec<Value> {
         let now = format_date(now_ms);
         let mut out = Vec::new();
         for r in reqs {
@@ -630,7 +643,9 @@ impl SimHome {
                 signature: host.ids[&self.id].sign(prepared.step().body()).to_vec(),
                 assertion: None,
             };
-            if let Ok((env, next)) = colophon_core::v05::write::calls::finish_receipt(&self.state, &prepared, &sig, &now) {
+            if let Ok((env, next)) =
+                colophon_core::v05::write::calls::finish_receipt(&self.state, &prepared, &sig, &now)
+            {
                 self.state = next;
                 out.push(serde_json::from_slice(&env).unwrap());
             }
@@ -644,7 +659,10 @@ impl SimHome {
 }
 impl Wire for SimHome {
     fn call(&mut self, host: &Host, req: &Request, now_ms: i64) -> Response {
-        let rest = req.url.strip_prefix(&self.base).expect("another home's URL");
+        let rest = req
+            .url
+            .strip_prefix(&self.base)
+            .expect("another home's URL");
         let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
         self.requests.push(format!("{:?} {}", req.method, path));
         let now = format_date(now_ms);
@@ -654,11 +672,22 @@ impl Wire for SimHome {
                 None => resp(404, json!({})),
             },
             (Method::Get, "/authority") => {
-                let after: u64 = q_get(query, "after").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let limit: usize = q_get(query, "limit").and_then(|s| s.parse().ok()).unwrap_or(64);
+                let after: u64 = q_get(query, "after")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let limit: usize = q_get(query, "limit")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(64);
                 let all: Vec<&Vec<u8>> = self.entries.range(after + 1..).map(|(_, e)| e).collect();
-                let page: Vec<Value> = all.iter().take(limit.min(64)).map(|e| serde_json::from_slice(e).unwrap()).collect();
-                resp(200, json!({"entries": page, "receipts": [], "more": all.len() > limit.min(64)}))
+                let page: Vec<Value> = all
+                    .iter()
+                    .take(limit.min(64))
+                    .map(|e| serde_json::from_slice(e).unwrap())
+                    .collect();
+                resp(
+                    200,
+                    json!({"entries": page, "receipts": [], "more": all.len() > limit.min(64)}),
+                )
             }
             (Method::Post, "/authority") => {
                 let v: Value = serde_json::from_slice(&req.body).unwrap();
@@ -678,7 +707,10 @@ impl Wire for SimHome {
                             receipts.extend(self.sign_receipts(host, a.receipts, now_ms));
                         }
                         Err(colophon_core::v05::history::home::Refusal::Conflict) => {
-                            let h = self.head_env(host, now_ms).map(|h| serde_json::from_slice::<Value>(&h).unwrap()).unwrap_or(json!({}));
+                            let h = self
+                                .head_env(host, now_ms)
+                                .map(|h| serde_json::from_slice::<Value>(&h).unwrap())
+                                .unwrap_or(json!({}));
                             return resp(409, h);
                         }
                         Err(colophon_core::v05::history::home::Refusal::PrimaryRequired(eps)) => {
@@ -687,24 +719,45 @@ impl Wire for SimHome {
                         Err(r) => return resp(422, json!({"result": r.code()})),
                     }
                 }
-                let head = self.head_env(host, now_ms).map(|h| serde_json::from_slice::<Value>(&h).unwrap());
+                let head = self
+                    .head_env(host, now_ms)
+                    .map(|h| serde_json::from_slice::<Value>(&h).unwrap());
                 resp(200, json!({"head": head, "receipts": receipts}))
             }
             (Method::Get, "/pending") => {
-                let after: u64 = q_get(query, "after").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let limit: usize = q_get(query, "limit").and_then(|s| s.parse().ok()).unwrap_or(64);
-                let page = self.state.pending_page(after, limit.min(64), now_ms).unwrap();
-                resp(200, json!({
-                    "objects": page.objects.iter().map(|o| json!({"seq": o.seq, "digest": o.digest, "kind": o.kind, "envelope": serde_json::from_slice::<Value>(&o.envelope).unwrap()})).collect::<Vec<_>>(),
-                    "more": page.more,
-                }))
+                let after: u64 = q_get(query, "after")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let limit: usize = q_get(query, "limit")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(64);
+                let page = self
+                    .state
+                    .pending_page(after, limit.min(64), now_ms)
+                    .unwrap();
+                resp(
+                    200,
+                    json!({
+                        "objects": page.objects.iter().map(|o| json!({"seq": o.seq, "digest": o.digest, "kind": o.kind, "envelope": serde_json::from_slice::<Value>(&o.envelope).unwrap()})).collect::<Vec<_>>(),
+                        "more": page.more,
+                    }),
+                )
             }
             (Method::Post, "/pending") => {
                 let v: Value = serde_json::from_slice(&req.body).unwrap();
-                let objs: Vec<Vec<u8>> = v["objects"].as_array().unwrap().iter().map(|o| canonical(o).unwrap()).collect();
-                let (next, results, receipts) = admit_pending_batch(&self.state, &objs, &now).unwrap();
+                let objs: Vec<Vec<u8>> = v["objects"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|o| canonical(o).unwrap())
+                    .collect();
+                let (next, results, receipts) =
+                    admit_pending_batch(&self.state, &objs, &now).unwrap();
                 self.state = next;
-                let refused: Vec<Value> = results.iter().filter_map(|r| r.as_ref().err().map(|e| json!(e.code()))).collect();
+                let refused: Vec<Value> = results
+                    .iter()
+                    .filter_map(|r| r.as_ref().err().map(|e| json!(e.code())))
+                    .collect();
                 if !refused.is_empty() {
                     return resp(422, json!(refused));
                 }
@@ -712,15 +765,23 @@ impl Wire for SimHome {
                 resp(200, json!({"receipts": rs}))
             }
             (Method::Get, "/changes") => {
-                let after: usize = q_get(query, "after").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let limit: usize = q_get(query, "limit").and_then(|s| s.parse().ok()).unwrap_or(500).min(500);
+                let after: usize = q_get(query, "after")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let limit: usize = q_get(query, "limit")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(500)
+                    .min(500);
                 if after > self.log.len() {
                     return resp(410, json!({}));
                 }
                 let slice = &self.log[after..];
                 let page: Vec<&String> = slice.iter().take(limit).collect();
                 let entries: Vec<Value> = page.iter().map(|p| json!({"path": p, "size": self.files[*p].len(), "sha256": hex(&Sha256::digest(&self.files[*p]))})).collect();
-                resp(200, json!({"entries": entries, "cursor": (after + page.len()).to_string(), "more": slice.len() > limit}))
+                resp(
+                    200,
+                    json!({"entries": entries, "cursor": (after + page.len()).to_string(), "more": slice.len() > limit}),
+                )
             }
             (Method::Get, p) if p.starts_with("/records/") => {
                 let rec = &p["/records/".len()..];
@@ -731,20 +792,33 @@ impl Wire for SimHome {
             }
             (Method::Put, p) if p.starts_with("/records/") => {
                 let rec = p["/records/".len()..].to_string();
-                let h = |k: &str| req.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone());
+                let h = |k: &str| {
+                    req.headers
+                        .iter()
+                        .find(|(n, _)| n.eq_ignore_ascii_case(k))
+                        .map(|(_, v)| v.clone())
+                };
                 if let Some(name) = rec.strip_prefix("blobs/") {
                     if hex(&Sha256::digest(&req.body)) != name {
                         return resp(400, json!({}));
                     }
                 }
                 let live = rec.starts_with("state/");
-                match (self.files.get(&rec).cloned(), h("If-None-Match"), h("If-Match")) {
+                match (
+                    self.files.get(&rec).cloned(),
+                    h("If-None-Match"),
+                    h("If-Match"),
+                ) {
                     (None, Some(_), None) => {
                         self.store(&rec, req.body.clone());
                         resp(201, json!({}))
                     }
                     (Some(old), Some(_), None) if !live => {
-                        if old == req.body { resp(200, json!({})) } else { resp(412, json!({})) }
+                        if old == req.body {
+                            resp(200, json!({}))
+                        } else {
+                            resp(412, json!({}))
+                        }
                     }
                     (Some(old), None, Some(m)) if live => {
                         if format!("\"{}\"", hex(&Sha256::digest(&old))) == m {
@@ -755,7 +829,11 @@ impl Wire for SimHome {
                         }
                     }
                     (Some(old), Some(_), None) if live => {
-                        if old == req.body { resp(200, json!({})) } else { resp(412, json!({})) }
+                        if old == req.body {
+                            resp(200, json!({}))
+                        } else {
+                            resp(412, json!({}))
+                        }
                     }
                     _ => resp(428, json!({})),
                 }
@@ -831,7 +909,11 @@ pub fn appoint_home(f: &mut Fixture) -> String {
     );
     let action = f
         .account
-        .begin_transition(&change, &[f.d.clone(), f.k.clone()], TransitionRule::Control)
+        .begin_transition(
+            &change,
+            &[f.d.clone(), f.k.clone()],
+            TransitionRule::Control,
+        )
         .unwrap();
     run(&mut f.account, &f.host, action);
     let rec = f.account.record_due().unwrap();
@@ -887,7 +969,8 @@ pub fn controller_engine(
         .unwrap()
         .index;
     let inputs = e.begin_unlock_slot(idx).unwrap();
-    e.finish_unlock_slot(idx, &host.answer_unlock(&inputs)).unwrap();
+    e.finish_unlock_slot(idx, &host.answer_unlock(&inputs))
+        .unwrap();
     e
 }
 

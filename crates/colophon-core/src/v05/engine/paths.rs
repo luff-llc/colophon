@@ -111,7 +111,9 @@ pub fn classify(path: &str) -> Option<Kind> {
             (key_id(author)
                 && ns_ok(ns)
                 && !slot.is_empty()
-                && slot.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+                && slot
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
             .then(|| Kind::Live {
                 author: (*author).into(),
                 namespace: (*ns).into(),

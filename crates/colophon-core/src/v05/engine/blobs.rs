@@ -55,7 +55,11 @@ impl<S: RecordSource> Engine<S> {
         let epoch = auth
             .epoch_at(namespace, auth.authority_seq())
             .ok_or_else(|| malformed("the namespace has no epoch yet"))?;
-        let Some(key) = self.account.epoch_keys().get(auth.account(), namespace, epoch) else {
+        let Some(key) = self
+            .account
+            .epoch_keys()
+            .get(auth.account(), namespace, epoch)
+        else {
             return Ok(Outcome::failure(denial(
                 "notReadable".into(),
                 "Namespace blob key is unavailable".into(),
@@ -91,9 +95,7 @@ impl<S: RecordSource> Engine<S> {
                 m.validate().map_err(|e| malformed(e.to_string()))?;
                 Ok(Outcome::success(m))
             }
-            Outcome::Failure { reason, detail, .. } => {
-                Ok(Outcome::failure(denial(reason, detail)))
-            }
+            Outcome::Failure { reason, detail, .. } => Ok(Outcome::failure(denial(reason, detail))),
         }
     }
 
@@ -159,12 +161,13 @@ impl<S: RecordSource> Engine<S> {
             .read_blob(&chunk.path)
             .map_err(|e| crate::v05::Failure::Unavailable(e.0))?
         {
-            BlobRead::Available(bytes) => match self.open_blob_chunk(namespace, digest, index, &bytes)
-            {
-                Ok(Outcome::Success { value, .. }) => Ok(BlobRead::Available(value)),
-                Ok(Outcome::Failure { detail, .. }) => Ok(BlobRead::Inaccessible(detail)),
-                Err(e) => Ok(BlobRead::Invalid(e.code())),
-            },
+            BlobRead::Available(bytes) => {
+                match self.open_blob_chunk(namespace, digest, index, &bytes) {
+                    Ok(Outcome::Success { value, .. }) => Ok(BlobRead::Available(value)),
+                    Ok(Outcome::Failure { detail, .. }) => Ok(BlobRead::Inaccessible(detail)),
+                    Err(e) => Ok(BlobRead::Invalid(e.code())),
+                }
+            }
             other => Ok(other),
         }
     }

@@ -89,7 +89,14 @@ fn auth_print(verdict: &crate::v05::history::Verdict, auth: &RecordAuthority) ->
         h.update(d.as_bytes());
         h.update(b"\n");
     }
-    h.update(format!("fork:{:?};upgrade:{:?};", auth.fork_seq(), auth.upgrade_seq()).as_bytes());
+    h.update(
+        format!(
+            "fork:{:?};upgrade:{:?};",
+            auth.fork_seq(),
+            auth.upgrade_seq()
+        )
+        .as_bytes(),
+    );
     let members = auth.state().members();
     match serde_json::to_vec(members) {
         Ok(b) => h.update(b),
@@ -212,12 +219,23 @@ impl Derived {
             verdict,
             auth,
             keys,
-            judged_at: judgement
-                .records
-                .iter()
-                .enumerate()
-                .map(|(i, j)| (j.path.clone(), i))
-                .collect(),
+            judged_at: {
+                // Several held byte strings can sit at one path (a garbage twin beside the
+                // real record): the one that is a record at all stands for the path.
+                let mut m: BTreeMap<String, usize> = BTreeMap::new();
+                for (i, j) in judgement.records.iter().enumerate() {
+                    let bad = matches!(j.outcome, Outcome::Invalid(_));
+                    match m.get(&j.path) {
+                        Some(k)
+                            if !matches!(judgement.records[*k].outcome, Outcome::Invalid(_)) => {}
+                        Some(_) if bad => {}
+                        _ => {
+                            m.insert(j.path.clone(), i);
+                        }
+                    }
+                }
+                m
+            },
             judgement,
             live,
             folded: BTreeMap::new(),

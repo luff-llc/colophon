@@ -370,7 +370,11 @@ impl<S: RecordSource> Engine<S> {
 
     /// Set the bearer token (storage access only) for a home.
     pub fn exchange_set_bearer(&mut self, home: &str, token: Option<String>) {
-        self.exchange.homes.entry(home.to_string()).or_default().bearer = token;
+        self.exchange
+            .homes
+            .entry(home.to_string())
+            .or_default()
+            .bearer = token;
     }
 
     /// Give the engine a call the host built for a home (`purpose` `colophon.home.read` or
@@ -487,7 +491,9 @@ impl<S: RecordSource> Engine<S> {
     /// Queue the requests of `phase`.
     fn plan(&mut self, home: &str, phase: Phase) -> Result<()> {
         match phase {
-            Phase::Head => self.enqueue(home, Tag::Head, Method::Get, "/head".into(), vec![], vec![]),
+            Phase::Head => {
+                self.enqueue(home, Tag::Head, Method::Get, "/head".into(), vec![], vec![])
+            }
             Phase::PullAuthority => {
                 let after = self.account.head().0;
                 self.enqueue(
@@ -566,7 +572,10 @@ impl<S: RecordSource> Engine<S> {
             let mut entries: Vec<Value> = Vec::new();
             let from = seq;
             while seq <= verified && entries.len() < PAGE {
-                let Some(b) = branch.get((seq - 1) as usize).and_then(|d| by_digest.get(d)) else {
+                let Some(b) = branch
+                    .get((seq - 1) as usize)
+                    .and_then(|d| by_digest.get(d))
+                else {
                     break;
                 };
                 entries.push(serde_json::from_slice(b).map_err(|e| malformed(e.to_string()))?);
@@ -611,7 +620,8 @@ impl<S: RecordSource> Engine<S> {
             if !matches!(proto, Some("colophon/transition/5" | "colophon/veto/5")) {
                 continue;
             }
-            if !open.contains(&env.digest) || self.receipted_by(&env.digest).iter().any(|h| h == home)
+            if !open.contains(&env.digest)
+                || self.receipted_by(&env.digest).iter().any(|h| h == home)
             {
                 continue;
             }
@@ -817,7 +827,10 @@ impl<S: RecordSource> Engine<S> {
                 Method::Put,
                 format!("/records/{p}"),
                 bytes,
-                vec![cond, ("Content-Type".into(), "application/octet-stream".into())],
+                vec![
+                    cond,
+                    ("Content-Type".into(), "application/octet-stream".into()),
+                ],
             );
         }
     }
@@ -850,7 +863,12 @@ impl<S: RecordSource> Engine<S> {
     /// Queue the pulls of the chunks of one blob this device does not hold and the home lists
     /// (an optional blob is fetched lazily, on first read: 0.3 §7.2). The next
     /// [`Engine::exchange_next`] sends them. Returns how many were queued.
-    pub fn exchange_want_blob(&mut self, home: &str, namespace: &str, digest: &str) -> Result<usize> {
+    pub fn exchange_want_blob(
+        &mut self,
+        home: &str,
+        namespace: &str,
+        digest: &str,
+    ) -> Result<usize> {
         self.check_ready()?;
         let manifest = match self.blob_manifest(namespace, digest)? {
             crate::model::Outcome::Success { value, .. } => value,
@@ -886,7 +904,12 @@ impl<S: RecordSource> Engine<S> {
 
     /// Consume the answer to the request with `ticket`. Everything the home sent is verified
     /// before it changes anything; faults are returned, never followed.
-    pub fn exchange_answer(&mut self, home: &str, ticket: u64, response: Response) -> Result<Report> {
+    pub fn exchange_answer(
+        &mut self,
+        home: &str,
+        ticket: u64,
+        response: Response,
+    ) -> Result<Report> {
         self.check_ready()?;
         let tag = {
             let h = self
@@ -931,16 +954,28 @@ impl<S: RecordSource> Engine<S> {
         match tag {
             Tag::Head => self.on_head(home, &response, &mut report)?,
             Tag::PullAuthority => self.on_pull_authority(home, &response, &mut report)?,
-            Tag::PushAuthority { last } => self.on_push_authority(home, last, &response, &mut report)?,
+            Tag::PushAuthority { last } => {
+                self.on_push_authority(home, last, &response, &mut report)?
+            }
             Tag::PullPending => self.on_pull_pending(home, &response, &mut report)?,
-            Tag::PushPending { digests } => self.on_push_pending(home, &digests, &response, &mut report)?,
+            Tag::PushPending { digests } => {
+                self.on_push_pending(home, &digests, &response, &mut report)?
+            }
             Tag::Changes => self.on_changes(home, &response, &mut report)?,
-            Tag::PullRecord { path, sha } => self.on_pull_record(home, &path, &sha, &response, &mut report)?,
-            Tag::PutRecord { path, sha } => self.on_put(home, &path, &sha, false, &response, &mut report),
+            Tag::PullRecord { path, sha } => {
+                self.on_pull_record(home, &path, &sha, &response, &mut report)?
+            }
+            Tag::PutRecord { path, sha } => {
+                self.on_put(home, &path, &sha, false, &response, &mut report)
+            }
             Tag::PutBlob { path } => self.on_put(home, &path, "", false, &response, &mut report),
             Tag::PullBlob { path } => self.on_pull_blob(home, &path, &response, &mut report),
-            Tag::PullLive { path, sha } => self.on_pull_live(home, &path, &sha, &response, &mut report)?,
-            Tag::PutLive { path, sha } => self.on_put(home, &path, &sha, true, &response, &mut report),
+            Tag::PullLive { path, sha } => {
+                self.on_pull_live(home, &path, &sha, &response, &mut report)?
+            }
+            Tag::PutLive { path, sha } => {
+                self.on_put(home, &path, &sha, true, &response, &mut report)
+            }
             Tag::GenesisCheck => self.on_genesis(home, &response, &mut report)?,
         }
         Ok(report)
@@ -982,7 +1017,9 @@ impl<S: RecordSource> Engine<S> {
             });
         }
         if c.foreign > 0 {
-            report.faults.push(Fault::ForeignAccount { home: home.into() });
+            report
+                .faults
+                .push(Fault::ForeignAccount { home: home.into() });
         }
         super::absorb(&mut report.changes, c);
         Ok(())
@@ -1041,20 +1078,44 @@ impl<S: RecordSource> Engine<S> {
             this.halt(home);
         };
         if r.status != 200 {
-            bad(self, report, Fault::Status { home: home.into(), status: r.status });
+            bad(
+                self,
+                report,
+                Fault::Status {
+                    home: home.into(),
+                    status: r.status,
+                },
+            );
             return Ok(());
         }
         let v = match body_json(r) {
             Ok(v) => v,
             Err(why) => {
-                bad(self, report, Fault::Malformed { home: home.into(), why });
+                bad(
+                    self,
+                    report,
+                    Fault::Malformed {
+                        home: home.into(),
+                        why,
+                    },
+                );
                 return Ok(());
             }
         };
-        let (entries, receipts) = match (envelopes(&v["entries"], PAGE), envelopes(&v["receipts"], PAGE * 8)) {
+        let (entries, receipts) = match (
+            envelopes(&v["entries"], PAGE),
+            envelopes(&v["receipts"], PAGE * 8),
+        ) {
             (Ok(e), Ok(r)) => (e, r),
             (Err(why), _) | (_, Err(why)) => {
-                bad(self, report, Fault::Malformed { home: home.into(), why });
+                bad(
+                    self,
+                    report,
+                    Fault::Malformed {
+                        home: home.into(),
+                        why,
+                    },
+                );
                 return Ok(());
             }
         };
@@ -1101,7 +1162,14 @@ impl<S: RecordSource> Engine<S> {
         let moved = after.0 > before.0;
         let more = v["more"].as_bool().unwrap_or(false);
         if (!none_new || more) && !moved && self.account.objects().entries.len() == held_before {
-            bad(self, report, Fault::NoProgress { home: home.into(), feed: "authority".into() });
+            bad(
+                self,
+                report,
+                Fault::NoProgress {
+                    home: home.into(),
+                    feed: "authority".into(),
+                },
+            );
             return Ok(());
         }
         if more {
@@ -1116,13 +1184,26 @@ impl<S: RecordSource> Engine<S> {
                     vec![],
                 );
             } else {
-                bad(self, report, Fault::NoProgress { home: home.into(), feed: "authority".into() });
+                bad(
+                    self,
+                    report,
+                    Fault::NoProgress {
+                        home: home.into(),
+                        feed: "authority".into(),
+                    },
+                );
             }
         }
         Ok(())
     }
 
-    fn on_push_authority(&mut self, home: &str, last: u64, r: &Response, report: &mut Report) -> Result<()> {
+    fn on_push_authority(
+        &mut self,
+        home: &str,
+        last: u64,
+        r: &Response,
+        report: &mut Report,
+    ) -> Result<()> {
         match r.status {
             200 => {
                 if let Ok(v) = body_json(r) {
@@ -1168,7 +1249,11 @@ impl<S: RecordSource> Engine<S> {
                     .ok()
                     .and_then(|v| v.get("endpoints").or(v.get("primary")).cloned())
                     .and_then(|v| v.as_array().cloned())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 report.faults.push(Fault::Redirect {
                     home: home.into(),
@@ -1327,7 +1412,13 @@ impl<S: RecordSource> Engine<S> {
         Ok(())
     }
 
-    fn on_push_pending(&mut self, home: &str, digests: &[String], r: &Response, report: &mut Report) -> Result<()> {
+    fn on_push_pending(
+        &mut self,
+        home: &str,
+        digests: &[String],
+        r: &Response,
+        report: &mut Report,
+    ) -> Result<()> {
         match r.status {
             200 => {
                 if let Ok(v) = body_json(r) {
@@ -1481,13 +1572,22 @@ impl<S: RecordSource> Engine<S> {
             let p = self.changes_path(cursor.as_deref());
             self.enqueue(home, Tag::Changes, Method::Get, p, vec![], vec![]);
         } else {
-            report.faults.push(Fault::ForeignAccount { home: home.into() });
+            report
+                .faults
+                .push(Fault::ForeignAccount { home: home.into() });
             self.halt(home);
         }
         Ok(())
     }
 
-    fn on_pull_record(&mut self, home: &str, path: &str, sha: &str, r: &Response, report: &mut Report) -> Result<()> {
+    fn on_pull_record(
+        &mut self,
+        home: &str,
+        path: &str,
+        sha: &str,
+        r: &Response,
+        report: &mut Report,
+    ) -> Result<()> {
         if r.status != 200 {
             report.faults.push(Fault::Status {
                 home: home.into(),
@@ -1500,6 +1600,7 @@ impl<S: RecordSource> Engine<S> {
                 home: home.into(),
                 path: path.into(),
             });
+            self.forget_listing(home, path);
             return Ok(());
         }
         let now = self.account.now_ms();
@@ -1519,7 +1620,7 @@ impl<S: RecordSource> Engine<S> {
         // the real record belongs. A record that parses and is held, refused or out of scope
         // is evidence and is kept like any other.
         match self.account.record_verdict(path) {
-            Some(code) if !is_not_a_record(&code) => {
+            Some(code) if !super::is_not_a_record(&code) => {
                 self.ix.have.insert(
                     path.to_string(),
                     Have {
@@ -1530,15 +1631,34 @@ impl<S: RecordSource> Engine<S> {
                 self.ix.listing.insert(path.to_string());
                 report.store.push((path.to_string(), r.body.clone()));
             }
-            code => report.faults.push(Fault::BadObject {
-                home: home.into(),
-                code: code.unwrap_or_else(|| "malformed".into()),
-            }),
+            code => {
+                report.faults.push(Fault::BadObject {
+                    home: home.into(),
+                    code: code.unwrap_or_else(|| "malformed".into()),
+                });
+                self.forget_listing(home, path);
+            }
         }
         Ok(())
     }
 
-    fn on_put(&mut self, home: &str, path: &str, sha: &str, live: bool, r: &Response, report: &mut Report) {
+    /// What a home listed for `path` did not hold up: forget it and the cursor that carried it,
+    /// so the next pass lists the home again from the start instead of trusting its listing.
+    fn forget_listing(&mut self, home: &str, path: &str) {
+        let h = self.home_mut(home);
+        h.remote.remove(path);
+        h.changes_cursor = None;
+    }
+
+    fn on_put(
+        &mut self,
+        home: &str,
+        path: &str,
+        sha: &str,
+        live: bool,
+        r: &Response,
+        report: &mut Report,
+    ) {
         match r.status {
             200 | 201 => {
                 let digest = if sha.is_empty() {
@@ -1584,13 +1704,21 @@ impl<S: RecordSource> Engine<S> {
                 home: home.into(),
                 path: path.into(),
             });
+            self.forget_listing(home, path);
             return;
         }
         self.ix.listing.insert(path.to_string());
         report.store.push((path.to_string(), r.body.clone()));
     }
 
-    fn on_pull_live(&mut self, home: &str, path: &str, sha: &str, r: &Response, report: &mut Report) -> Result<()> {
+    fn on_pull_live(
+        &mut self,
+        home: &str,
+        path: &str,
+        sha: &str,
+        r: &Response,
+        report: &mut Report,
+    ) -> Result<()> {
         if r.status != 200 {
             report.faults.push(Fault::Status {
                 home: home.into(),
@@ -1625,15 +1753,6 @@ impl<S: RecordSource> Engine<S> {
         }
         Ok(())
     }
-}
-
-/// The result codes of a header that never became a record (`Outcome::Invalid`): the failure
-/// codes of §1, none of which is an admission verdict.
-fn is_not_a_record(code: &str) -> bool {
-    !(code == "admitted"
-        || code.starts_with("refused:")
-        || code.starts_with("held:")
-        || code == "newerFormat")
 }
 
 /// The path of a pending object, or `None` for what the engine does not store.

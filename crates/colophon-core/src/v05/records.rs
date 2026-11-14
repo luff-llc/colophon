@@ -1474,7 +1474,8 @@ fn stage_one(
     let Some(member) = auth.member(&hd.author) else {
         return Stage::Unknown(Arc::new(c));
     };
-    let already = known.is_some_and(|k| k.contains(&verified_key(&h.bytes, &member.request.signing)));
+    let already =
+        known.is_some_and(|k| k.contains(&verified_key(&h.bytes, &member.request.signing)));
     if !skip_signature && !already {
         *sigs += 1;
         let sig = RawEnvelope::parse(&h.bytes, bounds::OPERATION_HEADER_BODY, false)
@@ -1955,14 +1956,17 @@ fn judge_impl(
                     let (author, signing) = match &stage {
                         Stage::Bad(_) => match parse_candidate(h) {
                             Ok(c) => {
-                                let s = auth.member(&c.header.author).map(|m| m.request.signing.clone());
+                                let s = auth
+                                    .member(&c.header.author)
+                                    .map(|m| m.request.signing.clone());
                                 (Some(c.header.author), s)
                             }
                             Err(_) => (None, None),
                         },
                         Stage::Unknown(c) | Stage::Ready(c) => (
                             Some(c.header.author.clone()),
-                            auth.member(&c.header.author).map(|m| m.request.signing.clone()),
+                            auth.member(&c.header.author)
+                                .map(|m| m.request.signing.clone()),
                         ),
                     };
                     if let (Stage::Ready(_), Some(sk)) = (&stage, &signing) {
@@ -2014,12 +2018,8 @@ fn judge_impl(
     let mut by_digest: BTreeMap<String, Judged> = BTreeMap::new();
     if let Some((c, print)) = cache.as_mut() {
         if let Some(last) = c.last.take() {
-            let old_held = last
-                .by_digest
-                .keys()
-                .filter(|d| seen.contains(*d))
-                .count()
-                == last.by_digest.len();
+            let old_held =
+                last.by_digest.keys().filter(|d| seen.contains(*d)).count() == last.by_digest.len();
             let fresh: Vec<usize> = order
                 .iter()
                 .copied()

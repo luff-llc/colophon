@@ -54,7 +54,14 @@ fn world(n: usize) -> World {
 fn world_v(n: usize, v: u8) -> World {
     let mut f = create_v(&["notes"], v);
     let member = f.host.identity(31);
-    admit(&mut f, &member, "Phone", "device", terms("write"), terms("write"));
+    admit(
+        &mut f,
+        &member,
+        "Phone",
+        "device",
+        terms("write"),
+        terms("write"),
+    );
     let src = MemSource::new();
     src.store_account(&f.account);
     let writer = member_session(&f, &member);
@@ -71,7 +78,12 @@ fn world_v(n: usize, v: u8) -> World {
     w
 }
 
-fn open(w: &World, src: &MemSource, listing: Vec<String>, saved: Option<&Saved>) -> Engine<MemSource> {
+fn open(
+    w: &World,
+    src: &MemSource,
+    listing: Vec<String>,
+    saved: Option<&Saved>,
+) -> Engine<MemSource> {
     open_as(w, src, listing, saved, &w.member)
 }
 fn open_as(
@@ -128,7 +140,11 @@ fn a_cold_open_reads_authority_first_and_no_record_until_unlocked() {
     )
     .unwrap();
     assert_eq!(*e.open_mode(), OpenMode::Cold);
-    assert_eq!(e.stats().unread_paths, 5, "the five records wait for the unlock");
+    assert_eq!(
+        e.stats().unread_paths,
+        5,
+        "the five records wait for the unlock"
+    );
     assert_eq!(e.stats().signatures_verified, 0);
     // Nothing is readable before the records are loaded: no empty success.
     assert!(e.view("notes").is_err());
@@ -136,7 +152,11 @@ fn a_cold_open_reads_authority_first_and_no_record_until_unlocked() {
     unlock(&w, &mut e, &w.member);
     assert_eq!(ids(&view(&e)).len(), 5);
     assert_eq!(e.stats().unread_paths, 0);
-    assert_eq!(e.stats().signatures_verified, 5, "each record's signature once");
+    assert_eq!(
+        e.stats().signatures_verified,
+        5,
+        "each record's signature once"
+    );
     assert_eq!(e.stats().payloads_decrypted, 5);
     assert!(e.access("notes").unwrap().is_none());
     assert_eq!(e.status().code, "ok");
@@ -158,7 +178,13 @@ fn a_source_of_another_account_is_refused() {
     );
     assert!(r.is_err(), "the genesis is not the expected account's");
     // Not even its records are read.
-    assert_eq!(src.reads() as usize, src.listing().iter().filter(|p| p.starts_with("authority/") || p.starts_with("transitions/")).count());
+    assert_eq!(
+        src.reads() as usize,
+        src.listing()
+            .iter()
+            .filter(|p| p.starts_with("authority/") || p.starts_with("transitions/"))
+            .count()
+    );
 }
 
 #[test]
@@ -174,10 +200,17 @@ fn refresh_judges_and_folds_only_what_is_new() {
     let changes = e.refresh(w.src.listing()).unwrap();
     assert!(changes.namespaces.contains_key("notes"));
     let after = e.stats();
-    assert_eq!(after.signatures_verified - before.signatures_verified, 10, "{after:?}");
+    assert_eq!(
+        after.signatures_verified - before.signatures_verified,
+        10,
+        "{after:?}"
+    );
     assert_eq!(after.payloads_decrypted - before.payloads_decrypted, 10);
     assert_eq!(after.walked_last, 10, "the walk resumed after the 40 held");
-    assert_eq!(after.folds_applied_last, 10, "the fold was extended, not redone");
+    assert_eq!(
+        after.folds_applied_last, 10,
+        "the fold was extended, not redone"
+    );
     // The result is a full open's.
     let fresh = open(&w, &w.src, w.src.listing(), None);
     assert_eq!(view(&e), view(&fresh));
@@ -194,12 +227,20 @@ fn records_that_sort_earlier_arrive_late_and_the_state_is_the_same() {
     let w = world(30);
     let all = w.src.listing();
     // The records of clocks 11..30 first, then 1..10.
-    let ops: Vec<String> = all.iter().filter(|p| p.starts_with("ops/")).cloned().collect();
+    let ops: Vec<String> = all
+        .iter()
+        .filter(|p| p.starts_with("ops/"))
+        .cloned()
+        .collect();
     let (early, late): (Vec<_>, Vec<_>) = ops.iter().cloned().partition(|p| {
         let clock: u64 = p.rsplit('/').next().unwrap()[..12].parse().unwrap();
         clock <= 10
     });
-    let auth: Vec<String> = all.iter().filter(|p| !p.starts_with("ops/")).cloned().collect();
+    let auth: Vec<String> = all
+        .iter()
+        .filter(|p| !p.starts_with("ops/"))
+        .cloned()
+        .collect();
     let src = MemSource::new();
     for p in auth.iter().chain(&late) {
         src.put(p, w.src.get(p).unwrap());
@@ -212,7 +253,11 @@ fn records_that_sort_earlier_arrive_late_and_the_state_is_the_same() {
     let before = e.stats();
     e.refresh(src.listing()).unwrap();
     let after = e.stats();
-    assert_eq!(after.signatures_verified - before.signatures_verified, 10, "only the new signatures");
+    assert_eq!(
+        after.signatures_verified - before.signatures_verified,
+        10,
+        "only the new signatures"
+    );
     let fresh = open(&w, &w.src, w.src.listing(), None);
     assert_eq!(view(&e), view(&fresh));
     assert_eq!(e.revision("notes"), fresh.revision("notes"));
@@ -263,9 +308,17 @@ fn a_checkpoint_that_does_not_verify_is_ignored_and_the_open_is_cold() {
     };
     for bad in [&flipped, &truncated, &garbage] {
         let e = open(&w, &w.src, w.src.listing(), Some(bad));
-        assert!(matches!(e.open_mode(), OpenMode::Invalidated(_)), "{:?}", e.open_mode());
+        assert!(
+            matches!(e.open_mode(), OpenMode::Invalidated(_)),
+            "{:?}",
+            e.open_mode()
+        );
         assert_eq!(view(&e), want);
-        assert_eq!(e.stats().signatures_verified, 12, "everything verified again");
+        assert_eq!(
+            e.stats().signatures_verified,
+            12,
+            "everything verified again"
+        );
     }
     // Sealed under another device key.
     let mut other_key = Engine::open(
@@ -292,15 +345,33 @@ fn a_checkpoint_of_another_account_or_identity_is_ignored() {
     // Another identity of the same account, holding the same device key.
     let mut w2 = world(6);
     let other_member = w2.f.host.identity(44);
-    admit(&mut w2.f, &other_member, "Tablet", "device", terms("write"), terms("write"));
+    admit(
+        &mut w2.f,
+        &other_member,
+        "Tablet",
+        "device",
+        terms("write"),
+        terms("write"),
+    );
     w2.src.store_account(&w2.f.account);
     // Same account bytes cannot be reused across worlds, so test identity on this world.
     let mut w = w;
     let m2 = w.f.host.identity(45);
-    admit(&mut w.f, &m2, "Tablet", "device", terms("write"), terms("write"));
+    admit(
+        &mut w.f,
+        &m2,
+        "Tablet",
+        "device",
+        terms("write"),
+        terms("write"),
+    );
     w.src.store_account(&w.f.account);
     let e2 = open_as(&w, &w.src, w.src.listing(), Some(&saved), &m2);
-    assert!(matches!(e2.open_mode(), OpenMode::Invalidated(_)), "{:?}", e2.open_mode());
+    assert!(
+        matches!(e2.open_mode(), OpenMode::Invalidated(_)),
+        "{:?}",
+        e2.open_mode()
+    );
     // A checkpoint of another account.
     let mut o = world_v(2, 1);
     let mut eo = open(&o, &o.src, o.src.listing(), None);
@@ -326,11 +397,19 @@ fn a_changed_provider_version_makes_that_record_be_verified_again() {
     let mut e = open(&w, &src, src.listing(), None);
     let saved = e.save([8; 32]).unwrap();
     // The provider reports a new version of one record (the bytes are the same).
-    let victim = src.listing().into_iter().find(|p| p.starts_with("ops/")).unwrap();
+    let victim = src
+        .listing()
+        .into_iter()
+        .find(|p| p.starts_with("ops/"))
+        .unwrap();
     src.put(&victim, src.get(&victim).unwrap());
     let e2 = open(&w, &src, src.listing(), Some(&saved));
     assert_eq!(*e2.open_mode(), OpenMode::Resumed);
-    assert_eq!(e2.stats().signatures_verified, 1, "the token changed: checked again, even though the bytes are the same");
+    assert_eq!(
+        e2.stats().signatures_verified,
+        1,
+        "the token changed: checked again, even though the bytes are the same"
+    );
     assert_eq!(e2.stats().payloads_decrypted, 1);
 }
 
@@ -338,7 +417,12 @@ fn a_changed_provider_version_makes_that_record_be_verified_again() {
 fn different_bytes_at_an_immutable_path_fail_closed() {
     let w = world(4);
     let mut e = open(&w, &w.src, w.src.listing(), None);
-    let victim = w.src.listing().into_iter().find(|p| p.starts_with("ops/")).unwrap();
+    let victim = w
+        .src
+        .listing()
+        .into_iter()
+        .find(|p| p.starts_with("ops/"))
+        .unwrap();
     let mut bytes = w.src.get(&victim).unwrap();
     bytes.push(b' ');
     let src2 = w.src.clone();
@@ -364,7 +448,12 @@ fn the_integrity_audit_reports_a_changed_or_missing_path() {
         }
     }
     assert_eq!(seen, held, "every held path checked once per pass");
-    let victim = w.src.listing().into_iter().find(|p| p.starts_with("ops/")).unwrap();
+    let victim = w
+        .src
+        .listing()
+        .into_iter()
+        .find(|p| p.starts_with("ops/"))
+        .unwrap();
     w.src.remove(&victim);
     let mut failed = None;
     for _ in 0..10 {
@@ -373,7 +462,10 @@ fn the_integrity_audit_reports_a_changed_or_missing_path() {
             break;
         }
     }
-    assert!(failed.is_some(), "a vanished covered path is an integrity error");
+    assert!(
+        failed.is_some(),
+        "a vanished covered path is an integrity error"
+    );
     assert!(e.view("notes").is_err(), "sticky");
 }
 
@@ -381,8 +473,18 @@ fn the_integrity_audit_reports_a_changed_or_missing_path() {
 fn a_covered_path_the_listing_no_longer_names_is_unavailable_not_gone() {
     let w = world(5);
     let mut e = open(&w, &w.src, w.src.listing(), None);
-    let victim = w.src.listing().into_iter().find(|p| p.starts_with("ops/")).unwrap();
-    let listing: Vec<String> = w.src.listing().into_iter().filter(|p| *p != victim).collect();
+    let victim = w
+        .src
+        .listing()
+        .into_iter()
+        .find(|p| p.starts_with("ops/"))
+        .unwrap();
+    let listing: Vec<String> = w
+        .src
+        .listing()
+        .into_iter()
+        .filter(|p| *p != victim)
+        .collect();
     e.refresh(listing).unwrap();
     assert_eq!(e.missing_covered(), vec![victim.clone()]);
     // What was verified is still shown: absence is not deletion (0.3 §8.4).
@@ -499,7 +601,16 @@ fn incremental_equals_full_across_shuffled_arrival_orders() {
             let mut ref_ids: Vec<(String, String)> = reference(&w, &held)
                 .into_iter()
                 .filter(|(_, c)| c == "admitted")
-                .map(|(p, c)| (p.rsplit('-').next().unwrap().trim_end_matches(".json").to_string(), c))
+                .map(|(p, c)| {
+                    (
+                        p.rsplit('-')
+                            .next()
+                            .unwrap()
+                            .trim_end_matches(".json")
+                            .to_string(),
+                        c,
+                    )
+                })
                 .collect();
             ref_ids.sort();
             assert_eq!(got, ref_ids, "seed {seed} after {end}");
@@ -514,14 +625,18 @@ fn incremental_equals_full_across_shuffled_arrival_orders() {
 }
 
 #[test]
-fn a_garbage_twin_of_a_record_changes_nothing() {
+fn garbage_planted_before_the_real_record_changes_nothing_and_is_replaced() {
     let w = world(6);
     let base = open(&w, &w.src, w.src.listing(), None);
     let want = view(&base);
-    // The same body under a signature from nobody: the body is one object, the envelope that
-    // verifies is the one that counts, and the garbage one is refused on its own.
-    let victim = w.src.listing().into_iter().find(|p| p.starts_with("ops/")).unwrap();
+    let victim = w
+        .src
+        .listing()
+        .into_iter()
+        .find(|p| p.starts_with("ops/"))
+        .unwrap();
     let real = w.src.get(&victim).unwrap();
+    // The same body under a signature from nobody.
     let mut v: Value = serde_json::from_slice(&real).unwrap();
     v["signature"] = json!(b64(&[7u8; 64]));
     let twin = serde_json::to_vec(&v).unwrap();
@@ -529,13 +644,65 @@ fn a_garbage_twin_of_a_record_changes_nothing() {
     for p in w.src.listing() {
         src.put(&p, w.src.get(&p).unwrap());
     }
-    // The twin is stored at a path of its own (one body, one path), so it is a second held
-    // record with the same body digest.
+    src.put(&victim, twin);
     let mut e = open(&w, &src, src.listing(), None);
-    let twin_path = victim.replace(".json", ".json");
-    let _ = (twin, twin_path);
+    // Five records fold; the sixth is no record at all, and nothing else is disturbed.
+    assert_eq!(ids(&view(&e)).len(), 5);
+    assert_eq!(e.account().record_verdict(&victim).unwrap(), "badSignature");
+    // The real one arrives at the path: bytes that verified nothing are replaced, the engine
+    // does not fail closed over them, and the state is the full one.
+    src.put(&victim, real);
+    e.apply_paths(vec![victim.clone()]).unwrap();
     assert_eq!(view(&e), want);
-    let _ = e.refresh(src.listing());
+    assert_eq!(e.account().record_verdict(&victim).unwrap(), "admitted");
+    assert!(e.view("notes").is_ok(), "not poisoned");
+}
+
+#[test]
+fn a_resume_from_any_point_of_a_shuffled_arrival_equals_a_cold_open() {
+    let w = world(24);
+    let records: Vec<(String, Vec<u8>)> = w
+        .src
+        .listing()
+        .into_iter()
+        .filter(|p| p.starts_with("ops/"))
+        .map(|p| (w.src.get(&p).unwrap(), p))
+        .map(|(b, p)| (p, b))
+        .collect();
+    let cold = open(&w, &w.src, w.src.listing(), None);
+    let want = view(&cold);
+    for seed in [3u64, 11, 29] {
+        let src = MemSource::new();
+        for p in w.src.listing().iter().filter(|p| !p.starts_with("ops/")) {
+            src.put(p, w.src.get(p).unwrap());
+        }
+        let mut e = open(&w, &src, src.listing(), None);
+        let order = shuffled(&records, seed);
+        let mut i = 0;
+        while i < order.len() {
+            let end = (i + 5).min(order.len());
+            for (p, b) in &order[i..end] {
+                src.put(p, b.clone());
+            }
+            e.refresh(src.listing()).unwrap();
+            // Restart from the sealed state, as a device would, and compare with a cold open
+            // of exactly what the source holds now.
+            let saved = e.save([seed as u8; 32]).unwrap();
+            let resumed = open(&w, &src, src.listing(), Some(&saved));
+            let cold_now = open(&w, &src, src.listing(), None);
+            assert_eq!(*resumed.open_mode(), OpenMode::Resumed);
+            assert_eq!(view(&resumed), view(&cold_now), "seed {seed} at {end}");
+            assert_eq!(resumed.revision("notes"), cold_now.revision("notes"));
+            assert_eq!(resumed.status(), cold_now.status());
+            assert_eq!(
+                resumed.stats().signatures_verified, 0,
+                "everything the checkpoint covers is read, nothing re-verified (seed {seed} at {end})"
+            );
+            e = resumed;
+            i = end;
+        }
+        assert_eq!(view(&e), want, "seed {seed}");
+    }
 }
 
 #[test]
@@ -544,13 +711,22 @@ fn the_engine_exposes_no_secret() {
     let e = open(&w, &w.src, w.src.listing(), None);
     let d = format!("{e:?}");
     assert!(!d.contains("[119"), "{d}");
-    let o = format!("{:?}", EngineOptions::new(w.f.account.id().as_str(), DEVICE_KEY));
-    assert!(!o.contains("119") && !o.contains("0x77") && !o.contains("[119"), "{o}");
+    let o = format!(
+        "{:?}",
+        EngineOptions::new(w.f.account.id().as_str(), DEVICE_KEY)
+    );
+    assert!(
+        !o.contains("119") && !o.contains("0x77") && !o.contains("[119"),
+        "{o}"
+    );
     let mut e = e;
     let saved = e.save([1; 32]).unwrap();
     // The checkpoint is sealed: no plaintext title is readable in it.
     let text = String::from_utf8_lossy(&saved.checkpoint);
-    assert!(!text.contains("Notebook"), "the sealed checkpoint holds no plaintext");
+    assert!(
+        !text.contains("Notebook"),
+        "the sealed checkpoint holds no plaintext"
+    );
     assert!(!String::from_utf8_lossy(&saved.verifier).contains("Notebook"));
 }
 
@@ -581,7 +757,11 @@ fn the_bounds_hold_for_a_hostile_listing_and_hostile_bytes() {
     for p in w.src.listing() {
         src.put(&p, w.src.get(&p).unwrap());
     }
-    let victim = src.listing().into_iter().find(|p| p.starts_with("ops/")).unwrap();
+    let victim = src
+        .listing()
+        .into_iter()
+        .find(|p| p.starts_with("ops/"))
+        .unwrap();
     src.put(&victim, vec![0xff; 64]);
     let e = open(&w, &src, src.listing(), None);
     assert_eq!(ids(&view(&e)).len(), 1);

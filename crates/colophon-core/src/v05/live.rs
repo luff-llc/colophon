@@ -93,6 +93,9 @@ pub fn live_path(author: &str, namespace: &str, slot: &str) -> String {
     format!("state/{author}/{namespace}/{slot}.json")
 }
 
+/// The highest admitted durable clock in a namespace before a fold position.
+type Earlier<'a> = &'a dyn Fn(&str, (u64, &str, &str)) -> u64;
+
 struct Valid {
     idx: usize,
     head: LiveHead,
@@ -107,7 +110,7 @@ fn judge_one(
     auth: &super::records::RecordAuthority,
     keys: &EpochKeys,
     account: &AccountId,
-    earlier: &dyn Fn(&str, (u64, &str, &str)) -> u64,
+    earlier: Earlier<'_>,
     h: &HeldRecord,
     skip_signature: bool,
 ) -> Result<LiveHead, LiveVerdict> {
@@ -164,9 +167,7 @@ fn judge_one(
     {
         return Err(LiveVerdict::Refused("caveatedLive"));
     }
-    if hd.authority > auth.authority_seq()
-        || auth.fork_seq().is_some_and(|f| hd.authority >= f)
-    {
+    if hd.authority > auth.authority_seq() || auth.fork_seq().is_some_and(|f| hd.authority >= f) {
         return Err(LiveVerdict::Quarantined("authorityBehind"));
     }
     if auth.epoch_at(&hd.namespace, hd.authority) != Some(hd.epoch) {

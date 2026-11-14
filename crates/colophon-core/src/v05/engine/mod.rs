@@ -24,13 +24,13 @@
 //! account's walk from its last state, and a merge of earlier records walks again without
 //! repeating any signature check or decryption (`v05::records::JudgeCache`). The result equals
 //! a full judgement; `tests/v05_account_engine.rs` shows it over shuffled arrival orders.
+pub use crate::engine::RecordSource;
 use crate::model::{Denial, LedgerEntry, OperationView, Outcome};
 use crate::v05::account::{Account, Changes, Identity, Incoming, Status};
 use crate::v05::history::Objects;
 use crate::v05::records::{HeldRecord, OperationHeader};
 use crate::v05::write::SignatureResult;
 use crate::v05::{malformed, require, Failure, Reason, Result};
-pub use crate::engine::RecordSource;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -185,6 +185,14 @@ pub(crate) fn sha(bytes: &[u8]) -> [u8; 32] {
 pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+/// Whether a verdict code (§1 failure codes against §11.5 admission spellings) says the
+/// header never became a record: it did not parse, or its signature, account or path is wrong.
+pub(crate) fn is_not_a_record(code: &str) -> bool {
+    !(code == "admitted"
+        || code.starts_with("refused:")
+        || code.starts_with("held:")
+        || code == "newerFormat")
+}
 fn unavailable(path: &str, why: impl std::fmt::Display) -> Failure {
     Failure::Unavailable(format!("{path}: {why}"))
 }
@@ -271,15 +279,15 @@ fn classify_listing(
     }
     for (p, k) in &kinds {
         match k {
-            Kind::Op { namespace, .. } if in_scope(options, namespace) => {
-                if !ix.have.contains_key(p) {
-                    ix.unread.insert(p.clone());
-                }
+            Kind::Op { namespace, .. }
+                if in_scope(options, namespace) && !ix.have.contains_key(p) =>
+            {
+                ix.unread.insert(p.clone());
             }
-            Kind::Live { namespace, .. } if in_scope(options, namespace) => {
-                if !ix.live_have.contains_key(p) {
-                    ix.unread.insert(p.clone());
-                }
+            Kind::Live { namespace, .. }
+                if in_scope(options, namespace) && !ix.live_have.contains_key(p) =>
+            {
+                ix.unread.insert(p.clone());
             }
             _ => {}
         }
@@ -544,11 +552,12 @@ impl<S: RecordSource> Engine<S> {
         if let Some(was) = self.restored_revisions.take() {
             // A resume must agree with a cold open: when the records read are exactly the
             // ones the checkpoint covered, the revisions it recorded are the ones derived now.
-            let ops = |m: &mut dyn Iterator<Item = (&String, [u8; 32])>| -> BTreeMap<String, [u8; 32]> {
-                m.filter(|(p, _)| matches!(paths::classify(p), Some(Kind::Op { .. })))
-                    .map(|(p, h)| (p.clone(), h))
-                    .collect()
-            };
+            let ops =
+                |m: &mut dyn Iterator<Item = (&String, [u8; 32])>| -> BTreeMap<String, [u8; 32]> {
+                    m.filter(|(p, _)| matches!(paths::classify(p), Some(Kind::Op { .. })))
+                        .map(|(p, h)| (p.clone(), h))
+                        .collect()
+                };
             let then = ops(&mut self.restored.iter().map(|(p, e)| (p, sha_of(e))));
             let now = ops(&mut self.ix.have.iter().map(|(p, h)| (p, h.sha)));
             if then == now {
@@ -708,8 +717,16 @@ impl<S: RecordSource> Engine<S> {
                     let version = self.source.content_version(p).unwrap_or(None);
                     let digest = sha(&bytes);
                     if self.ix.have.get(p).is_some_and(|h| h.sha != digest) {
-                        // Different bytes at an immutable path are equivocation (0.3 §7.1).
-                        return Err(self.poison(Failure::Refused(Reason::Fork)));
+                        // Different bytes where a record was verified are equivocation
+                        // (0.3 §7.1). Bytes that were never a record (garbage planted in
+                        // front of the real one) verified nothing, and are replaced.
+                        let was_record = self
+                            .account
+                            .record_verdict(p)
+                            .is_some_and(|c| !is_not_a_record(&c));
+                        if was_record {
+                            return Err(self.poison(Failure::Refused(Reason::Fork)));
+                        }
                     }
                     self.ix.have.insert(
                         p.clone(),
@@ -760,10 +777,7 @@ impl<S: RecordSource> Engine<S> {
         self.account.slots()
     }
     /// See [`Account::begin_unlock_slot`].
-    pub fn begin_unlock_slot(
-        &self,
-        index: usize,
-    ) -> Result<Vec<crate::v05::slots::OpeningInput>> {
+    pub fn begin_unlock_slot(&self, index: usize) -> Result<Vec<crate::v05::slots::OpeningInput>> {
         self.account.begin_unlock_slot(index)
     }
     /// Open a slot, then read the records once (the account opens every epoch the seed
@@ -964,7 +978,8 @@ impl<S: RecordSource> Engine<S> {
         seed: [u8; 32],
     ) -> Result<std::result::Result<crate::v05::account::PendingAction, Denial>> {
         self.check_ready()?;
-        self.account.begin_write(namespace, kind, payload, level, seed)
+        self.account
+            .begin_write(namespace, kind, payload, level, seed)
     }
 
     /// Finish a prepared action. The account verifies the exact bytes it returns before it
@@ -1077,14 +1092,7 @@ impl<S: RecordSource> Engine<S> {
         h.update(b"colophon/engine-checkpoint-nonce");
         let seed2: [u8; 32] = h.finalize().into();
         let scope = self.scope();
-        let checkpoint = seal::seal(
-            &plain,
-            &self.options.account,
-            &self.me,
-            &scope,
-            &key,
-            seed2,
-        )?;
+        let checkpoint = seal::seal(&plain, &self.options.account, &self.me, &scope, &key, seed2)?;
         Ok(Saved {
             verifier,
             checkpoint,

@@ -126,12 +126,17 @@ impl<S: RecordSource> Engine<S> {
         let mut cands = Vec::new();
         for c in candidates {
             require(
-                super::paths::classify(&c.path).is_some_and(|k| matches!(k, paths::Kind::Live { .. }))
+                super::paths::classify(&c.path)
+                    .is_some_and(|k| matches!(k, paths::Kind::Live { .. }))
                     && c.bytes.len() <= MAX_RECORD,
                 "not a live slot path",
             )?;
             if let Ok((h, _)) = OperationHeader::parse(&c.bytes) {
-                if self.live_witness.get(&c.path).is_some_and(|(g, _)| h.clock < *g) {
+                if self
+                    .live_witness
+                    .get(&c.path)
+                    .is_some_and(|(g, _)| h.clock < *g)
+                {
                     self.stale_live.push((c.path.clone(), h.clock));
                     continue;
                 }
@@ -213,7 +218,10 @@ impl<S: RecordSource> Engine<S> {
             .find(|h| h.author == author && h.namespace == namespace && h.slot == slot);
         let generation = durable
             .max(prior.map_or(0, |h| h.generation))
-            .max(self.account.live_generation_floor(&author, namespace, &slot))
+            .max(
+                self.account
+                    .live_generation_floor(&author, namespace, &slot),
+            )
             .checked_add(1)
             .ok_or_else(|| malformed("clock overflow"))?;
         require(
@@ -269,8 +277,9 @@ impl<S: RecordSource> Engine<S> {
             live: None,
             unknown: Default::default(),
         };
-        let ciphertext = crate::crypto::seal(key.expose(), &nonce, &canonical(&plain)?, &sketch.aad()?)
-            .map_err(|e| malformed(e.to_string()))?;
+        let ciphertext =
+            crate::crypto::seal(key.expose(), &nonce, &canonical(&plain)?, &sketch.aad()?)
+                .map_err(|e| malformed(e.to_string()))?;
         let body = canonical(&json!({
             "protocol": "colophon/operation/5",
             "account": account.as_str(),
@@ -292,7 +301,9 @@ impl<S: RecordSource> Engine<S> {
             "operation header exceeds its bound",
         )?;
         let state_path = live_path(&author, namespace, &slot);
-        let member = auth.member(&author).ok_or(Failure::Refused(Reason::NotGranted))?;
+        let member = auth
+            .member(&author)
+            .ok_or(Failure::Refused(Reason::NotGranted))?;
         // Judge the unsigned header exactly as a reader will judge the signed one.
         let verdict = self.account.preview_live(
             HeldRecord {
@@ -309,7 +320,11 @@ impl<S: RecordSource> Engine<S> {
                     detail: "a reader would refuse this live write".into(),
                 }))
             }
-            other => return Err(malformed(format!("a reader would not take this live write: {other:?}"))),
+            other => {
+                return Err(malformed(format!(
+                    "a reader would not take this live write: {other:?}"
+                )))
+            }
         }
         // Retain the exact signed predecessor at its immutable path first (0.3 §5.1): fetched
         // from the store and matched to the verified digest, never rebuilt.
@@ -425,9 +440,7 @@ impl<S: RecordSource> Engine<S> {
         stores.push((pending.state_path, envelope));
         Ok(LiveWritten {
             stores,
-            replaces: pending
-                .replaces
-                .map(|(p, d)| (p, super::hex(&d))),
+            replaces: pending.replaces.map(|(p, d)| (p, super::hex(&d))),
             changes: total,
         })
     }

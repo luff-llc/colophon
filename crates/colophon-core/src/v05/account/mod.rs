@@ -415,6 +415,31 @@ fn union(into: &mut Objects, from: &Objects) -> bool {
     }
     grew
 }
+/// Of several held byte strings at one path, drop those that are no record at all (they do not
+/// parse, or their signature, account or path is wrong) when another held string at that path is
+/// one. A keyless party's garbage twin of a real record then changes nothing, whichever arrived
+/// first; with nothing better at the path it stays, as evidence. Returns `None` when nothing is
+/// dropped. A function of the held set and the verdicts, so of the set alone.
+fn without_junk(records: &[HeldRecord], d: &Derived) -> Option<Vec<HeldRecord>> {
+    use crate::v05::records::Outcome as Verdict;
+    let junk = |i: usize| matches!(d.judgement.records[i].outcome, Verdict::Invalid(_));
+    if d.judgement.records.len() != records.len() || !(0..records.len()).any(junk) {
+        return None;
+    }
+    let mut good: BTreeSet<&str> = BTreeSet::new();
+    for (i, r) in records.iter().enumerate() {
+        if !junk(i) {
+            good.insert(r.path.as_str());
+        }
+    }
+    let keep: Vec<HeldRecord> = records
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| !junk(*i) || !good.contains(r.path.as_str()))
+        .map(|(_, r)| r.clone())
+        .collect();
+    (keep.len() != records.len()).then_some(keep)
+}
 fn union_records(into: &mut Vec<HeldRecord>, from: &[HeldRecord]) {
     let mut seen: BTreeSet<(String, Vec<u8>)> = into
         .iter()
@@ -505,6 +530,24 @@ impl Account {
             None,
             None,
         )?;
+        let mut d = d;
+        if let Some(keep) = without_junk(&held, &d) {
+            held = keep;
+            d = Derived::build(
+                &Inputs {
+                    objects: &all,
+                    records: &held,
+                    live: &[],
+                    persisted: &persisted,
+                    now_ms,
+                    seeds: &seeds,
+                    me,
+                    scope: &scope,
+                },
+                None,
+                None,
+            )?;
+        }
         let mut a = Self {
             me: me.clone(),
             now_ms,
@@ -997,7 +1040,11 @@ impl Account {
         let foreign = before - incoming.objects.entries.len();
         union(&mut objects, &incoming.objects);
         union_records(&mut records, &incoming.records);
-        let d = self.candidate(&objects, &records, &self.persisted, now)?;
+        let mut d = self.candidate(&objects, &records, &self.persisted, now)?;
+        if let Some(keep) = without_junk(&records, &d) {
+            records = keep;
+            d = self.candidate(&objects, &records, &self.persisted, now)?;
+        }
         let mut persisted = self.persisted.clone();
         let mut heads = HeadChanges::default();
         {
