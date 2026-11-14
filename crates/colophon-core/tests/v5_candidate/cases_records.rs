@@ -665,6 +665,22 @@ fn revoke_cases(out: &mut Out) {
         &["9.5", "11.1"],
         json!({"latestEpoch": {NS: 3}}),
     );
+    // §9.5: a revoke introduces a new epoch in every namespace the member could read.
+    let mut a = Ra::new("revoke-omits-epoch");
+    a.rekey(10, 1, &[]); // 2
+    a.grant(20, &w, "device", w_terms(), &[1]); // 3
+    a.add(
+        "revoke",
+        40,
+        json!({"member": w.sign.id, "kept": [], "heads": [], "epochs": []}),
+    ); // 4: the member reads `notes` and no epoch is introduced
+    a.write_case(
+        out,
+        "revoke-omits-epoch",
+        "A revoke of a member that can read `notes` carries no epoch for it while the vault is not retiring. §9.5: `epochs` introduces a new epoch in every namespace the member could read: the entry at seq 4 is malformed.",
+        &["9.5"],
+        json!({"history": {"result": "malformed", "seq": 4}, "records": {}, "opened": []}),
+    );
     let mut a = Ra::new("revoke-epoch-skips");
     a.rekey(10, 1, &[]); // 2
     a.grant(20, &w, "device", w_terms(), &[1]); // 3

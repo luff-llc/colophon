@@ -2630,6 +2630,22 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
             if m.home != HomeStatus::NotHome {
                 return Err(malformed("revoking a home is a transition").into());
             }
+            // §9.5: `epochs` introduces a new epoch in every namespace the member could read
+            // (empty if none); while the vault is retiring none may be introduced (§8.3).
+            if s.retiring.is_none() {
+                let have: BTreeSet<&str> = r.epochs.iter().map(|e| e.namespace.as_str()).collect();
+                let covered = m
+                    .terms
+                    .records()
+                    .unwrap_or_default()
+                    .iter()
+                    .all(|e| have.contains(e.namespace.as_str()));
+                crate::v05::require(
+                    covered,
+                    "revoke: a new epoch in every namespace the member could read",
+                )
+                .map_err(Outcome::from)?;
+            }
             // The epochs a revoke introduces are checked like a `rekey`'s (consecutive, one per
             // declared namespace) and folded into `epochs`, so a later `rekey` and the grant
             // share-completeness check see them.
