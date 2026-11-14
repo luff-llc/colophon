@@ -521,7 +521,13 @@ impl Account {
             )?;
         }
         let verified = stored.and_then(|(b, k)| stored::unprotect(b, k, &me));
-        if let Some((persisted, account)) = verified {
+        if let Some((kept, account)) = verified {
+            let persisted = match kept {
+                stored::Stored::Readable(p) => *p,
+                // A format change made the saved state unreadable: replay from the objects, and
+                // carry over the head marks (local memory no replay can recompute).
+                stored::Stored::Unreadable(old) => Persisted::rebuild(&given.objects, &old, now_ms),
+            };
             let tried = Self::open_with(&given, persisted, &me, now_ms)
                 .ok()
                 .filter(|a| a.d.auth.account().as_str() == account);
