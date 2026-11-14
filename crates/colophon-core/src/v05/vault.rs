@@ -560,8 +560,7 @@ impl fmt::Debug for SoftwareIdentity {
 /// A recovery kit (§7.5): 32 secret bytes the host prints or stores. There is exactly one
 /// derivation, the 0.3 and 0.4 one: `s' = HKDF-SHA256(IKM = kit, salt = "colophon/recovery/3",
 /// info = "identity", 32)`, then the software-identity expansion of `s'`. A kit made under
-/// 0.4 therefore keeps its keys after an in-place upgrade (§16.1). (Spec owner's decision; the
-/// §7.5 text says only "a software identity from 32 secret bytes".)
+/// 0.4 therefore keeps its keys after an in-place upgrade (§16.1). §7.5 states this derivation.
 pub fn kit_identity(secret: &[u8; 32]) -> VResult<SoftwareIdentity> {
     let mut s = hkdf32(secret, KIT_SALT, b"identity")?;
     let id = SoftwareIdentity::from_seed(&s);

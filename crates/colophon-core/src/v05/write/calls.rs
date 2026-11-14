@@ -20,6 +20,7 @@ use crate::v05::encoding::{
     bounds, canonical, date, decode_request_id, encode_base64, encode_base64url,
 };
 use crate::v05::heads::{verify_head, HeadContext};
+use crate::v05::history::home::HeadGuard;
 use crate::v05::history::home::{finish_receipt as home_finish_receipt, HomeState, ReceiptToSign};
 use crate::v05::ids::{is_key_id, key_id, AccountId};
 use crate::v05::members::Request;
@@ -449,7 +450,19 @@ impl PreparedHead {
 }
 
 /// §13.2: the exact head body; the signer is the home member `by`.
-pub fn prepare_head(spec: &HeadSpec<'_>) -> Result<PreparedHead> {
+///
+/// `guard` is what [`HomeState::guard_head`](crate::v05::history::home::HomeState::guard_head)
+/// returned for exactly this head (§13.3): a home that signs two digests for one seq, or heads
+/// whose `issued` does not increase, is not counted by verifiers, and the guard needs the home's
+/// history, which this module does not hold.
+pub fn prepare_head(spec: &HeadSpec<'_>, guard: &HeadGuard) -> Result<PreparedHead> {
+    require(
+        guard.home() == spec.by
+            && guard.seq() == spec.seq
+            && guard.digest() == spec.digest
+            && guard.issued() == spec.issued,
+        "the head guard is for another head",
+    )?;
     require(
         (1..=bounds::MAX_INTEGER).contains(&spec.seq),
         "authority.seq must be 1 to 2^53 - 1",

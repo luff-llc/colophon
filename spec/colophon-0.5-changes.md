@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 12, 2026-11-14. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 13, 2026-11-14. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -199,6 +199,26 @@ clocks and admission.
 | 101 | §8.7 says a revocation of a home that is not removal-only revokes it once final without excusing it, and that a later full set's anchor may be the activation itself | M-a, L3 of the check of revision 12 |
 | 102 | Checkpoint format 3 | L1 of the check of revision 12 |
 | 103 | Engine correction, no text change (§8.3 already says it): a keyring `update` that changes a controller's `agreement` drops every slot naming it and retires the vault, as a removal or demotion does. `t-rekey-slotted-drops-slot`, `i-rekey-slotted-as-immediate` | Found by the independent check of another package: the verifier kept the slot and left `retiring` false, so the holder of the old agreement key could still open the vault |
+
+### A.9 Revision 13
+
+| # | Change | Why |
+| --- | --- | --- |
+| 104 | §8.6 "Resolving a fork": a `resolve` carries `kept: {seq, digest}` and is valid when that entry is on the branch its `activate` is recorded on; it discards every other candidate, held now or shown later, for a verifier following that branch; with no other candidate held it is valid and changes nothing. One `resolve` settles a fork of any number of candidates and a later fork on a resolved branch is resolved the same way; two resolves keeping different entries leave the fork | E1 M3; fix round: H5, H6, M1 of the check of revision 13 |
+| 105 | §13.3 high-water mark per home; a head behind it, while the marked entry is on the held history, is `refused:rollback`; checkpoint format 4 | E1: head verification had no mark; `rules/rollback` ran for the first time |
+| 106 | §8.7 "Choosing receipts": a rule for a recorder, with the veto deadline filter. The verifier judges the receipts an entry carries for validity only (`headQuorum` distinct current homes, valid, in window, at or before the deadline) and never refuses an entry for a different valid receipt | E1 H4; the first round enforced the choice, withdrawn in the fix round (H3 of the check of revision 13: it made verdicts depend on held objects) |
+| 107 | §8.7 "Choosing heads" for a `final`: a rule for a recorder; the verifier judges the carried heads (one valid covering head per non-excused witness, not after the entry's `issued`) and never refuses a `final` for another valid head | E1 L5; H4 of the check of revision 13 |
+| 108 | §13.1: a home stores a late veto that comes with an in-window receipt from another current home and signs none of its own | E3 M2 |
+| 109 | §13.3: a home MUST give heads strictly increasing `issued` and MUST NOT sign a second digest at a seq unless the first was displaced under §8.6 rule 1; `HomeState::guard_head` returns a token `prepare_head` requires, and the home keeps only what the guard needs | E3; L1, L2 of the check of revision 13 |
+| 110 | §7.2 slot shape is enforced by the verifier (`malformed` at replay) | Check of the integrated write side |
+| 111 | §13.3 equivocation: the three forms are judged against held history (heads follow both entries back to the divergence; entries convict the signer units on both; the veto form carries the activation); "verifiable from the keys it names alone" removed | E1, coordinator B |
+| 112 | §17.5, §13.1 notices have no signed body or wire format; §12.1 `created` carries no rule; §7.5 one kit derivation; §17.1 the restricted open and the seed guarantee (and §3.4); §7.2 the PRF assertion's origin and UV; §7.3 QR payload bytes; §8.7 admission at a home's current head | The write-side builders' questions |
+| 113 | §8.6 rules 2 and 3 and §13.3: for two conflicting signed entries the convicted are the signer units present on both entries, not all of one entry's signers or all signers of both; a signer of only one may have raced honestly. The code (`judge_entries`) already did this; the text now matches | Coordinator decision |
+| 114 | §8.6 rule 1: a recording entry whose activation is final on its branch stands against a recording entry of another object whose activation is not | H2 of the check of revision 13 |
+| 115 | §8.6 "Resolving a fork": a `resolve`, and rule 3 generally, never discards a branch with a later activation made final by a `final` entry's heads (witnessed by homes); both the ordinary control rule in the recording state and the control rule of the keyring before the fork are required | H1 (a), M3 |
+| 116 | §13.1, §8.7 "No home", §18, guide §5: an account with no home has no witness of time or order, so a former controller can show a new verifier a different history from before its removal; hosts MUST create accounts with at least one home and warn when there is none; a verifier's rollback report is a refusal hosts MUST show. Documented vector `t-resolve-homeless-late-fork` | H1 (b): a stated limit, not a mechanism |
+| 117 | §17.2: head marks are local memory a replay cannot recompute; carried over a checkpoint rebuild; shape-checked | M2 |
+| 118 | §20 lists `colophon/pair-qr/5`; §7.3 payload bytes implemented in `pairing.rs` | M4 |
 
 ## B. Galley's requirements
 
@@ -827,6 +847,49 @@ prefix replay) is left to the performance step.
 | M-d §16.3 called a fraction or exponent a Swift decoding error | §16.3 "Steward threshold"; every entry kind checked |
 | M-e A quorum `handover` Swift accepts and the engine refuses | §16.3 "Quorum handover" (text only; engine unchanged) |
 | Low: checkpoint format, "anchor follows", bookkeeping | Format 3; §8.7 "is it or follows it"; the spec header, the guide's log and the notes now cover revisions 10 to 12. No vector of revision 12 was replayed by the Swift source |
+
+### G.18 Checks of the write side (2026-11-14), answered in revision 13
+
+The independent checks of the authority builders (E1), the vault, slots and pairing (E2) and
+the homes and calls (E3), and of the integrated write side, found these gaps in the verifier and
+the text. Their probe tests are not repeated here.
+
+| Finding | Settled in |
+| --- | --- |
+| E1 M3: a fork can never be resolved | §8.6 "Resolving a fork"; `t-resolve-fork`, `t-resolve-two`, `t-resolve-below-rule`; tests in `v05_write_authority.rs` |
+| E1: no head high-water mark, `refused:rollback` never returned | §13.3, §17.2; `rules/rollback` now runs; `v05_head_marks.rs` |
+| E1 H4: one late receipt blocks a valid `vetoed`; two bodies for one `vetoed` | §8.7 "Choosing receipts"; `t-vetoed-choice-right`, `-late-receipt-skipped`, `-wrong-choice` |
+| E1 L5: no choosing rule for a `final`'s heads | §8.7 "Choosing heads"; `t-final-head-choice-right`, `-choice-wrong`, `-ahead-ignored` |
+| E1: equivocation evidence "verifiable from the keys it names alone" | §13.3 Equivocation |
+| E3 M2: a late valid veto is never stored at a home | §13.1; test `a_late_veto_is_stored_with_an_in_window_receipt_from_another_home_and_signs_none` |
+| E3: signing two heads for one seq | §13.3 last bullet; `HomeState::guard_head` |
+| E3, E2: notices, link `created`, kit derivation, restricted open, PRF assertion, QR bytes | §17.5/§13.1, §12.1, §7.5, §17.1, §7.2, §7.3 |
+| Integrated write side: the verifier never checks the §7.2 slot shape | `Keyring::parse` runs the slot validation; `t-slot-wrong-length-genesis`, `i-slot-add-valid`, `i-slot-add-wrong-length` |
+| Integrated write side: what the core guarantees about the seed | §17.1 "The seed", §3.4 |
+
+### G.19 Independent check of revision 13 (PR #10, 2026-11-14), answered in the same revision
+
+6 High, 5 Medium, 4 Low, answered in one fix round; rows 104, 106, 107 and 109 above were rewritten and 114 to 118 added.
+
+| Finding | Settled in |
+| --- | --- |
+| H1 A removed controller rewrites final history with a late fork and a `resolve` | (a) §8.6 "Witnessed branches are never discarded": test `a_resolve_never_discards_a_branch_whose_later_activation_homes_witnessed`, vector `t-resolve-late-fork-witnessed`; (b) the limit for accounts without homes, §13.1, §18, guide §5, vector `t-resolve-homeless-late-fork` |
+| H2 Rule 1 lets an earlier-due `activate` displace a final activation | §8.6 rule 1; test `a_final_activation_stands_against_an_earlier_due_activate_of_another_transition` (without homes everything is final at once: the limit above) |
+| H3 One home can make verifiers refuse a correct `vetoed` | §8.7: carried receipts judged for validity only; `t-vetoed-other-valid-receipt-accepted`; test `a_second_receipt_of_one_veto_never_makes_a_recorded_vetoed_refused` |
+| H4 A routine second head makes a recorded `final` malformed | §8.7: carried heads judged for validity only; `t-final-head-other-valid-head-accepted`; test `a_second_head_of_a_witness_never_makes_a_recorded_final_refused` |
+| H5 "Void until the other branch is held" stops honest verifiers | `kept` shape; `t-resolve-no-losing-branch`; test `a_verifier_without_the_losing_branch_follows_the_resolved_one` |
+| H6 A fork of three candidates can never be resolved | `kept`; `t-resolve-three-candidates`; test `one_resolve_settles_a_fork_of_three_candidates` |
+| M1 `prepare_resolve` cannot build after an earlier `resolve` | `prepare_resolve` takes `kept`; `t-resolve-second-fork`; test `a_second_fork_later_on_a_resolved_branch_is_resolved_the_same_way` |
+| M2 Head marks are not recomputed by replay | §17.2; `Persisted::rebuild`; test `marks_are_shape_checked_and_carried_over_a_rebuild` |
+| M3 Which rule signs a `resolve` | §8.6: both; test `a_resolve_is_judged_by_the_keyring_before_the_fork` |
+| M4 `colophon/pair-qr/5` missing from §20 | §20; `QrPayload::to_bytes`/`from_bytes`; test `the_qr_payload_round_trips_as_canonical_json_and_refuses_everything_else` |
+| M5 Look-ahead cost | A note under the performance step of the implementation plan; not measured |
+| L1 `guard_head` optional | `HeadGuard` token required by `prepare_head` |
+| L2 `signed_heads` unbounded | Pruned; test `signed_heads_are_pruned_to_what_the_guard_needs` |
+| L3 Stale kit comment | `vault.rs` |
+| L4 Late veto at a home | No change |
+
+No vector of revision 13 was replayed by the Swift source.
 
 ## H. Theft and loss, worked through
 

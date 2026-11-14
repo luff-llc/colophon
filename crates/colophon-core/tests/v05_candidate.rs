@@ -355,7 +355,11 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
             Outcome::Fail(format!("transition: expected {want}, got {got}"))
         };
     }
-    if let Some(want) = exp.get("standsAtSeq3").and_then(Value::as_str) {
+    if let Some(want) = exp
+        .get("standsAtSeq3")
+        .and_then(Value::as_str)
+        .filter(|_| exp.get("result").is_none())
+    {
         let v = verify_history(&objects_of(dir), &Persisted::default(), now_of(case));
         let got = v.branch.get(2).cloned().unwrap_or_default();
         return if got == want {
@@ -407,6 +411,14 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
         ));
     }
     // Extra structured expectations this verifier can check.
+    if let Some(want) = exp.get("standsAtSeq3").and_then(Value::as_str) {
+        if verdict.branch.get(2).map(String::as_str) != Some(want) {
+            return Outcome::Fail(format!(
+                "seq 3 stands {:?}, want {want}",
+                verdict.branch.get(2)
+            ));
+        }
+    }
     if let Some(st) = &verdict.state {
         if let Some(cs) = exp
             .get("controllers")
@@ -541,6 +553,50 @@ fn run_call(dir: &Path, case: &Value) -> Outcome {
         Outcome::Pass(got)
     } else {
         Outcome::Fail(format!("expected {want}, got {got}"))
+    }
+}
+
+/// `rules/rollback` (§13.3): the verifier accepted seq 3 from the home; a head over seq 2 from
+/// the same home is `refused:rollback`, and without the mark it is `ok`.
+fn run_rollback(dir: &Path, case: &Value) -> Outcome {
+    let ver = &case["verifier"];
+    let now = ms(ver["now"].as_str().unwrap());
+    let objects = objects_for(Path::new("/nonexistent"), ver);
+    let verdict = verify_history(&objects, &Persisted::default(), now);
+    let Some(st) = verdict.state.as_ref() else {
+        return Outcome::Fail("history failed".into());
+    };
+    let homes: Vec<(String, Vec<u8>)> = st
+        .current_homes()
+        .into_iter()
+        .map(|m| (m.request.member_id(), m.request.signing.clone()))
+        .collect();
+    let ctx = HeadContext {
+        account: st.account(),
+        history: st.history(),
+        homes: &homes,
+        now_ms: now,
+    };
+    let bytes = fs::read(dir.join("head.json")).unwrap();
+    let by = colophon_core::v05::heads::head_by(&bytes).unwrap();
+    let hw = &ver["highWater"];
+    let marked = Persisted::default().with_head_mark(
+        &by,
+        hw["seq"].as_u64().unwrap(),
+        hw["digest"].as_str().unwrap(),
+    );
+    let got = match marked.check_head(&bytes, ctx) {
+        Ok(_) => "ok".to_string(),
+        Err(e) => e.code(),
+    };
+    let unmarked = Persisted::default().check_head(&bytes, ctx).is_ok();
+    let want = expected_of(case, "head");
+    if got == want && unmarked {
+        Outcome::Pass(format!("{got} (accepted without the mark)"))
+    } else {
+        Outcome::Fail(format!(
+            "expected {want}, got {got}; unmarked ok = {unmarked}"
+        ))
     }
 }
 
@@ -922,6 +978,8 @@ fn candidate_conformance() {
             } else {
                 Outcome::Fail(format!("{} at {}", v.code(), v.seq()))
             }
+        } else if rel == "rules/rollback" {
+            run_rollback(&dir, &case)
         } else if rel == "rules/equivocation" || rel == "rules/equivocation-displaced" {
             run_equivocation(&dir)
         } else if rel == "rules/t-activate-identical-bytes" {

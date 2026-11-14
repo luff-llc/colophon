@@ -1,0 +1,1 @@
+{"description":"A `keyring` entry that adds a well-formed slot for an existing controller (the Phone key).","expected":{"result":"ok","seq":3},"sections":["7.2","8.4"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

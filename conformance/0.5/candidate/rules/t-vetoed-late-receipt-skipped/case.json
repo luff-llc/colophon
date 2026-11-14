@@ -1,0 +1,1 @@
+{"description":"The lowest home ID's receipt of the veto is after the veto deadline, so it is not chosen; the entry carries the other home's timely receipt. The late receipt does not block it.","expected":{"result":"ok","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

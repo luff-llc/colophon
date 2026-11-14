@@ -1,10 +1,11 @@
 # Colophon 0.5: implementation notes
 
 **Status:** running list kept while building `colophon_core::v05` against
-[colophon-0.5.md](colophon-0.5.md) revision 12 (`spec-0.5-r12`). The foundation (encoding, keys,
-signatures, terms, records, calls) was merged as colophon#4. Step 1 brought it to revision 11
-(`63bbeff`); step 2 added the authority history verifier of §8; revision 12 is the last section.
-No vector of revision 12 was replayed by the Swift source.
+[colophon-0.5.md](colophon-0.5.md) revision 13 (`spec-0.5-r12` plus the revision 13 branch). The
+foundation (encoding, keys, signatures, terms, records, calls) was merged as colophon#4. Step 1
+brought it to revision 11 (`63bbeff`); step 2 added the authority history verifier of §8;
+revision 12 and revision 13 are the last two sections. No vector of revision 12 or revision 13
+was replayed by the Swift source.
 
 Revisions 7–11 settled every open item of the revision-6 list:
 - retention 7,260 s;
@@ -373,3 +374,135 @@ the Swift source**; the Swift readings (L2, M-d, M-e) are the engine's reading o
   checkpoint is refused and the account rebuilt.
 
 Revision-12 verification numbers are in PR #7.
+
+## Revision 13 (2026-11-14)
+
+Engine round 2, built on the integrated write side (PR #8), one commit per item. **No vector or
+test of revision 13 was replayed by the Swift source.**
+
+- **`resolve` (§8.6 rule 3, §8.7; E1 M3).** The reading as first built is superseded by the
+  fix round below (`kept` instead of `discarded`); see "Revision 13 fix round".
+- **Head rollback (§13.3, §17.2; E1 gap).** The mark is per home, as the decision says, kept in
+  `Persisted` (`head_mark`, `accept_head`, `check_head`) and checked by `heads::verify_head_with_mark`
+  after the signature, clock and held-history checks. A head behind its home's mark is
+  `refused:rollback` only while the marked entry is still on the held history, so a displaced
+  activation (§8.7 rollback) does not make an honest home's later, lower head a rollback.
+  `verify_head` itself is unchanged (no mark), so `calls.rs` and the write side are untouched.
+  Checkpoint format 4 (marks, and the fork a `resolve` names): a format 3 checkpoint is refused and
+  rebuilt (test `marks_survive_a_checkpoint_and_a_previous_format_is_refused`). `rules/rollback` is
+  now run (`run_rollback`); its `case.json` gained `verifier.history` (the account records), its
+  expectation is unchanged. Tests: `tests/v05_head_marks.rs`.
+- **`vetoed` choosing rule (§8.7; E1 H4).** The verifier takes the veto's receipts it holds
+  (`Pending.receipts`) together with the entry's own, keeps those valid under §13.5 and received at
+  or before the deadline, takes each home's lowest body digest and the `headQuorum` lowest home IDs,
+  and requires the entry's receipts to equal that. Partial views: adding the entry's own receipts
+  to the held set means a verifier that lacks a receipt the recorder held still accepts a correct
+  entry (test `a_verifier_missing_a_receipt_the_recorder_held_does_not_refuse`). Activation's
+  receipt choice is *not* enforced this way (question 1 above: differing choices are decided by
+  §8.6 digest order); the veto rule is stricter because the checker found two bodies for one
+  `vetoed`. **Risk for the spec owner:** a hostile low-ID home that signs a second, lower-digest
+  receipt in time and shows it only to some verifiers makes those verifiers refuse an otherwise
+  correct `vetoed` (an entry the recorder built without that receipt). A home signs one receipt per
+  object, so this needs a home that equivocates. Vectors `t-vetoed-choice-right`,
+  `t-vetoed-late-receipt-skipped`, `t-vetoed-wrong-choice`; tests in `v05_vetoed_choice.rs`.
+  Text item D (admission at the home's current head) is in §8.7 with this item.
+- **`final` with several covering heads per witness (§8.7).** Text and enforcement as for the
+  veto receipts: per witness the lowest body digest among the covering, usable heads, judged over
+  the heads held plus the entry's own. **Reading chosen, with the conflict that forced it:** the write side
+  ignores a head dated more than 60 s ahead of *its clock*. Taken literally at the verifier,
+  usability would depend on the verifier's clock, so a correct `final` would turn `malformed` once
+  the clock passed a lower-digest head's date (first version of `v05_final_choice.rs`); and a
+  verifier holding a later `final`'s embedded head (dated after the earlier one) would refuse the
+  earlier `final` of `t-removal-unblocks-addition` (the state-aware builder replay in
+  `v05_write_authority.rs` showed it with a 60 s slack). Usability is therefore measured against
+  the entry's own `issued`: for an entry a builder made the two agree (a usable lower head would
+  have been chosen and raised `issued`), and no existing vector changes. `prepare_final` (not
+  edited) is unchanged. Vectors `t-final-head-choice-right`,
+  `-choice-wrong`, `-ahead-ignored`; tests in `v05_final_choice.rs`.
+- **Late veto at a home (§13.1; E3 M2).** `home.rs` stores a veto that arrives after its 300 s
+  window (or the veto deadline) when an in-window receipt of it from another current home, received
+  at or before the deadline, is already held in `unmatched_receipts`; it then promotes the receipt,
+  stores and serves the veto and signs nothing. With none held it is `refused:late` and not stored,
+  as before; a receipt forwarded afterwards stays unmatched until the veto is sent again. Test
+  `a_late_veto_is_stored_with_an_in_window_receipt_from_another_home_and_signs_none`; no vector
+  (the runner's admission case takes one object, and this needs a receipt held first).
+- **Two heads for one seq (§13.3; E3).** The home module never drafts heads; the host does, with
+  `write::calls::prepare_head`, which knows no history. The guard is `HomeState::guard_head(seq,
+  digest, issued, now)`: the host MUST call it before preparing a head and persist the state it
+  returns (the draft counts as signed). It refuses a head for an entry not on the home's verified
+  branch, non-increasing `issued`, and a second digest at a seq unless following both entries
+  back to where their branches first differ lands on a conflict the home's verdict decided for
+  this head's side with a recording entry on one side (`displaced_by_rule_1`). `signed_heads` is a
+  new `#[serde(default)]` field of `HomeState` (version unchanged). `prepare_head` is not edited:
+  nothing in the write module enforces that a host calls the guard. Test
+  `a_home_signs_one_head_per_seq_unless_the_first_was_displaced_under_rule_1`.
+- **Slot shape at replay (§7.2; coordinator item A).** `Keyring::parse` now also calls
+  `slots::validate_slots`, the same structural validation the write side uses, so a slot with a
+  wrong-length sealed box, a bad salt, wrong parts and the rest is `malformed` at replay in
+  genesis, `keyring` and `vault` entries, activations and checkpoints. No existing vector
+  changed (314 in scope all pass). Vectors `t-slot-wrong-length-genesis`, `i-slot-add-valid`,
+  `i-slot-add-wrong-length` (the last two differ only in the 47-byte ciphertext). Only the
+  wrong-length case is vectored; the other shapes are covered by the slot module's own tests.
+- **Text-only items (one commit).**
+  - *Equivocation evidence (§13.3; item 7 as decided in coordinator item B).* The three forms are
+    judged against held history. Written against `v05/write/authority.rs` as first read; the
+    integrator's commits `e74ed50` (heads: walk back to the divergence, equal `issued`, `unavailable`
+    without the chain) and `884fe26` (entries: the signer units on both, a recording entry convicts
+    nobody) then made the code match this text, and the veto form already carried the activation.
+    Not enforced anywhere: that a home's heads have strictly increasing `issued` is checked at signing
+    by `HomeState::guard_head`, not by evidence verification.
+  - *Notices (§17.5, §13.1), link `created` (§12.1), kit derivation (§7.5; `vault::kit_identity` is
+    the one derivation), restricted open (§17.1; bounds `HOST_OPEN_MAX_INFO` 1,024 and
+    `HOST_OPEN_MAX_CIPHERTEXT` 65,536, the `{enc, ciphertext}` of §11.1, ciphertext at least 16
+    bytes, `refused:outOfScope` for a `colophon/` label), PRF-building assertion (§7.2: the §4.3
+    general origin rule, UV iff the controller's `verification`), the seed guarantee (§17.1, §3.4;
+    coordinator item C).
+  - *QR payload (§7.3).* Canonical JSON of the closed object `{account, e, nB, protocol:
+    "colophon/pair-qr/5"}`. `pairing.rs` has `QrPayload {account, e, nb}` and no encoder or decoder
+    ("the byte format is not specified"): it needs `to_bytes`/`from_bytes` for this and a doc
+    update. **Not changed** (not my file); the `protocol` member is new text, not a payload field.
+
+### Revision 13 fix round (2026-11-14)
+
+- **H3, H4 (§8.7).** The spec owner withdrew the enforcement of the choosing rules. The verifier
+  judges the receipts and heads an entry carries for validity only; `veto_choice_is_determined`,
+  the `final` head-choice check and the held-receipt replay in the fast path are gone. The choosing
+  rules stay as recorder behaviour. `t-vetoed-wrong-choice` and `t-final-head-choice-wrong` became
+  `t-vetoed-other-valid-receipt-accepted` and `t-final-head-other-valid-head-accepted` (`ok`).
+  Tests `a_second_receipt_of_one_veto_never_makes_a_recorded_vetoed_refused` and
+  `a_second_head_of_a_witness_never_makes_a_recorded_final_refused` (the checker's probes with the
+  corrected outcome). The hostile-home risk noted earlier no longer exists.
+- **H5, H6, M1, M3: the shape of `resolve` (§8.6).** The component is `{kept: {seq, digest}}`. It
+  is valid when the kept entry is on the branch its `activate` is recorded on (`apply_delta`),
+  and its effect is to record `(seq, digest)` in `State.resolved`. A verifier holding no other
+  candidate simply continues (H5; `a_verifier_without_the_losing_branch_follows_the_resolved_one`,
+  vector `t-resolve-no-losing-branch`). The look-ahead (`resolved_by_activation`) asks of each
+  candidate whether its branch keeps it; one eligible candidate stands, whatever the number of
+  candidates (H6; `one_resolve_settles_a_fork_of_three_candidates`, `t-resolve-three-candidates`),
+  and a later fork on a branch that already holds a `resolve` resolves the same way, so
+  `prepare_resolve` folds such a branch (M1; `a_second_fork_later_on_a_resolved_branch_is_resolved_the_same_way`,
+  `t-resolve-second-fork`). `ForkCtx` is gone: the pre-fork control rule is read from
+  `State.rule_at` (new, `(threshold, countBy holders)` per seq) and `ever` (descriptors by seq),
+  so it is checked wherever a `resolve` is judged, including at the builder's `finish`. M3: both
+  rules apply, text and code agree (`a_resolve_is_judged_by_the_keyring_before_the_fork`).
+  `prepare_resolve` takes `kept` (edited, `write/authority.rs`).
+- **H1 (a).** `Activation.witnessed` is set only when a `final` entry's heads made the activation
+  final. A candidate is eligible for a `resolve` only if no other candidate's branch holds a
+  witnessed activation after the fork (`a_resolve_never_discards_a_branch_whose_later_activation_homes_witnessed`;
+  vector `t-resolve-late-fork-witnessed`: refused:fork, not an attacker win). H1 (b): the limit for
+  an account with no home is text (§8.6, §13.1, §18, guide §5) and the documented vector
+  `t-resolve-homeless-late-fork`, whose expectation (`ok`, the late branch) is what the engine
+  gives. Rule 2 (heads of `headQuorum` homes covering the honest entry) still decides before any
+  resolve when a verifier holds those heads.
+- **H2 (§8.6 rule 1).** In `pair`, a recording entry whose activation is final on its branch (an
+  `activate` that `final_covers`, or a `final` entry) stands against a recording entry of another
+  object whose activation is not final (`a_final_activation_stands_against_an_earlier_due_activate_of_another_transition`).
+  Entries of one object that differ only in receipts or heads keep the digest order, which the
+  three-candidate cycle vector needs. Without homes every activation is final at once, so the
+  rule changes nothing there (that is the H1 (b) limit).
+- **L1, L2 (§13.3).** `guard_head` returns `(HomeState, HeadGuard)`; `write::calls::prepare_head`
+  takes the `HeadGuard` and refuses one issued for another home, seq, digest or `issued`, so a head
+  cannot be prepared for signing without the guard (edited, `write/calls.rs`; the builder tests now
+  reproduce the two vector heads the home may sign and show the guard refusing the rest).
+  `signed_heads` keeps the latest `issued` and the digests at seqs above the highest final
+  activation (`signed_heads_are_pruned_to_what_the_guard_needs`).
