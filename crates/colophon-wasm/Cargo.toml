@@ -8,6 +8,12 @@ rust-version.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["web05"]
+# The 0.5 export attributes (wasm-bindgen) of the sources shared with `colophon-ffi`.
+web05 = []
+native05 = []
+
 [dependencies]
 colophon-core = { path = "../colophon-core", version = "=0.4.0" }
 wasm-bindgen.workspace = true

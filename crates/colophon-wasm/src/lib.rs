@@ -10,6 +10,8 @@ use colophon_core::{
 use serde_json::{json, Value};
 mod keys;
 pub use keys::*;
+/// The 0.5 exports, sharing their sources with the native crate.
+pub mod v05;
 use wasm_bindgen::prelude::*;
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {

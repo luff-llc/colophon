@@ -8,6 +8,7 @@ mod storage_engine;
 pub use storage_engine::*;
 mod keys;
 mod types;
+pub mod v05;
 use colophon_core::{
     library::{Call, CreateOptions, Library, PendingBatch},
     model::{self, Outcome},
