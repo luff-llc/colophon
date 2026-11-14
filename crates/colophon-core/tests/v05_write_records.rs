@@ -2124,30 +2124,10 @@ fn rebuilt_epochs_equal_the_verifiers_folded_epochs_on_every_vector() {
         let folded = serde_json::to_value(auth.state()).unwrap();
         let epochs = folded["epochs"].as_object().unwrap();
         assert!(!epochs.is_empty(), "{}", dir.display());
-        // KNOWN GAP IN THE VERIFIER (`history/state.rs`, `"revoke"` arm, owner: the verifier's):
-        // epochs a `/5` `revoke` introduces (§9.5; a `/4` one is folded by the 0.4 replay) are not folded into `State::epochs`, which only
-        // the `rekey` arm updates. The record layer counts them. The expected difference is
-        // exactly the number of epochs `revoke` entries introduced; when the verifier is fixed
-        // this assertion fails and the allowance below is to be removed.
-        let mut by_revoke: std::collections::BTreeMap<String, u64> = Default::default();
-        for f in &files {
-            let env: Value = serde_json::from_slice(&std::fs::read(f).unwrap()).unwrap();
-            let body: Value =
-                serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
-                    .unwrap();
-            if body["kind"] == "revoke" && body["protocol"] == "colophon/authority/5" {
-                for e in body["epochs"].as_array().unwrap() {
-                    *by_revoke
-                        .entry(e["namespace"].as_str().unwrap().to_string())
-                        .or_default() += 1;
-                }
-            }
-        }
         for (ns, v) in epochs {
-            let gap = by_revoke.get(ns).copied().unwrap_or(0);
             assert_eq!(
                 auth.latest_epoch(ns),
-                v.as_u64().unwrap() + gap,
+                v.as_u64().unwrap(),
                 "{}: {ns}",
                 dir.display()
             );
@@ -2207,4 +2187,37 @@ fn the_verifier_refuses_an_epoch_introduced_while_the_vault_is_retiring() {
             other => panic!("expected the retiring refusal, got {:?}", other.map(|_| ())),
         }
     }
+}
+
+/// The epochs a `/5` `revoke` introduces are folded into the verifier's epoch history: a later
+/// `rekey` is checked against them, and a revoke whose epoch skips a number is malformed.
+#[test]
+fn a_revokes_epochs_are_folded_and_checked_as_consecutive() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../conformance/0.5/candidate/records");
+    let load = |name: &str| -> Objects {
+        let dir = root.join(name).join("records/authority");
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        Objects {
+            entries: files.iter().map(|p| std::fs::read(p).unwrap()).collect(),
+            ..Default::default()
+        }
+    };
+    let now = parse_date("2026-11-12T00:00:00Z").unwrap();
+    let ok = verify_history(
+        &load("revoke-epochs-then-rekey"),
+        &Persisted::default(),
+        now,
+    );
+    assert_eq!(ok.code(), "ok");
+    let state = serde_json::to_value(ok.state.as_ref().unwrap()).unwrap();
+    assert_eq!(state["epochs"]["notes"], 3);
+    let skip = verify_history(&load("revoke-epoch-skips"), &Persisted::default(), now);
+    assert_ne!(skip.code(), "ok");
+    assert_eq!(skip.code(), "malformed");
+    assert_eq!(skip.seq(), 4);
 }

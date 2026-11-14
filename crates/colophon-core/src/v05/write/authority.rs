@@ -1214,6 +1214,14 @@ pub fn prepare_activate(
     now_ms: i64,
     transition_digest: &str,
 ) -> Result<PendingBatch> {
+    // At an unresolved fork the one entry that can be recorded is the `activate` of a due
+    // `resolve` on the branch it is anchored on (§8.6 rule 3).
+    if matches!(
+        verify_history(objects, &Persisted::default(), now_ms).stop,
+        Some(Stop::Fork { .. })
+    ) {
+        return prepare_activate_resolve(objects, now_ms, transition_digest);
+    }
     let state = head_state(objects, now_ms)?;
     let t_bytes = find_pending(objects, transition_digest, "colophon/transition/5")?.clone();
     let env = AuthEnvelope::parse(
@@ -1248,6 +1256,119 @@ pub fn prepare_activate(
         issued,
         &timing.by,
     )
+}
+
+/// The `activate` of a due `resolve` transition at an unresolved fork: the history is folded
+/// over the branch the transition is anchored on (the held entries that follow `previous` links
+/// back from its anchor), and the entry is built on that branch with the same fields
+/// [`prepare_activate`] gives any activation.
+fn prepare_activate_resolve(
+    objects: &Objects,
+    now_ms: i64,
+    transition_digest: &str,
+) -> Result<PendingBatch> {
+    let t_bytes = find_pending(objects, transition_digest, "colophon/transition/5")?.clone();
+    let env = AuthEnvelope::parse(
+        &t_bytes,
+        bounds::TRANSITION_ENVELOPE,
+        bounds::TRANSITION_ENVELOPE,
+        true,
+    )?;
+    require(
+        env.value
+            .get("change")
+            .and_then(|c| c.get("resolve"))
+            .is_some(),
+        "only a resolve can be activated at a fork",
+    )?;
+    let anchor = env.value.get("anchor").ok_or_else(|| malformed("anchor"))?;
+    let (a_seq, a_digest) = (
+        anchor
+            .get("seq")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| malformed("anchor seq"))?,
+        anchor
+            .get("digest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| malformed("anchor digest"))?
+            .to_string(),
+    );
+    let mut by_digest: BTreeMap<String, (Option<String>, Vec<u8>)> = BTreeMap::new();
+    for bytes in &objects.entries {
+        if let Ok(e) = AuthEnvelope::parse(
+            bytes,
+            bounds::AUTHORITY_BODY,
+            bounds::AUTHORITY_BODY.saturating_mul(2),
+            false,
+        ) {
+            by_digest.entry(e.digest.clone()).or_insert_with(|| {
+                (
+                    e.value
+                        .get("previous")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    bytes.clone(),
+                )
+            });
+        }
+    }
+    let mut branch = Vec::new();
+    let mut at = Some(a_digest.clone());
+    while let Some(d) = at {
+        let (prev, bytes) = by_digest
+            .get(&d)
+            .ok_or_else(|| unavailable("the anchor's branch is not held back to the genesis"))?;
+        branch.push(bytes.clone());
+        at = prev.clone();
+    }
+    branch.reverse();
+    require(
+        branch.len() as u64 == a_seq,
+        "the anchor's branch is not contiguous from seq 1",
+    )?;
+    let scoped = Objects {
+        entries: branch,
+        pending: objects.pending.clone(),
+        heads: objects.heads.clone(),
+        predecessor: objects.predecessor.clone(),
+    };
+    let state = head_state(&scoped, now_ms)?;
+    let receipts = choose_receipts(
+        &state,
+        &objects.pending,
+        &env.digest,
+        issued_of(&env)?,
+        None,
+    )?;
+    let timing = transition_timing(&state, &t_bytes, &receipts)?;
+    if timing.due_ms > now_ms {
+        return Err(unavailable(format!(
+            "held: the transition is due at {}",
+            format_date(timing.due_ms)
+        )));
+    }
+    let header = Header {
+        seq: a_seq
+            .checked_add(1)
+            .ok_or_else(|| malformed("seq overflow"))?,
+        previous: Some(a_digest),
+        issued: format_date(timing.due_ms.max(state.last_issued_ms())),
+        by: timing.by,
+    };
+    let body = Kind::Activate {
+        transition: t_bytes,
+        receipts,
+    }
+    .body(&header)?;
+    Ok(PendingBatch {
+        steps: Vec::new(),
+        objects: objects.clone(),
+        now_ms,
+        plan: Plan::Entry {
+            seq: header.seq,
+            body,
+        },
+    })
 }
 
 /// The `vetoed` for a held transition and a held veto (§8.7): both receipt lists chosen, `by`
