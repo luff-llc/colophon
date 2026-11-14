@@ -115,15 +115,23 @@ fn succession(name: &str) -> (Objects, i64) {
         parse_date("2026-11-14T10:15:00Z").unwrap(),
     )
 }
-fn verified(name: &str) -> bool {
+/// The successor's own verdict and whether its succession is verified.
+fn successor_verdict(name: &str) -> (String, bool) {
     let (o, now) = succession(name);
     let v = verify_history(&o, &Persisted::default(), now);
-    assert_eq!(
-        v.code(),
-        "ok",
-        "{name}: the successor's own history verifies"
+    let code = v.code().to_string();
+    (
+        code,
+        v.state.is_some_and(|s| s.verified_succession().is_some()),
+    )
+}
+fn verified(name: &str) -> bool {
+    let (code, verified) = successor_verdict(name);
+    assert!(
+        code == "ok" || code == "held" || code == "badSignature",
+        "{name}: {code}"
     );
-    v.state.unwrap().verified_succession().is_some()
+    verified
 }
 fn predecessor_alone(name: &str) -> colophon_core::v05::history::Verdict {
     let (o, now) = succession(name);
@@ -418,4 +426,41 @@ fn h1_a_vetoed_never_rolls_back_a_final_activation() {
             assert_eq!(w.branch, v.branch, "{name}: rotation {rot}");
         }
     }
+}
+
+// ---- Fix round H2: held, then ok or refused, never ok then refused --------------------------
+
+#[test]
+fn h2_a_genesis_leaning_on_the_exemption_is_held_then_ok_or_badsignature() {
+    // F provisional: held, succession unverified.
+    assert_eq!(
+        successor_verdict("authority5-successor-provisional"),
+        ("held".to_string(), false)
+    );
+    // F final: the same genesis is ok and the succession verified.
+    assert_eq!(
+        successor_verdict("authority5-successor-final"),
+        ("ok".to_string(), true)
+    );
+    // F displaced by a `vetoed`: the same genesis is badSignature.
+    assert_eq!(
+        successor_verdict("authority5-successor-vetoed-no-proofs"),
+        ("badSignature".to_string(), false)
+    );
+    // A genesis that carries every possession proof is valid on its own, the succession
+    // simply unverified (F displaced).
+    assert_eq!(
+        successor_verdict("authority5-successor-vetoed"),
+        ("ok".to_string(), false)
+    );
+}
+
+/// Adding objects only moves a verdict from held to ok or to refused: the held genesis with the
+/// predecessor's `final` is ok, with only its head it is held.
+#[test]
+fn h2_a_predecessor_with_no_entry_at_f_leaves_the_genesis_held() {
+    let (mut o, now) = succession("authority5-successor-provisional");
+    o.predecessor.truncate(2);
+    let v = verify_history(&o, &Persisted::default(), now);
+    assert_eq!(v.code(), "held");
 }

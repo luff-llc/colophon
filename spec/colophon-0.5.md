@@ -682,10 +682,16 @@ A transition meeting the recovery rule has consent.
 - **Possession:** every controller added, and every controller whose `holder` is set, signs the
   body in `additions`, from an authority origin (a `sign` controller's from any origin its
   descriptor allows). Exempt: `upgrade`, and, at a successor genesis, keys whose descriptors equal
-  predecessor keys current at `head`, but only when the genesis's `handover` meets the rule that
-  may write F at `head` (§15.1; for a `/5` predecessor, when F is its `successor` activation naming
-  this account). Without that, every listed controller needs its possession proof, and a genesis
-  lacking one is `badSignature`. An unverified or vetoed succession still confers nothing (§15.1).
+  predecessor keys current at `head`, but only when the succession is authorized (§15.1): for a
+  Swift predecessor, when the genesis's `handover` meets the rule that may write F at `head`; for
+  a `/5` predecessor, when the succession is verified, which needs F final. Without that, every
+  listed controller needs its possession proof, and a genesis lacking one is `badSignature`. For a
+  `/5` predecessor whose F is absent or provisional the succession is not decided yet, so a genesis
+  that lacks a proof for a carried key is **held** (§8.5): it becomes `ok` when F is final and
+  `badSignature` when the predecessor has another entry at F's seq, such as the `vetoed` that
+  displaced F. A verdict may go from held to ok or from held to refused, never from ok to refused.
+  A genesis that carries a proof for every controller is valid on its own, with the succession
+  simply unverified. An unverified or vetoed succession still confers nothing (§15.1).
 - **UV.** Required on every WebAuthn signature under the control or recovery rule, on immediate
   `keyring` and `vault` entries, and on transitions, vetoes and `handover`. Single-rule,
   `rekey`, `suspend` and possession signatures need UV only when the controller has

@@ -4020,8 +4020,8 @@ pub fn part3(o: &mut Out) {
         "authority5-successor-provisional",
         &pm_prov.envs,
         Some(&sc),
-        json!({"succession": "unverified"}),
-        "The predecessor has homes, so its `successor` activation F is provisional: its witnesses H1 and H2 have signed no head covering it, and no `final` follows. The succession is not verified.",
+        json!({"succession": "unverified", "genesis": "held"}),
+        "The predecessor has homes, so its `successor` activation F is provisional: its witnesses H1 and H2 have signed no head covering it, and no `final` follows. The succession is not verified. The successor's genesis lists the predecessor's keys with no possession proofs and so leans on the carried-key exemption, which needs a verified succession: it is held, neither `ok` nor refused.",
         sc_extra(),
     );
     let mut pm_final = pm_prov.clone();
@@ -4036,7 +4036,7 @@ pub fn part3(o: &mut Out) {
         &pm_final.envs,
         Some(&sc),
         json!({"succession": "verified"}),
-        "As authority5-successor-provisional, with the `final` of F (the heads of H1 and H2) at seq 4. F is final: the succession is verified, and the `final` is the only entry the predecessor admitted after F.",
+        "As authority5-successor-provisional, with the `final` of F (the heads of H1 and H2) at seq 4. F is final: the succession is verified, and the `final` is the only entry the predecessor admitted after F. The same genesis that was held is now `ok`.",
         sc_extra(),
     );
     // The vetoed succession's genesis carries a possession proof for every key, so it is valid
@@ -4090,6 +4090,31 @@ pub fn part3(o: &mut Out) {
             "successor/authority/00000001.json".to_string(),
             sc2.envs[0].clone(),
         )],
+    );
+
+    // The genesis of the first successor lists carried keys with no proofs. Held while F is
+    // provisional, it is `badSignature` once a `vetoed` displaces F.
+    let v_sf1 = veto(&acct, &t_sf, sg![b, ph], &ts(R0 + 600));
+    let rv_sf1 = rec_at(&cx, &v_sf1, R0 + 601);
+    let mut pm_vetoed1 = base.clone();
+    record_veto(
+        &mut pm_vetoed1,
+        &t_sf,
+        std::slice::from_ref(&r_sf),
+        &v_sf1,
+        std::slice::from_ref(&rv_sf1),
+    );
+    grant_agent(&mut pm_vetoed1, &a, &ts(DUE0 + 100), &a);
+    let mut vetoed_recs1 = pm_vetoed1.envs.clone();
+    vetoed_recs1.push(pm_prov.envs[2].clone());
+    write_swift(
+        o,
+        "authority5-successor-vetoed-no-proofs",
+        &vetoed_recs1,
+        Some(&sc),
+        json!({"succession": "unverified", "genesis": "badSignature"}),
+        "As authority5-successor-provisional (a genesis with no possession proofs), but a valid `vetoed` displaces F at seq 3 and the predecessor continues. The succession is never verified, so the carried-key exemption never applies: the genesis that was held is `badSignature`.",
+        sc_extra(),
     );
 }
 

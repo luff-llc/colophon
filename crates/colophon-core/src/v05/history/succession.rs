@@ -21,6 +21,10 @@ pub struct Succession {
     pub carried_keys: BTreeMap<String, Controller>,
     pub handover_count: usize,
     pub authorized: bool,
+    /// The succession is not decided yet: for `/5`, F is absent or provisional, so a genesis that
+    /// leans on the carried-key exemption is held, not refused (§8.4 Possession).
+    #[serde(default)]
+    pub undecided: bool,
     pub window: Option<Window>,
     pub vetoed: bool,
     pub verified: Option<(u64, String)>,
@@ -146,6 +150,7 @@ pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Op
         carried_keys: Default::default(),
         handover_count: e.env.handover.len(),
         authorized: false,
+        undecided: false,
         window: None,
         vetoed: false,
         verified: None,
@@ -265,13 +270,17 @@ pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Op
                 })
                 .collect();
             // F is the `successor` activation at head + 1 naming this account. The succession
-            // is verified only when F is final (§15.1).
-            p.authorized = s.successor.as_deref()
+            // is verified only when F is final (§15.1), and only a verified succession exempts
+            // carried keys from possession (§8.4). While F is absent or provisional the genesis
+            // is undecided; once the predecessor has another entry at F's seq it is refused.
+            let names_us = s.successor.as_deref()
                 == Some(crate::v05::ids::AccountId::of_genesis(&e.env.body).as_str())
                 && s.successor_seq == Some(seq + 1);
-            if p.authorized && s.successor_final() {
+            if names_us && s.successor_final() {
                 p.verified = s.history().get(seq as usize).map(|d| (seq + 1, d.clone()));
             }
+            p.authorized = p.verified.is_some();
+            p.undecided = !p.authorized && (names_us || (s.history().len() as u64) <= seq);
             require(
                 e.env.handover.is_empty(),
                 "handover only for Swift predecessor",
