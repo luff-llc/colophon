@@ -1,1 +1,1 @@
-{"description":"§15.4: a migration with real view digests is recorded after F and its due time.","expected":{"migration":"recorded","now":"2026-11-14T10:12:30Z","succession":"verified"},"sections":["15.1","16.3"]}
+{"description":"§15.4: the owner's migration of a library with a member and a namespace, written after F with a drain window after F, is recorded.","expected":{"migration":"recorded","now":"2026-11-14T10:14:00Z","succession":"verified"},"sections":["15.1","16.3"]}

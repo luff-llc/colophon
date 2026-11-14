@@ -1160,6 +1160,10 @@ pub fn prepare_migration(
         "the drain window is 0 to 30 days",
     )?;
     require(
+        p.drain_from_ms >= at_f.issued_ms,
+        "the drain window starts after F (§15.4: the migration follows F)",
+    )?;
+    require(
         p.issued_ms >= p.drain_until_ms && now_ms >= p.drain_until_ms,
         "the migration is written after the drain window",
     )?;

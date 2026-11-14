@@ -380,15 +380,16 @@ fn complete(v: &Vector, scalars: &BTreeMap<String, Vec<u8>>) -> (Objects, Vec<u8
     let genesis = build_genesis(v, scalars).unwrap();
     let mut entries = files_in(&v.dir.join("successor/authority"));
     entries[0] = genesis.clone();
+    entries.truncate(2);
     let (home, received) = receipt_of(v);
     let mut objects = Objects {
         entries,
         predecessor: v.prefix(),
-        heads: v.successor_objects().heads,
         ..Objects::default()
     };
     let prepared = prepare_genesis_receipt(&objects, &home, received).unwrap();
     let sig = sign_steps(std::slice::from_ref(prepared.step()), scalars).remove(0);
+    objects.heads = v.successor_objects().heads;
     objects
         .pending
         .push(finish_genesis_receipt(&prepared, &sig).unwrap());
@@ -1166,20 +1167,21 @@ fn a_5_genesis_with_every_proof_verifies_at_once_and_a_chain_of_two_follows() {
     assert!(pending.finish(sigs).is_ok());
 }
 
-/// The generator's `swift-migration` vector lists a namespace (`notes`) that its predecessor
-/// never had (the generator's Swift library has no grant); §15.4 says the entry lists "every
-/// predecessor namespace", so the builder refuses to write it. The vector stays a verifier case.
+/// The `swift-migration` vector reproduces: the transition the builder makes from the predecessor
+/// (a grant for `notes` to one device, F at seq 4), the chosen copy counts and digests, a drain
+/// window after F and the owner's signers is the transition the vector's entry 3 embeds.
 #[test]
-fn the_migration_vector_lists_a_namespace_the_predecessor_never_had_and_the_builder_refuses_it() {
+fn the_migration_vector_reproduces_from_its_inputs() {
     let scalars = published_scalars();
     let v = vector("swift-migration");
-    let (objects, _, _) = complete(&vector("swift-keyring"), &scalars);
-    let t = body_value(&dec(body_value(
-        &files_in(&v.dir.join("successor/authority"))[2],
-    )["transition"]
-        .as_str()
-        .unwrap()));
+    let (mut objects, _, f) = complete(&v, &scalars);
+    objects.entries.truncate(2);
+    let held = files_in(&v.dir.join("successor/authority"));
+    let want_t = dec(body_value(&held[2])["transition"].as_str().unwrap());
+    let t = body_value(&want_t);
     let m = &t["change"]["migration"];
+    assert!(ms(m["drain"]["from"].as_str().unwrap()) > ms(body_value(&f)["issued"].as_str().unwrap()));
+    let member = m["members"][0]["id"].as_str().unwrap().to_string();
     let params = MigrationParams {
         predecessor: objects.predecessor.clone(),
         drain_from_ms: ms(m["drain"]["from"].as_str().unwrap()),
@@ -1191,15 +1193,34 @@ fn the_migration_vector_lists_a_namespace_the_predecessor_never_had_and_the_buil
             omitted: 1,
         }],
         omitted: vec![("cd".repeat(32), "invalidPayload".into())],
-        members: vec![],
+        members: vec![MigratedMember { id: member, label: "Phone".into(), kind: "device".into(), dropped: None }],
         issued_ms: ms(t["issued"].as_str().unwrap()),
-        signers: vec![],
+        signers: t["signers"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect(),
     };
-    // The view digest the generator wrote, from the same inputs, by the builder's own function.
-    assert_eq!(
-        m["namespaces"][0]["view"],
-        view_digest(&params.namespaces[0].copied).unwrap()
-    );
-    let e = prepare_migration(&objects, v.now(), &params).unwrap_err();
-    assert!(why(e).contains("exactly the predecessor's namespaces"));
+    let mut ordered = params.clone();
+    let by = t["by"].as_str().unwrap().to_string();
+    ordered.signers.retain(|s| *s != by);
+    ordered.signers.insert(0, by);
+    let pending = prepare_migration(&objects, v.now(), &ordered).unwrap();
+    let sigs = sign_steps(pending.steps(), &scalars);
+    let built = pending.finish(sigs).unwrap().pending[0].clone();
+    if built != want_t {
+        let (b, w) = (body_value(&built), body_value(&want_t));
+        for k in w.as_object().unwrap().keys() {
+            assert_eq!(b[k], w[k], "transition field {k}");
+        }
+        for k in w["change"]["migration"].as_object().unwrap().keys() {
+            assert_eq!(b["change"]["migration"][k], w["change"]["migration"][k], "migration field {k}");
+        }
+        panic!("only the signatures differ");
+    }
+    // A member the predecessor never had, or a namespace it never had, is still refused.
+    let mut bad = ordered.clone();
+    bad.namespaces[0].namespace = "other".into();
+    assert!(why(prepare_migration(&objects, v.now(), &bad).unwrap_err()).contains("exactly the predecessor's namespaces"));
+    // A drain window that ends before F is refused (§15.4 orders the migration after F).
+    let mut early = ordered.clone();
+    early.drain_from_ms = ms("2020-01-01T00:00:00Z");
+    early.drain_until_ms = early.drain_from_ms;
+    assert!(why(prepare_migration(&objects, v.now(), &early).unwrap_err()).contains("after F"));
 }
