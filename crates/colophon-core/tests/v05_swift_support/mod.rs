@@ -207,6 +207,13 @@ pub struct SwiftFixture {
     pub nskeys: BTreeMap<String, [u8; 32]>,
 }
 
+impl SwiftFixture {
+    /// The recovery identity's signing point (host identity 2).
+    pub fn root_recovery_signing(&self) -> Vec<u8> {
+        colophon_core::v05::vault::SoftwareIdentity::from_seed(&[2; 32]).unwrap().public().signing
+    }
+}
+
 pub fn webauthn_controller(key: &p256::ecdsa::SigningKey, credential: &[u8], roles: &[&str], label: &str) -> Value {
     let p = key.verifying_key().to_encoded_point(false);
     json!({"kind": "webauthn", "key": b64(p.as_bytes()), "rpID": "id.example", "credential": b64(credential),
