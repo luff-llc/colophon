@@ -205,3 +205,6 @@ without stopping either thief. What protects the owner is the veto window.
 | 2026-11-12 | Codex, second review of revision 7 | 5 High, 4 Medium, 2 Low | Revision 8; changes §G.11 |
 | 2026-11-12 | Codex, review of revision 8 | 1 High, 4 Medium, 1 Low | Revision 9; changes §G.12 |
 | 2026-11-12 | Codex, review of revision 9 | 1 High | Revision 10; changes §G.13 |
+| 2026-11-12 | Confirmation review of revision 10 | units, not controllers; sufficient not necessary; stale wording | Revision 11; changes §G.14 |
+| 2026-11-14 | Claude, engine check of the 0.5 history verifier (PRs #5 and #6) | 3 High, 4 Medium, 6 Low | Revision 12 answers M1, M2, M4, L2, L5 and the chain bound; changes §A.8, §G.16 |
+| 2026-11-14 | Claude, independent check of revision 12 (PR #7) | 3 High, 5 Medium, 4 Low | Revision 12 (fix round); changes §A.8, §G.17 |

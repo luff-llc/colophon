@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 11, 2026-11-12. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 12, 2026-11-14. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -11,7 +11,7 @@ fourth reviews (of 4032d44), mapped in §G.8. "Opus5" and "Codex5" are the fifth
 a1decc6) and "Builder N" the engine builder's implementation notes (`engine-0.5-foundation`,
 04c0eef), mapped in §G.9. "Opus6", "Codex6" and "Attack N" are the sixth reviews (of 281e7c4) and
 the engine attack's gaps (colophon#4), mapped in §G.10. "Codex7" is the second review of
-revision 7 (0a25988), mapped in §G.11; "Codex8" the review of revision 8 (a04d2b4), §G.12; "Codex9" the review of revision 9 (04e2db1), §G.13. The worked theft and loss scenarios moved from the spec
+revision 7 (0a25988), mapped in §G.11; "Codex8" the review of revision 8 (a04d2b4), §G.12; "Codex9" the review of revision 9 (04e2db1), §G.13; "M1–M4" and "L1–L6" are the engine check of the 0.5 history verifier (PRs #5 and #6, 2026-11-14), answered in §A.8 and §G.16. The worked theft and loss scenarios moved from the spec
 to §H. Revision 4 replaces the
 revision-2 and revision-3 recovery machinery (provisional keys, cancel, attempt 2,
 counter-recovery, full recovery, the primary yield, the no-home digest tie-break) with one
@@ -184,6 +184,21 @@ clocks and admission.
 | # | Change | Why |
 | --- | --- | --- |
 | 93 | §8.7's recovery liveness claim narrowed to "the owner's units outnumber the adversary's"; one recovery controller is the equal-units stall; hosts MUST warn about exactly one | Codex9 H1; the architect's decision (recovery doesn't outrank control) |
+
+### A.8 Revision 12
+
+| # | Change | Why |
+| --- | --- | --- |
+| 94 | "A `final` covers" is defined once, in §8.7 "Final": the activation is final in any of §8.7's ways (excusal, a `final` entry, a later `final` with the witnesses' heads, a later full set); §8.6 rule 1 refers to it. Finality by excusal obeys Order. A `vetoed` that displaces an activation removes the later entries on its branch with it | M1, then H1 of the check of revision 12: the first wording counted only a `final` entry and excusal, so a `vetoed` rolled back a cascade-final or full-set-final activation |
+| 95 | A `/5` succession is verified only when F is final. After a provisional F the predecessor admits only F's `final`, a `final` Order needs first for an earlier activation that is not removal-only, a `vetoed` displacing F, and the `activate` and `final` of a removal-only home revocation (§15.1, §15.2) | M2, M-b, M-c: a provisional F verified a succession that could never become final; and a dead witness home must not freeze the predecessor |
+| 96 | A carried key is exempt from its possession proof only when the succession is authorized: for Swift the `handover` meets the rule that may write F at `head`; for `/5` the succession is verified (F final). A `/5` genesis needing the exemption while F is absent or provisional is held, then `ok` when F is final or `badSignature` when a `vetoed` displaced F; a genesis with every proof is valid on its own (§8.4) | M4, then H2: the first wording let a provisional F confer the exemption, so a successor account verified and later became `badSignature` |
+| 97 | The proposer cap charges the unit of the primary signer only, and a home checks `refused:early` before the caps (§13.1) | L5: the engine charged cosigners and checked the caps first, stricter than the text |
+| 98 | The chain bound counts the accounts followed along `predecessor` references from the claimed account, 16 at most; objects off the chain are ignored (§2.4, §15.1) | The fix round chose 16 with no text behind it; H3: the first wording counted every genesis in the supplied set, so any 17 junk geneses made a valid succession `malformed` |
+| 99 | A Swift `threshold` is an optional integer on every entry kind: absent is 0, a quorum `handover` needs it above 0, any number form other than a plain integer is `malformed` (§16.3) | L2, M-d: read from Marginalia's `ColophonAuthority` at `c8280332`; Foundation accepts `2.0`, shipped writers never write it; not replayed by the Swift source |
+| 100 | §16.3 states how a Swift quorum `handover` differs: Swift ignores extra, duplicate, mislabelled or non-steward signatures; a 0.5 verifier refuses them; the shipped apps never write one | M-e |
+| 101 | §8.7 says a revocation of a home that is not removal-only revokes it once final without excusing it, and that a later full set's anchor may be the activation itself | M-a, L3 of the check of revision 12 |
+| 102 | Checkpoint format 3 | L1 of the check of revision 12 |
+| 103 | Engine correction, no text change (§8.3 already says it): a keyring `update` that changes a controller's `agreement` drops every slot naming it and retires the vault, as a removal or demotion does. `t-rekey-slotted-drops-slot`, `i-rekey-slotted-as-immediate` | Found by the independent check of another package: the verifier kept the slot and left `retiring` false, so the holder of the old agreement key could still open the vault |
 
 ## B. Galley's requirements
 
@@ -780,6 +795,38 @@ the machinery it makes redundant.
 | --- | --- |
 | Builder question 4: every witness later excused | §8.7 finality: after each entry, an empty remaining witness set makes the activation final without an empty `final`; repeat to a fixed point. `t-all-witnesses-excused` |
 | Builder question 5: non-transitive comparisons | §8.6: with three or more valid candidates, stand only one that wins every pairwise comparison; otherwise an unresolved fork, including cycles. `t-three-candidate-cycle`, `t-three-candidate-winner` |
+
+### G.16 Engine check of revision 11 (2026-11-14), answered in revision 12
+
+The check ran against PRs #5 and #6 (3 High, 4 Medium, 6 Low). The three High and M3 were fixed in
+the engine's fix round without a text change (a `final` covers only on its own branch; checkpoint
+format 2; chained successions). These are the findings that needed a decision. L1 (quadratic `/4`
+prefix replay) is left to the performance step.
+
+| Finding | Settled in |
+| --- | --- |
+| M1 Order is not applied to finality by the fixed point; §8.6 still says "a `final` covers" | §8.6 "A `final` covers", rule 1; §8.7 finality and Order. `t-excusal-final-not-displaced-by-vetoed`, `t-vetoed-displaces-activation-and-later-revocation` |
+| M2 A `/5` succession is verified from a provisional successor activation | §15.1 F and Verified, §15.2. `succession/authority5-successor-provisional`, `-final`, `-vetoed` |
+| M4 Possession exemption without any succession authority | §8.4 Possession. `succession/swift-no-handover-needs-possession`, `swift-handover-below-rule-needs-possession` |
+| L5 The home cap counts cosigners and runs before `refused:early` | §13.1 steps 1 to 3. Home tests `proposer_cap_charges_the_primary_signer_only`, `early_is_refused_before_the_caps` |
+| The chain bound of 16 accounts (fix round, M3) | §2.4 "Predecessor chain", §15.1 "Chain bound". Test `a_predecessor_chain_of_sixteen_accounts_is_accepted_and_seventeen_is_malformed` |
+| L2 Swift steward threshold defaults | §16.3 "Steward threshold", read from the Swift source; five tests in `v05_revision_12.rs`, not replayed by the Swift source |
+
+### G.17 Independent check of revision 12 (PR #7, 2026-11-14)
+
+3 High, 5 Medium, 4 Low, answered in the fix round of revision 12.
+
+| Finding | Settled in |
+| --- | --- |
+| H1 §8.6 "a `final` covers" left out the cascade and the full set | §8.7 "Final" defines it once; §8.6 rule 1 refers to it; one predicate in the engine. `t-cascade-final-not-displaced-by-vetoed`, `t-full-set-final-not-displaced-by-vetoed` |
+| H2 A provisional F conferred the possession exemption | §8.4 Possession, §15.1. `authority5-successor-provisional` (held), `-final` (ok), `-vetoed-no-proofs` (`badSignature`), `-vetoed` (valid with proofs) |
+| H3 The chain bound counted unrelated geneses | §2.4, §15.1 "Chain bound". `authority5-chain-16`, `authority5-chain-17` |
+| M-a The Order guard changes an outcome and had no vector | `t-order-guard-keeps-later-addition-provisional`; §8.7 Order |
+| M-b After a provisional F the engine admitted any `final` | §15.1 F. `authority5-successor-final-of-earlier-removal` |
+| M-c A dead witness home froze the predecessor | §15.1 F, §8.7. `authority5-successor-dead-witness` |
+| M-d §16.3 called a fraction or exponent a Swift decoding error | §16.3 "Steward threshold"; every entry kind checked |
+| M-e A quorum `handover` Swift accepts and the engine refuses | §16.3 "Quorum handover" (text only; engine unchanged) |
+| Low: checkpoint format, "anchor follows", bookkeeping | Format 3; §8.7 "is it or follows it"; the spec header, the guide's log and the notes now cover revisions 10 to 12. No vector of revision 12 was replayed by the Swift source |
 
 ## H. Theft and loss, worked through
 

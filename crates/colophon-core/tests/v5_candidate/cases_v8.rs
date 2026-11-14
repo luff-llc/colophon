@@ -1262,6 +1262,52 @@ pub fn part3(o: &mut Out) {
     activate(&mut c, &t_nv, &[rec(&cx, &t_nv)]);
     case_v(o, "t-removal-slotted-without-vault", &c, json!({"result": "ok", "seq": 3, "vault": "retiring", "slots": 0}),
            "Removing the slotted Mac key needs no vault change: its slot is dropped and the vault is retiring.", &["8.3", "8.7"], Some(ver(DUE0 + 60)));
+    // Revision 12, engine correction (§8.3): changing a controller's `agreement` drops every slot
+    // naming it and retires the vault, like a removal or demotion. The re-keyed Mac key names the
+    // only slot.
+    let rekeyed_mac = |ctrls: &Value| -> Vec<Value> {
+        let mut v: Vec<Value> = ctrls.as_array().unwrap().clone();
+        for c_ in v.iter_mut() {
+            if cid(c_) == a.id {
+                c_["key"]["agreement"] = json!(b64(&derived("r12/rekey/agreement").point));
+            }
+        }
+        v
+    };
+    let upd: Vec<Value> = rekeyed_mac(&kr5["controllers"])
+        .into_iter()
+        .filter(|c_| cid(c_) == a.id)
+        .collect();
+    let t_rk = p(&cx, json!({"keyring": {"update": upd}}), sg![a, k1]);
+    let mut c_rk = base.clone();
+    activate(&mut c_rk, &t_rk, &[rec(&cx, &t_rk)]);
+    case_v(
+        o,
+        "t-rekey-slotted-drops-slot",
+        &c_rk,
+        json!({"result": "ok", "seq": 3, "vault": "retiring", "slots": 0}),
+        "A transition re-keys the slotted Mac key (a new `agreement` point). At its activation the slot naming it is dropped and the vault is retiring, as for a removal or demotion; the key's other fields and its place in the keyring stay.",
+        &["8.3", "8.7"],
+        Some(ver(DUE0 + 60)),
+    );
+    let mut c_rk_imm = base.clone();
+    c_rk_imm.add(
+        "keyring",
+        &a,
+        &ts(R0),
+        &a,
+        Opt::default(),
+        json!({"keyring": kr_with_ctrls(&kr5, rekeyed_mac(&kr5["controllers"]))}),
+    );
+    case_v(
+        o,
+        "i-rekey-slotted-as-immediate",
+        &c_rk_imm,
+        bad("malformed", 3),
+        "The same re-keying written as an immediate `keyring` entry that keeps the slot: immediate entries only add or tighten (§8.4), so it is refused.",
+        &["8.3", "8.4"],
+        None,
+    );
     let t_k1 = p(&cx, rm(&a.id), sg![k1]);
     let mut c_k1 = base.clone();
     activate(&mut c_k1, &t_k1, &[rec(&cx, &t_k1)]);
@@ -3268,6 +3314,37 @@ pub fn part3(o: &mut Out) {
         60,
         vec![],
     );
+    // Revision 12, M4 (§8.4 Possession): a carried key is exempt from its possession proof only
+    // when the genesis's `handover` meets the rule that may write F at `head`. The genesis lists
+    // the kit, a predecessor key, and proves its possession in neither case.
+    let mut g = new_genesis(&recs, 2, &[], "No handover");
+    swift_case(
+        o,
+        "swift-no-handover-needs-possession",
+        &recs,
+        &mut g,
+        after,
+        json!({"succession": "unverified", "genesis": "badSignature"}),
+        "The genesis lists the predecessor's kit and carries no `handover`: the kit's possession proof is missing, so the genesis is `badSignature`.",
+        &a,
+        false,
+        60,
+        vec![],
+    );
+    let mut g = new_genesis(&recs, 2, sg![k1], "Handover by the kit");
+    swift_case(
+        o,
+        "swift-handover-below-rule-needs-possession",
+        &recs,
+        &mut g,
+        after,
+        json!({"succession": "unverified", "genesis": "badSignature"}),
+        "The `handover` is signed by the kit alone, which holds `recover` and not the control threshold F needs: it does not meet the rule that may write F, so the kit's possession is still required and the genesis is `badSignature`.",
+        &a,
+        false,
+        60,
+        vec![],
+    );
     // §16.3: a `layout` needs all signers to hold `control`; the kit holds only `recover`.
     let mut g = new_genesis(&recs, 2, sg![a], "Extra cosigner");
     let rg = successor_with_home(&mut g, 60, sr0 - 60);
@@ -3661,6 +3738,152 @@ pub fn part3(o: &mut Out) {
            "Both original witnesses are finally revoked by recovery transitions. The earlier addition becomes final without an empty final, so NEW may sign.",
            &["8.7"], Some(ver(exc_due2 + 120)));
 
+    // Revision 12, M1 (§8.6 rule 1, §8.7): finality by the fixed point counts as "a `final`
+    // covers", and a `vetoed` that displaces an activation takes the later revocations with it.
+    let v_addc = veto(&acct, &t_addc, sg![b], &ts(R0 + 600));
+    let rv_addc = rec_at(&cx, &v_addc, R0 + 601);
+    let mut addc_vetoed = base.clone();
+    record_veto(
+        &mut addc_vetoed,
+        &t_addc,
+        &[rec(&cx, &t_addc)],
+        &v_addc,
+        std::slice::from_ref(&rv_addc),
+    );
+    case(
+        o,
+        "t-excusal-final-not-displaced-by-vetoed",
+        &exc,
+        json!({"result": "ok", "seq": 7, "finality": {"3": "final", "4": "final", "6": "final"}}),
+        "As t-all-witnesses-excused, with a valid `vetoed` of the addition at seq 3 held too. The addition is final by the fixed point on its own branch (both witnesses finally revoked), which counts as a `final` that covers it: it is not displaced, and NEW may sign.",
+        &["8.6", "8.7"],
+        vec![("veto", v_addc.clone()), ("veto-receipt", rv_addc.clone())],
+        Some(ver(exc_due2 + 120)),
+        vec![("vetoed", vec![(3, addc_vetoed.envs[2].clone())])],
+    );
+    case(
+        o,
+        "t-vetoed-displaces-activation-and-later-revocation",
+        &addc_vetoed,
+        ok_at(3),
+        "A valid `vetoed` and a provisional activation of one addition at seq 3. On the activation's branch H1's revocation is final (seq 4, 5) but H2 still witnesses the addition, so no `final` covers it: the `vetoed` stands, the activation and the later revocation leave with the branch, and H1 and H2 stay current homes.",
+        &["8.6", "8.7"],
+        vec![("veto", v_addc.clone()), ("veto-receipt", rv_addc.clone())],
+        Some(ver(exc_due2 + 120)),
+        vec![(
+            "activate",
+            vec![
+                (3, exc.envs[2].clone()),
+                (4, exc.envs[3].clone()),
+                (5, exc.envs[4].clone()),
+            ],
+        )],
+    );
+
+    // Revision 12 fix round, H1 (§8.6 rule 1, §8.7): an activation that is final in any way §8.7
+    // gives is never displaced by a `vetoed`: here by a later `final` whose heads cover it, and
+    // by a later full set whose anchor is the activation.
+    let veto_objs = || vec![("veto", v_addc.clone()), ("veto-receipt", rv_addc.clone())];
+    let mut casc = base.clone();
+    activate(&mut casc, &t_addc, &[rec(&cx, &t_addc)]);
+    let t_rm_ph = p(&cx, rm(&ph.id), sg![a]);
+    activate(&mut casc, &t_rm_ph, &[rec(&cx, &t_rm_ph)]);
+    let hs = vec![
+        head5(&casc, &h1k, DUE0 + 100, Some(4)),
+        head5(&casc, &h2k, DUE0 + 100, Some(4)),
+    ];
+    final_of(&mut casc, 4, hs);
+    grant_agent(&mut casc, &new, &ts(DUE0 + 200), &new);
+    case(
+        o,
+        "t-cascade-final-not-displaced-by-vetoed",
+        &casc,
+        json!({"result": "ok", "seq": 6, "finality": {"3": "final", "4": "final"}}),
+        "The addition at seq 3 is final through the cascade: the `final` at seq 5 of the removal at seq 4 carries heads of both witnesses covering it. A valid `vetoed` of the addition at seq 3 is held too. A final activation is never displaced: the branch stands, and the grant signed by the added key at seq 6 is valid.",
+        &["8.6", "8.7"],
+        veto_objs(),
+        Some(ver(DUE0 + 1000)),
+        vec![("vetoed", vec![(3, addc_vetoed.envs[2].clone())])],
+    );
+    let mut fsc = base.clone();
+    activate(&mut fsc, &t_addc, &[rec(&cx, &t_addc)]);
+    let t_fs = prop(
+        &cx,
+        json!({"keyring": {"add": [ct(&x, AC, "Probe X")]}}),
+        sg![a, ph, b],
+        Pr {
+            adds: sg![x],
+            at: DUE0 + 30,
+            chain: Some(&fsc),
+            ..Pr::default()
+        },
+    );
+    activate_full(&mut fsc, &t_fs, &[rec_at(&cx, &t_fs, DUE0 + 31)]);
+    grant_agent(&mut fsc, &new, &ts(DUE0 + 200), &new);
+    case(
+        o,
+        "t-full-set-final-not-displaced-by-vetoed",
+        &fsc,
+        json!({"result": "ok", "seq": 5, "finality": {"3": "final"}}),
+        "The addition at seq 3 is final because a full set at seq 4 is anchored on it. A valid `vetoed` of the addition is held too. A final activation is never displaced: the unvetoable full set and the grant signed by the added key stay.",
+        &["8.6", "8.7"],
+        veto_objs(),
+        Some(ver(DUE0 + 1000)),
+        vec![("vetoed", vec![(3, addc_vetoed.envs[2].clone())])],
+    );
+
+    // Revision 12 fix round, M-a (§8.7 Order): a revocation of a home that also loosens policy is
+    // not removal-only, so once final it revokes the home without excusing it. A later addition
+    // whose witnesses are all excused still waits for the earlier provisional addition.
+    let mut ord = base.clone();
+    let t_rv = p(
+        &cx,
+        json!({"homes": {"revoke": [h2k.id]}, "policy": {"headMaxAge": 600}}),
+        sg![a, k1],
+    );
+    activate(&mut ord, &t_rv, &[rec(&cx, &t_rv)]);
+    activate(&mut ord, &t_addc, &[rec(&cx, &t_addc)]);
+    let hs = vec![
+        head5(&ord, &h1k, DUE0 + 100, Some(4)),
+        head5(&ord, &h2k, DUE0 + 100, Some(4)),
+    ];
+    final_of(&mut ord, 3, hs);
+    let t_a2 = prop(
+        &cx,
+        json!({"keyring": {"add": [ct(&x, AC, "Second addition")]}}),
+        sg![a],
+        Pr {
+            adds: sg![x],
+            ..Pr::default()
+        },
+    );
+    activate(&mut ord, &t_a2, &[rec(&cx, &t_a2)]);
+    let ord_at = DUE0 + 200;
+    let t_r1 = prop(
+        &cx,
+        json!({"homes": {"revoke": [h1k.id]}}),
+        sg![k1],
+        Pr {
+            at: ord_at,
+            chain: Some(&ord),
+            ..Pr::default()
+        },
+    );
+    activate(
+        &mut ord,
+        &t_r1,
+        &[receipt_of(&acct, &t_r1, &h1k, &ts(ord_at + 1))],
+    );
+    case_v(
+        o,
+        "t-order-guard-keeps-later-addition-provisional",
+        &ord,
+        json!({"result": "ok", "seq": 7, "finality": {"3": "final", "4": "provisional", "6": "provisional", "7": "final"}}),
+        "Seq 3 revokes H2 and loosens a policy field (control rule), so it is not removal-only: final at seq 5, it revokes H2 without excusing it. Seq 4 adds a key (witnesses H1 and H2, still provisional); seq 6 adds another (witness H1 only); seq 7 revokes H1 by recovery and is final at once, excusing H1. Every witness of seq 6 is excused, but seq 4 is an earlier provisional addition, so Order keeps seq 6 provisional too.",
+        &["8.7"],
+        Some(ver(ord_at + W + D + 120)),
+    );
+
     // Two activations of T with different receipts, with a final covering only the higher digest.
     let cy_t = p(&cx, rm(&b.id), sg![a]);
     let cy_r1 = rec(&cx, &cy_t);
@@ -3793,6 +4016,60 @@ pub fn part3(o: &mut Out) {
             c5.envs[0].clone(),
         )],
     );
+    // Revision 12 fix round, H3 (§2.4, §15.1): the chain bound counts the accounts followed along
+    // `predecessor` references. `k` predecessors are a chain of k accounts: 16 verify, 17 are
+    // `malformed`. Each account is a `/5` successor of the one before, with no home.
+    for (k, expected, why) in [
+        (16, json!({"succession": "verified"}), "A chain of 16 predecessor accounts, each a `/5` successor of the one before: at the bound, so the succession is verified."),
+        (17, json!({"succession": "unverified", "genesis": "malformed"}), "A chain of 17 predecessor accounts: one more than the bound, so the successor's genesis is `malformed`."),
+    ] {
+        let mut chains: Vec<Chain> = Vec::new();
+        let adds_k1: Sl = sg![k1];
+        for i in 0..=k {
+            let mut c = Chain::new();
+            let pred = (i > 0).then(|| {
+                json!({"format": "colophon/authority/5", "account": account_id(&chains[i - 1]), "head": anchor(&chains[i - 1])})
+            });
+            genesis(
+                &mut c,
+                &old5kr,
+                sg![a],
+                Gen {
+                    label: &format!("Chain account {i}"),
+                    predecessor: pred,
+                    opt: Opt {
+                        adds: if i == 0 { adds_k1 } else { &[] },
+                        ..Opt::default()
+                    },
+                    ..Gen::default()
+                },
+            );
+            chains.push(c);
+        }
+        for i in 0..k {
+            let t = transition(
+                &chains[i],
+                json!({"successor": {"account": account_id(&chains[i + 1])}}),
+                sg![a, k1],
+                &ts(60),
+                TOpt::default(),
+            );
+            activate(&mut chains[i], &t, &[]);
+        }
+        let entries: Vec<Value> = chains[..k].iter().flat_map(|c| c.envs.clone()).collect();
+        write_swift(
+            o,
+            &format!("authority5-chain-{k}"),
+            &entries,
+            Some(&chains[k]),
+            expected,
+            why,
+            vec![(
+                "successor/authority/00000001.json".to_string(),
+                chains[k].envs[0].clone(),
+            )],
+        );
+    }
     write_swift(
         o,
         "authority5-successor",
@@ -3803,6 +4080,229 @@ pub fn part3(o: &mut Out) {
         vec![(
             "successor/authority/00000001.json".to_string(),
             next5.envs[0].clone(),
+        )],
+    );
+
+    // Revision 12, M2 (§8.7, §15.1): a /5 succession is verified only when F, the `successor`
+    // activation, is final. The predecessor is the reference account with homes H1 and H2, so F
+    // has witnesses and starts provisional.
+    let mut sc = Chain::new();
+    genesis(
+        &mut sc,
+        &kr5,
+        sg![a],
+        Gen {
+            label: "Successor of a predecessor with homes",
+            predecessor: Some(
+                json!({"format": "colophon/authority/5", "account": acct, "head": anchor(base)}),
+            ),
+            ..Gen::default()
+        },
+    );
+    let t_sf = p(
+        &cx,
+        json!({"successor": {"account": account_id(&sc)}}),
+        sg![a, k1],
+    );
+    let r_sf = rec(&cx, &t_sf);
+    let sc_extra = || {
+        vec![(
+            "successor/authority/00000001.json".to_string(),
+            sc.envs[0].clone(),
+        )]
+    };
+    let mut pm_prov = base.clone();
+    activate(&mut pm_prov, &t_sf, std::slice::from_ref(&r_sf));
+    write_swift(
+        o,
+        "authority5-successor-provisional",
+        &pm_prov.envs,
+        Some(&sc),
+        json!({"succession": "unverified", "genesis": "held"}),
+        "The predecessor has homes, so its `successor` activation F is provisional: its witnesses H1 and H2 have signed no head covering it, and no `final` follows. The succession is not verified. The successor's genesis lists the predecessor's keys with no possession proofs and so leans on the carried-key exemption, which needs a verified succession: it is held, neither `ok` nor refused.",
+        sc_extra(),
+    );
+    let mut pm_final = pm_prov.clone();
+    let hs = vec![
+        head5(&pm_final, &h1k, DUE0 + 100, Some(3)),
+        head5(&pm_final, &h2k, DUE0 + 100, Some(3)),
+    ];
+    final_of(&mut pm_final, 3, hs);
+    write_swift(
+        o,
+        "authority5-successor-final",
+        &pm_final.envs,
+        Some(&sc),
+        json!({"succession": "verified"}),
+        "As authority5-successor-provisional, with the `final` of F (the heads of H1 and H2) at seq 4. F is final: the succession is verified, and the `final` is the only entry the predecessor admitted after F. The same genesis that was held is now `ok`.",
+        sc_extra(),
+    );
+    // The vetoed succession's genesis carries a possession proof for every key, so it is valid
+    // whether or not F stands (§8.4 Possession): the case is about the predecessor.
+    let mut sc2 = Chain::new();
+    genesis(
+        &mut sc2,
+        &kr5,
+        sg![a],
+        Gen {
+            label: "Successor of a vetoed succession",
+            predecessor: Some(
+                json!({"format": "colophon/authority/5", "account": acct, "head": anchor(base)}),
+            ),
+            opt: Opt {
+                adds: sg![ph, b, k1, k2],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    let t_sf2 = p(
+        &cx,
+        json!({"successor": {"account": account_id(&sc2)}}),
+        sg![a, k1],
+    );
+    let r_sf2 = rec(&cx, &t_sf2);
+    let mut pm_prov2 = base.clone();
+    activate(&mut pm_prov2, &t_sf2, std::slice::from_ref(&r_sf2));
+    let v_sf = veto(&acct, &t_sf2, sg![b, ph], &ts(R0 + 600));
+    let rv_sf = rec_at(&cx, &v_sf, R0 + 601);
+    let mut pm_vetoed = base.clone();
+    record_veto(
+        &mut pm_vetoed,
+        &t_sf2,
+        std::slice::from_ref(&r_sf2),
+        &v_sf,
+        std::slice::from_ref(&rv_sf),
+    );
+    grant_agent(&mut pm_vetoed, &a, &ts(DUE0 + 100), &a);
+    let mut vetoed_recs = pm_vetoed.envs.clone();
+    vetoed_recs.push(pm_prov2.envs[2].clone());
+    write_swift(
+        o,
+        "authority5-successor-vetoed",
+        &vetoed_recs,
+        Some(&sc2),
+        json!({"succession": "unverified", "predecessor": "continues: the `vetoed` stands at seq 3 and a grant follows at seq 4"}),
+        "F (the `activate` of the `successor` transition) and a valid `vetoed` of that transition are both held at seq 3. The `vetoed` displaces the provisional F: the succession is not verified, and the predecessor continues with a grant at seq 4.",
+        vec![(
+            "successor/authority/00000001.json".to_string(),
+            sc2.envs[0].clone(),
+        )],
+    );
+
+    // The genesis of the first successor lists carried keys with no proofs. Held while F is
+    // provisional, it is `badSignature` once a `vetoed` displaces F.
+    let v_sf1 = veto(&acct, &t_sf, sg![b, ph], &ts(R0 + 600));
+    let rv_sf1 = rec_at(&cx, &v_sf1, R0 + 601);
+    let mut pm_vetoed1 = base.clone();
+    record_veto(
+        &mut pm_vetoed1,
+        &t_sf,
+        std::slice::from_ref(&r_sf),
+        &v_sf1,
+        std::slice::from_ref(&rv_sf1),
+    );
+    grant_agent(&mut pm_vetoed1, &a, &ts(DUE0 + 100), &a);
+    let mut vetoed_recs1 = pm_vetoed1.envs.clone();
+    vetoed_recs1.push(pm_prov.envs[2].clone());
+    write_swift(
+        o,
+        "authority5-successor-vetoed-no-proofs",
+        &vetoed_recs1,
+        Some(&sc),
+        json!({"succession": "unverified", "genesis": "badSignature"}),
+        "As authority5-successor-provisional (a genesis with no possession proofs), but a valid `vetoed` displaces F at seq 3 and the predecessor continues. The succession is never verified, so the carried-key exemption never applies: the genesis that was held is `badSignature`.",
+        sc_extra(),
+    );
+
+    // Revision 12 fix round, M-c (§15.1): a witness home that never signs cannot freeze the
+    // predecessor. After a provisional F the predecessor admits a removal-only revocation of that
+    // home (recovery rule, so the dead home isn't its own witness); once it is final the home is
+    // excused for F, and F becomes final with the remaining witness's head.
+    let mut pd = pm_prov.clone();
+    let dead_at = DUE0 + 60;
+    let t_dead = prop(
+        &cx,
+        json!({"homes": {"revoke": [h2k.id]}}),
+        sg![k1],
+        Pr {
+            at: dead_at,
+            chain: Some(&pd),
+            ..Pr::default()
+        },
+    );
+    activate(
+        &mut pd,
+        &t_dead,
+        &[receipt_of(&acct, &t_dead, &h1k, &ts(dead_at + 1))],
+    );
+    let dead_due = dead_at + W + D;
+    let hs = vec![head5(&pd, &h1k, dead_due + 100, Some(4))];
+    final_of(&mut pd, 4, hs);
+    let hs = vec![head5(&pd, &h1k, dead_due + 110, Some(3))];
+    final_of(&mut pd, 3, hs);
+    write_swift(
+        o,
+        "authority5-successor-dead-witness",
+        &pd.envs,
+        Some(&sc),
+        json!({"succession": "verified", "now": "2026-11-18T00:00:00Z"}),
+        "F (seq 3) is provisional and H2, one of its two witnesses, never signs a head. The owner revokes H2 under the recovery rule (seq 4, a removal-only home revocation the predecessor admits after F); its `final` carries H1's head (seq 5), which excuses H2; F's `final` with H1's head alone (seq 6) makes F final. The succession is verified.",
+        sc_extra(),
+    );
+    // Not every `final` is admitted after a provisional F: a `final` of an earlier removal-only
+    // activation is `malformed` evidence.
+    let mut pe = base.clone();
+    let t_x = p(&cx, rm(&b.id), sg![a]);
+    activate(&mut pe, &t_x, &[rec(&cx, &t_x)]);
+    let mut sc3 = Chain::new();
+    genesis(
+        &mut sc3,
+        &kr5,
+        sg![a],
+        Gen {
+            label: "Successor after an earlier removal",
+            predecessor: Some(
+                json!({"format": "colophon/authority/5", "account": acct, "head": anchor(&pe)}),
+            ),
+            opt: Opt {
+                adds: sg![ph, b, k1, k2],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    let f3_at = DUE0 + 10;
+    let t_f3 = prop(
+        &cx,
+        json!({"successor": {"account": account_id(&sc3)}}),
+        sg![a, k1],
+        Pr {
+            at: f3_at,
+            chain: Some(&pe),
+            ..Pr::default()
+        },
+    );
+    activate(
+        &mut pe,
+        &t_f3,
+        &[receipt_of(&acct, &t_f3, &h1k, &ts(f3_at + 1))],
+    );
+    let hs = vec![
+        head5(&pe, &h1k, DUE0 + 100, Some(3)),
+        head5(&pe, &h2k, DUE0 + 100, Some(3)),
+    ];
+    final_of(&mut pe, 3, hs);
+    write_swift(
+        o,
+        "authority5-successor-final-of-earlier-removal",
+        &pe.envs,
+        Some(&sc3),
+        json!({"succession": "unverified", "now": "2026-11-18T00:00:00Z", "predecessor": "stops at seq 4: the `final` at seq 5 is malformed evidence"}),
+        "A removal-only activation at seq 3 is provisional, F follows at seq 4 (provisional), and a `final` of the seq 3 activation is appended at seq 5. After a provisional F the predecessor admits a `final` of F, of an earlier activation that is not removal-only, or of a home revocation; a `final` of an earlier removal-only activation is none of these, so the predecessor ends at seq 4 and the succession is not verified.",
+        vec![(
+            "successor/authority/00000001.json".to_string(),
+            sc3.envs[0].clone(),
         )],
     );
 }

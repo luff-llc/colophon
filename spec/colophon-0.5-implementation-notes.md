@@ -1,9 +1,10 @@
 # Colophon 0.5: implementation notes
 
 **Status:** running list kept while building `colophon_core::v05` against
-[colophon-0.5.md](colophon-0.5.md) revision 11 (`63bbeff`). The foundation (encoding, keys,
-signatures, terms, records, calls) was merged as colophon#4. This branch brings it to revision 11
-(step 1) and adds the authority history verifier of §8 (step 2).
+[colophon-0.5.md](colophon-0.5.md) revision 12 (`spec-0.5-r12`). The foundation (encoding, keys,
+signatures, terms, records, calls) was merged as colophon#4. Step 1 brought it to revision 11
+(`63bbeff`); step 2 added the authority history verifier of §8; revision 12 is the last section.
+No vector of revision 12 was replayed by the Swift source.
 
 Revisions 7–11 settled every open item of the revision-6 list:
 - retention 7,260 s;
@@ -307,12 +308,11 @@ and, where a vector fits, a generated one:
   covers nothing. Vectors `t-vetoed-beats-activate-invalid-final`,
   `t-activate-after-covered-entry-invalid-final`.
 - H3: the checkpoint records the earliest time a candidate held at an already decided seq comes
-  due (`held_until`); a resumed verifier replays once the clock reaches it. **Checkpoint format 2**;
+  due (`held_until`); a resumed verifier replays once the clock reaches it. **Checkpoint format 2** (3 since revision 12);
   a format 1 checkpoint is refused (`unknown checkpoint version`) and is rebuilt from its objects.
 - M3: a `/5` predecessor that is itself a successor is verified with its own predecessor, split
-  from the flat set by genesis and descent. The text names no bound for chain length; the
-  implementation refuses more than 16 distinct genesis accounts in the set as `malformed`
-  (a spec question). A cycle cannot recur: each level removes its own genesis. Vector
+  from the flat set by genesis and descent. The implementation refuses more than 16 distinct
+  genesis accounts in the set as `malformed` (written into §2.4 and §15.1 in revision 12). A cycle cannot recur: each level removes its own genesis. Vector
   `succession/authority5-chain`.
 - L3: a Swift `layout` needs every signer to hold `control` (§16.3). Vector
   `succession/swift-layout-extra-noncontrol-cosigner`.
@@ -321,7 +321,55 @@ and, where a vector fits, a generated one:
   it counts, so the code now uses `>` at the cutoff. Vector
   `succession/swift-veto-by-key-removed-at-cutoff`.
 
-Left as specification questions, with no spec or behaviour change: M1 (Order and finality by
-excusal, §8.6 wording), M2 (a `/5` succession verified from a provisional successor activation),
-M4 (possession exemption without succession authority), L1 (quadratic `/4` prefix replay), L2
-(Swift steward threshold defaults), L5 (home cap counts cosigners).
+Left open after this round: L1 (quadratic `/4` prefix replay), for the performance step. M1, M2,
+M4, L2, L5 and the chain bound were decided in revision 12 and are built (next section).
+
+## Revision 12 (2026-11-14)
+
+Built on `spec-0.5-r12`, one commit per item, each with a test or a generated vector. The text
+decisions are in changes §A.8, §G.16 and §G.17. **No vector or test of revision 12 was replayed by
+the Swift source**; the Swift readings (L2, M-d, M-e) are the engine's reading of Marginalia
+`origin/main` `c8280332`.
+
+- **One meaning of final (§8.6, §8.7; M1, H1).** §8.7 "Final" defines "a `final` covers" once;
+  `final_covers` tests `Activation::final_`, the flag the rest of the engine uses, in the state
+  after the activate and after any valid entry that follows it on its branch. A `vetoed` therefore
+  never rolls back a cascade-final, full-set-final or excusal-final activation. Vectors
+  `t-excusal-`, `t-cascade-` and `t-full-set-final-not-displaced-by-vetoed`, and
+  `t-vetoed-displaces-activation-and-later-revocation` for the other direction.
+- **Order guard (§8.7; M-a).** `finalize_empty_witnesses` obeys Order, and an activation with no
+  witnesses becomes final at the fixed point rather than inside `activate`. The first version of
+  these notes said no history makes the guard matter. One does: a revocation of a home that also
+  loosens a policy field is not removal-only, so once final it revokes the home without excusing
+  it. `t-order-guard-keeps-later-addition-provisional` fails with the guard removed. Open design
+  point, not decided here: that home is revoked but never excused, so an earlier activation that
+  lists it as a witness can only become final through its head or a full set.
+- **Final successions (§15.1, §15.2; M2, M-b, M-c).** The state keeps `successor_seq`. While F is
+  provisional the account admits F's `final`, a `final` of an earlier activation that is not
+  removal-only, the `activate` of a removal-only home revocation and that revocation's `final`;
+  nothing else (a `vetoed` displacing F is a candidate at F's seq). Once F is final nothing is
+  admitted. A removal-only revocation excuses a dead witness for F, so F can become final. The
+  succession is verified only when F is final. Vectors `succession/authority5-successor-*`.
+- **Possession (§8.4; M4, H2).** Swift: the carried-key exemption needs the `handover` to meet the
+  rule that may write F. `/5`: it needs the succession verified. While a `/5` predecessor's F is
+  absent or provisional the successor genesis is held (`Succession::undecided`); it is `ok` when F
+  is final and `badSignature` when the predecessor has another entry at F's seq. A genesis with
+  every proof is valid on its own. Vectors `succession/swift-*-needs-possession`,
+  `authority5-successor-provisional`, `-final`, `-vetoed-no-proofs`, `-vetoed`.
+- **Proposer cap (§13.1; L5).** `TCheck.proposer` is the unit of the primary signer; a pending
+  transition's `units` is that unit only; the early check runs before the caps and before a first
+  sighting is recorded. Two tests in `v05_home.rs`.
+- **Chain bound (§2.4, §15.1; H3).** `chain_length` follows `predecessor` references from the
+  claimed account; more than 16 accounts is `malformed`; other objects are ignored. Vectors
+  `succession/authority5-chain-16` (verified) and `-17` (`malformed`); the earlier test that
+  counted unsigned geneses now asserts they change nothing.
+- **Swift numbers and quorum (§16.3; L2, M-d, M-e).** `AuthorityState.swift:105` and `:315`
+  (`?? 0`), `:164` (`threshold > 0`), `AuthorityEntry.swift:51` (`Int?`) and `:135` (a
+  `DecodingError` is rethrown). `threshold` is checked on every entry kind: absent or `null` is 0,
+  any other form than a plain integer is `malformed` (Foundation accepts `2.0`; shipped writers
+  never write it). The engine's quorum handover is stricter than Swift's (`:165-167` ignores extra,
+  duplicate, mislabelled and non-steward signatures); that is stated in §16.3 and left unchanged.
+- **Checkpoint format 3.** `successor_seq` and `undecided` changed the saved state; a format 2
+  checkpoint is refused and the account rebuilt.
+
+Revision-12 verification numbers are in PR #7.

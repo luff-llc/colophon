@@ -159,6 +159,9 @@ pub struct State {
     pub(super) succession: Option<super::succession::Succession>,
     #[serde(default)]
     pub(super) successor: Option<String>,
+    /// The seq of the activation that set `successor` (F, §15.1).
+    #[serde(default)]
+    pub(super) successor_seq: Option<u64>,
     #[serde(default)]
     /// Owner asserted migration manifest, when recorded.
     pub migration: Option<Value>,
@@ -249,6 +252,14 @@ impl State {
     /// The provisional activation that added controller `id`, if any.
     pub fn controller_provisional(&self, id: &str) -> Option<u64> {
         self.meta.get(id).and_then(|m| m.provisional)
+    }
+    /// Whether the activation of the `successor` transition (F) is final: nothing more is
+    /// admitted (§15.2). A state saved without F's seq counts as final.
+    pub(super) fn successor_final(&self) -> bool {
+        self.successor.is_some()
+            && self
+                .successor_seq
+                .is_none_or(|f| self.activations.iter().any(|a| a.seq == f && a.final_))
     }
     pub(super) fn seq(&self) -> u64 {
         self.digests.len() as u64
@@ -484,13 +495,28 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
     {
         return Err(bad_signature("genesis: control rule not met").into());
     }
+    // A carried key is exempt only when the succession is authorized (§8.4 Possession): for Swift
+    // the genesis's `handover` meets the rule that may write F at `head`; for `/5` the succession
+    // is verified, F final. A genesis that needs the exemption while a `/5` succession is still
+    // undecided is held; once decided it is `ok` or `badSignature`, never `ok` then refused.
+    let mut held = false;
     for id in keyring.controllers.keys() {
+        if id == &e.by || e.env.additions.iter().any(|a| &a.signer == id) {
+            continue;
+        }
         let carried = succession
             .as_ref()
             .is_some_and(|p| p.carried(id, &keyring.controllers[id]));
-        if id != &e.by && !carried && !e.env.additions.iter().any(|a| &a.signer == id) {
-            return Err(bad_signature("genesis: possession proof missing").into());
+        match succession.as_ref() {
+            Some(p) if carried && p.authorized => {}
+            Some(p) if carried && p.undecided => held = true,
+            _ => return Err(bad_signature("genesis: possession proof missing").into()),
         }
+    }
+    if held {
+        return Err(Outcome::Held(
+            "genesis: possession proof missing and the succession is not decided yet".into(),
+        ));
     }
     // Step 4: unknown content.
     let mut unknown = super::prescan("genesis", v);
@@ -594,6 +620,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         upgrade_seq: None,
         succession,
         successor: None,
+        successor_seq: None,
         migration: None,
     })
 }
@@ -612,6 +639,8 @@ enum Rule {
 pub(crate) struct TCheck {
     pub digest: String,
     pub by: String,
+    /// The unit of the primary signer (`by`): the proposer a home charges (§13.1 step 1).
+    pub proposer: String,
     pub units: BTreeSet<String>,
     pub anchor_seq: u64,
     pub change: Map<String, Value>,
@@ -1107,9 +1136,15 @@ pub(crate) fn check_transition(
     } else {
         Vec::new()
     };
+    let proposer = k
+        .controllers
+        .get(&by)
+        .map(|c| k.unit_of(c))
+        .unwrap_or_default();
     Ok(TCheck {
         digest: env.digest.clone(),
         by,
+        proposer,
         units: all,
         anchor_seq,
         change,
@@ -1178,6 +1213,8 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     let mut changed = false;
     let mut removed: Vec<String> = Vec::new();
     let mut demoted: Vec<String> = Vec::new();
+    // Controllers whose `agreement` changes: their slots drop like a demotion's (§8.3).
+    let mut rekeyed: Vec<String> = Vec::new();
     let mut added: Vec<String> = Vec::new();
     let anchor = t.anchor_seq;
     if let Some(kc) = t.change.get("keyring").and_then(Value::as_object) {
@@ -1211,6 +1248,9 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
                 .ok_or_else(|| malformed("void: update of an absent key"))?;
             if old.roles().iter().any(|r| !c.has(r)) {
                 demoted.push(c.id());
+            }
+            if old.key().agreement() != c.key().agreement() {
+                rekeyed.push(c.id());
             }
             if raw.get(&c.id()) != Some(x) {
                 changed = true;
@@ -1298,7 +1338,11 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     let mut slots: Vec<Value> = k.slots.clone();
     let gone: BTreeSet<&String> = removed.iter().chain(&demoted).collect();
     let before = slots.len();
-    slots.retain(|sl| !Keyring::slot_ids(sl).iter().any(|id| gone.contains(id)));
+    slots.retain(|sl| {
+        !Keyring::slot_ids(sl)
+            .iter()
+            .any(|id| gone.contains(id) || rekeyed.contains(id))
+    });
     let dropped = slots.len() != before;
     if let Some(vc) = t.change.get("vault").and_then(Value::as_object) {
         overrides.insert(
@@ -1377,6 +1421,7 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
             .ok_or_else(|| malformed("successor account"))?;
         AccountId::parse(id)?;
         n.successor = Some(id.into());
+        n.successor_seq = Some(act_seq);
         changed = true;
     }
     if t.change.contains_key("layout") {
@@ -1497,13 +1542,23 @@ fn make_final(n: &mut State, seq: u64) {
 }
 
 /// Excusals can make other activations final, including removals that excuse more homes.
-/// Reach the least fixed point after an entry; no empty `final` object is needed.
+/// Reach the least fixed point after an entry; no empty `final` object is needed. Finality this
+/// way obeys Order (§8.7): an activation that is not removal-only becomes final only when every
+/// earlier activation that is not removal-only is final.
 fn finalize_empty_witnesses(n: &mut State) {
     loop {
         let ready: Vec<u64> = n
             .activations
             .iter()
-            .filter(|a| !a.final_ && a.witnesses.iter().all(|h| n.excused.contains(h)))
+            .filter(|a| {
+                !a.final_
+                    && a.witnesses.iter().all(|h| n.excused.contains(h))
+                    && (a.removal_only
+                        || !n
+                            .activations
+                            .iter()
+                            .any(|b| b.seq < a.seq && !b.removal_only && !b.final_))
+            })
             .map(|a| a.seq)
             .collect();
         if ready.is_empty() {
@@ -1545,6 +1600,51 @@ fn recorded_issued(prev: i64, at: i64) -> i64 {
     prev.max(at)
 }
 
+/// What a predecessor admits after a provisional `successor` activation F (§15.1), by kind:
+/// - a `final` of F;
+/// - a `final` of an earlier activation that is not removal-only, which Order may need first;
+/// - a `final` of a later removal-only home revocation (see below);
+/// - an `activate` of a removal-only home revocation, checked in `apply` once applied;
+///
+/// Nothing else is admitted. A `vetoed` that displaces F is a candidate at F's seq, not a later entry.
+/// A `final` of an earlier removal-only activation is `malformed` evidence.
+fn admit_after_provisional_f(s: &State, e: &Entry) -> Result<()> {
+    match e.kind.as_str() {
+        "activate" => Ok(()),
+        "final" => {
+            let f = s.successor_seq.unwrap_or(0);
+            let seq = e
+                .env
+                .value
+                .get("activation")
+                .and_then(|a| a.get("seq"))
+                .and_then(Value::as_u64);
+            let digest = e
+                .env
+                .value
+                .get("activation")
+                .and_then(|a| a.get("digest"))
+                .and_then(Value::as_str);
+            let target = s
+                .activations
+                .iter()
+                .find(|a| Some(a.seq) == seq && Some(a.digest.as_str()) == digest);
+            let admitted = target.is_some_and(|a| {
+                a.seq == f
+                    || (a.seq < f && !a.removal_only)
+                    || (a.seq > f && a.removal_only && !a.revokes.is_empty())
+            });
+            crate::v05::require(
+                admitted,
+                "after a provisional successor activation only the entries that settle it are admitted",
+            )
+        }
+        _ => Err(malformed(
+            "after a provisional successor activation only the entries that settle it are admitted",
+        )),
+    }
+}
+
 /// Apply entry `e` to state `s` (§8.7's table).
 pub(crate) fn apply(
     s: &State,
@@ -1555,8 +1655,14 @@ pub(crate) fn apply(
     now_ms: i64,
 ) -> Step<State> {
     let _ = (pending, heads);
+    // After a `successor` activation F the account admits only the entries that settle it
+    // (§8.7, §15.1): a `final`, or, as a conflicting candidate at F's seq, a `vetoed` that
+    // displaces F while it is provisional. Once F is final the account is closed.
     if s.successor.is_some() {
-        return Err(malformed("entry after terminal successor").into());
+        if s.successor_final() {
+            return Err(malformed("entry after terminal successor").into());
+        }
+        admit_after_provisional_f(s, e)?;
     }
     // §8.5 step 1: header.
     if e.seq != s.seq() + 1 || e.previous.as_deref() != s.digests.last().map(String::as_str) {
@@ -1569,7 +1675,22 @@ pub(crate) fn apply(
         return Err(Outcome::Held("issued more than 60 s ahead".into()));
     }
     let mut n = match e.kind.as_str() {
-        "activate" => activate(s, e, now_ms)?,
+        "activate" => {
+            let n = activate(s, e, now_ms)?;
+            // After a provisional F only a removal-only home revocation's activation (§15.1).
+            if s.successor.is_some()
+                && !n
+                    .activations
+                    .last()
+                    .is_some_and(|a| a.removal_only && !a.revokes.is_empty())
+            {
+                return Err(malformed(
+                    "after a provisional successor activation only a home revocation activates",
+                )
+                .into());
+            }
+            n
+        }
         "vetoed" => vetoed(s, e)?,
         "final" => final_entry(s, e, &all)?,
         "suspend" => suspend(s, e)?,
@@ -1698,9 +1819,8 @@ fn activate(s: &State, e: &Entry, now_ms: i64) -> Step<State> {
             })
             .unwrap_or_default(),
     });
-    if witnesses.is_empty() {
-        make_final(&mut n, e.seq);
-    }
+    // An activation with no witnesses is final by the fixed point, which `apply` reaches
+    // after this entry and which obeys Order (§8.7).
     if t.full_set {
         let earlier: Vec<u64> = n
             .activations
@@ -2784,52 +2904,52 @@ struct Ctx<'a> {
     now_ms: i64,
 }
 /// Whether a `final` covers the activate `act`, whose state after it is `after` (§8.6 rule 1,
-/// §8.7). Only a `final` that is a valid entry on the activate's own branch counts: a chain of
-/// `previous` links runs from `act` to it, and every entry on that chain applies in turn. A
-/// parsed object that no branch contains, or one that fails its checks, covers nothing.
+/// §8.7 "Final"): the activation is final, in any of the ways §8.7 gives, in `after` or in the
+/// state after any valid entry that follows it on its own branch. "Final" is `Activation::final_`,
+/// the one predicate the rest of the engine uses, so a `vetoed` never rolls back anything §8.7
+/// calls final. A parsed object that no branch contains, or one that fails its checks, covers
+/// nothing. When a `vetoed` displaces the activation instead, the entries after it leave with it
+/// (§8.7 rollback).
 fn final_covers(ctx: &Ctx, act: &Entry, after: &State) -> bool {
-    let by_digest: BTreeMap<&str, &Entry> = ctx
+    let is_final = |st: &State| {
+        st.activations
+            .iter()
+            .any(|a| a.seq == act.seq && a.digest == act.env.digest && a.final_)
+    };
+    if is_final(after) {
+        return true;
+    }
+    // Entries after `act`, in seq order, each applied to the state of its `previous`. Every step
+    // raises seq, so the walk is bounded by the entries held.
+    let mut later: Vec<&Entry> = ctx
         .all
         .iter()
-        .map(|e| (e.env.digest.as_str(), *e))
+        .copied()
+        .filter(|e| e.seq > act.seq)
         .collect();
-    ctx.all.iter().any(|f| {
-        if f.kind != "final"
-            || f.env
-                .value
-                .get("activation")
-                .and_then(|a| a.get("digest"))
-                .and_then(Value::as_str)
-                != Some(act.env.digest.as_str())
-        {
-            return false;
+    later.sort_by(|x, y| (x.seq, &x.env.digest).cmp(&(y.seq, &y.env.digest)));
+    let mut states: BTreeMap<&str, State> = BTreeMap::new();
+    states.insert(act.env.digest.as_str(), after.clone());
+    for f in later {
+        let Some(prev) = f.previous.as_deref().and_then(|p| states.get(p)) else {
+            continue;
+        };
+        let Ok(next) = apply(
+            prev,
+            f,
+            ctx.pending,
+            ctx.heads,
+            ctx.all.to_vec(),
+            ctx.now_ms,
+        ) else {
+            continue;
+        };
+        if is_final(&next) {
+            return true;
         }
-        // Walk back to the activate. Each step lowers seq, so the walk is bounded.
-        let mut chain: Vec<&Entry> = vec![f];
-        let mut cur: &Entry = f;
-        while cur.previous.as_deref() != Some(act.env.digest.as_str()) {
-            let Some(next) = cur
-                .previous
-                .as_deref()
-                .and_then(|p| by_digest.get(p).copied())
-            else {
-                return false;
-            };
-            if next.seq >= cur.seq || next.seq <= act.seq {
-                return false;
-            }
-            chain.push(next);
-            cur = next;
-        }
-        let mut st = after.clone();
-        for e in chain.into_iter().rev() {
-            match apply(&st, e, ctx.pending, ctx.heads, ctx.all.to_vec(), ctx.now_ms) {
-                Ok(n) => st = n,
-                Err(_) => return false,
-            }
-        }
-        true
-    })
+        states.insert(f.env.digest.as_str(), next);
+    }
+    false
 }
 pub(super) fn covered_by_home_head(
     s: &State,
@@ -3165,6 +3285,7 @@ pub(super) fn from_upgrade(
         upgrade_seq: Some(seq),
         succession: None,
         successor: None,
+        successor_seq: None,
         migration: None,
     })
 }

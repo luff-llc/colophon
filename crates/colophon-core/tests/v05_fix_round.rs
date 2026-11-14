@@ -154,21 +154,22 @@ fn m3_chain_without_the_older_history_is_unavailable() {
     assert_ne!(v.code(), "ok");
 }
 
+/// Objects in the supplied set that no step of the chain reaches are ignored (§15.1 "Chain
+/// bound"): seventeen unrelated genesis entries do not change the verdict.
 #[test]
-fn m3_chain_longer_than_sixteen_accounts_is_malformed() {
+fn m3_unrelated_genesis_entries_do_not_change_the_verdict() {
     let (mut o, now) = chain_objects();
+    let want = verify_history(&o, &Persisted::default(), now);
     let base = body(&o.predecessor[2]);
     assert_eq!(base["kind"], "genesis");
     for i in 0..17 {
         let mut b = base.clone();
         b["issued"] = json!(format!("2026-11-13T09:{:02}:00Z", i));
+        b["label"] = json!(format!("Unrelated {i}"));
         o.predecessor.push(unsigned_env(&b));
     }
     let v = verify_history(&o, &Persisted::default(), now);
-    assert_eq!(v.code(), "malformed");
-    assert!(
-        format!("{:?}", v.stop).contains("longer than 16"),
-        "{:?}",
-        v.stop
-    );
+    assert_eq!(v.code(), want.code());
+    assert_eq!(v.code(), "ok");
+    assert!(v.state.unwrap().verified_succession().is_some());
 }
