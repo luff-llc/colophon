@@ -13,16 +13,26 @@ Never use them for real data.
 
 ## Regenerate and check
 
+One Rust generator, `crates/colophon-core/tests/v5_candidate.rs` (helpers in
+`crates/colophon-core/tests/v5_candidate/`), builds every generated file here. It is opt-in
+(both tests are `#[ignore]`) and uses only the core's own dependencies (`p256`, `aes-gcm`, `hkdf`,
+`sha2`, `serde_json`, `base64`). It does not call the 0.5 verifier: canonical JSON, signing and
+entry building are written out again in the test, so the vectors stay independent of the code they
+test.
+
 ```sh
-python3 -I conformance/0.5/candidate/generate.py          # write
-python3 -I conformance/0.5/candidate/generate.py --check  # compare with the files here
+# compare the files here with what the generator builds
+cargo test -p colophon-core --test v5_candidate -- --ignored v5_generator_check
+# rewrite them
+COLOPHON_WRITE_V5_VECTORS=1 cargo test -p colophon-core --test v5_candidate -- --ignored v5_generator_write
 ```
 
-`generate.py` runs `rules.py` (shared helpers and the cases that still hold), which runs `rules_v8.py` (pending transitions, who-wins rows, succession). It needs Python 3 and `cryptography`
-(Apache-2.0 OR BSD-3-Clause; checked with 50.0.2), for tooling only. Signatures are
-deterministic (RFC 6979), so regeneration is byte-identical. The generator also re-encodes all
-267 published 0.4 authority bodies without duplicate names, and checks that its canonical encoder
-reproduces them byte for byte.
+Signatures are deterministic (RFC 6979 over SHA-256), so regeneration is byte-identical. The
+generator also re-encodes all 267 published 0.4 authority bodies without duplicate names and
+checks that its canonical encoder reproduces them byte for byte, and checks that every envelope's
+body is canonical JSON and every honest call and link signature verifies. It replaces the Python
+generator (`generate.py`, `rules.py`, `rules_v8.py`, which needed `cryptography`), which produced
+the same 1,078 files.
 
 ## Contents
 
@@ -45,9 +55,9 @@ reproduces them byte for byte.
 
 ## What was run
 
-- `generate.py --check`: 1,036 generated files match. The directory holds 1,042 files: those plus
-  six sources (`README.md`, `generate.py`, `rules.py`, `rules_v8.py`, and the probe's
-  `Package.swift` and `main.swift`).
+- `v5_generator_check` (the Rust generator): 1,078 generated files match, byte for byte. The
+  directory holds 1,081 files: those plus three sources (`README.md` and the probe's
+  `Package.swift` and `main.swift`). The Python generator it replaced matched the same 1,078.
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
   intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).
