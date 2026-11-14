@@ -234,6 +234,17 @@ impl Status {
     }
 }
 
+/// The work of the latest derivation, and the sum since the account opened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Work {
+    /// The latest judgement of the held records.
+    pub last: crate::v05::records::JudgeStats,
+    /// All judgements since the account was opened.
+    pub total: crate::v05::records::JudgeStats,
+    /// Operations applied to namespace folds by the latest build (the rest were reused).
+    pub fold_applied: u64,
+}
+
 /// What a merge, an unlock or a finished action changed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Changes {
@@ -309,6 +320,8 @@ pub struct Account {
     now_ms: i64,
     objects: Objects,
     records: Vec<HeldRecord>,
+    /// Live-state candidates (0.3 §5.1) at `state/` paths.
+    live: Vec<HeldRecord>,
     persisted: Persisted,
     seeds: SeedRing,
     scope: Option<BTreeSet<String>>,
@@ -482,6 +495,7 @@ impl Account {
             &Inputs {
                 objects: &all,
                 records: &held,
+                live: &[],
                 persisted: &persisted,
                 now_ms,
                 seeds: &seeds,
@@ -496,6 +510,7 @@ impl Account {
             now_ms,
             objects: all,
             records: held,
+            live: Vec::new(),
             persisted,
             seeds,
             scope,
@@ -528,6 +543,7 @@ impl Account {
             &Inputs {
                 objects,
                 records,
+                live: &self.live,
                 persisted,
                 now_ms,
                 seeds: &self.seeds,
@@ -702,6 +718,151 @@ impl Account {
     /// objects arrived. It is not a counter. 0 when nothing is folded here.
     pub fn revision(&self, namespace: &str) -> u64 {
         self.d.folded.get(namespace).map_or(0, |f| f.revision)
+    }
+    /// The work the latest derivation did, so a host and a test can see that a merge of new
+    /// records judged and folded only what is new (E6's incremental judgement).
+    pub fn work(&self) -> Work {
+        let (last, total) = {
+            let c = self
+                .d
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (c.last_run(), c.totals())
+        };
+        Work {
+            last,
+            total,
+            fold_applied: self.d.fold_applied,
+        }
+    }
+    /// What this device may remember of the held records' crypto, for the engine's sealed
+    /// checkpoint (crate-private: a caller could not tell it from verified state).
+    pub(crate) fn export_judge_memo(&self) -> Vec<crate::v05::records::RecordMemo> {
+        self.d
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .export_memo(&self.records)
+    }
+    /// Take a memo back from a checkpoint whose seal verified.
+    pub(crate) fn import_judge_memo(&mut self, memo: Vec<crate::v05::records::RecordMemo>) {
+        self.d
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .import_memo(memo);
+    }
+    /// The current live heads (0.3 §5.1): verified, current, folded.
+    pub fn live_heads(&self) -> &[crate::v05::live::LiveHead] {
+        &self.d.live.heads
+    }
+    /// The verdict on each live-state candidate held: `(path, verdict)`.
+    pub fn live_verdicts(&self) -> &[(String, crate::v05::live::LiveVerdict)] {
+        &self.d.live.verdicts
+    }
+    /// Hold live-state candidates (`state/<author>/<namespace>/<slot>.json` envelopes) and
+    /// judge them with the history (0.3 §5.1). They are held as a set, so the heads are a
+    /// function of what is held. At most [`crate::v05::live::MAX_CANDIDATES_PER_PATH`]
+    /// different byte strings are held per path and 16,384 in all; a merge past either bound
+    /// is refused whole. Nothing changes on failure.
+    pub fn merge_live(&mut self, candidates: Vec<HeldRecord>, now_ms: i64) -> Result<Changes> {
+        crate::v05::write::check_issued(now_ms)?;
+        require(
+            candidates.len() <= 16_384
+                && candidates
+                    .iter()
+                    .all(|c| c.bytes.len() <= MAX_RECORD_BYTES && c.path.len() <= 512),
+            "a live candidate exceeds its bound",
+        )?;
+        let mut live = self.live.clone();
+        union_records(&mut live, &candidates);
+        let mut per: BTreeMap<&str, usize> = BTreeMap::new();
+        for c in &live {
+            *per.entry(c.path.as_str()).or_default() += 1;
+        }
+        require(
+            live.len() <= 16_384
+                && per
+                    .values()
+                    .all(|n| *n <= crate::v05::live::MAX_CANDIDATES_PER_PATH),
+            "too many live candidates",
+        )?;
+        let now = now_ms.max(self.now_ms);
+        let d = Derived::build(
+            &Inputs {
+                objects: &self.objects,
+                records: &self.records,
+                live: &live,
+                persisted: &self.persisted,
+                now_ms: now,
+                seeds: &self.seeds,
+                me: &self.me,
+                scope: &self.scope,
+            },
+            Some(&self.d),
+            None,
+        )?;
+        let (o, r, p) = (
+            self.objects.clone(),
+            self.records.clone(),
+            self.persisted.clone(),
+        );
+        let c = self.commit(d, o, r, p, now);
+        self.live = live;
+        Ok(c)
+    }
+    /// The highest clock of an admitted, authenticated operation in `namespace` (0 if none): a
+    /// writer's next clock is one past it (§11.4).
+    pub fn highest_admitted_clock(&self, namespace: &str) -> u64 {
+        self.d
+            .judgement
+            .records
+            .iter()
+            .filter(|j| {
+                j.outcome == crate::v05::records::Outcome::Admitted
+                    && j.plaintext.is_some()
+                    && j.namespace.as_deref() == Some(namespace)
+            })
+            .map(|j| j.clock)
+            .max()
+            .unwrap_or(0)
+    }
+    /// What the live judgement would say of `candidate` held with the live candidates now held,
+    /// without holding it. `unsigned` skips the signature check (the write side's own header
+    /// before the host signed it).
+    pub(crate) fn preview_live(
+        &self,
+        candidate: HeldRecord,
+        unsigned: bool,
+    ) -> Result<crate::v05::live::LiveVerdict> {
+        let mut live = self.live.clone();
+        union_records(&mut live, std::slice::from_ref(&candidate));
+        let at = live
+            .iter()
+            .position(|c| c.path == candidate.path && c.bytes == candidate.bytes)
+            .ok_or_else(|| crate::v05::malformed("candidate not held"))?;
+        let j = crate::v05::live::judge_live_with(
+            &self.d.auth,
+            &self.d.keys,
+            &self.d.judgement,
+            &live,
+            unsigned.then_some(at),
+        );
+        Ok(j.verdicts
+            .get(at)
+            .map(|v| v.1.clone())
+            .unwrap_or(crate::v05::live::LiveVerdict::Invalid("not judged".into())))
+    }
+    /// The record-layer view of the verified history, for the engine (crate-private: it holds
+    /// no secret, but the engine must not take verified state from a caller, so it reads this).
+    pub(crate) fn record_authority(&self) -> &crate::v05::records::RecordAuthority {
+        &self.d.auth
+    }
+    /// The epoch keys this account holds, for the engine's blob and live-state work.
+    /// Crate-private: nothing outside the crate can read a key through it.
+    pub(crate) fn epoch_keys(&self) -> &crate::v05::records::EpochKeys {
+        &self.d.keys
     }
     /// Restrict which namespaces this session folds and unlocks (as 0.4's read scope).
     pub fn set_read_scope(&mut self, namespaces: Vec<String>) -> Result<Changes> {

@@ -16,17 +16,20 @@ use crate::v05::history::envelope::AuthEnvelope;
 use crate::v05::history::{verify_history, MemberRecord, Objects, Persisted, Verdict};
 use crate::v05::members::MemberKind;
 use crate::v05::records::{
-    judge_records, EpochKeys, HeldRecord, Judgement, Level, Outcome, ProposalState, RecordAuthority,
+    judge_cached, EpochKeys, HeldRecord, JudgeCache, Judgement, Level, Outcome, ProposalState,
+    RecordAuthority,
 };
 use crate::v05::terms::Access;
 use crate::v05::{malformed, Failure, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 /// What a [`Derived`] is built from.
 pub(super) struct Inputs<'a> {
     pub objects: &'a Objects,
     pub records: &'a [HeldRecord],
+    pub live: &'a [HeldRecord],
     pub persisted: &'a Persisted,
     pub now_ms: i64,
     pub seeds: &'a SeedRing,
@@ -61,7 +64,36 @@ pub(super) struct Derived {
     pub auth: RecordAuthority,
     pub keys: EpochKeys,
     pub judgement: Judgement,
+    /// The judgement of the live-state candidates held (0.3 §5.1).
+    pub live: crate::v05::live::LiveJudgement,
     pub folded: BTreeMap<String, Folded>,
+    /// What the judgement read from the verified state that its branch does not fix.
+    pub print: [u8; 32],
+    /// Memory of the judgement of the held records, shared by the successive derivations of
+    /// one account. It only ever remembers answers that are functions of their inputs, and a
+    /// derivation uses it only for the inputs it was made under, so sharing it is safe.
+    pub cache: Arc<Mutex<JudgeCache>>,
+    /// Operations applied to a namespace fold by the latest build (the rest were reused).
+    pub fold_applied: u64,
+}
+
+/// A hash of everything the judgement of records reads from the verified state besides the
+/// branch's own entries: the fork and upgrade seqs and every member with its terms, expiry,
+/// revocation and provisional standing.
+fn auth_print(verdict: &crate::v05::history::Verdict, auth: &RecordAuthority) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for d in &verdict.branch {
+        h.update(d.as_bytes());
+        h.update(b"\n");
+    }
+    h.update(format!("fork:{:?};upgrade:{:?};", auth.fork_seq(), auth.upgrade_seq()).as_bytes());
+    let members = auth.state().members();
+    match serde_json::to_vec(members) {
+        Ok(b) => h.update(b),
+        Err(_) => h.update(format!("{members:?}").as_bytes()),
+    }
+    h.finalize().into()
 }
 
 /// The body digest of a held authority entry, `/5` or the 0.4 prefix of an upgraded account.
@@ -162,7 +194,15 @@ impl Derived {
                 }
             }
         }
-        let judgement = judge_records(&auth, &keys, inputs.records);
+        let cache = prior.map_or_else(Default::default, |p| p.cache.clone());
+        let print = auth_print(&verdict, &auth);
+        let judgement = {
+            let mut c = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            judge_cached(&auth, &keys, inputs.records, &mut c, print)
+        };
+        let live = crate::v05::live::judge_live(&auth, &keys, &judgement, inputs.live);
         let (effective, verified_pending) = effective_objects(inputs.objects, auth.state());
         let mut derived = Self {
             effective,
@@ -171,13 +211,17 @@ impl Derived {
             auth,
             keys,
             judgement,
+            live,
             folded: BTreeMap::new(),
+            print,
+            cache,
+            fold_applied: 0,
         };
         derived.fold(inputs, prior);
         Ok(derived)
     }
 
-    fn fold(&mut self, inputs: &Inputs<'_>, _prior: Option<&Derived>) {
+    fn fold(&mut self, inputs: &Inputs<'_>, prior: Option<&Derived>) {
         let account = self.auth.account().clone();
         let library = account.as_str().chars().take(32).collect::<String>();
         let namespaces: Vec<String> = self.auth.namespaces().to_vec();
@@ -266,14 +310,65 @@ impl Derived {
                     dg.clone(),
                 ));
             }
+            // Current live heads fold at their `(generation, author, id)` position, as any
+            // operation does; the caller of `judge_live` already left out the ones that are an
+            // admitted immutable record too.
+            for head in self.live.heads.iter().filter(|h| h.namespace == ns) {
+                let plain = &head.plaintext;
+                let member = self.auth.member(&head.author);
+                let (mk, label) = member.map_or((MemberKind::Device, String::new()), |m| {
+                    (m.request.kind.clone(), m.request.label.clone())
+                });
+                ops.push((
+                    (
+                        head.generation,
+                        head.author.clone(),
+                        head.id.clone(),
+                        head.digest.clone(),
+                    ),
+                    OperationView {
+                        id: head.id.clone(),
+                        kind: head.kind.clone(),
+                        author: head.author.clone(),
+                        author_label: label,
+                        origin: if mk == MemberKind::Agent {
+                            "ai"
+                        } else {
+                            "person"
+                        }
+                        .into(),
+                        clock: head.generation,
+                        created: plain
+                            .get("created")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        payload: plain.get("payload").cloned().unwrap_or(Value::Null),
+                    },
+                    mk,
+                    head.digest.clone(),
+                ));
+            }
             ops.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut fold = Namespace::new(&ns);
+            // A fold is a left fold over the operations in fold order, so when the previous
+            // build folded exactly the first operations of this one, under the same verified
+            // standing of every member, it is extended instead of redone.
+            let reuse = prior
+                .filter(|p| p.print == self.print)
+                .and_then(|p| p.folded.get(&ns))
+                .filter(|f| {
+                    f.fold.order.len() <= ops.len()
+                        && f.fold.order.iter().zip(&ops).all(|(a, b)| *a == b.3)
+                });
+            let (mut fold, mut admitted, start) = match reuse {
+                Some(f) => (f.fold.clone(), f.admitted.clone(), f.fold.order.len()),
+                None => (Namespace::new(&ns), Vec::new(), 0),
+            };
             let policy = CheckpointPolicy {
                 every: 0,
                 retain: 0,
             };
-            let mut admitted = Vec::new();
-            for (_, view, mk, dg) in &ops {
+            for (_, view, mk, dg) in &ops[start..] {
                 let ctx = self.auth.member(&view.author).map(|m| AuthorContext {
                     kind: model_kind(mk),
                     library: library.clone(),
@@ -281,6 +376,7 @@ impl Derived {
                 });
                 fold.append(dg, view, ctx, &policy);
                 admitted.push(view.clone());
+                self.fold_applied += 1;
             }
             // A change token, not a counter: a function of the folded operations and their
             // order, so it is the same however the objects arrived. Zero for no operations.

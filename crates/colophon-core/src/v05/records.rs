@@ -50,6 +50,7 @@ use super::vault::{EcdhOutput, SealedBox, VaultPublic, VaultSeed};
 use super::{bad_signature, malformed, require, Failure, Reason, Result, Unknown};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// `level` of a header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1152,7 +1153,6 @@ impl Judged {
 }
 
 struct Cand {
-    idx: usize,
     path: String,
     digest: String,
     format: HeaderFormat,
@@ -1178,7 +1178,7 @@ fn legacy_aad(c: &Cand) -> Result<Vec<u8>> {
 
 /// Parse a held record: `/5` through [`OperationHeader::parse`], `/3` as 0.3 §5 states the
 /// header (`library` in place of `account`, no `level` and no `previous`).
-fn parse_candidate(idx: usize, held: &HeldRecord) -> Result<Cand> {
+fn parse_candidate(held: &HeldRecord) -> Result<Cand> {
     let raw = RawEnvelope::parse(&held.bytes, bounds::OPERATION_HEADER_BODY, false)?;
     let protocol = raw
         .value
@@ -1191,7 +1191,6 @@ fn parse_candidate(idx: usize, held: &HeldRecord) -> Result<Cand> {
             let (header, _) = OperationHeader::parse(&held.bytes)?;
             let aad = header.aad()?;
             Ok(Cand {
-                idx,
                 path: held.path.clone(),
                 digest: header.digest(),
                 format: HeaderFormat::V5,
@@ -1258,7 +1257,6 @@ fn parse_candidate(idx: usize, held: &HeldRecord) -> Result<Cand> {
                 unknown: Unknown::default(),
             };
             let mut cand = Cand {
-                idx,
                 path: held.path.clone(),
                 digest: super::encoding::digest(&raw.body),
                 format: HeaderFormat::V3,
@@ -1282,6 +1280,7 @@ pub(crate) struct Walk {
 }
 /// The §9.5 kept set of one revocation: the `kept` digests plus every header the walk reaches,
 /// and whether some walk met a header it does not hold.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct KeptSet {
     pub digests: BTreeSet<String>,
     pub incomplete: bool,
@@ -1435,17 +1434,25 @@ pub fn judge_records(auth: &RecordAuthority, keys: &EpochKeys, held: &[HeldRecor
 }
 
 /// Stage one of admission for one held record.
+#[derive(Clone)]
 enum Stage {
     /// Failed before admission.
     Bad(Box<Judged>),
     /// Parsed and bound, but the author is not a member: no key to check a signature with.
-    Unknown(Box<Cand>),
+    Unknown(Arc<Cand>),
     /// Parsed, bound, path-checked and signature-checked.
-    Ready(Box<Cand>),
+    Ready(Arc<Cand>),
 }
-fn stage_one(auth: &RecordAuthority, idx: usize, h: &HeldRecord, skip_signature: bool) -> Stage {
+/// Stage one of one held record. `sigs` counts the signature verifications performed.
+fn stage_one(
+    auth: &RecordAuthority,
+    h: &HeldRecord,
+    skip_signature: bool,
+    sigs: &mut u64,
+    known: Option<&BTreeSet<[u8; 32]>>,
+) -> Stage {
     let account = auth.account();
-    let c = match parse_candidate(idx, h) {
+    let c = match parse_candidate(h) {
         Ok(c) => c,
         Err(f) => return Stage::Bad(Box::new(Judged::invalid(&h.path, f))),
     };
@@ -1465,16 +1472,18 @@ fn stage_one(auth: &RecordAuthority, idx: usize, h: &HeldRecord, skip_signature:
         )));
     }
     let Some(member) = auth.member(&hd.author) else {
-        return Stage::Unknown(Box::new(c));
+        return Stage::Unknown(Arc::new(c));
     };
-    if !skip_signature {
+    let already = known.is_some_and(|k| k.contains(&verified_key(&h.bytes, &member.request.signing)));
+    if !skip_signature && !already {
+        *sigs += 1;
         let sig = RawEnvelope::parse(&h.bytes, bounds::OPERATION_HEADER_BODY, false)
             .and_then(|env| OperationHeader::verify(&env, &member.request.signing));
         if let Err(f) = sig {
             return Stage::Bad(Box::new(Judged::invalid(&h.path, f)));
         }
     }
-    Stage::Ready(Box::new(c))
+    Stage::Ready(Arc::new(c))
 }
 
 /// [`judge_records`], optionally skipping the signature check of the one held record at index
@@ -1491,177 +1500,149 @@ pub(crate) fn judge_core(
     held: &[HeldRecord],
     unsigned: Option<usize>,
 ) -> Judgement {
-    let account = auth.account().clone();
-    let mut records: Vec<Option<Judged>> = vec![None; held.len()];
-    let mut cands: Vec<Cand> = Vec::new();
-    let mut early: BTreeMap<usize, Outcome> = BTreeMap::new();
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
-    let mut aliases: Vec<(usize, usize)> = Vec::new();
-    for (idx, h) in held.iter().enumerate() {
-        let c = match stage_one(auth, idx, h, unsigned == Some(idx)) {
-            Stage::Bad(j) => {
-                records[idx] = Some(*j);
-                continue;
-            }
-            Stage::Unknown(c) => {
-                early.insert(idx, Outcome::Refused("notGranted"));
-                *c
-            }
-            Stage::Ready(c) => *c,
-        };
-        if let Some(first) = seen.get(&c.digest) {
-            aliases.push((idx, *first));
-            continue;
-        }
-        seen.insert(c.digest.clone(), cands.len());
-        cands.push(c);
+    judge_impl(auth, keys, held, unsigned, None)
+}
+
+/// What one candidate's admission reads besides the walk state.
+struct JudgeEnv<'a> {
+    auth: &'a RecordAuthority,
+    keys: &'a EpochKeys,
+    account: AccountId,
+    upgrade: Option<u64>,
+    /// The §9.5 kept set of each revoked member whose revocation is on the verified branch.
+    kept: &'a BTreeMap<String, KeptSet>,
+}
+/// What the walk in fold order carries from one candidate to the next: the highest admitted
+/// clock per namespace, the budget slots reserved per author, and the `(author, id)` pairs
+/// that authenticated.
+#[derive(Clone, Default)]
+struct WalkState {
+    highest: BTreeMap<String, u64>,
+    reserved: BTreeMap<String, BTreeSet<String>>,
+    authentic: BTreeSet<(String, String)>,
+}
+type FoldKey = (u64, String, String, String);
+fn fold_key(c: &Cand) -> FoldKey {
+    (
+        c.header.clock,
+        c.header.author.clone(),
+        c.header.id.clone(),
+        c.digest.clone(),
+    )
+}
+
+/// Admit one candidate at its place in the walk (§11.5 steps 1–8 and opening). The same code
+/// serves the full judgement and the incremental one.
+fn judge_candidate(
+    env: &JudgeEnv<'_>,
+    st: &mut WalkState,
+    memo: Option<&mut BTreeMap<String, Option<Value>>>,
+    stats: &mut JudgeStats,
+    c: &Cand,
+    early: bool,
+) -> Judged {
+    let hd = &c.header;
+    let auth = env.auth;
+    let mut j = Judged {
+        path: c.path.clone(),
+        outcome: Outcome::Admitted,
+        format: Some(c.format),
+        digest: Some(c.digest.clone()),
+        author: Some(hd.author.clone()),
+        namespace: Some(hd.namespace.clone()),
+        id: Some(hd.id.clone()),
+        clock: hd.clock,
+        level: Some(hd.level),
+        plaintext: None,
+        folded: false,
+        reserved: false,
+    };
+    if early {
+        j.outcome = Outcome::Refused("notGranted");
+        return j;
     }
-    let upgrade = auth.upgrade_seq();
-    let mut order: Vec<usize> = (0..cands.len()).collect();
-    order.sort_by(|a, b| {
-        let (x, y) = (&cands[*a].header, &cands[*b].header);
-        (x.clock, &x.author, &x.id, &cands[*a].digest).cmp(&(
-            y.clock,
-            &y.author,
-            &y.id,
-            &cands[*b].digest,
-        ))
-    });
-    let walkable: BTreeMap<String, Walk> = cands
-        .iter()
-        .map(|c| {
-            (
-                c.digest.clone(),
-                Walk {
-                    author: c.header.author.clone(),
-                    namespace: c.header.namespace.clone(),
-                    previous: c.header.previous.clone(),
-                },
-            )
-        })
-        .collect();
-    let mut highest: BTreeMap<String, u64> = BTreeMap::new();
-    let mut reserved: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut authentic: BTreeSet<(String, String)> = BTreeSet::new();
-    let mut kept_cache: BTreeMap<String, KeptSet> = BTreeMap::new();
-    let mut judged_by_cand: Vec<Option<Judged>> = vec![None; cands.len()];
-    for &ci in &order {
-        let c = &cands[ci];
-        let hd = &c.header;
-        let mut j = Judged {
-            path: c.path.clone(),
-            outcome: Outcome::Admitted,
-            format: Some(c.format),
-            digest: Some(c.digest.clone()),
-            author: Some(hd.author.clone()),
-            namespace: Some(hd.namespace.clone()),
-            id: Some(hd.id.clone()),
-            clock: hd.clock,
-            level: Some(hd.level),
-            plaintext: None,
-            folded: false,
-            reserved: false,
-        };
-        if let Some(o) = early.get(&c.idx) {
-            j.outcome = o.clone();
-            judged_by_cand[ci] = Some(j);
-            continue;
+    // The upgrade fence (§11.5).
+    let fenced = match (env.upgrade, c.format) {
+        (Some(u), HeaderFormat::V3) => {
+            hd.authority >= u
+                || !c
+                    .library
+                    .as_deref()
+                    .is_some_and(|l| auth.account().has_legacy_id(l))
         }
-        // The upgrade fence (§11.5).
-        let fenced = match (upgrade, c.format) {
-            (Some(u), HeaderFormat::V3) => {
-                hd.authority >= u
-                    || !c
-                        .library
-                        .as_deref()
-                        .is_some_and(|l| auth.account().has_legacy_id(l))
-            }
-            (Some(u), HeaderFormat::V5) => hd.authority < u,
-            (None, HeaderFormat::V3) => true,
-            (None, HeaderFormat::V5) => false,
-        };
-        if fenced {
-            j.outcome = Outcome::Refused("wrongFormat");
-            judged_by_cand[ci] = Some(j);
-            continue;
-        }
-        let Some(member) = auth.member(&hd.author) else {
-            j.outcome = Outcome::Refused("notGranted");
-            judged_by_cand[ci] = Some(j);
-            continue;
-        };
-        let entry = member
-            .terms
-            .records()
-            .and_then(|r| r.iter().find(|e| e.namespace == hd.namespace));
-        let kept = match member.revoked_seq {
-            None => Kept::NotKept,
-            Some(_) => {
-                let set = kept_cache.entry(hd.author.clone()).or_insert_with(|| {
-                    match auth.revokes.get(&hd.author) {
-                        Some(info) => kept_set(&info.kept, &info.heads, &hd.author, &walkable),
-                        None => KeptSet {
-                            digests: BTreeSet::new(),
-                            incomplete: false,
-                        },
-                    }
-                });
-                if set.digests.contains(&c.digest) {
-                    Kept::Kept
-                } else if set.incomplete {
-                    Kept::Incomplete
-                } else {
-                    Kept::NotKept
-                }
-            }
-        };
-        let spent = reserved.get(&hd.author);
-        let writes_left = match member.terms.writes() {
-            None => None,
-            Some(budget) => {
-                if spent.is_some_and(|s| s.contains(&hd.id)) {
-                    None
-                } else {
-                    Some(budget.saturating_sub(spent.map_or(0, |s| s.len() as u64)))
-                }
-            }
-        };
-        let author_view = AuthorView {
-            access: if hd.authority >= member.granted_seq {
-                entry.map(|e| e.access)
-            } else {
+        (Some(u), HeaderFormat::V5) => hd.authority < u,
+        (None, HeaderFormat::V3) => true,
+        (None, HeaderFormat::V5) => false,
+    };
+    if fenced {
+        j.outcome = Outcome::Refused("wrongFormat");
+        return j;
+    }
+    let Some(member) = auth.member(&hd.author) else {
+        j.outcome = Outcome::Refused("notGranted");
+        return j;
+    };
+    let entry = member
+        .terms
+        .records()
+        .and_then(|r| r.iter().find(|e| e.namespace == hd.namespace));
+    let kept = match member.revoked_seq {
+        None => Kept::NotKept,
+        Some(_) => match env.kept.get(&hd.author) {
+            Some(set) if set.digests.contains(&c.digest) => Kept::Kept,
+            Some(set) if set.incomplete => Kept::Incomplete,
+            _ => Kept::NotKept,
+        },
+    };
+    let spent = st.reserved.get(&hd.author);
+    let writes_left = match member.terms.writes() {
+        None => None,
+        Some(budget) => {
+            if spent.is_some_and(|s| s.contains(&hd.id)) {
                 None
-            },
-            expires_ms: member.expires_ms,
-            revoked_seq: member.revoked_seq,
-            kept,
-            writes_left,
-            provisional: member.provisional.is_some(),
-        };
-        let cited = hd.authority.min(auth.authority_seq());
-        let ns_view = NamespaceView {
-            authority_seq: auth.authority_seq(),
-            fork_seq: auth.fork_seq(),
-            epoch_at_cited: auth.epoch_at(&hd.namespace, cited).unwrap_or(0),
-            highest_clock: highest.get(&hd.namespace).copied().unwrap_or(0),
-        };
-        match admit(hd, &author_view, &ns_view) {
-            Admission::Refused(r) => j.outcome = Outcome::Refused(r.as_str()),
-            Admission::Held(w) => j.outcome = Outcome::Held(w),
-            Admission::NewerFormat => j.outcome = Outcome::NewerFormat,
-            Admission::Admitted => {
-                // Step 8: reserve, and count the clock, whatever opening finds.
-                j.reserved = true;
-                reserved
-                    .entry(hd.author.clone())
-                    .or_default()
-                    .insert(hd.id.clone());
-                let h = highest.entry(hd.namespace.clone()).or_insert(0);
-                *h = (*h).max(hd.clock);
-                match keys.get(&account, &hd.namespace, hd.epoch) {
-                    None => j.outcome = Outcome::Held("unavailable"),
-                    Some(key) => {
-                        let opened = open_plaintext(
+            } else {
+                Some(budget.saturating_sub(spent.map_or(0, |s| s.len() as u64)))
+            }
+        }
+    };
+    let author_view = AuthorView {
+        access: if hd.authority >= member.granted_seq {
+            entry.map(|e| e.access)
+        } else {
+            None
+        },
+        expires_ms: member.expires_ms,
+        revoked_seq: member.revoked_seq,
+        kept,
+        writes_left,
+        provisional: member.provisional.is_some(),
+    };
+    let cited = hd.authority.min(auth.authority_seq());
+    let ns_view = NamespaceView {
+        authority_seq: auth.authority_seq(),
+        fork_seq: auth.fork_seq(),
+        epoch_at_cited: auth.epoch_at(&hd.namespace, cited).unwrap_or(0),
+        highest_clock: st.highest.get(&hd.namespace).copied().unwrap_or(0),
+    };
+    match admit(hd, &author_view, &ns_view) {
+        Admission::Refused(r) => j.outcome = Outcome::Refused(r.as_str()),
+        Admission::Held(w) => j.outcome = Outcome::Held(w),
+        Admission::NewerFormat => j.outcome = Outcome::NewerFormat,
+        Admission::Admitted => {
+            // Step 8: reserve, and count the clock, whatever opening finds.
+            j.reserved = true;
+            st.reserved
+                .entry(hd.author.clone())
+                .or_default()
+                .insert(hd.id.clone());
+            let h = st.highest.entry(hd.namespace.clone()).or_insert(0);
+            *h = (*h).max(hd.clock);
+            match env.keys.get(&env.account, &hd.namespace, hd.epoch) {
+                None => j.outcome = Outcome::Held("unavailable"),
+                Some(key) => {
+                    let mut open = || {
+                        stats.opened += 1;
+                        open_plaintext(
                             key.expose(),
                             &c.aad,
                             &Sealed {
@@ -1675,27 +1656,38 @@ pub(crate) fn judge_core(
                                 nonce: &hd.nonce,
                                 ciphertext: &hd.ciphertext,
                             },
-                        );
-                        match opened {
-                            Err(_) => j.outcome = Outcome::Refused("invalidPayload"),
-                            Ok(pt) => {
-                                let scope = match entry {
-                                    Some(e) => admit_opened(&pt, e, &member.terms),
-                                    None => Admission::Refused(Reason::NotGranted),
-                                };
-                                match scope {
-                                    Admission::Refused(r) => {
-                                        j.outcome = Outcome::Refused(r.as_str());
-                                    }
-                                    Admission::NewerFormat => j.outcome = Outcome::NewerFormat,
-                                    _ => {
-                                        if !authentic.insert((hd.author.clone(), hd.id.clone())) {
-                                            j.outcome = Outcome::Refused("duplicateID");
-                                        } else {
-                                            j.folded =
-                                                pt.get("v").and_then(Value::as_u64) == Some(1);
-                                            j.plaintext = Some(pt);
-                                        }
+                        )
+                        .ok()
+                    };
+                    let opened: Option<Value> = match memo {
+                        None => open(),
+                        Some(m) => match m.get(&c.digest) {
+                            Some(r) => r.clone(),
+                            None => {
+                                let r = open();
+                                m.insert(c.digest.clone(), r.clone());
+                                r
+                            }
+                        },
+                    };
+                    match opened {
+                        None => j.outcome = Outcome::Refused("invalidPayload"),
+                        Some(pt) => {
+                            let scope = match entry {
+                                Some(e) => admit_opened(&pt, e, &member.terms),
+                                None => Admission::Refused(Reason::NotGranted),
+                            };
+                            match scope {
+                                Admission::Refused(r) => {
+                                    j.outcome = Outcome::Refused(r.as_str());
+                                }
+                                Admission::NewerFormat => j.outcome = Outcome::NewerFormat,
+                                _ => {
+                                    if !st.authentic.insert((hd.author.clone(), hd.id.clone())) {
+                                        j.outcome = Outcome::Refused("duplicateID");
+                                    } else {
+                                        j.folded = pt.get("v").and_then(Value::as_u64) == Some(1);
+                                        j.plaintext = Some(pt);
                                     }
                                 }
                             }
@@ -1704,19 +1696,418 @@ pub(crate) fn judge_core(
                 }
             }
         }
-        judged_by_cand[ci] = Some(j);
     }
-    for (ci, j) in judged_by_cand.into_iter().enumerate() {
-        if let Some(j) = j {
-            records[cands[ci].idx] = Some(j);
+    j
+}
+
+/// The §9.5 kept set of every member whose revocation is on the verified branch, over the
+/// candidates held.
+fn kept_sets(auth: &RecordAuthority, cands: &[&Arc<Cand>]) -> BTreeMap<String, KeptSet> {
+    let owners: Vec<String> = auth
+        .state()
+        .members()
+        .iter()
+        .filter(|m| m.revoked_seq.is_some())
+        .map(|m| m.request.member_id())
+        .filter(|id| auth.revokes.contains_key(id))
+        .collect();
+    if owners.is_empty() {
+        return BTreeMap::new();
+    }
+    let walkable: BTreeMap<String, Walk> = cands
+        .iter()
+        .map(|c| {
+            (
+                c.digest.clone(),
+                Walk {
+                    author: c.header.author.clone(),
+                    namespace: c.header.namespace.clone(),
+                    previous: c.header.previous.clone(),
+                },
+            )
+        })
+        .collect();
+    owners
+        .into_iter()
+        .filter_map(|id| {
+            let info = auth.revokes.get(&id)?;
+            let set = kept_set(&info.kept, &info.heads, &id, &walkable);
+            Some((id, set))
+        })
+        .collect()
+}
+
+/// What the cache remembers of one held record's stage one, with what it was valid for.
+struct StageEntry {
+    /// The author the header names, when it parsed.
+    author: Option<String>,
+    /// The signing key the author had in the verified state when this was computed.
+    signing: Option<Vec<u8>>,
+    stage: Stage,
+}
+/// Work counters of the judgements a cache made (`since` creation; see
+/// [`JudgeCache::last_run`] for the latest call).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JudgeStats {
+    /// Records parsed.
+    pub parsed: u64,
+    /// Signatures verified.
+    pub signatures: u64,
+    /// Payloads decrypted.
+    pub opened: u64,
+    /// Candidates admitted in the walk (the walk resumed from the previous state counts only
+    /// the new ones).
+    pub walked: u64,
+    /// The walk resumed from the previous walk's state.
+    pub resumed: bool,
+}
+struct Last {
+    print: [u8; 32],
+    keys: Vec<(String, u64)>,
+    kept: BTreeMap<String, KeptSet>,
+    by_digest: BTreeMap<String, Judged>,
+    state: WalkState,
+    last_key: Option<FoldKey>,
+}
+/// Memory for incremental judgement. It remembers stage one of each held record (parse and
+/// signature, valid while the author's key is the same) and the opened payload of each
+/// admitted body, and the state of the last walk in fold order, so a merge that only adds
+/// records after the last one resumes the walk instead of redoing it. Every answer is the one
+/// [`judge_core`] gives over the same inputs: the same code decides each candidate, and the
+/// cache is used only when the inputs it was made under are the inputs now.
+#[derive(Default)]
+pub struct JudgeCache {
+    account: Option<String>,
+    stage: BTreeMap<(String, [u8; 32]), StageEntry>,
+    opened: BTreeMap<String, Option<Value>>,
+    /// `sha256(envelope bytes || signing key)` of every signature that verified.
+    verified: BTreeSet<[u8; 32]>,
+    last: Option<Last>,
+    totals: JudgeStats,
+    run: JudgeStats,
+}
+/// What a device may remember about one held record between sessions, so a restart need not
+/// verify its signature or decrypt it again. It is a cache of results that are functions of the
+/// record's exact bytes and the author's key; the engine keeps it only inside a sealed
+/// checkpoint and takes it back only from one whose tag verified.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RecordMemo {
+    /// The record's path.
+    pub path: String,
+    /// SHA-256 of the exact envelope bytes, hex.
+    pub sha256: String,
+    /// `sha256(bytes || author signing key)`, hex, when the signature verified.
+    pub verified: Option<String>,
+    /// The body digest, when it opened.
+    pub body: Option<String>,
+    /// The opened plaintext.
+    pub plaintext: Option<Value>,
+}
+fn verified_key(bytes: &[u8], signing: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.update(signing);
+    h.finalize().into()
+}
+fn hex32(b: &[u8; 32]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+fn unhex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 || !is_lower_hex(s, 64) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, c) in s.as_bytes().chunks(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok()?;
+    }
+    Some(out)
+}
+impl JudgeCache {
+    /// The memo of the given held records.
+    pub(crate) fn export_memo(&self, held: &[HeldRecord]) -> Vec<RecordMemo> {
+        use sha2::{Digest, Sha256};
+        held.iter()
+            .map(|h| {
+                let d: [u8; 32] = Sha256::digest(&h.bytes).into();
+                let entry = self.stage.get(&(h.path.clone(), d));
+                let (verified, body, plaintext) = match entry.map(|e| (&e.stage, &e.signing)) {
+                    Some((Stage::Ready(c), Some(sk))) => {
+                        let vk = verified_key(&h.bytes, sk);
+                        (
+                            self.verified.contains(&vk).then(|| hex32(&vk)),
+                            Some(c.digest.clone()),
+                            self.opened.get(&c.digest).cloned().flatten(),
+                        )
+                    }
+                    _ => (None, None, None),
+                };
+                RecordMemo {
+                    path: h.path.clone(),
+                    sha256: hex32(&d),
+                    verified,
+                    body,
+                    plaintext,
+                }
+            })
+            .collect()
+    }
+    /// Take a memo back. The caller vouches for it (the engine, from a sealed checkpoint).
+    pub(crate) fn import_memo(&mut self, memo: Vec<RecordMemo>) {
+        for m in memo {
+            if let Some(v) = m.verified.as_deref().and_then(unhex32) {
+                self.verified.insert(v);
+            }
+            if let (Some(body), Some(pt)) = (m.body, m.plaintext) {
+                if is_lower_hex(&body, 64) {
+                    self.opened.insert(body, Some(pt));
+                }
+            }
         }
     }
-    for (idx, ci) in aliases {
-        let mut j = records[cands[ci].idx].clone();
+    /// A new, empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Work done since the cache was made.
+    pub fn totals(&self) -> JudgeStats {
+        self.totals
+    }
+    /// Work done by the latest judgement.
+    pub fn last_run(&self) -> JudgeStats {
+        self.run
+    }
+    /// Remembered records.
+    pub fn len(&self) -> usize {
+        self.stage.len()
+    }
+    /// True when nothing is remembered.
+    pub fn is_empty(&self) -> bool {
+        self.stage.is_empty()
+    }
+}
+
+/// [`judge_core`] with a cache, for a caller (the account) that judges a growing set again and
+/// again. `print` must be a hash of everything the judgement reads from `auth` that `auth`'s
+/// verified branch does not fix (members and their terms, expiries, revocations, the fork
+/// and upgrade seqs); the walk is resumed only when it is equal to the previous call's.
+pub(crate) fn judge_cached(
+    auth: &RecordAuthority,
+    keys: &EpochKeys,
+    held: &[HeldRecord],
+    cache: &mut JudgeCache,
+    print: [u8; 32],
+) -> Judgement {
+    judge_impl(auth, keys, held, None, Some((cache, print)))
+}
+
+fn judge_impl(
+    auth: &RecordAuthority,
+    keys: &EpochKeys,
+    held: &[HeldRecord],
+    unsigned: Option<usize>,
+    mut cache: Option<(&mut JudgeCache, [u8; 32])>,
+) -> Judgement {
+    use sha2::{Digest, Sha256};
+    let account = auth.account().clone();
+    let mut run = JudgeStats::default();
+    if let Some((c, _)) = cache.as_mut() {
+        if c.account.as_deref() != Some(account.as_str()) {
+            **c = JudgeCache::default();
+            c.account = Some(account.as_str().to_string());
+        }
+    }
+    // Stage one.
+    let mut records: Vec<Option<Judged>> = vec![None; held.len()];
+    // `(held index, candidate, unknown author)`, one per distinct body.
+    let mut cands: Vec<(usize, Arc<Cand>, bool)> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut aliases: Vec<(usize, String)> = Vec::new();
+    let mut fresh_stage: Vec<((String, [u8; 32]), StageEntry)> = Vec::new();
+    let mut fresh_verified: Vec<[u8; 32]> = Vec::new();
+    for (idx, h) in held.iter().enumerate() {
+        let memo_key = cache.as_ref().map(|_| {
+            let d: [u8; 32] = Sha256::digest(&h.bytes).into();
+            (h.path.clone(), d)
+        });
+        let hit = match (&cache, &memo_key) {
+            (Some((c, _)), Some(k)) => c.stage.get(k).filter(|e| match &e.author {
+                None => true,
+                Some(a) => {
+                    auth.member(a).map(|m| m.request.signing.clone()) == e.signing
+                        && unsigned != Some(idx)
+                }
+            }),
+            _ => None,
+        };
+        let stage = match hit {
+            Some(e) => e.stage.clone(),
+            None => {
+                run.parsed += 1;
+                let stage = stage_one(
+                    auth,
+                    h,
+                    unsigned == Some(idx),
+                    &mut run.signatures,
+                    cache.as_ref().map(|(c, _)| &c.verified),
+                );
+                if let (Some(k), true) = (memo_key, unsigned.is_none()) {
+                    let (author, signing) = match &stage {
+                        Stage::Bad(_) => match parse_candidate(h) {
+                            Ok(c) => {
+                                let s = auth.member(&c.header.author).map(|m| m.request.signing.clone());
+                                (Some(c.header.author), s)
+                            }
+                            Err(_) => (None, None),
+                        },
+                        Stage::Unknown(c) | Stage::Ready(c) => (
+                            Some(c.header.author.clone()),
+                            auth.member(&c.header.author).map(|m| m.request.signing.clone()),
+                        ),
+                    };
+                    if let (Stage::Ready(_), Some(sk)) = (&stage, &signing) {
+                        fresh_verified.push(verified_key(&h.bytes, sk));
+                    }
+                    fresh_stage.push((
+                        k,
+                        StageEntry {
+                            author,
+                            signing,
+                            stage: stage.clone(),
+                        },
+                    ));
+                }
+                stage
+            }
+        };
+        let (c, unknown) = match stage {
+            Stage::Bad(j) => {
+                records[idx] = Some(*j);
+                continue;
+            }
+            Stage::Unknown(c) => (c, true),
+            Stage::Ready(c) => (c, false),
+        };
+        if !seen.insert(c.digest.clone()) {
+            aliases.push((idx, c.digest.clone()));
+            continue;
+        }
+        cands.push((idx, c, unknown));
+    }
+    let mut order: Vec<usize> = (0..cands.len()).collect();
+    order.sort_by(|a, b| fold_key(&cands[*a].1).cmp(&fold_key(&cands[*b].1)));
+    let all: Vec<&Arc<Cand>> = cands.iter().map(|(_, c, _)| c).collect();
+    let kept = kept_sets(auth, &all);
+    let keys_fp: Vec<(String, u64)> = auth
+        .namespaces()
+        .iter()
+        .flat_map(|ns| {
+            (1..=auth.latest_epoch(ns))
+                .filter(|e| keys.get(&account, ns, *e).is_some())
+                .map(|e| (ns.clone(), e))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    // Can the previous walk be resumed? Only when everything it read is as it was, every body
+    // it judged is still held, and every new body sorts after the last one it judged.
+    let mut resume: Option<(WalkState, Vec<usize>, Option<FoldKey>)> = None;
+    let mut by_digest: BTreeMap<String, Judged> = BTreeMap::new();
+    if let Some((c, print)) = cache.as_mut() {
+        if let Some(last) = c.last.take() {
+            let old_held = last
+                .by_digest
+                .keys()
+                .filter(|d| seen.contains(*d))
+                .count()
+                == last.by_digest.len();
+            let fresh: Vec<usize> = order
+                .iter()
+                .copied()
+                .filter(|i| !last.by_digest.contains_key(&cands[*i].1.digest))
+                .collect();
+            let after = fresh.iter().all(|i| {
+                last.last_key
+                    .as_ref()
+                    .is_none_or(|k| fold_key(&cands[*i].1) > *k)
+            });
+            if old_held
+                && after
+                && last.print == *print
+                && last.keys == keys_fp
+                && last.kept == kept
+            {
+                by_digest = last.by_digest;
+                resume = Some((last.state, fresh, last.last_key));
+            }
+        }
+    }
+    let (mut state, walk, mut last_key): (WalkState, Vec<usize>, Option<FoldKey>) = match resume {
+        Some((s, fresh, k)) => {
+            run.resumed = true;
+            (s, fresh, k)
+        }
+        None => (WalkState::default(), order.clone(), None),
+    };
+    let env = JudgeEnv {
+        auth,
+        keys,
+        account: account.clone(),
+        upgrade: auth.upgrade_seq(),
+        kept: &kept,
+    };
+    for &ci in &walk {
+        let (_, c, early) = &cands[ci];
+        run.walked += 1;
+        let memo = cache.as_mut().map(|(cc, _)| &mut cc.opened);
+        let j = judge_candidate(&env, &mut state, memo, &mut run, c, *early);
+        last_key = Some(fold_key(c));
+        by_digest.insert(c.digest.clone(), j);
+    }
+    for (ci, (idx, c, _)) in cands.iter().enumerate() {
+        let _ = ci;
+        records[*idx] = by_digest.get(&c.digest).cloned();
+    }
+    for (idx, digest) in aliases {
+        let mut j = by_digest.get(&digest).cloned();
         if let Some(j) = j.as_mut() {
             j.path = held[idx].path.clone();
         }
         records[idx] = j;
+    }
+    if let Some((c, print)) = cache {
+        for (k, e) in fresh_stage {
+            c.stage.insert(k, e);
+        }
+        c.verified.extend(fresh_verified);
+        // Forget what no held record names, so the cache stays the size of the held set.
+        // (Not while nothing is held: a memo taken back from a checkpoint waits for its records.)
+        if !held.is_empty() {
+            let live: BTreeSet<&str> = by_digest.keys().map(String::as_str).collect();
+            c.opened.retain(|d, _| live.contains(d.as_str()));
+        }
+        if c.verified.len() > 1 << 20 {
+            c.verified.clear();
+        }
+        c.totals.parsed += run.parsed;
+        c.totals.signatures += run.signatures;
+        c.totals.opened += run.opened;
+        c.totals.walked += run.walked;
+        c.run = run;
+        c.last = Some(Last {
+            print,
+            keys: keys_fp,
+            kept,
+            by_digest: by_digest.clone(),
+            state,
+            last_key,
+        });
+        if c.stage.len() > held.len().saturating_mul(2).saturating_add(64) {
+            let held_keys: BTreeSet<(String, [u8; 32])> = held
+                .iter()
+                .map(|h| (h.path.clone(), Sha256::digest(&h.bytes).into()))
+                .collect();
+            c.stage.retain(|k, _| held_keys.contains(k));
+        }
     }
     let records: Vec<Judged> = records
         .into_iter()
@@ -1877,24 +2268,28 @@ pub struct HeaderInfo {
     pub nonce: Vec<u8>,
     /// The path it is held at.
     pub path: String,
+    /// Carries a live stamp: a retained copy of a replaceable revision (0.3 §5.1), which is
+    /// not part of any author chain (`previous` is null by rule).
+    pub live: bool,
 }
 /// The held headers that parse, bind to the account and path and carry a valid signature by a
 /// member of the verified history. Anything else is left out.
 pub fn verified_headers(auth: &RecordAuthority, held: &[HeldRecord]) -> Vec<HeaderInfo> {
     let mut out = Vec::new();
-    for (idx, h) in held.iter().enumerate() {
-        if let Stage::Ready(c) = stage_one(auth, idx, h, false) {
+    for h in held.iter() {
+        if let Stage::Ready(c) = stage_one(auth, h, false, &mut 0, None) {
             out.push(HeaderInfo {
-                digest: c.digest,
-                author: c.header.author,
-                namespace: c.header.namespace,
-                id: c.header.id,
+                digest: c.digest.clone(),
+                author: c.header.author.clone(),
+                namespace: c.header.namespace.clone(),
+                id: c.header.id.clone(),
                 clock: c.header.clock,
                 epoch: c.header.epoch,
-                previous: c.header.previous,
+                previous: c.header.previous.clone(),
                 format: c.format,
-                nonce: c.header.nonce,
-                path: c.path,
+                nonce: c.header.nonce.clone(),
+                path: c.path.clone(),
+                live: c.header.live.is_some(),
             });
         }
     }
@@ -1905,7 +2300,12 @@ pub fn verified_headers(auth: &RecordAuthority, held: &[HeldRecord]) -> Vec<Head
 pub fn chain_heads(headers: &[HeaderInfo], author: &str, namespace: &str) -> Vec<String> {
     let mine: Vec<&HeaderInfo> = headers
         .iter()
-        .filter(|h| h.author == author && h.namespace == namespace && h.format == HeaderFormat::V5)
+        .filter(|h| {
+            h.author == author
+                && h.namespace == namespace
+                && h.format == HeaderFormat::V5
+                && !h.live
+        })
         .collect();
     let named: BTreeSet<&str> = mine.iter().filter_map(|h| h.previous.as_deref()).collect();
     let mut heads: Vec<String> = mine
