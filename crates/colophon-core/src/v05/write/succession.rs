@@ -639,14 +639,6 @@ pub fn prepare_authority5_genesis(
         .last()
         .cloned()
         .ok_or_else(|| malformed("the predecessor holds no entry"))?;
-    require(
-        p.issued_ms >= state.last_issued_ms(),
-        "genesis issued before the predecessor's head",
-    )?;
-    require(
-        state.verified_succession().is_none(),
-        "the predecessor already has a verified succession",
-    )?;
     let claim = json!({"format": AUTHORITY5_FORMAT, "account": state.account().as_str(),
                        "head": {"seq": n, "digest": last}});
     let body = Kind::Genesis {

@@ -788,3 +788,141 @@ fn the_migration_transition_is_built_activated_and_recorded() {
     let rec = state.migration.clone().unwrap();
     assert_eq!(rec["predecessor"]["account"], v.genesis_body()["predecessor"]["account"]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// A `/5` predecessor.
+
+fn vec5(name: &str) -> (std::path::PathBuf, Vec<u8>, Vec<Vec<u8>>) {
+    let dir = repo().join("conformance/0.5/candidate/succession").join(name);
+    (
+        dir.clone(),
+        strip(std::fs::read(dir.join("genesis.json")).unwrap()),
+        files_in(&dir.join("predecessor/authority")),
+    )
+}
+
+/// Split a predecessor set into the claimed account's entries and the rest (its own
+/// predecessors'), by following `previous` links to each entry's genesis.
+fn split_account(set: &[Vec<u8>], account: &str) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let by_digest: BTreeMap<String, (Option<String>, &Vec<u8>)> = set
+        .iter()
+        .map(|b| (body_digest(b), (body_value(b)["previous"].as_str().map(str::to_string), b)))
+        .collect();
+    let owner = |d: &str| {
+        let mut cur = d.to_string();
+        while let Some((Some(prev), _)) = by_digest.get(&cur) {
+            cur = prev.clone();
+        }
+        cur
+    };
+    let (mut mine, mut rest) = (Vec::new(), Vec::new());
+    for b in set {
+        if owner(&body_digest(b)) == account {
+            mine.push(b.clone());
+        } else {
+            rest.push(b.clone());
+        }
+    }
+    (mine, rest)
+}
+
+fn genesis5_params(genesis: &[u8], set: &[Vec<u8>], omit: bool) -> Authority5GenesisParams {
+    let body = body_value(genesis);
+    let (mut mine, rest) = split_account(set, body["predecessor"]["account"].as_str().unwrap());
+    // The genesis names the head it names: keep the predecessor's entries up to that seq.
+    mine.sort_by_key(|b| body_value(b)["seq"].as_u64().unwrap());
+    mine.truncate(body["predecessor"]["head"]["seq"].as_u64().unwrap() as usize);
+    Authority5GenesisParams {
+        label: body["label"].as_str().unwrap().into(),
+        namespaces: vec![],
+        keyring: body["keyring"].clone(),
+        issued_ms: ms(body["issued"].as_str().unwrap()),
+        predecessor: Objects { entries: mine, predecessor: rest, ..Objects::default() },
+        signers: vec![body["by"].as_str().unwrap().to_string()],
+        omit_carried_proofs: omit,
+    }
+}
+
+#[test]
+fn a_5_predecessor_succeeds_with_the_genesis_held_until_f_is_final() {
+    let scalars = published_scalars();
+    let (dir, genesis, pred) = vec5("authority5-successor-final");
+    // The predecessor before F: its genesis and the activation that made its homes.
+    let before = pred[..2].to_vec();
+    let mut p = genesis5_params(&genesis, &before, true);
+    p.predecessor.entries = before.clone();
+    let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
+    assert!(pending.steps().iter().all(|s| s.role() != StepRole::Possession && s.role() != StepRole::Handover));
+    let sigs = sign_steps(pending.steps(), &scalars);
+    let built = pending.finish(sigs).unwrap().entries[0].1.clone();
+    assert_eq!(built, genesis, "the held genesis reproduces");
+    // The `successor` transition, F's activation (receipts from the held objects) and its
+    // `final` (the homes' heads) reproduce the vector's entries 3 and 4.
+    let act = body_value(&pred[2]);
+    let t_bytes = dec(act["transition"].as_str().unwrap());
+    let t = body_value(&t_bytes);
+    let objects = Objects { entries: before.clone(), ..Objects::default() };
+    let signers: Vec<String> = t["signers"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().into()).collect();
+    let mut ordered = vec![t["by"].as_str().unwrap().to_string()];
+    ordered.extend(signers.into_iter().filter(|s| s != t["by"].as_str().unwrap()));
+    let pend = prepare_successor_transition(&objects, ms("2026-11-14T09:00:00Z"), &built, ms(t["issued"].as_str().unwrap()), ordered).unwrap();
+    let sigs = sign_steps(pend.steps(), &scalars);
+    let transition = pend.finish(sigs).unwrap().pending[0].clone();
+    assert_eq!(transition, t_bytes);
+    // A transition for a genesis that does not name this head is refused.
+    let (_, other, _) = vec5("authority5-chain");
+    assert!(prepare_successor_transition(&objects, ms("2026-11-14T09:00:00Z"), &other, ms(t["issued"].as_str().unwrap()), vec![t["by"].as_str().unwrap().into()]).is_err());
+    let _ = dir;
+    // The whole set verifies with the succession verified: the genesis was held until now.
+    let all = Objects { entries: pred.clone(), ..Objects::default() };
+    let succ = Objects { entries: vec![genesis.clone()], predecessor: pred.clone(), ..Objects::default() };
+    let _ = all;
+    let v = verify_history(&succ, &Persisted::default(), ms("2026-11-14T10:00:00Z"));
+    assert!(v.stop.is_none(), "{:?}", v.stop);
+    assert!(v.state.unwrap().verified_succession().is_some());
+    // Before F is final the same genesis is held, not refused.
+    let early = Objects { entries: vec![genesis], predecessor: pred[..3].to_vec(), ..Objects::default() };
+    let v = verify_history(&early, &Persisted::default(), ms("2026-11-14T10:00:00Z"));
+    assert!(matches!(v.stop, Some(colophon_core::v05::history::Stop::Held { .. })), "{:?}", v.stop);
+}
+
+#[test]
+fn a_5_genesis_with_every_proof_verifies_at_once_and_a_chain_of_two_follows() {
+    let scalars = published_scalars();
+    let (_, genesis, pred) = vec5("authority5-successor-final");
+    let p = genesis5_params(&genesis, &pred[..2], false);
+    let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
+    assert!(pending.steps().iter().any(|s| s.role() == StepRole::Possession));
+    let sigs = sign_steps(pending.steps(), &scalars);
+    let g = pending.finish(sigs).unwrap().entries[0].1.clone();
+    let v = verify_history(
+        &Objects { entries: vec![g], predecessor: pred[..2].to_vec(), ..Objects::default() },
+        &Persisted::default(),
+        ms("2026-11-14T09:00:00Z"),
+    );
+    assert!(v.stop.is_none(), "{:?}", v.stop);
+    // A chain A to B to C (the vector): the builder takes B's objects with A's as its
+    // predecessor, and the verifier follows both.
+    let (_, c_genesis, set) = vec5("authority5-chain");
+    let p = genesis5_params(&c_genesis, &set, true);
+    assert!(!p.predecessor.predecessor.is_empty());
+    let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
+    let sigs = sign_steps(pending.steps(), &scalars);
+    let built = pending.finish(sigs).unwrap().entries[0].1.clone();
+    let (bv, cv): (Value, Value) = (serde_json::from_slice(&built).unwrap(), serde_json::from_slice(&c_genesis).unwrap());
+    assert_eq!(bv["body"], cv["body"], "the chain genesis body reproduces");
+    assert_eq!(bv["signature"], cv["signature"], "the chain genesis signature reproduces");
+    // 17 accounts is one too many (§2.4): refused at finish.
+    let (_, g17, set17) = vec5("authority5-chain-17");
+    let p = genesis5_params(&g17, &set17, true);
+    let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
+    let sigs = sign_steps(pending.steps(), &scalars);
+    let e = pending.finish(sigs).unwrap_err();
+    assert!(matches!(e, Failure::Malformed(ref m) if m.contains("longer than 16")), "{e:?}");
+    // 16 is allowed.
+    let (_, g16, set16) = vec5("authority5-chain-16");
+    let p = genesis5_params(&g16, &set16, true);
+    let pending = prepare_authority5_genesis(&p, ms("2026-11-14T09:00:00Z")).unwrap();
+    let sigs = sign_steps(pending.steps(), &scalars);
+    assert!(pending.finish(sigs).is_ok());
+}
