@@ -857,7 +857,7 @@ pub fn sync_pass<S: RecordSource>(
     // read), then the pass exchanges.
     e.advance(now_ms).unwrap();
     e.refresh(src.listing()).unwrap();
-    for _ in 0..10_000 {
+    for _ in 0..1_000_000 {
         match e.exchange_next(home).unwrap() {
             Step::Done => return faults,
             Step::Waiting => panic!("the loop answers every request"),

@@ -386,7 +386,8 @@ fn the_1024_bound_makes_a_passive_sample_wait_for_an_immutable_anchor() {
                     signature: s.host.ids[step.signer()].sign(step.body()).to_vec(),
                     assertion: None,
                 };
-                e.finish_live_write(p, sig).unwrap();
+                let w = e.finish_live_write(p, sig).unwrap();
+                s.src.publish_stores(&w.stores);
                 n += 1;
             }
             Ok(Err(d)) => panic!("{d:?}"),
