@@ -310,9 +310,8 @@ and, where a vector fits, a generated one:
   due (`held_until`); a resumed verifier replays once the clock reaches it. **Checkpoint format 2**;
   a format 1 checkpoint is refused (`unknown checkpoint version`) and is rebuilt from its objects.
 - M3: a `/5` predecessor that is itself a successor is verified with its own predecessor, split
-  from the flat set by genesis and descent. The text names no bound for chain length; the
-  implementation refuses more than 16 distinct genesis accounts in the set as `malformed`
-  (a spec question). A cycle cannot recur: each level removes its own genesis. Vector
+  from the flat set by genesis and descent. The implementation refuses more than 16 distinct
+  genesis accounts in the set as `malformed` (written into §2.4 and §15.1 in revision 12). A cycle cannot recur: each level removes its own genesis. Vector
   `succession/authority5-chain`.
 - L3: a Swift `layout` needs every signer to hold `control` (§16.3). Vector
   `succession/swift-layout-extra-noncontrol-cosigner`.
@@ -321,7 +320,53 @@ and, where a vector fits, a generated one:
   it counts, so the code now uses `>` at the cutoff. Vector
   `succession/swift-veto-by-key-removed-at-cutoff`.
 
-Left as specification questions, with no spec or behaviour change: M1 (Order and finality by
-excusal, §8.6 wording), M2 (a `/5` succession verified from a provisional successor activation),
-M4 (possession exemption without succession authority), L1 (quadratic `/4` prefix replay), L2
-(Swift steward threshold defaults), L5 (home cap counts cosigners).
+Left open after this round: L1 (quadratic `/4` prefix replay), for the performance step. M1, M2,
+M4, L2, L5 and the chain bound were decided in revision 12 and are built (next section).
+
+## Revision 12 (2026-11-14)
+
+Built on `spec-0.5-r12`, one commit per item, each with a test or a generated vector. The text
+decisions are in changes §A.8 and §G.16.
+
+- **M1 (§8.6 rule 1, §8.7).** `finalize_empty_witnesses` obeys Order. An activation with no
+  witnesses is no longer made final inside `activate`; it becomes final at the fixed point after
+  the entry, in Order. `final_covers` now walks every valid entry after the activate on its own
+  branch, not only `final` entries, and counts an activation that is final by the fixed point in
+  the state after it or after any such entry. Vectors `t-excusal-final-not-displaced-by-vetoed`
+  and `t-vetoed-displaces-activation-and-later-revocation`; tests in `v05_revision_12.rs` also
+  rotate the objects. I found no history in which the Order guard changes which activations end
+  final by excusal: a home that witnesses an earlier activation is either still current (a
+  witness of the later one) or finally revoked (excused). It fixes the order within one fixed
+  point only, so it has no vector of its own.
+- **M2 (§15.1, §15.2).** The state keeps the seq of the `successor` activation
+  (`successor_seq`, defaulted in a saved state, so no checkpoint format change). While it is
+  provisional the account admits only a `final`; once it is final nothing. The successor verifies a
+  `/5` predecessor as authorized when F is the `successor` activation at `head + 1` naming it, and
+  as verified only when F is final. Vectors `succession/authority5-successor-provisional`,
+  `-final`, `-vetoed`.
+- **M4 (§8.4).** The possession exemption for a carried key needs the succession to be
+  authorized: for Swift, the `handover` meets the rule that may write F (computed at the
+  genesis); for `/5`, F exists naming the account (provisional counts). Without it the genesis is
+  `badSignature` at seq 1. Vectors `succession/swift-no-handover-needs-possession` and
+  `swift-handover-below-rule-needs-possession`; the runner reads a new `expected.genesis`.
+- **L5 (§13.1).** The transition check reports the proposer's unit (`TCheck.proposer`); a pending
+  transition's `units` is that unit only; the early check runs before the caps and before a first
+  sighting is recorded. Two tests in `v05_home.rs`.
+- **Chain bound (§2.4, §15.1).** Text only; the engine already refused a predecessor set with
+  more than 16 genesis entries. A boundary test at 16 and 17.
+- **L2 (§16.3).** Read from Marginalia `origin/main` `c8280332`: `AuthorityState.swift:105`
+  (`genesis.threshold ?? 0`), `:315` (`entry.threshold ?? 0`), `:164` (`threshold > 0` for a
+  quorum handover); `AuthorityEntry.swift:51` (`threshold: Int?`) and `:135` (a `DecodingError`
+  is rethrown). The engine now reads absent or `null` as 0, a non-integer as `malformed`, and
+  refuses a quorum handover at threshold 0 (it used to default a genesis to 1 and let 0 pass).
+  Five tests; the Swift source has not replayed them. Not changed, because the findings did not
+  ask for it: Swift counts the stewards among the signatures and ignores other signatures
+  (`AuthorityState.swift:165-167`), where the engine refuses a quorum record that carries any
+  non-steward signer; and whether a whole-valued float such as `2.0` decodes as an `Int` depends on
+  Foundation's `JSONDecoder`, so the engine refuses it.
+
+Revision-12 verification: 361 workspace tests pass, none fail, six ignored; conformance 287 in
+scope, 287 pass, none fail, four not implemented (the earlier 280 are unchanged, and none of their
+expected outcomes changed); all 1,182 generated files reproduce byte for byte; workspace
+all-target clippy with `-D warnings`, the WASM target check and rustfmt on the changed Rust files
+are clean. No dependency, lockfile, 0.4 source, FFI or WASM change.

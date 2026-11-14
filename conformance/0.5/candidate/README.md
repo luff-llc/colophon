@@ -1,7 +1,7 @@
 # Colophon 0.5 candidate vectors
 
 **Status: hand-built for review, not replayed by any 0.5 implementation.** These files go with
-[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 11. No 0.5 verifier exists yet,
+[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 12. No 0.5 verifier exists yet,
 so every `expected` outcome for 0.5 is the spec author's reading of the text. The bytes are
 real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256 (raw, or
 WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except

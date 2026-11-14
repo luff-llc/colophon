@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 11, for review, 2026-11-12.** Not frozen, not
+**Status: final candidate, revision 12, for review, 2026-11-14.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -10,7 +10,9 @@ first engine builder's questions, making that state model checkable by every ver
 revision 7 answers two reviews of revision 6 (281e7c4) and the engine attack, recording finality
 in the history and stating §8.7 as a state table; revision 8 answers the second review of revision 7
 (0a25988): removals, revoked homes, recovery that restores control, and verdicts that depend on
-the object set only; revision 9 keeps a revoked home current until its revocation is final. The
+the object set only; revision 9 keeps a revoked home current until its revocation is final; revision 12 answers the
+engine check of the 0.5 history verifier: finality by excusal, final successions, possession under
+handover, the proposer cap, the chain bound and the Swift steward threshold. The
 mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
