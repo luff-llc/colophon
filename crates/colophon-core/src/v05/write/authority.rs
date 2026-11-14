@@ -16,6 +16,7 @@ use crate::v05::history::{
     verify_history, HomeStatus, Objects, Persisted, State, Stop,
 };
 use crate::v05::signature::{AuthorityRule, RawEnvelope};
+use crate::v05::slots::{validate_self_slot, validate_slots, validate_vault_entry_slots};
 use crate::v05::{bad_signature, malformed, require, Failure, Reason, Result};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -357,25 +358,7 @@ fn is_self_slot(old: &Keyring, new: &Value, signer: &str) -> bool {
     {
         return false;
     }
-    let old_keys: Vec<Vec<u8>> = old.slots.iter().map(Keyring::slot_key).collect();
-    let mut new_keys: Vec<Vec<u8>> = new.slots.iter().map(Keyring::slot_key).collect();
-    for k in &old_keys {
-        match new_keys.iter().position(|n| n == k) {
-            Some(i) => {
-                new_keys.swap_remove(i);
-            }
-            None => return false,
-        }
-    }
-    let added: Vec<&Value> = new
-        .slots
-        .iter()
-        .filter(|s| !old_keys.contains(&Keyring::slot_key(s)))
-        .collect();
-    !added.is_empty()
-        && added
-            .iter()
-            .all(|s| Keyring::slot_ids(s) == [signer.to_string()])
+    validate_self_slot(&new.controllers, &old.slots, &new.slots, signer).is_ok()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -387,8 +370,8 @@ pub struct GenesisParams {
     pub label: String,
     /// Declared namespaces: sorted, distinct.
     pub namespaces: Vec<String>,
-    /// The whole keyring, with its first slots as opaque values built elsewhere (§7.2); only
-    /// its structure is checked here.
+    /// The whole keyring, with its first slots built elsewhere (§7.2); the slots are checked
+    /// here with [`validate_slots`].
     pub keyring: Value,
     /// `issued`, in ms.
     pub issued_ms: i64,
@@ -402,6 +385,7 @@ pub struct GenesisParams {
 /// controller.
 pub fn prepare_genesis(p: &GenesisParams, now_ms: i64) -> Result<PendingBatch> {
     let k = Keyring::parse(p.keyring.clone(), 1)?;
+    validate_slots(&k.controllers, &k.slots, 1)?;
     require(!p.signers.is_empty(), "genesis needs a signer")?;
     require(
         p.signers.iter().all(|s| k.controllers.contains_key(s)),
@@ -539,8 +523,12 @@ pub fn prepare_signed(
             rule,
         ));
     }
+    if let Kind::Vault { slots, .. } = &kind {
+        validate_vault_entry_slots(&state.keyring().controllers, slots, &signers[0])?;
+    }
     if let Kind::Keyring { keyring } = &kind {
         let new = Keyring::parse(keyring.clone(), 0)?;
+        validate_slots(&new.controllers, &new.slots, 0)?;
         for c in possession_controllers(state.keyring(), &new) {
             steps.push(step(
                 &path,

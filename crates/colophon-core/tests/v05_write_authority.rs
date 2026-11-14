@@ -688,6 +688,58 @@ fn transition_params(
 }
 
 #[test]
+fn genesis_and_keyring_builders_validate_slots_with_the_slot_module() {
+    let f = fixture();
+    // A slot the verifier's own keyring check lets through but E2's validation refuses: a
+    // sealed box of the wrong length.
+    let mut short = slot_for(&f.a.id, "A");
+    short["sealed"]["ciphertext"] = json!(b64(&[7u8; 47]));
+    let kr = keyring(
+        vec![
+            raw_controller(&f.a, &key(2), "A", &["approve", "control", "recover"]),
+            raw_controller(&f.b, &key(4), "B", &["control"]),
+        ],
+        vec![short.clone()],
+        1,
+        1,
+    );
+    let r = prepare_genesis(
+        &GenesisParams {
+            label: "x".into(),
+            namespaces: vec![],
+            keyring: kr,
+            issued_ms: T0,
+            signers: vec![f.a.id.clone()],
+        },
+        T0,
+    );
+    assert!(matches!(r, Err(Failure::Malformed(_))), "{r:?}");
+    // The same on a keyring entry that adds a slot.
+    let mut chain = Chain::new(T0 + 3_600 * SEC);
+    chain.genesis(
+        &f.host,
+        "Slots",
+        &[],
+        fixture_keyring(&f),
+        std::slice::from_ref(&f.a.id),
+    );
+    let mut kr = chain.state().keyring().raw.clone();
+    let mut slots = kr["slots"].as_array().unwrap().clone();
+    let mut bad = slot_for(&f.b.id, "B2");
+    bad["sealed"]["ciphertext"] = json!(b64(&[7u8; 47]));
+    slots.push(bad);
+    kr["slots"] = Value::Array(slots);
+    let r = prepare_signed(
+        &chain.objects,
+        chain.now,
+        Kind::Keyring { keyring: kr },
+        T0 + SEC,
+        std::slice::from_ref(&f.a.id),
+    );
+    assert!(matches!(r, Err(Failure::Malformed(_))), "{r:?}");
+}
+
+#[test]
 fn removing_a_slotted_key_retires_the_vault_and_a_vault_entry_ends_it() {
     let f = fixture();
     let mut chain = Chain::new(T0 + 3_600 * SEC);

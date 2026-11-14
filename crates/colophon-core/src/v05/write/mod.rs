@@ -86,8 +86,8 @@ pub struct KeptHead {
 /// bytes; they are written as standard padded base64 (§2.2).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
-    /// Creates the account. `keyring` is the whole keyring object; its slots are opaque values
-    /// built elsewhere.
+    /// Creates the account. `keyring` is the whole keyring object; its slots are built elsewhere
+    /// and checked with `validate_slots`.
     Genesis {
         /// 1–200 bytes.
         label: String,
