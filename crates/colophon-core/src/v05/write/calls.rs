@@ -15,40 +15,72 @@
 //!
 //! The step and signature-result types below are local to this package; a shared
 //! `build/mod.rs` should own them (see the E3 report).
-use crate::v05::calls::{verify_call, AccountView, CallConfig};
+use crate::v05::calls::{chain_parent, check_link_chain, verify_call, AccountView, CallConfig};
 use crate::v05::encoding::{
-    bounds, canonical, date, decode_request_id, digest, encode_base64, encode_base64url,
+    bounds, canonical, date, decode_request_id, encode_base64, encode_base64url,
 };
 use crate::v05::heads::{verify_head, HeadContext};
 use crate::v05::history::home::{finish_receipt as home_finish_receipt, HomeState, ReceiptToSign};
 use crate::v05::ids::{is_key_id, key_id, AccountId};
 use crate::v05::members::Request;
 use crate::v05::replay::MemoryReplayStore;
-use crate::v05::signature::{challenge, RawEnvelope};
+use crate::v05::signature::challenge;
 use crate::v05::terms::{Terms, TermsKind};
-use crate::v05::{malformed, require, Failure, Reason, Result};
+use crate::v05::{malformed, require, Result};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
 
 /// Most links a call carries (§12.2: `depth` allows at most 4).
 pub const MAX_LINKS: usize = 4;
 
 /// What the host must sign: exact bytes, who signs, and the WebAuthn challenge where the
-/// signer is a WebAuthn key.
+/// signer is a WebAuthn key. Read-only: the host reads these and signs; it cannot replace them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SigningStep {
+    path: String,
+    body: Vec<u8>,
+    signer: String,
+    signing: Vec<u8>,
+    challenge: Option<String>,
+}
+impl SigningStep {
+    fn new(
+        path: String,
+        body: Vec<u8>,
+        signer: String,
+        signing: Vec<u8>,
+        challenge: Option<String>,
+    ) -> Self {
+        Self {
+            path,
+            body,
+            signer,
+            signing,
+            challenge,
+        }
+    }
     /// Where the finished object is stored (host label), or a descriptive name for objects
     /// that are embedded or sent.
-    pub path: String,
+    pub fn path(&self) -> &str {
+        &self.path
+    }
     /// The exact canonical body bytes to sign.
-    pub body: Vec<u8>,
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
     /// The signer's key ID.
-    pub signer: String,
-    /// The signer's signing point.
-    pub signing: Vec<u8>,
+    pub fn signer(&self) -> &str {
+        &self.signer
+    }
+    /// The signer's signing point (empty for a head or receipt: the home's key is looked up in
+    /// the verifier's homes).
+    pub fn signing(&self) -> &[u8] {
+        &self.signing
+    }
     /// For a WebAuthn signer: the unpadded base64url of SHA-256(body) that `clientData` must
     /// carry (§4.3). `None` for a `raw` signer.
-    pub challenge: Option<String>,
+    pub fn challenge(&self) -> Option<&str> {
+        self.challenge.as_deref()
+    }
 }
 
 /// A signature from the host.
@@ -124,9 +156,13 @@ pub struct RequestSpec<'a> {
 /// A prepared request, to sign `raw` by `member.signing`.
 #[derive(Clone, Debug)]
 pub struct PreparedRequest {
+    step: SigningStep,
+}
+impl PreparedRequest {
     /// The step: stored at `requests/<memberID>.json`.
-    pub step: SigningStep,
-    account: AccountId,
+    pub fn step(&self) -> &SigningStep {
+        &self.step
+    }
 }
 
 /// §9.1: the exact request body and its signer. Shape errors are `malformed` at once; the
@@ -163,14 +199,13 @@ pub fn prepare_request(spec: &RequestSpec<'_>) -> Result<PreparedRequest> {
     )?;
     let id = key_id(spec.signing);
     Ok(PreparedRequest {
-        step: SigningStep {
-            path: format!("requests/{id}.json"),
-            body: bytes,
-            signer: id,
-            signing: spec.signing.to_vec(),
-            challenge: None,
-        },
-        account: spec.account.clone(),
+        step: SigningStep::new(
+            format!("requests/{id}.json"),
+            bytes,
+            id,
+            spec.signing.to_vec(),
+            None,
+        ),
     })
 }
 
@@ -180,10 +215,6 @@ pub fn prepare_request(spec: &RequestSpec<'_>) -> Result<PreparedRequest> {
 pub fn finish_request(prepared: &PreparedRequest, sig: &SignatureResult) -> Result<Vec<u8>> {
     let env = raw_envelope(&prepared.step.body, raw_signature(sig)?)?;
     let request = Request::parse(&env, false)?;
-    require(
-        request.account == prepared.account && request.body == prepared.step.body,
-        "request differs from its preparation",
-    )?;
     request.unknown.check()?;
     Ok(env)
 }
@@ -191,31 +222,21 @@ pub fn finish_request(prepared: &PreparedRequest, sig: &SignatureResult) -> Resu
 // ---------------------------------------------------------------------------------------------
 // Links (§12.1).
 
-/// What a link narrows: the member (first link) or the previous link.
-#[derive(Clone, Copy, Debug)]
-pub struct LinkParent<'a> {
-    /// The parent's signing point: the member's, or the previous link's `to.signing`. It signs
-    /// the link.
-    pub signing: &'a [u8],
-    /// The parent's terms (the member's, or the previous link's).
-    pub terms: &'a Terms,
-    /// The parent's expiry in ms: the member's current one, or the previous link's `expires`.
-    pub expires_ms: Option<i64>,
-    /// `Some(session number)` when this is the first link (the member's current session,
-    /// §9.6); `None` for later links.
-    pub member_session: Option<u64>,
-}
-
-/// A link to build (§12.1).
+/// A link to build (§12.1). The member, the parent key, terms, expiry, session and policy come
+/// from the verified view, never from the caller.
 #[derive(Clone, Debug)]
 pub struct LinkSpec<'a> {
     /// The account.
     pub account: &'a AccountId,
+    /// The member whose chain this link extends, by ID.
+    pub member: &'a str,
+    /// The links already finished in this chain, member outward; empty for the first link.
+    pub prior: &'a [Vec<u8>],
     /// The `to.signing` the link grants authority to.
     pub to_signing: &'a [u8],
     /// Link terms (§10.1: no `records`, `expires`, `writes`, `serves` or `import`).
     pub terms: Value,
-    /// `session`: exactly on the first link.
+    /// `session`: exactly on the first link (the member's current session number).
     pub session: Option<u64>,
     /// `notBefore`.
     pub not_before: &'a str,
@@ -225,50 +246,43 @@ pub struct LinkSpec<'a> {
     pub created: &'a str,
 }
 
-/// A prepared link, to sign `raw` by its parent's key.
+/// A prepared link, to sign `raw` by its parent's key (the member's, or the previous link's
+/// `to.signing`, read from the view).
 #[derive(Clone, Debug)]
 pub struct PreparedLink {
+    step: SigningStep,
+    member: String,
+    prior: Vec<Vec<u8>>,
+}
+impl PreparedLink {
     /// The step.
-    pub step: SigningStep,
-    to: Vec<u8>,
-    terms: Terms,
-    session: Option<u64>,
-    not_before_ms: i64,
-    expires_ms: i64,
-    parent_signing: Vec<u8>,
-    parent_terms: Terms,
-    parent_expires_ms: Option<i64>,
-    parent_session: Option<u64>,
+    pub fn step(&self) -> &SigningStep {
+        &self.step
+    }
 }
 
-/// What a link is checked against at finish.
-#[derive(Clone, Copy, Debug)]
-pub struct LinkContext<'a> {
-    /// The clock, in ms. A link already past `expires` is refused (it could never be used).
-    pub now_ms: i64,
-    /// `policy.linkMaxAge` in seconds at the state the call will be evaluated at (§18).
-    pub link_max_age_s: u64,
-    /// Every principal's point in the held history (§3.3 rule 4).
-    pub principal_points: &'a BTreeSet<Vec<u8>>,
-}
-
-/// §12.1: the exact link body and its signer (the parent's key).
-pub fn prepare_link(parent: &LinkParent<'_>, spec: &LinkSpec<'_>) -> Result<PreparedLink> {
-    point(parent.signing, "link parent key")?;
+/// §12.1: the exact link body and its signer, the parent's key read from `view` and the chain
+/// so far. Shape errors are `malformed` at once; every authority rule is judged at finish.
+pub fn prepare_link(view: &AccountView, spec: &LinkSpec<'_>) -> Result<PreparedLink> {
+    let parent = chain_parent(view, spec.member, spec.prior)?;
     point(spec.to_signing, "to.signing")?;
     let nb = date(spec.not_before, "notBefore")?;
     let exp = date(spec.expires, "expires")?;
     date(spec.created, "created")?;
     require(nb <= exp, "link notBefore is after expires")?;
     require(
-        spec.session.is_some() == parent.member_session.is_some(),
+        spec.session.is_some() == parent.first,
         "session is present exactly on the first link",
     )?;
-    let terms = Terms::parse(spec.terms.clone(), TermsKind::Link)?;
+    if let Some(s) = spec.session {
+        require(s <= bounds::MAX_INTEGER, "session exceeds 2^53 - 1")?;
+    }
+    require(spec.prior.len() < MAX_LINKS, "at most 4 links")?;
+    Terms::parse(spec.terms.clone(), TermsKind::Link)?;
     let mut body = json!({
         "protocol": "colophon/link/5",
         "account": account_text(spec.account),
-        "from": key_id(parent.signing),
+        "from": key_id(&parent.signing),
         "to": {"signing": encode_base64(spec.to_signing)},
         "terms": spec.terms,
         "notBefore": spec.not_before,
@@ -284,64 +298,35 @@ pub fn prepare_link(parent: &LinkParent<'_>, spec: &LinkSpec<'_>) -> Result<Prep
         "link body exceeds its bound",
     )?;
     Ok(PreparedLink {
-        step: SigningStep {
-            path: "link".into(),
-            body: bytes,
-            signer: key_id(parent.signing),
-            signing: parent.signing.to_vec(),
-            challenge: None,
-        },
-        to: spec.to_signing.to_vec(),
-        terms,
-        session: spec.session,
-        not_before_ms: nb,
-        expires_ms: exp,
-        parent_signing: parent.signing.to_vec(),
-        parent_terms: parent.terms.clone(),
-        parent_expires_ms: parent.expires_ms,
-        parent_session: parent.member_session,
+        step: SigningStep::new(
+            "link".into(),
+            bytes,
+            key_id(&parent.signing),
+            parent.signing,
+            None,
+        ),
+        member: spec.member.to_string(),
+        prior: spec.prior.to_vec(),
     })
 }
 
-/// Assemble the link envelope and check it as §12.3 steps 6 do, link by link: the binding
-/// (`badSignature`), `session` (`refused:ended`), window, parent expiry and `linkMaxAge`
-/// (`refused:expired`), narrowing (`refused:notNarrower`) and `to.signing` not a principal's
-/// point (`malformed`). The returned bytes are the embedded envelope (canonical JSON).
+/// Assemble the link envelope and judge **those exact bytes** with the call verifier's own
+/// chain code (§12.3 steps 4 to 6) over `view` at `now_ms`: binding, `session`
+/// (`refused:ended`), window, parent expiry and `linkMaxAge` (`refused:expired`), narrowing
+/// (`refused:notNarrower`), `to.signing` not a principal's point and not repeated. The member's
+/// terms, session, expiry, policy and principals are the view's.
+///
+/// A link whose `notBefore` is still in the future is accepted: a link may be built ahead of
+/// its use, so `Ok` means "valid within its window", not "usable now"; a call that uses it
+/// before `notBefore` is `refused:expired`.
 pub fn finish_link(
     prepared: &PreparedLink,
     sig: &SignatureResult,
-    ctx: &LinkContext<'_>,
+    view: &AccountView,
+    now_ms: i64,
 ) -> Result<Vec<u8>> {
     let env = raw_envelope(&prepared.step.body, raw_signature(sig)?)?;
-    let parsed = RawEnvelope::parse(&env, bounds::LINK_BODY, true)?;
-    if parsed.body != prepared.step.body || parsed.verify(&prepared.parent_signing).is_err() {
-        return Err(crate::v05::bad_signature(
-            "link does not verify under its parent's key",
-        ));
-    }
-    if let Some(expected) = prepared.parent_session {
-        if prepared.session != Some(expected) {
-            return Err(Failure::Refused(Reason::Ended));
-        }
-    }
-    let span_ms = i128::from(prepared.expires_ms) - i128::from(prepared.not_before_ms);
-    let in_time = ctx.now_ms <= prepared.expires_ms
-        && prepared
-            .parent_expires_ms
-            .is_none_or(|e| prepared.expires_ms <= e)
-        && span_ms <= i128::from(ctx.link_max_age_s) * 1_000;
-    if !in_time {
-        return Err(Failure::Refused(Reason::Expired));
-    }
-    if !prepared.terms.narrows(&prepared.parent_terms) {
-        return Err(Failure::Refused(Reason::NotNarrower));
-    }
-    if ctx.principal_points.contains(&prepared.to) {
-        return Err(malformed(
-            "a link's to.signing is a principal's key (§3.3 rule 4)",
-        ));
-    }
-    prepared.terms.unknown_outside_conditions().check()?;
+    check_link_chain(view, &prepared.member, &prepared.prior, &env, now_ms)?;
     Ok(env)
 }
 
@@ -389,16 +374,24 @@ pub struct CallSpec<'a> {
 /// A prepared call.
 #[derive(Clone, Debug)]
 pub struct PreparedCall {
-    /// The step.
-    pub step: SigningStep,
+    step: SigningStep,
     webauthn: bool,
+}
+impl PreparedCall {
+    /// The step.
+    pub fn step(&self) -> &SigningStep {
+        &self.step
+    }
 }
 
 /// §12.2: the exact call body and the acting key as signer.
 pub fn prepare_call(spec: &CallSpec<'_>) -> Result<PreparedCall> {
     point(spec.key, "key")?;
     date(spec.created, "created")?;
-    require(spec.as_of.0 >= 1, "asOf.seq must be at least 1")?;
+    require(
+        (1..=bounds::MAX_INTEGER).contains(&spec.as_of.0),
+        "asOf.seq must be 1 to 2^53 - 1",
+    )?;
     require(
         crate::v05::encoding::is_digest(spec.as_of.1),
         "asOf.digest must be 64 lowercase hex",
@@ -453,13 +446,13 @@ pub fn prepare_call(spec: &CallSpec<'_>) -> Result<PreparedCall> {
     )?;
     let challenge = spec.webauthn.then(|| challenge(&bytes));
     Ok(PreparedCall {
-        step: SigningStep {
-            path: "call".into(),
-            body: bytes,
-            signer: key_id(spec.key),
-            signing: spec.key.to_vec(),
+        step: SigningStep::new(
+            "call".into(),
+            bytes,
+            key_id(spec.key),
+            spec.key.to_vec(),
             challenge,
-        },
+        ),
         webauthn: spec.webauthn,
     })
 }
@@ -495,11 +488,7 @@ pub fn finish_call(
         (false, s) => raw_envelope(&prepared.step.body, raw_signature(s)?)?,
     };
     let mut store = MemoryReplayStore::new();
-    let verified = verify_call(&env, view, cfg, &mut store)?;
-    require(
-        verified.call.digest == digest(&prepared.step.body),
-        "verified call differs from its preparation",
-    )?;
+    verify_call(&env, view, cfg, &mut store)?;
     Ok(env)
 }
 
@@ -526,13 +515,21 @@ pub struct HeadSpec<'a> {
 /// A prepared head, to sign `raw` by the home's member key.
 #[derive(Clone, Debug)]
 pub struct PreparedHead {
+    step: SigningStep,
+}
+impl PreparedHead {
     /// The step. `signing` is empty: the home's key is looked up in the verifier's homes.
-    pub step: SigningStep,
+    pub fn step(&self) -> &SigningStep {
+        &self.step
+    }
 }
 
 /// §13.2: the exact head body; the signer is the home member `by`.
 pub fn prepare_head(spec: &HeadSpec<'_>) -> Result<PreparedHead> {
-    require(spec.seq >= 1, "authority.seq must be at least 1")?;
+    require(
+        (1..=bounds::MAX_INTEGER).contains(&spec.seq),
+        "authority.seq must be 1 to 2^53 - 1",
+    )?;
     require(
         crate::v05::encoding::is_digest(spec.digest),
         "authority.digest must be 64 lowercase hex",
@@ -551,13 +548,13 @@ pub fn prepare_head(spec: &HeadSpec<'_>) -> Result<PreparedHead> {
         "head body exceeds its bound",
     )?;
     Ok(PreparedHead {
-        step: SigningStep {
-            path: format!("heads/{}.json", spec.by),
-            body: bytes,
-            signer: spec.by.to_string(),
-            signing: Vec::new(),
-            challenge: None,
-        },
+        step: SigningStep::new(
+            format!("heads/{}.json", spec.by),
+            bytes,
+            spec.by.to_string(),
+            Vec::new(),
+            None,
+        ),
     })
 }
 
@@ -581,10 +578,18 @@ pub fn finish_head(
 /// A receipt to sign, from a home's signing request.
 #[derive(Clone, Debug)]
 pub struct PreparedReceipt {
+    step: SigningStep,
+    object: String,
+}
+impl PreparedReceipt {
     /// The step: stored beside its object as `<home member ID>.receipt.json`.
-    pub step: SigningStep,
+    pub fn step(&self) -> &SigningStep {
+        &self.step
+    }
     /// The receipted object's body digest.
-    pub object: String,
+    pub fn object(&self) -> &str {
+        &self.object
+    }
 }
 
 /// Turn the signing request that `home::admit` returned into a step, unchanged. The body is
@@ -601,14 +606,15 @@ pub fn prepare_receipt(request: &ReceiptToSign) -> Result<PreparedReceipt> {
         .and_then(Value::as_str)
         .ok_or_else(|| malformed("receipt names no home"))?
         .to_string();
+    require(is_key_id(&by), "receipt `by` is not a home member ID")?;
     Ok(PreparedReceipt {
-        step: SigningStep {
-            path: format!("{by}.receipt.json"),
-            body: request.body.clone(),
-            signer: by,
-            signing: Vec::new(),
-            challenge: None,
-        },
+        step: SigningStep::new(
+            format!("{by}.receipt.json"),
+            request.body.clone(),
+            by,
+            Vec::new(),
+            None,
+        ),
         object: request.object.clone(),
     })
 }
