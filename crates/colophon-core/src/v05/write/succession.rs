@@ -1229,16 +1229,37 @@ pub fn prepare_migration(
         status.format == SWIFT_FORMAT,
         "migration here is for a Swift predecessor",
     )?;
-    let (f_seq, f_digest) = status
-        .verified
+    // F is what the verifier's migration rule reads (§15.4, revision 14): the entry after `head`,
+    // a `layout` above 2 naming this account, issued after the due time, with the handover
+    // authorized and the window open. It does not depend on how old the homes' heads are.
+    require(
+        status.authorized,
+        "migration needs a verified succession: the handover does not meet the rule that may write F",
+    )?;
+    let timing = status
+        .timing
         .clone()
-        .ok_or_else(|| unavailable("migration needs a verified succession"))?;
+        .ok_or_else(|| unavailable("migration needs a verified succession: no window"))?;
+    require(
+        !status.vetoed,
+        "migration needs a verified succession: vetoed",
+    )?;
+    let f_seq = status.head_seq + 1;
     let at_f = usize::try_from(f_seq)
         .ok()
         .and_then(|n| n.checked_sub(1))
         .and_then(|i| all.entries.get(i))
-        .ok_or_else(|| malformed("the predecessor does not hold F"))?;
-    require(at_f.digest == f_digest, "the predecessor does not hold F")?;
+        .ok_or_else(|| {
+            unavailable("migration needs a verified succession: the predecessor holds no F")
+        })?;
+    require(
+        at_f.value["kind"] == "layout"
+            && at_f.value["layout"].as_u64().unwrap_or(0) > 2
+            && at_f.value["successor"] == state.account().as_str()
+            && at_f.issued_ms > timing.due_ms,
+        "migration needs a verified succession: F is not a freezing entry of this account after the due time",
+    )?;
+    let f_digest = at_f.digest.clone();
     let head_idx = usize::try_from(status.head_seq)
         .ok()
         .and_then(|n| n.checked_sub(1))
@@ -1313,26 +1334,21 @@ pub fn prepare_migration(
         .keys()
         .map(|id| json!({"id": id, "slot": new_slotted.contains(id)}))
         .collect();
-    // Members: those current at head.
+    // Members: those the Swift fold holds at head (`history::swift`'s own fold, which ignores a
+    // grant to a revoked key as the shipped reader does), with the first grant's role.
     let mut current: BTreeMap<String, &Value> = BTreeMap::new();
     for e in all.entries.iter().take(head_idx + 1) {
-        match e.value["kind"].as_str() {
-            Some("grant") => {
-                if let Some(id) = e.value["member"]
-                    .get("signing")
-                    .and_then(Value::as_str)
-                    .and_then(|s| decode_base64(s, 65).ok())
-                    .map(|p| key_id(&p))
-                {
-                    current.insert(id, &e.value);
+        if e.value["kind"].as_str() == Some("grant") {
+            if let Some(id) = e.value["member"]
+                .get("signing")
+                .and_then(Value::as_str)
+                .and_then(|s| decode_base64(s, 65).ok())
+                .map(|p| key_id(&p))
+            {
+                if head.members.contains_key(&id) {
+                    current.entry(id).or_insert(&e.value);
                 }
             }
-            Some("revoke") => {
-                if let Some(id) = e.value["memberID"].as_str() {
-                    current.remove(id);
-                }
-            }
-            _ => {}
         }
     }
     let listed: BTreeSet<&String> = p.members.iter().map(|m| &m.id).collect();

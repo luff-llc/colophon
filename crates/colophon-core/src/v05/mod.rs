@@ -31,6 +31,8 @@ pub mod records;
 pub mod replay;
 pub mod signature;
 pub mod slots;
+pub mod swift_copy;
+pub mod swift_slots;
 pub mod terms;
 pub mod vault;
 /// Builders for 0.5 objects: prepare the exact bytes a host signs, then finish under the verifier.

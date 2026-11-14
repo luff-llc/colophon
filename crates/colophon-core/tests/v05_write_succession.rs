@@ -938,10 +938,19 @@ fn the_migration_transition_is_built_activated_and_recorded() {
         dropped: None,
     }];
     assert!(why(prepare_migration(&objects, now, &p).unwrap_err()).contains("current members"));
-    // Not before the succession is verified.
-    let mut unverified = objects.clone();
-    unverified.heads.clear();
-    assert!(prepare_migration(&unverified, now, &params).is_err());
+    // Not before F: the verifier's migration rule (revision 14) needs F issued after the due
+    // time, and no longer depends on how fresh the homes' heads are.
+    let mut no_f = objects.clone();
+    no_f.predecessor.pop();
+    let mut p = params.clone();
+    p.predecessor = no_f.predecessor.clone();
+    assert!(prepare_migration(&no_f, now, &p).is_err());
+    let mut stale = objects.clone();
+    stale.heads.clear();
+    assert!(
+        prepare_migration(&stale, now, &params).is_ok(),
+        "heads are not part of whether the entry is valid"
+    );
     // The valid one.
     let pending = prepare_migration(&objects, now, &params).unwrap();
     let sigs = sign_steps(pending.steps(), &scalars);
