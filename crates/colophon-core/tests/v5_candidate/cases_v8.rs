@@ -889,6 +889,15 @@ pub fn part3(o: &mut Out) {
          "An ordinary entry issued before the due time and covered by the primary's head keeps its seq; the activation follows it.",
          &["8.6"], vec![("transition", t1.clone()), ("receipt", r1.clone()), ("head-H1-primary", head5(&y_before, &h1k, R0 + 130, None))],
          Some(ver(DUE0 + 60)), vec![("activate-first", vec![(3, act_first.envs[2].clone())])]);
+    // A `final` that does not verify (it lacks H2's head) does not cover the activation (§8.6
+    // rule 1): the covered entry still keeps its seq.
+    let mut act_first_bad = act_first.clone();
+    let hs_bad = vec![head5(&act_first, &h1k, DUE0 + 100, Some(3))];
+    final_of(&mut act_first_bad, 3, hs_bad);
+    case(o, "t-activate-after-covered-entry-invalid-final", &x_after, ok_at(4),
+         "As t-activate-after-covered-entry, with a `final` after the activate on its branch that lacks H2's head. An invalid `final` covers nothing: the covered entry keeps seq 3.",
+         &["8.6", "8.7"], vec![("transition", t1.clone()), ("receipt", r1.clone()), ("head-H1-primary", head5(&y_before, &h1k, R0 + 130, None))],
+         Some(ver(DUE0 + 60)), vec![("activate-first", vec![(3, act_first_bad.envs[2].clone()), (4, act_first_bad.envs[3].clone())])]);
     let mut bd = base.clone();
     activate(&mut bd, &t1, std::slice::from_ref(&r1));
     let mut y_back = base.clone();
@@ -924,6 +933,20 @@ pub fn part3(o: &mut Out) {
         vec![],
         None,
         vec![("activate", vec![(3, alt.envs[2].clone())])],
+    );
+    let mut alt_bad = alt.clone();
+    let hs_bad = vec![head5(&alt, &h1k, DUE0 + 100, Some(3))];
+    final_of(&mut alt_bad, 3, hs_bad);
+    case(
+        o,
+        "t-vetoed-beats-activate-invalid-final",
+        &c,
+        ok_at(3),
+        "As t-vetoed-beats-activate, with a `final` after the activate on its branch that lacks H2's head. An invalid `final` covers nothing: the veto still stands.",
+        &["8.6", "8.7"],
+        vec![],
+        None,
+        vec![("activate", vec![(3, alt_bad.envs[2].clone()), (4, alt_bad.envs[3].clone())])],
     );
     let mut fin = base.clone();
     activate(&mut fin, &t1, std::slice::from_ref(&r1));

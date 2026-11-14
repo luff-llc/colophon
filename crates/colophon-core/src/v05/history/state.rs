@@ -2743,6 +2743,16 @@ fn due_and_object(s: &State, e: &Entry) -> (i64, String) {
         _ => (i64::MAX, String::new()),
     }
 }
+/// The clock time from which a candidate held at `s` can be judged again: the earlier of its
+/// issued-ahead release and (for an `activate`) its due time. A lower bound is safe; it only
+/// brings a replay forward.
+pub(crate) fn release_time(s: Option<&State>, e: &Entry) -> i64 {
+    let ahead = e.issued.saturating_sub(60 * SEC);
+    match (s, e.kind.as_str()) {
+        (Some(s), "activate") => ahead.min(due_and_object(s, e).0),
+        _ => ahead,
+    }
+}
 fn kind_rank(k: &str) -> u8 {
     match k {
         "activate" => 0,
@@ -2766,15 +2776,59 @@ fn descendants(all: &[&Entry], from: &str) -> BTreeSet<String> {
         }
     }
 }
-fn final_covers(all: &[&Entry], activate_digest: &str) -> bool {
-    all.iter().any(|e| {
-        e.kind == "final"
-            && e.env
+/// What a conflict needs besides the candidates: the held objects and the clock.
+struct Ctx<'a> {
+    heads: &'a HeadSet,
+    all: &'a [&'a Entry],
+    pending: &'a Pending,
+    now_ms: i64,
+}
+/// Whether a `final` covers the activate `act`, whose state after it is `after` (§8.6 rule 1,
+/// §8.7). Only a `final` that is a valid entry on the activate's own branch counts: a chain of
+/// `previous` links runs from `act` to it, and every entry on that chain applies in turn. A
+/// parsed object that no branch contains, or one that fails its checks, covers nothing.
+fn final_covers(ctx: &Ctx, act: &Entry, after: &State) -> bool {
+    let by_digest: BTreeMap<&str, &Entry> = ctx
+        .all
+        .iter()
+        .map(|e| (e.env.digest.as_str(), *e))
+        .collect();
+    ctx.all.iter().any(|f| {
+        if f.kind != "final"
+            || f.env
                 .value
                 .get("activation")
                 .and_then(|a| a.get("digest"))
                 .and_then(Value::as_str)
-                == Some(activate_digest)
+                != Some(act.env.digest.as_str())
+        {
+            return false;
+        }
+        // Walk back to the activate. Each step lowers seq, so the walk is bounded.
+        let mut chain: Vec<&Entry> = vec![f];
+        let mut cur: &Entry = f;
+        while cur.previous.as_deref() != Some(act.env.digest.as_str()) {
+            let Some(next) = cur
+                .previous
+                .as_deref()
+                .and_then(|p| by_digest.get(p).copied())
+            else {
+                return false;
+            };
+            if next.seq >= cur.seq || next.seq <= act.seq {
+                return false;
+            }
+            chain.push(next);
+            cur = next;
+        }
+        let mut st = after.clone();
+        for e in chain.into_iter().rev() {
+            match apply(&st, e, ctx.pending, ctx.heads, ctx.all.to_vec(), ctx.now_ms) {
+                Ok(n) => st = n,
+                Err(_) => return false,
+            }
+        }
+        true
     })
 }
 pub(super) fn covered_by_home_head(
@@ -2799,21 +2853,23 @@ pub(crate) fn resolve_conflict(
     valid: &[(&Entry, State)],
     heads: &HeadSet,
     all: Vec<&Entry>,
+    pending: &Pending,
+    now_ms: i64,
 ) -> Option<usize> {
+    let ctx = Ctx {
+        heads,
+        all: &all,
+        pending,
+        now_ms,
+    };
     // The pairwise rules need not be transitive. A fold can return a loser in a
     // cycle, or stop at an unresolved pair before reaching a candidate that beats both.
     // Stand only a candidate that wins against every other valid candidate (§8.6).
     (0..valid.len())
-        .find(|&i| (0..valid.len()).all(|j| i == j || pair(s, valid, i, j, heads, &all) == Some(i)))
+        .find(|&i| (0..valid.len()).all(|j| i == j || pair(s, valid, i, j, &ctx) == Some(i)))
 }
-fn pair(
-    s: &State,
-    valid: &[(&Entry, State)],
-    i: usize,
-    j: usize,
-    heads: &HeadSet,
-    all: &[&Entry],
-) -> Option<usize> {
+fn pair(s: &State, valid: &[(&Entry, State)], i: usize, j: usize, ctx: &Ctx) -> Option<usize> {
+    let (heads, all) = (ctx.heads, ctx.all);
     let (x, y) = (valid[i].0, valid[j].0);
     let xr = RECORDING.contains(&x.kind.as_str());
     let yr = RECORDING.contains(&y.kind.as_str());
@@ -2823,7 +2879,8 @@ fn pair(
             let (due, _) = due_and_object(s, rec);
             let primary = s.primary_home();
             let covered = primary.is_some_and(|p| covered_by_home_head(s, heads, all, other, &p));
-            let finalized = rec.kind == "activate" && final_covers(all, &rec.env.digest);
+            let rec_idx = if xr { i } else { j };
+            let finalized = rec.kind == "activate" && final_covers(ctx, rec, &valid[rec_idx].1);
             Some(if covered && other.issued <= due && !finalized {
                 oi
             } else {
@@ -2838,13 +2895,12 @@ fn pair(
                 && ((x.kind == "activate" && y.kind == "vetoed")
                     || (x.kind == "vetoed" && y.kind == "activate"))
             {
-                let (act, vet, ai, vi) = if x.kind == "activate" {
-                    (x, y, i, j)
+                let (act, ai, vi) = if x.kind == "activate" {
+                    (x, i, j)
                 } else {
-                    (y, x, j, i)
+                    (y, j, i)
                 };
-                let _ = vet;
-                return Some(if final_covers(all, &act.env.digest) {
+                return Some(if final_covers(ctx, act, &valid[ai].1) {
                     ai
                 } else {
                     vi

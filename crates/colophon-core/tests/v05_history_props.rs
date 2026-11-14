@@ -412,6 +412,42 @@ fn persisted_folded_state_resumes_suffix_with_replay_equivalent_verdict() {
 }
 
 #[test]
+fn checkpoints_taken_before_held_entries_come_due_resume_like_replay() {
+    // Checkpoint the whole object set at a clock before `now`, so entries dated after it are
+    // held, then resume at `now` with nothing new. The verdict and folded state must equal
+    // full replay at `now` (§17.2).
+    for (dir, now) in cases() {
+        let all = objects_of(&dir);
+        let replay = verify_history(&all, &Persisted::default(), now);
+        for back in [
+            30_000,
+            90_000,
+            600_000,
+            3_600_000,
+            86_400_000,
+            8 * 86_400_000,
+        ] {
+            let at = now - back;
+            let saved = Persisted::checkpoint(&all, &Persisted::default(), at);
+            let saved = Persisted::from_bytes(&saved.to_bytes().unwrap()).unwrap();
+            let resumed = verify_history(&Objects::default(), &saved, now);
+            assert_eq!(
+                summary(&resumed),
+                summary(&replay),
+                "{} checkpoint {back} ms before now",
+                dir.display()
+            );
+            assert_eq!(
+                serde_json::to_value(&resumed.state).unwrap(),
+                serde_json::to_value(&replay.state).unwrap(),
+                "{} folded state, checkpoint {back} ms before now",
+                dir.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn clock_retries_held_activation_and_expires_suspension_after_restart() {
     let (objects, early) = vector("t-activate-early");
     let held = verify_history(&objects, &Persisted::default(), early);
@@ -442,7 +478,7 @@ fn checkpoint_rejects_unknown_format_and_malformed_bytes() {
     let (objects, now) = vector("t-suspend");
     let cp = Persisted::checkpoint(&objects, &Persisted::default(), now);
     let mut value: Value = serde_json::from_slice(&cp.to_bytes().unwrap()).unwrap();
-    value["version"] = Value::from(2);
+    value["version"] = Value::from(99);
     assert!(Persisted::from_bytes(&serde_json::to_vec(&value).unwrap()).is_err());
 }
 

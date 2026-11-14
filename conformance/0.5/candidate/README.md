@@ -55,9 +55,9 @@ the same 1,078 files.
 
 ## What was run
 
-- `v5_generator_check` (the Rust generator): 1,078 generated files match, byte for byte. The
-  directory holds 1,081 files: those plus three sources (`README.md` and the probe's
-  `Package.swift` and `main.swift`). The Python generator it replaced matched the same 1,078.
+- `v5_generator_check` (the Rust generator): 1,094 generated files match, byte for byte. The
+  directory holds 1,097 files: those plus three sources (`README.md` and the probe's
+  `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each).
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
   intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).

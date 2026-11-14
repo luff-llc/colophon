@@ -48,6 +48,10 @@ pub struct Persisted {
     checkpoint: Option<Checkpoint>,
 }
 
+/// Checkpoint format. 2 added `held_until`; a format 1 checkpoint is refused, and the caller
+/// rebuilds it from its retained objects.
+const CHECKPOINT_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Checkpoint {
     version: u32,
@@ -55,6 +59,8 @@ struct Checkpoint {
     state: Option<State>,
     objects: Objects,
     conflicts: bool,
+    /// Earliest time a candidate held at a decided seq comes due (format 2).
+    held_until: Option<i64>,
     high_water: Option<(u64, String)>,
 }
 
@@ -85,12 +91,13 @@ impl Persisted {
         Self {
             high_water: high_water.clone(),
             checkpoint: Some(Checkpoint {
-                version: 1,
+                version: CHECKPOINT_VERSION,
                 now_ms,
                 state: verdict.state,
                 objects: all,
                 conflicts: !verdict.conflicts.is_empty()
                     || matches!(verdict.stop, Some(Stop::Fork { .. })),
+                held_until: verdict.held_until,
                 high_water,
             }),
         }
@@ -111,7 +118,10 @@ impl Persisted {
     pub fn from_bytes(bytes: &[u8]) -> crate::v05::Result<Self> {
         let cp: Checkpoint =
             serde_json::from_slice(bytes).map_err(|e| crate::v05::malformed(e.to_string()))?;
-        crate::v05::require(cp.version == 1, "unknown checkpoint version")?;
+        crate::v05::require(
+            cp.version == CHECKPOINT_VERSION,
+            "unknown checkpoint version",
+        )?;
         if let Some(state) = &cp.state {
             state.check_checkpoint_shape()?;
         }
@@ -182,6 +192,9 @@ pub struct Verdict {
     pub rollback: bool,
     /// Conflicts decided by §8.6, as `(seq, standing digest, losing digests)`.
     pub conflicts: Vec<(u64, String, Vec<String>)>,
+    /// The earliest clock time at which a candidate that was held at an already decided seq
+    /// is judged again (§8.1, §17.2). A resumed verifier replays once the clock reaches it.
+    pub held_until: Option<i64>,
 }
 impl Verdict {
     /// The §1 result code of the verification: `ok`, `held`, `refused:fork` or a failure's.
@@ -289,6 +302,7 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         stop: None,
         rollback: false,
         conflicts: Vec::new(),
+        held_until: None,
     };
     let mut st: Option<State> = None;
     let mut seq = 1u64;
@@ -313,6 +327,7 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
             let retained: std::collections::BTreeSet<&Vec<u8>> =
                 cp.objects.entries.iter().collect();
             let safe = !cp.conflicts
+                && cp.held_until.is_none_or(|t| now_ms < t)
                 && now_ms >= cp.now_ms
                 && incoming
                     .predecessor
@@ -353,6 +368,7 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         // Judge every candidate against the state before it.
         let mut valid: Vec<(&Entry, State)> = Vec::new();
         let mut first_failure: Option<(Stop, &Entry)> = None;
+        let mut held_at: Option<i64> = None;
         for e in &candidates {
             let r = match &st {
                 None => state::genesis(e, now_ms, &objects.predecessor),
@@ -366,12 +382,19 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
                     }
                 }
                 Err(state::Outcome::Held(why)) => {
+                    let t = state::release_time(st.as_ref(), e);
+                    held_at = Some(held_at.map_or(t, |h| h.min(t)));
                     if first_failure.is_none()
                         || matches!(first_failure, Some((Stop::Failed { .. }, _)))
                     {
                         first_failure = Some((Stop::Held { seq, why }, e));
                     }
                 }
+            }
+        }
+        if !valid.is_empty() {
+            if let Some(t) = held_at {
+                verdict.held_until = Some(verdict.held_until.map_or(t, |h| h.min(t)));
             }
         }
         let chosen = match valid.len() {
@@ -381,7 +404,14 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
             }
             1 => valid.pop(),
             _ => match &st {
-                Some(s) => match state::resolve_conflict(s, &valid, &heads, by_seq_all(&by_seq)) {
+                Some(s) => match state::resolve_conflict(
+                    s,
+                    &valid,
+                    &heads,
+                    by_seq_all(&by_seq),
+                    &pending,
+                    now_ms,
+                ) {
                     Some(i) => {
                         let losers = valid
                             .iter()
