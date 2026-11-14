@@ -2273,6 +2273,97 @@ pub fn part3(o: &mut Out) {
         &["8.3", "8.4"],
         None,
     );
+    // E9 fix round: a transition's `grant` follows the rules of an immediate grant (§9.2, §9.3).
+    // An import grant is for a device or app, with write in every records entry and an expiry
+    // later than `issued`; an `activate` that embeds one that is not is not a valid entry, and
+    // verification stops before it.
+    let mut ig = Chain::new();
+    genesis(
+        &mut ig,
+        &kr5,
+        sg![a],
+        Gen {
+            label: "Import",
+            namespaces: vec!["notes"],
+            opt: Opt {
+                adds: sg![ph, b, k1, k2],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    ig.add(
+        "rekey",
+        &a,
+        &ts(30),
+        &a,
+        Opt::default(),
+        json!({"epochs": [epoch_obj("notes", 1, "e1")]}),
+    );
+    let aig = account_id(&ig);
+    let t_home_ig = transition(
+        &ig,
+        json!({"homes": {"appoint": [home_appointment(&aig, &h1k, &h1a, "Home one")]}}),
+        sg![a],
+        &ts(60),
+        TOpt::default(),
+    );
+    activate(&mut ig, &t_home_ig, &[]);
+    let import_case = |label: &str, kind: &str, access: &str, expires: bool| -> Chain {
+        let k = derived(&format!("e9/import/{label}"));
+        let ag = derived(&format!("e9/import/{label}/agreement"));
+        let mut c = ig.clone();
+        let mut terms =
+            json!({"records": [{"namespace": "notes", "access": access}], "import": true});
+        if expires {
+            terms["expires"] = json!(ts(R0 + 7 * 86_400));
+        }
+        let req = request(
+            &aig,
+            &k,
+            &ag,
+            kind,
+            json!({"records": [{"namespace": "notes", "access": access}]}),
+            label,
+            None,
+        );
+        let t = transition(
+            &c,
+            json!({"grant": {"request": req, "terms": terms}}),
+            sg![a],
+            &ts(R0),
+            TOpt::default(),
+        );
+        activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+        c
+    };
+    case_v(
+        o,
+        "t-grant-import-agent",
+        &import_case("Agent", "agent", "read", false),
+        bad("malformed", 4),
+        "A transition granting `import` to an agent, read only, with no expiry: §9.3 allows import only to a device or app, with write everywhere and an expiry; the `activate` is not a valid entry and the history stops before it.",
+        &["8.7", "9.2", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    case_v(
+        o,
+        "t-grant-import-device-no-expiry",
+        &import_case("Importer", "device", "write", false),
+        bad("malformed", 4),
+        "The same grant to a device with write but no `expires`: `import` needs an expiry later than `issued`.",
+        &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    case_v(
+        o,
+        "t-grant-import-device",
+        &import_case("Importer", "device", "write", true),
+        ok_at(4),
+        "The grant of import to a device, write access, with an expiry later than `issued`: the transition activates and the member is added.",
+        &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
     let mut many: Vec<Key> = vec![a.clone()];
     many.extend((1..23).map(|i| derived(&format!("r7/many/{i}")))); // A owns the default genesis slot.
     let kr_m = keyring(
