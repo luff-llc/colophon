@@ -129,7 +129,6 @@ struct Ra {
     label: String,
     twins: Vec<(String, Vec<u8>)>,
     by_digest: Map<String, Value>,
-    second: Option<Key>,
 }
 
 impl Ra {
@@ -198,7 +197,6 @@ impl Ra {
             label: label.to_string(),
             twins: Vec::new(),
             by_digest: Map::new(),
-            second,
         }
     }
     fn key_for(&mut self, ns: &str, epoch: u64) -> [u8; 32] {
