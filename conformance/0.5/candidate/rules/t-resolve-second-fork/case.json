@@ -1,0 +1,1 @@
+{"description":"The resolved branch forks again at seq 5; a second `resolve`, built on a branch that already holds the first, keeps one of the two seq 5 entries and settles it the same way. The seq 3 loser is held as well.","expected":{"result":"ok","seq":6},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-17T09:14:20Z"}}

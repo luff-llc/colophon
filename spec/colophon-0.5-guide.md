@@ -149,6 +149,12 @@ whether it is final and which homes it still needs; and per unit, v(u).
 > two services: if one is down, removals still work and new keys wait; if one turns dishonest
 > while someone also has one of your keys, you can lose the account.
 
+**An account with no home.** Tell the person: "Nothing keeps a record of when things happened on
+this account. Someone who once held one of your keys can later show a new device a different
+history, from before you removed that key, and nothing can tell the two apart. Add a home." Hosts
+MUST create accounts with at least one home (§18), MUST warn when an account has none, and MUST
+refuse and show a rollback a verifier with saved state reports (§13.1).
+
 **One recovery unit.** Have none or at least two recovery units. A unit is a key when the account
 counts keys (the person reference does, so your two security keys are two units), and a holder
 when it counts holders (the company reference): then two security keys that are both yours are

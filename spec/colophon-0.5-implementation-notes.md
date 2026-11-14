@@ -380,31 +380,8 @@ Revision-12 verification numbers are in PR #7.
 Engine round 2, built on the integrated write side (PR #8), one commit per item. **No vector or
 test of revision 13 was replayed by the Swift source.**
 
-- **`resolve` (§8.6 rule 3, §8.7; E1 M3).** The reading implemented, written out in §8.6
-  "Resolving a fork":
-  - *Which branch.* The transition's anchor is on the branch that will keep the fork's seq; its
-    `activate` is an entry on that branch. `discarded` names the other candidate's `{seq, digest}`.
-  - *Who signs.* The control rule of the keyring before the fork (state after seq
-    `discarded.seq − 1`), counting only the control units that keyring holds, up to its
-    threshold. Consent (`recoverThreshold`) and "each signer current" are judged in the state
-    before the recording entry, as for every transition. The pre-fork keyring is kept in the
-    state (`State.fork`, set only during the verifier's look-ahead) so no history walk is needed.
-  - *How the verifier chooses.* At a conflict that §8.6 rules 1 and 2 leave open, each valid
-    candidate's own branch is folded forward with the fork in view (no nested look-ahead: a later
-    unresolved conflict ends that branch). A candidate stands when its branch holds an activation
-    of a `resolve` that discards every other valid candidate and no other candidate's branch holds
-    one. The activation, not its finality, resolves it; a `vetoed` displacing it leaves the fork.
-  - *The losing branch.* Not on the verified branch; the verdict's `conflicts` lists it as a loser.
-  - *Two resolves.* The text gives no order, so neither resolves: the fork stands. This is the
-    fail-safe reading of "activates on one branch", reported to the spec owner as undetermined.
-  - *Only a held fork.* `apply_delta` voids a `resolve` that names no held, valid candidate at that
-    seq other than its own branch's. Home and builder admission judge the shape only (one branch
-    is all they see). A home that has stopped at a fork cannot receipt a `resolve` anchored beyond
-    its folded state: not built.
-  - Tests in `v05_write_authority.rs` (`resolve_finish_returns_the_transition_and_the_verifier_
-    applies_its_activation`, `two_resolves_one_on_each_branch_leave_the_fork`,
-    `a_resolve_is_judged_by_the_keyring_before_the_fork`, `a_resolve_activation_names_a_fork_the_
-    verifier_holds`); vectors `t-resolve-fork`, `t-resolve-two`, `t-resolve-below-rule`.
+- **`resolve` (§8.6 rule 3, §8.7; E1 M3).** The reading as first built is superseded by the
+  fix round below (`kept` instead of `discarded`); see "Revision 13 fix round".
 - **Head rollback (§13.3, §17.2; E1 gap).** The mark is per home, as the decision says, kept in
   `Persisted` (`head_mark`, `accept_head`, `check_head`) and checked by `heads::verify_head_with_mark`
   after the signature, clock and held-history checks. A head behind its home's mark is
@@ -495,3 +472,31 @@ test of revision 13 was replayed by the Swift source.**
   Tests `a_second_receipt_of_one_veto_never_makes_a_recorded_vetoed_refused` and
   `a_second_head_of_a_witness_never_makes_a_recorded_final_refused` (the checker's probes with the
   corrected outcome). The hostile-home risk noted earlier no longer exists.
+- **H5, H6, M1, M3: the shape of `resolve` (§8.6).** The component is `{kept: {seq, digest}}`. It
+  is valid when the kept entry is on the branch its `activate` is recorded on (`apply_delta`),
+  and its effect is to record `(seq, digest)` in `State.resolved`. A verifier holding no other
+  candidate simply continues (H5; `a_verifier_without_the_losing_branch_follows_the_resolved_one`,
+  vector `t-resolve-no-losing-branch`). The look-ahead (`resolved_by_activation`) asks of each
+  candidate whether its branch keeps it; one eligible candidate stands, whatever the number of
+  candidates (H6; `one_resolve_settles_a_fork_of_three_candidates`, `t-resolve-three-candidates`),
+  and a later fork on a branch that already holds a `resolve` resolves the same way, so
+  `prepare_resolve` folds such a branch (M1; `a_second_fork_later_on_a_resolved_branch_is_resolved_the_same_way`,
+  `t-resolve-second-fork`). `ForkCtx` is gone: the pre-fork control rule is read from
+  `State.rule_at` (new, `(threshold, countBy holders)` per seq) and `ever` (descriptors by seq),
+  so it is checked wherever a `resolve` is judged, including at the builder's `finish`. M3: both
+  rules apply, text and code agree (`a_resolve_is_judged_by_the_keyring_before_the_fork`).
+  `prepare_resolve` takes `kept` (edited, `write/authority.rs`).
+- **H1 (a).** `Activation.witnessed` is set only when a `final` entry's heads made the activation
+  final. A candidate is eligible for a `resolve` only if no other candidate's branch holds a
+  witnessed activation after the fork (`a_resolve_never_discards_a_branch_whose_later_activation_homes_witnessed`;
+  vector `t-resolve-late-fork-witnessed`: refused:fork, not an attacker win). H1 (b): the limit for
+  an account with no home is text (§8.6, §13.1, §18, guide §5) and the documented vector
+  `t-resolve-homeless-late-fork`, whose expectation (`ok`, the late branch) is what the engine
+  gives. Rule 2 (heads of `headQuorum` homes covering the honest entry) still decides before any
+  resolve when a verifier holds those heads.
+- **H2 (§8.6 rule 1).** In `pair`, a recording entry whose activation is final on its branch (an
+  `activate` that `final_covers`, or a `final` entry) stands against a recording entry of another
+  object whose activation is not final (`a_final_activation_stands_against_an_earlier_due_activate_of_another_transition`).
+  Entries of one object that differ only in receipts or heads keep the digest order, which the
+  three-candidate cycle vector needs. Without homes every activation is final at once, so the
+  rule changes nothing there (that is the H1 (b) limit).

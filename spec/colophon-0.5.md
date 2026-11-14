@@ -680,7 +680,7 @@ doubt. Each needs the control rule unless stated:
 | Appoint or renew a home; `primaryHome`, `headQuorum` | The recovery rule may also propose these when `recoverThreshold ≥ threshold`, or in a full set |
 | A grant with `import`; `recoveryDelay`; raising `rate` | — |
 | Raise `headMaxAge`, `callWindow`, `linkMaxAge`; `memberRule` to `single`; `history` to `public` | — |
-| `layout`; `migration` (only with a `predecessor`); `successor`; `resolve` (control rule of the keyring before the fork, §8.6 "Resolving a fork") | — |
+| `layout`; `migration` (only with a `predecessor`); `successor`; `resolve` (control rule in the recording state and control rule of the keyring before the fork, §8.6 "Resolving a fork") | — |
 
 **Recovery-set consent.** When the state before activation has `recoverThreshold ≥ 1`, a
 transition also needs `recoverThreshold` `recover` units if any component:
@@ -783,6 +783,10 @@ either the activation is final on its branch and no `vetoed` displaces it, or it
      dated more than 300 s before their clock (§13.1), so an honest primary covers no backdated Y.
    - Between an `activate` and a `vetoed` of one transition, the `vetoed` stands if its veto is
      valid, unless a `final` covers the `activate` (§8.7).
+   - A recording entry whose activation is **final on its branch** (§8.7 "Final": an `activate`
+     that is final, or a `final` entry) stands against a recording entry of **another object**
+     whose activation is not; nothing displaces a final activation. If both are final, or the
+     objects are the same, the order below applies.
    - Between other recording entries the order is total, comparing in turn: the earlier due time;
      the lower **object digest** (the transition body's for `activate`, `vetoed` and `final`, the
      genesis body's for `successionVetoed`); the kind rank (`activate` 0, `vetoed` 1, `final` 2,
@@ -803,30 +807,42 @@ either the activation is final on its branch and no `vetoed` displaces it, or it
 
 Records citing a seq at or after an unresolved fork are held.
 
-**Resolving a fork.** A `resolve` transition (§8.7) is built on **one branch**: its anchor is an
-entry of that branch at or after the forked seq, and `discarded` names `{seq, digest}` of the
-entry another candidate holds at the forked seq. It is signed under the **control rule of the
-keyring in force before the fork** (the state after seq `discarded.seq − 1`, §8.4): only the
-`control` units that keyring holds count, up to its `threshold`, so a controller that a branch
-added after the fork adds nothing. The recovery-set consent §8.4 requires is judged in the state
-before the entry that records it, and every signer must be current there (§8.7 validity 1).
-It is recorded as any transition is: an `activate` entry on the branch it was built on, with
-receipts, due time and veto as §8.7 says; it has no veto deadline of its own beyond them.
-- **Choosing the branch.** A verifier that holds a valid `resolve` activation on one candidate's
-  branch, whose `discarded` names every other valid candidate at the forked seq, stands that
-  candidate at the forked seq. The activation, not its finality, resolves the fork. A `vetoed`
-  that displaces it (§8.7) leaves the fork open again, as the objects held say. The verifier
-  looks for the activation along each candidate's own branch up to the first later unresolved
-  conflict on it.
+**Resolving a fork.** A `resolve` transition (§8.7) carries `kept: {seq, digest}`, an entry at the
+forked seq. It is built on the branch that holds the kept entry: its anchor is an entry of that
+branch, and it is **valid when the kept entry is on the branch its `activate` is recorded on**.
+Its effect: every other candidate at that seq, held now or shown later, is discarded for a
+verifier following this branch. A verifier that holds no other candidate treats the `resolve` as
+valid and changing nothing, so no honest verifier is ever stopped by it, whether or not homes
+serve the losing entry.
+- **Who signs.** Both rules hold: the ordinary control rule (§8.4) in the state the entry is
+  recorded in (the kept branch's own keyring and threshold), consent and currency included; and
+  the control rule of the keyring before the fork (the state after seq `kept.seq − 1`): the
+  signers that held `control` there must reach that keyring's `threshold`, so a controller that a
+  branch added after the fork adds nothing. It is recorded as any transition is, an `activate`
+  entry with receipts, due time and veto as §8.7 says.
+- **Choosing the branch.** At a conflict §8.6 rules 1 and 2 leave open, a candidate **keeps
+  itself** when its branch holds a valid `resolve` activation whose `kept` is that candidate's
+  entry at the seq. It stands if it is the only candidate that keeps itself and no other
+  candidate's branch holds an activation after the fork that homes witnessed (below). One
+  `resolve` settles a fork of any number of candidates. A `vetoed` that displaces the activation
+  (§8.7) leaves the fork open again. The verifier looks for the activation along each candidate's
+  own branch up to the first later unresolved conflict on it; a later fork on a branch that
+  already holds a `resolve` is resolved the same way, by its own `resolve`.
+- **Two `resolve`s.** Nothing orders resolves. If two candidates each keep themselves, neither
+  resolves the fork and rule 3 stands; no candidate is dropped.
+- **Witnessed branches are never discarded.** A `resolve`, and rule 3 generally, never discards a
+  branch on which an activation after the fork point is final **as witnessed by homes**: made
+  final by a `final` entry with the witnesses' heads (a full set counts once its own `final`
+  carries heads). Finality by excusal, an empty witness set or a later full set's anchor is not
+  witnessed. A late fork by a former controller therefore cannot win in an account with homes;
+  the owner's own `resolve` keeping the witnessed branch settles it.
 - **The losing branch.** Its entry at the forked seq and everything after it on that branch are
   not part of the account's history; they stay equivocation evidence under rule 3, and nobody
   appends them again. Transitions anchored on them are void.
-- **Two `resolve`s.** Nothing orders resolves. If a valid activation that discards the other
-  candidate is held on each of two branches, neither resolves the fork and rule 3 stands; no
-  candidate is dropped.
-- **Only a held fork.** A `resolve` whose `discarded` is not a valid entry the verifier holds at
-  that seq, other than the one on the activation's own branch, changes nothing, so its
-  activation is void (§8.7 "Delta at activation") until the verifier holds that entry.
+- **The limit.** An account with no home has no witness of time or order: everything on it is
+  final at once on every branch alike, so a former controller can show a new verifier a different
+  history from before its removal (a late entry and a `resolve` keeping it), and nothing in the
+  objects tells the two apart (§13.1, §18).
 
 ### 8.7 Pending transitions
 
@@ -844,7 +860,7 @@ receipts, due time and veto as §8.7 says; it has no veto deadline of its own be
   `addThreshold`, `countBy`), `policy` (fields to set; `primaryHome: null` unsets it), `vault`
   (§8.3), `homes` (`appoint: [{request, terms}]`, `revoke`), `grant` (`{request, terms}` with
   `import`), `layout`, `migration` (§15.4), `successor` (`{account}`), `resolve`
-  (`{discarded: {seq, digest}}`, `seq` at least 2; §8.6 "Resolving a fork").
+  (`{kept: {seq, digest}}`, `seq` at least 2; §8.6 "Resolving a fork").
 - **Composite rule.** One signer set meets, for every component, a rule that component allows,
   using the same rule (control or recovery) for all; consent if any component needs it;
   escalation and the full set judged once over the whole. It activates atomically or not at all.
@@ -1486,6 +1502,14 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   can check that `issued` is the admission time (the clock rule), which is what stops a dormant
   account's history being filled in one sitting. A hostile primary can still admit backdated
   entries (changes §H). Transitions and vetoes are bounded by the admission caps above.
+- **An account with no home has no witness of time or order.** Everything on it is final at
+  once, on every branch alike, so a former controller can show a **new** verifier a different
+  history from before its own removal (a late entry at an old seq and a `resolve` keeping it),
+  and nothing in the objects can tell the two apart. This is a limit, not a defence (§8.6, §8.7
+  "No home"). A verifier with persisted state whose high-water entry is not on the branch it would
+  now follow reports `refused:rollback`, and a host MUST treat that as a refusal and show it. Hosts
+  MUST create accounts with at least one home by default (§18) and MUST warn when an account has
+  none.
 - **Honest bulk work** fits the defaults: a first import is records, not authority entries;
   onboarding twenty people is twenty grants. A clean copy with more than 64 members to re-admit
   needs a second approver or a day's pause (§15.3), or a transition raising `rate`.
@@ -1929,7 +1953,7 @@ from seq 1, so two verifiers that persist it reach the same verdicts:
   session number, revoked seq), homes in appointment order, policy, epochs, and whether the vault
   is retiring;
 - the digests of transitions with an `activate` or `vetoed` on the branch, and the forks a
-  `resolve` activation on it discarded (`seq`, `digest`);
+  `resolve` activation on it kept (`seq`, `digest`), and the activations that homes witnessed;
 - each activation not yet final, with its witness set and whether it is removal-only; the
   `final` entries; the homes excused by final removals;
 - v(u) per unit and, per unit, the seq of its last compliant activation;
@@ -2019,7 +2043,7 @@ ranges.
 | `policy.primaryHome` | absent | a current home | transition with consent |
 | `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | lowering immediate; raising by transition with consent |
 | Member `expires`, `depth` | 7 days and 1 for `agent`; none and 0 otherwise | §10.1 | approver; `renew` extends |
-| Homes | **two, run by different operators (one may be the owner's own machine), before any recovery key** | 0–8 | transition with consent |
+| Homes | **two, run by different operators (one may be the owner's own machine), before any recovery key; a host MUST create every account with at least one and MUST warn when an account has none (§13.1: without a home there is no witness of time or order)** | 0–8 | transition with consent |
 | Drain window | 7 days | 0–30 days | the copying host |
 
 **Reference setup for new accounts:**

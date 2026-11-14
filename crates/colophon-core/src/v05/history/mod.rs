@@ -568,7 +568,7 @@ impl Folder<'_> {
                         )
                         .or_else(|| {
                             if lookahead {
-                                self.resolved_by_activation(s, &mut valid, verdict, seq)
+                                self.resolved_by_activation(&valid, verdict, seq)
                             } else {
                                 None
                             }
@@ -609,28 +609,22 @@ impl Folder<'_> {
     }
 
     /// §8.6 rule 3: a fork stays unresolved "until a `resolve` transition activates on one
-    /// branch". Fold each valid candidate's own branch forward (no nested look-ahead, so a
-    /// later unresolved conflict ends that branch) with the fork in view, and find the
-    /// candidate whose branch holds a `resolve` activation that discards every other candidate.
-    /// If two candidates both do, or none does, there is no choice and the fork stands. The
-    /// chosen candidate's state keeps the fork in view so the same activation applies when the
-    /// main fold reaches it.
+    /// branch". Fold each valid candidate's own branch forward (no nested look-ahead, so a later
+    /// unresolved conflict ends that branch) and find the candidate that **keeps itself**: its
+    /// branch holds an activation of a `resolve` whose `kept` is the candidate's entry at this
+    /// seq. A candidate is eligible when it keeps itself and no other candidate's branch holds
+    /// an activation after the fork that homes witnessed (a `final` entry with heads): a
+    /// `resolve` never discards such a branch. One eligible candidate stands, whatever the
+    /// number of candidates. Two or none leave the fork.
     fn resolved_by_activation(
         &self,
-        s: &State,
-        valid: &mut [(&Entry, State)],
+        valid: &[(&Entry, State)],
         verdict: &Verdict,
         seq: u64,
     ) -> Option<usize> {
-        let candidates: Vec<String> = valid.iter().map(|(e, _)| e.env.digest.clone()).collect();
-        let ctx = state::ForkCtx {
-            seq,
-            keyring: s.keyring.clone(),
-            candidates: candidates.clone(),
-        };
-        let mut discards: Vec<std::collections::BTreeSet<String>> = Vec::new();
-        for (e, next) in valid.iter_mut() {
-            next.fork = Some(ctx.clone());
+        let mut keeps = Vec::new();
+        let mut protected = Vec::new();
+        for (e, next) in valid.iter() {
             let mut sub = Verdict {
                 branch: verdict.branch.clone(),
                 state: None,
@@ -641,26 +635,21 @@ impl Folder<'_> {
             };
             sub.branch.push(e.env.digest.clone());
             let end = self.run(Some(next.clone()), &mut sub, false);
-            discards.push(
-                end.map(|n| {
-                    n.resolved_forks()
-                        .iter()
-                        .filter(|(q, d)| *q == seq && candidates.contains(d))
-                        .map(|(_, d)| d.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            keeps.push(end.as_ref().is_some_and(|n| {
+                n.resolved_forks()
+                    .iter()
+                    .any(|(q, d)| *q == seq && *d == e.env.digest)
+            }));
+            protected.push(
+                end.as_ref()
+                    .is_some_and(|n| n.activations().iter().any(|a| a.seq > seq && a.witnessed)),
             );
         }
-        let with: Vec<usize> = (0..valid.len())
-            .filter(|i| !discards[*i].is_empty())
+        let eligible: Vec<usize> = (0..valid.len())
+            .filter(|&i| keeps[i] && (0..valid.len()).all(|j| j == i || !protected[j]))
             .collect();
-        match with.as_slice() {
-            [i] if (0..valid.len())
-                .all(|j| j == *i || discards[*i].contains(&valid[j].0.env.digest)) =>
-            {
-                Some(*i)
-            }
+        match eligible.as_slice() {
+            [i] => Some(*i),
             _ => None,
         }
     }
