@@ -589,7 +589,17 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                 if now_ms < at {
                     return Err(Refusal::Early);
                 }
-                if now_ms > at.saturating_add(WINDOW) || now_ms > t.deadline_ms {
+                // A veto that reaches the home after its own window is stored only when it comes
+                // with at least one in-window receipt from another current home, held already
+                // as for a forwarded transition (§13.1); the home signs no receipt of its own.
+                let late = now_ms > at.saturating_add(WINDOW) || now_ms > t.deadline_ms;
+                if late
+                    && !next.unmatched_receipts.iter().any(|r| {
+                        check_receipt(&st, &r.envelope, &env.digest, at).is_ok_and(
+                            |(by, received)| by != home.home && received <= t.deadline_ms,
+                        )
+                    })
+                {
                     return Err(Refusal::Late);
                 }
                 next.add(
@@ -607,6 +617,9 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                     at,
                     Some(t.due_ms.saturating_add(WEEK)),
                 )?;
+                if late {
+                    return Ok(());
+                }
                 let draft = ReceiptToSign {
                     object: env.digest.clone(),
                     body: canonical(

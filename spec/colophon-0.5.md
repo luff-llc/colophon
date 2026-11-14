@@ -1420,7 +1420,11 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   another current home, within 300 s after the transition's `issued`, or it was not serving for any
   part of that window. Otherwise it refuses that `activate` for ever and notifies the controllers,
   and it **still stores and serves the transition and its receipts** (§14), so the owner can veto
-  it before its deadline; a late transition with a valid veto is vetoed like any other. A home
+  it before its deadline; a late transition with a valid veto is vetoed like any other. A veto that
+  reaches a home more than 300 s after its `issued` is stored and served when it comes with at
+  least one receipt of it from another current home that is in window (§13.5) and that the home
+  already holds, as a forwarded transition is; the home signs no receipt of its own for it.
+  Without such a receipt it is `refused:late` and not stored. A home
   persists, per object, when it first saw it, its own serving intervals over the object's window,
   and its decision, and reuses that decision after a restart.
 - **Clock.** A home refuses an entry more than 60 s ahead of its clock (`refused:early`), and an

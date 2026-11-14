@@ -624,3 +624,69 @@ fn early_is_refused_before_the_caps() {
     let (_, results, _) = admit_pending_batch(&home, &proposals, &stamp(at + 10)).unwrap();
     assert_eq!(results, vec![Ok(()), Ok(()), Err(Refusal::Early)]);
 }
+
+#[test]
+fn a_late_veto_is_stored_with_an_in_window_receipt_from_another_home_and_signs_none() {
+    // §13.1 (revision 13): a veto that reaches a home more than 300 s after its `issued` is
+    // stored when it comes with at least one in-window receipt from another current home, as a
+    // forwarded transition is; the home signs no receipt of its own for it.
+    let recording = body(&fixture(
+        "t-vetoed-by-target",
+        "records/authority/00000003.json",
+    ));
+    let dec = |f: &str| STANDARD.decode(recording[f].as_str().unwrap()).unwrap();
+    let (t, v) = (dec("transition"), dec("veto"));
+    let tr = STANDARD
+        .decode(recording["transitionReceipts"][0].as_str().unwrap())
+        .unwrap();
+    let vr = STANDARD
+        .decode(recording["receipts"][0].as_str().unwrap())
+        .unwrap();
+    let (at, va) = (time(&t), time(&v));
+    let ready = |forward_veto_receipt: bool| {
+        // The second home; the receipts are the first home's.
+        let home = setup("t-vetoed-by-target", true, always(), at);
+        let home = admit(&home, &t, &stamp(at + 1)).state;
+        let home = admit(&home, &tr, &stamp(at + 2)).state;
+        if forward_veto_receipt {
+            // Held before the veto: its object is not here yet (`unavailable`).
+            let a = admit(&home, &vr, &stamp(va + 1));
+            assert!(a.result.is_err());
+            a.state
+        } else {
+            home
+        }
+    };
+    let late = stamp(va + 300_001);
+    // With the receipt held: stored, served, and no receipt of its own.
+    let with = admit(&ready(true), &v, &late);
+    assert_eq!(with.result, Ok(()));
+    assert!(with.receipts.is_empty());
+    let digest_v = digest(
+        &STANDARD
+            .decode(
+                serde_json::from_slice::<Value>(&v).unwrap()["body"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+    );
+    let detail = with
+        .state
+        .pending_object(&digest_v, va + 300_001)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.receipts.len(), 1, "the forwarded receipt now counts");
+    // Without any receipt: refused and not stored, as before.
+    let without = admit(&ready(false), &v, &late);
+    assert_eq!(without.result, Err(Refusal::Late));
+    assert!(without
+        .state
+        .pending_object(&digest_v, va + 300_001)
+        .unwrap()
+        .is_none());
+    // On time it still gets the home's own receipt.
+    let on_time = admit(&ready(false), &v, &stamp(va + 1_000));
+    assert_eq!(on_time.result, Ok(()));
+    assert_eq!(on_time.receipts.len(), 1);
+}

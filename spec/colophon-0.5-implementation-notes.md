@@ -441,3 +441,10 @@ test of revision 13 was replayed by the Swift source.**
   have been chosen and raised `issued`), and no existing vector changes. `prepare_final` (not
   edited) is unchanged. Vectors `t-final-head-choice-right`,
   `-choice-wrong`, `-ahead-ignored`; tests in `v05_final_choice.rs`.
+- **Late veto at a home (§13.1; E3 M2).** `home.rs` stores a veto that arrives after its 300 s
+  window (or the veto deadline) when an in-window receipt of it from another current home, received
+  at or before the deadline, is already held in `unmatched_receipts`; it then promotes the receipt,
+  stores and serves the veto and signs nothing. With none held it is `refused:late` and not stored,
+  as before; a receipt forwarded afterwards stays unmatched until the veto is sent again. Test
+  `a_late_veto_is_stored_with_an_in_window_receipt_from_another_home_and_signs_none`; no vector
+  (the runner's admission case takes one object, and this needs a receipt held first).
