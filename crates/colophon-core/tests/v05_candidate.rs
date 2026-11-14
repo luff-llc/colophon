@@ -753,31 +753,36 @@ fn trimmed(path: &Path) -> Vec<u8> {
 /// §13.3: two heads by one home at one seq with different digests are evidence; the evidence
 /// verifies from the home's key in the account's history.
 fn run_equivocation(dir: &Path) -> Outcome {
-    use colophon_core::v05::write::authority::{verify_evidence, Evidence};
-    let verdict = verify_history(
-        &objects_of(&cand().join("account")),
-        &Persisted::default(),
-        ms("2026-11-11T09:01:00Z"),
-    );
+    use colophon_core::v05::write::authority::{verify_evidence, Evidence, EvidenceContext};
+    let objects = objects_of(&cand().join("account"));
+    let now_ms = ms("2026-11-11T09:01:00Z");
+    let verdict = verify_history(&objects, &Persisted::default(), now_ms);
     let Some(st) = verdict.state else {
         return Outcome::Fail("the account history does not verify".into());
     };
-    let homes: Vec<(String, Vec<u8>)> = st
-        .current_homes()
-        .iter()
-        .map(|m| (m.request.member_id(), m.request.signing.clone()))
-        .collect();
     let ev = trimmed(&dir.join("evidence.json"));
-    match verify_evidence(&ev, st.account().as_str(), &homes) {
+    // The evidence's two heads are at seq 3. Whether they convict depends on §8.6 rule 1, which
+    // needs the entries the heads cover as held objects; the vector ships none, and the
+    // verifier answers `unavailable`, never a conviction.
+    let ctx = EvidenceContext {
+        objects: &objects,
+        now_ms,
+    };
+    match verify_evidence(&ev, st.account().as_str(), &ctx) {
         Ok(Evidence::Heads { home, seq }) => {
             Outcome::Pass(format!("evidence ok: home {home} at seq {seq}"))
         }
+        Err(Failure::Unavailable(_)) => Outcome::NotImplemented(
+            "heads evidence needs the entries the heads cover as held objects; the vector ships none",
+        ),
         other => Outcome::Fail(format!("{other:?}")),
     }
 }
 
-/// §8.7: two homes holding both receipts build the activation independently. Rebuilt through
-/// the builder from the entry's own fields, both files are the builder's bytes.
+/// §8.7: two homes holding both receipts build the activation independently. The vector
+/// directory holds only the two entries (no history), so `prepare_activate` cannot run from
+/// state here: the entry is rebuilt through `Kind::body` from its own fields, which checks
+/// the encoding only. The state-derived choice is tested in `v05_write_authority`.
 fn run_identical_activation(dir: &Path) -> Outcome {
     use colophon_core::v05::write::{envelope, Header, Kind};
     let (a, b) = (
@@ -811,7 +816,9 @@ fn run_identical_activation(dir: &Path) -> Outcome {
         .body(&header)
         .and_then(|bd| envelope(&bd, None, &[], &[], &[]));
     match rebuilt {
-        Ok(r) if r == a => Outcome::Pass("identical bytes, equal to the builder's".into()),
+        Ok(r) if r == a => Outcome::Pass(
+            "identical bytes; the vector ships no history, so only the encoder is exercised".into(),
+        ),
         other => Outcome::Fail(format!("builder differs: {:?}", other.map(|r| r.len()))),
     }
 }

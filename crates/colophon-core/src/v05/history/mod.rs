@@ -64,6 +64,13 @@ pub fn transition_timing(
     })
 }
 
+/// Check a held transition the way a home does before it receipts it: the transition's own
+/// checks, its unknown content, that it is not already recorded, and that its delta would
+/// apply at the head (a transition that would be void at activation is refused here).
+pub fn check_admissible_transition(s: &State, transition: &[u8]) -> Result<(), Failure> {
+    state::admission_transition(s, transition).map(|_| ())
+}
+
 impl State {
     /// The `issued` of the last verified entry, in ms.
     pub fn last_issued_ms(&self) -> i64 {

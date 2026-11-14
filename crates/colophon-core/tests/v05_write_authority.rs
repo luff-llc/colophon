@@ -95,13 +95,14 @@ impl Host {
         steps
             .iter()
             .map(|s| {
-                let k = &self.keys[&s.signer];
-                match &s.challenge {
+                let k = &self.keys[s.signer()];
+                match s.challenge() {
                     None => SignatureResult {
-                        signature: k.sign_raw(&s.body),
+                        signature: k.sign_raw(s.body()),
                         assertion: None,
                     },
                     Some(ch) => {
+                        let ch = ch.to_string();
                         let mut auth = Sha256::digest(RP.as_bytes()).to_vec();
                         auth.push(0x05);
                         auth.extend([0, 0, 0, 1]);
@@ -220,6 +221,10 @@ impl Chain {
         assert!(v.stop.is_none(), "history stops: {:?}", v.stop);
         v.state.unwrap()
     }
+    /// The account ID from the first held entry, even when the history forks.
+    fn account_of_genesis(&self) -> String {
+        body_digest_of_env(&self.objects.entries[0])
+    }
     fn account(&self) -> String {
         self.state().account().as_str().to_string()
     }
@@ -228,7 +233,7 @@ impl Chain {
     }
     /// Finish a batch with the host's signatures and hold what it returns.
     fn run(&mut self, host: &Host, batch: PendingBatch) -> Records {
-        let sigs = host.sign(&batch.steps);
+        let sigs = host.sign(batch.steps());
         let r = batch.finish(sigs).unwrap_or_else(|e| panic!("finish: {e}"));
         self.hold(&r);
         r
@@ -329,13 +334,13 @@ fn genesis_single_signer_verifies() {
     )
     .unwrap();
     let roles: Vec<_> = batch
-        .steps
+        .steps()
         .iter()
-        .map(|s| (s.signer.clone(), s.role))
+        .map(|s| (s.signer().to_string(), s.role()))
         .collect();
     assert_eq!(roles[0], (f.a.id.clone(), StepRole::Primary));
     assert!(roles.contains(&(f.b.id.clone(), StepRole::Possession)));
-    assert!(batch.steps.iter().all(|s| s.challenge.is_none()));
+    assert!(batch.steps().iter().all(|s| s.challenge().is_none()));
     chain.run(&f.host, batch);
     let st = chain.state();
     assert_eq!(st.history().len(), 1);
@@ -402,13 +407,13 @@ fn genesis_with_a_webauthn_signer_carries_an_assertion() {
         T0 + 60 * SEC,
     )
     .unwrap();
-    let step = &batch.steps[0];
-    assert!(step.uv);
+    let step = &batch.steps()[0];
+    assert!(step.uv());
     assert_eq!(
-        step.challenge.as_deref(),
-        Some(colophon_core::v05::signature::challenge(&step.body).as_str())
+        step.challenge(),
+        Some(colophon_core::v05::signature::challenge(step.body()).as_str())
     );
-    let sigs = host.sign(&batch.steps);
+    let sigs = host.sign(batch.steps());
     assert!(sigs[0].assertion.is_some());
     let r = batch.finish(sigs).unwrap();
     assert_eq!(r.entries.len(), 1);
@@ -429,7 +434,7 @@ fn a_bad_signature_returns_nothing() {
         T0 + 60 * SEC,
     )
     .unwrap();
-    let mut sigs = f.host.sign(&batch.steps);
+    let mut sigs = f.host.sign(batch.steps());
     sigs[0].signature[10] ^= 1;
     assert!(matches!(batch.finish(sigs), Err(Failure::BadSignature(_))));
 }
@@ -489,8 +494,8 @@ fn immediate_entries_each_verify() {
     // endSessions by the member itself (raw, one signer)
     let batch =
         prepare_end_sessions_by_member(&chain.objects, chain.now, &m.id, T0 + 4 * SEC).unwrap();
-    assert_eq!(batch.steps.len(), 1);
-    assert_eq!(batch.steps[0].signer, m.id);
+    assert_eq!(batch.steps().len(), 1);
+    assert_eq!(batch.steps()[0].signer(), m.id);
     chain.run(&host, batch);
     // keyring: add an approve controller C (possession proof by C, signed by A)
     let c = key(30);
@@ -512,9 +517,9 @@ fn immediate_entries_each_verify() {
     )
     .unwrap();
     assert!(batch
-        .steps
+        .steps()
         .iter()
-        .any(|s| s.signer == c.id && s.role == StepRole::Possession));
+        .any(|s| s.signer() == c.id && s.role() == StepRole::Possession));
     chain.run(&host, batch);
     // revoke
     chain.signed(
@@ -597,10 +602,8 @@ fn entries_the_signers_cannot_make_are_refused_at_prepare() {
     );
     assert!(matches!(r, Err(Failure::BadSignature(_))));
     // A rule the signers meet but a body the verifier refuses: finish returns nothing.
-    let bad = Kind::Renew {
-        member: key(77).id,
-        expires: "2026-11-25T08:00:00Z".into(),
-        shares: vec![],
+    let bad = Kind::Rekey {
+        epochs: vec![json!({"namespace": "undeclared", "epoch": 1, "seals": {}})],
     };
     let batch = prepare_signed(
         &chain.objects,
@@ -610,7 +613,7 @@ fn entries_the_signers_cannot_make_are_refused_at_prepare() {
         std::slice::from_ref(&f.a.id),
     )
     .unwrap();
-    let sigs = f.host.sign(&batch.steps);
+    let sigs = f.host.sign(batch.steps());
     assert!(matches!(batch.finish(sigs), Err(Failure::Malformed(_))));
     // issued earlier than the preceding entry is refused up front.
     let r = prepare_signed(
@@ -650,7 +653,7 @@ fn seq_two_is_a_rekey_when_namespaces_are_declared() {
         std::slice::from_ref(&f.a.id),
     )
     .unwrap();
-    let sigs = f.host.sign(&batch.steps);
+    let sigs = f.host.sign(batch.steps());
     assert!(batch.finish(sigs).is_err());
     // The rekey introducing epoch 1 is accepted. Seals are opaque values from package E4.
     let epoch = json!({"namespace": "notes", "epoch": 1,
@@ -707,7 +710,10 @@ fn removing_a_slotted_key_retires_the_vault_and_a_vault_entry_ends_it() {
     assert_eq!(r.pending.len(), 1);
     let t_digest = body_digest_of_env(&r.pending[0]);
     let act = prepare_activate(&chain.objects, chain.now, &t_digest).unwrap();
-    assert!(act.steps.is_empty(), "a recording entry needs no signature");
+    assert!(
+        act.steps().is_empty(),
+        "a recording entry needs no signature"
+    );
     chain.run(&f.host, act);
     let st = chain.state();
     assert!(st.vault_retiring());
@@ -778,13 +784,74 @@ fn a_transition_the_signers_cannot_propose_is_refused() {
     let mut p = transition_params(&chain, T0 + SEC, &[&f.a], change.clone());
     p.anchor = Some((1, "0".repeat(64)));
     assert!(prepare_transition(&chain.objects, chain.now, &p).is_err());
-    // Removing the last control key breaks §6: the verifier's check at finish refuses it.
+    // Removing every controller would be void at activation (§6, §8.7 "Delta at
+    // activation"): finish runs the admission delta check, so nothing is returned.
     let change = json!({"keyring": {"remove": [f.a.id, f.b.id]}});
     let p = transition_params(&chain, T0 + SEC, &[&f.a], change);
     let batch = prepare_transition(&chain.objects, chain.now, &p).unwrap();
-    let sigs = f.host.sign(&batch.steps);
-    let r = batch.finish(sigs);
-    assert!(r.is_ok() || r.is_err());
+    let sigs = f.host.sign(batch.steps());
+    match batch.finish(sigs) {
+        Err(Failure::Malformed(m)) => assert!(m.contains("void"), "{m}"),
+        other => panic!("a void transition must return nothing: {other:?}"),
+    }
+}
+
+#[test]
+fn prepare_refuses_a_transition_lacking_consent_escalation_or_the_right_rule() {
+    let f = fixture();
+    let mut chain = Chain::new(T0 + 3_600 * SEC);
+    chain.genesis(
+        &f.host,
+        "Consent",
+        &[],
+        fixture_keyring(&f),
+        std::slice::from_ref(&f.a.id),
+    );
+    // B (control, no recover) alone changing recoveryDelay: the verifier needs recovery-set
+    // consent, so a host is never asked to sign it.
+    let p = transition_params(
+        &chain,
+        T0 + SEC,
+        &[&f.b],
+        json!({"policy": {"recoveryDelay": 7200}}),
+    );
+    assert!(matches!(
+        prepare_transition(&chain.objects, chain.now, &p),
+        Err(Failure::BadSignature(_))
+    ));
+    // A holds recover: consent is met, and the change verifies.
+    let p = transition_params(
+        &chain,
+        T0 + SEC,
+        &[&f.a],
+        json!({"policy": {"recoveryDelay": 7200}}),
+    );
+    let batch = prepare_transition(&chain.objects, chain.now, &p).unwrap();
+    let sigs = f.host.sign(batch.steps());
+    assert_eq!(batch.finish(sigs).unwrap().pending.len(), 1);
+    // `keep` needs the recovery rule: under the control rule it is refused up front.
+    let p = transition_params(
+        &chain,
+        T0 + SEC,
+        &[&f.a],
+        json!({"keyring": {"remove": [f.b.id], "keep": []}}),
+    );
+    assert!(matches!(
+        prepare_transition(&chain.objects, chain.now, &p),
+        Err(Failure::BadSignature(_))
+    ));
+    // Under the recovery rule a policy change is not open.
+    let mut p = transition_params(
+        &chain,
+        T0 + SEC,
+        &[&f.a],
+        json!({"policy": {"callWindow": 600}}),
+    );
+    p.rule = TransitionRule::Recovery;
+    assert!(matches!(
+        prepare_transition(&chain.objects, chain.now, &p),
+        Err(Failure::BadSignature(_))
+    ));
 }
 
 /// An account with A and B and a home H appointed by an activated transition.
@@ -883,7 +950,7 @@ fn veto_suspend_vetoed_activate_and_final_verify() {
 
     // The home builds the `vetoed`; the suspension ends with it.
     let batch = prepare_vetoed(&chain.objects, chain.now, &t2_digest, &v_digest).unwrap();
-    assert!(batch.steps.is_empty());
+    assert!(batch.steps().is_empty());
     chain.run(&host, batch);
     let st = chain.state();
     assert!(st.active_suspensions(during).is_empty());
@@ -929,15 +996,19 @@ fn veto_suspend_vetoed_activate_and_final_verify() {
     let st = chain.state();
     assert!(st.activations().last().unwrap().final_);
 
-    // Evidence of a veto against a final activation: the form is built and verifies.
+    // The honest home must not be convicted: H receipted the veto of T2, which was recorded as
+    // `vetoed`, and signed the head for the `final` of T3, a different transition.
     let final_entry = chain.objects.entries.last().unwrap().clone();
-    let homes = vec![(h.id.clone(), h.point.clone())];
+    let activation = rec.entries[0].1.clone();
     let rcpt = receipt(&account, &h, &v_digest, v_issued + 5 * SEC);
-    let ev = equivocation_of_veto(&account, &veto, &rcpt, &final_entry, &homes).unwrap();
-    assert!(matches!(
-        verify_evidence(&ev, &account, &homes).unwrap(),
-        Evidence::Veto { .. }
-    ));
+    let ctx = EvidenceContext {
+        objects: &chain.objects,
+        now_ms: chain.now,
+    };
+    assert!(
+        equivocation_of_veto(&account, &activation, &veto, &rcpt, &final_entry, &ctx).is_err(),
+        "a veto of T2 and the final of T3 convict nobody"
+    );
 }
 
 impl Chain {
@@ -963,30 +1034,28 @@ fn receipts_are_chosen_by_lowest_home_then_lowest_digest() {
     } else {
         r2.clone()
     };
-    let a = choose_receipts(&st, &[r1.clone(), r2.clone()], &object, issued).unwrap();
-    let b = choose_receipts(&st, &[r2.clone(), r1.clone()], &object, issued).unwrap();
+    let a = choose_receipts(&st, &[r1.clone(), r2.clone()], &object, issued, None).unwrap();
+    let b = choose_receipts(&st, &[r2.clone(), r1.clone()], &object, issued, None).unwrap();
     assert_eq!(a, vec![want.clone()]);
     assert_eq!(a, b);
     // A receipt outside its window, by a stranger, or of another object does not count.
     let late = receipt(&account, &h, &object, issued + 301 * SEC);
     let stranger = receipt(&account, &key(55), &object, issued + 10 * SEC);
     let other = receipt(&account, &h, &"b".repeat(64), issued + 10 * SEC);
-    let r = choose_receipts(&st, &[late, stranger, other], &object, issued);
+    let r = choose_receipts(&st, &[late, stranger, other], &object, issued, None);
     assert!(matches!(r, Err(Failure::Unavailable(_))));
 }
 
 // ---------------------------------------------------------------------------------------------
 // Resolve and equivocation evidence.
 
-#[test]
-fn resolve_is_built_on_one_branch_of_a_fork() {
-    let f = fixture();
+fn two_grants_at_seq_two(f: &Fixture) -> (Chain, Host, Vec<Vec<u8>>) {
     let mut chain = Chain::new(T0 + 3_600 * SEC);
     chain.genesis(
         &f.host,
         "Fork",
         &[],
-        fixture_keyring(&f),
+        fixture_keyring(f),
         std::slice::from_ref(&f.a.id),
     );
     let account = chain.account();
@@ -1010,85 +1079,641 @@ fn resolve_is_built_on_one_branch_of_a_fork() {
             std::slice::from_ref(&f.a.id),
         )
         .unwrap();
-        let sigs = host.sign(&batch.steps);
+        let sigs = host.sign(batch.steps());
         let rec = batch.finish(sigs).unwrap();
         branches.push(rec.entries[0].1.clone());
     }
     chain.objects.entries.extend(branches.iter().cloned());
     assert_eq!(chain.verdict().code(), "refused:fork");
-    let dx = body_digest_of_env(&branches[0]);
-    let dy = body_digest_of_env(&branches[1]);
-    // Evidence of the conflict (§8.6 rule 3): both entries, sorted by body digest.
-    let ev = equivocation_of_entries(&account, &branches[0], &branches[1]).unwrap();
+    (chain, host, branches)
+}
+
+#[test]
+fn entries_evidence_is_built_from_two_valid_conflicting_entries() {
+    let f = fixture();
+    let (chain, _host, branches) = two_grants_at_seq_two(&f);
+    let account = chain.account_of_genesis();
+    let ctx = EvidenceContext {
+        objects: &chain.objects,
+        now_ms: chain.now,
+    };
+    let ev = equivocation_of_entries(&account, &branches[0], &branches[1], &ctx).unwrap();
     assert_eq!(
-        verify_evidence(&ev, &account, &[]).unwrap(),
+        verify_evidence(&ev, &account, &ctx).unwrap(),
         Evidence::Entries { seq: 2 }
     );
     assert_eq!(
         ev,
-        equivocation_of_entries(&account, &branches[1], &branches[0]).unwrap()
+        equivocation_of_entries(&account, &branches[1], &branches[0], &ctx).unwrap()
     );
-    assert!(equivocation_of_entries(&account, &branches[0], &branches[0]).is_err());
-    // `resolve` on branch X, discarding Y: A holds control and recover.
+    assert!(equivocation_of_entries(&account, &branches[0], &branches[0], &ctx).is_err());
+}
+
+#[test]
+fn entries_evidence_from_fabricated_entries_convicts_nobody() {
+    // The checker's H2: two made-up envelopes with garbage signatures at one seq and previous.
+    let f = fixture();
+    let (chain, _host, _branches) = two_grants_at_seq_two(&f);
+    let account = chain.account_of_genesis();
+    let genesis_digest = body_digest_of_env(&chain.objects.entries[0]);
+    let ctx = EvidenceContext {
+        objects: &chain.objects,
+        now_ms: chain.now,
+    };
+    let mk = |previous: &str, member: &str| {
+        let b = canonical(&json!({"protocol": "colophon/authority/5", "seq": 2,
+            "previous": previous, "issued": "2026-11-11T09:00:00Z", "by": f.a.id,
+            "kind": "endSessions", "member": member}))
+        .unwrap();
+        canonical(&json!({"body": b64(&b), "signature": b64(&[1u8; 64])})).unwrap()
+    };
+    // Previous not held: unavailable, never a conviction.
+    let (a, b) = (
+        mk(&"33".repeat(32), &"55".repeat(16)),
+        mk(&"33".repeat(32), &"66".repeat(16)),
+    );
+    assert!(matches!(
+        equivocation_of_entries(&account, &a, &b, &ctx),
+        Err(Failure::Unavailable(_))
+    ));
+    // Previous held, signatures garbage: badSignature.
+    let (a, b) = (
+        mk(&genesis_digest, &"55".repeat(16)),
+        mk(&genesis_digest, &"66".repeat(16)),
+    );
+    assert!(matches!(
+        equivocation_of_entries(&account, &a, &b, &ctx),
+        Err(Failure::BadSignature(_))
+    ));
+}
+
+#[test]
+fn resolve_finish_returns_nothing_while_the_verifier_cannot_apply_it() {
+    // Verifier gap (checker M3): `resolve` changes nothing under `apply_delta`, so it is void
+    // at activation and admission refuses it. finish runs that admission check and returns
+    // nothing. Not E1's to fix; this records the behaviour.
+    let f = fixture();
+    let (chain, host, branches) = two_grants_at_seq_two(&f);
+    let (dx, dy) = (
+        body_digest_of_env(&branches[0]),
+        body_digest_of_env(&branches[1]),
+    );
     let batch = prepare_resolve(
         &chain.objects,
         chain.now,
-        (2, dx.clone()),
+        (2, dx),
         (2, dy),
         T0 + 10 * SEC,
         vec![f.a.id.clone()],
         TransitionRule::Control,
     )
     .unwrap();
-    let rec = batch.finish(vec![]).err();
-    assert!(rec.is_some(), "no signatures: nothing is returned");
+    assert!(
+        batch.finish(vec![]).is_err(),
+        "no signatures: nothing returned"
+    );
+    let (dx, dy) = (
+        body_digest_of_env(&branches[0]),
+        body_digest_of_env(&branches[1]),
+    );
     let batch = prepare_resolve(
         &chain.objects,
         chain.now,
         (2, dx),
-        (2, body_digest_of_env(&branches[1])),
+        (2, dy),
         T0 + 10 * SEC,
         vec![f.a.id.clone()],
         TransitionRule::Control,
     )
     .unwrap();
-    let sigs = host.sign(&batch.steps);
-    let rec = batch.finish(sigs).unwrap();
-    assert_eq!(rec.pending.len(), 1);
+    let sigs = host.sign(batch.steps());
+    match batch.finish(sigs) {
+        Err(Failure::Malformed(m)) => assert!(m.contains("void"), "{m}"),
+        other => panic!("expected a void refusal: {other:?}"),
+    }
+}
+
+/// A transition T2 (A removes B) receipted by H, vetoed by B; the veto receipted by H.
+fn vetoable(
+    f: &Fixture,
+    v_offset: i64,
+    v_receipt_offset: i64,
+) -> (Chain, Key, Host, String, String, i64) {
+    let (mut chain, h, host) = account_with_home(f);
+    let account = chain.account();
+    let t2_issued = T0 + 100 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t2_issued,
+            &[&f.a],
+            json!({"keyring": {"remove": [f.b.id]}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t2 = r.pending[0].clone();
+    let t2_digest = body_digest_of_env(&t2);
+    let r2 = receipt(&account, &h, &t2_digest, t2_issued + 10 * SEC);
+    chain.objects.pending.push(r2.clone());
+    let v_issued = t2_issued + v_offset;
+    let batch = prepare_veto(
+        &chain.objects,
+        chain.now,
+        &VetoParams {
+            transition: t2,
+            transition_receipts: vec![r2],
+            issued_ms: v_issued,
+            signers: vec![f.b.id.clone()],
+        },
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let v_digest = body_digest_of_env(&r.pending[0]);
+    chain.objects.pending.push(receipt(
+        &account,
+        &h,
+        &v_digest,
+        v_issued + v_receipt_offset,
+    ));
+    (chain, h, host, t2_digest, v_digest, t2_issued)
 }
 
 #[test]
-fn head_equivocation_evidence_builds_and_verifies() {
+fn heads_evidence_does_not_convict_an_honest_displacement() {
+    // The checker's H3. An honest home signs a head over a provisional `activate`, then
+    // receives the `vetoed` that displaces it (§8.6 rule 1) and signs a head over that.
     let f = fixture();
-    let (chain, h, _) = account_with_home(&f);
+    let (chain, h, _host, t2, v, _) = vetoable(&f, 30 * SEC, 5 * SEC);
     let account = chain.account();
-    let homes = vec![(h.id.clone(), h.point.clone())];
-    let a = head(&account, &h, 3, &"1".repeat(64), T0 + 100 * SEC);
-    let b = head(&account, &h, 3, &"2".repeat(64), T0 + 101 * SEC);
-    let ev = equivocation_of_heads(&account, &a, &b, &homes).unwrap();
-    assert_eq!(ev, equivocation_of_heads(&account, &b, &a, &homes).unwrap());
+    let act = prepare_activate(&chain.objects, chain.now, &t2)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let vet = prepare_vetoed(&chain.objects, chain.now, &t2, &v)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let (x, y) = (act.entries[0].1.clone(), vet.entries[0].1.clone());
+    assert_eq!((act.entries[0].0, vet.entries[0].0), (3, 3));
+    let mut all = chain.objects.clone();
+    all.entries.extend([x.clone(), y.clone()]);
+    let verdict = verify_history(&all, &Persisted::default(), chain.now);
+    assert!(verdict.stop.is_none(), "{:?}", verdict.stop);
     assert_eq!(
-        verify_evidence(&ev, &account, &homes).unwrap(),
+        verdict.branch[2],
+        body_digest_of_env(&y),
+        "the vetoed stands"
+    );
+    let ctx = EvidenceContext {
+        objects: &all,
+        now_ms: chain.now,
+    };
+    let early_over_x = head(&account, &h, 3, &body_digest_of_env(&x), T0 + 5_000 * SEC);
+    let later_over_y = head(&account, &h, 3, &body_digest_of_env(&y), T0 + 5_100 * SEC);
+    let r = equivocation_of_heads(&account, &early_over_x, &later_over_y, &ctx);
+    assert!(
+        matches!(r, Err(Failure::Malformed(ref m)) if m.contains("rule 1")),
+        "{r:?}"
+    );
+    // The other order is a regression, not a displacement: the home signed over the entry
+    // that stands and later over the one it displaced.
+    let early_over_y = head(&account, &h, 3, &body_digest_of_env(&y), T0 + 5_000 * SEC);
+    let later_over_x = head(&account, &h, 3, &body_digest_of_env(&x), T0 + 5_100 * SEC);
+    let ev = equivocation_of_heads(&account, &early_over_y, &later_over_x, &ctx).unwrap();
+    assert_eq!(
+        verify_evidence(&ev, &account, &ctx).unwrap(),
         Evidence::Heads {
             home: h.id.clone(),
             seq: 3
         }
     );
-    // Refusals: the same entry, different seqs, a different home, an unknown home, a forged one.
+    // The two orders of arguments build the same evidence.
+    assert_eq!(
+        ev,
+        equivocation_of_heads(&account, &later_over_x, &early_over_y, &ctx).unwrap()
+    );
+}
+
+#[test]
+fn heads_evidence_needs_the_history_and_verified_heads() {
+    let f = fixture();
+    let (chain, h, _) = account_with_home(&f);
+    let account = chain.account();
+    let ctx = EvidenceContext {
+        objects: &chain.objects,
+        now_ms: chain.now,
+    };
+    let a = head(&account, &h, 3, &"1".repeat(64), T0 + 100 * SEC);
+    let b = head(&account, &h, 3, &"2".repeat(64), T0 + 101 * SEC);
+    // The held history stops at seq 2: unavailable, never a conviction.
+    assert!(matches!(
+        equivocation_of_heads(&account, &a, &b, &ctx),
+        Err(Failure::Unavailable(_))
+    ));
+    // Refusals: the same entry, different seqs, a stranger, a forged signature.
     let same = head(&account, &h, 3, &"1".repeat(64), T0 + 102 * SEC);
-    assert!(equivocation_of_heads(&account, &a, &same, &homes).is_err());
+    assert!(equivocation_of_heads(&account, &a, &same, &ctx).is_err());
     let other_seq = head(&account, &h, 4, &"2".repeat(64), T0 + 101 * SEC);
-    assert!(equivocation_of_heads(&account, &a, &other_seq, &homes).is_err());
+    assert!(equivocation_of_heads(&account, &a, &other_seq, &ctx).is_err());
     let stranger = key(56);
+    let sa = head(&account, &stranger, 3, &"1".repeat(64), T0 + 100 * SEC);
     let sb = head(&account, &stranger, 3, &"2".repeat(64), T0 + 101 * SEC);
-    assert!(equivocation_of_heads(&account, &a, &sb, &homes).is_err());
-    assert!(equivocation_of_heads(&account, &a, &b, &[]).is_err());
+    assert!(matches!(
+        equivocation_of_heads(&account, &sa, &sb, &ctx),
+        Err(Failure::BadSignature(_))
+    ));
+    assert!(equivocation_of_heads(&account, &a, &sb, &ctx).is_err());
     let mut forged = b.clone();
     let n = forged.len();
     forged[n - 6] ^= 1;
-    assert!(equivocation_of_heads(&account, &a, &forged, &homes).is_err());
+    assert!(equivocation_of_heads(&account, &a, &forged, &ctx).is_err());
+    // Entries a head covers that are not held: unavailable even when the history reaches.
+    let (chain, h, _host, t2, _v, _) = vetoable(&f, 30 * SEC, 5 * SEC);
+    let act = prepare_activate(&chain.objects, chain.now, &t2)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let mut held = chain.objects.clone();
+    held.entries.push(act.entries[0].1.clone());
+    let ctx = EvidenceContext {
+        objects: &held,
+        now_ms: chain.now,
+    };
+    let account = chain.account();
+    let x = head(
+        &account,
+        &h,
+        3,
+        &body_digest_of_env(&act.entries[0].1),
+        T0 + 5_000 * SEC,
+    );
+    let unknown = head(&account, &h, 3, &"2".repeat(64), T0 + 5_100 * SEC);
+    assert!(matches!(
+        equivocation_of_heads(&account, &x, &unknown, &ctx),
+        Err(Failure::Unavailable(_))
+    ));
     // Evidence over the wrong account does not verify.
-    assert!(verify_evidence(&ev, &"c".repeat(64), &homes).is_err());
+    assert!(verify_evidence(b"{}", &"c".repeat(64), &ctx).is_err());
+}
+
+/// An activation of T2 (removing B) that H witnesses with a head, recorded by a `final`, with
+/// B's veto of T2 receipted by H `v_receipt_offset` after the veto's `issued`.
+fn final_over_a_vetoed_activation(
+    f: &Fixture,
+    v_offset: i64,
+    v_receipt_offset: i64,
+) -> (Chain, Key, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (mut chain, h, host, t2, v, _) = vetoable(f, v_offset, v_receipt_offset);
+    let account = chain.account();
+    let veto = chain
+        .objects
+        .pending
+        .iter()
+        .find(|b| body_digest_of_env(b) == v)
+        .unwrap()
+        .clone();
+    let rcpt = chain
+        .objects
+        .pending
+        .iter()
+        .find(|b| {
+            let e: Value = serde_json::from_slice(b).unwrap();
+            let body: Value =
+                serde_json::from_slice(&STANDARD.decode(e["body"].as_str().unwrap()).unwrap())
+                    .unwrap();
+            body["protocol"] == "colophon/receipt/5" && body["object"] == v.as_str()
+        })
+        .unwrap()
+        .clone();
+    let act = prepare_activate(&chain.objects, chain.now, &t2).unwrap();
+    let r = chain.run(&host, act);
+    let activation = r.entries[0].1.clone();
+    let a = chain.state().activations().last().unwrap().clone();
+    chain
+        .objects
+        .heads
+        .push(head(&account, &h, a.seq, &a.digest, T0 + 5_000 * SEC));
+    let fin = prepare_final(&chain.objects, chain.now, a.seq).unwrap();
+    let r = chain.run(&host, fin);
+    (chain, h, activation, veto, rcpt, r.entries[0].1.clone())
+}
+
+#[test]
+fn veto_evidence_convicts_only_a_home_that_receipted_in_time_and_witnessed_the_final() {
+    let f = fixture();
+    let (chain, h, activation, veto, rcpt, fin) =
+        final_over_a_vetoed_activation(&f, 30 * SEC, 5 * SEC);
+    let account = chain.account();
+    let ctx = EvidenceContext {
+        objects: &chain.objects,
+        now_ms: chain.now,
+    };
+    let ev = equivocation_of_veto(&account, &activation, &veto, &rcpt, &fin, &ctx).unwrap();
+    assert_eq!(
+        verify_evidence(&ev, &account, &ctx).unwrap(),
+        Evidence::Veto { home: h.id.clone() }
+    );
+    // A final whose head is forged does not convict (the checker's H1: heads were never
+    // signature-checked).
+    let fin_body: Value = serde_json::from_slice(
+        &STANDARD
+            .decode(
+                serde_json::from_slice::<Value>(&fin).unwrap()["body"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let real_head = dec(fin_body["heads"][0].as_str().unwrap()).unwrap();
+    let mut hv: Value = serde_json::from_slice(&real_head).unwrap();
+    hv["signature"] = json!(b64(&[0u8; 64]));
+    let fake_head = canonical(&hv).unwrap();
+    let header = Header {
+        seq: fin_body["seq"].as_u64().unwrap(),
+        previous: fin_body["previous"].as_str().map(str::to_string),
+        issued: fin_body["issued"].as_str().unwrap().to_string(),
+        by: fin_body["by"].as_str().unwrap().to_string(),
+    };
+    let forged_body = Kind::Final {
+        activation_seq: fin_body["activation"]["seq"].as_u64().unwrap(),
+        activation_digest: fin_body["activation"]["digest"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        heads: vec![fake_head],
+    }
+    .body(&header)
+    .unwrap();
+    let forged_final = envelope(&forged_body, None, &[], &[], &[]).unwrap();
+    assert!(matches!(
+        equivocation_of_veto(&account, &activation, &veto, &rcpt, &forged_final, &ctx),
+        Err(Failure::BadSignature(_))
+    ));
+    // A receipt of another veto, a veto of another transition: no link, no conviction.
+    let other_rcpt = receipt(&account, &h, &"9".repeat(64), T0 + 150 * SEC);
+    assert!(equivocation_of_veto(&account, &activation, &veto, &other_rcpt, &fin, &ctx).is_err());
+}
+
+#[test]
+fn veto_evidence_refuses_a_receipt_after_the_deadline() {
+    // T2's veto deadline is its `issued` + 3,600 s. The veto is issued at +3,500 s and the
+    // home receipts it at +3,700 s: too late to have stopped anything.
+    let f = fixture();
+    let (chain, _h, activation, veto, rcpt, fin) =
+        final_over_a_vetoed_activation(&f, 3_500 * SEC, 200 * SEC);
+    let account = chain.account();
+    let ctx = EvidenceContext {
+        objects: &chain.objects,
+        now_ms: chain.now,
+    };
+    match equivocation_of_veto(&account, &activation, &veto, &rcpt, &fin, &ctx) {
+        Err(Failure::Malformed(m)) => assert!(m.contains("deadline"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn vetoed_skips_a_receipt_after_the_deadline() {
+    // The checker's H4. The lowest home's receipt of the veto is late; the other home's is
+    // timely. The late one is skipped, not chosen, and the `vetoed` verifies.
+    let f = fixture();
+    let (mut chain, lo, hi, host) = account_with_two_homes(&f);
+    let account = chain.account();
+    let t2_issued = T0 + 100 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t2_issued,
+            &[&f.a],
+            json!({"keyring": {"remove": [f.b.id]}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t2 = r.pending[0].clone();
+    let t2_digest = body_digest_of_env(&t2);
+    let r2 = receipt(&account, &lo, &t2_digest, t2_issued + 10 * SEC);
+    chain.objects.pending.push(r2.clone());
+    let v_issued = t2_issued + 3_500 * SEC;
+    let batch = prepare_veto(
+        &chain.objects,
+        chain.now,
+        &VetoParams {
+            transition: t2,
+            transition_receipts: vec![r2],
+            issued_ms: v_issued,
+            signers: vec![f.b.id.clone()],
+        },
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let v_digest = body_digest_of_env(&r.pending[0]);
+    let late = receipt(&account, &lo, &v_digest, v_issued + 200 * SEC);
+    let timely = receipt(&account, &hi, &v_digest, v_issued + 10 * SEC);
+    chain.objects.pending.extend([late, timely]);
+    let rec = prepare_vetoed(&chain.objects, chain.now, &t2_digest, &v_digest)
+        .unwrap()
+        .finish(vec![])
+        .expect("one late receipt must not block a valid vetoed");
+    assert_eq!(rec.entries[0].0, 3);
+}
+
+fn account_with_two_homes(f: &Fixture) -> (Chain, Key, Key, Host) {
+    let mut chain = Chain::new(T0 + 10 * 86_400 * SEC);
+    chain.genesis(
+        &f.host,
+        "Homes",
+        &[],
+        fixture_keyring(f),
+        std::slice::from_ref(&f.a.id),
+    );
+    let account = chain.account();
+    let (h1, h2) = (key(40), key(42));
+    let mut host = Host::default();
+    host.keys = f.host.keys.clone();
+    host.add(&h1);
+    host.add(&h2);
+    let mut appoint: Vec<(String, Value)> = [(&h1, key(41)), (&h2, key(43))]
+        .iter()
+        .map(|(h, ag)| {
+            (
+                h.id.clone(),
+                json!({"request": b64(&request(&account, h, ag, "Home", "server", home_terms())),
+                       "terms": home_terms()}),
+            )
+        })
+        .collect();
+    appoint.sort_by(|a, b| a.0.cmp(&b.0));
+    let change =
+        json!({"homes": {"appoint": appoint.into_iter().map(|x| x.1).collect::<Vec<_>>()}});
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(&chain, T0 + 10 * SEC, &[&f.a], change),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t = body_digest_of_env(&r.pending[0]);
+    let act = prepare_activate(&chain.objects, chain.now, &t).unwrap();
+    chain.run(&host, act);
+    assert_eq!(chain.state().current_homes().len(), 2);
+    let (lo, hi) = if h1.id < h2.id { (h1, h2) } else { (h2, h1) };
+    (chain, lo, hi, host)
+}
+
+#[test]
+fn the_chooser_treats_a_reformatted_receipt_like_the_canonical_one() {
+    // Like a home: canonicalize a held receipt rather than skip it.
+    let f = fixture();
+    let (chain, h, _) = account_with_home(&f);
+    let st = chain.state();
+    let account = chain.account();
+    let object = "a".repeat(64);
+    let issued = T0 + 100 * SEC;
+    let canonical_receipt = receipt(&account, &h, &object, issued + 10 * SEC);
+    let pretty =
+        serde_json::to_vec_pretty(&serde_json::from_slice::<Value>(&canonical_receipt).unwrap())
+            .unwrap();
+    assert_ne!(pretty, canonical_receipt);
+    let chosen = choose_receipts(&st, &[pretty], &object, issued, None).unwrap();
+    assert_eq!(chosen, vec![canonical_receipt]);
+}
+
+#[test]
+fn prepare_refuses_what_only_finish_would_refuse() {
+    let f = fixture();
+    let mut chain = Chain::new(T0 + 3_600 * SEC);
+    chain.genesis(
+        &f.host,
+        "Early",
+        &[],
+        fixture_keyring(&f),
+        std::slice::from_ref(&f.a.id),
+    );
+    // An issued time that is no §2.2 date.
+    for bad in [i64::MAX, i64::MIN, 253_402_300_800_000] {
+        let r = prepare_signed(
+            &chain.objects,
+            chain.now,
+            Kind::EndSessions { member: key(77).id },
+            bad,
+            std::slice::from_ref(&f.a.id),
+        );
+        assert!(matches!(r, Err(Failure::Malformed(_))), "{bad}: {r:?}");
+    }
+    assert!(prepare_genesis(
+        &GenesisParams {
+            label: "x".into(),
+            namespaces: vec![],
+            keyring: fixture_keyring(&f),
+            issued_ms: i64::MAX,
+            signers: vec![f.a.id.clone()],
+        },
+        chain.now
+    )
+    .is_err());
+    // endSessions, renew and revoke of a member that does not exist.
+    let ghost = key(77).id;
+    for kind in [
+        Kind::EndSessions {
+            member: ghost.clone(),
+        },
+        Kind::Revoke {
+            member: ghost.clone(),
+            kept: vec![],
+            heads: vec![],
+            epochs: vec![],
+        },
+    ] {
+        let r = prepare_signed(
+            &chain.objects,
+            chain.now,
+            kind,
+            T0 + SEC,
+            std::slice::from_ref(&f.a.id),
+        );
+        assert!(matches!(r, Err(Failure::Malformed(_))), "{r:?}");
+    }
+    assert!(prepare_end_sessions_by_member(&chain.objects, chain.now, &ghost, T0 + SEC).is_err());
+    // A body over the bound is refused from its embedded objects, before serializing.
+    let big = Kind::Grant {
+        request: vec![0u8; 800_000],
+        terms: json!({}),
+        shares: vec![],
+    };
+    let header = Header {
+        seq: 2,
+        previous: Some("0".repeat(64)),
+        issued: "2026-11-11T08:00:00Z".into(),
+        by: f.a.id.clone(),
+    };
+    assert!(matches!(big.body(&header), Err(Failure::Malformed(_))));
+}
+
+#[test]
+fn final_ignores_a_head_dated_ahead_of_the_clock() {
+    // The checker's L5. A witness's future-dated head with the lower digest must not hold
+    // back a `final` when a usable head exists.
+    let f = fixture();
+    let (mut chain, h, host, _t2, _v, _) = vetoable(&f, 30 * SEC, 5 * SEC);
+    let account = chain.account();
+    // A transition T3 by A and B, activated; H is its witness.
+    let t3_issued = T0 + 200 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t3_issued,
+            &[&f.a, &f.b],
+            json!({"policy": {"callWindow": 600}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t3 = body_digest_of_env(&r.pending[0]);
+    chain
+        .objects
+        .pending
+        .push(receipt(&account, &h, &t3, t3_issued + 10 * SEC));
+    let act = prepare_activate(&chain.objects, chain.now, &t3).unwrap();
+    chain.run(&host, act);
+    let a = chain.state().activations().last().unwrap().clone();
+    let good = head(&account, &h, a.seq, &a.digest, T0 + 5_000 * SEC);
+    // Several future-dated heads: one of them is sure to have the lowest digest.
+    let mut futures = Vec::new();
+    for n in 0..6 {
+        futures.push(head(
+            &account,
+            &h,
+            a.seq,
+            &a.digest,
+            chain.now + 3_600 * SEC + n * SEC,
+        ));
+    }
+    chain.objects.heads.extend(futures);
+    chain.objects.heads.push(good.clone());
+    let rec = prepare_final(&chain.objects, chain.now, a.seq)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let body: Value = serde_json::from_slice(
+        &STANDARD
+            .decode(
+                serde_json::from_slice::<Value>(&rec.entries[0].1).unwrap()["body"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(dec(body["heads"][0].as_str().unwrap()).unwrap(), good);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1330,7 +1955,11 @@ fn kind_of(b: &Value) -> Option<(Kind, &'static [&'static str])> {
 }
 
 #[test]
-fn builders_reproduce_the_candidate_vectors_entry_bytes() {
+fn kind_body_round_trips_the_candidate_vectors_field_names_and_encoding() {
+    // What this proves, and no more: `Kind::body` puts the vector's own field values under the
+    // right names, spells the header and `kind`, base64-embeds objects and encodes canonically.
+    // Keyrings, terms, receipts and heads are copied from the vector as opaque values here; the
+    // state-aware replay test below is the one that builds from held objects.
     let scalars = published_scalars();
     let mut files = Vec::new();
     files_named(&repo().join("conformance/0.5/candidate"), &mut files);
@@ -1566,4 +2195,279 @@ fn the_account_vector_rebuilds_through_prepare_and_finish() {
     let batch = prepare_activate(&chain.objects, now, &t_digest).unwrap();
     let r = batch.finish(vec![]).unwrap();
     assert_eq!(r.entries[0].1, read("00000003.json"), "activate bytes");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The state-aware replay: prepare and finish from held objects against the vectors.
+
+fn client_challenge(client: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(client)
+        .ok()?
+        .get("challenge")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Replay one vector's primary chain through the state-aware builders. Each entry's inputs are
+/// held objects and fields (the transition and receipts of an `activate` are pending objects,
+/// the heads of a `final` are held heads), never the vector's finished bytes; the vector's
+/// bytes are held afterwards so the next entry has its history. Returns per kind
+/// (identical, refused by the builder, different bytes, skipped).
+fn replay_vector(
+    dir: &std::path::Path,
+    scalars: &BTreeMap<String, Vec<u8>>,
+    stats: &mut BTreeMap<String, [usize; 4]>,
+    notes: &mut Vec<String>,
+) {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join("records/authority"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    let case = read_json(&dir.join("case.json"));
+    let base_now = case["verifier"]["now"]
+        .as_str()
+        .and_then(parse_date)
+        .unwrap_or_else(|| parse_date("2026-11-20T00:00:00Z").unwrap());
+    // The rate-limit vectors hold 60+ entries; replaying each against its whole history is
+    // quadratic. Their earlier entries are only held; the last three are replayed.
+    let replay_from = if files.len() > 12 { files.len() - 3 } else { 0 };
+    let expected_ok_through = match (
+        case["expected"]["result"].as_str(),
+        case["expected"]["seq"].as_u64(),
+    ) {
+        (Some("ok"), Some(n)) => n,
+        _ => 0,
+    };
+    let mut objects = Objects::default();
+    for (idx, p) in files.into_iter().enumerate() {
+        let mut raw = std::fs::read(&p).unwrap();
+        if raw.last() == Some(&b'\n') {
+            raw.pop();
+        }
+        if idx < replay_from {
+            objects.entries.push(raw);
+            continue;
+        }
+        let rel = p.strip_prefix(repo()).unwrap().display().to_string();
+        let env: Value = serde_json::from_slice(&raw).unwrap();
+        let body_bytes = dec(env["body"].as_str().unwrap()).unwrap();
+        let bv: Value = serde_json::from_slice(&body_bytes).unwrap();
+        let kind_name = bv["kind"].as_str().unwrap_or("?").to_string();
+        let cell = stats.entry(kind_name.clone()).or_default();
+        let hold = |objects: &mut Objects| objects.entries.push(raw.clone());
+        // A body that is not canonical on purpose is a negative vector for the verifier; a
+        // builder only writes canonical bytes.
+        if canonical(&bv).ok().as_deref() != Some(&body_bytes[..]) {
+            cell[3] += 1;
+            hold(&mut objects);
+            continue;
+        }
+        if bv["protocol"] != "colophon/authority/5" || env.get("handover").is_some() {
+            cell[3] += 1;
+            hold(&mut objects);
+            continue;
+        }
+        let issued = bv["issued"].as_str().and_then(parse_date).unwrap_or(0);
+        let now = base_now.max(issued);
+        let by = bv["by"].as_str().unwrap().to_string();
+        let ids = |f: &str| -> Vec<String> {
+            env.get(f)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|i| i["signer"].as_str().map(str::to_string))
+                .collect()
+        };
+        let mut signers = vec![by.clone()];
+        signers.extend(ids("cosignatures"));
+        // Prepare from held objects.
+        let mut held = objects.clone();
+        let prepared = (|| -> Option<Result<PendingBatch, Failure>> {
+            let bytes = |f: &str| dec(bv[f].as_str()?);
+            Some(match kind_name.as_str() {
+                "genesis" => prepare_genesis(
+                    &GenesisParams {
+                        label: bv["label"].as_str()?.into(),
+                        namespaces: strs(&bv["namespaces"])?,
+                        keyring: bv["keyring"].clone(),
+                        issued_ms: issued,
+                        signers: signers.clone(),
+                    },
+                    now,
+                ),
+                "activate" => {
+                    let t = bytes("transition")?;
+                    held.pending.push(t.clone());
+                    held.pending.extend(list(&bv["receipts"])?);
+                    prepare_activate(&held, now, &body_digest_of_env(&t))
+                }
+                "vetoed" => {
+                    let (t, v) = (bytes("transition")?, bytes("veto")?);
+                    held.pending.extend([t.clone(), v.clone()]);
+                    held.pending.extend(list(&bv["transitionReceipts"])?);
+                    held.pending.extend(list(&bv["receipts"])?);
+                    prepare_vetoed(&held, now, &body_digest_of_env(&t), &body_digest_of_env(&v))
+                }
+                "final" => {
+                    held.heads.extend(list(&bv["heads"])?);
+                    prepare_final(&held, now, bv["activation"]["seq"].as_u64()?)
+                }
+                "suspend" => {
+                    let t = bytes("transition")?;
+                    held.pending.push(t.clone());
+                    held.pending.extend(list(&bv["receipts"])?);
+                    prepare_suspend(
+                        &held,
+                        now,
+                        bv["key"].as_str()?,
+                        &body_digest_of_env(&t),
+                        issued,
+                        &by,
+                    )
+                }
+                "endSessions" if !env["cosignatures"].is_array() => {
+                    // Signed by the member itself under the member rule, or by a controller.
+                    match prepare_end_sessions_by_member(&held, now, &by, issued) {
+                        Ok(b) => Ok(b),
+                        Err(_) => {
+                            let (kind, _) = kind_of(&bv)?;
+                            prepare_signed(&held, now, kind, issued, &signers)
+                        }
+                    }
+                }
+                _ => {
+                    let (kind, _) = kind_of(&bv)?;
+                    if matches!(kind, Kind::Genesis { .. }) || kind.is_recording() {
+                        return None;
+                    }
+                    prepare_signed(&held, now, kind, issued, &signers)
+                }
+            })
+        })();
+        let Some(prepared) = prepared else {
+            cell[3] += 1;
+            hold(&mut objects);
+            continue;
+        };
+        let outcome = (|| -> Result<Vec<u8>, String> {
+            let batch = prepared.map_err(|e| format!("prepare: {e}"))?;
+            // The vector item for each step, by role and signer.
+            let item = |step: &SigningStep| -> Option<Value> {
+                if step.role() == StepRole::Primary {
+                    return Some(env.clone());
+                }
+                let list = if step.role() == StepRole::Cosignature {
+                    "cosignatures"
+                } else {
+                    "additions"
+                };
+                env.get(list)?
+                    .as_array()?
+                    .iter()
+                    .find(|i| i["signer"] == step.signer())
+                    .cloned()
+            };
+            let mut sigs = Vec::new();
+            for step in batch.steps() {
+                let k = key_from_scalar(scalars.get(step.signer()).ok_or("scalar not published")?);
+                let it = item(step).ok_or("the vector has no such signature item")?;
+                match step.challenge() {
+                    None => sigs.push(SignatureResult {
+                        signature: k.sign_raw(step.body()),
+                        assertion: None,
+                    }),
+                    Some(ch) => {
+                        let a = it.get("assertion").ok_or("no vector assertion")?;
+                        let (d, c) = (
+                            dec(a["authenticatorData"].as_str().unwrap()).unwrap(),
+                            dec(a["clientData"].as_str().unwrap()).unwrap(),
+                        );
+                        // The step's challenge is the challenge the vector's clientData carries.
+                        if client_challenge(&c).as_deref() != Some(ch) {
+                            return Err("DIFFERENT: the WebAuthn challenge differs".into());
+                        }
+                        sigs.push(SignatureResult {
+                            signature: k.sign_webauthn(&d, &c),
+                            assertion: Some((d, c)),
+                        });
+                    }
+                }
+            }
+            let rec = batch.finish(sigs).map_err(|e| format!("finish: {e}"))?;
+            Ok(rec.entries[0].1.clone())
+        })();
+        match outcome {
+            Ok(built) if built == raw => cell[0] += 1,
+            Ok(_) => {
+                cell[2] += 1;
+                notes.push(format!(
+                    "DIFFERENT {rel}: finish succeeded with other bytes"
+                ));
+            }
+            Err(e) if e.starts_with("DIFFERENT") => {
+                cell[2] += 1;
+                notes.push(format!("{e} {rel}"));
+            }
+            Err(e) if e == "scalar not published" || e.starts_with("the vector has no") => {
+                cell[3] += 1
+            }
+            Err(e) => {
+                cell[1] += 1;
+                // The builder may refuse only what the case says is refused.
+                if bv["seq"].as_u64().unwrap_or(0) <= expected_ok_through {
+                    notes.push(format!("DIFFERENT {rel}: refused a valid entry: {e}"));
+                } else {
+                    notes.push(format!("refused {rel}: {e}"));
+                }
+            }
+        }
+        hold(&mut objects);
+    }
+}
+
+#[test]
+fn state_aware_builders_reproduce_vector_entries_from_held_objects() {
+    let scalars = published_scalars();
+    let mut stats: BTreeMap<String, [usize; 4]> = BTreeMap::new();
+    let mut notes = Vec::new();
+    let root = repo().join("conformance/0.5/candidate");
+    let mut dirs = vec![root.join("account")];
+    for e in std::fs::read_dir(root.join("rules")).unwrap() {
+        let p = e.unwrap().path();
+        if p.join("records/authority").is_dir() && p.join("case.json").exists() {
+            dirs.push(p);
+        }
+    }
+    dirs.sort();
+    for d in &dirs {
+        replay_vector(d, &scalars, &mut stats, &mut notes);
+    }
+    println!("replayed {} vector histories", dirs.len());
+    for (k, [same, refused, diff, skipped]) in &stats {
+        println!(
+            "  {k}: {same} identical, {refused} refused by the builder, {diff} different, {skipped} skipped"
+        );
+    }
+    for n in notes.iter().take(60) {
+        println!("  {n}");
+    }
+    let different: Vec<_> = notes
+        .iter()
+        .filter(|n| n.starts_with("DIFFERENT"))
+        .collect();
+    assert!(
+        different.is_empty(),
+        "bytes differ from the vectors: {different:#?}"
+    );
+    for kind in [
+        "genesis", "grant", "activate", "keyring", "rekey", "revoke", "vault", "suspend", "vetoed",
+        "final",
+    ] {
+        assert!(
+            stats.get(kind).is_some_and(|c| c[0] > 0),
+            "no {kind} entry was reproduced through prepare and finish"
+        );
+    }
 }

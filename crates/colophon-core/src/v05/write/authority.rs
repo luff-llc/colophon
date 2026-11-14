@@ -12,8 +12,8 @@ use crate::v05::encoding::{
 use crate::v05::history::envelope::AuthEnvelope;
 use crate::v05::history::keyring::Keyring;
 use crate::v05::history::{
-    check_pending_transition, check_pending_veto, transition_timing, verify_history, HomeStatus,
-    Objects, Persisted, State, Stop,
+    check_admissible_transition, check_pending_transition, check_pending_veto, transition_timing,
+    verify_history, HomeStatus, Objects, Persisted, State, Stop,
 };
 use crate::v05::signature::{AuthorityRule, RawEnvelope};
 use crate::v05::{bad_signature, malformed, require, Failure, Reason, Result};
@@ -52,14 +52,17 @@ enum Plan {
 /// proofs.
 #[derive(Debug)]
 pub struct PendingBatch {
-    /// The signing work.
-    pub steps: Vec<SigningStep>,
+    steps: Vec<SigningStep>,
     objects: Objects,
     now_ms: i64,
     plan: Plan,
 }
 
 impl PendingBatch {
+    /// The signing work, read-only.
+    pub fn steps(&self) -> &[SigningStep] {
+        &self.steps
+    }
     /// Assemble the envelopes from `signatures` (one per step, in order), verify the result
     /// under §8 with `verify_history`, and return the records. Nothing is returned unless the
     /// verifier says `ok`; a held result (a due time or `issued` in the future) is
@@ -112,6 +115,7 @@ impl PendingBatch {
                 )?;
                 let state = head_state(&self.objects, self.now_ms)?;
                 check_pending_transition(&state, &env)?;
+                check_admissible_transition(&state, &env)?;
                 Ok(Records {
                     pending: vec![env],
                     ..Records::default()
@@ -408,6 +412,7 @@ pub fn prepare_genesis(p: &GenesisParams, now_ms: i64) -> Result<PendingBatch> {
             "genesis: control rule not met by these signers",
         ));
     }
+    super::check_issued(p.issued_ms)?;
     let by = p.signers[0].clone();
     let body = Kind::Genesis {
         label: p.label.clone(),
@@ -461,6 +466,7 @@ pub fn prepare_genesis(p: &GenesisParams, now_ms: i64) -> Result<PendingBatch> {
 // Signed entries.
 
 fn next_header(state: &State, issued_ms: i64, by: &str) -> Result<Header> {
+    super::check_issued(issued_ms)?;
     require(
         issued_ms >= state.last_issued_ms(),
         "issued is earlier than the preceding entry's",
@@ -502,7 +508,19 @@ pub fn prepare_signed(
     if matches!(kind, Kind::Genesis { .. }) || kind.is_recording() {
         return Err(malformed("not a signed entry kind"));
     }
+    super::check_issued(issued_ms)?;
     let state = head_state(objects, now_ms)?;
+    if let Kind::EndSessions { member } | Kind::Renew { member, .. } | Kind::Revoke { member, .. } =
+        &kind
+    {
+        require(
+            state
+                .members()
+                .iter()
+                .any(|m| &m.request.member_id() == member && m.revoked_seq.is_none()),
+            "the member does not exist or is already revoked",
+        )?;
+    }
     let rule = immediate_rule(&state, &kind, signers, issued_ms)?;
     let header = next_header(&state, issued_ms, &signers[0])?;
     let body = kind.body(&header)?;
@@ -594,7 +612,11 @@ struct Receipt {
     body_digest: String,
 }
 
-fn parse_receipt(state: &State, bytes: &[u8]) -> Option<Receipt> {
+fn parse_receipt(state: &State, held: &[u8]) -> Option<Receipt> {
+    // Like a home, canonicalize a held receipt rather than skip it: the same object held
+    // as a reformatted copy is the same receipt (§2.2: equality is body bytes).
+    let canon = canonical(&crate::v05::encoding::strict_parse(held).ok()?).ok()?;
+    let bytes = &canon[..];
     let env =
         RawEnvelope::parse_bounded(bytes, bounds::RECEIPT_BODY, bounds::RECEIPT_ENVELOPE, true)
             .ok()?;
@@ -627,13 +649,16 @@ fn parse_receipt(state: &State, bytes: &[u8]) -> Option<Receipt> {
 /// the number of current homes), from the homes with the lowest member IDs whose valid
 /// receipts are held, for each home its receipt with the lowest body digest, sorted by home
 /// ID. A receipt is valid when its home is current, its signature verifies, it names the
-/// object, and `received` is within 300 s after the object's `issued`. With no home, none are
+/// object, and `received` is within 300 s after the object's `issued`; with `not_after_ms`
+/// (a veto's receipts, before the transition's veto deadline), also not after that time, and a
+/// later receipt is skipped, not chosen. With no home, none are
 /// needed. Too few homes with receipts: `unavailable`.
 pub fn choose_receipts(
     state: &State,
     held: &[Vec<u8>],
     object_digest: &str,
     object_issued_ms: i64,
+    not_after_ms: Option<i64>,
 ) -> Result<Vec<Vec<u8>>> {
     let homes = state.current_homes();
     if homes.is_empty() {
@@ -648,6 +673,7 @@ pub fn choose_receipts(
         if r.object != object_digest
             || r.received_ms < object_issued_ms
             || r.received_ms > object_issued_ms.saturating_add(RECEIPT_WINDOW_MS)
+            || not_after_ms.is_some_and(|d| r.received_ms > d)
         {
             continue;
         }
@@ -781,6 +807,7 @@ fn transition_batch(
             "the transition's rule is not met by these signers",
         ));
     }
+    transition_components_allowed(state, &p.signers, p.rule, &p.change)?;
     let (a_seq, a_digest) = match &p.anchor {
         Some((s, d)) => (*s, d.clone()),
         None => (
@@ -792,6 +819,7 @@ fn transition_batch(
         a_seq >= 1 && state.history().get((a_seq - 1) as usize) == Some(&a_digest),
         "anchor is not on this branch",
     )?;
+    super::check_issued(p.issued_ms)?;
     let body = transition_body(
         state.account().as_str(),
         a_seq,
@@ -834,6 +862,117 @@ fn transition_batch(
         now_ms,
         plan: Plan::Transition { body },
     })
+}
+
+/// Consent, escalation and the per-component rules of §8.4 and §8.7, as far as they are
+/// certain from the change and the state: a host is never asked to sign a transition the
+/// verifier is sure to refuse. A case this does not catch is still refused by the verifier at
+/// [`PendingBatch::finish`]; nothing here refuses what the verifier accepts.
+fn transition_components_allowed(
+    state: &State,
+    signers: &[String],
+    rule: TransitionRule,
+    change: &Value,
+) -> Result<()> {
+    let k = state.keyring();
+    let unmet = |why: &str| bad_signature(format!("the transition's rule is not met: {why}"));
+    let comps = change
+        .as_object()
+        .ok_or_else(|| malformed("change must be an object"))?;
+    require(!comps.is_empty(), "change has no component")?;
+    let keyring = comps.get("keyring");
+    let kfield = |f: &str| keyring.and_then(|v| v.get(f));
+    // Escalation: |U| >= 1 + max v(u) over the signer units (§8.7).
+    let signer_units = units(k, signers, None);
+    let max_v = signer_units
+        .iter()
+        .map(|u| state.veto_counts().get(u).copied().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    if (signer_units.len() as u64) < 1 + max_v {
+        return Err(unmet("escalation needs more signer units"));
+    }
+    // Which components the table allows under which rule.
+    let has = |c: &str| comps.contains_key(c);
+    if matches!(rule, TransitionRule::Control) && kfield("keep").is_some() {
+        return Err(unmet("`keep` needs the recovery rule"));
+    }
+    if matches!(rule, TransitionRule::Recovery) {
+        let policy_blocked = comps
+            .get("policy")
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.keys().any(|f| f != "primaryHome" && f != "headQuorum"));
+        let threshold_blocked = ["threshold", "addThreshold", "recoverThreshold", "countBy"]
+            .iter()
+            .any(|f| kfield(f).is_some());
+        if policy_blocked
+            || threshold_blocked
+            || ["grant", "layout", "migration", "successor", "resolve"]
+                .iter()
+                .any(|c| has(c))
+        {
+            return Err(unmet(
+                "a component of this change is not open to the recovery rule",
+            ));
+        }
+        return Ok(());
+    }
+    // Recovery-set consent (§8.4), under the control rule.
+    if k.recover_threshold >= 1 {
+        let recover_unit = |id: &str| k.controllers.get(id).is_some_and(|c| c.has(&Role::Recover));
+        let ids = |f: &str| -> Vec<String> {
+            kfield(f)
+                .and_then(Value::as_array)
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let ctrls = |f: &str| -> Vec<Controller> {
+            kfield(f)
+                .and_then(Value::as_array)
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|x| Controller::parse(x.clone(), f).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut consent = ids("remove").iter().any(|i| recover_unit(i))
+            || ctrls("add").iter().any(|c| c.has(&Role::Recover))
+            || ["layout", "migration", "successor", "resolve", "homes"]
+                .iter()
+                .any(|c| has(c))
+            || kfield("countBy").is_some_and(|v| v != &k.raw["countBy"])
+            || kfield("recoverThreshold").is_some_and(|v| v.as_u64() != Some(k.recover_threshold))
+            || kfield("threshold")
+                .and_then(Value::as_u64)
+                .is_some_and(|t| t > k.threshold);
+        for c in ctrls("update") {
+            if let Some(old) = k.controllers.get(&c.id()) {
+                let mut a = serde_json::to_value(old).unwrap_or(Value::Null);
+                let mut b = serde_json::to_value(&c).unwrap_or(Value::Null);
+                for v in [&mut a, &mut b] {
+                    if let Some(m) = v.as_object_mut() {
+                        m.remove("label");
+                    }
+                }
+                consent |= (old.has(&Role::Recover) || c.has(&Role::Recover)) && a != b;
+            }
+        }
+        if let Some(pol) = comps.get("policy").and_then(Value::as_object) {
+            consent |= ["recoveryDelay", "headQuorum", "primaryHome", "rate"]
+                .iter()
+                .any(|f| pol.contains_key(*f));
+        }
+        let recover_units = units(k, signers, Some(&Role::Recover)).len() as u64;
+        if consent && recover_units < k.recover_threshold {
+            return Err(unmet("recovery-set consent is missing"));
+        }
+    }
+    Ok(())
 }
 
 /// Prepare a pending transition (§8.7): its exact body, anchored on the head unless
@@ -934,6 +1073,7 @@ pub struct VetoParams {
 /// current `control` or `recover` controller. Unit counts and disjointness are judged by the
 /// verifier at finish.
 pub fn prepare_veto(objects: &Objects, now_ms: i64, p: &VetoParams) -> Result<PendingBatch> {
+    super::check_issued(p.issued_ms)?;
     let state = head_state(objects, now_ms)?;
     check_signers_current(&state, &p.signers, i64::MAX)?;
     for id in &p.signers {
@@ -1001,7 +1141,13 @@ pub fn prepare_suspend(
         bounds::TRANSITION_ENVELOPE,
         true,
     )?;
-    let receipts = choose_receipts(&state, &objects.pending, &env.digest, issued_of(&env)?)?;
+    let receipts = choose_receipts(
+        &state,
+        &objects.pending,
+        &env.digest,
+        issued_of(&env)?,
+        None,
+    )?;
     prepare_signed(
         objects,
         now_ms,
@@ -1056,7 +1202,13 @@ pub fn prepare_activate(
         bounds::TRANSITION_ENVELOPE,
         true,
     )?;
-    let receipts = choose_receipts(&state, &objects.pending, &env.digest, issued_of(&env)?)?;
+    let receipts = choose_receipts(
+        &state,
+        &objects.pending,
+        &env.digest,
+        issued_of(&env)?,
+        None,
+    )?;
     let timing = transition_timing(&state, &t_bytes, &receipts)?;
     if timing.due_ms > now_ms {
         return Err(unavailable(format!(
@@ -1098,8 +1250,17 @@ pub fn prepare_vetoed(
         true,
     )?;
     let v = AuthEnvelope::parse(&v_bytes, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)?;
-    let t_receipts = choose_receipts(&state, &objects.pending, &t.digest, issued_of(&t)?)?;
-    let v_receipts = choose_receipts(&state, &objects.pending, &v.digest, issued_of(&v)?)?;
+    let t_receipts = choose_receipts(&state, &objects.pending, &t.digest, issued_of(&t)?, None)?;
+    // The veto's receipts are those before the transition's veto deadline (§8.7): a later
+    // receipt is skipped, so one late receipt cannot block a valid `vetoed`.
+    let deadline = transition_timing(&state, &t_bytes, &t_receipts)?.deadline_ms;
+    let v_receipts = choose_receipts(
+        &state,
+        &objects.pending,
+        &v.digest,
+        issued_of(&v)?,
+        Some(deadline),
+    )?;
     let mut latest = i64::MIN;
     for r in &v_receipts {
         latest = latest.max(receipt_received(&state, r)?);
@@ -1165,6 +1326,11 @@ pub fn prepare_final(objects: &Objects, now_ms: i64, activation_seq: u64) -> Res
         ) else {
             continue;
         };
+        // A head ahead of the clock by more than 60 s is not usable yet (§13.3): it must not
+        // hold a `final` back when another head of the witness is usable. Open spec question.
+        if issued > now_ms.saturating_add(60 * SEC) {
+            continue;
+        }
         if !required.iter().any(|h| h == by)
             || env.value.get("protocol").and_then(Value::as_str) != Some("colophon/head/5")
             || seq < act.seq
@@ -1214,9 +1380,22 @@ pub fn prepare_final(objects: &Objects, now_ms: i64, activation_seq: u64) -> Res
 
 // ---------------------------------------------------------------------------------------------
 // Equivocation evidence (§13.3).
+//
+// Evidence convicts a home or signers, so every form is judged from verified material only:
+// every signature in it is checked, under the keys of the history the verifier holds, and a
+// form that needs history the caller does not hold is `unavailable`, never a conviction.
 
 /// The `protocol` of an evidence object.
 pub const EVIDENCE_PROTOCOL: &str = "colophon/equivocation/5";
+
+/// What evidence is judged against: the objects the verifier holds, and its clock.
+#[derive(Clone, Copy, Debug)]
+pub struct EvidenceContext<'a> {
+    /// The account's held entries, pending objects and heads.
+    pub objects: &'a Objects,
+    /// The verifier's clock, in ms.
+    pub now_ms: i64,
+}
 
 fn finish_evidence(value: Value) -> Result<Vec<u8>> {
     let bytes = canonical(&value)?;
@@ -1227,7 +1406,16 @@ fn finish_evidence(value: Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn head_facts(bytes: &[u8], account: &str) -> Result<(RawEnvelope, String, u64, String)> {
+fn parse_entry_env(bytes: &[u8]) -> Result<AuthEnvelope> {
+    AuthEnvelope::parse(
+        bytes,
+        bounds::AUTHORITY_BODY,
+        bounds::AUTHORITY_BODY.saturating_mul(2),
+        true,
+    )
+}
+
+fn head_facts(bytes: &[u8], account: &str) -> Result<(RawEnvelope, String, u64, String, i64)> {
     let env = RawEnvelope::parse(bytes, bounds::HEAD_BODY, true)?;
     let mut o = Obj::new(env.value.clone(), "head")?;
     require(
@@ -1241,55 +1429,204 @@ fn head_facts(bytes: &[u8], account: &str) -> Result<(RawEnvelope, String, u64, 
     let mut a = o.obj("authority")?;
     let seq = a.uint("seq")?;
     let dg = a.digest("digest")?;
+    let (_, issued) = o.date("issued")?;
     let by = o.key_id("by")?;
-    Ok((env, by, seq, dg))
+    Ok((env, by, seq, dg, issued))
 }
 
-/// Two heads by one home with the same `seq` and different digests (§13.3): the evidence
-/// `{"protocol","account","heads"}` with the heads sorted by body digest. `homes` are the
-/// account's homes `(member ID, signing point)`; both signatures must verify under the key
-/// of one of them. Whether a later head's entry displaced the earlier one under §8.6 rule 1
-/// is for the caller to rule out.
+/// The held entries from the genesis to the entry with body digest `tip`, following
+/// `previous`, with the pending objects and heads. `unavailable` when the chain is not held.
+fn chain_to(objects: &Objects, tip: &str) -> Result<Objects> {
+    let mut by_digest: BTreeMap<String, (Option<String>, Vec<u8>)> = BTreeMap::new();
+    for bytes in &objects.entries {
+        if let Ok(e) = parse_entry_env(bytes).or_else(|_| {
+            AuthEnvelope::parse(
+                bytes,
+                bounds::AUTHORITY_BODY,
+                bounds::AUTHORITY_BODY.saturating_mul(2),
+                false,
+            )
+        }) {
+            let prev = e
+                .value
+                .get("previous")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            by_digest.insert(e.digest.clone(), (prev, bytes.clone()));
+        }
+    }
+    let mut entries = Vec::new();
+    let mut at = Some(tip.to_string());
+    while let Some(d) = at {
+        let (prev, bytes) = by_digest
+            .get(&d)
+            .ok_or_else(|| unavailable("the history is not held back to the genesis"))?;
+        entries.push(bytes.clone());
+        at = prev.clone();
+    }
+    entries.reverse();
+    Ok(Objects {
+        entries,
+        pending: objects.pending.clone(),
+        heads: objects.heads.clone(),
+        predecessor: objects.predecessor.clone(),
+    })
+}
+
+fn verified_state(objects: &Objects, account: &str, now_ms: i64) -> Result<State> {
+    let st = head_state(objects, now_ms)?;
+    require(
+        st.account().as_str() == account,
+        "the history is of another account",
+    )?;
+    Ok(st)
+}
+
+/// Verify one entry in its place: the entries before it (held back to the genesis) plus the
+/// entry must verify `ok` with the entry as the head (§8.5, every signature included).
+fn verify_entry_in_place(
+    objects: &Objects,
+    account: &str,
+    entry: &AuthEnvelope,
+    entry_bytes: &[u8],
+    now_ms: i64,
+) -> Result<()> {
+    let seq = entry
+        .value
+        .get("seq")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| malformed("seq"))?;
+    require(seq >= 2, "an entry in evidence has a predecessor")?;
+    let previous = entry
+        .value
+        .get("previous")
+        .and_then(Value::as_str)
+        .ok_or_else(|| malformed("previous"))?;
+    let mut chain = chain_to(objects, previous)?;
+    require(
+        chain.entries.len() as u64 == seq - 1,
+        "the entry does not follow its predecessors' seqs",
+    )?;
+    let genesis_ok = chain.entries.first().and_then(|g| {
+        AuthEnvelope::parse(g, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false).ok()
+    });
+    require(
+        genesis_ok.is_some_and(|g| g.digest == account),
+        "the history is of another account",
+    )?;
+    chain.entries.push(entry_bytes.to_vec());
+    let verdict = verify_history(&chain, &Persisted::default(), now_ms);
+    stop_to_error(&verdict.stop)?;
+    require(
+        verdict.branch.len() as u64 == seq && verdict.branch.last() == Some(&entry.digest),
+        "the entry is not the head of the verified branch",
+    )
+}
+
+/// Two heads by one home with the same `seq` and different digests (§13.3), judged against
+/// the held history.
+///
+/// Convicts only when both heads verify under the home's key, name the same seq with
+/// different digests, the held history reaches that seq (otherwise `unavailable`), both
+/// entries are held, and the later head's entry did not displace the earlier one under §8.6
+/// rule 1 (a conflict with a recording entry, the later head over the entry that stands).
+fn judge_heads(
+    account: &str,
+    head_a: &[u8],
+    head_b: &[u8],
+    ctx: &EvidenceContext<'_>,
+) -> Result<Evidence> {
+    let (ea, by_a, seq_a, dg_a, issued_a) = head_facts(head_a, account)?;
+    let (eb, by_b, seq_b, dg_b, issued_b) = head_facts(head_b, account)?;
+    require(by_a == by_b, "the heads are by different homes")?;
+    require(seq_a == seq_b, "the heads cover different seqs")?;
+    require(dg_a != dg_b, "the heads cover the same entry")?;
+    let verdict = verify_history(ctx.objects, &Persisted::default(), ctx.now_ms);
+    let st = verdict
+        .state
+        .ok_or_else(|| unavailable("no verified history is held"))?;
+    require(
+        st.account().as_str() == account,
+        "the history is of another account",
+    )?;
+    let key = st
+        .members()
+        .iter()
+        .find(|m| m.request.member_id() == by_a && m.home != HomeStatus::NotHome)
+        .map(|m| m.request.signing.clone())
+        .ok_or_else(|| bad_signature("the heads are not by a home of this account"))?;
+    ea.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
+    eb.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
+    if (st.history().len() as u64) < seq_a {
+        return Err(unavailable(
+            "the held history does not reach the heads' seq: no conviction",
+        ));
+    }
+    let standing = st.history()[(seq_a - 1) as usize].clone();
+    let held = |d: &str| {
+        ctx.objects.entries.iter().find_map(|b| {
+            let e =
+                AuthEnvelope::parse(b, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)
+                    .ok()?;
+            (e.digest == d).then_some(e)
+        })
+    };
+    let (Some(xa), Some(xb)) = (held(&dg_a), held(&dg_b)) else {
+        return Err(unavailable(
+            "an entry a head covers is not held: no conviction",
+        ));
+    };
+    let previous = |e: &AuthEnvelope| e.value.get("previous").cloned();
+    let recording = |e: &AuthEnvelope| {
+        matches!(
+            e.value.get("kind").and_then(Value::as_str),
+            Some("activate" | "vetoed" | "final" | "successionVetoed")
+        )
+    };
+    if previous(&xa) == previous(&xb) && (recording(&xa) || recording(&xb)) {
+        // §8.6 rule 1 settles this conflict. An honest home signs a head over the entry that
+        // was displaced and, later, over the one that displaced it.
+        let (later_digest, earlier_digest) = if issued_a > issued_b {
+            (&dg_a, &dg_b)
+        } else {
+            (&dg_b, &dg_a)
+        };
+        if issued_a != issued_b && *later_digest == standing && *earlier_digest != standing {
+            return Err(malformed(
+                "the later head's entry displaced the earlier under §8.6 rule 1: not equivocation",
+            ));
+        }
+    }
+    Ok(Evidence::Heads {
+        home: by_a,
+        seq: seq_a,
+    })
+}
+
+/// Two heads by one home with the same `seq` and different digests: the evidence
+/// `{"protocol","account","heads"}`, sorted by body digest, built only when it convicts
+/// ([`verify_evidence`] on the result).
 pub fn equivocation_of_heads(
     account: &str,
     head_a: &[u8],
     head_b: &[u8],
-    homes: &[(String, Vec<u8>)],
+    ctx: &EvidenceContext<'_>,
 ) -> Result<Vec<u8>> {
-    let (ea, by_a, seq_a, dg_a) = head_facts(head_a, account)?;
-    let (eb, by_b, seq_b, dg_b) = head_facts(head_b, account)?;
-    require(by_a == by_b, "the heads are by different homes")?;
-    require(seq_a == seq_b, "the heads cover different seqs")?;
-    require(dg_a != dg_b, "the heads cover the same entry")?;
-    let key = homes
-        .iter()
-        .find(|(id, _)| id == &by_a)
-        .map(|(_, k)| k.clone())
-        .ok_or_else(|| bad_signature("the heads are not by a known home"))?;
-    ea.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
-    eb.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
+    let (ea, ..) = head_facts(head_a, account)?;
+    let (eb, ..) = head_facts(head_b, account)?;
     let mut pair = [(digest(&ea.body), head_a), (digest(&eb.body), head_b)];
     pair.sort_by(|x, y| x.0.cmp(&y.0));
-    finish_evidence(json!({
+    let bytes = finish_evidence(json!({
         "protocol": EVIDENCE_PROTOCOL,
         "account": account,
         "heads": pair.iter().map(|(_, b)| encode_base64(b)).collect::<Vec<_>>(),
-    }))
+    }))?;
+    verify_evidence(&bytes, account, ctx)?;
+    Ok(bytes)
 }
 
-/// Two conflicting entries (§8.6 rule 2, §13.3): the same `seq` and `previous`, different
-/// bodies, sorted by body digest, under `entries`. Their validity is for the verifier that
-/// classifies the conflict; this checks the shape and the conflict.
-pub fn equivocation_of_entries(account: &str, a: &[u8], b: &[u8]) -> Result<Vec<u8>> {
-    let parse = |x: &[u8]| {
-        AuthEnvelope::parse(
-            x,
-            bounds::AUTHORITY_BODY,
-            bounds::AUTHORITY_BODY.saturating_mul(2),
-            true,
-        )
-    };
-    let (ea, eb) = (parse(a)?, parse(b)?);
+fn judge_entries(account: &str, a: &[u8], b: &[u8], ctx: &EvidenceContext<'_>) -> Result<Evidence> {
+    let (ea, eb) = (parse_entry_env(a)?, parse_entry_env(b)?);
     let key = |e: &AuthEnvelope| {
         (
             e.value.get("seq").and_then(Value::as_u64),
@@ -1301,118 +1638,205 @@ pub fn equivocation_of_entries(account: &str, a: &[u8], b: &[u8]) -> Result<Vec<
         "the entries are not at one seq and previous",
     )?;
     require(ea.digest != eb.digest, "the entries are equal")?;
+    // Each must be a valid entry in its place: signatures and rules included (§8.5).
+    verify_entry_in_place(ctx.objects, account, &ea, a, ctx.now_ms)?;
+    verify_entry_in_place(ctx.objects, account, &eb, b, ctx.now_ms)?;
+    Ok(Evidence::Entries {
+        seq: ea.value.get("seq").and_then(Value::as_u64).unwrap_or(0),
+    })
+}
+
+/// Two conflicting entries (§8.6 rule 2, §13.3): the same `seq` and `previous`, different
+/// bodies, sorted by body digest, under `entries`. Built only when both are valid entries in
+/// their place under the held history.
+pub fn equivocation_of_entries(
+    account: &str,
+    a: &[u8],
+    b: &[u8],
+    ctx: &EvidenceContext<'_>,
+) -> Result<Vec<u8>> {
+    let (ea, eb) = (parse_entry_env(a)?, parse_entry_env(b)?);
     let mut pair = [(ea.digest.clone(), a), (eb.digest.clone(), b)];
     pair.sort_by(|x, y| x.0.cmp(&y.0));
-    finish_evidence(json!({
+    let bytes = finish_evidence(json!({
         "protocol": EVIDENCE_PROTOCOL,
         "account": account,
         "entries": pair.iter().map(|(_, e)| encode_base64(e)).collect::<Vec<_>>(),
-    }))
+    }))?;
+    verify_evidence(&bytes, account, ctx)?;
+    Ok(bytes)
 }
 
-/// A veto against a final activation (§8.7, §13.3): the veto envelope, the home's receipt of
-/// it, and the `final` entry whose heads include that home's. The receipt must verify under
-/// the home's key in `homes`, name the veto's body, and the home must be one of the `final`'s
-/// heads. That the receipt is before the veto's deadline needs the transition, which the
-/// evidence does not carry (reported as a spec question).
-pub fn equivocation_of_veto(
+/// A veto against a final activation (§8.7, §13.3). The evidence carries the **activation**
+/// entry (which embeds the transition and its receipts) as well as the veto, the home's
+/// receipt of the veto and the `final`; the spec's "verifiable from the keys it names alone"
+/// does not hold for it (the deadline needs the transition), a spec change.
+fn judge_veto(
     account: &str,
+    activation: &[u8],
     veto: &[u8],
     receipt: &[u8],
     final_entry: &[u8],
-    homes: &[(String, Vec<u8>)],
-) -> Result<Vec<u8>> {
+    ctx: &EvidenceContext<'_>,
+) -> Result<Evidence> {
+    let act = parse_entry_env(activation)?;
+    require(
+        act.value.get("kind").and_then(Value::as_str) == Some("activate"),
+        "not an activate entry",
+    )?;
+    let fin = parse_entry_env(final_entry)?;
+    require(
+        fin.value.get("kind").and_then(Value::as_str) == Some("final"),
+        "not a final entry",
+    )?;
+    let link = &fin.value["activation"];
+    require(
+        link.get("digest").and_then(Value::as_str) == Some(act.digest.as_str())
+            && link.get("seq") == act.value.get("seq"),
+        "the final does not record this activation",
+    )?;
+    let t_bytes = decode_base64(
+        act.value
+            .get("transition")
+            .and_then(Value::as_str)
+            .ok_or_else(|| malformed("activate transition"))?,
+        bounds::TRANSITION_ENVELOPE,
+    )?;
+    let receipts: Vec<Vec<u8>> = act
+        .value
+        .get("receipts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed("activate receipts"))?
+        .iter()
+        .map(|v| decode_base64(v.as_str().unwrap_or_default(), bounds::RECEIPT_ENVELOPE))
+        .collect::<Result<_>>()?;
+    let t = AuthEnvelope::parse(
+        &t_bytes,
+        bounds::TRANSITION_ENVELOPE,
+        bounds::TRANSITION_ENVELOPE,
+        true,
+    )?;
     let v = AuthEnvelope::parse(veto, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)?;
     require(
-        v.value.get("account").and_then(Value::as_str) == Some(account),
-        "the veto names another account",
+        v.value.get("account").and_then(Value::as_str) == Some(account)
+            && v.value.get("transition").and_then(Value::as_str) == Some(t.digest.as_str()),
+        "the veto does not name the activated transition",
     )?;
+    // The state before the activation: the veto's signers and the home's key are judged there.
+    let act_previous = act
+        .value
+        .get("previous")
+        .and_then(Value::as_str)
+        .ok_or_else(|| malformed("previous"))?;
+    let before = chain_to(ctx.objects, act_previous)?;
+    let s = verified_state(&before, account, ctx.now_ms)?;
+    check_pending_veto(&s, &t_bytes, &receipts, veto)?;
+    let timing = transition_timing(&s, &t_bytes, &receipts)?;
+    // The home's receipt of the veto, before the deadline.
     let r = RawEnvelope::parse_bounded(
         receipt,
         bounds::RECEIPT_BODY,
         bounds::RECEIPT_ENVELOPE,
         true,
     )?;
+    let mut o = Obj::new(r.value.clone(), "receipt")?;
     require(
-        r.value.get("protocol").and_then(Value::as_str) == Some("colophon/receipt/5")
-            && r.value.get("account").and_then(Value::as_str) == Some(account)
-            && r.value.get("object").and_then(Value::as_str) == Some(v.digest.as_str()),
+        o.string("protocol")? == "colophon/receipt/5" && o.string("account")? == account,
+        "not a receipt of this account",
+    )?;
+    require(
+        o.digest("object")? == v.digest,
         "the receipt is not of this veto",
     )?;
-    let home = r
-        .value
-        .get("by")
-        .and_then(Value::as_str)
-        .ok_or_else(|| malformed("receipt by"))?;
-    let key = homes
-        .iter()
-        .find(|(id, _)| id == home)
-        .map(|(_, k)| k.clone())
-        .ok_or_else(|| bad_signature("the receipt is not by a known home"))?;
+    let (_, received) = o.date("received")?;
+    let home = o.key_id("by")?;
+    o.finish_closed()?;
+    let key = s
+        .current_homes()
+        .into_iter()
+        .find(|m| m.request.member_id() == home)
+        .map(|m| m.request.signing.clone())
+        .ok_or_else(|| bad_signature("the receipt is not by a home current at the activation"))?;
     r.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
-    let f = AuthEnvelope::parse(
-        final_entry,
-        bounds::AUTHORITY_BODY,
-        bounds::AUTHORITY_BODY.saturating_mul(2),
-        true,
+    let v_issued = issued_of(&v)?;
+    require(
+        received >= v_issued && received <= v_issued.saturating_add(RECEIPT_WINDOW_MS),
+        "the receipt is outside its window",
     )?;
     require(
-        f.value.get("kind").and_then(Value::as_str) == Some("final"),
-        "not a final entry",
+        received <= timing.deadline_ms,
+        "the home receipted the veto after the deadline",
     )?;
-    let heads = f
+    // The `final` verifies in its place (every head under its home's key, covering the
+    // activation), and the convicted home's head is among them.
+    verify_entry_in_place(ctx.objects, account, &fin, final_entry, ctx.now_ms)?;
+    let mut has_home = false;
+    for h in fin
         .value
         .get("heads")
         .and_then(Value::as_array)
-        .ok_or_else(|| malformed("final heads"))?;
-    let mut has_home = false;
-    for h in heads {
+        .ok_or_else(|| malformed("final heads"))?
+    {
         let bytes = decode_base64(
             h.as_str().ok_or_else(|| malformed("head"))?,
             bounds::HEAD_BODY * 2 + 4_096,
         )?;
-        let (_, by, _, _) = head_facts(&bytes, account)?;
+        let (_, by, ..) = head_facts(&bytes, account)?;
         has_home |= by == home;
     }
     require(has_home, "the final carries no head by the receipting home")?;
-    finish_evidence(json!({
+    Ok(Evidence::Veto { home })
+}
+
+/// A veto against a final activation: `{"protocol","account","activation","veto","receipt",
+/// "final"}`, built only when it convicts ([`verify_evidence`] on the result).
+pub fn equivocation_of_veto(
+    account: &str,
+    activation: &[u8],
+    veto: &[u8],
+    receipt: &[u8],
+    final_entry: &[u8],
+    ctx: &EvidenceContext<'_>,
+) -> Result<Vec<u8>> {
+    let bytes = finish_evidence(json!({
         "protocol": EVIDENCE_PROTOCOL,
         "account": account,
+        "activation": encode_base64(activation),
         "veto": encode_base64(veto),
         "receipt": encode_base64(receipt),
         "final": encode_base64(final_entry),
-    }))
+    }))?;
+    verify_evidence(&bytes, account, ctx)?;
+    Ok(bytes)
 }
 
 /// What an evidence object proves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Evidence {
-    /// Two heads by `home` at one seq with different digests.
+    /// Two heads by `home` at one seq with different digests, not explained by §8.6 rule 1.
     Heads {
         /// The misbehaving home.
         home: String,
         /// The seq.
         seq: u64,
     },
-    /// Two conflicting entries at `seq`.
+    /// Two conflicting valid entries at `seq`.
     Entries {
         /// The seq.
         seq: u64,
     },
-    /// A home receipted a veto of a final activation.
+    /// A home receipted a valid, timely veto of a transition and then signed a head for the
+    /// `final` of its activation.
     Veto {
         /// The receipting home.
         home: String,
     },
 }
 
-/// Verify an evidence object from the keys it names alone (§13.3): the bound, the protocol,
-/// the account, and the form's own checks. The heads form is checked under `homes`.
-pub fn verify_evidence(
-    bytes: &[u8],
-    account: &str,
-    homes: &[(String, Vec<u8>)],
-) -> Result<Evidence> {
+/// Verify an evidence object (§13.3) against the held objects: the bound, canonical bytes,
+/// the protocol, the account, and the form's own checks, every signature included. It never
+/// convicts on unverified material: history that is not held makes the result `unavailable`.
+pub fn verify_evidence(bytes: &[u8], account: &str, ctx: &EvidenceContext<'_>) -> Result<Evidence> {
     require(
         bytes.len() <= bounds::EQUIVOCATION,
         "equivocation evidence exceeds 2,097,152 bytes",
@@ -1428,60 +1852,38 @@ pub fn verify_evidence(
         "evidence names another account",
     )?;
     let embedded = |s: &str| decode_base64(s, bounds::EQUIVOCATION);
+    let pair = |o: &mut Obj, f: &str| -> Result<Vec<Vec<u8>>> {
+        let list = o.array(f)?;
+        require(list.len() == 2, "two objects")?;
+        list.iter()
+            .map(|v| embedded(v.as_str().unwrap_or_default()))
+            .collect()
+    };
     if o.has("heads") {
-        let list = o.array("heads")?;
+        let h = pair(&mut o, "heads")?;
         o.finish_closed()?;
-        require(list.len() == 2, "two heads")?;
-        let h: Vec<Vec<u8>> = list
-            .iter()
-            .map(|v| embedded(v.as_str().unwrap_or_default()))
-            .collect::<Result<_>>()?;
-        let again = equivocation_of_heads(account, &h[0], &h[1], homes)?;
+        let (ea, ..) = head_facts(&h[0], account)?;
+        let (eb, ..) = head_facts(&h[1], account)?;
         require(
-            again == bytes,
-            "heads are not sorted by body digest, or the object is not canonical",
+            digest(&ea.body) < digest(&eb.body),
+            "heads are not sorted by body digest",
         )?;
-        let (_, by, seq, _) = head_facts(&h[0], account)?;
-        Ok(Evidence::Heads { home: by, seq })
+        judge_heads(account, &h[0], &h[1], ctx)
     } else if o.has("entries") {
-        let list = o.array("entries")?;
+        let e = pair(&mut o, "entries")?;
         o.finish_closed()?;
-        require(list.len() == 2, "two entries")?;
-        let e: Vec<Vec<u8>> = list
-            .iter()
-            .map(|v| embedded(v.as_str().unwrap_or_default()))
-            .collect::<Result<_>>()?;
-        let again = equivocation_of_entries(account, &e[0], &e[1])?;
-        require(again == bytes, "entries are not sorted by body digest")?;
-        let env = AuthEnvelope::parse(
-            &e[0],
-            bounds::AUTHORITY_BODY,
-            bounds::AUTHORITY_BODY.saturating_mul(2),
-            true,
+        let (ea, eb) = (parse_entry_env(&e[0])?, parse_entry_env(&e[1])?);
+        require(
+            ea.digest < eb.digest,
+            "entries are not sorted by body digest",
         )?;
-        Ok(Evidence::Entries {
-            seq: env.value.get("seq").and_then(Value::as_u64).unwrap_or(0),
-        })
+        judge_entries(account, &e[0], &e[1], ctx)
     } else {
+        let activation = embedded(&o.string("activation")?)?;
         let veto = embedded(&o.string("veto")?)?;
         let receipt = embedded(&o.string("receipt")?)?;
         let fin = embedded(&o.string("final")?)?;
         o.finish_closed()?;
-        let again = equivocation_of_veto(account, &veto, &receipt, &fin, homes)?;
-        require(again == bytes, "the object is not canonical")?;
-        let r = RawEnvelope::parse_bounded(
-            &receipt,
-            bounds::RECEIPT_BODY,
-            bounds::RECEIPT_ENVELOPE,
-            true,
-        )?;
-        Ok(Evidence::Veto {
-            home: r
-                .value
-                .get("by")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        })
+        judge_veto(account, &activation, &veto, &receipt, &fin, ctx)
     }
 }

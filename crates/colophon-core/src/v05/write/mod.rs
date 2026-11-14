@@ -47,6 +47,18 @@ pub fn format_date(ms: i64) -> String {
     }
 }
 
+/// Milliseconds of `0001-01-01T00:00:00Z` and `9999-12-31T23:59:59.999Z`: the §2.2 range.
+pub const DATE_RANGE_MS: (i64, i64) = (-62_135_596_800_000, 253_402_300_799_999);
+
+/// Refuse a time that cannot be written as a §2.2 date.
+pub fn check_issued(ms: i64) -> Result<()> {
+    if (DATE_RANGE_MS.0..=DATE_RANGE_MS.1).contains(&ms) {
+        Ok(())
+    } else {
+        Err(malformed("issued is outside the years 0001-9999"))
+    }
+}
+
 /// The header every authority body has (§8.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Header {
@@ -343,12 +355,57 @@ impl Kind {
     /// The canonical body (§2.1) of this entry under `header`: at most 1,048,576 bytes (§2.4),
     /// a genesis only at seq 1 with `previous` null, any other kind never.
     pub fn body(&self, header: &Header) -> Result<Vec<u8>> {
+        crate::v05::encoding::date(&header.issued, "issued")?;
         let genesis = matches!(self, Self::Genesis { .. });
         if genesis != (header.seq == 1) {
             return Err(malformed("only seq 1 is a genesis, and seq 1 must be one"));
         }
         if header.previous.is_none() != genesis {
             return Err(malformed("previous is null at seq 1 and only there"));
+        }
+        // The base64 of the embedded objects alone is knowable before anything is serialized.
+        let embedded: usize = match self {
+            Self::Grant { request, .. } => request.len(),
+            Self::Suspend {
+                transition,
+                receipts,
+                ..
+            }
+            | Self::Activate {
+                transition,
+                receipts,
+            } => transition.len() + receipts.iter().map(Vec::len).sum::<usize>(),
+            Self::Vetoed {
+                transition,
+                transition_receipts,
+                veto,
+                receipts,
+            } => {
+                transition.len()
+                    + veto.len()
+                    + transition_receipts
+                        .iter()
+                        .chain(receipts)
+                        .map(Vec::len)
+                        .sum::<usize>()
+            }
+            Self::Final { heads, .. } => heads.iter().map(Vec::len).sum(),
+            Self::SuccessionVetoed {
+                veto,
+                receipts,
+                genesis_receipts,
+            } => {
+                veto.len()
+                    + receipts
+                        .iter()
+                        .chain(genesis_receipts)
+                        .map(Vec::len)
+                        .sum::<usize>()
+            }
+            _ => 0,
+        };
+        if embedded.div_ceil(3) * 4 > bounds::AUTHORITY_BODY {
+            return Err(malformed("authority body exceeds 1,048,576 bytes"));
         }
         let mut m = self.fields();
         m.insert("protocol".into(), json!(AUTHORITY_PROTOCOL));
@@ -514,24 +571,17 @@ pub enum StepRole {
 }
 
 /// One exact body and signer for a host signature. Cosignatures and possession proofs share
-/// the primary step's body.
+/// the primary step's body. The fields are private: a host reads them through the accessors
+/// and cannot replace what it was asked to sign.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SigningStep {
-    /// Where the object will live: `authority/<seq, 8 digits>.json`, or `transitions/<digest>.json`
-    /// and `vetoes/<digest>.json` for pending objects.
-    pub path: String,
-    /// The exact bytes to sign.
-    pub body: Vec<u8>,
-    /// The signer's controller (or member) ID.
-    pub signer: String,
-    /// What the signature is for.
-    pub role: StepRole,
-    /// The signer's key descriptor.
-    pub descriptor: crate::v05::descriptor::KeyDescriptor,
-    /// The WebAuthn challenge, unpadded base64url SHA-256 of `body`; absent for a raw key.
-    pub challenge: Option<String>,
-    /// UV is required on this signature (§8.4 "UV").
-    pub uv: bool,
+    path: String,
+    body: Vec<u8>,
+    signer: String,
+    role: StepRole,
+    descriptor: crate::v05::descriptor::KeyDescriptor,
+    challenge: Option<String>,
+    uv: bool,
 }
 impl SigningStep {
     pub(crate) fn new(
@@ -554,6 +604,35 @@ impl SigningStep {
             challenge,
             uv,
         }
+    }
+    /// Where the object will live: `authority/<seq, 8 digits>.json`, or
+    /// `transitions/<digest>.json` and `vetoes/<digest>.json` for pending objects.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    /// The exact bytes to sign.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+    /// The signer's controller (or member) ID.
+    pub fn signer(&self) -> &str {
+        &self.signer
+    }
+    /// What the signature is for.
+    pub fn role(&self) -> StepRole {
+        self.role
+    }
+    /// The signer's key descriptor.
+    pub fn descriptor(&self) -> &crate::v05::descriptor::KeyDescriptor {
+        &self.descriptor
+    }
+    /// The WebAuthn challenge, unpadded base64url SHA-256 of `body`; absent for a raw key.
+    pub fn challenge(&self) -> Option<&str> {
+        self.challenge.as_deref()
+    }
+    /// UV is required on this signature (§8.4 "UV").
+    pub fn uv(&self) -> bool {
+        self.uv
     }
 }
 
