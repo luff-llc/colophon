@@ -820,7 +820,14 @@ fn one_write_does_a_constant_number_of_signature_checks_whatever_is_held() {
         let mut host = std::mem::replace(&mut w.f.host, Host::new());
         host.counter = 5_000;
         let src = w.src.clone();
-        engine_write(&mut e, &mut host, &src, "notes", "createNotebook", json!({"id": "extra", "title": "Extra"}));
+        engine_write(
+            &mut e,
+            &mut host,
+            &src,
+            "notes",
+            "createNotebook",
+            json!({"id": "extra", "title": "Extra"}),
+        );
         let after = e.stats();
         assert!(
             after.signatures_verified - before.signatures_verified <= 2,
@@ -848,10 +855,23 @@ fn a_write_over_budget_or_clock_is_refused_at_prepare_as_the_full_judgement_refu
     let mut host = host_keys;
     let mut e = member_engine(&f, &host, &src, &id, f.account.now_ms());
     for i in 0..2 {
-        engine_write(&mut e, &mut host, &src, "notes", "createNotebook", json!({"id": format!("n{i}"), "title": "T"}));
+        engine_write(
+            &mut e,
+            &mut host,
+            &src,
+            "notes",
+            "createNotebook",
+            json!({"id": format!("n{i}"), "title": "T"}),
+        );
     }
     let seed = host.fresh();
-    let third = e.begin_write("notes", "createNotebook", json!({"id": "n2", "title": "T"}), Level::Write, seed);
+    let third = e.begin_write(
+        "notes",
+        "createNotebook",
+        json!({"id": "n2", "title": "T"}),
+        Level::Write,
+        seed,
+    );
     let reason = match third {
         Err(f) => f.code(),
         Ok(Err(d)) => d.reason,
@@ -879,7 +899,10 @@ fn a_resumed_open_with_nothing_new_does_no_signature_check_decryption_or_fold() 
     let st = r.stats();
     assert_eq!(st.signatures_verified, 0, "{st:?}");
     assert_eq!(st.payloads_decrypted, 0, "{st:?}");
-    assert_eq!(st.folds_applied_last, 0, "no fold: the snapshot is the fold ({st:?})");
+    assert_eq!(
+        st.folds_applied_last, 0,
+        "no fold: the snapshot is the fold ({st:?})"
+    );
     assert_eq!(view(&r), want);
     assert_eq!(r.revision("notes"), e.revision("notes"));
     // One new record is the only fold; a part that fails its seal opens that namespace cold and says so.
@@ -888,7 +911,11 @@ fn a_resumed_open_with_nothing_new_does_no_signature_check_decryption_or_fold() 
     let n = part.len() - 3;
     part[n] ^= 1;
     let c = open(&w, &w.src, w.src.listing(), Some(&bad));
-    assert!(matches!(c.open_mode(), OpenMode::Invalidated(m) if m.contains("notes")), "{:?}", c.open_mode());
+    assert!(
+        matches!(c.open_mode(), OpenMode::Invalidated(m) if m.contains("notes")),
+        "{:?}",
+        c.open_mode()
+    );
     assert_eq!(c.stats().folds_applied_last, 40);
     assert_eq!(view(&c), want);
 }

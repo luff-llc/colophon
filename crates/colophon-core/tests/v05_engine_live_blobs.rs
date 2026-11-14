@@ -726,24 +726,46 @@ fn an_immutable_action_on_an_episode_retains_the_live_head_it_relies_on() {
     let mut s = shared(&[LISTEN]);
     let id = s.admit(31, terms_for(&[(LISTEN, "write")]));
     let mut e = s.engine(&id);
-    engine_write(&mut e, &mut s.host, &s.src, LISTEN, "follow",
-        json!({"id": "show", "url": "https://example.org/f", "title": "T"}));
+    engine_write(
+        &mut e,
+        &mut s.host,
+        &s.src,
+        LISTEN,
+        "follow",
+        json!({"id": "show", "url": "https://example.org/f", "title": "T"}),
+    );
     let live = s.live(&mut e, position("e1", 10.0));
     let (slot_path, slot_bytes) = live.stores.last().unwrap().clone();
     // A deliberate seek on the same episode is immutable and relies on the head: it is
     // retained exactly, first.
-    let w = engine_write(&mut e, &mut s.host, &s.src, LISTEN, "position",
-        json!({"id": "e1", "show": "show", "seconds": 50.0, "seek": true}));
+    let w = engine_write(
+        &mut e,
+        &mut s.host,
+        &s.src,
+        LISTEN,
+        "position",
+        json!({"id": "e1", "show": "show", "seconds": 50.0, "seek": true}),
+    );
     let (ops, bytes) = &w.stores[0];
-    assert!(ops.starts_with("ops/"), "{:?}", w.stores.iter().map(|x| &x.0).collect::<Vec<_>>());
+    assert!(
+        ops.starts_with("ops/"),
+        "{:?}",
+        w.stores.iter().map(|x| &x.0).collect::<Vec<_>>()
+    );
     assert_eq!(bytes, &slot_bytes, "the exact signed bytes of the head");
     assert_ne!(ops, &slot_path);
     let mut r = s.engine(&id);
     r.refresh(s.src.listing()).unwrap();
     assert_eq!(r.account().record_verdict(ops).as_deref(), Some("admitted"));
     // An action on another episode retains nothing.
-    let w2 = engine_write(&mut e, &mut s.host, &s.src, LISTEN, "position",
-        json!({"id": "e2", "show": "show", "seconds": 5.0, "seek": true}));
+    let w2 = engine_write(
+        &mut e,
+        &mut s.host,
+        &s.src,
+        LISTEN,
+        "position",
+        json!({"id": "e2", "show": "show", "seconds": 5.0, "seek": true}),
+    );
     assert_eq!(w2.stores.len(), 1);
 }
 
@@ -791,29 +813,58 @@ fn an_import_grant_is_made_through_the_account_and_its_batch_folds() {
     let change = Change::grant(&req.raw, granted);
     let action = f
         .account
-        .begin_transition(&change, &[f.d.clone(), f.k.clone()], TransitionRule::Control)
+        .begin_transition(
+            &change,
+            &[f.d.clone(), f.k.clone()],
+            TransitionRule::Control,
+        )
         .unwrap();
     let done = run(&mut f.account, &f.host, action);
     let digest = pending_path(&done.pending[0]);
-    let digest = digest.trim_start_matches("transitions/").trim_end_matches(".json").to_string();
+    let digest = digest
+        .trim_start_matches("transitions/")
+        .trim_end_matches(".json")
+        .to_string();
     let merge_pending = |a: &mut colophon_core::v05::account::Account, o: Objects| {
         let n = a.now_ms();
-        a.merge(Incoming { objects: o, records: vec![] }, n).unwrap();
+        a.merge(
+            Incoming {
+                objects: o,
+                records: vec![],
+            },
+            n,
+        )
+        .unwrap();
     };
     let r = home_receipt(&f, &home, &digest, now + 10 * SEC);
-    merge_pending(&mut f.account, Objects { pending: vec![r], ..Default::default() });
+    merge_pending(
+        &mut f.account,
+        Objects {
+            pending: vec![r],
+            ..Default::default()
+        },
+    );
     f.account.advance(now + 2 * HOUR).unwrap();
     let rec = f.account.record_due().unwrap();
     assert_eq!(rec.len(), 1, "the activation is recorded when due");
     // Provisional until a home's head covers the activation; then final.
     let head = home_head(&f, &home, now + 2 * HOUR);
-    merge_pending(&mut f.account, Objects { heads: vec![head], ..Default::default() });
+    merge_pending(
+        &mut f.account,
+        Objects {
+            heads: vec![head],
+            ..Default::default()
+        },
+    );
     let _ = f.account.record_due().unwrap();
     assert!(f.account.members().iter().any(|m| m.member.id == importer));
     // Its shares: a transition's grant carries none; the shares-only renew seals them.
     assert!(!f.account.owed_shares().is_empty());
     let seed = f.host.fresh();
-    let a = f.account.begin_renew_shares(&importer, &[f.d.clone()], seed).unwrap();
+    let a = f
+        .account
+        .begin_renew_shares(&importer, &[f.d.clone()], seed)
+        .unwrap();
     run(&mut f.account, &f.host, a);
     assert!(f.account.owed_shares().is_empty());
     // The importer's engine publishes a batch.
@@ -841,5 +892,8 @@ fn an_import_grant_is_made_through_the_account_and_its_batch_folds() {
         Outcome::Success { value, .. } => value.to_string(),
         o => panic!("{o:?}"),
     };
-    assert!(nb.contains("imported"), "the batch folds for a member whose terms carry import: {nb}");
+    assert!(
+        nb.contains("imported"),
+        "the batch folds for a member whose terms carry import: {nb}"
+    );
 }
