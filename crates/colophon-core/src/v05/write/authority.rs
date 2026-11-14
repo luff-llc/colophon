@@ -1522,10 +1522,16 @@ fn verify_entry_in_place(
 /// Two heads by one home with the same `seq` and different digests (§13.3), judged against
 /// the held history.
 ///
-/// Convicts only when both heads verify under the home's key, name the same seq with
-/// different digests, the held history reaches that seq (otherwise `unavailable`), both
-/// entries are held, and the later head's entry did not displace the earlier one under §8.6
-/// rule 1 (a conflict with a recording entry, the later head over the entry that stands).
+/// Both heads must verify under the home's key and both entries must be held. The branches the
+/// two entries lie on are walked back through the held entries to the seq where they first
+/// differ (the divergence); a chain that is not held that far is `unavailable`, never a
+/// conviction. Let h1 be the head with the earlier `issued` and h2 the later:
+///
+/// * the divergence is between two signed entries: equivocation;
+/// * the divergence involves a recording entry, so §8.6 rule 1 decides it: not equivocation
+///   when the two `issued` are equal, or when h2's entry lies on the side that stands (the home
+///   followed a displacement, at the divergence seq or any seq after it); otherwise (h2 on the
+///   side that does not stand: the home went back to what had been displaced) equivocation.
 fn judge_heads(
     account: &str,
     head_a: &[u8],
@@ -1553,12 +1559,6 @@ fn judge_heads(
         .ok_or_else(|| bad_signature("the heads are not by a home of this account"))?;
     ea.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
     eb.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
-    if (st.history().len() as u64) < seq_a {
-        return Err(unavailable(
-            "the held history does not reach the heads' seq: no conviction",
-        ));
-    }
-    let standing = st.history()[(seq_a - 1) as usize].clone();
     let held = |d: &str| {
         ctx.objects.entries.iter().find_map(|b| {
             let e =
@@ -1567,29 +1567,61 @@ fn judge_heads(
             (e.digest == d).then_some(e)
         })
     };
-    let (Some(xa), Some(xb)) = (held(&dg_a), held(&dg_b)) else {
-        return Err(unavailable(
-            "an entry a head covers is not held: no conviction",
-        ));
+    let not_held = || unavailable("an entry a head covers is not held back to the divergence");
+    let (Some(mut xa), Some(mut xb)) = (held(&dg_a), held(&dg_b)) else {
+        return Err(not_held());
     };
+    let seq_of = |e: &AuthEnvelope| e.value.get("seq").and_then(Value::as_u64);
     let previous = |e: &AuthEnvelope| e.value.get("previous").cloned();
+    require(
+        seq_of(&xa) == Some(seq_a) && seq_of(&xb) == Some(seq_a),
+        "a head's digest names an entry at another seq",
+    )?;
+    // Walk both branches back in step to where they first differ: the two entries there share
+    // a predecessor (or are both seq 1).
+    let mut at = seq_a;
+    while previous(&xa) != previous(&xb) {
+        at = at
+            .checked_sub(1)
+            .filter(|s| *s >= 1)
+            .ok_or_else(|| malformed("the branches never meet"))?;
+        let step = |e: &AuthEnvelope| -> Result<AuthEnvelope> {
+            let prev = e
+                .value
+                .get("previous")
+                .and_then(Value::as_str)
+                .ok_or_else(|| malformed("the branches never meet"))?;
+            let p = held(prev).ok_or_else(not_held)?;
+            require(
+                seq_of(&p) == Some(at),
+                "an entry does not follow its predecessor's seq",
+            )?;
+            Ok(p)
+        };
+        xa = step(&xa)?;
+        xb = step(&xb)?;
+    }
     let recording = |e: &AuthEnvelope| {
         matches!(
             e.value.get("kind").and_then(Value::as_str),
             Some("activate" | "vetoed" | "final" | "successionVetoed")
         )
     };
-    if previous(&xa) == previous(&xb) && (recording(&xa) || recording(&xb)) {
-        // §8.6 rule 1 settles this conflict. An honest home signs a head over the entry that
-        // was displaced and, later, over the one that displaced it.
-        let (later_digest, earlier_digest) = if issued_a > issued_b {
-            (&dg_a, &dg_b)
+    if recording(&xa) || recording(&xb) {
+        // §8.6 rule 1 settles this divergence. An honest home signs a head over what it held,
+        // and later over the entry that displaced it, however far past the divergence it is.
+        let standing = at
+            .checked_sub(1)
+            .and_then(|i| st.history().get(i as usize))
+            .ok_or_else(|| unavailable("the held history does not reach the divergence"))?;
+        let (later_side, issued_later, issued_earlier) = if issued_a > issued_b {
+            (&xa, issued_a, issued_b)
         } else {
-            (&dg_b, &dg_a)
+            (&xb, issued_b, issued_a)
         };
-        if issued_a != issued_b && *later_digest == standing && *earlier_digest != standing {
+        if issued_later == issued_earlier || later_side.digest == *standing {
             return Err(malformed(
-                "the later head's entry displaced the earlier under §8.6 rule 1: not equivocation",
+                "the later head follows a displacement under §8.6 rule 1: not equivocation",
             ));
         }
     }

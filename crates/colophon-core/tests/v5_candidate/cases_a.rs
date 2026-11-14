@@ -830,11 +830,11 @@ fn part2(o: &mut Out, p1: &P1, _attacker: &Key) {
         pair.sort_by_key(|e| sha(&body_of(e)));
         pair
     };
-    // Both heads at one instant: a home signing over two entries at one seq. Neither entry
-    // displaced the other as the later head's, so this convicts.
+    // The home signs over the activation that stands (09:00:00) and then, later, over the grant
+    // that lost to it: it went back to an entry it had passed over, so this convicts.
     let pair = sorted(
         p1.head_env.clone(),
-        head_over(sha(&body_of(&y_env)), "2026-11-11T09:00:00Z"),
+        head_over(sha(&body_of(&y_env)), "2026-11-11T09:00:30Z"),
     );
     write(
         o,
@@ -845,7 +845,7 @@ fn part2(o: &mut Out, p1: &P1, _attacker: &Key) {
     write(
         o,
         "rules/equivocation/case.json",
-        &json!({"description": "Two heads by one home at seq 3 with different digests, over the activation that stands and over the ordinary grant held beside it. The history both heads cover ships with the vector.",
+        &json!({"description": "Two heads by one home at seq 3 with different digests: the earlier over the activation that stands, the later over the ordinary grant held beside it, which lost to it (§8.6 rule 1). The home went back to what it had passed over, so the heads convict. The history both heads cover ships with the vector.",
         "sections": ["8.6", "13.3"], "expected": {"evidence": "ok", "home": "not counted"}}),
     );
     // An honest home: a head over the grant, then (later) over the activation that displaced

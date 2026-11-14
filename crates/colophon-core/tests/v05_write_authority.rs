@@ -1488,6 +1488,192 @@ fn heads_evidence_at_seq_zero_is_malformed_not_a_panic() {
     assert!(equivocation_of_heads(&account, &a, &b, &ctx).is_err());
 }
 
+fn grant_kind(account: &str, n: u8) -> Kind {
+    let (m, magree) = (key(n), key(n + 1));
+    Kind::Grant {
+        request: request(account, &m, &magree, "Agent", "agent", agent_terms()),
+        terms: granted_terms("2026-12-31T00:00:00Z"),
+        shares: vec![],
+    }
+}
+
+/// The checker's N1. Home `hi` never saw the veto: it appends the activation A3, then a grant
+/// E4, and signs a head over E4. The `vetoed` V3 (receipted by `lo`) displaces A3 and E4 under
+/// §8.6 rule 1, the branch grows F4 and `hi` signs a head over F4. That is a home following a
+/// displacement one seq after it, not equivocation.
+struct AfterDisplacement {
+    account: String,
+    hi: Key,
+    ctx_objects: Objects,
+    now: i64,
+    head_e4: Vec<u8>,
+    head_f4: Vec<u8>,
+    head_e4_late: Vec<u8>,
+    head_f4_early: Vec<u8>,
+    head_e4_same: Vec<u8>,
+    head_f4_same: Vec<u8>,
+}
+fn after_displacement() -> AfterDisplacement {
+    let f = fixture();
+    let (mut chain, lo, hi, host) = account_with_two_homes(&f);
+    let account = chain.account();
+    let t2_issued = T0 + 100 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t2_issued,
+            &[&f.a],
+            json!({"keyring": {"remove": [f.b.id]}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t2 = r.pending[0].clone();
+    let t2_digest = body_digest_of_env(&t2);
+    let r2 = receipt(&account, &lo, &t2_digest, t2_issued + 10 * SEC);
+    chain.objects.pending.push(r2.clone());
+    let mut hi_view = chain.objects.clone();
+    let a3 = prepare_activate(&hi_view, chain.now, &t2_digest)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    assert_eq!(a3.entries[0].0, 3);
+    hi_view.entries.push(a3.entries[0].1.clone());
+    let b = prepare_signed(
+        &hi_view,
+        chain.now,
+        grant_kind(&account, 20),
+        t2_issued + 4_000 * SEC,
+        std::slice::from_ref(&f.a.id),
+    )
+    .unwrap();
+    let sigs = host.sign(b.steps());
+    let e4 = b.finish(sigs).unwrap();
+    assert_eq!(e4.entries[0].0, 4);
+    let batch = prepare_veto(
+        &chain.objects,
+        chain.now,
+        &VetoParams {
+            transition: t2.clone(),
+            transition_receipts: vec![r2],
+            issued_ms: t2_issued + 30 * SEC,
+            signers: vec![f.b.id.clone()],
+        },
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let v_digest = body_digest_of_env(&r.pending[0]);
+    chain
+        .objects
+        .pending
+        .push(receipt(&account, &lo, &v_digest, t2_issued + 35 * SEC));
+    let v3 = prepare_vetoed(&chain.objects, chain.now, &t2_digest, &v_digest)
+        .unwrap()
+        .finish(vec![])
+        .unwrap();
+    let mut all = chain.objects.clone();
+    all.entries.extend([
+        a3.entries[0].1.clone(),
+        e4.entries[0].1.clone(),
+        v3.entries[0].1.clone(),
+    ]);
+    let verdict = verify_history(&all, &Persisted::default(), chain.now);
+    assert!(verdict.stop.is_none(), "{:?}", verdict.stop);
+    assert_eq!(
+        verdict.branch[2],
+        body_digest_of_env(&v3.entries[0].1),
+        "the vetoed stands"
+    );
+    let b = prepare_signed(
+        &all,
+        chain.now,
+        grant_kind(&account, 22),
+        t2_issued + 4_100 * SEC,
+        std::slice::from_ref(&f.a.id),
+    )
+    .unwrap();
+    let sigs = host.sign(b.steps());
+    let f4 = b.finish(sigs).unwrap();
+    assert_eq!(f4.entries[0].0, 4);
+    all.entries.push(f4.entries[0].1.clone());
+    let (de, df) = (
+        body_digest_of_env(&e4.entries[0].1),
+        body_digest_of_env(&f4.entries[0].1),
+    );
+    let at = t2_issued + 4_010 * SEC;
+    AfterDisplacement {
+        head_e4: head(&account, &hi, 4, &de, at),
+        head_f4: head(&account, &hi, 4, &df, at + 190 * SEC),
+        head_e4_late: head(&account, &hi, 4, &de, at + 400 * SEC),
+        head_f4_early: head(&account, &hi, 4, &df, at - 10 * SEC),
+        head_e4_same: head(&account, &hi, 4, &de, at),
+        head_f4_same: head(&account, &hi, 4, &df, at),
+        account,
+        hi,
+        ctx_objects: all,
+        now: chain.now,
+    }
+}
+
+#[test]
+fn heads_evidence_does_not_convict_a_home_one_seq_after_a_displacement() {
+    let d = after_displacement();
+    let ctx = EvidenceContext {
+        objects: &d.ctx_objects,
+        now_ms: d.now,
+    };
+    // Earlier head over E4 (displaced), later over F4 (the standing branch).
+    let r = equivocation_of_heads(&d.account, &d.head_e4, &d.head_f4, &ctx);
+    assert!(
+        matches!(r, Err(Failure::Malformed(ref m)) if m.contains("rule 1")),
+        "{r:?}"
+    );
+    // The other way round the home went back to what had been displaced: equivocation.
+    let ev = equivocation_of_heads(&d.account, &d.head_f4_early, &d.head_e4_late, &ctx).unwrap();
+    assert_eq!(
+        verify_evidence(&ev, &d.account, &ctx).unwrap(),
+        Evidence::Heads {
+            home: d.hi.id.clone(),
+            seq: 4
+        }
+    );
+    // Equal `issued` over a rule 1 divergence is not equivocation either way round.
+    for (a, b) in [
+        (&d.head_e4_same, &d.head_f4_same),
+        (&d.head_f4_same, &d.head_e4_same),
+    ] {
+        let r = equivocation_of_heads(&d.account, a, b, &ctx);
+        assert!(
+            matches!(r, Err(Failure::Malformed(ref m)) if m.contains("rule 1")),
+            "{r:?}"
+        );
+    }
+}
+
+#[test]
+fn heads_evidence_needs_the_history_back_to_the_divergence() {
+    let d = after_displacement();
+    // Drop the displaced branch's seq 3 entry (the activation) from the held objects: the walk
+    // from E4 cannot reach the divergence.
+    let mut objects = d.ctx_objects.clone();
+    let before = objects.entries.len();
+    objects.entries.retain(|e| {
+        let v: Value = serde_json::from_slice(e).unwrap();
+        let body: Value =
+            serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+        !(body["kind"] == "activate" && body["seq"] == 3)
+    });
+    assert_eq!(objects.entries.len(), before - 1);
+    let ctx = EvidenceContext {
+        objects: &objects,
+        now_ms: d.now,
+    };
+    let r = equivocation_of_heads(&d.account, &d.head_f4_early, &d.head_e4_late, &ctx);
+    assert!(matches!(r, Err(Failure::Unavailable(_))), "{r:?}");
+}
+
 #[test]
 fn heads_evidence_needs_the_history_and_verified_heads() {
     let f = fixture();
