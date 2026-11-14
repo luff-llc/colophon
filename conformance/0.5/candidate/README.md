@@ -1,7 +1,7 @@
 # Colophon 0.5 candidate vectors
 
 **Status: hand-built for review, not replayed by any 0.5 implementation.** These files go with
-[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 11. No 0.5 verifier exists yet,
+[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 12. No 0.5 verifier exists yet,
 so every `expected` outcome for 0.5 is the spec author's reading of the text. The bytes are
 real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256 (raw, or
 WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except
@@ -45,6 +45,8 @@ the same 1,078 files.
 | `rules/call-*` | §12.3, §13.4 | Pending addition, provisional addition, after `final`, pending removal, suspended, suspended history read, a suspension expired by the clock, recover-only history read. Each carries `verifier.statuses` |
 | `rules/veto-webauthn-*` | §4.3, §8.7 | A veto signature with and without UV, and from a call origin |
 | `rules/row-*` | changes §H | Event sequences: rows 2, 3, 4, 8, 9, 10, 11, 12 (and a gone home revoked by one recovery key), 13 (the honest home serves the transition; the owner's veto stands), 17 |
+| `rules/t-excusal-final-not-displaced-by-vetoed`, `t-cascade-final-not-displaced-by-vetoed`, `t-full-set-final-not-displaced-by-vetoed`, `t-vetoed-displaces-activation-and-later-revocation`, `t-order-guard-keeps-later-addition-provisional` | §8.6, §8.7 | Revision 12 (M1, H1, M-a): an activation that is final by excusal, by the cascade or by a full set is never displaced by a `vetoed`; a `vetoed` that displaces a provisional one takes the later revocations with it; Order keeps a later addition provisional behind an earlier one when a non-removal-only revocation does not excuse its home |
+| `rules/t-rekey-slotted-drops-slot`, `i-rekey-slotted-as-immediate` | §8.3, §8.4 | Revision 12 engine correction: re-keying the slotted controller drops its slot and retires the vault; the same change as an immediate entry is `malformed` |
 | `rules/t-conflict-no-evidence`, `t-quorum2-veto-beats-removal`, `row-13-quorum1-hidden-transition`, `t-removal-unblocks-addition`, `t-revoke-home-*`, `t-planted-key-dropped`, `t-vault-by-approve-only`, `t-recovery-*` | §8.3, §8.4, §8.6, §8.7 | Revision 8: one per High of the second review of revision 7 |
 | `encoding/number-ties.json` | §2.1 | Doubles with two equally near shortest decimals: the even last digit is canonical |
 | `calls/link-unknown-operator-*` | §10.4, §12.3 | `any:[true, unknown]` is `ok`; `any:[false, unknown]` is `newerFormat` |
@@ -52,12 +54,15 @@ the same 1,078 files.
 | `pairing/pairing.json` | §7.3 | Commitment and code |
 | `succession/swift-*` | §13.5, §15.1, §16.3 | Receipt 60 s into the succession window (verified), 400 s (late, unverified); F before the due time; veto recorded as `successionVetoed`; a key removed before the last removal and before the delay can't veto, the last-removed key can, and so can a key removed within the delay before the genesis; a hand-over with an extra key needs two vetoers; root library signed by the root alone, and vetoed by the kit; WebAuthn and recover-set swaps; a premature thief freeze followed by the owner's verified layout-4 freeze; an entry after a verified F |
 | `succession/authority5-chain` | §15.1 | A to B to C, each a `/5` successor: C verifies B through B's own predecessor |
+| `succession/authority5-successor-*` | §8.4, §8.7, §15.1 | Revision 12 (M2, H2, M-b, M-c): a predecessor with homes. F provisional (not verified; the genesis lacking possession proofs is held); F made final by a `final` (verified, the same genesis `ok`); F displaced by a `vetoed` (not verified, the predecessor continues; without proofs the genesis is `badSignature`, with proofs it is valid); a dead witness home revoked after F, which excuses it (verified); a `final` of an earlier removal-only activation refused after F |
+| `succession/authority5-chain-16`, `authority5-chain-17` | §2.4, §15.1 | Revision 12 (H3): a real chain of 16 predecessor accounts verifies, one of 17 is `malformed` |
+| `succession/swift-no-handover-needs-possession`, `swift-handover-below-rule-needs-possession` | §8.4, §15.1 | Revision 12 (M4): a genesis listing the predecessor's kit with no `handover`, or one below the rule that may write F: the kit's possession is required, `badSignature` at seq 1 |
 | `probes/swift-der/` | §16.3 | CryptoKit probe |
 
 ## What was run
 
-- `v5_generator_check` (the Rust generator): 1,123 generated files match, byte for byte. The
-  directory holds 1,126 files: those plus three sources (`README.md` and the probe's
+- `v5_generator_check` (the Rust generator): 1,314 generated files match, byte for byte. The
+  directory holds 1,317 files: those plus three sources (`README.md` and the probe's
   `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each , a seven-file chained succession, a nine-file Swift layout case and a thirteen-file cutoff case).
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all

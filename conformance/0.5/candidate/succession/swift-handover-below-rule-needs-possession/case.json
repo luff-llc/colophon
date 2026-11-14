@@ -1,0 +1,1 @@
+{"description":"The `handover` is signed by the kit alone, which holds `recover` and not the control threshold F needs: it does not meet the rule that may write F, so the kit's possession is still required and the genesis is `badSignature`.","expected":{"genesis":"badSignature","succession":"unverified"},"sections":["15.1","16.3"]}

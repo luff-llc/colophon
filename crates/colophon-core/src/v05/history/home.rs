@@ -85,6 +85,7 @@ pub struct PendingObject {
     /// Exact first stored envelope bytes.
     pub envelope: Vec<u8>,
     target: String,
+    /// For a transition, its proposer's unit (§13.1 step 1); for a veto, its signers' units.
     units: BTreeSet<String>,
     expires_ms: Option<i64>,
 }
@@ -464,10 +465,12 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                 )?;
                 let t = state::admission_transition(&st, incoming)?;
                 let at = issued.ok_or_else(|| malformed("issued"))?;
-                // First sight is recorded for a transition this home takes in, not one it
-                // refuses as early (§13.1): a later in-window receipt must not be judged
-                // against a sighting before the transition's own `issued`.
-                let first_sight = !next.facts.contains_key(&t.digest);
+                // `refused:early` comes first (§13.1 "Clock"), before the caps and before any
+                // sighting is recorded: a later in-window receipt must not be judged against a
+                // sighting before the transition's own `issued`.
+                if now_ms < at {
+                    return Err(Refusal::Early);
+                }
                 next.facts.entry(t.digest.clone()).or_insert(Fact {
                     first_seen_ms: now_ms,
                     serving: home.serving.clone(),
@@ -478,9 +481,12 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                     .iter()
                     .filter(|p| p.kind == "transition" && next.visible(p, &st, now_ms))
                     .collect();
-                if t.units
+                // The proposer is the primary signer's unit; cosigners are not charged (§13.1).
+                if active
                     .iter()
-                    .any(|u| active.iter().filter(|p| p.units.contains(u)).count() >= 2)
+                    .filter(|p| p.units.contains(&t.proposer))
+                    .count()
+                    >= 2
                 {
                     return Err(Refusal::ProposerFull);
                 }
@@ -497,19 +503,13 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                 if active.len() >= 2 * units.len() {
                     return Err(Refusal::PendingFull);
                 }
-                if now_ms < at {
-                    if first_sight {
-                        next.facts.remove(&t.digest);
-                    }
-                    return Err(Refusal::Early);
-                }
                 // Late valid transitions are retained and served, but do not get a receipt.
                 next.add(
                     &env,
                     incoming,
                     "transition",
                     t.digest.clone(),
-                    t.units,
+                    BTreeSet::from([t.proposer.clone()]),
                     if t.full_set {
                         None
                     } else {
@@ -831,7 +831,7 @@ fn admit_entry(
                     &t_bytes,
                     "transition",
                     t.digest.clone(),
-                    t.units,
+                    BTreeSet::from([t.proposer.clone()]),
                     Some(t.due_ms.saturating_add(WEEK)),
                 )?;
             }

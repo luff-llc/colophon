@@ -894,7 +894,9 @@ fn run_succession(dir: &Path, case: &Value) -> Outcome {
             .heads
             .push(fs::read(dir.join("successor-head.json")).unwrap());
     }
-    let now = ms("2026-11-14T10:15:00Z");
+    let now = ms(case["expected"]["now"]
+        .as_str()
+        .unwrap_or("2026-11-14T10:15:00Z"));
     let v = verify_history(&objects, &Persisted::default(), now);
     let verified = v
         .state
@@ -908,6 +910,15 @@ fn run_succession(dir: &Path, case: &Value) -> Outcome {
             v.seq(),
             v.stop
         ));
+    }
+    if let Some(code) = case["expected"]["genesis"].as_str() {
+        if v.code() != code || v.seq() != 1 {
+            return Outcome::Fail(format!(
+                "genesis want {code} at 1, got {} at {}",
+                v.code(),
+                v.seq()
+            ));
+        }
     }
     if let Some(code) = case["expected"]["seq3"].as_str() {
         let wanted = code.rsplit(' ').next().unwrap();

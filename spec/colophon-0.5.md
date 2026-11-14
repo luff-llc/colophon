@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 11, for review, 2026-11-12.** Not frozen, not
+**Status: final candidate, revision 12, for review, 2026-11-14.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -10,7 +10,11 @@ first engine builder's questions, making that state model checkable by every ver
 revision 7 answers two reviews of revision 6 (281e7c4) and the engine attack, recording finality
 in the history and stating §8.7 as a state table; revision 8 answers the second review of revision 7
 (0a25988): removals, revoked homes, recovery that restores control, and verdicts that depend on
-the object set only; revision 9 keeps a revoked home current until its revocation is final. The
+the object set only; revision 9 keeps a revoked home current until its revocation is final; revision 10 states the
+one-recovery-key stall and narrows the liveness claim; revision 11 states recovery conditions in
+units; revision 12 answers the engine check of the 0.5 history verifier and its own check: one
+meaning of "final", final successions, possession under handover, the proposer cap, the chain
+bound and the Swift steward threshold. The
 mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
@@ -139,6 +143,11 @@ verified as their own version required.
 
 Exceeding a bound is `malformed`, wherever the object is, including a `clientData` inside any
 envelope. A verifier MUST NOT allocate in proportion to a claimed length before checking it.
+
+**Predecessor chain.** A verifier follows the accounts along `predecessor` references from the
+claimed account (§15.1), at most 16. A chain of more than 16 accounts is `malformed`. Objects in
+the supplied set that no step of the chain reaches are ignored: they are never counted and never
+a reason for `malformed`.
 
 **The bounds compose.** The largest recording entry is a `vetoed` at `headQuorum` 8: base64 (4⌈n/3⌉)
 of a transition envelope (622,592 → 830,124), a veto envelope (131,072 → 174,764) and 16 receipt
@@ -675,8 +684,16 @@ A transition meeting the recovery rule has consent.
 - **Possession:** every controller added, and every controller whose `holder` is set, signs the
   body in `additions`, from an authority origin (a `sign` controller's from any origin its
   descriptor allows). Exempt: `upgrade`, and, at a successor genesis, keys whose descriptors equal
-  predecessor keys current at `head` (an unverified or vetoed succession still confers nothing,
-  §15.1).
+  predecessor keys current at `head`, but only when the succession is authorized (§15.1): for a
+  Swift predecessor, when the genesis's `handover` meets the rule that may write F at `head`; for
+  a `/5` predecessor, when the succession is verified, which needs F final. Without that, every
+  listed controller needs its possession proof, and a genesis lacking one is `badSignature`. For a
+  `/5` predecessor whose F is absent or provisional the succession is not decided yet, so a genesis
+  that lacks a proof for a carried key is **held** (§8.5): it becomes `ok` when F is final and
+  `badSignature` when the predecessor has another entry at F's seq, such as the `vetoed` that
+  displaced F. A verdict may go from held to ok or from held to refused, never from ok to refused.
+  A genesis that carries a proof for every controller is valid on its own, with the succession
+  simply unverified. An unverified or vetoed succession still confers nothing (§15.1).
 - **UV.** Required on every WebAuthn signature under the control or recovery rule, on immediate
   `keyring` and `vault` entries, and on transitions, vetoes and `handover`. Single-rule,
   `rekey`, `suspend` and possession signatures need UV only when the controller has
@@ -734,6 +751,12 @@ not be transitive, and MUST NOT be folded into a running winner.
 
 Every recording entry has a **due time**: an `activate`'s or `vetoed`'s is its transition's; a
 `final`'s is its activation's transition's; a `successionVetoed`'s is the succession's.
+
+"A `final` covers" an `activate` as §8.7 defines under "Final": the activation is final, in any of
+the ways given there, on its own branch. A `vetoed` that displaces an activation removes every later
+entry on that branch (§8.7 Rollback), including any entry that would have made it final, so
+either the activation is final on its branch and no `vetoed` displaces it, or it is not and the
+`vetoed` takes the branch with it.
 
 1. **Activation order.**
    - If X is a recording entry and Y is not, **Y stands only if** the verifier holds a head of the
@@ -855,14 +878,22 @@ from heads it has seen or the order it saw things in.
   whose revocation isn't final yet; a home is excused only once its revocation is final), less the
   homes it revokes itself under the stronger authority. For a
   full set they are those of them that remain after it.
-- An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
+- **Final.** An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering
-  it, or a later full set's anchor follows it.
+  it, or a later full set's anchor is it or follows it.
   After each entry, excuse homes whose removal-only revocation is final and make every activation
-  with no remaining witnesses final without a `final` entry; repeat until no more become final.
-- **Order.** An activation that is not removal-only gets a `final` only when every earlier
-  activation that is not removal-only is final. Removal-only activations are outside this order:
-  they never wait for an earlier provisional activation, and none waits for them.
+  with no remaining witnesses final without a `final` entry, in Order; repeat until no more
+  become final. **A `final` covers an activation** (§8.6 rule 1) when it is final in any of these
+  ways, in the state after it or after any valid entry that follows it on its branch: its witness
+  set is empty or fully excused, a `final` entry names it, a later `final` carries a head from every
+  one of its witnesses, or a later full set's anchor is it or follows it. This is the one meaning
+  of "final" in §8.6, §8.7 and §15.
+- **Order.** An activation that is not removal-only gets a `final`, or becomes final by excusal,
+  only when every earlier activation that is not removal-only is final. Removal-only activations
+  are outside this order: they never wait for an earlier provisional activation, and none waits
+  for them. A revocation of a home that is not removal-only (it also loosens a policy field, say)
+  revokes the home once final but does not excuse it, so activations that list that home as a
+  witness wait for its head.
 - **Until final, whatever an activation adds counts for nothing.** An added controller, home or
   member signs no entry, transition, veto, `suspend` or call (`refused:revoked`), counts toward no
   rule, unit, quorum, full set or escalation, and its receipts and heads don't count; records by an
@@ -873,8 +904,8 @@ from heads it has seen or the order it saw things in.
 - **A provisional activation, removal-only or not, is displaced by a valid `vetoed` of its own
   transition** (§8.6 rule 1). A verifier holding the `activate` and not the `vetoed` applies the
   activation as provisional; when it receives the `vetoed`, the same rule displaces the activation,
-  whatever order the objects came in. Once a `final` covers the activation, the `vetoed` changes
-  nothing.
+  whatever order the objects came in. Once a `final` covers the activation, whether it is a
+  `final` entry or finality by excusal, the `vetoed` changes nothing.
 - **Rollback** of a provisional activation removes it and every later entry on its branch, and
   nothing else; nothing it added has signed. Transitions anchored on a removed entry are void;
   recording entries are rebuilt by the homes; displaced signed entries go back to their signers'
@@ -906,7 +937,7 @@ with the result shown, and an entry that fails changes nothing. Every recording 
 | **Immediate entry E** (every kind except `genesis`, `suspend`, `vault` and recording entries) | §8.5 steps 1–2; signer current, not suspended, not added by a provisional activation (`badSignature`); §8.4 rule (`badSignature`); rate (§13.1, `malformed`); kind rules (`malformed`) | Apply. A suspension whose transition E makes invalid, or whose due time + 7 days is before E's `issued`, ends. |
 | **`vault`** | As an immediate entry; the vault is retiring and the signer was current at the anchor of the removal that made it retire, is still current, and holds `control` or `recover` (`badSignature`); a slot names the signer, `previousVault` present (`malformed`) | New vault; not retiring. |
 | **`suspend` (key K, T, receipts)** | §8.5 steps 1–2; signer is a signer of T (`badSignature`); T valid at E; T not recorded on the branch; T removes or demotes K; T's delta not void; the signer's unit has no outstanding suspension (`malformed`) | K suspended until the earliest of: T's `activate` or `vetoed`; the first entry after which T is no longer valid at a hypothetical `activate`; the first entry, or the verifier's clock, past T's due time + 7 days. |
-| **`activate` (T, receipts)**, T not a full set | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); delta not void (`malformed`) | Apply the delta (with `keep`, §8.3's slot drops, retiring, and the drop of keys the removed key added); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set, or final if that set is empty. |
+| **`activate` (T, receipts)**, T not a full set | `by` = T's `by`; T not recorded on the branch; T valid at E; receipts chosen as above; `issued` = max(due, previous `issued`) and not more than 7 days after due (`malformed`); delta not void (`malformed`) | Apply the delta (with `keep`, §8.3's slot drops, retiring, and the drop of keys the removed key added); T recorded; v(u) reset for T's units if T met escalation; the activation is provisional with its witness set; it becomes final when every witness is excused, in Order (the fixed point). |
 | **Full-set `activate`** | As `activate`, with the full set's due time; no veto | As `activate`; every activation before T's anchor becomes final. |
 | **`vetoed` (T, transitionReceipts, V, receipts)** | `by` = V's `by`; T not recorded on the branch; T valid at E with `transitionReceipts`; T not a full set; V's units ≥ T's, disjoint from them, each a current `control` or `recover` controller; V's receipts chosen, each within 300 s of V's `issued` and before T's veto deadline; `issued` = max(latest chosen veto receipt, previous `issued`), not more than 7 days after it (`malformed`) | T recorded; v(u) += 1 for each of T's units; suspensions citing T end. |
 | **`final` (activation A, heads)** | A is an `activate` on the branch, not yet final; if A is not removal-only, every earlier activation that is not removal-only is final; `heads` is non-empty and has exactly one head per witness of A, each signed by that home's key in the state before A, covering A on this branch (not necessarily fresh); `by` = A's `by`; `issued` = max(latest head's `issued`, previous `issued`) (`malformed`) | A is final, and so is every earlier activation whose witnesses all have a head here covering it; what they added counts. A removal-only A that revoked homes excuses them from every other activation's witnesses. |
@@ -1356,10 +1387,14 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   validity never depends on which home admitted what, only on receipts reaching `headQuorum`.
   Hosts refused at one home retry at the others.
   1. each `control` or `recover` unit may have at most 2 pending transitions it proposed
-     (`refused:proposerFull`);
+     (`refused:proposerFull`); the proposer is the unit of the primary signer (`by`), and
+     cosigners are not charged;
   2. the account may have at most 2 pending transitions per such unit, so no set of proposers can
      take another unit's share (`refused:pendingFull`);
   3. a transition may have at most 8 vetoes, at most one per vetoing unit (`refused:vetoFull`).
+
+  A home checks the clock first (`refused:early`, "Clock" above), then these caps in this order.
+
   A hostile home at `headQuorum` 1 can still receipt a transition, hide it from its listing, and
   reveal it only in its `activate` after the deadline; then nobody can veto it. That is why quorum
   1 doesn't resist a hostile home (§18).
@@ -1503,7 +1538,14 @@ library upgrades in place instead.
 
 **F.** F is at `head.seq + 1`, with `previous` = `head.digest`, and names this account.
 - For `/5` it is the `activate` of a `successor` transition: the waiting and vetoing happen in the
-  predecessor (§8.7).
+  predecessor (§8.7). After it, while F is provisional, the predecessor admits only
+  these entries: F's own `final`; a `final` that Order (§8.7) requires first for an earlier
+  activation that is not removal-only; a `vetoed` that displaces F (§8.6 rule 1: a candidate at F's
+  seq, which lets the predecessor continue); and the entries of a removal-only revocation of a
+  home, its `activate` and its `final`, so that a dead or hostile witness cannot freeze the
+  predecessor for ever: once that revocation is final the home is excused for F (§8.7), exactly as
+  for any other activation. A `final` of an earlier removal-only activation is not among them.
+  Every other entry is `malformed` evidence. Once F is final the account admits nothing (§15.2).
 - For Swift it is the freezing `layout` entry (§16.3). Swift has no pending entries, so the
   waiting happens in the successor first:
   1. **Handover.** The genesis carries `handover`: signatures over the genesis body by the keys
@@ -1547,9 +1589,17 @@ library upgrades in place instead.
 - **Published** at the predecessor's own homes (`/5`), or at the successor's homes under
   `{base}/predecessor/` (Swift).
 
+**Chain bound.** A `/5` predecessor may itself be a successor, so a verifier follows the chain
+through each genesis: the claimed account, then the account its genesis names as its predecessor,
+and so on. It follows at most 16 accounts; a longer chain is `malformed` (§2.4). Objects in the
+supplied set that are not on this chain, such as an unsigned or unrelated genesis, are ignored and
+never change the verdict.
+
 **Verified** when:
 - the verifier holds the predecessor history through F;
 - F names this account;
+- for `/5`, F is final (§8.7), by a `final` on the predecessor's branch or by excusal: a provisional
+  F verifies nothing, and a `vetoed` that displaces it ends the succession attempt;
 - the history has no fork at or before F;
 - the succession was due before F;
 - for Swift, fresh heads issued after the due time by every successor home current at the
@@ -1566,8 +1616,9 @@ it.
 
 ### 15.2 Successor
 
-After a `successor` transition activates, the account accepts no further entry; later entries are
-`malformed` evidence. The old account stays readable. A verified succession can't be undone.
+After the activation of a `successor` transition is final, the account accepts no further entry;
+later entries are `malformed` evidence. While it is provisional the account admits only the
+entries that settle it (§15.1). The old account stays readable. A verified succession can't be undone.
 
 ### 15.3 Clean copy
 
@@ -1720,6 +1771,23 @@ valid when controllers are distinct valid points, `webauthn` ones have `rpID`, a
 `control`, `1 ≤ threshold ≤ control count`, an explicit `recoverThreshold` is 2 to the recover count
 and then `threshold ≥ recoverThreshold`, and slots are complete. `layout` must exceed the current
 layout.
+
+**Steward threshold.** `threshold` is an optional integer field of every Swift entry
+(`AuthorityEntry.threshold: Int?`). On a `genesis` or a `stewards` entry, absent or `null` is 0
+(`AuthorityState`: `genesis.threshold ?? 0`, `entry.threshold ?? 0`), and a `quorum` `handover`
+needs `threshold > 0` as well as that many distinct steward signatures, so a threshold of 0 (or a
+negative one) lets no quorum hand the root over. Swift reads a string, a boolean, an array, an
+object or an integer beyond 64 bits as a decoding error, and its decoder would also accept `2.0`,
+`1e1` or `2E0` as integers. Shipped Swift writers always write plain integers, so a 0.5 verifier
+refuses any other number form for `threshold` in a predecessor, on every entry kind, as
+`malformed`. This reading has not been replayed by the Swift source.
+
+**Quorum handover.** Swift counts the distinct stewards whose key verifies the primary signature
+or any cosignature, and ignores every other signature: extra, duplicate, mislabelled or from a
+non-steward, provided enough stewards verify (`AuthorityState.swift`, the `quorum` case). A 0.5
+verifier refuses a quorum `handover` that carries such a signature: it needs every signature to
+verify under a steward, each steward once, and the primary signer to be one. The shipped apps
+never write a quorum `handover`, so no existing library is affected.
 
 **The freezing entry.** F is a `layout` entry with `layout` greater than 2 and an extra field
 `successor` (the 64-hex 0.5 account ID), signed under the rule in force (root before adoption, the `layout` rule
