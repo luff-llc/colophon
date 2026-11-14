@@ -268,7 +268,50 @@ fn sessions(n: usize) {
     let before = ea.stats();
     let t = Instant::now();
     ea.refresh(src.listing()).unwrap();
-    row("concurrent record merged", &before, &ea.stats(), t);
+    row("late record, device far behind", &before, &ea.stats(), t);
+    let before = ea.stats();
+    let t = Instant::now();
+    ea.refresh(src.listing()).unwrap();
+    row("refresh, nothing new", &before, &ea.stats(), t);
+    // A device a few records behind: its record sorts before the last three.
+    for i in 0..5 {
+        engine_write(
+            &mut ea,
+            &mut host,
+            &src,
+            NS,
+            "createNotebook",
+            json!({"id": format!("x{i}"), "title": "X"}),
+        );
+    }
+    eb.refresh(src.listing()).unwrap();
+    for i in 0..3 {
+        engine_write(
+            &mut ea,
+            &mut host,
+            &src,
+            NS,
+            "createNotebook",
+            json!({"id": format!("y{i}"), "title": "Y"}),
+        );
+    }
+    engine_write(
+        &mut eb,
+        &mut host,
+        &src,
+        NS,
+        "createNotebook",
+        json!({"id": "b2", "title": "B"}),
+    );
+    let before = ea.stats();
+    let t = Instant::now();
+    ea.refresh(src.listing()).unwrap();
+    row(
+        "late record, device nearly current",
+        &before,
+        &ea.stats(),
+        t,
+    );
     // A live slot is held.
     engine_write(
         &mut ea,
@@ -304,6 +347,11 @@ fn sessions(n: usize) {
         json!({"id": "ep0", "show": "show", "seconds": 2.0}),
     );
     row("live position update", &before, &ea.stats(), t);
+    // The clock moves a second.
+    let before = ea.stats();
+    let t = Instant::now();
+    ea.advance(NOW + 1_000).unwrap();
+    row("advance one second", &before, &ea.stats(), t);
 }
 
 #[test]

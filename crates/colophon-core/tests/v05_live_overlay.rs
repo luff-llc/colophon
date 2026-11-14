@@ -25,6 +25,8 @@ impl Rng {
 }
 
 fn journey(seed: u64, steps: usize) {
+    // Snapshots every few operations, so late records rewind to one.
+    colophon_core::v05::account::set_fold_snapshot_interval(3);
     let mut rng = Rng(seed);
     let mut f = create(&[LISTEN]);
     let t = terms_for(&[(LISTEN, "write")]);
@@ -97,5 +99,111 @@ fn journey(seed: u64, steps: usize) {
 fn live_overlay_equals_a_rebuild_after_every_step() {
     for seed in 1..=6u64 {
         journey(seed, 30);
+    }
+}
+
+const NOTES: &str = "notes";
+
+fn notebook(e: &mut Eng, host: &mut Host, src: &MemSource, n: &str) {
+    engine_write(
+        e,
+        host,
+        src,
+        NOTES,
+        "createNotebook",
+        json!({"id": n, "title": n}),
+    );
+}
+type Eng = colophon_core::v05::engine::Engine<MemSource>;
+
+/// A record that sorts before the last of its namespace (a second device with a lower clock) is
+/// judged and folded at its place: the walk visits it alone and the fold is taken back to a
+/// snapshot, not to nothing; and the result is what a rebuild gives.
+#[test]
+fn a_late_record_costs_what_it_affects() {
+    colophon_core::v05::account::set_fold_snapshot_interval(8);
+    let mut f = create(&[NOTES]);
+    let t = terms_for(&[(NOTES, "write")]);
+    let a = f.host.identity(31);
+    let b = f.host.identity(32);
+    admit(&mut f, &a, "A", "device", t.clone(), t.clone());
+    admit(&mut f, &b, "B", "device", t.clone(), t);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    let mut ea = member_engine(&f, &host, &src, &a, NOW);
+    let mut eb = member_engine(&f, &host, &src, &b, NOW);
+    for i in 0..60 {
+        notebook(&mut ea, &mut host, &src, &format!("a{i}"));
+    }
+    eb.refresh(src.listing()).unwrap();
+    for i in 60..64 {
+        notebook(&mut ea, &mut host, &src, &format!("a{i}"));
+    }
+    // B writes at the clock after what it saw: before A's last four.
+    notebook(&mut eb, &mut host, &src, "late");
+    let before = ea.stats();
+    ea.refresh(src.listing()).unwrap();
+    let after = ea.stats();
+    ea.account().verify_derivation().unwrap();
+    assert_eq!(after.walked_last, 1, "only the late record is walked");
+    assert!(
+        after.folds_applied_last <= 8 + 6,
+        "the fold is taken back to a snapshot, not to nothing: {}",
+        after.folds_applied_last
+    );
+    assert!(after.signatures_verified - before.signatures_verified <= 1);
+    let cold = member_engine(&f, &host, &src, &a, NOW);
+    let mut cold = cold;
+    cold.refresh(src.listing()).unwrap();
+    assert_eq!(cold.revision(NOTES), ea.revision(NOTES));
+    assert_eq!(
+        serde_json::to_string(&cold.view(NOTES).unwrap()).unwrap(),
+        serde_json::to_string(&ea.view(NOTES).unwrap()).unwrap()
+    );
+}
+
+/// Late records at random places among several authors: after every step the maintained
+/// derivation equals a rebuild.
+#[test]
+fn random_late_records_equal_a_rebuild() {
+    colophon_core::v05::account::set_fold_snapshot_interval(4);
+    for seed in 1..=8u64 {
+        let mut rng = Rng(seed * 7919);
+        let mut f = create(&[NOTES]);
+        let t = terms_for(&[(NOTES, "write")]);
+        let ids: Vec<String> = (0..3).map(|i| f.host.identity(40 + i)).collect();
+        for (i, id) in ids.iter().enumerate() {
+            admit(&mut f, id, &format!("D{i}"), "device", t.clone(), t.clone());
+        }
+        let src = MemSource::new();
+        src.store_account(&f.account);
+        let mut host = std::mem::replace(&mut f.host, Host::new());
+        let mut e: Vec<Eng> = ids
+            .iter()
+            .map(|id| member_engine(&f, &host, &src, id, NOW))
+            .collect();
+        let mut n = 0;
+        for _ in 0..40 {
+            let who = rng.below(3);
+            if rng.below(3) == 0 {
+                e[who].refresh(src.listing()).unwrap();
+            } else {
+                n += 1;
+                notebook(&mut e[who], &mut host, &src, &format!("n{n}"));
+            }
+            for x in &e {
+                x.account().verify_derivation().unwrap();
+            }
+        }
+        for x in &mut e {
+            x.refresh(src.listing()).unwrap();
+            x.account().verify_derivation().unwrap();
+        }
+        let revs: Vec<u64> = e.iter().map(|x| x.revision(NOTES)).collect();
+        assert!(
+            revs.windows(2).all(|w| w[0] == w[1]),
+            "seed {seed}: {revs:?}"
+        );
     }
 }

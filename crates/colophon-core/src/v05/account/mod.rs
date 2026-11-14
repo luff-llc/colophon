@@ -138,6 +138,8 @@
 mod action;
 mod create;
 mod derived;
+#[doc(hidden)]
+pub use derived::set_fold_snapshot_interval;
 pub(crate) use derived::wipe_value;
 mod moving;
 mod read;
@@ -881,10 +883,39 @@ impl Account {
     }
 
     fn diff(&self, new: &Derived, new_objects: &Objects) -> Changes {
+        let mut c = self.diff_core(
+            new.auth.state(),
+            &new.verdict.branch,
+            &new.effective,
+            new_objects,
+        );
+        for name in new.folded.keys() {
+            let before = self
+                .d
+                .folded
+                .contains_key(name)
+                .then(|| self.d.revision_of_ns(name));
+            let rev = new.revision_of_ns(name);
+            if before != Some(rev) {
+                c.namespaces.insert(name.clone(), rev);
+            }
+        }
+        c
+    }
+
+    /// What changed in the verified history, its members and its pending objects between the
+    /// derivation held and a new one (the record layer is the caller's).
+    fn diff_core(
+        &self,
+        ns: &crate::v05::history::State,
+        nb: &[String],
+        new_effective: &Objects,
+        new_objects: &Objects,
+    ) -> Changes {
         let old = &self.d;
-        let (os, ns) = (old.auth.state(), new.auth.state());
+        let os = old.auth.state();
         let mut c = Changes::default();
-        let (ob, nb) = (&old.verdict.branch, &new.verdict.branch);
+        let ob = &old.verdict.branch;
         c.authority.seq = (ob.len() as u64, nb.len() as u64);
         let common = ob.iter().zip(nb).take_while(|(a, b)| a == b).count();
         c.authority.reorganized = common < ob.len();
@@ -914,18 +945,8 @@ impl Account {
         c.authority.controllers_removed = ctl(os).difference(&ctl(ns)).cloned().collect();
         c.authority.vault_changed = os.keyring().vault != ns.keyring().vault;
         c.authority.policy_changed = os.keyring().policy != ns.keyring().policy;
-        for name in new.folded.keys() {
-            let before = old
-                .folded
-                .contains_key(name)
-                .then(|| old.revision_of_ns(name));
-            let rev = new.revision_of_ns(name);
-            if before != Some(rev) {
-                c.namespaces.insert(name.clone(), rev);
-            }
-        }
         let was: BTreeSet<String> = self.pending_digests();
-        let now: BTreeSet<String> = read::pending_transitions(&new.effective, ns)
+        let now: BTreeSet<String> = read::pending_transitions(new_effective, ns)
             .into_iter()
             .map(|t| t.digest)
             .collect();
@@ -1554,6 +1575,13 @@ impl Account {
         if now_ms <= self.now_ms {
             return Ok(Changes::default());
         }
+        // When the verified history at the new time is the one it was (the same branch, and the
+        // same members, terms, expiries and standing the judgement reads), nothing the records
+        // were judged against has changed: the history's own time-dependent view is replaced
+        // and the judgement, the folds and the live slots stand.
+        if let Some(c) = self.retime(now_ms)? {
+            return Ok(c);
+        }
         let d = self.candidate(&self.objects, &self.records, &self.persisted, now_ms)?;
         let (o, r, p) = (
             self.objects.clone(),
@@ -1561,6 +1589,50 @@ impl Account {
             self.persisted.clone(),
         );
         Ok(self.commit(d, o, r, p, now_ms))
+    }
+
+    /// [`Account::advance`] without rebuilding the record layer, when the history at `now_ms`
+    /// leaves what the records were judged against as it was; `None` when it does not.
+    fn retime(&mut self, now_ms: i64) -> Result<Option<Changes>> {
+        let Some(next) = Derived::retimed(
+            &Inputs {
+                objects: &self.objects,
+                records: &self.records,
+                live: &self.live,
+                persisted: &self.persisted,
+                now_ms,
+                seeds: &self.seeds,
+                me: &self.me,
+                scope: &self.scope,
+                fold_seed: &self.fold_seed,
+            },
+            &self.d,
+        ) else {
+            return Ok(None);
+        };
+        let mut changes = self.diff_core(
+            next.auth.state(),
+            &next.verdict.branch,
+            &next.effective,
+            &self.objects,
+        );
+        let mut persisted = self.persisted.clone();
+        if crate::v05::history::succession_status(next.auth.state())
+            .is_some_and(|s| s.verified.is_some())
+        {
+            persisted = persisted.with_succession_verified();
+        }
+        self.d.verdict = next.verdict;
+        self.d.auth = next.auth;
+        self.d.effective = next.effective;
+        self.d.verified_pending = next.verified_pending;
+        self.persisted = persisted;
+        self.now_ms = now_ms;
+        self.note_pending();
+        let now = self.pending_digests();
+        changes.pending.gone.retain(|g| !now.contains(g));
+        changes.status = Some(Status::of(&self.d.verdict));
+        Ok(Some(changes))
     }
 
     /// The verified view calls are evaluated over (§12.3), at the account's clock.

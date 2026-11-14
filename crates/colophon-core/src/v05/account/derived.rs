@@ -25,6 +25,30 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+/// Operations between the fold snapshots kept along each namespace (see [`SNAPSHOTS_KEPT`]).
+/// A record that lands at position `p` takes the namespace back to the snapshot at or before
+/// `p`, so the work is the distance to it (under this many operations) plus what follows `p`.
+pub(super) const SNAPSHOT_EVERY_DEFAULT: usize = 256;
+static SNAPSHOT_EVERY_NOW: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(SNAPSHOT_EVERY_DEFAULT);
+/// The interval in force.
+pub(super) fn snapshot_every() -> usize {
+    SNAPSHOT_EVERY_NOW.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Change the interval, process-wide (tests set a small one so a short journey rewinds to a
+/// snapshot; 0 puts it back to the default). It changes no verdict: snapshots are a cache.
+#[doc(hidden)]
+pub fn set_fold_snapshot_interval(n: usize) {
+    SNAPSHOT_EVERY_NOW.store(
+        if n == 0 { SNAPSHOT_EVERY_DEFAULT } else { n },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+/// The snapshots kept per namespace: the last ones, covering the most recent
+/// `SNAPSHOT_EVERY * SNAPSHOTS_KEPT` operations. A record that lands before the oldest takes
+/// the fold back to nothing, which is the cost of a cold fold.
+pub(super) const SNAPSHOTS_KEPT: usize = 2;
+
 /// What a [`Derived`] is built from.
 pub(super) struct Inputs<'a> {
     pub objects: &'a Objects,
@@ -264,6 +288,38 @@ pub(super) fn grant_of(m: &MemberRecord) -> Grant {
         expires: m.expires_ms.map(crate::v05::write::format_date),
         write_budget: m.terms.writes(),
         import: m.terms.import().then_some(true),
+    }
+}
+
+/// The parts of a derivation that read the clock: the verified history and what is made of it.
+pub(super) struct Retimed {
+    pub verdict: Verdict,
+    pub auth: RecordAuthority,
+    pub effective: Objects,
+    pub verified_pending: BTreeSet<Vec<u8>>,
+}
+impl Derived {
+    /// The history verified at `inputs.now_ms`, when it leaves everything the record layer was
+    /// derived from as `prior` has it: the same branch and the same `print` (members and their
+    /// terms, expiries, revocations, standing, fork and upgrade seqs). The epoch keys follow
+    /// from the branch and the seeds, so they are the same too. `None` otherwise.
+    pub(super) fn retimed(inputs: &Inputs<'_>, prior: &Derived) -> Option<Retimed> {
+        let verdict = verify_history(inputs.objects, inputs.persisted, inputs.now_ms);
+        let state = verdict.state.as_ref()?;
+        if verdict.branch != prior.verdict.branch || state.history().len() != verdict.branch.len() {
+            return None;
+        }
+        let auth = RecordAuthority::from_verdict(inputs.objects, verdict.clone()).ok()?;
+        if auth_print(&verdict, &auth) != prior.print {
+            return None;
+        }
+        let (effective, verified_pending) = effective_objects(inputs.objects, auth.state());
+        Some(Retimed {
+            verdict,
+            auth,
+            effective,
+            verified_pending,
+        })
     }
 }
 
@@ -523,7 +579,9 @@ impl Derived {
         }
         drop(cache);
         self.fold_applied = 0;
-        // Each namespace's fold takes the new operations when they all come after its last.
+        // Each namespace's fold takes the new operations after its last; operations that land
+        // before it take the namespace back to a snapshot and fold from there.
+        let mut late: BTreeSet<String> = BTreeSet::new();
         if !full_fold {
             for (ns, items) in &mut by_ns {
                 items.sort_by(|a, b| a.0.cmp(&b.0));
@@ -531,14 +589,19 @@ impl Derived {
                     // Not folded here (unreadable, out of scope, no key): nothing to extend.
                     continue;
                 };
-                let after = match f.keys.last() {
-                    Some(last) => items.first().is_none_or(|i| i.0 > *last),
+                match f.keys.last() {
+                    Some(last) => {
+                        if items.first().is_some_and(|i| i.0 <= *last) {
+                            late.insert(ns.clone());
+                        }
+                    }
                     // An empty fold with a checkpoint's snapshot to reuse: the full path takes it.
-                    None => f.fold.order.is_empty() && !inputs.fold_seed.contains_key(ns),
-                };
-                if !after {
-                    full_fold = true;
-                    break;
+                    None => {
+                        if !(f.fold.order.is_empty() && !inputs.fold_seed.contains_key(ns)) {
+                            full_fold = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -549,24 +612,90 @@ impl Derived {
         }
         let account = self.auth.account().clone();
         let library = account.as_str().chars().take(32).collect::<String>();
-        let policy = CheckpointPolicy {
-            every: 0,
-            retain: 0,
+        let policy_normal = CheckpointPolicy {
+            every: snapshot_every(),
+            retain: SNAPSHOTS_KEPT,
         };
         for (ns, items) in by_ns {
+            let mut policy = policy_normal.clone();
+            let is_late = late.contains(&ns);
             let Some(f) = self.folded.get_mut(&ns) else {
                 continue;
             };
+            let mut applied = 0u64;
+            let mut items = items;
+            if is_late {
+                // Back to the snapshot at or before the first of them, then every operation
+                // from there on, the new ones among them, in fold order. (Operations after the
+                // insertion keep their verdicts: `judge_extend` decided that.)
+                let first = items[0].0.clone();
+                let p = f.keys.partition_point(|k| *k < first);
+                f.fold.checkpoints.retain(|s| {
+                    s.position <= p && f.fold.hashes.get(s.position) == Some(&s.digest)
+                });
+                // The snapshot is taken, not copied: it is the state the replay goes on from,
+                // and the snapshots after it are gone with the operations they covered.
+                let (state, from) = match f.fold.checkpoints.pop() {
+                    Some(s) => (s.state, s.position),
+                    None => (crate::domain::State::new(&ns), 0),
+                };
+                let mut tail: Vec<FoldItem> = Vec::new();
+                for i in from..f.keys.len() {
+                    let (Some(view), Some(dg)) = (f.admitted.get(i), f.fold.order.get(i)) else {
+                        continue;
+                    };
+                    let mk = self
+                        .auth
+                        .member(&view.author)
+                        .map_or(MemberKind::Device, |m| m.request.kind.clone());
+                    tail.push((f.keys[i].clone(), view.clone(), mk, dg.clone()));
+                }
+                tail.append(&mut items);
+                tail.sort_by(|a, b| a.0.cmp(&b.0));
+                f.fold.state = state;
+                f.fold.order.truncate(from);
+                f.fold.hashes.truncate(from + 1);
+                f.keys.truncate(from);
+                f.admitted.truncate(from);
+                items = tail;
+                // A short replay makes no snapshot (each one is a copy of the state); a long
+                // one lays them down again as a fold from nothing does.
+                if items.len() <= policy.every {
+                    policy = CheckpointPolicy {
+                        every: 0,
+                        retain: 0,
+                    };
+                }
+            }
+            // Over a long replay, only the snapshots that will be kept are made.
+            let total = f.keys.len() + items.len();
+            let keep_from = total.saturating_sub(policy.every * SNAPSHOTS_KEPT);
             for (pos, view, mk, dg) in &items {
                 let ctx = self.auth.member(&view.author).map(|m| AuthorContext {
                     kind: model_kind(mk),
                     library: library.clone(),
                     grant: Some(grant_of(m)),
                 });
-                f.fold.append(dg, view, ctx, &policy);
+                // `append` makes a snapshot at each multiple; for a long replay it is the
+                // last few that matter, so the earlier multiples make none.
+                let will = policy.every > 0 && (f.fold.order.len() + 1) % policy.every == 0;
+                let skip = will && f.fold.order.len() + 1 < keep_from;
+                let step = if skip {
+                    CheckpointPolicy {
+                        every: 0,
+                        retain: 0,
+                    }
+                } else {
+                    policy.clone()
+                };
+                f.fold.append(dg, view, ctx, &step);
                 f.admitted.push(view.clone());
                 f.keys.push(pos.clone());
-                self.fold_applied += 1;
+                applied += 1;
+            }
+            self.fold_applied += applied;
+            if is_late {
+                f.fold.applied = f.keys.len() as u64;
             }
             f.revision = Self::revision_of(&f.fold);
         }
@@ -895,11 +1024,23 @@ impl Derived {
                 Some(f) => (f.fold.clone(), f.admitted.clone(), f.fold.order.len()),
                 None => (Namespace::new(&ns), Vec::new(), 0),
             };
+            // Snapshots are copies of the state, so a fold from far back lays down only those
+            // it will keep: at the multiples of the interval in the last `SNAPSHOTS_KEPT`.
+            let every = snapshot_every();
             let policy = CheckpointPolicy {
                 every: 0,
                 retain: 0,
             };
-            for (_, view, mk, dg) in &ops[start..] {
+            let keep_from = ops.len().saturating_sub(every * SNAPSHOTS_KEPT);
+            // A fold taken from before (a checkpoint's or the last derivation's) is a place to
+            // rewind to as well.
+            if start > 0 && fold.checkpoints.last().is_none_or(|s| s.position != start) {
+                fold.checkpoints.push(fold.snapshot());
+                if fold.checkpoints.len() > SNAPSHOTS_KEPT {
+                    fold.checkpoints.remove(0);
+                }
+            }
+            for (i, (_, view, mk, dg)) in ops.iter().enumerate().skip(start) {
                 let ctx = self.auth.member(&view.author).map(|m| AuthorContext {
                     kind: model_kind(mk),
                     library: library.clone(),
@@ -908,6 +1049,13 @@ impl Derived {
                 fold.append(dg, view, ctx, &policy);
                 admitted.push(view.clone());
                 self.fold_applied += 1;
+                let n = i + 1;
+                if n % every == 0 && n >= keep_from && n < ops.len() + 1 {
+                    fold.checkpoints.push(fold.snapshot());
+                    if fold.checkpoints.len() > SNAPSHOTS_KEPT {
+                        fold.checkpoints.remove(0);
+                    }
+                }
             }
             // A change token, not a counter: a function of the folded operations and their
             // order, so it is the same however the objects arrived. Zero for no operations.
