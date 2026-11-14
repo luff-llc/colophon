@@ -804,7 +804,10 @@ fn transition_batch(
         ),
     };
     require(
-        a_seq >= 1 && state.history().get((a_seq - 1) as usize) == Some(&a_digest),
+        a_seq
+            .checked_sub(1)
+            .and_then(|i| state.history().get(i as usize))
+            == Some(&a_digest),
         "anchor is not on this branch",
     )?;
     super::check_issued(p.issued_ms)?;
@@ -877,7 +880,7 @@ fn transition_components_allowed(
         .map(|u| state.veto_counts().get(u).copied().unwrap_or(0))
         .max()
         .unwrap_or(0);
-    if (signer_units.len() as u64) < 1 + max_v {
+    if (signer_units.len() as u64) < max_v.saturating_add(1) {
         return Err(unmet("escalation needs more signer units"));
     }
     // Which components the table allows under which rule.
@@ -1322,7 +1325,11 @@ pub fn prepare_final(objects: &Objects, now_ms: i64, activation_seq: u64) -> Res
         if !required.iter().any(|h| h == by)
             || env.value.get("protocol").and_then(Value::as_str) != Some("colophon/head/5")
             || seq < act.seq
-            || state.history().get((seq - 1) as usize).map(String::as_str) != Some(dg)
+            || seq
+                .checked_sub(1)
+                .and_then(|i| state.history().get(i as usize))
+                .map(String::as_str)
+                != Some(dg)
         {
             continue;
         }
@@ -1416,6 +1423,7 @@ fn head_facts(bytes: &[u8], account: &str) -> Result<(RawEnvelope, String, u64, 
     )?;
     let mut a = o.obj("authority")?;
     let seq = a.uint("seq")?;
+    require(seq >= 1, "authority.seq must be at least 1")?;
     let dg = a.digest("digest")?;
     let (_, issued) = o.date("issued")?;
     let by = o.key_id("by")?;
@@ -1492,7 +1500,7 @@ fn verify_entry_in_place(
         .ok_or_else(|| malformed("previous"))?;
     let mut chain = chain_to(objects, previous)?;
     require(
-        chain.entries.len() as u64 == seq - 1,
+        chain.entries.len() as u64 == seq.saturating_sub(1),
         "the entry does not follow its predecessors' seqs",
     )?;
     let genesis_ok = chain.entries.first().and_then(|g| {

@@ -1461,6 +1461,33 @@ fn builder_and_home_choose_the_same_receipts_for_a_reformatted_one() {
     );
 }
 
+/// The checker's N4: two heads at seq 0 by a current home used to underflow `seq - 1`.
+#[test]
+fn heads_evidence_at_seq_zero_is_malformed_not_a_panic() {
+    let f = fixture();
+    let (chain, h, _) = account_with_home(&f);
+    let account = chain.account();
+    let ctx = EvidenceContext {
+        objects: &chain.objects,
+        now_ms: chain.now,
+    };
+    let a = head(&account, &h, 0, &"1".repeat(64), T0 + 100 * SEC);
+    let b = head(&account, &h, 0, &"2".repeat(64), T0 + 101 * SEC);
+    let mut pair = [
+        (body_digest_of_env(&a), a.clone()),
+        (body_digest_of_env(&b), b.clone()),
+    ];
+    pair.sort_by(|x, y| x.0.cmp(&y.0));
+    let ev = canonical(
+        &json!({"protocol": "colophon/equivocation/5", "account": account,
+        "heads": [b64(&pair[0].1), b64(&pair[1].1)]}),
+    )
+    .unwrap();
+    let r = verify_evidence(&ev, &account, &ctx);
+    assert!(matches!(r, Err(Failure::Malformed(_))), "{r:?}");
+    assert!(equivocation_of_heads(&account, &a, &b, &ctx).is_err());
+}
+
 #[test]
 fn heads_evidence_needs_the_history_and_verified_heads() {
     let f = fixture();
