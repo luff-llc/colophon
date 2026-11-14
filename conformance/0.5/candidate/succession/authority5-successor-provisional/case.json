@@ -1,0 +1,1 @@
+{"description":"The predecessor has homes, so its `successor` activation F is provisional: its witnesses H1 and H2 have signed no head covering it, and no `final` follows. The succession is not verified.","expected":{"succession":"unverified"},"sections":["15.1","16.3"]}

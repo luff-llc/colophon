@@ -159,6 +159,9 @@ pub struct State {
     pub(super) succession: Option<super::succession::Succession>,
     #[serde(default)]
     pub(super) successor: Option<String>,
+    /// The seq of the activation that set `successor` (F, §15.1).
+    #[serde(default)]
+    pub(super) successor_seq: Option<u64>,
     #[serde(default)]
     /// Owner asserted migration manifest, when recorded.
     pub migration: Option<Value>,
@@ -249,6 +252,14 @@ impl State {
     /// The provisional activation that added controller `id`, if any.
     pub fn controller_provisional(&self, id: &str) -> Option<u64> {
         self.meta.get(id).and_then(|m| m.provisional)
+    }
+    /// Whether the activation of the `successor` transition (F) is final: nothing more is
+    /// admitted (§15.2). A state saved without F's seq counts as final.
+    pub(super) fn successor_final(&self) -> bool {
+        self.successor.is_some()
+            && self
+                .successor_seq
+                .is_none_or(|f| self.activations.iter().any(|a| a.seq == f && a.final_))
     }
     pub(super) fn seq(&self) -> u64 {
         self.digests.len() as u64
@@ -594,6 +605,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         upgrade_seq: None,
         succession,
         successor: None,
+        successor_seq: None,
         migration: None,
     })
 }
@@ -1377,6 +1389,7 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
             .ok_or_else(|| malformed("successor account"))?;
         AccountId::parse(id)?;
         n.successor = Some(id.into());
+        n.successor_seq = Some(act_seq);
         changed = true;
     }
     if t.change.contains_key("layout") {
@@ -1565,8 +1578,18 @@ pub(crate) fn apply(
     now_ms: i64,
 ) -> Step<State> {
     let _ = (pending, heads);
+    // After a `successor` activation F the account admits only the entries that settle it
+    // (§8.7, §15.1): a `final`, or, as a conflicting candidate at F's seq, a `vetoed` that
+    // displaces F while it is provisional. Once F is final the account is closed.
     if s.successor.is_some() {
-        return Err(malformed("entry after terminal successor").into());
+        if s.successor_final() {
+            return Err(malformed("entry after terminal successor").into());
+        }
+        if e.kind != "final" {
+            return Err(
+                malformed("only a final settles a provisional successor activation").into(),
+            );
+        }
     }
     // §8.5 step 1: header.
     if e.seq != s.seq() + 1 || e.previous.as_deref() != s.digests.last().map(String::as_str) {
@@ -3188,6 +3211,7 @@ pub(super) fn from_upgrade(
         upgrade_seq: Some(seq),
         succession: None,
         successor: None,
+        successor_seq: None,
         migration: None,
     })
 }

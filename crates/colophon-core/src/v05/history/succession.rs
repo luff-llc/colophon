@@ -238,11 +238,13 @@ pub(super) fn prepare(e: &Entry, predecessor: &[Vec<u8>], now: i64) -> Result<Op
                         .and_then(|(_, c)| c.as_ref().map(|c| (id.clone(), c.clone())))
                 })
                 .collect();
+            // F is the `successor` activation at head + 1 naming this account. The succession
+            // is verified only when F is final (§15.1).
             p.authorized = s.successor.as_deref()
                 == Some(crate::v05::ids::AccountId::of_genesis(&e.env.body).as_str())
-                && s.history().len() as u64 == seq + 1;
-            if p.authorized {
-                p.verified = Some((seq + 1, s.history().last().cloned().unwrap_or_default()));
+                && s.successor_seq == Some(seq + 1);
+            if p.authorized && s.successor_final() {
+                p.verified = s.history().get(seq as usize).map(|d| (seq + 1, d.clone()));
             }
             require(
                 e.env.handover.is_empty(),

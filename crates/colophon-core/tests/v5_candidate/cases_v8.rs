@@ -3847,6 +3847,113 @@ pub fn part3(o: &mut Out) {
             next5.envs[0].clone(),
         )],
     );
+
+    // Revision 12, M2 (§8.7, §15.1): a /5 succession is verified only when F, the `successor`
+    // activation, is final. The predecessor is the reference account with homes H1 and H2, so F
+    // has witnesses and starts provisional.
+    let mut sc = Chain::new();
+    genesis(
+        &mut sc,
+        &kr5,
+        sg![a],
+        Gen {
+            label: "Successor of a predecessor with homes",
+            predecessor: Some(
+                json!({"format": "colophon/authority/5", "account": acct, "head": anchor(base)}),
+            ),
+            ..Gen::default()
+        },
+    );
+    let t_sf = p(
+        &cx,
+        json!({"successor": {"account": account_id(&sc)}}),
+        sg![a, k1],
+    );
+    let r_sf = rec(&cx, &t_sf);
+    let sc_extra = || {
+        vec![(
+            "successor/authority/00000001.json".to_string(),
+            sc.envs[0].clone(),
+        )]
+    };
+    let mut pm_prov = base.clone();
+    activate(&mut pm_prov, &t_sf, std::slice::from_ref(&r_sf));
+    write_swift(
+        o,
+        "authority5-successor-provisional",
+        &pm_prov.envs,
+        Some(&sc),
+        json!({"succession": "unverified"}),
+        "The predecessor has homes, so its `successor` activation F is provisional: its witnesses H1 and H2 have signed no head covering it, and no `final` follows. The succession is not verified.",
+        sc_extra(),
+    );
+    let mut pm_final = pm_prov.clone();
+    let hs = vec![
+        head5(&pm_final, &h1k, DUE0 + 100, Some(3)),
+        head5(&pm_final, &h2k, DUE0 + 100, Some(3)),
+    ];
+    final_of(&mut pm_final, 3, hs);
+    write_swift(
+        o,
+        "authority5-successor-final",
+        &pm_final.envs,
+        Some(&sc),
+        json!({"succession": "verified"}),
+        "As authority5-successor-provisional, with the `final` of F (the heads of H1 and H2) at seq 4. F is final: the succession is verified, and the `final` is the only entry the predecessor admitted after F.",
+        sc_extra(),
+    );
+    // The vetoed succession's genesis carries a possession proof for every key, so it is valid
+    // whether or not F stands (§8.4 Possession): the case is about the predecessor.
+    let mut sc2 = Chain::new();
+    genesis(
+        &mut sc2,
+        &kr5,
+        sg![a],
+        Gen {
+            label: "Successor of a vetoed succession",
+            predecessor: Some(
+                json!({"format": "colophon/authority/5", "account": acct, "head": anchor(base)}),
+            ),
+            opt: Opt {
+                adds: sg![ph, b, k1, k2],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    let t_sf2 = p(
+        &cx,
+        json!({"successor": {"account": account_id(&sc2)}}),
+        sg![a, k1],
+    );
+    let r_sf2 = rec(&cx, &t_sf2);
+    let mut pm_prov2 = base.clone();
+    activate(&mut pm_prov2, &t_sf2, std::slice::from_ref(&r_sf2));
+    let v_sf = veto(&acct, &t_sf2, sg![b, ph], &ts(R0 + 600));
+    let rv_sf = rec_at(&cx, &v_sf, R0 + 601);
+    let mut pm_vetoed = base.clone();
+    record_veto(
+        &mut pm_vetoed,
+        &t_sf2,
+        std::slice::from_ref(&r_sf2),
+        &v_sf,
+        std::slice::from_ref(&rv_sf),
+    );
+    grant_agent(&mut pm_vetoed, &a, &ts(DUE0 + 100), &a);
+    let mut vetoed_recs = pm_vetoed.envs.clone();
+    vetoed_recs.push(pm_prov2.envs[2].clone());
+    write_swift(
+        o,
+        "authority5-successor-vetoed",
+        &vetoed_recs,
+        Some(&sc2),
+        json!({"succession": "unverified", "predecessor": "continues: the `vetoed` stands at seq 3 and a grant follows at seq 4"}),
+        "F (the `activate` of the `successor` transition) and a valid `vetoed` of that transition are both held at seq 3. The `vetoed` displaces the provisional F: the succession is not verified, and the predecessor continues with a grant at seq 4.",
+        vec![(
+            "successor/authority/00000001.json".to_string(),
+            sc2.envs[0].clone(),
+        )],
+    );
 }
 
 fn statuses(id: &str, status: &str) -> Value {

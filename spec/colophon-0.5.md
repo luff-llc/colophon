@@ -1514,7 +1514,10 @@ library upgrades in place instead.
 
 **F.** F is at `head.seq + 1`, with `previous` = `head.digest`, and names this account.
 - For `/5` it is the `activate` of a `successor` transition: the waiting and vetoing happen in the
-  predecessor (§8.7).
+  predecessor (§8.7). After it the predecessor admits only the entries that settle it: a `final`
+  (for F, or for an earlier activation that Order, §8.7, needs first) and, as a conflicting
+  candidate at F's seq, a `vetoed` of that transition, which displaces F while it is provisional
+  (§8.6 rule 1) and lets the predecessor continue. Every other entry is `malformed` evidence.
 - For Swift it is the freezing `layout` entry (§16.3). Swift has no pending entries, so the
   waiting happens in the successor first:
   1. **Handover.** The genesis carries `handover`: signatures over the genesis body by the keys
@@ -1561,6 +1564,8 @@ library upgrades in place instead.
 **Verified** when:
 - the verifier holds the predecessor history through F;
 - F names this account;
+- for `/5`, F is final (§8.7), by a `final` on the predecessor's branch or by excusal: a provisional
+  F verifies nothing, and a `vetoed` that displaces it ends the succession attempt;
 - the history has no fork at or before F;
 - the succession was due before F;
 - for Swift, fresh heads issued after the due time by every successor home current at the
@@ -1577,8 +1582,9 @@ it.
 
 ### 15.2 Successor
 
-After a `successor` transition activates, the account accepts no further entry; later entries are
-`malformed` evidence. The old account stays readable. A verified succession can't be undone.
+After the activation of a `successor` transition is final, the account accepts no further entry;
+later entries are `malformed` evidence. While it is provisional the account admits only the
+entries that settle it (§15.1). The old account stays readable. A verified succession can't be undone.
 
 ### 15.3 Clean copy
 

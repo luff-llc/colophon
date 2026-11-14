@@ -101,3 +101,87 @@ fn m1_vetoed_displaces_the_activation_and_the_later_revocation() {
         assert_eq!(w.branch, v.branch, "rotation {rot}");
     }
 }
+
+// ---- M2 -----------------------------------------------------------------------------------
+
+fn succession(name: &str) -> (Objects, i64) {
+    let dir = cand().join("succession").join(name);
+    (
+        Objects {
+            entries: files(&dir.join("successor/authority")),
+            predecessor: files(&dir.join("predecessor/authority")),
+            ..Default::default()
+        },
+        parse_date("2026-11-14T10:15:00Z").unwrap(),
+    )
+}
+fn verified(name: &str) -> bool {
+    let (o, now) = succession(name);
+    let v = verify_history(&o, &Persisted::default(), now);
+    assert_eq!(
+        v.code(),
+        "ok",
+        "{name}: the successor's own history verifies"
+    );
+    v.state.unwrap().verified_succession().is_some()
+}
+fn predecessor_alone(name: &str) -> colophon_core::v05::history::Verdict {
+    let (o, now) = succession(name);
+    verify_history(
+        &Objects {
+            entries: o.predecessor,
+            ..Default::default()
+        },
+        &Persisted::default(),
+        now,
+    )
+}
+
+#[test]
+fn m2_provisional_successor_activation_is_not_a_verified_succession() {
+    assert!(!verified("authority5-successor-provisional"));
+    let v = predecessor_alone("authority5-successor-provisional");
+    assert_eq!((v.code(), v.branch.len()), ("ok".to_string(), 3));
+    assert!(!is_final(&v, 3));
+}
+
+#[test]
+fn m2_final_successor_activation_is_verified_and_closes_the_predecessor() {
+    assert!(verified("authority5-successor-final"));
+    let v = predecessor_alone("authority5-successor-final");
+    assert_eq!((v.code(), v.branch.len()), ("ok".to_string(), 4));
+    assert!(is_final(&v, 3));
+    // After F is final the predecessor admits nothing: a further entry is evidence only.
+    let (mut o, now) = succession("authority5-successor-final");
+    let (extra, _) = succession("authority5-successor-vetoed");
+    o.predecessor.push(extra.predecessor[3].clone());
+    let w = verify_history(
+        &Objects {
+            entries: o.predecessor,
+            ..Default::default()
+        },
+        &Persisted::default(),
+        now,
+    );
+    assert_eq!(w.branch.len(), 4);
+}
+
+#[test]
+fn m2_vetoed_displaces_a_provisional_successor_activation_and_the_predecessor_continues() {
+    assert!(!verified("authority5-successor-vetoed"));
+    let v = predecessor_alone("authority5-successor-vetoed");
+    assert_eq!((v.code(), v.branch.len()), ("ok".to_string(), 4));
+    let s = v.state.unwrap();
+    assert!(s.activations().iter().all(|a| a.seq < 3), "F is displaced");
+    // Any order of the same objects gives the same branch.
+    let (o, now) = succession("authority5-successor-vetoed");
+    for rot in 1..o.predecessor.len() {
+        let mut shuffled = o.clone();
+        shuffled.predecessor.rotate_left(rot);
+        let w = verify_history(&shuffled, &Persisted::default(), now);
+        assert!(
+            w.state.unwrap().verified_succession().is_none(),
+            "rotation {rot}"
+        );
+    }
+}
