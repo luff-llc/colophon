@@ -15,19 +15,27 @@
 //!   keys held, and the §11.6 proposal fold.
 //! * [`EpochKey`]: an opaque epoch key, bound to its account, namespace and epoch.
 //!
-//! **The epoch key guarantee, exactly.** An [`EpochKey`] has private fields, no accessor
-//! visible outside this crate, no `Serialize`, a redacted `Debug` and no `Display`; it erases
-//! its bytes on drop (best effort: ordinary writes, `black_box`). A caller can use it only
-//! through functions in this crate that check the key's account, namespace and epoch against
-//! the object they work on: opening a header ([`EpochKey::open`]) and, in
-//! `v05::write::records`, encrypting one operation and sealing the key to recipients the
-//! verified authority state names. A key is obtained only by opening a seal in the verified
-//! history with the host's raw ECDH result (or the vault seed), or by the core generating one
-//! from host entropy. **The host is trusted with** the seed it supplies for a new epoch (it can
-//! recompute the key from it) and with the ECDH results and vault seed it passes in; the core
-//! cannot stop a host that holds those from deriving the key. What the core promises is that
-//! none of its own paths return, log or serialize the key, and that it seals it only to the
-//! recipients §7.1 names, taken from the verified state.
+//! **The epoch key guarantee, and the trust boundary, exactly.** An [`EpochKey`] has private
+//! fields, no accessor visible outside this crate, no `Serialize`, a redacted `Debug` and no
+//! `Display`; it erases its bytes on drop (best effort: ordinary writes, `black_box`). What the
+//! core guarantees:
+//!
+//! * it never returns epoch key bytes through its interface;
+//! * a new epoch is sealed only to the recipients the verified state names (§7.1);
+//! * a handle opens only headers of its own account, namespace and epoch.
+//!
+//! What it does **not** guarantee, by design: a grant's `shares` are part of the body the
+//! controller signs, so they must be sealed before signing and the core cannot hold them back
+//! until after. **Holding [`EpochKeys`] handles is therefore as trusted as holding the keys:** a
+//! host that holds them can have them sealed to a member it is preparing to admit (through
+//! `prepare_grant`) and read the raw key from that seal with the member's own agreement key.
+//! The host is likewise trusted with the seed it supplies for a new epoch (it can recompute the
+//! key from it), and with the ECDH results and vault seed it passes in. Do not hand handles to
+//! code the host does not trust as much as the keys.
+//!
+//! A member that was provisional (§8.7) or expired when an epoch was made is not sealed to it;
+//! it gets its shares by a `renew` once it is current ([`RecordAuthority::owed_shares`] lists
+//! who is owed what).
 //!
 //! Not here: folding and live state (§11.8, §6: the domain modules), and the
 //! caveated-live-writer rule of 0.3 §5 (§11.8 incorporates it; the §19 results have no code for
@@ -553,9 +561,11 @@ impl std::fmt::Debug for EpochKey {
     }
 }
 
-/// The epoch keys one holder has, by `(namespace, epoch)`, for one account.
+/// The epoch keys one holder has, by `(namespace, epoch)`, for one account. The first key
+/// inserted fixes the account; a key bound to another account is refused, never substituted.
 #[derive(Debug, Default)]
 pub struct EpochKeys {
+    account: Option<AccountId>,
     keys: BTreeMap<(String, u64), EpochKey>,
 }
 impl EpochKeys {
@@ -563,9 +573,15 @@ impl EpochKeys {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Add a key (replacing an equal `(namespace, epoch)` of the same account).
-    pub fn insert(&mut self, key: EpochKey) {
+    /// Add a key (replacing an equal `(namespace, epoch)` of the same account). A key of
+    /// another account than the keys already held is `malformed`.
+    pub fn insert(&mut self, key: EpochKey) -> Result<()> {
+        match &self.account {
+            Some(a) => require(a == &key.account, "a key of another account")?,
+            None => self.account = Some(key.account.clone()),
+        }
         self.keys.insert((key.namespace.clone(), key.epoch), key);
+        Ok(())
     }
     /// The key for `(namespace, epoch)` of `account`, if held.
     pub fn get(&self, account: &AccountId, namespace: &str, epoch: u64) -> Option<&EpochKey> {
@@ -595,6 +611,18 @@ pub struct Recipient {
     pub agreement: Vec<u8>,
     /// True for the vault.
     pub vault: bool,
+}
+/// One epoch a member is owed a share of (see [`RecordAuthority::owed_shares`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwedShare {
+    /// The member ID.
+    pub member: String,
+    /// The namespace.
+    pub namespace: String,
+    /// The epoch.
+    pub epoch: u64,
+    /// The member is provisional (its activation is not final yet).
+    pub provisional: bool,
 }
 /// What an ECDH needs to open an epoch seal: the peer point to agree with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -808,6 +836,40 @@ impl RecordAuthority {
             .filter(|(s, n, _)| *s <= seq && n == namespace)
             .map(|(_, _, e)| *e)
             .max()
+    }
+    /// True while the vault is retiring (§8.3): hosts MUST NOT introduce epochs.
+    pub fn vault_retiring(&self) -> bool {
+        self.state.vault_retiring()
+    }
+    /// Members owed shares: each current (not revoked) member with a `records` entry for a
+    /// namespace and an epoch of it that no epoch object of the verified history sealed to it,
+    /// for example an epoch made while it was expired or provisional (§9.4: a `renew` carries
+    /// the shares; a member that was provisional when an epoch was made gets its shares by a
+    /// `renew` once its activation is final). Sorted by member, namespace, epoch.
+    pub fn owed_shares(&self) -> Vec<OwedShare> {
+        let mut out = Vec::new();
+        for m in self.state.members() {
+            if m.revoked_seq.is_some() {
+                continue;
+            }
+            let id = m.request.member_id();
+            for entry in m.terms.records().unwrap_or_default() {
+                for e in 1..=self.latest_epoch(&entry.namespace) {
+                    if !self.sealed_to(&entry.namespace, e).contains(&id) {
+                        out.push(OwedShare {
+                            member: id.clone(),
+                            namespace: entry.namespace.clone(),
+                            epoch: e,
+                            provisional: m.provisional.is_some(),
+                        });
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            (&a.member, &a.namespace, a.epoch).cmp(&(&b.member, &b.namespace, b.epoch))
+        });
+        out
     }
     /// The latest epoch of `namespace` in the verified history (0: none yet).
     pub fn latest_epoch(&self, namespace: &str) -> u64 {
@@ -1369,33 +1431,55 @@ fn stage_one(auth: &RecordAuthority, idx: usize, h: &HeldRecord, skip_signature:
     Stage::Ready(Box::new(c))
 }
 
-/// [`judge_records`], optionally skipping the signature check of the record at `unsigned`
-/// (the write side judges its own header before the host has signed it).
+/// [`judge_records`], optionally skipping the signature check of the one held record at index
+/// `unsigned` (the write side judges its own header before the host has signed it).
+///
+/// The verdict is a function of the set of objects, not of the order of `held`: one body under
+/// several envelopes is one object (§2.2) and is judged once, the result given to each of its
+/// envelopes; fold order is `(clock, author, id)` with the body digest, lowest first, as the
+/// last tie-break (the text has none past `id`; two bodies by one author with one ID and clock
+/// differ only in AAD-only fields such as `level` or `previous`).
 pub(crate) fn judge_core(
     auth: &RecordAuthority,
     keys: &EpochKeys,
     held: &[HeldRecord],
-    unsigned: Option<&str>,
+    unsigned: Option<usize>,
 ) -> Judgement {
     let account = auth.account().clone();
     let mut records: Vec<Option<Judged>> = vec![None; held.len()];
     let mut cands: Vec<Cand> = Vec::new();
     let mut early: BTreeMap<usize, Outcome> = BTreeMap::new();
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut aliases: Vec<(usize, usize)> = Vec::new();
     for (idx, h) in held.iter().enumerate() {
-        match stage_one(auth, idx, h, unsigned == Some(h.path.as_str())) {
-            Stage::Bad(j) => records[idx] = Some(*j),
+        let c = match stage_one(auth, idx, h, unsigned == Some(idx)) {
+            Stage::Bad(j) => {
+                records[idx] = Some(*j);
+                continue;
+            }
             Stage::Unknown(c) => {
                 early.insert(idx, Outcome::Refused("notGranted"));
-                cands.push(*c);
+                *c
             }
-            Stage::Ready(c) => cands.push(*c),
+            Stage::Ready(c) => *c,
+        };
+        if let Some(first) = seen.get(&c.digest) {
+            aliases.push((idx, *first));
+            continue;
         }
+        seen.insert(c.digest.clone(), cands.len());
+        cands.push(c);
     }
     let upgrade = auth.upgrade_seq();
     let mut order: Vec<usize> = (0..cands.len()).collect();
     order.sort_by(|a, b| {
         let (x, y) = (&cands[*a].header, &cands[*b].header);
-        (x.clock, &x.author, &x.id, a).cmp(&(y.clock, &y.author, &y.id, b))
+        (x.clock, &x.author, &x.id, &cands[*a].digest).cmp(&(
+            y.clock,
+            &y.author,
+            &y.id,
+            &cands[*b].digest,
+        ))
     });
     let walkable: BTreeMap<String, Walk> = cands
         .iter()
@@ -1580,6 +1664,13 @@ pub(crate) fn judge_core(
         if let Some(j) = j {
             records[cands[ci].idx] = Some(j);
         }
+    }
+    for (idx, ci) in aliases {
+        let mut j = records[cands[ci].idx].clone();
+        if let Some(j) = j.as_mut() {
+            j.path = held[idx].path.clone();
+        }
+        records[idx] = j;
     }
     let records: Vec<Judged> = records
         .into_iter()

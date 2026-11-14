@@ -3,16 +3,23 @@
 //! entries, and proposals' resolutions.
 //!
 //! **What the host is trusted with, exactly.** Every secret here is an [`EpochKey`]: an opaque
-//! handle bound to an account, a namespace and an epoch (see `v05::records` for its
-//! guarantees). A new epoch key is made from the 32-byte seed the host passes in, so a host
-//! that remembers the seed can recompute the key. The core never returns, logs or serializes a
-//! key, never seals one to a key the caller names (the recipients come from the verified
-//! authority state: the current vault and the members §7.1 names, plus, for a `grant`, the
-//! member of the verified request the entry admits), and encrypts only the one operation a
-//! [`PreparedOperation`] describes, under the key bound to that operation's account,
-//! namespace and epoch. Hosts MUST pass a fresh seed per action; a repeated seed repeats the
+//! handle bound to an account, a namespace and an epoch (see `v05::records` for the guarantees
+//! and the trust boundary). The core never returns epoch key bytes through its interface; a new
+//! epoch is sealed only to the recipients the verified authority state names (the current vault
+//! and the members §7.1 names); a handle opens only headers of its own account, namespace and
+//! epoch, and encrypts only the one operation a [`PreparedOperation`] describes.
+//!
+//! **Holding [`EpochKeys`] is as trusted as holding the keys.** A grant's `shares` are part of
+//! the body a controller signs, so they are sealed before signing: a host that holds handles can
+//! have them sealed to a member it is preparing to admit, and that member can read the raw key.
+//! A new epoch key is made from the seed the host passes in, so a host that remembers the seed
+//! can recompute the key. Hosts MUST pass a fresh seed per action; a repeated seed repeats the
 //! key and the nonce, and prepare refuses a nonce already used under the same key by a header
 //! it can see.
+//!
+//! **While the vault is retiring (§8.3)** no epoch is introduced: [`build_epochs`] and
+//! [`prepare_rekey`] refuse, and [`prepare_revoke`] carries empty `epochs` and says a `rekey`
+//! is owed ([`PreparedRevoke::rekey_owed`]) once the new vault is in place.
 //!
 //! **Prepare, then finish.** Prepared state has private fields and read-only accessors. The
 //! only thing a host can change between the two calls is the signature, and `finish` judges
@@ -74,6 +81,11 @@ pub fn build_epochs(
     exclude: Option<&str>,
     seed: [u8; 32],
 ) -> Result<(Vec<Value>, EpochKeys)> {
+    if auth.vault_retiring() {
+        return Err(Failure::Unavailable(
+            "the vault is retiring (§8.3): hosts MUST NOT introduce epochs; complete the `vault` entry first".into(),
+        ));
+    }
     let namespaces = sorted_distinct(namespaces)?;
     let mut entropy = Entropy::new(seed);
     let mut epochs = Vec::new();
@@ -100,7 +112,7 @@ pub fn build_epochs(
             );
         }
         epochs.push(json!({"namespace": ns, "epoch": epoch, "seals": seals}));
-        keys.insert(key);
+        keys.insert(key)?;
     }
     Ok((epochs, keys))
 }
@@ -179,7 +191,23 @@ pub fn prepare_grant(
         &req.account == auth.account(),
         "the request names another account",
     )?;
+    req.unknown.check()?;
+    require(
+        auth.member(&req.member_id()).is_none(),
+        "the member key is already in the account",
+    )?;
     let parsed = Terms::parse(terms.clone(), TermsKind::Member)?;
+    parsed.unknown().check()?;
+    require(
+        parsed.covered_by(&req.terms),
+        "the granted terms are not covered by the request",
+    )?;
+    for entry in parsed.records().unwrap_or_default() {
+        require(
+            auth.namespaces().contains(&entry.namespace),
+            "a granted namespace the account does not declare",
+        )?;
+    }
     let mut wanted = BTreeSet::new();
     for entry in parsed.records().unwrap_or_default() {
         for e in 1..=auth.latest_epoch(&entry.namespace) {
@@ -269,8 +297,19 @@ pub struct PreparedRevoke {
     kept: Vec<String>,
     heads: Vec<KeptHead>,
     walk_incomplete: bool,
+    owed: Vec<String>,
 }
 impl PreparedRevoke {
+    /// True when the vault is retiring (§8.3) and the member could read a namespace: the entry
+    /// carries empty `epochs` and a `rekey` of [`PreparedRevoke::owed_namespaces`] is owed as
+    /// soon as the new vault is in place, or the removed member's key keeps reading new records.
+    pub fn rekey_owed(&self) -> bool {
+        !self.owed.is_empty()
+    }
+    /// The namespaces a `rekey` is owed for (empty unless [`PreparedRevoke::rekey_owed`]).
+    pub fn owed_namespaces(&self) -> &[String] {
+        &self.owed
+    }
     /// The batch to sign.
     pub fn batch(&self) -> &PendingBatch {
         &self.batch
@@ -384,7 +423,13 @@ pub fn prepare_revoke(
         .iter()
         .map(|e| e.namespace.clone())
         .collect();
-    let (epochs, keys) = build_epochs(&auth, &readable, issued_ms, Some(member), seed)?;
+    // While the vault is retiring §8.3 allows empty `epochs`, and forbids introducing any.
+    let (epochs, keys, owed) = if auth.vault_retiring() {
+        (Vec::new(), EpochKeys::new(), readable.clone())
+    } else {
+        let (e, k) = build_epochs(&auth, &readable, issued_ms, Some(member), seed)?;
+        (e, k, Vec::new())
+    };
     let batch = prepare_signed(
         objects,
         now_ms,
@@ -403,6 +448,7 @@ pub fn prepare_revoke(
         kept,
         heads,
         walk_incomplete,
+        owed,
     })
 }
 
@@ -460,11 +506,12 @@ fn unsigned_envelope(body: &[u8]) -> Result<Vec<u8>> {
     canonical(&json!({"body": encode_base64(body), "signature": encode_base64(&[0u8; 64])}))
 }
 
-fn judged_ok(judgement: &Judgement, path: &str) -> Result<()> {
+fn judged_ok(judgement: &Judgement, body_digest: &str) -> Result<()> {
+    // The header is found by the digest of its body, never by path.
     let j = judgement
         .records
         .iter()
-        .find(|j| j.path == path)
+        .find(|j| j.digest.as_deref() == Some(body_digest))
         .ok_or_else(|| malformed("the header was not judged"))?;
     match j.outcome.failure() {
         Some(f) => Err(f),
@@ -603,8 +650,11 @@ pub fn prepare_operation(
         bytes: unsigned_envelope(&body)?,
     });
     let mut only = EpochKeys::new();
-    only.insert(key.clone());
-    judged_ok(&judge_core(&auth, &only, &with, Some(&path)), &path)?;
+    only.insert(key.clone())?;
+    judged_ok(
+        &judge_core(&auth, &only, &with, Some(with.len() - 1)),
+        &crate::v05::encoding::digest(&body),
+    )?;
     let step = SigningStep::for_call(
         path.clone(),
         body.clone(),
@@ -662,9 +712,9 @@ impl PreparedOperation {
             bytes: envelope.clone(),
         });
         let mut only = EpochKeys::new();
-        only.insert(self.key.clone());
+        only.insert(self.key.clone())?;
         let judgement = judge_core(&self.auth, &only, &with, None);
-        judged_ok(&judgement, &self.path)?;
+        judged_ok(&judgement, &crate::v05::encoding::digest(&self.body))?;
         let digest = crate::v05::encoding::digest(&self.body);
         Ok(FinishedOperation {
             path: self.path,
