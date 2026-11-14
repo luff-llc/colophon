@@ -122,9 +122,19 @@ impl AccountPairing {
     fn new(s: Stage) -> Self {
         Self { st: Mutex::new(s) }
     }
-    fn step<T>(&self, f: impl FnOnce(Stage) -> R<(Stage, T)>) -> R<T> {
+    fn step<T>(
+        &self,
+        allowed: &[&str],
+        f: impl FnOnce(Stage) -> R<(Stage, T)>,
+    ) -> R<T> {
         guard(|| {
             let mut g = lock(&self.st)?;
+            if !allowed.contains(&g.name()) {
+                return Err(AccountError::consumed(&format!(
+                    "not valid in the `{}` stage",
+                    g.name()
+                )));
+            }
             let old = std::mem::replace(&mut *g, Stage::Spent);
             let (next, out) = f(old)?;
             *g = next;
@@ -202,7 +212,7 @@ impl AccountPairing {
         now_ms: i64,
     ) -> R<String> {
         let nb = fixed::<32>(&nb, "nonce")?;
-        self.step(|s| match s {
+        self.step(&["awaitingReveal"], |s| match s {
             Stage::AwaitingReveal(a) => {
                 let mut l = lock(&limiter.l)?;
                 let code = a.finish_limited(&e, &nb, &mut l, now_ms).map_err(abort)?;
@@ -213,7 +223,7 @@ impl AccountPairing {
         })
     }
     fn reject_inner(&self, limiter: &PairingFailureLimiter, now_ms: i64) -> R<()> {
-        self.step(|s| match s {
+        self.step(&["code", "revealed"], |s| match s {
             Stage::Code(c) | Stage::Revealed(c) => {
                 c.reject(&mut *lock(&limiter.l)?, now_ms);
                 Ok((Stage::Spent, ()))
@@ -251,7 +261,7 @@ impl AccountPairing {
     /// the QR path this confirms the pairing at once.
     pub fn send_nonce(&self, na: Vec<u8>) -> Result<Vec<u8>, AccountError> {
         let na = fixed::<32>(&na, "nonce")?;
-        self.step(|s| match s {
+        self.step(&["waiting", "scanned"], |s| match s {
             Stage::Waiting(w) => {
                 let (next, n) = w.send_nonce(na);
                 Ok((Stage::AwaitingReveal(next), n.to_vec()))
@@ -267,7 +277,7 @@ impl AccountPairing {
     /// available from `digits`. QR path: confirms the pairing.
     pub fn receive_nonce(&self, na: Vec<u8>) -> Result<String, AccountError> {
         let na = fixed::<32>(&na, "nonce")?;
-        self.step(|s| match s {
+        self.step(&["joiner", "qrJoiner"], |s| match s {
             Stage::Joiner(j, _) => {
                 let (r, code) = j.reveal(na).map_err(abort)?;
                 Ok((
@@ -288,7 +298,7 @@ impl AccountPairing {
     }
     /// The person saw the same code on both screens.
     pub fn confirm(&self) -> Result<(), AccountError> {
-        self.step(|s| match s {
+        self.step(&["code", "revealed"], |s| match s {
             Stage::Revealed(c) | Stage::Code(c) => Ok((Stage::Confirmed(c.confirm()), ())),
             other => Err(wrong(other)),
         })

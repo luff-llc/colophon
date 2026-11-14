@@ -157,13 +157,15 @@ free_fn! {
 free_fn! {
     /// The public part of the vault a host-chosen seed names: `{"signing","agreement","id"}`.
     /// The seed is read and dropped; only public values return.
-    pub fn account_vault_public(seed: Vec<u8>) -> Result<String, AccountError> {
-        guard(|| {
+    pub fn account_vault_public(mut seed: Vec<u8>) -> Result<String, AccountError> {
+        let r = guard(|| {
             let s = VaultSeed::from_host_random(fixed::<32>(&seed, "seed")?);
             let p = s.public()?;
             let v = p.to_value();
             to_string(&json!({"signing": v["signing"], "agreement": v["agreement"], "id": p.id()}))
-        })
+        });
+        seed.fill(0);
+        r
     }
 }
 free_fn! {

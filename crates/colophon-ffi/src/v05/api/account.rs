@@ -626,7 +626,7 @@ impl AccountCore {
 }
 impl AccountCore {
     fn begin_inner(&self, spec: String, mut entropy: Vec<u8>) -> R<AccountAction> {
-        guard(|| {
+        let r = guard(|| {
             let spec = parse(&spec, "the action")?;
             let a = lock(&self.acc)?;
             let (kind, p) = begin(&a, None, &spec, &mut entropy)?;
@@ -634,7 +634,9 @@ impl AccountCore {
                 Prepared::Action(p) => AccountAction::ready(p, self.owner, &kind),
                 Prepared::Denied(d) => AccountAction::denied(d, self.owner, &kind),
             })
-        })
+        });
+        entropy.fill(0);
+        r
     }
     fn provide_prf_inner(&self, action: &AccountAction, results: String) -> R<()> {
         guard(|| {

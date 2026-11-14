@@ -162,7 +162,7 @@ impl AccountEngine {
         })
     }
     fn begin_inner(&self, spec: String, mut entropy: Vec<u8>) -> R<AccountAction> {
-        guard(|| {
+        let r = guard(|| {
             let spec = parse(&spec, "the action")?;
             if matches!(
                 spec.get("action").and_then(Value::as_str),
@@ -182,7 +182,9 @@ impl AccountEngine {
                 Prepared::Action(p) => AccountAction::ready(p, self.owner, &kind),
                 Prepared::Denied(d) => AccountAction::denied(d, self.owner, &kind),
             })
-        })
+        });
+        entropy.fill(0);
+        r
     }
     fn begin_import_inner(
         &self,

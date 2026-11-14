@@ -40,7 +40,7 @@ mod verify;
 
 pub use account::AccountCore;
 pub use action::AccountAction;
-pub use create::AccountCreation;
+pub use create::{account_default_policy, AccountCreation};
 pub use engine::{AccountBlobWriter, AccountEngine, AccountLiveWrite};
 pub use fault::{AccountError, REFUSAL_REASONS};
 pub use moving::AccountMove;
