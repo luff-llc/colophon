@@ -1349,6 +1349,111 @@ fn heads_evidence_does_not_convict_an_honest_displacement() {
     );
 }
 
+/// A reformatted copy of an envelope: the same two fields, pretty-printed and reordered. It is
+/// valid JSON with the same body bytes, but not the canonical encoding.
+fn reformatted(env: &[u8]) -> Vec<u8> {
+    let v: Value = serde_json::from_slice(env).unwrap();
+    let out = format!(
+        "{{\n  \"signature\": {},\n  \"body\": {}\n}}\n",
+        v["signature"], v["body"]
+    )
+    .into_bytes();
+    assert_ne!(out, env);
+    out
+}
+
+/// E1's receipt chooser canonicalizes a held receipt; `history/home.rs` `chosen_receipts` calls
+/// `check_receipt` (which also canonicalizes) and then parses the held bytes as they are. Give
+/// both a reformatted receipt and see whether they choose the same set.
+#[test]
+fn builder_and_home_choose_the_same_receipts_for_a_reformatted_one() {
+    use colophon_core::v05::history::home::{admit, HomeState, ServingInterval};
+    let f = fixture();
+    let (mut chain, h, host) = account_with_home(&f);
+    let account = chain.account();
+    let t2_issued = T0 + 1_000 * SEC;
+    let batch = prepare_transition(
+        &chain.objects,
+        chain.now,
+        &transition_params(
+            &chain,
+            t2_issued,
+            &[&f.a],
+            json!({"keyring": {"remove": [f.b.id]}}),
+        ),
+    )
+    .unwrap();
+    let r = chain.run(&host, batch);
+    let t2 = r.pending[0].clone();
+    let t2_digest = body_digest_of_env(&t2);
+    let canon = receipt(&account, &h, &t2_digest, t2_issued + 10 * SEC);
+    let reform = reformatted(&canon);
+    // Builder side.
+    let state = chain.state();
+    let by_builder = |held: &[Vec<u8>]| {
+        choose_receipts(&state, held, &t2_digest, t2_issued, None)
+            .map(|v| v.len())
+            .map_err(|e| format!("{e:?}"))
+    };
+    let builder_canon = by_builder(&[canon.clone()]);
+    let builder_reform = by_builder(&[reform.clone()]);
+    let chosen = choose_receipts(&state, &[reform.clone()], &t2_digest, t2_issued, None).unwrap();
+    assert_eq!(
+        chosen,
+        vec![canon.clone()],
+        "the builder keeps canonical bytes"
+    );
+    // Home side: the chooser runs when a veto arrives and needs the transition's receipt
+    // quorum. The home stores the receipt as admitted.
+    let batch = prepare_veto(
+        &chain.objects,
+        chain.now,
+        &VetoParams {
+            transition: t2.clone(),
+            transition_receipts: vec![canon.clone()],
+            issued_ms: t2_issued + 30 * SEC,
+            signers: vec![f.b.id.clone()],
+        },
+    )
+    .unwrap();
+    let veto = chain.run(&host, batch).pending[0].clone();
+    let at = |ms: i64| format_date(ms);
+    let home_with = |held: Option<&[u8]>| {
+        let objects = Objects {
+            entries: chain.objects.entries.clone(),
+            ..Default::default()
+        };
+        let serving = vec![ServingInterval {
+            from_ms: i64::MIN,
+            through_ms: None,
+        }];
+        let home = HomeState::new(h.id.clone(), &objects, serving, t2_issued).unwrap();
+        let a = admit(&home, &t2, &at(t2_issued + 10 * SEC));
+        assert_eq!(format!("{:?}", a.result), "Ok(())", "transition admitted");
+        let b = match held {
+            Some(held) => admit(&a.state, held, &at(t2_issued + 11 * SEC)),
+            None => a,
+        };
+        let receipt_admit = format!("{:?}", b.result);
+        let c = admit(&b.state, &veto, &at(t2_issued + 35 * SEC));
+        (receipt_admit, format!("{:?}", c.result))
+    };
+    let home_canon = home_with(Some(&canon));
+    let home_reform = home_with(Some(&reform));
+    // Control: with no receipt held the veto is not admitted, so the veto step does test the
+    // chooser.
+    assert_ne!(home_with(None).1, "Ok(())");
+    eprintln!("builder: canonical {builder_canon:?}, reformatted {builder_reform:?}");
+    eprintln!("home:    canonical {home_canon:?}, reformatted {home_reform:?}");
+    assert_eq!(builder_canon, Ok(1));
+    assert_eq!(builder_reform, builder_canon);
+    assert_eq!(home_canon.1, "Ok(())");
+    assert_eq!(
+        home_reform, home_canon,
+        "the home and the builder disagree on a reformatted receipt"
+    );
+}
+
 #[test]
 fn heads_evidence_needs_the_history_and_verified_heads() {
     let f = fixture();
