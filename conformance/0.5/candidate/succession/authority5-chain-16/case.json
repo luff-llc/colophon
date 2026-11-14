@@ -1,0 +1,1 @@
+{"description":"A chain of 16 predecessor accounts, each a `/5` successor of the one before: at the bound, so the succession is verified.","expected":{"succession":"verified"},"sections":["15.1","16.3"]}

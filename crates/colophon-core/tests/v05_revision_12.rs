@@ -215,42 +215,38 @@ fn m4_carried_keys_need_possession_unless_the_handover_meets_the_rule() {
 // ---- The chain bound (§2.4, §15.1) ----------------------------------------------------------
 
 #[test]
-fn a_predecessor_chain_of_sixteen_accounts_is_accepted_and_seventeen_is_malformed() {
+fn h3_a_chain_of_sixteen_accounts_verifies_and_seventeen_is_malformed() {
+    let (o, now) = succession("authority5-chain-16");
+    let v = verify_history(&o, &Persisted::default(), now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+    assert!(v.state.unwrap().verified_succession().is_some());
+    let (o, now) = succession("authority5-chain-17");
+    let v = verify_history(&o, &Persisted::default(), now);
+    assert_eq!(v.code(), "malformed");
+    assert!(format!("{:?}", v.stop).contains("longer than 16"));
+}
+
+/// Junk geneses added to a chain at the bound (or past it) are ignored.
+#[test]
+fn h3_unrelated_geneses_neither_count_nor_break_a_chain_at_the_bound() {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let (base, now) = succession("authority5-chain");
-    let genesis = base
-        .predecessor
-        .iter()
-        .find(|b| {
-            let env: Value = serde_json::from_slice(b).unwrap();
-            let body: Value =
-                serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
-                    .unwrap();
-            body["kind"] == "genesis"
-        })
-        .unwrap()
-        .clone();
+    let (base, now) = succession("authority5-chain-16");
+    let genesis = base.predecessor[0].clone();
     let env: Value = serde_json::from_slice(&genesis).unwrap();
     let body: Value =
         serde_json::from_slice(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap()).unwrap();
-    let held = |n: usize| {
-        let mut o = base.clone();
-        for i in 0..n {
-            let mut b = body.clone();
-            b["issued"] = serde_json::json!(format!("2026-11-13T09:{:02}:00Z", i));
-            let bytes = colophon_core::v05::encoding::canonical(&b).unwrap();
-            o.predecessor.push(
-                serde_json::to_vec(&serde_json::json!({"body": STANDARD.encode(bytes)})).unwrap(),
-            );
-        }
-        verify_history(&o, &Persisted::default(), now)
-    };
-    // The chain holds A and B: two genesis entries. Fourteen more make sixteen.
-    let sixteen = held(14);
-    assert_eq!(sixteen.code(), "ok", "{:?}", sixteen.stop);
-    let seventeen = held(15);
-    assert_eq!(seventeen.code(), "malformed");
-    assert!(format!("{:?}", seventeen.stop).contains("longer than 16"));
+    let mut o = base.clone();
+    for i in 0..20 {
+        let mut b = body.clone();
+        b["label"] = serde_json::json!(format!("Unrelated {i}"));
+        let bytes = colophon_core::v05::encoding::canonical(&b).unwrap();
+        o.predecessor.push(
+            serde_json::to_vec(&serde_json::json!({"body": STANDARD.encode(bytes)})).unwrap(),
+        );
+    }
+    let v = verify_history(&o, &Persisted::default(), now);
+    assert_eq!(v.code(), "ok", "{:?}", v.stop);
+    assert!(v.state.unwrap().verified_succession().is_some());
 }
 
 // ---- L2: the Swift steward threshold (§16.3) --------------------------------------------------

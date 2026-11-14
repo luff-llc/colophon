@@ -3918,6 +3918,60 @@ pub fn part3(o: &mut Out) {
             c5.envs[0].clone(),
         )],
     );
+    // Revision 12 fix round, H3 (§2.4, §15.1): the chain bound counts the accounts followed along
+    // `predecessor` references. `k` predecessors are a chain of k accounts: 16 verify, 17 are
+    // `malformed`. Each account is a `/5` successor of the one before, with no home.
+    for (k, expected, why) in [
+        (16, json!({"succession": "verified"}), "A chain of 16 predecessor accounts, each a `/5` successor of the one before: at the bound, so the succession is verified."),
+        (17, json!({"succession": "unverified", "genesis": "malformed"}), "A chain of 17 predecessor accounts: one more than the bound, so the successor's genesis is `malformed`."),
+    ] {
+        let mut chains: Vec<Chain> = Vec::new();
+        let adds_k1: Sl = sg![k1];
+        for i in 0..=k {
+            let mut c = Chain::new();
+            let pred = (i > 0).then(|| {
+                json!({"format": "colophon/authority/5", "account": account_id(&chains[i - 1]), "head": anchor(&chains[i - 1])})
+            });
+            genesis(
+                &mut c,
+                &old5kr,
+                sg![a],
+                Gen {
+                    label: &format!("Chain account {i}"),
+                    predecessor: pred,
+                    opt: Opt {
+                        adds: if i == 0 { adds_k1 } else { &[] },
+                        ..Opt::default()
+                    },
+                    ..Gen::default()
+                },
+            );
+            chains.push(c);
+        }
+        for i in 0..k {
+            let t = transition(
+                &chains[i],
+                json!({"successor": {"account": account_id(&chains[i + 1])}}),
+                sg![a, k1],
+                &ts(60),
+                TOpt::default(),
+            );
+            activate(&mut chains[i], &t, &[]);
+        }
+        let entries: Vec<Value> = chains[..k].iter().flat_map(|c| c.envs.clone()).collect();
+        write_swift(
+            o,
+            &format!("authority5-chain-{k}"),
+            &entries,
+            Some(&chains[k]),
+            expected,
+            why,
+            vec![(
+                "successor/authority/00000001.json".to_string(),
+                chains[k].envs[0].clone(),
+            )],
+        );
+    }
     write_swift(
         o,
         "authority5-successor",

@@ -49,9 +49,36 @@ impl Succession {
     }
 }
 
-/// Most distinct accounts a predecessor object set may hold: the chain A to B to C to ... that a
-/// verifier follows through one genesis (§15.1 "Chain bound", §2.4). A longer set is `malformed`.
+/// Most accounts a verifier follows along `predecessor` references from the claimed account: the
+/// chain A to B to C to ... of §15.1 "Chain bound" and §2.4. A longer chain is `malformed`.
+/// Objects in the set that no step of the chain reaches are ignored, never counted.
 pub(super) const MAX_PREDECESSOR_ACCOUNTS: usize = 16;
+
+/// How many accounts the chain from `account` holds in `entries`: each `/5` genesis held whose
+/// digest the previous step names counts one, and the walk stops at a missing genesis or a
+/// predecessor of another format.
+fn chain_length(entries: &[&Entry], account: &str) -> usize {
+    let mut length = 0;
+    let mut seen = BTreeSet::new();
+    let mut current = account.to_string();
+    while seen.insert(current.clone()) {
+        let Some(g) = entries.iter().find(|e| {
+            e.kind == "genesis" && e.seq == 1 && e.previous.is_none() && e.env.digest == current
+        }) else {
+            break;
+        };
+        length += 1;
+        let claim = g.env.value.get("predecessor");
+        match (
+            claim.and_then(|c| c.get("format")).and_then(Value::as_str),
+            claim.and_then(|c| c.get("account")).and_then(Value::as_str),
+        ) {
+            (Some("colophon/authority/5"), Some(next)) => current = next.to_string(),
+            _ => break,
+        }
+    }
+    length
+}
 
 /// An account's own entries, and the rest of the predecessor set.
 type ChainSplit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
@@ -73,7 +100,7 @@ fn split_chain(predecessor: &[Vec<u8>], account: &str) -> Result<Option<ChainSpl
         .map(|e| e.env.digest.as_str())
         .collect();
     require(
-        genesis_accounts.len() <= MAX_PREDECESSOR_ACCOUNTS,
+        chain_length(&entries, account) <= MAX_PREDECESSOR_ACCOUNTS,
         "predecessor chain longer than 16 accounts",
     )?;
     if !genesis_accounts.contains(account) {

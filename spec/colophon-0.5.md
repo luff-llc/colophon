@@ -142,9 +142,10 @@ verified as their own version required.
 Exceeding a bound is `malformed`, wherever the object is, including a `clientData` inside any
 envelope. A verifier MUST NOT allocate in proportion to a claimed length before checking it.
 
-**Predecessor chain.** A predecessor chain, the predecessor and each predecessor of a predecessor,
-holds at most 16 accounts. A predecessor object set with more than 16 genesis entries is
-`malformed` (§15.1).
+**Predecessor chain.** A verifier follows the accounts along `predecessor` references from the
+claimed account (§15.1), at most 16. A chain of more than 16 accounts is `malformed`. Objects in
+the supplied set that no step of the chain reaches are ignored: they are never counted and never
+a reason for `malformed`.
 
 **The bounds compose.** The largest recording entry is a `vetoed` at `headQuorum` 8: base64 (4⌈n/3⌉)
 of a transition envelope (622,592 → 830,124), a veto envelope (131,072 → 174,764) and 16 receipt
@@ -1575,8 +1576,10 @@ library upgrades in place instead.
   `{base}/predecessor/` (Swift).
 
 **Chain bound.** A `/5` predecessor may itself be a successor, so a verifier follows the chain
-through each genesis. The chain holds at most 16 accounts, not counting the successor being
-verified: a predecessor object set with more than 16 genesis entries is `malformed` (§2.4).
+through each genesis: the claimed account, then the account its genesis names as its predecessor,
+and so on. It follows at most 16 accounts; a longer chain is `malformed` (§2.4). Objects in the
+supplied set that are not on this chain, such as an unsigned or unrelated genesis, are ignored and
+never change the verdict.
 
 **Verified** when:
 - the verifier holds the predecessor history through F;
