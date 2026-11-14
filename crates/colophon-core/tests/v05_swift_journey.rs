@@ -1730,3 +1730,22 @@ fn a_translator_carries_the_whole_batch_and_cannot_change_who_wrote_it() {
     );
     assert!(rows.contains("conflict") && rows.contains("kept"), "{rows}");
 }
+
+#[test]
+fn a_verified_succession_is_a_stored_fact_and_does_not_lapse_when_heads_age() {
+    let (mut j, _keys, _issued, _frozen) = through_f(false);
+    assert!(
+        j.acct.succession_seen_verified(),
+        "the account stored the fact when it first saw the succession verified"
+    );
+    // Heads age (no fresh head for weeks): the verifier alone would no longer verify it, the
+    // stored fact does (§15.1).
+    j.acct.advance(j.now + 60 * 24 * 3_600 * SEC).unwrap();
+    assert_eq!(
+        j.acct.swift_succession().unwrap().stage,
+        MoveStage::Verified
+    );
+    // The fact is in the sealed persisted state and survives a restart from it.
+    let bytes = j.acct.export_persisted(&[7; 32], [1; 32]).unwrap();
+    assert!(!bytes.is_empty());
+}

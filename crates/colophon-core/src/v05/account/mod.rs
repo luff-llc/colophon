@@ -589,6 +589,13 @@ impl Account {
                 None,
             )?;
         }
+        let persisted = if crate::v05::history::succession_status(d.auth.state())
+            .is_some_and(|s| s.verified.is_some())
+        {
+            persisted.with_succession_verified()
+        } else {
+            persisted
+        };
         let mut a = Self {
             me: me.clone(),
             now_ms,
@@ -661,6 +668,14 @@ impl Account {
         now_ms: i64,
     ) -> Changes {
         let mut changes = self.diff(&d, &objects);
+        // §15.1: a verifier that has seen the succession verified keeps it. The fact is stored
+        // with the persisted verifier state, never re-derived and never lost when heads age.
+        let mut persisted = persisted;
+        if crate::v05::history::succession_status(d.auth.state())
+            .is_some_and(|s| s.verified.is_some())
+        {
+            persisted = persisted.with_succession_verified();
+        }
         self.d = d;
         self.objects = objects;
         self.records = records;
@@ -1081,6 +1096,11 @@ impl Account {
                 ),
             );
         }
+    }
+    /// Whether this account has seen its succession verified (§15.1), kept in its persisted
+    /// verifier state.
+    pub fn succession_seen_verified(&self) -> bool {
+        self.persisted.succession_verified()
     }
     /// The record-layer view of the verified history, for the engine (crate-private: it holds
     /// no secret, but the engine must not take verified state from a caller, so it reads this).
