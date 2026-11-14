@@ -3209,3 +3209,406 @@ fn record_due_returns_the_bytes_of_everything_it_recorded() {
         .iter()
         .all(|e| f.account.objects().entries.contains(e)));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Order independence for vetoes, forks, resolves and proposals; a `control` controller added by
+// a transition with a home appointed.
+
+/// Open the objects in shuffled orders, and merge them in shuffled pieces from the genesis:
+/// every account shows the same state as the one opened in stored order.
+fn assert_order_independent(
+    objects: &Objects,
+    records: &[HeldRecord],
+    now: i64,
+    host: &Host,
+    d: &str,
+    namespace_probe: bool,
+) {
+    let fp = |a: &Account| {
+        let mut v = fingerprint(a, host, d);
+        v["proposals"] = serde_json::to_value(a.proposals("notes")).unwrap();
+        v["fork"] = json!(a.fork_candidates());
+        v
+    };
+    let opened = |o: Objects, r: Vec<HeldRecord>| {
+        let mut a = Account::open(o, r, None, Identity::Controller(d.to_string()), now).unwrap();
+        if namespace_probe {
+            unlock_controller(host, &mut a, d);
+        }
+        a
+    };
+    let want = fp(&opened(objects.clone(), records.to_vec()));
+    for seed in [1u64, 2, 3, 0xfeed_face, 0x0bad_cafe_1234] {
+        let o = Objects {
+            entries: shuffled(&objects.entries, seed),
+            pending: shuffled(&objects.pending, seed + 1),
+            heads: shuffled(&objects.heads, seed + 2),
+            predecessor: vec![],
+        };
+        assert_eq!(
+            fp(&opened(o, shuffled(records, seed + 3))),
+            want,
+            "open {seed}"
+        );
+    }
+    // From one entry of the genesis seq, in pieces.
+    let genesis = {
+        let a = opened(objects.clone(), vec![]);
+        objects
+            .entries
+            .iter()
+            .find(|e| digest_of(e) == a.objects_first())
+            .unwrap()
+            .clone()
+    };
+    for seed in [5u64, 9, 21] {
+        let mut a = Account::open(
+            Objects {
+                entries: vec![genesis.clone()],
+                ..Default::default()
+            },
+            vec![],
+            None,
+            Identity::Controller(d.to_string()),
+            now,
+        )
+        .unwrap();
+        if namespace_probe {
+            unlock_controller(host, &mut a, d);
+        }
+        let mut pieces: Vec<Incoming> = shuffled(&objects.entries, seed)
+            .into_iter()
+            .map(|e| Incoming {
+                objects: Objects {
+                    entries: vec![e],
+                    ..Default::default()
+                },
+                records: vec![],
+            })
+            .collect();
+        pieces.extend(
+            shuffled(&objects.pending, seed)
+                .into_iter()
+                .map(|p| Incoming {
+                    objects: Objects {
+                        pending: vec![p],
+                        ..Default::default()
+                    },
+                    records: vec![],
+                }),
+        );
+        pieces.extend(shuffled(records, seed).into_iter().map(|r| Incoming {
+            objects: Objects::default(),
+            records: vec![r],
+        }));
+        for p in shuffled(&pieces, seed + 7) {
+            a.merge(p, now).unwrap();
+        }
+        assert_eq!(fp(&a), want, "merge {seed}");
+    }
+}
+
+#[test]
+fn vetoes_merged_in_any_order_give_one_state() {
+    let mut f = create(&["notes"]);
+    let d2 = add_second_device(&mut f, &["approve"]);
+    let h = appoint_home(&mut f);
+    let now = f.account.now_ms();
+    let acct = f.account.id().as_str().to_string();
+    let action = f
+        .account
+        .begin_remove_controller(
+            &[d2.clone()],
+            &[],
+            &[f.d.clone()],
+            TransitionRule::Control,
+            None,
+        )
+        .unwrap();
+    let done = run(&mut f.account, &f.host, action);
+    assert_eq!(
+        done.record_paths(),
+        [format!(
+            "transitions/{}.json",
+            pending_digest(&done.pending[0])
+        )]
+    );
+    let t = pending_digest(&done.pending[0]);
+    hold_pending(
+        &mut f.account,
+        vec![receipt(&acct, &f.host, &h, &t, now + 10 * SEC)],
+    );
+    let mut p = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Controller(f.p.clone()),
+        now,
+    )
+    .unwrap();
+    let veto = p.begin_veto(&t, &[f.p.clone()]).unwrap();
+    let vdone = run(&mut p, &f.host, veto);
+    let v = pending_digest(&vdone.pending[0]);
+    hold_pending(
+        &mut f.account,
+        vec![
+            vdone.pending[0].clone(),
+            receipt(&acct, &f.host, &h, &v, now + 20 * SEC),
+        ],
+    );
+    f.account.record_due().unwrap();
+    assert_eq!(f.account.status().code, "ok");
+    assert_order_independent(f.account.objects(), &[], now, &f.host, &f.d, true);
+}
+
+#[test]
+fn forks_and_resolves_merged_in_any_order_give_one_state() {
+    let f = create(&["notes"]);
+    let now = f.account.now_ms();
+    let (mut host, d, p, k) = (f.host, f.d.clone(), f.p.clone(), f.k.clone());
+    let (e1, e2) = (host.identity(60), host.identity(61));
+    let objects = f.account.objects().clone();
+    let open = || {
+        let mut a = Account::open(
+            objects.clone(),
+            vec![],
+            None,
+            Identity::Controller(d.clone()),
+            now,
+        )
+        .unwrap();
+        unlock_controller(&host, &mut a, &d);
+        a
+    };
+    let (mut a1, mut a2) = (open(), open());
+    let add = |a: &Account, who: &str| {
+        a.begin_add_controller(&AddController {
+            controller: host.raw_controller(who, "New", &["approve"]),
+            mode: AddMode::Immediate {
+                signers: vec![d.clone()],
+            },
+        })
+        .unwrap()
+    };
+    let x1 = {
+        let act = add(&a1, &e1);
+        run(&mut a1, &host, act)
+    };
+    let x2 = {
+        let act = add(&a2, &e2);
+        run(&mut a2, &host, act)
+    };
+    let both = Incoming {
+        objects: Objects {
+            entries: vec![x1.entries[0].1.clone(), x2.entries[0].1.clone()],
+            ..Default::default()
+        },
+        records: vec![],
+    };
+    a1.merge(both, now).unwrap();
+    assert_eq!(a1.status().code, "refused:fork");
+    // The fork itself, in any order.
+    assert_order_independent(a1.objects(), &[], now, &host, &d, true);
+    let kept = digest_of(&x1.entries[0].1);
+    let action = a1
+        .begin_resolve(
+            (3, kept.clone()),
+            (3, kept),
+            &[d.clone(), p.clone(), k.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+    run(&mut a1, &host, action);
+    // The fork with a held resolve (not yet recorded), and then recorded.
+    assert_order_independent(a1.objects(), &[], now, &host, &d, true);
+    a1.record_due().unwrap();
+    assert_eq!(a1.status().code, "ok");
+    assert_order_independent(a1.objects(), &[], now, &host, &d, true);
+}
+
+#[test]
+fn proposals_merged_in_any_order_give_one_state() {
+    let mut f = create(&["notes"]);
+    let proposer = f.host.identity(31);
+    let writer = f.host.identity(32);
+    admit(
+        &mut f,
+        &proposer,
+        "Claude",
+        "agent",
+        agent_terms("propose"),
+        agent_terms("propose"),
+    );
+    admit(
+        &mut f,
+        &writer,
+        "Phone",
+        "device",
+        terms("write"),
+        terms("write"),
+    );
+    let mut p = member_session(&f, &proposer);
+    let mut w = member_session(&f, &writer);
+    let mut recs = Vec::new();
+    for i in 0..2 {
+        let seed = f.host.fresh();
+        let a = p
+            .begin_propose(
+                "notes",
+                "createNotebook",
+                json!({"id": format!("pb{i}"), "title": format!("P{i}")}),
+                seed,
+            )
+            .unwrap()
+            .unwrap();
+        recs.extend(run(&mut p, &f.host, a).records);
+    }
+    let now = w.now_ms();
+    w.merge(
+        Incoming {
+            objects: Objects::default(),
+            records: recs.clone(),
+        },
+        now,
+    )
+    .unwrap();
+    let ids: Vec<String> = w.proposals("notes").into_iter().map(|x| x.id).collect();
+    let seed = f.host.fresh();
+    let a = w.begin_resolution("notes", true, &ids[..1], seed).unwrap();
+    recs.extend(run(&mut w, &f.host, a).records);
+    let seed = f.host.fresh();
+    let a = w.begin_resolution("notes", false, &ids[1..], seed).unwrap();
+    recs.extend(run(&mut w, &f.host, a).records);
+    // A second, later resolution of the first: evidence only.
+    let seed = f.host.fresh();
+    let a = w.begin_resolution("notes", false, &ids[..1], seed).unwrap();
+    recs.extend(run(&mut w, &f.host, a).records);
+    assert_order_independent(f.account.objects(), &recs, now, &f.host, &f.d, true);
+    let mut c = Account::open(
+        f.account.objects().clone(),
+        recs.clone(),
+        None,
+        Identity::Controller(f.d.clone()),
+        now,
+    )
+    .unwrap();
+    unlock_controller(&f.host, &mut c, &f.d);
+    let states: Vec<String> = c.proposals("notes").into_iter().map(|x| x.state).collect();
+    assert_eq!(states.iter().filter(|s| *s == "accepted").count(), 1);
+    assert_eq!(states.iter().filter(|s| *s == "declined").count(), 1);
+}
+
+#[test]
+fn a_control_controller_added_by_a_transition_with_a_home_then_its_slot() {
+    let mut f = create(&["notes"]);
+    let h = appoint_home(&mut f);
+    let d3 = f.host.identity(52);
+    let acct = f.account.id().as_str().to_string();
+    let now = f.account.now_ms();
+    let mut s3 = Account::open(
+        f.account.objects().clone(),
+        vec![],
+        None,
+        Identity::Controller(d3.clone()),
+        now,
+    )
+    .unwrap();
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    pair_and_transfer(&mut host, &f.account, &mut s3, now);
+    f.host = host;
+    let c = f
+        .host
+        .raw_controller(&d3, "Laptop", &["approve", "control"]);
+    let action = f
+        .account
+        .begin_add_controller(&AddController {
+            controller: c,
+            mode: AddMode::Transition {
+                signers: vec![f.d.clone()],
+                rule: TransitionRule::Control,
+            },
+        })
+        .unwrap();
+    let done = run(&mut f.account, &f.host, action);
+    let t = pending_digest(&done.pending[0]);
+    hold_pending(
+        &mut f.account,
+        vec![receipt(&acct, &f.host, &h, &t, now + 10 * SEC)],
+    );
+    f.account.advance(now + 2 * HOUR).unwrap();
+    let rec = f.account.record_due().unwrap();
+    assert_eq!(rec.len(), 1);
+    assert!(
+        f.account
+            .controllers()
+            .iter()
+            .any(|c| c.id == d3 && c.provisional),
+        "provisional until `final`"
+    );
+    // While provisional the new controller is not current: its self-slot is refused at prepare.
+    s3.merge(
+        Incoming {
+            objects: f.account.objects().clone(),
+            records: vec![],
+        },
+        now + 2 * HOUR,
+    )
+    .unwrap();
+    let entropy = f.host.fresh();
+    let early = s3.begin_add_slot(
+        &d3,
+        SlotPlan {
+            controllers: vec![d3.clone()],
+            label: "Laptop".into(),
+        },
+        entropy,
+    );
+    assert!(early.is_err(), "a provisional controller does not sign yet");
+    // The home's head over the activation makes it final; then the self-slot is accepted.
+    let (seq, dg) = f.account.head();
+    let head = {
+        let body = canonical(&json!({
+            "protocol": "colophon/head/5", "account": acct,
+            "authority": {"seq": seq, "digest": dg}, "by": h,
+            "issued": colophon_core::v05::write::format_date(now + 2 * HOUR),
+        }))
+        .unwrap();
+        canonical(&json!({"body": b64(&body), "signature": b64(&f.host.ids[&h].sign(&body))}))
+            .unwrap()
+    };
+    hold_head(&mut f.account, head);
+    let fin = f.account.record_due().unwrap();
+    assert_eq!(fin.len(), 1, "the `final` entry");
+    s3.merge(
+        Incoming {
+            objects: f.account.objects().clone(),
+            records: vec![],
+        },
+        now + 2 * HOUR,
+    )
+    .unwrap();
+    let entropy = f.host.fresh();
+    let action = s3
+        .begin_add_slot(
+            &d3,
+            SlotPlan {
+                controllers: vec![d3.clone()],
+                label: "Laptop".into(),
+            },
+            entropy,
+        )
+        .unwrap();
+    let slot = run(&mut s3, &f.host, action);
+    f.account
+        .merge(review_entries(&slot), now + 2 * HOUR)
+        .unwrap();
+    assert!(
+        f.account
+            .controllers()
+            .iter()
+            .find(|c| c.id == d3)
+            .unwrap()
+            .has_slot
+    );
+    assert_eq!(f.account.status().code, "ok");
+}

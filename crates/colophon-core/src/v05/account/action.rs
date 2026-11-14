@@ -184,6 +184,35 @@ pub struct AddController {
     pub mode: AddMode,
 }
 
+impl Finished {
+    /// Where each produced object is stored (the 0.4 `record_paths`): `authority/<seq, 8
+    /// digits>.json` for an entry, `transitions/<digest>.json` or `vetoes/<digest>.json` for a
+    /// pending object, the header's own path for a record.
+    pub fn record_paths(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .entries
+            .iter()
+            .map(|(seq, _)| format!("authority/{seq:08}.json"))
+            .collect();
+        for b in &self.pending {
+            if let Ok(e) = AuthEnvelope::parse(
+                b,
+                bounds::TRANSITION_ENVELOPE,
+                bounds::TRANSITION_ENVELOPE,
+                true,
+            ) {
+                let dir = match e.value.get("protocol").and_then(Value::as_str) {
+                    Some("colophon/veto/5") => "vetoes",
+                    _ => "transitions",
+                };
+                out.push(format!("{dir}/{}.json", e.digest));
+            }
+        }
+        out.extend(self.records.iter().map(|r| r.path.clone()));
+        out
+    }
+}
+
 /// A prepared action. Its fields are private: a host reads what to do through the accessors
 /// and can change nothing between `begin_*` and [`Account::finish`].
 pub struct PendingAction {
