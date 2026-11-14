@@ -54,15 +54,15 @@ impl Succession {
 /// so this is the implementation's (a spec question); a longer set is `malformed`.
 pub(super) const MAX_PREDECESSOR_ACCOUNTS: usize = 16;
 
+/// An account's own entries, and the rest of the predecessor set.
+type ChainSplit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
 /// Split a `/5` predecessor object set for the account `account` (§15.1): the entries that
 /// descend from its genesis, and everything else, which is that account's own predecessor
 /// history when it is itself a successor. Unparseable bytes go to both halves, as evidence for
 /// the first and as possible foreign-format history for the second. `None` when no genesis of
 /// `account` is held; the whole set is then verified as before.
-fn split_chain(
-    predecessor: &[Vec<u8>],
-    account: &str,
-) -> Result<Option<(Vec<Vec<u8>>, Vec<Vec<u8>>)>> {
+fn split_chain(predecessor: &[Vec<u8>], account: &str) -> Result<Option<ChainSplit>> {
     let parsed: Vec<(&Vec<u8>, Option<Entry>)> = predecessor
         .iter()
         .map(|b| (b, super::parse_entry(b).ok()))
