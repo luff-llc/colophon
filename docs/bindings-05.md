@@ -154,7 +154,8 @@ handover keys are controllers, no key twice, the dates, `earlier_attempts`): a g
 fails at `begin`.
 
 **`earlier_attempts` and a live attempt.** An earlier freezing entry's successor blocks a new genesis
-unless it can no longer verify: it is **vetoed**, or its F was written before it was due (**premature**).
+unless it can no longer verify: it is **vetoed**, or its F was written before it was due (**premature**:
+the window never opened, or F is dated before the due time).
 An attempt that is merely not yet verified, waiting for a home's head, is live and blocks (`still live`);
 one that has verified makes the predecessor final. The rule sits in `write::succession::check_earlier_attempts`.
 
@@ -648,8 +649,8 @@ counts); `suggest_signers` has no `SignerNeed` for a pending transition's recove
 `EntryChange.kind` is still a string; `u64` counters inside `*_json` results lose precision above 2^53
 under `JSON.parse`, and on the web a negative `bigint` passed for a `u64` wraps (wasm-bindgen's own conversion); the web secret records' getters copy `output`, `secret` and `shared` back out to JS
 (the records are consumed and wiped by the call, a copy the host reads is the host's); an earlier
-succession attempt is judged live unless it is vetoed or premature (an attempt whose window never opened
-stays live: whether such an attempt is "never due" is the spec's to say); a handover that does not meet
+succession attempt is judged live unless it is vetoed or premature (its window never opened, or its F is
+dated before the due time); a handover that does not meet
 the rule that may write F, and the control rule, are still checked after the passkey ceremony because
 they need the built keyring (every other check runs before it).
 

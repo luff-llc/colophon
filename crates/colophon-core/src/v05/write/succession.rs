@@ -376,12 +376,14 @@ fn check_earlier_attempts(
                 state.verified_succession().is_none(),
                 "an earlier freezing entry's succession is verified: the predecessor is final",
             )?;
-            // An attempt that is merely not yet verified (waiting for a head) is still live and
-            // blocks a new one. Only an attempt that can no longer verify frees the way: one
-            // that is vetoed, or whose F was written before it was due (premature).
+            // An attempt that is merely not yet verified (due, F written after the due time,
+            // waiting for a home's head) is still live and blocks a new one. Only an attempt that
+            // can no longer verify frees the way: one that is vetoed, or whose F was written
+            // before the succession was due (premature: the window never opened, or F's date is
+            // earlier than the due time).
             let status = succession_status(&state);
-            let dead = status.as_ref().is_some_and(|st| {
-                st.vetoed || st.timing.as_ref().is_some_and(|t| rec.issued_ms < t.due_ms)
+            let dead = status.as_ref().is_none_or(|st| {
+                st.vetoed || st.timing.as_ref().is_none_or(|t| rec.issued_ms < t.due_ms)
             });
             require(
                 dead,
