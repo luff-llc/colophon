@@ -1395,9 +1395,16 @@ fn builder_and_home_choose_the_same_receipts_for_a_reformatted_one() {
             .map(|v| v.len())
             .map_err(|e| format!("{e:?}"))
     };
-    let builder_canon = by_builder(&[canon.clone()]);
-    let builder_reform = by_builder(&[reform.clone()]);
-    let chosen = choose_receipts(&state, &[reform.clone()], &t2_digest, t2_issued, None).unwrap();
+    let builder_canon = by_builder(std::slice::from_ref(&canon));
+    let builder_reform = by_builder(std::slice::from_ref(&reform));
+    let chosen = choose_receipts(
+        &state,
+        std::slice::from_ref(&reform),
+        &t2_digest,
+        t2_issued,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         chosen,
         vec![canon.clone()],
