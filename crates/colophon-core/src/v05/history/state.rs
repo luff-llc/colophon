@@ -1821,7 +1821,6 @@ pub(crate) fn apply(
     if e.issued > now_ms.saturating_add(60 * SEC) {
         return Err(Outcome::Held("issued more than 60 s ahead".into()));
     }
-    let _ = heads;
     let mut n = match e.kind.as_str() {
         "activate" => {
             let n = activate(s, e, now_ms)?;
@@ -1840,7 +1839,7 @@ pub(crate) fn apply(
             n
         }
         "vetoed" => vetoed(s, e, pending)?,
-        "final" => final_entry(s, e, &all)?,
+        "final" => final_entry(s, e, &all, heads)?,
         "suspend" => suspend(s, e)?,
         "vault" => vault_entry(s, e)?,
         "genesis" => return Err(malformed("a second genesis").into()),
@@ -2205,7 +2204,7 @@ fn vetoed(s: &State, e: &Entry, pending: &Pending) -> Step<State> {
     Ok(n)
 }
 
-fn final_entry(s: &State, e: &Entry, all: &[&Entry]) -> Step<State> {
+fn final_entry(s: &State, e: &Entry, all: &[&Entry], held_heads: &HeadSet) -> Step<State> {
     unsigned(e)?;
     let v = &e.env.value;
     let act = v
@@ -2253,6 +2252,7 @@ fn final_entry(s: &State, e: &Entry, all: &[&Entry]) -> Step<State> {
             .map(|m| m.request.signing.clone())
     };
     let mut by_home: BTreeMap<String, u64> = BTreeMap::new();
+    let mut chosen_body: BTreeMap<String, String> = BTreeMap::new();
     let mut latest = i64::MIN;
     let mut last: Option<String> = None;
     for h in &heads {
@@ -2274,6 +2274,7 @@ fn final_entry(s: &State, e: &Entry, all: &[&Entry]) -> Step<State> {
         .map_err(Outcome::from)?;
         last = Some(rh.by.clone());
         by_home.insert(rh.by.clone(), rh.seq);
+        chosen_body.insert(rh.by.clone(), crate::v05::encoding::digest(&rh.env.body));
         latest = latest.max(rh.issued);
     }
     let homes: BTreeSet<String> = by_home.keys().cloned().collect();
@@ -2285,6 +2286,33 @@ fn final_entry(s: &State, e: &Entry, all: &[&Entry]) -> Step<State> {
         .collect();
     if homes != required {
         return Err(malformed("final: heads are not exactly one per witness").into());
+    }
+    // §8.7 "Choosing heads": per witness, the lowest body digest among the covering heads that
+    // are usable: not dated more than 60 s after the entry's own `issued`. The recorder's clock
+    // is not visible to a verifier, and judging against the verifier's clock would turn a
+    // correct entry into a refused one as time passes, so the entry's `issued` stands in for it.
+    // Judged over the heads this verifier holds together with the entry's own, so a head the
+    // recorder held and this verifier does not cannot make a correct entry fail.
+    for home in &required {
+        let Some(key) = before_key(home) else {
+            continue;
+        };
+        let chosen = chosen_body.get(home).cloned().unwrap_or_default();
+        let lowest = held_heads
+            .heads
+            .iter()
+            .filter(|h| {
+                &h.by == home
+                    && h.seq >= a.seq
+                    && s.on_branch(h.seq, &h.digest)
+                    && h.issued <= e.issued.saturating_add(60 * SEC)
+                    && h.env.verify(&key).is_ok()
+            })
+            .map(|h| crate::v05::encoding::digest(&h.env.body))
+            .min();
+        if lowest.is_some_and(|l| l < chosen) {
+            return Err(malformed("final: a witness's head is not the determined choice").into());
+        }
     }
     if e.issued != recorded_issued(s.last_issued(), latest) {
         return Err(malformed("final: issued is not determined").into());

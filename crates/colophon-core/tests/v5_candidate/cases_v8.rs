@@ -1074,6 +1074,46 @@ pub fn part3(o: &mut Out) {
         &["8.7"],
         Some(ver(DUE0 + 200)),
     );
+    // Revision 13 (§8.7 "Choosing heads"): per witness, the covering head with the lowest body
+    // digest among the usable ones (not more than 60 s ahead of the clock).
+    let mut pc = base.clone();
+    activate(&mut pc, &t_addc, &[rec(&cx, &t_addc)]);
+    let h2_head = head5(&pc, &h2k, DUE0 + 60, Some(3));
+    let mut two = [
+        head5(&pc, &h1k, DUE0 + 50, Some(3)),
+        head5(&pc, &h1k, DUE0 + 55, Some(3)),
+    ];
+    two.sort_by_key(|h| sha(&body_of(h)));
+    let [h1_low, h1_high] = two;
+    let head_objs = |hs: Vec<(&'static str, Value)>| {
+        let mut v = vec![("head-H2", h2_head.clone())];
+        v.extend(hs);
+        v
+    };
+    let mut right = pc.clone();
+    final_of(&mut right, 3, vec![h1_low.clone(), h2_head.clone()]);
+    case(o, "t-final-head-choice-right", &right, ok_at(4),
+         "H1 signed two heads covering the activation. The `final` carries the one with the lower body digest.",
+         &["8.7", "13.3"], head_objs(vec![("head-H1-low", h1_low.clone()), ("head-H1-high", h1_high.clone())]),
+         Some(ver(DUE0 + 200)), vec![]);
+    let mut wrong = pc.clone();
+    final_of(&mut wrong, 3, vec![h1_high.clone(), h2_head.clone()]);
+    case(o, "t-final-head-choice-wrong", &wrong, bad("malformed", 4),
+         "The same two heads of H1, both held; the `final` carries the higher body digest, not the chosen one.",
+         &["8.7", "13.3"], head_objs(vec![("head-H1-low", h1_low.clone()), ("head-H1-high", h1_high.clone())]),
+         Some(ver(DUE0 + 200)), vec![]);
+    // A head dated 1000 s ahead of the verifier's clock is not usable, however low its digest.
+    let usable = head5(&pc, &h1k, DUE0 + 50, Some(3));
+    let ahead = (0..200)
+        .map(|n| head5(&pc, &h1k, DUE0 + 1000 + n, Some(3)))
+        .find(|h| sha(&body_of(h)) < sha(&body_of(&usable)))
+        .expect("a lower digest among 200 heads");
+    let mut skip = pc.clone();
+    final_of(&mut skip, 3, vec![usable.clone(), h2_head.clone()]);
+    case(o, "t-final-head-ahead-ignored", &skip, ok_at(4),
+         "H1 also signed a head dated 1000 s past the verifier's clock whose body digest is lower. It is not usable (§13.3), so it is not chosen and the `final` carrying the usable head stands.",
+         &["8.7", "13.3"], head_objs(vec![("head-H1-usable", usable.clone()), ("head-H1-ahead", ahead)]),
+         Some(ver(DUE0 + 200)), vec![]);
     let mut pm = base.clone();
     activate(&mut pm, &t_addc, &[rec(&cx, &t_addc)]);
     let hs = vec![head5(&pm, &h1k, DUE0 + 50, Some(3))];

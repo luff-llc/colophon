@@ -921,6 +921,17 @@ from heads it has seen or the order it saw things in.
   set is empty or fully excused, a `final` entry names it, a later `final` carries a head from every
   one of its witnesses, or a later full set's anchor is it or follows it. This is the one meaning
   of "final" in §8.6, §8.7 and §15.
+- **Choosing heads.** A `final` carries, for each witness, one head: among the heads valid for it
+  (signed by that home's key in the state before the activation, covering the activation on this
+  branch, not necessarily fresh) and **usable** (not dated more than 60 s after the `final`'s own
+  `issued`, §13.3), the one with the lowest body digest. A head dated further ahead is skipped,
+  never chosen, and never blocks the entry. A verifier enforces the choice over the heads it holds
+  together with the entry's: a `final` whose head for a witness is not the lowest among those is
+  `malformed`. A head the verifier lacks cannot make a correct entry fail, since the entry carries
+  the ones it chose. (Usability is measured against the entry's `issued`, not the verifier's
+  clock, so a recorded `final` never changes verdict as time passes; a recorder building at its
+  own clock takes the same head except when a lower-digest head dated between its `issued` and its
+  clock exists, in which case the two entries differ only in heads and §8.6 drops the loser.)
 - **Order.** An activation that is not removal-only gets a `final`, or becomes final by excusal,
   only when every earlier activation that is not removal-only is final. Removal-only activations
   are outside this order: they never wait for an earlier provisional activation, and none waits
