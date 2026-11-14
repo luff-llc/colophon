@@ -1180,6 +1180,16 @@ fn run_succession(dir: &Path, case: &Value) -> Outcome {
             ));
         }
     }
+    if case["expected"]["migration"] == "recorded"
+        && v.state.as_ref().is_none_or(|s| s.migration.is_none())
+    {
+        return Outcome::Fail(format!(
+            "the migration entry is not recorded; history {} at {}: {:?}",
+            v.code(),
+            v.seq(),
+            v.stop
+        ));
+    }
     if case["expected"].get("evidence").is_some()
         && v.state
             .as_ref()

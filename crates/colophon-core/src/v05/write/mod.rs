@@ -16,6 +16,8 @@
 pub mod authority;
 pub mod calls;
 pub mod records;
+pub mod succession;
+pub mod upgrade;
 
 use crate::v05::encoding::{bounds, canonical, encode_base64};
 use crate::v05::{malformed, Failure, Result};
@@ -570,6 +572,8 @@ pub enum StepRole {
     Cosignature,
     /// A possession proof by a controller the entry adds (`additions`, §8.4).
     Possession,
+    /// A `handover` signature by a key of a Swift predecessor over a successor genesis (§15.1).
+    Handover,
 }
 
 /// One exact body and signer for a host signature. Cosignatures and possession proofs share

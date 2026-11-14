@@ -573,3 +573,120 @@ pub fn finish_receipt(
     let next = home_finish_receipt(home, &prepared.object, &env, now)?;
     Ok((env, next))
 }
+
+// ---------------------------------------------------------------------------------------------
+// The receipt of a successor genesis (§13.5, §15.1 step 2).
+
+/// A successor home's receipt of the genesis, to sign.
+#[derive(Clone, Debug)]
+pub struct PreparedGenesisReceipt {
+    receipt: PreparedReceipt,
+    objects: crate::v05::history::Objects,
+    now_ms: i64,
+}
+impl PreparedGenesisReceipt {
+    /// The step: stored beside the genesis as `<home member ID>.receipt.json`. Raw signature.
+    pub fn step(&self) -> &SigningStep {
+        self.receipt.step()
+    }
+    /// The receipted object's body digest: the genesis body digest, which is the account ID.
+    pub fn object(&self) -> &str {
+        self.receipt.object()
+    }
+}
+
+/// What a successor home drafts for the genesis of a succession it hosts (§13.5, §15.1 step 2).
+/// `objects` is what the home holds of the successor (its entries from the genesis through the
+/// entry that opened the succession window, with the Swift predecessor in `predecessor`), `home`
+/// its member ID and `now_ms` its clock. The body is `received` = `now_ms` for the genesis
+/// digest, for the account the verified history shows.
+///
+/// Refused: a succession whose window has not opened; a home that was not current at the window's
+/// entry; a clock outside the window (W0 to W0 + 300 s); a home that already holds its own
+/// receipt of this genesis (a home signs at most one receipt per object). The clause of §15.1 step
+/// 3 that homes "refuse it more than 300 s behind their clocks" is not separately enforced: the
+/// window bound covers a genesis the home sees late, and the spec does not say what the 300 s is
+/// measured from (reported as a question).
+pub fn prepare_genesis_receipt(
+    objects: &crate::v05::history::Objects,
+    home: &str,
+    now_ms: i64,
+) -> Result<PreparedGenesisReceipt> {
+    use crate::v05::history::succession_status;
+    use crate::v05::signature::RawEnvelope;
+    require(is_key_id(home), "a home is a member ID")?;
+    let state = super::authority::head_state(objects, now_ms)?;
+    let status =
+        succession_status(&state).ok_or_else(|| malformed("this account has no predecessor"))?;
+    let t = status.timing.as_ref().ok_or_else(|| {
+        crate::v05::Failure::Unavailable("the succession window has not opened".into())
+    })?;
+    require(
+        t.homes.iter().any(|h| h == home),
+        "this home was not current at the window's entry",
+    )?;
+    require(
+        (t.window_start_ms..=t.window_end_ms).contains(&now_ms),
+        "a home receipts the genesis only within the succession window",
+    )?;
+    for held in &objects.pending {
+        if let Ok(env) = RawEnvelope::parse(held, bounds::RECEIPT_BODY, false) {
+            require(
+                !(env.value["by"] == home && env.value["object"] == status.genesis_digest.as_str()),
+                "a home signs at most one receipt per object",
+            )?;
+        }
+    }
+    let body = canonical(&json!({
+        "protocol": "colophon/receipt/5",
+        "account": state.account().as_str(),
+        "object": status.genesis_digest,
+        "received": super::format_date(now_ms),
+        "by": home,
+    }))?;
+    Ok(PreparedGenesisReceipt {
+        receipt: PreparedReceipt {
+            step: SigningStep::for_call(
+                format!("{home}.receipt.json"),
+                body,
+                home.to_string(),
+                Vec::new(),
+                None,
+            ),
+            object: status.genesis_digest.clone(),
+        },
+        objects: objects.clone(),
+        now_ms,
+    })
+}
+
+/// Assemble the receipt envelope and have the succession verifier's own receipt check accept it
+/// (a window home, its key, the genesis digest, `received` in the window) before returning it.
+pub fn finish_genesis_receipt(
+    prepared: &PreparedGenesisReceipt,
+    sig: &SignatureResult,
+) -> Result<Vec<u8>> {
+    let env = raw_envelope(&prepared.receipt.step.body, raw_signature(sig)?)?;
+    require(
+        env.len() <= bounds::RECEIPT_ENVELOPE,
+        "receipt envelope exceeds its bound",
+    )?;
+    let state = super::authority::head_state(&prepared.objects, prepared.now_ms)?;
+    let status = crate::v05::history::succession_status(&state)
+        .ok_or_else(|| malformed("this account has no predecessor"))?;
+    let t = status
+        .timing
+        .ok_or_else(|| malformed("the succession window has not opened"))?;
+    let valid = crate::v05::history::succession::receipt_is_valid(
+        &state,
+        &env,
+        &prepared.receipt.object,
+        t.window_start_ms,
+        i64::MAX,
+    );
+    require(
+        valid,
+        "the succession verifier does not accept this receipt",
+    )?;
+    Ok(env)
+}
