@@ -399,6 +399,23 @@ fn run_history(dir: &Path, case: &Value) -> Outcome {
     }
     let verdict = verify_history(&objects_of(dir), &Persisted::default(), now_of(case));
     let got = (verdict.code(), verdict.seq());
+    // The verdict is a function of the set of objects (§8.6): the same in the reverse order
+    // and in byte order (several envelopes over one body are one object, §2.2).
+    for variant in 0..2 {
+        let mut o = objects_of(dir);
+        if variant == 0 {
+            o.entries.reverse();
+        } else {
+            o.entries.sort();
+        }
+        let again = verify_history(&o, &Persisted::default(), now_of(case));
+        if (again.code(), again.seq()) != got {
+            return Outcome::Fail(format!(
+                "the verdict depends on the order of the entries: {got:?} against {:?}",
+                (again.code(), again.seq())
+            ));
+        }
+    }
     let detail = match &verdict.stop {
         Some(Stop::Failed { failure, .. }) => failure.detail().to_string(),
         Some(Stop::Held { why, .. }) => why.clone(),

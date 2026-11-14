@@ -2767,6 +2767,11 @@ fn kind_body_round_trips_the_candidate_vectors_field_names_and_encoding() {
             raw.pop();
         }
         let rel = p.strip_prefix(repo()).unwrap().display().to_string();
+        if rel.contains("garbage-twin") {
+            // A deliberately unsigned twin over a real body (§2.2): not a builder output.
+            *skipped.entry("a garbage-signature twin").or_default() += 1;
+            continue;
+        }
         let Ok(env): Result<Value, _> = serde_json::from_slice(&raw) else {
             *skipped.entry("not json").or_default() += 1;
             continue;

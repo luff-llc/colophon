@@ -370,6 +370,9 @@ pub(crate) struct Entry {
     pub by: String,
     pub kind: String,
     pub size: usize,
+    /// The exact envelope bytes: several envelopes over one body are one object (§2.2), and
+    /// the verifier judges them in byte order.
+    pub raw: Vec<u8>,
 }
 
 fn parse_entry(bytes: &[u8]) -> Result<Entry, Failure> {
@@ -389,6 +392,7 @@ fn parse_entry(bytes: &[u8]) -> Result<Entry, Failure> {
         });
     }
     Ok(Entry {
+        raw: bytes.to_vec(),
         size: env.body.len(),
         env,
         seq: h.seq,
@@ -412,7 +416,10 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
     for bytes in &objects.entries {
         match parse_entry(bytes) {
             Ok(e) => {
-                if seen.insert(e.env.digest.clone()) {
+                // One body under several envelopes is one object (§2.2); every envelope is
+                // kept and judged, in byte order, so that a keyless envelope over a real
+                // body can never stand in for it.
+                if seen.insert(bytes.clone()) {
                     by_seq.entry(e.seq).or_default().push(Ok(e));
                 }
             }
@@ -433,7 +440,7 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
     // Sort candidates at each seq by body digest so iteration never depends on input order.
     for list in by_seq.values_mut() {
         list.sort_by(|a, b| match (a, b) {
-            (Ok(x), Ok(y)) => x.env.digest.cmp(&y.env.digest),
+            (Ok(x), Ok(y)) => (&x.env.digest, &x.raw).cmp(&(&y.env.digest, &y.raw)),
             _ => std::cmp::Ordering::Equal,
         });
     }
@@ -547,30 +554,58 @@ impl Folder<'_> {
                 }
                 break;
             }
-            // Judge every candidate against the state before it.
+            // Judge every candidate against the state before it. The envelopes over one body
+            // are one candidate: it is valid when any of them is (the first in byte order that
+            // verifies), and an envelope that does not verify is ignored. Only when none
+            // verifies is the result that of the first.
             let mut valid: Vec<(&Entry, State)> = Vec::new();
             let mut first_failure: Option<(Stop, &Entry)> = None;
             let mut held_at: Option<i64> = None;
+            let mut groups: Vec<Vec<&Entry>> = Vec::new();
             for e in &candidates {
-                let r = match &st {
-                    None => state::genesis(e, now_ms, self.predecessor),
-                    Some(s) => state::apply(
-                        s,
-                        e,
-                        self.pending,
-                        self.heads,
-                        by_seq_all(self.by_seq),
-                        now_ms,
-                    ),
-                };
-                match r {
-                    Ok(next) => valid.push((e, next)),
-                    Err(state::Outcome::Fail(f)) => {
+                match groups.last_mut() {
+                    Some(g) if g[0].env.digest == e.env.digest => g.push(e),
+                    _ => groups.push(vec![e]),
+                }
+            }
+            for group in &groups {
+                let mut chosen_ok: Option<(&Entry, State)> = None;
+                let mut first_result: Option<(&Entry, state::Outcome)> = None;
+                for e in group {
+                    let r = match &st {
+                        None => state::genesis(e, now_ms, self.predecessor),
+                        Some(s) => state::apply(
+                            s,
+                            e,
+                            self.pending,
+                            self.heads,
+                            by_seq_all(self.by_seq),
+                            now_ms,
+                        ),
+                    };
+                    match r {
+                        Ok(next) => {
+                            chosen_ok = Some((*e, next));
+                            break;
+                        }
+                        Err(o) => {
+                            if first_result.is_none() {
+                                first_result = Some((*e, o));
+                            }
+                        }
+                    }
+                }
+                if let Some(v) = chosen_ok {
+                    valid.push(v);
+                    continue;
+                }
+                match first_result {
+                    Some((e, state::Outcome::Fail(f))) => {
                         if first_failure.is_none() {
                             first_failure = Some((Stop::Failed { seq, failure: f }, e));
                         }
                     }
-                    Err(state::Outcome::Held(why)) => {
+                    Some((e, state::Outcome::Held(why))) => {
                         let t = state::release_time(st.as_ref(), e);
                         held_at = Some(held_at.map_or(t, |h| h.min(t)));
                         if first_failure.is_none()
@@ -579,6 +614,7 @@ impl Folder<'_> {
                             first_failure = Some((Stop::Held { seq, why }, e));
                         }
                     }
+                    None => {}
                 }
             }
             if !valid.is_empty() {
@@ -692,10 +728,13 @@ impl Folder<'_> {
 }
 
 fn by_seq_all(by_seq: &BTreeMap<u64, Vec<Result<Entry, Failure>>>) -> Vec<&Entry> {
+    // One entry per body: the envelopes over a body are one object (§2.2).
+    let mut seen = std::collections::BTreeSet::new();
     by_seq
         .values()
         .flatten()
         .filter_map(|r| r.as_ref().ok())
+        .filter(|e| seen.insert(&e.env.digest))
         .collect()
 }
 

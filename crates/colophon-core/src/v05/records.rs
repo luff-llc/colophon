@@ -677,6 +677,17 @@ impl RecordAuthority {
         if let Some(Stop::Failed { failure, .. }) = &verdict.stop {
             return Err(failure.clone());
         }
+        Self::from_verdict(objects, verdict)
+    }
+    /// The record-layer view of a verdict the caller already holds, over the same `objects`
+    /// the verdict was made from (the account layer's, which resumes from persisted state).
+    /// A verdict that holds no genesis is refused. One that stopped with a failure after its
+    /// genesis gives the view of the verified prefix, which reads but never writes:
+    /// [`RecordAuthority::require_clean`] returns the failure.
+    pub(crate) fn from_verdict(
+        objects: &Objects,
+        verdict: super::history::Verdict,
+    ) -> Result<Self> {
         let state = verdict
             .state
             .clone()
@@ -999,6 +1010,41 @@ impl RecordAuthority {
             .and_then(|m| m.get(&vault.id()))
             .ok_or_else(|| Failure::Unavailable("no vault seal for this epoch".into()))?;
         let info = epoch_info(self.account(), namespace, epoch, &vault.id());
+        let mut plain = seed.open_core_seal(sb, &info)?;
+        let key = <[u8; 32]>::try_from(plain.as_slice()).map_err(|_| super::vault::locked());
+        erase(&mut plain);
+        Ok(EpochKey::from_secret(
+            self.account(),
+            namespace,
+            epoch,
+            key?,
+        ))
+    }
+}
+
+impl RecordAuthority {
+    /// Open the seal of `(namespace, epoch)` addressed to the vault that `seed` derives, which
+    /// may be an earlier vault of this account (§7.1, §8.3: epochs sealed to an earlier vault
+    /// are reached through `previousVault`). The seal must be addressed to that vault's ID, and
+    /// the ID must not be a member's. The key is bound to this account, namespace and epoch.
+    pub(crate) fn open_epoch_with_seed(
+        &self,
+        seed: &VaultSeed,
+        namespace: &str,
+        epoch: u64,
+    ) -> Result<EpochKey> {
+        let public = seed.public()?;
+        let id = public.id();
+        require(
+            self.member(&id).is_none(),
+            "the seal is addressed to a member, not a vault",
+        )?;
+        let sb = self
+            .sealed
+            .get(&(namespace.to_string(), epoch))
+            .and_then(|m| m.get(&id))
+            .ok_or_else(|| Failure::Unavailable("no seal for this vault and epoch".into()))?;
+        let info = epoch_info(self.account(), namespace, epoch, &id);
         let mut plain = seed.open_core_seal(sb, &info)?;
         let key = <[u8; 32]>::try_from(plain.as_slice()).map_err(|_| super::vault::locked());
         erase(&mut plain);
