@@ -296,3 +296,32 @@ build pass. Changed Rust files pass rustfmt; workspace rustfmt still reports onl
 six unchanged 0.4 files. No dependency, lockfile, released engine or binding changes.
 The legacy `/3` record parser/admission path remains a limitation beyond this authority
 upgrade adapter; the stored upgrade sequence is available to callers for its format fence.
+
+## Fix round after the independent check (2026-11-14)
+
+Fixed, each with a regression test (`tests/v05_fix_round.rs`, `v05_history_props.rs`, `v05_home.rs`)
+and, where a vector fits, a generated one:
+
+- H1, H2: only a `final` that is a valid entry on the activate's own branch (a descendant whose
+  chain applies in turn) covers an activate in §8.6 rule 1; an unverified or off-branch `final`
+  covers nothing. Vectors `t-vetoed-beats-activate-invalid-final`,
+  `t-activate-after-covered-entry-invalid-final`.
+- H3: the checkpoint records the earliest time a candidate held at an already decided seq comes
+  due (`held_until`); a resumed verifier replays once the clock reaches it. **Checkpoint format 2**;
+  a format 1 checkpoint is refused (`unknown checkpoint version`) and is rebuilt from its objects.
+- M3: a `/5` predecessor that is itself a successor is verified with its own predecessor, split
+  from the flat set by genesis and descent. The text names no bound for chain length; the
+  implementation refuses more than 16 distinct genesis accounts in the set as `malformed`
+  (a spec question). A cycle cannot recur: each level removes its own genesis. Vector
+  `succession/authority5-chain`.
+- L3: a Swift `layout` needs every signer to hold `control` (§16.3). Vector
+  `succession/swift-layout-extra-noncontrol-cosigner`.
+- L4: a transition refused `refused:early` leaves no first-seen time (§13.1).
+- L6: §15.1 step 3 is exact: for an entry dated exactly W0 minus the delay only the state after
+  it counts, so the code now uses `>` at the cutoff. Vector
+  `succession/swift-veto-by-key-removed-at-cutoff`.
+
+Left as specification questions, with no spec or behaviour change: M1 (Order and finality by
+excusal, §8.6 wording), M2 (a `/5` succession verified from a provisional successor activation),
+M4 (possession exemption without succession authority), L1 (quadratic `/4` prefix replay), L2
+(Swift steward threshold defaults), L5 (home cap counts cosigners).
