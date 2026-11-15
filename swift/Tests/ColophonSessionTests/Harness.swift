@@ -12,11 +12,11 @@ import ColophonSession
     let owner: SoftwareKeys
     let session: ColophonSession
     init(medium: MemoryMedium = MemoryMedium(), member: SoftwareKeys = SoftwareKeys(), owner: SoftwareKeys = SoftwareKeys(),
-         homes: [HomeConfiguration] = [], createWithoutHome: Bool = true, namespaces: [String] = ["reading.saved"],
+         homes: [HomeConfiguration] = [], createWithoutHome: Bool = true, recovery: SoftwareKeys? = nil, additional: [AdditionalController] = [], namespaces: [String] = ["reading.saved"],
          clock: @escaping @Sendable () -> Date = { Date() }) {
         self.medium = medium; self.member = member; self.owner = owner
         session = ColophonSession(configuration: .init(memberLabel: "Test device", namespaces: namespaces, location: .memory(medium),
-            privateContainer: home, keys: member, ownerController: owner, homes: homes, createWithoutHome: createWithoutHome,
+            privateContainer: home, keys: member, ownerController: owner, recoveryKeys: recovery, homes: homes, createWithoutHome: createWithoutHome, additionalControllers: additional,
             deviceSecrets: MemoryDeviceSecrets(), now: clock))
     }
     isolated deinit { try? FileManager.default.removeItem(at: home) }

@@ -206,7 +206,7 @@ import Observation
         await restore()
         let descriptor = try await key.keyDescriptor()
         let spec = ControllerSpec(key: descriptor, label: label, roles: roles, verification: descriptor.form == .webauthn, holder: nil, audiences: [])
-        do { apply(try await worker.addController(spec, mode: immediate ? .immediate : .transition)) } catch { handleCommandError(error); throw error }
+        do { apply(try await worker.addController(spec, mode: immediate ? .immediate : .transition, possession: key)) } catch { handleCommandError(error); throw error }
     }
     /// The existing device's half of "add a device": after both screens showed the same digits, seals the
     /// vault seed to the new device. See `AccountPairing`.

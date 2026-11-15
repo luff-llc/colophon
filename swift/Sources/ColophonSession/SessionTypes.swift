@@ -120,6 +120,8 @@ public struct SessionConfiguration: Sendable {
     /// Explicit opt-out of §18 (tests, an account that will be given a home later). The account then
     /// reports `Notices.noHome` until a home is appointed.
     public let createWithoutHome: Bool
+    /// Further controllers to create the account with (the reference setup has several control keys).
+    public let additionalControllers: [AdditionalController]
     /// Where the 32-byte device-held key that seals saved state is kept (per account).
     public let deviceSecrets: any DeviceSecretStore
     /// The clock, for tests. Everything the engine judges by time uses it.
@@ -130,14 +132,26 @@ public struct SessionConfiguration: Sendable {
     public init(memberLabel: String, memberKind: MemberKind = .app, namespaces: [String], access: [Access] = [.read, .write],
                 libraryNamespaces: [String]? = nil, location: StorageLocation, privateContainer: URL,
                 keys: any AsyncKeyProvider, ownerController: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil,
-                enrollment: EnrollmentPolicy = .pairing, homes: [HomeConfiguration] = [], createWithoutHome: Bool = false,
+                enrollment: EnrollmentPolicy = .pairing, homes: [HomeConfiguration] = [], createWithoutHome: Bool = false, additionalControllers: [AdditionalController] = [],
                 deviceSecrets: any DeviceSecretStore = KeychainDeviceSecrets(), recoveryDelay: Int? = nil,
                 now: @escaping @Sendable () -> Date = { Date() }) {
         self.ownerController = ownerController; self.homes = homes; self.createWithoutHome = createWithoutHome
+        self.additionalControllers = additionalControllers
         self.memberLabel = memberLabel; self.memberKind = memberKind; self.namespaces = namespaces
         self.access = access; self.libraryNamespaces = libraryNamespaces ?? namespaces
         self.enrollment = enrollment; self.deviceSecrets = deviceSecrets; self.recoveryDelay = recoveryDelay; self.now = now
         self.location = location; self.privateContainer = privateContainer; self.keys = keys; self.recoveryKeys = recoveryKeys
+    }
+}
+
+/// A further controller the account is created with (spec §18: each device's owner key, a passkey per platform,
+/// recovery keys). It signs its own possession proof at creation, so its provider is needed then.
+public struct AdditionalController: Sendable {
+    public let provider: any AsyncKeyProvider
+    public let label: String
+    public let roles: [ControllerRole]
+    public init(provider: any AsyncKeyProvider, label: String, roles: [ControllerRole] = [.approve, .control]) {
+        self.provider = provider; self.label = label; self.roles = roles
     }
 }
 

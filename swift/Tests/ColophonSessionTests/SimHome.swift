@@ -21,6 +21,7 @@ final class SimHome: HomeTransport, @unchecked Sendable {
     private var log: [String] = []
     private(set) var requestLog: [String] = []
     private(set) var pendingObjects: [Data] = []
+    private var pendingList: [[String: Any]] = []
     var online = true
     var now: @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
 
@@ -104,12 +105,30 @@ final class SimHome: HomeTransport, @unchecked Sendable {
                 let head = headEnvelope().flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? NSNull()
                 return response(200, ["head": head, "receipts": [Any]()])
             case ("GET", "/pending"):
-                return response(200, ["objects": [Any](), "more": false])
+                let after = Int(query(queryText, "after") ?? "0") ?? 0
+                let page = pendingList.filter { ($0["seq"] as? Int ?? 0) > after }
+                return response(200, ["objects": page, "more": false])
             case ("POST", "/pending"):
+                var receipts: [Any] = []
                 if let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any], let objects = object["objects"] as? [Any] {
-                    for item in objects { pendingObjects.append(Self.canonical(item)) }
+                    for item in objects {
+                        pendingObjects.append(Self.canonical(item))
+                        guard let envelope = item as? [String: Any], let text = envelope["body"] as? String, let body = Data(base64Encoded: text),
+                              let inner = try? JSONSerialization.jsonObject(with: body) as? [String: Any], let account,
+                              let proto = inner["protocol"] as? String, proto.hasSuffix("/transition/5") || proto.hasSuffix("/veto/5") else { continue }
+                        let digest = Self.hex(body)
+                        let issuedMs = Self.parseDate((inner["issued"] as? String) ?? "") ?? now()
+                        let receiptBody = Self.canonical(["protocol": "colophon/receipt/5", "account": account, "object": digest,
+                                                          "received": (try? accountFormatDate(ms: max(now(), issuedMs))) ?? "", "by": id])
+                        guard let signature = try? key.signature(for: receiptBody).rawRepresentation else { continue }
+                        let receipt: [String: Any] = ["body": receiptBody.base64EncodedString(), "signature": signature.base64EncodedString()]
+                        receipts.append(receipt)
+                        let kind = proto.hasSuffix("/veto/5") ? "veto" : "transition"
+                        pendingList.append(["seq": pendingList.count + 1, "digest": digest, "kind": kind, "envelope": item])
+                        pendingList.append(["seq": pendingList.count + 1, "digest": digest, "kind": "receipt", "envelope": receipt])
+                    }
                 }
-                return response(200, ["receipts": [Any]()])
+                return response(200, ["receipts": receipts])
             case ("GET", "/changes"):
                 let after = Int(query(queryText, "after") ?? "0") ?? 0
                 let limit = min(500, Int(query(queryText, "limit") ?? "500") ?? 500)
@@ -135,6 +154,11 @@ final class SimHome: HomeTransport, @unchecked Sendable {
                 }
             }
         }
+    }
+    private static func parseDate(_ text: String) -> Int64? {
+        let plain = ISO8601DateFormatter(); let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return (plain.date(from: text) ?? fractional.date(from: text)).map { Int64($0.timeIntervalSince1970 * 1000) }
     }
     private func store(_ path: String, _ bytes: Data) { files[path] = bytes; log.append(path) }
 }

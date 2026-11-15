@@ -285,7 +285,21 @@ actor SessionWorker {
         guard let engine else { return .empty }
         let keys = await localKeyIDs()
         let seq = journal.shownSeq, shown = journal.shownTransitions
-        return SessionNotices(notices: try await engine.run { try $0.notices(shownSeq: seq, shownTransitions: shown, localKeys: keys) })
+        let raw = try await engine.run { try $0.notices(shownSeq: seq, shownTransitions: shown, localKeys: keys) }
+        // The member engine that reads the account is not a controller, so the engine reports nothing as vetoable
+        // to it. The one-tap veto is the owner controller's: this device may offer it when the owner key is a
+        // controller with `control` or `recover` and the deadline the engine computed has not passed.
+        let controllers = try await engine.run { try $0.controllers() }
+        let ownerID = try? await KeyCustody.keyID(of: configuration.ownerController)
+        let ownerMayVeto = controllers.first { $0.id == ownerID }.map { $0.roles.contains(.control) || $0.roles.contains(.recover) } ?? false
+        let now = nowMs
+        let pending = raw.pending.map { p in
+            Pending(digest: p.digest, by: p.by, signers: p.signers, issuedMs: p.issuedMs, anchorSeq: p.anchorSeq, firstSeenSeq: p.firstSeenSeq,
+                    dueMs: p.dueMs, vetoDeadlineMs: p.vetoDeadlineMs, fullSet: p.fullSet, components: p.components, removes: p.removes,
+                    adds: p.adds, vetoes: p.vetoes, vetoable: ownerMayVeto && p.fullSet != true && (p.vetoDeadlineMs.map { now <= $0 } ?? false))
+        }
+        return SessionNotices(notices: Notices(pending: pending, activations: raw.activations, owed: raw.owed,
+                                               controllersWithoutSlot: raw.controllersWithoutSlot, vaultRetiring: raw.vaultRetiring, noHome: raw.noHome))
     }
     /// Marks what the person has now seen: activations up to the current head and the pending transitions listed.
     func acknowledgeNotices() async throws -> SessionSnapshot {
@@ -428,17 +442,19 @@ actor SessionWorker {
             if engine == nil { _ = try await reconcile() }
             try await withOwner { owner, custody, ownerID in
                 let signers = try await signers(owner, ownerID: ownerID, need: .veto)
-                let written = try await owner.execute(custody: custody) { try $0.beginVeto(transition: transition, signers: signers, entropy: try colophonEntropy(32)) }
+                let written = try await owner.execute(custody: custody) { try $0.beginVeto(transition: transition, signers: signers, entropy: Data()) }
                 try await persist(written, on: owner)
             }
             return try await reconcile()
         }
     }
     /// Adds a controller key (a second device, a passkey, a security key) as an immediate `approve` controller.
-    func addController(_ spec: ControllerSpec, mode: AddMode) async throws -> SessionSnapshot {
+    func addController(_ spec: ControllerSpec, mode: AddMode, possession key: any AsyncKeyProvider) async throws -> SessionSnapshot {
         try await gated {
             if engine == nil { _ = try await reconcile() }
-            try await withOwner { owner, custody, ownerID in
+            try await withOwner { owner, ownerCustody, ownerID in
+                // The new key signs its own possession proof; it is held for this call only.
+                let custody = KeyCustody(providers: ownerCustody.providers.merging([try KeyCustody.keyID(of: spec): key]) { _, new in new })
                 let signers = try await signers(owner, ownerID: ownerID, need: .control)
                 let written = try await owner.execute(custody: custody) {
                     try $0.beginAddController(controller: spec, mode: mode, signers: signers, rule: .control, entropy: Data())
@@ -492,7 +508,7 @@ actor SessionWorker {
             }
             guard !configuration.homes.isEmpty || configuration.createWithoutHome else { throw SessionError.noHome }
             journal.left = false
-            let custody = try await ownerCustody()
+            let baseCustody = try await ownerCustody()
             let ownerKey = try await configuration.ownerController.keyDescriptor()
             let ownerID = try accountKeyId(signing: ownerKey.signing)
             let isPasskey = ownerKey.form == .webauthn
@@ -503,6 +519,14 @@ actor SessionWorker {
                 let kitID = try accountKeyId(signing: descriptor.signing)
                 controllers.append(ControllerSpec(key: descriptor, label: "Recovery kit", roles: [.recover], verification: descriptor.form == .webauthn, holder: nil, audiences: []))
                 slots.append(SlotPlan(controllers: [kitID], label: "Recovery kit"))
+            }
+            var custody = baseCustody
+            for extra in configuration.additionalControllers {
+                let descriptor = try await extra.provider.keyDescriptor()
+                let id = try accountKeyId(signing: descriptor.signing)
+                controllers.append(ControllerSpec(key: descriptor, label: extra.label, roles: extra.roles, verification: descriptor.form == .webauthn, holder: nil, audiences: []))
+                slots.append(SlotPlan(controllers: [id], label: extra.label))
+                custody = KeyCustody(providers: custody.providers.merging([id: extra.provider]) { _, new in new })
             }
             var policy = try JSONSerialization.jsonObject(with: Data(accountDefaultPolicy().utf8)) as? [String: Any] ?? [:]
             if let delay = configuration.recoveryDelay { policy["recoveryDelay"] = delay }

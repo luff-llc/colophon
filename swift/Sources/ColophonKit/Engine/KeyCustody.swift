@@ -19,6 +19,8 @@ public struct KeyCustody: Sendable {
         providers = byId
     }
 
+    public static func keyID(of spec: ControllerSpec) throws -> String { try accountKeyId(signing: spec.key.signing) }
+
     public static func keyID(of provider: any AsyncKeyProvider) async throws -> String {
         try accountKeyId(signing: try await provider.publicKeys().signing)
     }
