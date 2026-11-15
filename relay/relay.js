@@ -4,6 +4,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import { HomeKey, HomeModule, HomeSlot } from './home.js';
 import path from 'node:path';
 
 export const PROTOCOL = 'colophon/relay/3';
@@ -13,6 +14,11 @@ export const DEFAULT_LIMITS = Object.freeze({
   pageEntries: 1000,
   waitSeconds: 30,
   slotBytes: 0, // 0 = no per-slot quota
+  // Home slots only (not published at GET {base}):
+  authorityBodyBytes: 16 * 1024 * 1024,
+  pendingBodyBytes: 12 * 1024 * 1024,
+  replayRows: 65536, // replay rows per slot, shared out per principal by the home module
+  requestsPerMinute: 1200, // per address; 0 = unlimited
 });
 
 const SLOT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -55,13 +61,14 @@ export function newToken() {
 }
 
 class HttpError extends Error {
-  constructor(status, message, headers = {}) { super(message); this.status = status; this.headers = headers; }
+  /** `body`, when given, is the JSON answer as it is (a home's `{"result":…}`), else `{"error"}`. */
+  constructor(status, message, headers = {}, body = undefined) { super(message); this.status = status; this.headers = headers; this.body = body; }
 }
 
 /** One library slot on disk: records/<path>, an append-only log.jsonl and meta.json. */
 class Slot {
-  constructor(root, name, limits) {
-    this.root = root; this.name = name; this.limits = limits;
+  constructor(root, name, limits, classify = classifyPath) {
+    this.root = root; this.name = name; this.limits = limits; this.classify = classify; this.home = null;
     this.entries = []; this.current = new Map(); this.bytes = 0;
     this.waiters = new Set(); this.chain = Promise.resolve(); this.instance = null;
   }
@@ -120,7 +127,7 @@ class Slot {
       if (!line) continue;
       try {
         const e = JSON.parse(line);
-        if (!classifyPath(e.path)) return null;
+        if (!this.classify(e.path)) return null;
         out.push(e.deleted ? { path: e.path, deleted: true } : { path: e.path, size: e.size, sha256: e.sha256 });
       } catch { return null; }
     }
@@ -136,7 +143,7 @@ class Slot {
         const full = path.join(dir, ent.name);
         if (ent.isSymbolicLink()) throw new Error(`Refusing symlink in relay storage: ${full}`);
         if (ent.isDirectory()) await walk(full, relPath);
-        else if (ent.isFile() && classifyPath(relPath)) found.set(relPath, { size: (await fsp.lstat(full)).size });
+        else if (ent.isFile() && this.classify(relPath)) found.set(relPath, { size: (await fsp.lstat(full)).size });
       }
     };
     await walk(this.recordsDir(), '');
@@ -335,15 +342,31 @@ function readBody(req, max) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {} }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false }) {
   if (!dataDir) throw new Error('dataDir is required');
   const effective = { ...DEFAULT_LIMITS, ...limits };
   await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
   await ensureRealDir(path.resolve(dataDir));
   const auth = new Map();
+  const homeSlots = new Map();
+  let homeModule = null; let homeKey = null;
+  if (Object.values(libraries ?? {}).some((e) => e && e.home)) {
+    if (!home?.wasm || !home?.key) throw new Error('A home slot needs home.wasm (the module path) and home.key (a private P-256 JWK)');
+    homeModule = home.wasm instanceof HomeModule ? home.wasm : await HomeModule.load(home.wasm);
+    homeKey = await HomeKey.fromJwk(home.key, homeModule);
+  }
   for (const [name, entry] of Object.entries(libraries ?? {})) {
     if (!SLOT.test(name)) throw new Error(`Invalid library slot name: ${name}`);
+    if (entry && entry.home) {
+      if (typeof entry.base !== 'string' || !/^https?:\/\//.test(entry.base)) throw new Error(`Home slot ${name} needs base, the URL its account names as its endpoint`);
+      // Provisioning: a home slot serves the one account the operator created it for.
+      if (typeof entry.account !== 'string' || !HEX64.test(entry.account)) throw new Error(`Home slot ${name} needs account, the 64-hex ID of the account it is provisioned for`);
+      homeSlots.set(name, { base: entry.base.replace(/\/+$/, ''), account: entry.account });
+      if (entry.token || entry.tokenSha256) console.error(`Home slot ${name}: a bearer token authorizes nothing at a 0.5 home and is ignored`);
+      continue;
+    }
     if (entry && entry.open === true) auth.set(name, null);
+    else if (entry && entry.home && !entry.token && !entry.tokenSha256) auth.set(name, Buffer.alloc(32)); // calls only: no bearer matches
     else if (entry && typeof entry.tokenSha256 === 'string' && HEX64.test(entry.tokenSha256)) auth.set(name, Buffer.from(entry.tokenSha256, 'hex'));
     else if (entry && typeof entry.token === 'string' && entry.token.length >= 16) auth.set(name, createHash('sha256').update(entry.token).digest());
     else throw new Error(`Library slot ${name} needs tokenSha256, a token of at least 16 characters, or open: true`);
@@ -354,8 +377,20 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
     if (slots.has(name)) return slots.get(name);
     if (!opening.has(name)) {
       opening.set(name, (async () => {
-        const s = new Slot(path.join(path.resolve(dataDir), name), name, effective);
+        const isHome = homeSlots.has(name);
+        // A home slot's path grammar is the module's (the engine's paths).
+        const homeClassify = (p) => homeModule.call({ op: 'classify', path: p }).kind;
+        const s = new Slot(path.join(path.resolve(dataDir), name), name, effective, isHome ? homeClassify : classifyPath);
         await s.open();
+        if (isHome) {
+          s.home = new HomeSlot({
+            slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
+            clock, resolve, tracing,
+            deps: { HttpError, send, readBody, clampInt },
+            limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
+          });
+          await s.home.open();
+        }
         slots.set(name, s);
         return s;
       })());
@@ -376,16 +411,19 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
-    const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records)(?:\/(.*))?)?$/.exec(url.pathname);
+    const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor)(?:\/(.*))?)?$/.exec(url.pathname);
     if (!route) throw new HttpError(404, 'Not found');
     const [, name, section, recordPath] = route;
     if (!SLOT.test(name)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
-    authorize(req, name);
+    if (!homeSlots.has(name)) authorize(req, name);
     const s = await slot(name);
+    if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
+    if (!s.home && ['head', 'authority', 'pending', 'predecessor'].includes(section)) throw new HttpError(404, 'Not found');
     if (!section) {
       if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
-      const { slotBytes, ...published } = effective;
-      return send(res, 200, { protocol: PROTOCOL, slot: name, limits: published, ...(slotBytes ? { quotaBytes: slotBytes } : {}) });
+      const { slotBytes, authorityBodyBytes, pendingBodyBytes, replayRows, requestsPerMinute, ...published } = effective;
+      return send(res, 200, { protocol: PROTOCOL, slot: name, limits: published, ...(slotBytes ? { quotaBytes: slotBytes } : {}),
+        ...(s.home ? { home: { member: s.home.key.memberId } } : {}) });
     }
     if (section === 'changes') {
       if (req.method !== 'GET' || recordPath !== undefined) throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
@@ -401,7 +439,7 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
       }
       return send(res, 200, page);
     }
-    const kind = classifyPath(recordPath);
+    const kind = s.classify(recordPath);
     if (!kind) throw new HttpError(400, 'Invalid record path');
     if (url.search) throw new HttpError(400, 'Record URLs take no query');
     if (req.method === 'GET' || req.method === 'HEAD') {
@@ -441,12 +479,23 @@ export async function createRelay({ dataDir, libraries, limits = {} }) {
   function listener(req, res) {
     handle(req, res).catch((error) => {
       if (res.headersSent || res.destroyed) { res.destroy(); return; }
-      if (error instanceof HttpError) send(res, error.status, { error: error.message }, error.headers);
+      if (error instanceof HttpError) send(res, error.status, error.body !== undefined ? error.body : { error: error.message }, error.headers);
       else { console.error(error); send(res, 500, { error: 'Internal relay error' }); }
     });
   }
 
-  return { listener, limits: effective, slot };
+  // The scheduler: recording entries, heads and forwarding for every home slot, on the relay's clock.
+  const tickAll = async () => {
+    for (const name of homeSlots.keys()) {
+      const s = await slot(name);
+      try { await s.home.tick(); } catch (error) { console.error(`home tick failed for slot ${name}: ${error.message}`); }
+    }
+  };
+  let timer = null;
+  if (homeSlots.size > 0) for (const name of homeSlots.keys()) await slot(name);
+  if (homeSlots.size > 0 && tickMs > 0) { timer = setInterval(() => { tickAll(); }, tickMs); timer.unref?.(); }
+
+  return { listener, limits: effective, slot, tickAll, close: () => { if (timer) clearInterval(timer); } };
 }
 
 // The response (not the request, which closes once its body is read) closes with the client.
@@ -473,5 +522,5 @@ export async function startRelay({ host = '127.0.0.1', port = 8787, tls, ...opti
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
   const address = server.address();
   return { server, relay, host: address.address, port: address.port,
-    close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
+    close: () => new Promise((resolve) => { relay.close(); server.closeAllConnections?.(); server.close(() => resolve()); }) };
 }

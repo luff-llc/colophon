@@ -249,6 +249,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "colophon-home-wasm"
+version = "0.4.0"
+dependencies = [
+ "base64",
+ "colophon-core",
+ "p256",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "colophon-wasm"
 version = "0.4.0"
 dependencies = [
