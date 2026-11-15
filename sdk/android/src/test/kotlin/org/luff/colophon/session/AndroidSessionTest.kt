@@ -22,6 +22,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.luff.colophon.keys.CredentialClient
 import org.luff.colophon.keys.PasskeyProvider
+import org.luff.colophon.keys.apkKeyHashOrigin
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -34,7 +35,7 @@ import javax.crypto.KeyGenerator
  * authenticator does (authenticator data for the rp with UP and UV, client data naming the challenge and origin, a DER
  * ES256 signature over both, and the PRF extension's `results.first` when a salt is asked for). Not a device.
  */
-private class SyntheticCredentials(private val prfSupported: Boolean = true) : CredentialClient {
+private class SyntheticCredentials(private val prfSupported: Boolean = true, private val origin: String = "https://id.luff.works") : CredentialClient {
     val key = P256.generate()
     val rp = "id.luff.works"
     val credential = byteArrayOf(1)
@@ -50,7 +51,7 @@ private class SyntheticCredentials(private val prfSupported: Boolean = true) : C
         val salt = request.obj("extensions")?.obj("prf")?.obj("eval")?.string("first")
         val sha = MessageDigest.getInstance("SHA-256")
         val authData = sha.digest(rp.toByteArray()) + byteArrayOf(5, 0, 0, 0, 0)
-        val clientData = Json.write(mapOf("type" to "webauthn.get", "challenge" to challenge, "origin" to "https://$rp")).toByteArray()
+        val clientData = Json.write(mapOf("type" to "webauthn.get", "challenge" to challenge, "origin" to origin)).toByteArray()
         val signature = Signature.getInstance("SHA256withECDSA").run { initSign(key.private); update(authData + sha.digest(clientData)); sign() }
         val url = { b: ByteArray -> P256.base64url(b) }
         val response = mutableMapOf<String, Any?>("rawId" to url(credential), "response" to mapOf(
@@ -90,6 +91,28 @@ class AndroidSessionTest {
             assertEquals("${second.state.value}", SessionPhase.Ready, second.phase)
             val view = Json.obj(second.view("notes"))!!
             assertEquals(1, view.obj("value")!!.list("admitted")!!.size)
+        } finally { first.shutdown(); second.shutdown() }
+    }
+
+    // The documented call for a real Android app: its assertions carry the app's platform origin, which must be in
+    // `origins` as well as `authorityOrigins` (spec §3.1; core descriptor.rs general rule).
+    @Test fun anAndroidAppOriginCreatesAndApproves() = runBlocking<Unit> {
+        val appOrigin = apkKeyHashOrigin(ByteArray(64) { 3 })
+        val credentials = SyntheticCredentials(origin = appOrigin)
+        val owner = PasskeyController(PasskeyProvider.restore(credentials.descriptor, credentials), listOf(appOrigin, "https://id.luff.works"))
+        val d = owner.keyDescriptor()
+        assertEquals(listOf(appOrigin), d.origins)
+        val medium = MemoryMedium()
+        val first = session(medium, owner)
+        val second = session(medium, SoftwareKeys())
+        try {
+            first.create()
+            assertEquals("${first.state.value}", SessionPhase.Ready, first.phase)
+            second.restore()
+            first.refresh()
+            first.approve(first.requests.single())
+            second.refresh()
+            assertEquals("${second.state.value}", SessionPhase.Ready, second.phase)
         } finally { first.shutdown(); second.shutdown() }
     }
 

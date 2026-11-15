@@ -44,7 +44,9 @@ android {
         unitTests.isReturnDefaultValues = true
         unitTests.all {
             it.jvmArgs(if (System.getenv("COLOPHON_SESSION_BENCH") != null) "-Xmx2g" else "-Xmx512m")
-            val hostLibs = rootDir.resolve("../../target/release").canonicalPath
+            // The host library follows CARGO_TARGET_DIR, as scripts/test-android.sh builds it.
+            val cargoTarget = System.getenv("CARGO_TARGET_DIR")?.let { file(it) } ?: rootDir.resolve("../../target")
+            val hostLibs = cargoTarget.resolve("release").canonicalPath
             it.systemProperty("jna.library.path", hostLibs)
             it.systemProperty("java.library.path", hostLibs)
             it.environment("DYLD_LIBRARY_PATH", hostLibs)

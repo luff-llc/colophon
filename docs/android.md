@@ -52,6 +52,10 @@ lifecycleScope.launch {
 session.state.collect { render(it.phase, it.notices) }                    // pending changes, no home, locked, ...
 ```
 
+* **The passkey's origins.** `PasskeyController` puts every platform origin of `authorityOrigins` (the app's
+  `android:apk-key-hash:...` from `appPasskeyOrigins`) into the descriptor's `origins` too: the core admits a platform
+  authority origin only when `origins` names it (spec §3.1). `AndroidSessionTest.anAndroidAppOriginCreatesAndApproves`
+  runs this call with assertions made under such an origin.
 * **A second device** restores over a copy of the history (a shared folder) or with nothing, shows
   `SessionPhase.WaitingForApproval(code)`, and hands `exportRequest()` to an owner device, which calls
   `importRequest(bytes)` and `approve(request)`. The new device learns its approval through the home (`syncNow()`).

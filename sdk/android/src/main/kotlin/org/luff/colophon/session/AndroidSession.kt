@@ -146,7 +146,13 @@ class PasskeyController(private val passkey: PasskeyProvider, private val author
     override suspend fun keyDescriptor(): KeyDescriptorView = KeyDescriptorView(
         SignForm.WEBAUTHN, signing.copyOf(), null, descriptor.string("rp"),
         Base64.getDecoder().decode(descriptor.string("credential") ?: throw IllegalArgumentException("no credential")),
-        (descriptor.list("origins") ?: listOf()).filterIsInstance<String>(), authorityOrigins.sorted())
+        origins, authorityOrigins.distinct().sorted())
+    /**
+     * `origins`: the registration's own, plus every platform origin among `authorityOrigins` (`android:apk-key-hash:...`):
+     * the core admits a platform authority origin only when `origins` names it too (spec §3.1).
+     */
+    private val origins: List<String> get() =
+        ((descriptor.list("origins") ?: listOf()).filterIsInstance<String>() + authorityOrigins.filter { !it.startsWith("https://") }).distinct().sorted()
     /** A WebAuthn assertion is required so its authenticator data and client data are kept: no raw signature. */
     override suspend fun sign(body: ByteArray): ByteArray = throw KeyCustodyException.Unsupported()
     override suspend fun sharedSecret(peer: ByteArray): SecretBytes = throw KeyCustodyException.Unsupported()
