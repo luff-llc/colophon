@@ -47,6 +47,7 @@ public struct SystemWebAuthnCeremonies: WebAuthnCeremonies {
       let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: rpID)
       let request = provider.createCredentialRegistrationRequest(challenge: challenge, name: userName, userID: userID)
       request.userVerificationPreference = .required
+      request.attestationPreference = .none
       let authorization = try await Self.authorize(request)
       guard let credential = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration,
         let attestation = credential.rawAttestationObject else { throw KeyProviderError.credentialMissing }

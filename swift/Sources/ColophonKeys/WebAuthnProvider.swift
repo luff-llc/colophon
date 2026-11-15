@@ -9,7 +9,7 @@ struct WebAuthnProvider: Sendable {
     let ceremonies: any WebAuthnCeremonies
 
     static func register(kind: CredentialKind, relyingParty: String, userID: Data, userName: String,
-                         challenge: Data, ceremonies: any WebAuthnCeremonies) async throws -> KeyDescriptor {
+                         challenge: Data, authorityOrigins: [String] = [], ceremonies: any WebAuthnCeremonies) async throws -> KeyDescriptor {
         try checkPlatform(kind: kind, ceremonies: ceremonies)
         let registration: Registration
         do {
@@ -18,7 +18,7 @@ struct WebAuthnProvider: Sendable {
                                                           userName: userName, challenge: challenge)
             try Task.checkCancellation()
         } catch { throw KeyProviderError.map(error) }
-        let descriptor = try KeyDescriptor(attestationObject: registration.attestationObject, relyingParty: relyingParty)
+        let descriptor = try KeyDescriptor(attestationObject: registration.attestationObject, relyingParty: relyingParty, authorityOrigins: authorityOrigins)
         guard descriptor.credential == registration.credentialID else { throw KeyProviderError.credentialMissing }
         return descriptor
     }

@@ -1,7 +1,10 @@
 import Foundation
 import ColophonKit
 
-struct SessionKeyFailure: Error, Sendable { let detail: String }
+public struct SessionKeyFailure: Error, Sendable, LocalizedError {
+    public let detail: String
+    public var errorDescription: String? { detail }
+}
 /// Classifies provider failures at their origin, preserving storage/core errors separately.
 struct SessionKeys: AsyncKeyProvider {
     let base: any AsyncKeyProvider
@@ -23,6 +26,11 @@ struct SessionKeys: AsyncKeyProvider {
     }
     func sign(body: Data) async throws -> Data {
         do { return try await base.sign(body: body) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw SessionKeyFailure(detail: error.localizedDescription) }
+    }
+    func keyDescriptor() async throws -> KeyDescriptorView {
+        do { return try await base.keyDescriptor() }
         catch is CancellationError { throw CancellationError() }
         catch { throw SessionKeyFailure(detail: error.localizedDescription) }
     }

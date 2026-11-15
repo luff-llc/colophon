@@ -27,6 +27,7 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
         Group {
             if session.hasUsableContent {
                 VStack(spacing: 0) {
+                    NoticesView(session: session)
                     if session.phase != .ready {
                         HStack {
                             Text(session.phase == .retry ? "Refresh failed" : "Updating Your Library…")
@@ -74,6 +75,11 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
                 Text(presentation.dataNote).font(.footnote).foregroundStyle(.secondary)
             }
             .disabled(action.isWorking)
+        case .locked:
+            LibraryStatusView(title: "Locked", message: "Your library is hidden while this app is in the background.", artwork: artwork) {
+                Button("Unlock") { Task { await action.run { await session.unlock() } } }
+                    .buttonStyle(.borderedProminent).accessibilityIdentifier("library.unlock")
+            }
         case .opening: progress(title: "Opening Your Library", id: "library.opening")
         case .waitingForDownload: progress(title: "Waiting for Your Library", id: "library.waitingForDownload")
         case .refreshing: progress(title: "Updating Your Library", id: "library.refreshing")

@@ -16,9 +16,9 @@ public struct PasskeyProvider: AsyncKeyProvider {
 
     /// Registers an ES256 credential and returns the core-parsed descriptor, never a registration PRF output.
     public static func register(relyingParty: String, userID: Data, userName: String, challenge: Data,
-                                ceremonies: any WebAuthnCeremonies = SystemWebAuthnCeremonies()) async throws -> KeyDescriptor {
+                                authorityOrigins: [String] = [], ceremonies: any WebAuthnCeremonies = SystemWebAuthnCeremonies()) async throws -> KeyDescriptor {
         try await WebAuthnProvider.register(kind: .passkey, relyingParty: relyingParty, userID: userID,
-                                           userName: userName, challenge: challenge, ceremonies: ceremonies)
+                                           userName: userName, challenge: challenge, authorityOrigins: authorityOrigins, ceremonies: ceremonies)
     }
 
     /// Restricts get to this credential; use the core's fresh challenge and salt when building a slot.
@@ -33,4 +33,16 @@ public struct PasskeyProvider: AsyncKeyProvider {
     public func sign(body: Data) async throws -> Data { throw KeyProviderError.unsupportedHere }
     /// WebAuthn credentials do not expose ECDH.
     public func agree(peer: Data) async throws -> Data { throw KeyProviderError.unsupportedHere }
+    /// The protocol descriptor of this credential, with its `authorityOrigins`.
+    public func keyDescriptor() async throws -> KeyDescriptorView { descriptor.view }
+}
+
+extension PasskeyProvider {
+    /// The WebAuthn `user.id` to register with (spec §17.4): the UTF-8 account ID (64 hex characters)
+    /// when the account exists, 32 random bytes when it does not. A lookup hint only: verifiers find a
+    /// controller by `rp` and `credential` and never require it.
+    public static func userID(account: String?) throws -> Data {
+        if let account { return Data(account.utf8) }
+        return try colophonEntropy(32)
+    }
 }

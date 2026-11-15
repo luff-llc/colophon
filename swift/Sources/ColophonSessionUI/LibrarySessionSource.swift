@@ -8,9 +8,10 @@ import Foundation
     var hasUsableContent: Bool { get }
     var context: UUID { get }
     var revision: UInt64 { get }
-    var members: [Member] { get }
+    var members: [AccountMember] { get }
     var requests: [AccessRequest] { get }
-    var ledger: [LedgerEntry] { get }
+    /// New in 0.5: what a person must be shown that is not content (pending changes, unseen activations, no home).
+    var notices: SessionNotices { get }
     func restore() async
     func refresh() async
     func retry() async
@@ -20,6 +21,12 @@ import Foundation
     func importRequest(from url: URL) async throws
     func approve(_ request: AccessRequest, grant: GrantOptions?) async throws
     func revoke(memberID: String) async throws
+    /// New in 0.5: one call to veto a pending change; the session stores it and submits it to every home.
+    func veto(_ transition: String) async throws
+    /// New in 0.5: the person saw the notices.
+    func acknowledgeNotices() async
+    /// New in 0.5: opens a locked session again.
+    func unlock() async
 }
 
 extension ColophonSession: LibrarySessionSource {}

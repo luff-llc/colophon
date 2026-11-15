@@ -8,24 +8,23 @@ import SwiftUI
     var phase: SessionPhase
     var context = UUID()
     var revision: UInt64 = 1
-    var members: [Member]
+    var members: [AccountMember]
     var requests: [AccessRequest]
-    var ledger: [LedgerEntry]
+    var notices: SessionNotices = .empty
     init(phase: SessionPhase = .ready) {
         self.phase = phase
         members = [
-            Member(id: "device", label: "My Mac", kind: .device, grant: Grant(import: nil, namespaces: ["notes", "reading.books"], access: [.read, .write], expires: nil, writeBudget: nil), since: 3, revokedAt: nil, writes: 2),
-            Member(id: "reader", label: "Reading Assistant", kind: .agent,
-                   grant: Grant(import: nil, namespaces: ["reading.books"], access: [.read], expires: nil, writeBudget: nil),
-                   since: 2, revokedAt: nil, writes: 0)
+            Self.member("device", "My Mac", .device, ["notes", "reading.books"], [.read, .write]),
+            Self.member("reader", "Reading Assistant", .agent, ["reading.books"], [.read]),
         ]
         requests = [Self.request]
-        ledger = [LedgerEntry(sequence: 1, at: "2026-11-06T12:00:00Z", actor: "controller", actorLabel: "My Mac",
-                              event: .created, subject: nil, namespace: nil, kind: nil, origin: nil, text: "Created this library")]
+    }
+    static func member(_ id: String, _ label: String, _ kind: AccountMemberKind, _ namespaces: [String], _ access: [AccessKind]) -> AccountMember {
+        AccountMember(id: id, label: label, kind: kind, kindRaw: nil, grant: AccountGrant(namespaces: namespaces, access: access, expires: nil, writeBudget: nil, import: false),
+                      since: 3, revokedAt: nil, writes: 0, expiresMs: nil, provisional: false, home: false, session: 0)
     }
     static let request = AccessRequest(id: "request", label: "My iPad", kind: .device,
-                                      namespaces: ["reading.books", "notes"], access: [.read, .write],
-                                      pairingCode: "123456", record: Data())
+        termsJSON: #"{"records":[{"namespace":"reading.books","access":"write"},{"namespace":"notes","access":"write"}]}"#, record: Data())
     func restore() async {}
     func refresh() async {}
     func retry() async {}
@@ -35,6 +34,9 @@ import SwiftUI
     func importRequest(from url: URL) async throws {}
     func approve(_ request: AccessRequest, grant: GrantOptions?) async throws { requests.removeAll { $0.id == request.id }; revision += 1 }
     func revoke(memberID: String) async throws { revision += 1 }
+    func veto(_ transition: String) async throws { notices = .empty }
+    func acknowledgeNotices() async { notices = .empty }
+    func unlock() async { phase = .ready }
     static var host: LibraryHostActions {
         .init(containers: [
             .init(id: "cloud", title: "iCloud Drive", kind: .iCloud, location: .iCloud(container: "preview", libraryName: "Library")),
@@ -72,7 +74,6 @@ private struct GatePreview: View {
         .environment(\.dynamicTypeSize, .accessibility3)
 }
 #Preview("Member") { NavigationStack { MemberDetailView(member: PreviewLibrarySession().members[1], session: PreviewLibrarySession()) } }
-#Preview("Colophon") { NavigationStack { ColophonLedgerView(session: PreviewLibrarySession()) } }
 #Preview("Connect") { NavigationStack { ConnectLibraryView(host: PreviewLibrarySession.host) } }
 #Preview("Join") { NavigationStack { ConnectLibraryView(host: PreviewLibrarySession.host, purpose: .join) } }
 #Preview("Recovery") { NavigationStack { RecoveryKitView(host: PreviewLibrarySession.host) } }

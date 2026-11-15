@@ -1,7 +1,7 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// The Rust-backed 0.3 SDK. The independent 0.1 package lives in reference/swift.
+// The Rust-backed Apple SDK on Colophon 0.5. The independent 0.1 package lives in reference/swift.
 let package = Package(name: "ColophonSDK", platforms: [.macOS(.v14), .iOS(.v17), .visionOS("26.0")], products: [
   .library(name: "ColophonFFI", targets: ["ColophonFFI"]),
   .library(name: "ColophonKit", targets: ["ColophonKit"]),
@@ -28,7 +28,8 @@ let package = Package(name: "ColophonSDK", platforms: [.macOS(.v14), .iOS(.v17),
   .target(name: "ColophonSessionUI", dependencies: ["ColophonSession"], path: "swift/Sources/ColophonSessionUI"),
   .testTarget(name: "ColophonSessionUITests", dependencies: ["ColophonSessionUI"], path: "swift/Tests/ColophonSessionUITests"),
   .testTarget(name: "ColophonDomainKitTests", dependencies: ["ColophonBooksKit", "ColophonListeningKit", "ColophonSavedKit", "ColophonNotesKit"], path: "swift/Tests/ColophonDomainKitTests"),
-  .testTarget(name: "ColophonSessionTests", dependencies: ["ColophonSession", "ColophonKitStorage"], path: "swift/Tests/ColophonSessionTests"),
+  .testTarget(name: "ColophonSessionTests", dependencies: ["ColophonSession", "ColophonKitStorage", "ColophonSavedKit", "ColophonKeys"], path: "swift/Tests/ColophonSessionTests"),
+  .testTarget(name: "ColophonStorageTests", dependencies: ["ColophonKitStorage"], path: "swift/Tests/ColophonStorageTests"),
   .binaryTarget(name: "ColophonFFI", path: "sdk/apple/ColophonFFI.xcframework"),
   .target(name: "ColophonKit", dependencies: ["ColophonFFI"], path: "swift/Sources/ColophonKit",
           exclude: ["Generated/ColophonFFI.h", "Generated/ColophonFFI.modulemap"],

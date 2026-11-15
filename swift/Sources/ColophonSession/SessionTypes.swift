@@ -1,6 +1,7 @@
+import Foundation
+
 @_exported import ColophonKit
 @_exported import ColophonKitStorage
-import Foundation
 
 public enum SessionPhase: Equatable, Sendable {
     case opening, noLibrary, creating, migrating
@@ -8,12 +9,15 @@ public enum SessionPhase: Equatable, Sendable {
     case waitingForApproval(code: String)
     case denied
     case unavailable(reason: String)
-    /// Authenticated layout this client cannot evaluate. Folder, identity and bytes stay put.
+    /// Authenticated content of a newer format than this client evaluates. Nothing is changed or lost.
     case updateRequired
     case ready
     /// A refresh is in flight; previously verified content from this connection is still usable.
     case refreshing
     case retry
+    /// New in 0.5: `lock()` ran (the app went to the background, or the engine was discarded). Content is
+    /// hidden and no secret is held; `restore()`, `refresh()` or `unlock()` opens it again.
+    case locked
     case failed(error: SessionFailure)
 }
 
@@ -30,6 +34,11 @@ public enum SessionFailure: Equatable, Sendable {
 
 public enum SessionError: Error, Equatable, Sendable {
     case notReady, staleRevision, destinationChanged, invalidCommand, publicationUncertain, migrationCollision
+    /// New in 0.5: the account was created without a home and the host did not opt out (spec §18).
+    case noHome
+    /// New in 0.5: a step needs the owner controller (the person's passkey or owner key) and this
+    /// configuration holds none that the account's keyring names.
+    case ownerRequired
 }
 
 /// A command is bound to the context and revision observed before the user's action began.
@@ -58,8 +67,9 @@ public struct DomainCommand: Codable, Equatable, Sendable {
 }
 
 public enum WriteReceipt: Equatable, Sendable {
+    /// The signed record is durable in this device's store. Homes receive it on the next exchange.
     case saved(operationID: String)
-    /// Signed records are journaled privately; retry publishes the same bytes, never re-signs.
+    /// Not durable yet (an ingress envelope that must be retried). Retry publishes the same envelope.
     case queued
 }
 
@@ -67,6 +77,24 @@ public enum EnrollmentPolicy: Sendable {
     case pairing
     /// Approve device-local App Group app members through this controller's current authority.
     case deviceOnlyAppGroup(controller: any AsyncKeyProvider)
+}
+
+/// A home the account names, as this host reaches it.
+public struct HomeConfiguration: Sendable {
+    /// The home's base URL, as named in the account (`Home.endpoints`).
+    public let endpoint: URL
+    public let label: String
+    /// The home's own signed member request (§9.1), to appoint it when this host creates the account. A
+    /// relay or home service publishes it; the SDK cannot know it. Nil: the home is not appointed here
+    /// (it is reached only if the account already names it).
+    public let request: Data?
+    /// Storage bearer token for the home (access to its store only, never membership).
+    public let bearerToken: String?
+    public let transport: any HomeTransport
+    public init(endpoint: URL, label: String = "Home", request: Data? = nil, bearerToken: String? = nil,
+                transport: any HomeTransport = URLSessionHomeTransport()) {
+        self.endpoint = endpoint; self.label = label; self.request = request; self.bearerToken = bearerToken; self.transport = transport
+    }
 }
 
 public struct SessionConfiguration: Sendable {
@@ -82,72 +110,77 @@ public struct SessionConfiguration: Sendable {
     /// Owner controller provider, separate from the content member. Hosts own persistence and presence policy.
     public let ownerController: any AsyncKeyProvider
     public let enrollment: EnrollmentPolicy
-    /// Shared rollout marker outside the immutable library record tree. Configure every suite app.
-    public let migrationMarker: URL?
-    /// Lets a dedicated copying session bypass the rollout barrier; the core still requires an import grant.
-    public let migrationWriter: Bool
-    /// Short, explicit expiry for the copying member's control-rule import grant at creation.
-    public let importExpires: String?
-    /// Signed, display-only source library ID for a clean copy.
-    public let importedFrom: String?
-    /// Optional host-persisted recovery-kit controller, with its own genesis sealed slot.
+    /// Optional host-persisted recovery-kit controller (`recover` only, with its own sealed slot).
     public let recoveryKeys: (any AsyncKeyProvider)?
-    /// Optional relay (spec §8). The local location stays the source of truth.
-    public let relay: RelayConfiguration?
-    /// Configure separate member and owner providers; hosts choose custody and authentication policy.
+    /// The homes to appoint at creation and to exchange with. Spec §18: a host creates every account with
+    /// at least one and warns when there is none. Empty and `createWithoutHome` false makes `create()`
+    /// refuse with `SessionError.noHome`.
+    public let homes: [HomeConfiguration]
+    /// Explicit opt-out of §18 (tests, an account that will be given a home later). The account then
+    /// reports `Notices.noHome` until a home is appointed.
+    public let createWithoutHome: Bool
+    /// Where the 32-byte device-held key that seals saved state is kept (per account).
+    public let deviceSecrets: any DeviceSecretStore
+    /// The clock, for tests. Everything the engine judges by time uses it.
+    public let now: @Sendable () -> Date
+    /// `recoveryDelay` for a new account, in seconds (`policy.recoveryDelay`; spec §18: at least 3,600 with a home).
+    public let recoveryDelay: Int?
+    /// Whether the owner key alone is enough to sign the controller's own steps (no other control key).
     public init(memberLabel: String, memberKind: MemberKind = .app, namespaces: [String], access: [Access] = [.read, .write],
                 libraryNamespaces: [String]? = nil, location: StorageLocation, privateContainer: URL,
-                keys: any AsyncKeyProvider, ownerController: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil, enrollment: EnrollmentPolicy = .pairing, migrationMarker: URL? = nil, migrationWriter: Bool = false,
-                importExpires: String? = nil, importedFrom: String? = nil,
-                relay: RelayConfiguration? = nil) {
-        self.migrationMarker = migrationMarker; self.migrationWriter = migrationWriter; self.relay = relay
-        self.ownerController = ownerController; self.importExpires = importExpires; self.importedFrom = importedFrom
+                keys: any AsyncKeyProvider, ownerController: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil,
+                enrollment: EnrollmentPolicy = .pairing, homes: [HomeConfiguration] = [], createWithoutHome: Bool = false,
+                deviceSecrets: any DeviceSecretStore = KeychainDeviceSecrets(), recoveryDelay: Int? = nil,
+                now: @escaping @Sendable () -> Date = { Date() }) {
+        self.ownerController = ownerController; self.homes = homes; self.createWithoutHome = createWithoutHome
         self.memberLabel = memberLabel; self.memberKind = memberKind; self.namespaces = namespaces
         self.access = access; self.libraryNamespaces = libraryNamespaces ?? namespaces
-        self.enrollment = enrollment
+        self.enrollment = enrollment; self.deviceSecrets = deviceSecrets; self.recoveryDelay = recoveryDelay; self.now = now
         self.location = location; self.privateContainer = privateContainer; self.keys = keys; self.recoveryKeys = recoveryKeys
     }
 }
 
-/// A relay slot URL and its storage token. Load the token from the Keychain (`RelayToken`);
-/// it grants relay storage only, never library membership.
-public struct RelayConfiguration: Sendable {
-    public let endpoint: RelayEndpoint
-    /// When true the session syncs in the background: after local changes, on relay long-poll
-    /// wake-ups and with capped backoff after failures. When false, call `syncNow()`.
-    public let automatic: Bool
-    public let transport: any RelayTransport
-    public init(url: URL, token: String?, automatic: Bool = true, transport: any RelayTransport = URLSessionRelayTransport()) {
-        endpoint = RelayEndpoint(url: url, token: token); self.automatic = automatic; self.transport = transport
+/// A member's request for access, as an approver sees it.
+public struct AccessRequest: Equatable, Sendable, Identifiable {
+    /// The member's key ID.
+    public let id: String
+    public let label: String
+    public let kind: AccountMemberKind
+    public let termsJSON: String
+    /// A short code both devices derive from the key ID: compare it before approving.
+    public let pairingCode: String
+    /// The request exactly as signed; share it (`ColophonSession.exportRequest()`) or write it to the library folder.
+    public let record: Data
+    public init(id: String, label: String, kind: AccountMemberKind, termsJSON: String, pairingCode: String? = nil, record: Data) {
+        self.id = id; self.label = label; self.kind = kind; self.termsJSON = termsJSON
+        self.pairingCode = pairingCode ?? Self.code(for: id); self.record = record
+    }
+    /// The namespaces the request asks for, read from its terms.
+    public var namespaces: [String] { records.map(\.0) }
+    /// The access it asks for: read, plus write when any record entry asks for it.
+    public var access: [Access] { records.contains { $0.1 == "write" } ? [.read, .write] : [.read] }
+    private var records: [(String, String)] {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(termsJSON.utf8)) as? [String: Any],
+              let list = object["records"] as? [[String: Any]] else { return [] }
+        return list.compactMap { entry in (entry["namespace"] as? String).map { ($0, (entry["access"] as? String) ?? "read") } }
+    }
+    static func code(for id: String) -> String {
+        let head = id.prefix(8).uppercased()
+        return head.prefix(4) + "-" + head.suffix(4)
     }
 }
 
-struct CoreSnapshot: Sendable {
-    let libraryID: String
-    let me: Member
-    let members: [Member]
-    let ledger: [LedgerEntry]
-    let requests: [AccessRequest]
-    let views: [String: NamespaceView]
-    let denials: [String: Denial]
-    let records: [String: Data]
-    var engine: NativeEngine? = nil
-    var engineRevisions: [String: UInt64]? = nil
-}
-
-struct SessionSnapshot: Sendable {
-    let phase: SessionPhase
-    let core: CoreSnapshot?
-    let revision: UInt64
-    let namespaceRevisions: [String: UInt64]
-}
-
-extension SessionConfiguration {
-    var enrollmentController: (any AsyncKeyProvider)? {
-        guard memberKind == .app, case .appGroup = location,
-              case .deviceOnlyAppGroup(let keys) = enrollment else { return nil }
-        return keys
-    }
+/// What a person may be shown about this account that is not content (§17.5, §18).
+public struct SessionNotices: Equatable, Sendable {
+    public let notices: Notices
+    /// Transitions not yet shown or still pending, with signers, first-seen seq, deadline and `vetoable`.
+    public var pending: [Pending] { notices.pending }
+    /// Activations no key on this device signed that the person has not seen.
+    public var unseenActivations: [SeenActivation] { notices.activations }
+    /// The account names no home: warn (spec §18, guide §5). Without a home there is no witness of time or order.
+    public var noHome: Bool { notices.noHome }
+    public var owed: [Owed] { notices.owed }
+    public static let empty = SessionNotices(notices: Notices(pending: [], activations: [], owed: [], controllersWithoutSlot: [], vaultRetiring: false, noHome: false))
 }
 
 extension SessionError: LocalizedError {
@@ -159,6 +192,8 @@ extension SessionError: LocalizedError {
         case .staleRevision: "The library changed while this action was open. Review the current values and try again."
         case .destinationChanged: "The selected library or member changed. Start this action again."
         case .invalidCommand: "This command or extension envelope is invalid."
+        case .noHome: "This account has no home. Without one there is no witness of time or order for your changes; add a home before relying on it."
+        case .ownerRequired: "This step needs the account owner's key."
         }
     }
 }

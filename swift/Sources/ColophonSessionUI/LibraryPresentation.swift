@@ -39,11 +39,23 @@ public enum LibraryWords {
         if value.contains(.write) { return "Write only" }
         return "No access"
     }
-    public static func grant(_ member: Member) -> String {
+    public static func access(_ value: [AccessKind]) -> String {
+        access(value.map { $0 == .read ? Access.read : Access.write })
+    }
+    public static func kind(_ value: AccountMemberKind) -> String {
+        switch value {
+        case .device: kind(MemberKind.device)
+        case .app: kind(MemberKind.app)
+        case .agent: kind(MemberKind.agent)
+        case .server: kind(MemberKind.server)
+        case .unknown: "Unknown kind"
+        }
+    }
+    public static func grant(_ member: AccountMember) -> String {
         if member.revokedAt != nil { return "Access ended" }
         guard let grant = member.grant else { return "Waiting for approval" }
         var lines = [access(grant.access), grant.namespaces.map(namespace).joined(separator: ", ")]
-        if grant.import == true { lines.append("Can import history") }
+        if grant.import { lines.append("Can import history") }
         if let expires = grant.expires { lines.append("Expires \(date(expires))") }
         if let budget = grant.writeBudget { lines.append("Up to \(budget) changes; \(member.writes) made") }
         return lines.joined(separator: " · ")

@@ -8,11 +8,11 @@ import ColophonNotesKit
 
 @MainActor final class DomainHarness {
     let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    let memory = MemoryRecordStore()
+    let memory = MemoryMedium()
     let session: ColophonSession
     var exercised: Set<String> = []
     init() {
-        session = ColophonSession(configuration: .init(memberLabel: "Owner", namespaces: ["reading.books", "listening.podcasts", "reading.saved", "notes"], location: .memory(memory), privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys()))
+        session = ColophonSession(configuration: .init(memberLabel: "Owner", namespaces: ["reading.books", "listening.podcasts", "reading.saved", "notes"], location: .memory(memory), privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys(), createWithoutHome: true, deviceSecrets: MemoryDeviceSecrets()))
     }
     isolated deinit { try? FileManager.default.removeItem(at: home) }
     func start() async throws { await session.create(); try #require(session.phase == .ready) }

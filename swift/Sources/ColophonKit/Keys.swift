@@ -15,6 +15,17 @@ public protocol AsyncKeyProvider: Sendable {
     func publicKeys() async throws -> PublicKeys
     func sign(body: Data) async throws -> Data
     func agree(peer: Data) async throws -> Data
+    /// The key as the protocol writes it (spec §3.1), the form every 0.5 export takes. Raw keys are
+    /// described by `publicKeys()`; a passkey provider overrides it with its `rp`, credential and origins.
+    func keyDescriptor() async throws -> KeyDescriptorView
+}
+
+extension AsyncKeyProvider {
+    public func keyDescriptor() async throws -> KeyDescriptorView {
+        let keys = try await publicKeys()
+        return KeyDescriptorView(form: .raw, signing: keys.signing, agreement: keys.agreement.isEmpty ? nil : keys.agreement,
+                                 rp: nil, credential: nil, origins: [], authorityOrigins: [])
+    }
 }
 
 extension AsyncKeyProvider {
