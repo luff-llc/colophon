@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 14, 2026-11-14. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 15, 2026-11-15. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -244,6 +244,31 @@ Rows 119 to 125 and 127 to 129, 131 to 134 are text only. Rows 126 and 130 (the 
 | 134 | §9.5 walk: records reached by any walk, complete or not, are kept; §14: a home keeps the envelope it stored and MAY keep another; §2.2 a verifier uses one of the envelopes that verify; §9.5 `epochs` MAY cover other declared namespaces; §11.6 the resolution's own kind; §17.1, §17.2, §17.3, §17.5 wording; a self-slot before `final` is `badSignature` (§8.7) | M1, M2, L1–L10 of the check of revision 14 |
 
 Checked and unchanged: §19 lists `revokedBackdated`, `authorityBehind`, `unavailable` and `duplicateID`, and `....000Z` dates are canonical under §2.2 (PR #11 Q9, Q12). The no-home rollback warning (decisions item from the check of revision 13) is already row 116.
+
+### A.11 Revision 15
+
+Text only: every row states what the merged code already does (`crates/colophon-core/src/v05/`, the home module `crates/colophon-home-wasm`, `relay/`); no verifier, vector or code changed. Sources: the independent checks E6, E8 to E11, B1, B2, H1, S1, K1 and the order check, the builders' questions in PRs #16, #18, #19, #21 to #25, and the running decisions list.
+
+| # | Change | Why |
+| --- | --- | --- |
+| 135 | §14 "Store layout": `transitions/<digest>.json`, `vetoes/<digest>.json`, `receipts/<object digest>/<home id>.receipt.json`, `heads/<home id>.json`, `predecessor/authority/<n>.json`; §13.5 names the receipt path (`engine/paths.rs`) | PR #16 Q1; E6 §7 |
+| 136 | §11.8: the caveated live writer is judged per namespace (`kinds` of the entry for N, any `conditions`, `writes` or `expires`); `refused:caveatedLive` for a stamped header under `state/` or `ops/`; a stamp that disagrees with its header is `invalidPayload`; §19 lists the code (`records::live_caveated`) | PR #16 Q2, M5, M7; E6 M7; PR #18 |
+| 137 | §11.8: the blob chunk AAD's library is the first 32 characters of the account ID (`engine/blobs.rs`) | PR #16 Q6; E6 §5, M9 |
+| 138 | §9.5, §11.2: a live-stamped header is outside the author chain and never a maximal head; a keep-everything `revoke` lists in `kept` the live copies no walk reaches (`chain_heads`, `prepare_revoke`) | PR #16 Q5, M4, L6; E6 M4 |
+| 139 | §9.3 "A grant inside a transition": a `grant` or `homes.appoint` component meets every rule of an immediate grant at activation, else the `activate` is `malformed`; a home refuses it at admission; shares come by a shares-only `renew` (`members::check_granted_terms`, `admission_transition`; vectors `rules/t-grant-import-*`) | E9 H-B; PR #18; PR #16 Q7 |
+| 140 | §12.3, §13.4, §14 "Calls at a home": audience `{base}`; purpose by method, `colophon.history.read` on the history paths only; `args` exactly `{"method","path","body"}`; who may read and write records; a bearer token authorizes nothing (`calls::verify_home_request`, `home_purposes`, `home_path_serves_history`, `home_record_writes`) | PR #21; PR #23 Q5; E11 High; H1 M5, M6 |
+| 141 | §12.3 "The signer's own check": S at the signer's held seq behind a home's fresh head; a member that does not find itself may sign a read; one that holds its own revocation builds nothing; a verifier is never lenient (`check_home_call_as_signer`, `evaluate`) | PR #23 Q1 and gap 3; E11 |
+| 142 | §13.4 "Without a call": `GET {base}`, the head, the two POSTs and a forwarded head; the history paths under `public` only (`access` in the home module) | PR #23 Q2 (the rule; how the history reaches a new device under `members` stays open); H1 H2, L2 |
+| 143 | §14: a home that holds nothing of the account answers 404 to all but `GET {base}`, the two POSTs and a forwarded head; a client treats that 404 as an empty history (`access`, `on_pull_authority`) | PR #23 Q4; H1 Q9, Q11 |
+| 144 | §14: 401 with `WWW-Authenticate: Colophon`, 403 and 429 `{"result"}`, 409 head or `null`, 421 `{"endpoints"}`, 422 `{"result"}` for `/authority` and an array of result strings for `/pending`; `receipts` of `POST /authority` are receipts only; `GET /authority` `receipts` only a successor genesis's; `limit` clamped; forwarding by `POST {peer}/pending` and `PUT {peer}/records/heads/<id>.json`, and when it counts as delivered (`relay/home.js`, `peer_answer`) | PR #21 sentences 1–5, 10, 11; H1 H3, M2, L1; PR #16 Q8 |
+| 145 | §13.1 "One home, one account": a home is provisioned for one account; a first upload must begin with its genesis, else `refused:outOfScope` and nothing held (`admit_first`) | PR #21 sentence 7; H1 H1 |
+| 146 | §13.3: when a head is due, and a due head is signed before `GET {base}/head` is answered | PR #23 |
+| 147 | §15.1 step 4: a `successionVetoed`'s receipts are judged for validity only (`succession::receipts`) | E7 L6 |
+| 148 | §16.3 "Envelopes": a broken Swift wrapper is ignored where another envelope verifies; an envelope over 2 MiB or whose outer JSON or body cannot be read makes the predecessor `malformed` (`history/swift.rs` `verify`) | PR #25; order check |
+| 149 | §9.5 "Held means read": the held set is a function of the read scope (`Account::set_read_scope`) | PR #19 P1 |
+| 150 | §17.1: the host is trusted with the seed and the data keys at rotation, device transfer and admitting a member; §13.1, §18: an account with no home has no rollback protection for a new verifier; each home is provisioned for one account | decisions list (E4, check of revision 13); PR #21 |
+
+Checked and already in the text, unchanged: notices have no signed body or wire format (§13.1, §17.5); link `created` carries no rule (§12.1); a late veto with another home's in-window receipt (§13.1); two heads for one seq (§13.3); several envelopes over one body (§2.2, §8.6); receipts and heads judged for validity only, a head's time against the entry's own `issued` (§8.7); `resolve` carries `kept: {seq, digest}` (§8.6, §8.7); the shares-only `renew` (§9.4); two successors as a stated limit (§15.1).
 
 ## B. Galley's requirements
 
@@ -943,6 +968,31 @@ and its fixes were merged first. Rows 119 to 132 of §A.10 hold the changes.
 | Not written | PR #11 Q5, Q7; PR #12 Q2, Q3, Q5, Q9; PR #13 Q2, Q4, Q6, Q7, Q8; E7 L1, L3 to L7: engine readings the text does not need or that wait for the owner |
 
 No vector of revisions 12 to 14 was replayed by the Swift source.
+
+### G.21 Checks of the engine, the home, the bindings and the SDKs (2026-11-14 to 2026-11-15), answered in revision 15
+
+The independent checks of the account engine (E6, PR #16), the Swift move (E8), the engine rounds
+(E9, E10, PRs #18, #19), the bindings (B1, B2), the home on the relay (H1, PR #21), the Swift SDK
+(S1, PR #22), the two-device journeys (E11, PR #23), the Kotlin SDK (K1, PR #24) and the order
+check (PR #25), and the builders' questions, asked for text; the code was merged first. Rows 135
+to 150 of §A.11 hold the changes.
+
+| Source | Settled in |
+| --- | --- |
+| PR #16 Q1, E6 §7 store paths | §14 "Store layout", §13.5 |
+| PR #16 Q2, M5, M7; E6 M7; PR #18 the caveated live writer | §11.8, §19 |
+| PR #16 Q6, E6 §5 the blob AAD | §11.8 |
+| PR #16 Q5, M4, L6; E6 M4 live copies and the author chain | §9.5, §11.2 |
+| E9 H-B, PR #18, PR #16 Q7 a grant inside a transition | §9.3 |
+| PR #19 P1 the held set and the read scope | §9.5 |
+| PR #21 sentences 1–5, 7, 8, 10–13; H1 H1–H3, M2, M5, M6, L1, L2 | §13.1, §13.4, §14 |
+| PR #23 Q1, Q2 (the rule), Q4, Q5; E11 High | §12.3, §13.3, §13.4, §14 |
+| E7 L6 succession receipts | §15.1 step 4 |
+| PR #25, the order check: a broken Swift wrapper | §16.3 |
+| Decisions list: the host's trust, no home, homes per account | §17.1, §13.1, §18 |
+| Not written | PR #21 sentences 6, 14 (the clock rule before a home's appointment, and at a non-primary home); PR #23 Q2 (how the history reaches a new device under `members`), Q3, Q6 to Q9; PR #16 Q3, Q4, Q10; PR #18 (`MAX_KEPT_DIGESTS`, `PUT {base}/predecessor/`); PR #19 M4 (pruning); E8 Q1, Q4, Q5: undecided, or rules the owner has not taken |
+
+No vector changed in revision 15, and none was replayed by the Swift source.
 
 ## H. Theft and loss, worked through
 

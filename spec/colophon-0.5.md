@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 14, for review, 2026-11-14.** Not frozen, not
+**Status: final candidate, revision 15, for review, 2026-11-15.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -24,8 +24,12 @@ and E7) does and answers the builders' questions; its fix round adds two verifie
 shares-only `renew`, §9.4, and the checks of a `migration`, §15.4): several envelopes over one body, what a `revoke` introduces and
 how its walk runs, tie-breaks and resolvers in records, how far epoch key handles and stored state
 are trusted, the veto and competing-attempt rules of succession, the migration and upgrade
-limits of the shipped Swift code, and the account-facing host rules. The
-mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
+limits of the shipped Swift code, and the account-facing host rules; revision 15 says what the
+merged engine, the home on the relay and the three SDKs (packages E6 to E11, H1, B1, B2, S1, K1)
+do: the store layout, a call bound to its request at a home and the signer's own check, what
+needs no call, a home that holds nothing, the caveated live writer per namespace, live copies in
+`kept`, the blob AAD, a grant inside a transition, a broken Swift wrapper, and the host's trust.
+The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
 [colophon-0.5-guide.md](colophon-0.5-guide.md).
@@ -1099,6 +1103,16 @@ grant MUST give `write` in every `records` entry, have `expires` later than `iss
 control rule, and be for a `device` or `app`. Readers compare a parent operation's signed
 `created` with `expires` and never use first-seen time. To stop imports, revoke the member.
 
+**A grant inside a transition.** The `grant` component of a transition, and each item of
+`homes.appoint`, MUST meet at activation every rule §9.2 and this section set for an immediate
+`grant`: its terms covered by the request, the request naming this account, new member points,
+every granted namespace declared, and with `import` a `device` or `app` member, `write` in every
+`records` entry and an `expires` later than the transition's `issued` (an appointed home also
+serves `home` and is not an `agent`). Otherwise the delta is void and the `activate` is
+`malformed` (§8.5), and a home refuses the transition at admission. The component carries no
+`shares`: once the activation is final, the member gets its epochs by a shares-only `renew`
+(§9.4).
+
 ### 9.4 Renew
 
 `renew` has two forms. `member` MUST be current: not revoked and not provisional (§8.7).
@@ -1142,8 +1156,16 @@ every record of the member that is neither in `kept` nor reached by any walk, co
 (a header reached before the walk met a missing one is kept; the missing header could have reached
 any other), never as not kept. A record that cites the
 revocation seq or later is refused `revoked` whatever the walk says (§11.5 step 3). The approver's host computes `kept` and `heads` from every record it holds, including
-every fork head (up to 16) so no branch is lost. A kept record whose payload doesn't
+every fork head (up to 16) so no branch is lost. A live-stamped header (a retained live copy
+under `ops/`, §11.2) is outside the author chain, so no walk reaches it and the host never
+names one in `heads`: to keep everything, it lists in `kept` every `/3` header of the member and
+every live-stamped header of it that no walk from `heads` reaches. A kept record whose payload doesn't
 authenticate is refused `invalidPayload`, not preserved (§11.8).
+
+**Held means read.** A replica holds only the records of the namespaces in its read scope (0.3
+§4): a header outside the scope is not held, for the walk as for everything else, so a replica
+that once read a namespace and one that never did reach the same verdicts. Narrowing the scope
+drops those records; widening it reads them again.
 
 ### 9.6 Ending sessions
 
@@ -1254,7 +1276,9 @@ At `ops/<author>/<namespace>/<clock, 12 digits>-<id>.json`:
   `previous` that names no header the verifier holds does not keep the header from being
   admitted: only the §9.5 walk follows `previous`.
 - Optional `live` stamp `{"account","slot","generation","operationID"}` (§11.8); a live-stamped
-  header has `level` `write` and `previous` `null`.
+  header has `level` `write` and `previous` `null`. It is not part of its author's chain: it is
+  never a maximal head for the rule above, and a retained copy under `ops/` does not fork the
+  chain (§9.5 says how a revocation keeps it).
 - AAD: canonical JSON of `{account, author, authority, clock, created, epoch, id, level,
   namespace, previous, protocol}`. `nonce` 12 bytes; `ciphertext` includes the 16-byte tag.
 
@@ -1352,8 +1376,15 @@ Substitutions:
   and whether they contain `import`".
 - "member kind" reads the request `kind`. A grant's namespaces and access read its `records`
   entries, each with its own access. `writeBudget` reads `writes`.
-- An **uncaveated** writer is one whose terms have no `expires`, `writes`, `kinds` or
-  `conditions`. A **caveated** live stamp is one by any other writer.
+- An **uncaveated** writer in a namespace N is a member with a `records` entry for N that has
+  no `kinds` and whose terms have no `expires`, `writes` or `conditions`. The rule is per
+  namespace: `kinds` on an entry for another namespace does not caveat N. A **caveated** live
+  stamp is one by any other writer; its header, as a live candidate under `state/` or as a
+  retained copy under `ops/`, is refused `caveatedLive`. A live-stamped header under `ops/` is
+  refused `invalidPayload` unless its stamp's `account` is this account, its `generation` is
+  the header's `clock` and its `operationID` the header's `id`.
+- The blob chunk AAD's library (0.3 §7.2) is the first 32 characters of the account ID, as in
+  §11.1, so a chunk written under 0.4 opens unchanged after an in-place upgrade.
 - `/3` header rules read §11.2–§11.5 for `/5` headers.
 - "Revocation … preserves only admitted records whose payload and content-derived ID
   authenticated" applies to §9.5: a kept record whose payload doesn't authenticate is refused
@@ -1366,7 +1397,9 @@ Substitutions:
 - §8's "await acknowledgement of each authority sequence before uploading its successor" reads:
   a home's acknowledgement of a `POST {base}/authority` batch (§14) acknowledges every entry in
   it.
-- Publication and reading of authority history on a relay that is a home read §13–§14.
+- Publication and reading of authority history on a relay that is a home read §13–§14. At a
+  home, a bearer token authorizes nothing: every request §13.4 and §14 do not open needs a
+  call (§14).
 
 ## 12. Links and calls
 
@@ -1460,7 +1493,8 @@ A verifier MUST, in order (the pipeline of §1):
    no `conditions` predicate may be false on `args` (§10.4). For a controller, `purpose` must be
    among the verifier's configured purposes for controller calls; there is no generic or fallback
    purpose, except that a home always accepts `colophon.history.read`, `colophon.home.read` and
-   `colophon.home.write` at its own endpoints, allowed as §13.4 and §14 say. A current member
+   `colophon.home.write` at its own endpoints, each only for the requests §14 binds it to and
+   allowed as §13.4 and §14 say. A current member
    calling with its own key may read the history and records at a home; through links, only when
    every link's terms grant the purpose there. Else `refused:outOfScope`.
 8. **Extensions.** Unknown fields, terms or values in the authenticated call, links or terms, or
@@ -1468,6 +1502,19 @@ A verifier MUST, in order (the pipeline of §1):
    predicate doesn't decide the result (for example inside an `any` with a true member) is not
    reported.
 9. Otherwise `ok`, recorded in the replay store as §12.4 says.
+
+**The signer's own check.** A host judges every call it builds by these steps before it sends
+it, with a replay store of its own, and sends nothing that fails. For a call to a home whose
+fresh head it holds and verifies but that names an entry beyond its own history (the signer is
+behind that home), two things differ, and nothing else:
+- Step 4: such a head counts as covering the signer's held history, so S is judged at the
+  highest seq the signer holds, not refused because it has not fetched.
+- Step 5: a member that does not find itself in the history it holds (an approval it has not
+  fetched) may still sign `colophon.home.read` or `colophon.history.read` with its own key and no
+  links, and the home, which holds the history, decides.
+
+A signer that holds its own revocation, expiry, ended session or removal builds nothing. A
+verifier, and so a home, never applies this leniency: it fetches first (step 4).
 
 ### 12.4 Replay store
 
@@ -1501,6 +1548,11 @@ A home is a member with `serves: ["home"]`, appointed by a transition, and count
 that activation is final (§8.7). Any server, device or service the owner chooses can be one. A
 home stores only entries, transitions and vetoes that verify `ok`, and holds no controller or
 member private key, PRF output or seed. An account appoints up to 8 homes.
+
+**One home, one account.** A home is provisioned by its operator for one account (its ID)
+before anything is uploaded, and serves that account only. Its first upload MUST begin with that
+account's genesis (the body whose digest is the ID); anything else is refused
+`refused:outOfScope` and nothing of it is held, so nobody else's history can occupy the home.
 
 - **Ordering.** Immediate entries go first to the primary home (`policy.primaryHome`, else the
   earliest-appointed current home), which stores the first valid entry per seq. Other homes store
@@ -1558,7 +1610,8 @@ member private key, PRF output or seed. An account appoints up to 8 homes.
   once, on every branch alike, so a former controller can show a **new** verifier a different
   history from before its own removal (a late entry at an old seq and a `resolve` keeping it),
   and nothing in the objects can tell the two apart. This is a limit, not a defence (§8.6, §8.7
-  "No home"). A verifier with persisted state whose high-water entry is not on the branch it would
+  "No home"). Such an account has **no rollback protection for a new verifier**: only a verifier
+  with persisted state detects one. A verifier with persisted state whose high-water entry is not on the branch it would
   now follow reports `refused:rollback`, and a host MUST treat that as a refusal and show it. Hosts
   MUST create accounts with at least one home by default (§18) and MUST warn when an account has
   none.
@@ -1638,7 +1691,10 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   the history from any source, verifies it from seq 1, asks every home the history names, and
   applies §12.3 step 4.
 - A home SHOULD sign a new head at least every `policy.headMaxAge` / 2 and MUST NOT sign a head for
-  an entry it hasn't verified. It MUST give its heads strictly increasing `issued`, and MUST NOT
+  an entry it hasn't verified. A head is **due** when the home has none, when its latest head
+  does not name the home's latest entry, or when `headMaxAge` / 2 has passed since its `issued`;
+  a due head is signed before the home answers `GET {base}/head`, so no caller is served a head
+  the home was due to replace. It MUST give its heads strictly increasing `issued`, and MUST NOT
   sign a head for a second digest at a seq unless its own verdict shows the first displaced under
   §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
   second head's side; the Equivocation rule above). The guard belongs to home admission, which holds the history: the host
@@ -1656,6 +1712,17 @@ granting that purpose there. The head is always public. This governs every path 
 history, transitions, vetoes and receipts, including `records/authority/*` on a relay that is a
 home.
 
+The **history paths** are `/authority`, `/pending`, `/pending/<digest>` and the `records/` paths
+of authority entries, predecessor entries, transitions, vetoes, receipts and heads (§14 "Store
+layout"). `colophon.history.read` is accepted there and nowhere else: never for the change feed,
+records, live values or blob chunks, which need `colophon.home.read` (§14).
+
+**Without a call** anyone may make exactly these requests: `GET {base}`, the head (`GET
+{base}/head` and `records/heads/<home ID>.json`), `POST {base}/authority`, `POST {base}/pending`
+and the `PUT` of another home's head (§14); and, under `public`, `GET` of the history paths. So a
+device with nothing yet fetches, under `public`, the head, the history and the pending feed, and
+under `members` only the head and `GET {base}`. Everything else needs a call.
+
 ### 13.5 Receipt
 
 ```json
@@ -1663,7 +1730,7 @@ home.
 ```
 
 Signed `raw` by a home's member key for a transition, a veto or a successor genesis, and stored
-beside it as `<home member ID>.receipt.json`. A home signs at most one receipt per object, and
+as `receipts/<object digest>/<home member ID>.receipt.json` (§14 "Store layout"). A home signs at most one receipt per object, and
 only while its clock is between the object's `issued` and 300 s after it. It is valid when:
 
 - `by` is a current home in the state the verifier evaluates, not one added by a provisional
@@ -1680,11 +1747,11 @@ A home is a relay (0.3 §8) whose `GET {base}` response adds `"home":{"member":"
 | Request | Response |
 | --- | --- |
 | `GET {base}/head` | 200 latest head envelope; 404 if none. Public, `no-store`. |
-| `GET {base}/authority?after={seq}&limit={n}` | 200 `{"entries":[…],"receipts":[…],"more":bool}`, 1–64 entries from `after + 1`, under §13.4. |
-| `POST {base}/authority` | `{"from":<seq>,"entries":[…],"receipts":[…]}`, 1–64 contiguous entries. 200 `{"head":…,"receipts":[…]}`; 409 with the current head if `from` overlaps different bytes or leaves a gap; 422 with the §1 result; a non-primary home answers 421 with the primary's endpoints for an entry no primary head covers. No other authorization is needed. |
+| `GET {base}/authority?after={seq}&limit={n}` | 200 `{"entries":[…],"receipts":[…],"more":bool}`, 1–64 entries from `after + 1`, under §13.4. `receipts` holds only receipts embedded in no entry: those of a successor genesis (§15.1). |
+| `POST {base}/authority` | `{"from":<seq>,"entries":[…],"receipts":[…]}`, 1–64 contiguous entries; `receipts` holds receipt envelopes only (at most 64), admitted as in `POST {base}/pending`, and any other object there is `malformed` and nothing of the request is admitted. 200 `{"head":…,"receipts":[…]}`; 409 with the current head envelope, or `null` when the home has signed none, if `from` overlaps different bytes or leaves a gap; 422 `{"result":"<§1 result>"}`; a non-primary home answers 421 `{"endpoints":[…]}`, the primary's, for an entry no primary head covers. No other authorization is needed. |
 | `GET {base}/pending?after={cursor}&limit={n}` | 200 `{"objects":[{"seq":<cursor>,"digest","kind","envelope"}…],"more":bool}`: 1–64 pending objects in the order the home first stored them, after `cursor` (0 to start). `kind` is `transition`, `veto` or `receipt` (a receipt by any current home). Cursors are the home's own increasing integers and never reused. Under §13.4. |
 | `GET {base}/pending/{digest}` | 200 `{"envelope","receipts":[…]}` for a pending transition or veto with every receipt the home holds for it; 404 otherwise. Under §13.4. |
-| `POST {base}/pending` | `{"objects":[…]}`, 1–16 transition, veto or receipt envelopes. 200 `{"receipts":[…]}` with this home's receipts for those it receipted; 422 with one result per refused object: the §8.5 result, or `refused:early`, `refused:late`, `refused:proposerFull`, `refused:pendingFull` or `refused:vetoFull` (§13.1). No other authorization is needed. |
+| `POST {base}/pending` | `{"objects":[…]}`, 1–16 transition, veto or receipt envelopes. 200 `{"receipts":[…]}` with this home's receipts for those it receipted, when every object was admitted; otherwise 422 with a JSON array holding, in request order, the result string of each refused object: the §8.5 result, or `refused:early`, `refused:late`, `refused:proposerFull`, `refused:pendingFull` or `refused:vetoFull` (§13.1). The receipts of the objects of such a batch that were admitted are in the pending feed. No other authorization is needed. |
 
 **Pending objects.** A home lists every transition and veto it stores that has no recording entry
 on its branch, and every receipt of them, until 7 days after the transition's due time; then it
@@ -1699,11 +1766,53 @@ A home that is a successor's home also serves `GET {base}/predecessor/authority/
 `POST` of an envelope whose body equals a stored one answers 200. The home keeps the envelope it
 stored and MAY keep the new one too (§2.2); which envelopes it keeps never changes a verdict.
 
-`Authorization: Colophon <base64url of a call envelope>` MAY replace a bearer token, verified under
-§12.3 with audience `{base}`: `colophon.home.read` for reading records, allowed as §13.4 allows
-history; `colophon.home.write` for writing records, allowed to controllers with `approve` or
-`control`, to `sign` controllers listing `{base}`, to members under terms granting it, and to any
-member writing only paths under its own author ID. A bearer token remains storage access only.
+**Store layout.** A home serves the account's store under `{base}/records/`, at the paths of
+0.3 §4 and these, which every store of a 0.5 account (a home, a shared folder, a device) uses:
+`authority/<seq, 8 digits>.json`; `transitions/<body digest>.json` and `vetoes/<body
+digest>.json` for pending objects; `receipts/<object digest>/<home member ID>.receipt.json`;
+`heads/<home member ID>.json`, each home's latest head; and `predecessor/authority/<seq, 8
+digits>.json` for a predecessor's entries (§15.1). A receipt is read only under `receipts/`.
+
+**A home that holds nothing of the account**, or that holds a first upload not yet appointing
+it, serves nothing it holds: it answers 404 to every request but `GET {base}`, `POST
+{base}/authority`, `POST {base}/pending` and a forwarded head's `PUT`. A client that gets 404
+from `GET {base}/authority` at a home that has acknowledged nothing of the account treats its
+history as empty and uploads (§13.1 "First upload").
+
+**Calls at a home.** A request that needs a call (§13.4) carries `Authorization: Colophon
+<base64url of a call envelope>`, verified under §12.3 and bound to that request:
+- `audience` is the home's base URL `{base}` (another home's: `refused:audience`);
+- `purpose` is `colophon.home.read` for `GET` and `HEAD`, also `colophon.history.read` on the
+  history paths only (§13.4), and `colophon.home.write` for every other method; any other
+  purpose is `refused:outOfScope`, checked before anything else beyond parsing;
+- `args` is exactly `{"method","path","body"}`: the HTTP method; the path and query relative to
+  `{base}`, exactly as sent; and the lowercase hex SHA-256 of the request body, of the empty
+  string when there is none. Anything else is `refused:outOfScope` (§12.3 step 7), and nothing
+  is reserved.
+
+`colophon.home.read` is allowed to controllers with `approve` or `control` that are not
+suspended, to `sign` controllers listing `{base}`, to any current member with its own key, and
+to members under terms granting it there (through links, only when every link's terms grant it);
+a `recover`-only or suspended controller reads the history with `colophon.history.read` and
+reads no records. `colophon.home.write` is allowed to controllers with `approve` or `control`
+that are not suspended, to `sign` controllers listing `{base}`, to members under terms granting it there, and to any current
+member whose writes in that request are all under its own author ID in namespaces its terms
+grant: `propose` or more for a record under `ops/` or `history/`, `write` for a live value under
+`state/`; a blob chunk, which names no author, needs `propose` or more in some namespace.
+Through links, every link's terms must also grant `colophon.home.write` at `{base}`. A bearer
+token authorizes nothing at a home.
+
+**Answers.** A request that needs a call and carries none is answered 401 with `WWW-Authenticate:
+Colophon`. A call refused under §12.3 is answered 403 `{"result":"<§1 result>"}`. A home whose
+replay store or rate limit refuses (§12.4) answers 429 `{"result":"refused:window"}` with
+`Retry-After`. `limit` outside 1–64 is clamped; `after` beyond the head returns no entries.
+
+**Forwarding** (§13.1). A home forwards each transition, veto and receipt by its own `POST
+{peer}/pending`, and its heads by `PUT {peer}/records/heads/<home member ID>.json`. An object
+counts as delivered only when the peer answered 200, or refused it with `malformed`,
+`badSignature`, `newerFormat`, `refused:late`, `refused:fork`, `refused:revoked`,
+`refused:expired`, `refused:outOfScope`, `refused:notGranted` or `refused:conflict`; anything
+else, `unavailable` and the caps included, is offered again while the home lists the object.
 
 ## 15. Succession and exit
 
@@ -1761,7 +1870,10 @@ library upgrades in place instead.
      envelope (§8.7), whose `transition` is the genesis body digest; `receipts` are its chosen
      receipts (§8.7) by homes current at the window's entry, each `received` within 300 s of the
      veto's `issued` and before the veto deadline; `genesisReceipts` are the genesis's chosen
-     receipts. Each veto signer must be an eligible key of step 3, verified under its predecessor
+     receipts. "Chosen" is a rule for the recorder: a verifier judges the receipts the entry
+     carries for validity only (`headQuorum` of them, from distinct homes current at the
+     window's entry, sorted by home ID, each valid and in its window), as §8.7 says for a
+     `vetoed`. Each veto signer must be an eligible key of step 3, verified under its predecessor
      descriptor (§16.3: `rpID` as `rp`, the general origin rule, UV). An account has at most one
      such entry; it is ordered by §8.6 rule 1 with the succession's due time and bounded in time
      like a `vetoed`. After it the succession is never verified and no `migration` activates.
@@ -1946,6 +2058,13 @@ This section is normative for verifying a predecessor, in every binding. It desc
 ID is the first 32 hex of SHA-256 of entry 1's body; each entry's `previous` is SHA-256 hex of the
 preceding body and `seq` is contiguous.
 
+**Envelopes.** Several envelopes over one body are one entry, valid when any of them verifies
+(§2.2), judged in byte order of the envelope bytes; arrival order never matters. An envelope
+whose `signature`, `assertion` or `cosignatures` cannot be read or does not verify is ignored
+where another envelope over the same body verifies, and its failure is reported only when none
+does. An envelope of more than 2,097,152 bytes, or whose outer JSON, `body`, body JSON, `seq`,
+`issued` or `signer` cannot be read, makes the predecessor `malformed`, whatever else is held.
+
 **Body fields.** `seq`, `previous` (absent at 1), `issued`, `kind`, `by`, and by kind: `genesis`
 (`label`, `root`, `recovery` as `{signing, agreement}`, optional `controller`, `stewards`,
 `threshold`, `layout`); `grant` (`member`, `role`, `custody`, `namespaces`, `write`, `expires`,
@@ -2025,8 +2144,10 @@ is written on failure. New PRF slots need PRF before the body (§7.2).
 **The seed.** The core never returns seed bytes or a raw ECDH output through its interface. An
 opened seed can be sealed only to controllers of its own account's verified keyring (slots), to
 a new vault the host creates at a rotation, or to a device the person confirmed by pairing
-(§7.4). The host is trusted with the seed during rotation and transfer: it supplies the
-entropy of a new vault and performs the scan or code comparison.
+(§7.4). The host is trusted with the seed and the data keys at three moments: a vault
+rotation (it supplies the entropy of the new vault), moving the seed to a new device (it
+performs the scan or code comparison) and admitting a member (the grant's `shares` seal the epoch
+keys to a key the host presents, below).
 
 **Epoch keys.** The core never returns epoch key bytes: it hands the host opaque handles that
 open only headers of their own account, namespace and epoch, and it seals a new epoch only to the
@@ -2167,7 +2288,7 @@ ranges.
 | `policy.primaryHome` | absent | a current home | transition with consent |
 | `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | lowering immediate; raising by transition with consent |
 | Member `expires`, `depth` | 7 days and 1 for `agent`; none and 0 otherwise | §10.1 | approver; `renew` extends |
-| Homes | **two, run by different operators (one may be the owner's own machine), before any recovery key; a host MUST create every account with at least one and MUST warn when an account has none (§13.1: without a home there is no witness of time or order)** | 0–8 | transition with consent |
+| Homes | **two, run by different operators (one may be the owner's own machine), before any recovery key; a host MUST create every account with at least one and MUST warn when an account has none (§13.1: without a home there is no witness of time or order and no rollback protection for a new verifier)**; each home is provisioned for its one account (§13.1) | 0–8 | transition with consent |
 | Drain window | 7 days | 0–30 days | the copying host |
 
 **Reference setup for new accounts:**
@@ -2199,6 +2320,7 @@ homes at `headQuorum` 2, the company reference; hosts SHOULD offer it to people 
 | --- | --- |
 | Authority (§8) | The one table in §8.5; `refused:fork` (§8.6) |
 | Slots (§7) | `refused:vaultLocked` |
+| Live state (§11.8) | refused `caveatedLive` (a live-stamped header by a caveated writer, under `state/` or retained under `ops/`); otherwise the §11.5 results |
 | Records (§11.5) | `newerFormat` (an unknown condition result); refused `notGranted`, `expired`, `revoked`, `wrongEpoch`, `clockJump`, `budgetSpent`, `outOfScope`, `invalidPayload`, `duplicateID`, `wrongFormat`, `budgetScopeUnavailable`; held `revokedBackdated`, `authorityBehind`, `unavailable` |
 | Evidence (§8.6, §15.1) | equivocation evidence; `malformed` entries after a final entry |
 | Transitions (§8.7) | pending, due, vetoed, activated (provisional or final), void |
