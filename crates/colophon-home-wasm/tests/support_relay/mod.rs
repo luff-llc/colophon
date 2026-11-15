@@ -142,6 +142,16 @@ impl Relay {
         clock_ms: i64,
         resolve: &[(&str, u16)],
     ) -> Self {
+        Self::start_on(keys, base, dir, clock_ms, resolve, 0)
+    }
+    pub fn start_on(
+        keys: &HomeKeys,
+        base: &str,
+        dir: &std::path::Path,
+        clock_ms: i64,
+        resolve: &[(&str, u16)],
+        port: u16,
+    ) -> Self {
         let (relay, wasm) = prerequisites().expect("prerequisites");
         std::fs::create_dir_all(dir).unwrap();
         let clock = dir.join("clock");
@@ -161,7 +171,7 @@ impl Relay {
             .arg(relay)
             .arg("--config")
             .arg(&config)
-            .env("COLOPHON_RELAY_PORT", "0")
+            .env("COLOPHON_RELAY_PORT", port.to_string())
             .env("COLOPHON_RELAY_DATA", dir.join("data"))
             .env("COLOPHON_RELAY_TOKENS", format!("home={TOKEN}"))
             .env("COLOPHON_RELAY_HOME_SLOTS", format!("home={base}"))
@@ -218,8 +228,8 @@ impl Relay {
     pub fn restart(self, keys: &HomeKeys, clock_ms: i64, resolve: &[(&str, u16)]) -> Self {
         let mut me = self;
         me.stop();
-        let (dir, base) = (me.dir.clone(), me.base.clone());
-        Self::start(keys, &base, &dir, clock_ms, resolve)
+        let (dir, base, port) = (me.dir.clone(), me.base.clone(), me.port);
+        Self::start_on(keys, &base, &dir, clock_ms, resolve, port)
     }
 }
 impl Drop for Relay {
@@ -231,24 +241,29 @@ impl Drop for Relay {
 /// The engine's transport to the relay: the test sends each request, rewriting the account's
 /// endpoint (an `https://` name §9.1 requires) to the process on localhost.
 pub struct RealRelay<'a> {
-    pub relay: &'a Relay,
+    pub relays: Vec<&'a Relay>,
     pub requests: Vec<String>,
 }
 impl<'a> RealRelay<'a> {
     pub fn new(relay: &'a Relay) -> Self {
+        Self::many(vec![relay])
+    }
+    pub fn many(relays: Vec<&'a Relay>) -> Self {
         Self {
-            relay,
+            relays,
             requests: Vec::new(),
         }
     }
 }
 impl Wire for RealRelay<'_> {
     fn call(&mut self, _host: &Host, req: &Request, now_ms: i64) -> Response {
-        self.relay.set_clock(now_ms);
-        let rest = req
-            .url
-            .strip_prefix(&self.relay.base)
+        let relay = *self
+            .relays
+            .iter()
+            .find(|r| req.url.starts_with(&r.base))
             .expect("another home's URL");
+        relay.set_clock(now_ms);
+        let rest = req.url.strip_prefix(&relay.base).unwrap();
         let method = match req.method {
             Method::Get => "GET",
             Method::Post => "POST",
@@ -266,9 +281,9 @@ impl Wire for RealRelay<'_> {
             headers.push(("Authorization".into(), format!("Bearer {TOKEN}")));
         }
         let (status, hs, body) = http(
-            self.relay.port,
+            relay.port,
             method,
-            &self.relay.url(rest),
+            &relay.url(rest),
             &headers,
             &req.body,
         );
@@ -286,13 +301,19 @@ impl Wire for RealRelay<'_> {
 /// A fixture like `create`, with the history readable by anyone (the engine's reads carry no
 /// call in these journeys), and a home whose keys the relay holds.
 pub fn create_public(namespaces: &[&str]) -> Fixture {
+    create_with(namespaces, "public", 1)
+}
+
+/// The same, with the history policy ("public" or "members") and `headQuorum` chosen.
+pub fn create_with(namespaces: &[&str], history: &str, quorum: u64) -> Fixture {
     let mut host = Host::new();
     let d = host.identity(10);
     let k = host.kit(20);
     let p = host.passkey();
     let mut params = params(&mut host, &d, &p, &k, namespaces);
     if let Some(policy) = params.policy.as_mut() {
-        policy["history"] = json!("public");
+        policy["history"] = json!(history);
+        policy["headQuorum"] = json!(quorum);
     }
     let mut creation = Creation::begin(params, Identity::Controller(d.clone()), T0).unwrap();
     let results = host.answer_prf(creation.prf_requests());
@@ -321,27 +342,35 @@ pub fn create_public(namespaces: &[&str]) -> Fixture {
 /// Appoint a home whose key the test holds (a transition recorded at once: there is no home yet
 /// to witness time). `endpoints` are `https://` names; the test maps them to processes.
 pub fn appoint_home_keys(f: &mut Fixture, keys: &HomeKeys, endpoint: &str) -> String {
-    let agreement = f.host.identity(71);
-    let agreement = f.host.ids[&agreement].public().agreement;
-    let created = colophon_core::v05::write::format_date(f.account.now_ms());
-    let prepared = prepare_request(&RequestSpec {
-        account: f.account.id(),
-        signing: &keys.point,
-        agreement: &agreement,
-        label: "Home",
-        kind: "server",
-        terms: json!({"serves": ["home"]}),
-        created: &created,
-        custody: None,
-        operator: None,
-        endpoints: Some(vec![endpoint.to_string()]),
-    })
-    .unwrap();
-    let sig = keys.sign(prepared.step().body());
-    let req = finish_request(&prepared, &sig).unwrap();
-    let change = Change::homes(
-        json!({"appoint": [{"request": b64(&req.raw), "terms": {"serves": ["home"]}}]}),
-    );
+    appoint_homes(f, &[(keys, endpoint)]);
+    keys.id.clone()
+}
+
+/// Appoint several homes in one transition.
+pub fn appoint_homes(f: &mut Fixture, homes: &[(&HomeKeys, &str)]) {
+    let mut appoint = Vec::new();
+    for (n, (keys, endpoint)) in homes.iter().enumerate() {
+        let agreement = f.host.identity(71 + n as u8);
+        let agreement = f.host.ids[&agreement].public().agreement;
+        let created = colophon_core::v05::write::format_date(f.account.now_ms());
+        let prepared = prepare_request(&RequestSpec {
+            account: f.account.id(),
+            signing: &keys.point,
+            agreement: &agreement,
+            label: "Home",
+            kind: "server",
+            terms: json!({"serves": ["home"]}),
+            created: &created,
+            custody: None,
+            operator: None,
+            endpoints: Some(vec![endpoint.to_string()]),
+        })
+        .unwrap();
+        let sig = keys.sign(prepared.step().body());
+        let req = finish_request(&prepared, &sig).unwrap();
+        appoint.push(json!({"request": b64(&req.raw), "terms": {"serves": ["home"]}}));
+    }
+    let change = Change::homes(json!({"appoint": appoint}));
     let action = f
         .account
         .begin_transition(
@@ -353,7 +382,6 @@ pub fn appoint_home_keys(f: &mut Fixture, keys: &HomeKeys, endpoint: &str) -> St
     run(&mut f.account, &f.host, action);
     let rec = f.account.record_due().unwrap();
     assert_eq!(rec.len(), 1);
-    keys.id.clone()
 }
 
 /// The account's entries in seq order, as JSON values.
@@ -382,4 +410,50 @@ pub fn first_upload(relay: &Relay, f: &Fixture, now_ms: i64) {
         );
         assert_eq!(status, 200, "first upload at {from}: {body}");
     }
+}
+
+/// A free local port (bound and released: a short race, accepted in a test).
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Wait until `f` holds, polling; panics with `what` after `secs` seconds.
+pub fn eventually(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        if f() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// The kinds of the entries a home serves, in seq order.
+pub fn kinds(relay: &Relay) -> Vec<String> {
+    let (s, _, b) = http(
+        relay.port,
+        "GET",
+        &relay.url("/authority?after=0&limit=64"),
+        &[],
+        &[],
+    );
+    assert_eq!(s, 200);
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(e["body"].as_str().unwrap())
+                .unwrap();
+            let b: Value = serde_json::from_slice(&body).unwrap();
+            b["kind"].as_str().unwrap().to_string()
+        })
+        .collect()
 }

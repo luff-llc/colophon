@@ -404,21 +404,14 @@ fn pending_files(objects: &Objects) -> Vec<(String, Vec<u8>)> {
     }
     out
 }
-fn new_files(before: &Persisted, after: &Persisted) -> Vec<Value> {
-    let had: std::collections::BTreeSet<String> = before
-        .objects()
-        .map(|o| pending_files(o).into_iter().map(|(p, _)| p).collect())
-        .unwrap_or_default();
-    after
-        .objects()
-        .map(|o| {
-            pending_files(o)
-                .into_iter()
-                .filter(|(p, _)| !had.contains(p))
-                .map(|(p, b)| json!({"path": p, "bytes": b64(&b)}))
-                .collect()
-        })
-        .unwrap_or_default()
+fn new_files(before: &Objects, after: &Objects) -> Vec<Value> {
+    let had: std::collections::BTreeSet<String> =
+        pending_files(before).into_iter().map(|(p, _)| p).collect();
+    pending_files(after)
+        .into_iter()
+        .filter(|(p, _)| !had.contains(p))
+        .map(|(p, b)| json!({"path": p, "bytes": b64(&b)}))
+        .collect()
 }
 
 fn post_pending(req: &Value) -> R<Value> {
@@ -449,10 +442,10 @@ fn post_pending(req: &Value) -> R<Value> {
             }
         }
     }
-    let before = h.persisted().map_err(|e| e.to_string())?;
+    let before = h.held_objects().map_err(|e| e.to_string())?;
     let (next, results, receipts) =
         admit_pending_batch(h, &objs, &now).map_err(|e| e.to_string())?;
-    let after = next.persisted().map_err(|e| e.to_string())?;
+    let after = next.held_objects().map_err(|e| e.to_string())?;
     let refused: Vec<Value> = results
         .iter()
         .enumerate()
@@ -506,9 +499,9 @@ fn admit_one(req: &Value) -> R<Value> {
                              "state": l.dump()?, "store": []}));
         }
     };
-    let before = h.persisted().map_err(|e| e.to_string())?;
+    let before = h.held_objects().map_err(|e| e.to_string())?;
     let a = admit(&h, &canon, &now);
-    let after = a.state.persisted().map_err(|e| e.to_string())?;
+    let after = a.state.held_objects().map_err(|e| e.to_string())?;
     let mut out = match &a.result {
         Ok(()) => json!({"outcome": "ok"}),
         Err(r) => refusal(r),
@@ -535,9 +528,9 @@ fn op_finish_receipt(req: &Value) -> R<Value> {
         signature: bytes_of(req, "signature")?,
         assertion: None,
     };
-    let before = h.persisted().map_err(|e| e.to_string())?;
+    let before = h.held_objects().map_err(|e| e.to_string())?;
     let (env, next) = finish_receipt(&h, &prepared, &sig, &now).map_err(|e| e.to_string())?;
-    let after = next.persisted().map_err(|e| e.to_string())?;
+    let after = next.held_objects().map_err(|e| e.to_string())?;
     l.home = Some(next);
     Ok(json!({
         "state": l.dump()?,
@@ -732,15 +725,14 @@ fn record_due(req: &Value) -> R<Value> {
     let Some(mut h) = l.home.take() else {
         return Ok(json!({"entries": [], "state": req["state"], "store": [], "sign": []}));
     };
-    let persisted = h.persisted().map_err(|e| e.to_string())?;
-    let objects = persisted.objects().cloned().unwrap_or_default();
-    let before = h.persisted().map_err(|e| e.to_string())?;
+    let objects = h.held_objects().map_err(|e| e.to_string())?;
+    let before = objects.clone();
     let mut note = Value::Null;
     let mut stored = Vec::new();
     let mut sign = Vec::new();
     let mut result = "ok".to_string();
     match Account::open(
-        objects,
+        objects.clone(),
         Vec::new(),
         None,
         Identity::Member(l.slot.home.clone()),
@@ -769,7 +761,38 @@ fn record_due(req: &Value) -> R<Value> {
             }
         },
     }
-    let after = h.persisted().map_err(|e| e.to_string())?;
+    if stored.is_empty() && note.is_null() {
+        // Say why nothing was recorded: what each held transition is waiting for.
+        let why: Vec<String> = objects
+            .pending
+            .iter()
+            .filter_map(|p| AuthEnvelope::parse(p, bounds::TRANSITION_ENVELOPE, bounds::TRANSITION_ENVELOPE, false).ok())
+            .filter_map(|e| match e.value.get("protocol").and_then(Value::as_str) {
+                Some("colophon/transition/5") => colophon_core::v05::write::authority::prepare_activate(&objects, now_ms, &e.digest)
+                    .err()
+                    .map(|x| format!("activate {}: {x}", &e.digest[..8])),
+                Some("colophon/veto/5") => {
+                    let t = e.value.get("transition").and_then(Value::as_str).unwrap_or_default().to_string();
+                    colophon_core::v05::write::authority::prepare_vetoed(&objects, now_ms, &t, &e.digest)
+                        .err()
+                        .map(|x| format!("vetoed {}: {x}", &e.digest[..8]))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut why = why;
+        if let Ok(v) = view(&h, now_ms) {
+            for a in v.state.activations().iter().filter(|a| !a.final_) {
+                if let Err(e) = colophon_core::v05::write::authority::prepare_final(&objects, now_ms, a.seq) {
+                    why.push(format!("final {}: {e}", a.seq));
+                }
+            }
+        }
+        if !why.is_empty() {
+            note = json!(format!("waiting: {}", why.join("; ")));
+        }
+    }
+    let after = h.held_objects().map_err(|e| e.to_string())?;
     stored.extend(new_files(&before, &after));
     l.home = Some(h);
     Ok(json!({
@@ -932,8 +955,8 @@ fn authorize(req: &Value) -> R<Value> {
     };
     let call = B64.decode(call_text).map_err(|e| e.to_string())?;
     let base = str_of(req, "base")?.to_string();
-    let verdict = verify_history(&Objects::default(), &v.persisted, now_ms);
-    let objects = v.persisted.objects().cloned().unwrap_or_default();
+    let objects = h.held_objects().map_err(|e| e.to_string())?;
+    let verdict = verify_history(&objects, &v.persisted, now_ms);
     let view = AccountView::from_history_verifier(&verdict, &objects, now_ms)
         .map_err(|e| e.to_string())?;
     let existing = req.get("existing").filter(|e| !e.is_null()).map(|e| {
@@ -990,8 +1013,8 @@ fn objects(req: &Value) -> R<Value> {
     let mut files = Vec::new();
     let mut heads = Vec::new();
     if let Some(h) = &l.home {
-        let p = h.persisted().map_err(|e| e.to_string())?;
-        if let Some(o) = p.objects() {
+        {
+            let o = &h.held_objects().map_err(|e| e.to_string())?;
             for e in &o.entries {
                 let seq = entry_seq(e)?;
                 files.push(json!({"path": entry_path(seq), "bytes": b64(e)}));

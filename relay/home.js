@@ -432,25 +432,36 @@ export class HomeSlot {
   // account's other homes (§13.1). Driven by the relay's clock; the module decides, this runs it.
 
   async tick() {
-    return this.lock(async () => {
+    if (this.ticking) return; // one scheduler pass at a time
+    this.ticking = true;
+    try { await this.tickOnce(); } finally { this.ticking = false; }
+  }
+
+  async tickOnce() {
+    await this.lock(async () => {
       if (!this.status().appointed) return;
       const r = this.wasm.call({ op: 'record_due', state: this.state, now: this.clock() });
+      const said = r.result === 'ok' && !r.note ? '' : `${r.result} ${r.note ?? ''}`;
+      if (said && said !== this.lastSaid) console.error(`recording entries for slot ${this.slot.name}: ${said}`);
+      this.lastSaid = said;
       await this.commit(r.state);
       await this.materialize(r.store);
       await this.signReceipts(r.sign);
       await this.ensureHead();
-      await this.forwardAll();
     });
+    // Calls to other homes happen outside the lock: two homes forwarding to each other would
+    // otherwise wait on one another.
+    await this.forwardAll();
   }
 
   async forwardAll() {
-    const st = this.status();
+    const st = await this.lock(async () => this.status());
     for (const peer of st.peers ?? []) {
       const endpoint = (peer.endpoints ?? [])[0];
       if (!endpoint) continue;
       const base = (this.resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
       const row = (this.forward.peers[peer.id] ??= { after: 0, head: '' });
-      try { await this.forwardTo(base, row); } catch { /* the peer is away: the next tick tries again */ }
+      try { await this.forwardTo(base, row); } catch (error) { console.error(`forwarding to home ${peer.id} failed (it will be retried): ${error.message}`); }
     }
   }
 
@@ -458,7 +469,7 @@ export class HomeSlot {
     const init = (extra) => ({ signal: AbortSignal.timeout(5000), ...extra });
     // Pending objects, in the order this home first stored them, from this peer's cursor.
     for (;;) {
-      const page = this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: 16 });
+      const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: 16 }));
       if (page.objects.length === 0) break;
       const objects = page.objects.map((o) => JSON.parse(unb64(o.envelope)));
       const r = await fetch(`${base}/pending`, init({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) }));
@@ -467,9 +478,11 @@ export class HomeSlot {
         // Its receipts of what we sent come back; we take them like any forwarded receipt.
         const { receipts } = await r.json();
         if (Array.isArray(receipts) && receipts.length) {
-          const back = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(Buffer.from(JSON.stringify({ objects: receipts.slice(0, 16) }))) });
-          await this.commit(back.state);
-          await this.materialize(back.store);
+          await this.lock(async () => {
+            const back = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(Buffer.from(JSON.stringify({ objects: receipts.slice(0, 16) }))) });
+            await this.commit(back.state);
+            await this.materialize(back.store);
+          });
         }
       }
       row.after = page.objects[page.objects.length - 1].seq;
@@ -481,7 +494,8 @@ export class HomeSlot {
       const text = JSON.stringify(head);
       if (sha(text) !== row.head) {
         const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, init({ method: 'PUT', headers: { 'content-type': 'application/json' }, body: text }));
-        if (r.status === 200 || r.status === 422) { row.head = sha(text); await this.writeJson('forward.json', this.forward); }
+        if (r.status === 200) { row.head = sha(text); await this.writeJson('forward.json', this.forward); }
+        else console.error(`peer refused our head: ${r.status} ${(await r.text()).slice(0, 200)}`);
       }
     }
   }

@@ -199,6 +199,14 @@ impl HomeState {
     pub fn persisted(&self) -> Result<Persisted> {
         Persisted::from_bytes(&self.checkpoint)
     }
+    /// Everything this home holds as verifier input: the entries and heads of its checkpoint and
+    /// every pending object it stores (the checkpoint's own copy of those is refreshed only when an
+    /// entry is admitted). What a host builds recording entries and call views from.
+    pub fn held_objects(&self) -> Result<Objects> {
+        let mut objects = self.persisted()?.objects().cloned().unwrap_or_default();
+        objects.pending = self.pending.iter().map(|p| p.envelope.clone()).collect();
+        Ok(objects)
+    }
     /// Persist atomically alongside the caller's committed history.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(|e| malformed(e.to_string()))
