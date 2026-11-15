@@ -46,6 +46,7 @@ function loadConfig(argv, env) {
   return {
     home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
     clock: clockFile ? () => Number(readFileSync(clockFile, 'utf8').trim()) : undefined,
+    tracing: Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1',
     tickMs: Number(env.COLOPHON_RELAY_TICK_MS ?? config.tickMs ?? 2000),
     resolve: config.resolve,
     host: env.COLOPHON_RELAY_HOST ?? config.host ?? '127.0.0.1',

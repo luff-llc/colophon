@@ -12,7 +12,7 @@
 // module lists, under one lock; at start-up the files are reconciled with the state before
 // anything is served.
 import { createHash } from 'node:crypto';
-import { promises as fsp } from 'node:fs';
+import { promises as fsp, writeSync } from 'node:fs';
 import path from 'node:path';
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
@@ -388,7 +388,8 @@ export class HomeSlot {
         const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
         const limit = clampInt(url.searchParams.get('limit'), 64, 1, 64);
         let page;
-        try { page = this.wasm.call({ op: 'authority_page', state: this.state, now: this.clock(), after, limit }); }
+        // Under the lock: a reader never sees a committed entry before its file is stored.
+        try { page = await this.lock(async () => this.wasm.call({ op: 'authority_page', state: this.state, now: this.clock(), after, limit })); }
         catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot serve its history now'); throw error; }
         send(res, 200, { entries: page.entries.map((e) => JSON.parse(unb64(e))), receipts: [], more: page.more });
         return true;
@@ -407,7 +408,7 @@ export class HomeSlot {
         const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
         const limit = clampInt(url.searchParams.get('limit'), 64, 1, 64);
         let page;
-        try { page = this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after, limit }); }
+        try { page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after, limit })); }
         catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot list its pending objects now'); throw error; }
         send(res, 200, {
           objects: page.objects.map((o) => ({ seq: o.seq, digest: o.digest, kind: o.kind, envelope: JSON.parse(unb64(o.envelope)) })),
@@ -502,15 +503,26 @@ export class HomeSlot {
     try { await this.tickOnce(); } finally { this.ticking = false; }
   }
 
+  /** Test builds only (`--test-clock` with COLOPHON_RELAY_TRACE=1): a synchronous marker on
+   * stderr, so a test that kills the process can tell where it was. */
+  trace(what) { if (this.tracing) writeSync(2, `trace ${what}\n`); }
+
   async tickOnce() {
     await this.lock(async () => {
+      const now = this.clock();
+      // record_due is a pure function of (state, now): an unchanged pair would give the same
+      // answer, so it is not asked again (it verifies the whole history each time).
+      if (this.lastDue && this.lastDue.state === this.state && this.lastDue.now === now) { await this.ensureHead(); return; }
       if (!this.status().appointed) return;
-      const r = this.wasm.call({ op: 'record_due', state: this.state, now: this.clock() });
+      this.trace('record_due start');
+      const r = this.wasm.call({ op: 'record_due', state: this.state, now });
       const said = r.result === 'ok' && !r.note ? '' : `recording entries for slot ${this.slot.name}: ${r.result} ${r.note ?? ''}`;
       this.note('record', said);
       await this.commit(r.state);
       await this.materialize(r.store);
       await this.signReceipts(r.sign);
+      this.trace('record_due end');
+      this.lastDue = { state: this.state, now };
       await this.ensureHead();
     });
     // Calls to other homes happen outside the lock: two homes forwarding to each other would

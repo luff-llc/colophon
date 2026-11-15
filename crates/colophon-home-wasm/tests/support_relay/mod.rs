@@ -138,7 +138,7 @@ impl HomeKeys {
 
 /// A running relay process. Dropped, it is killed and waited for.
 pub struct Relay {
-    child: Child,
+    child: Option<Child>,
     pub port: u16,
     pub dir: PathBuf,
     pub clock: PathBuf,
@@ -166,6 +166,19 @@ impl Relay {
         resolve: &[(&str, u16)],
         port: u16,
     ) -> Self {
+        Self::start_with(keys, account, base, dir, clock_ms, resolve, port, json!({}))
+    }
+    /// The same with relay `limits` set in the config file.
+    pub fn start_with(
+        keys: &HomeKeys,
+        account: &str,
+        base: &str,
+        dir: &std::path::Path,
+        clock_ms: i64,
+        resolve: &[(&str, u16)],
+        port: u16,
+        limits: Value,
+    ) -> Self {
         let (relay, wasm) = prerequisites().expect("prerequisites");
         std::fs::create_dir_all(dir).unwrap();
         let clock = dir.join("clock");
@@ -180,7 +193,7 @@ impl Relay {
                 )
             })
             .collect();
-        std::fs::write(&config, json!({"resolve": resolve_map}).to_string()).unwrap();
+        std::fs::write(&config, json!({"resolve": resolve_map, "limits": limits}).to_string()).unwrap();
         let mut child = Command::new("bun")
             .arg(relay)
             .arg("--test-clock")
@@ -204,7 +217,7 @@ impl Relay {
         let v: Value = serde_json::from_str(&line).expect("the listening line");
         let port = v["listening"]["port"].as_u64().unwrap() as u16;
         Self {
-            child,
+            child: Some(child),
             port,
             dir: dir.to_path_buf(),
             clock,
@@ -237,8 +250,21 @@ impl Relay {
     }
     /// Stop the process and wait for it.
     pub fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(c) = self.child.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+    /// A relay process this test does not own (started and killed elsewhere), to talk to.
+    pub fn attached(port: u16, base: &str, account: &str, dir: &std::path::Path) -> Self {
+        Self {
+            child: None,
+            port,
+            dir: dir.to_path_buf(),
+            clock: dir.join("clock"),
+            base: base.to_string(),
+            account: account.to_string(),
+        }
     }
     pub fn restart(self, keys: &HomeKeys, clock_ms: i64, resolve: &[(&str, u16)]) -> Self {
         let mut me = self;
@@ -503,12 +529,28 @@ pub fn home_call_with(
     now_ms: i64,
     request_id: [u8; 32],
 ) -> Vec<u8> {
-    use base64::engine::general_purpose::STANDARD;
     let (kind, id) = match account.identity() {
         Identity::Controller(id) => ("controller", id.clone()),
         Identity::Member(id) => ("member", id.clone()),
     };
-    let me = &host.ids[&id];
+    call_as(host, account, kind, &id, audience, purpose, args, now_ms, request_id)
+}
+
+/// A call signed by the principal `kind` (`member` or `controller`) `id`, whose key the host
+/// holds, over what `account` has verified.
+pub fn call_as(
+    host: &Host,
+    account: &Account,
+    kind: &str,
+    id: &str,
+    audience: &str,
+    purpose: &str,
+    args: Value,
+    now_ms: i64,
+    request_id: [u8; 32],
+) -> Vec<u8> {
+    use base64::engine::general_purpose::STANDARD;
+    let me = &host.ids[id];
     let (seq, digest) = account.head();
     let body = colophon_core::v05::encoding::canonical(&json!({
         "protocol": "colophon/call/5",

@@ -516,3 +516,297 @@ fn a_restart_in_the_middle_loses_nothing_receipts_nothing_twice_and_the_feed_res
     let v: Value = serde_json::from_slice(&b).unwrap();
     assert!(v["objects"].as_array().unwrap().iter().all(|o| o["seq"].as_u64().unwrap() > max_before));
 }
+
+// ---------------------------------------------------------------------------------------------
+// The 2026-11-15 check's attacks (A1–A11), ported: each failed before this fix round and passes
+// after it.
+
+const EMPTY_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+fn get_with(relay: &Relay, path: &str, call: Option<&[u8]>) -> (u16, Value) {
+    let mut h = vec![];
+    if let Some(c) = call {
+        h.push(("Authorization".to_string(), format!("Colophon {}", URL_SAFE_NO_PAD.encode(c))));
+    }
+    let (s, _, b) = http(relay.port, "GET", &relay.url(path), &h, &[]);
+    (s, serde_json::from_slice(&b).unwrap_or(Value::Null))
+}
+fn fresh_head(relay: &Relay, after: &str) -> Vec<u8> {
+    let mut head = Vec::new();
+    eventually("a fresh head", 20, || {
+        let (s, b) = relay.get("/head");
+        s == 200 && {
+            let v: Value = serde_json::from_slice(&b).unwrap();
+            let h: Value = serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+            head = b;
+            h["issued"].as_str().unwrap() >= after
+        }
+    });
+    head
+}
+fn take_head(f: &mut Fixture, head: Vec<u8>, now: i64) {
+    f.account.advance(now).unwrap();
+    f.account
+        .merge(
+            colophon_core::v05::account::Incoming {
+                objects: colophon_core::v05::history::Objects { heads: vec![head], ..Default::default() },
+                records: vec![],
+            },
+            now,
+        )
+        .unwrap();
+}
+
+/// A1 (H1). Before: a stranger's genesis was held (200) and the owner refused for ever (409).
+#[test]
+fn a1_a_stranger_cannot_squat_a_fresh_home_slot() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let ka = HomeKeys::new(0x77);
+    let mut owner = create_with(&[NS], "members", 1);
+    appoint_homes(&mut owner, &[(&ka, BASE_A)]);
+    let squatter = create_with(&[NS], "public", 1);
+    let scratch = Scratch::new("a1");
+    let a = Relay::start(&ka, owner.account.id().as_str(), BASE_A, scratch.path(), T0 + 1_000, &[]);
+    let genesis = entries_json(&squatter)[0].1.clone();
+    let (s, b) = a.post("/authority", &json!({"from": 1, "entries": [genesis], "receipts": []}));
+    assert_eq!((s, b), (422, json!({"result": "refused:outOfScope"})), "refused, nothing held");
+    let all = entries_json(&owner);
+    let entries: Vec<&Value> = all.iter().map(|(_, e)| e).collect();
+    let (s, b) = a.post("/authority", &json!({"from": 1, "entries": entries, "receipts": []}));
+    assert_eq!(s, 200, "the owner's first upload: {b}");
+}
+
+/// A2 (H2, L2). Before: a held genesis of a `members` account was served to anyone (200), and
+/// `records/heads/*` needed a call.
+#[test]
+fn a2_an_unappointed_home_serves_nothing_and_the_head_is_always_public() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let ka = HomeKeys::new(0x77);
+    let mut owner = create_with(&[NS], "members", 1);
+    appoint_homes(&mut owner, &[(&ka, BASE_A)]);
+    let scratch = Scratch::new("a2");
+    let a = Relay::start(&ka, owner.account.id().as_str(), BASE_A, scratch.path(), T0 + 1_000, &[]);
+    let all = entries_json(&owner);
+    let (s, _) = a.post("/authority", &json!({"from": 1, "entries": [all[0].1], "receipts": []}));
+    assert_eq!(s, 200, "held");
+    for p in ["/records/authority/00000001.json", "/authority?after=0&limit=64", "/pending?after=0&limit=64", "/head", "/changes"] {
+        assert_eq!(a.get(p).0, 404, "{p} before appointment");
+    }
+    let entries: Vec<&Value> = all.iter().map(|(_, e)| e).collect();
+    assert_eq!(a.post("/authority", &json!({"from": 1, "entries": entries, "receipts": []})).0, 200);
+    assert_eq!(a.get("/records/authority/00000001.json").0, 401, "members: a call is needed");
+    assert_eq!(a.get(&format!("/records/heads/{}.json", ka.id)).0, 200, "the head is public");
+    assert_eq!(a.get("/head").0, 200);
+}
+
+/// A3 (M1). Before: an upload 400 s after creation was `refused:late`.
+#[test]
+fn a3_an_account_created_a_week_ago_can_make_its_first_upload() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let ka = HomeKeys::new(0x77);
+    let mut owner = create_with(&[NS], "public", 1);
+    appoint_homes(&mut owner, &[(&ka, BASE_A)]);
+    let scratch = Scratch::new("a3");
+    let week = T0 + 7 * 24 * HOUR;
+    let a = Relay::start(&ka, owner.account.id().as_str(), BASE_A, scratch.path(), week, &[]);
+    first_upload(&a, &owner, week);
+    assert_eq!(kinds(&a).len(), entries_json(&owner).len());
+}
+
+/// A4 (H5, L1). Before: one caller filled the global table and everyone got 429 (with a body
+/// JSON-encoded twice). Now the share is per principal: the caller over its share is refused
+/// alone, with `{"result":"refused:window"}`, and another principal is still served.
+#[test]
+fn a4_one_caller_over_its_share_is_refused_alone() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let ka = HomeKeys::new(0x77);
+    let mut f = create_with(&[NS], "members", 1);
+    appoint_homes(&mut f, &[(&ka, BASE_A)]);
+    let scratch = Scratch::new("a4");
+    let a = Relay::start_with(&ka, f.account.id().as_str(), BASE_A, scratch.path(), T0 + 1_000, &[], 0, json!({"replayRows": 8, "requestsPerMinute": 0}));
+    first_upload(&a, &f, T0 + 1_000);
+    a.set_clock(NOW);
+    let head = fresh_head(&a, "2026-11-11T11:00:00Z");
+    take_head(&mut f, head, NOW);
+    let path = "/authority?after=0&limit=1";
+    let args = json!({"method": "GET", "path": path, "body": EMPTY_SHA});
+    let (d, k) = (f.d.clone(), f.k.clone());
+    let mut statuses = Vec::new();
+    for _ in 0..65 {
+        let c = call_as(&f.host, &f.account, "controller", &d, BASE_A, "colophon.home.read", args.clone(), NOW, fresh_request_id());
+        statuses.push(get_with(&a, path, Some(&c)));
+    }
+    assert!(statuses[..64].iter().all(|(s, _)| *s == 200), "the share (64 rows at least) is served");
+    assert_eq!(statuses[64], (429, json!({"result": "refused:window"})));
+    // The kit is a `recover` controller: §13.4 lets it read the history (`colophon.history.read`).
+    let c = call_as(&f.host, &f.account, "controller", &k, BASE_A, "colophon.history.read", args, NOW, fresh_request_id());
+    assert_eq!(get_with(&a, path, Some(&c)).0, 200, "another principal is not locked out");
+}
+
+/// A6 (H4) over the relay: `home-state.json` after 1 and 40 heads (before: 277,762 and 617,654
+/// bytes).
+#[test]
+fn a6_the_home_state_file_does_not_grow_with_heads() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let ka = HomeKeys::new(0x77);
+    let mut f = create_with(&[NS], "public", 1);
+    appoint_homes(&mut f, &[(&ka, BASE_A)]);
+    let scratch = Scratch::new("a6");
+    let a = Relay::start(&ka, f.account.id().as_str(), BASE_A, scratch.path(), T0, &[]);
+    first_upload(&a, &f, T0 + 1_000);
+    let state = scratch.path().join("data/home/home-state.json");
+    let mut sizes = Vec::new();
+    for i in 0..40i64 {
+        let t = NOW + i * 150_000;
+        a.set_clock(t);
+        let want = colophon_core::v05::write::format_date(t);
+        fresh_head(&a, &want);
+        sizes.push(std::fs::metadata(&state).unwrap().len());
+    }
+    eprintln!("A6 home-state.json bytes after 1, 10, 20, 40 heads: {} {} {} {}", sizes[0], sizes[9], sizes[19], sizes[39]);
+    assert!(sizes[39] <= sizes[0] + 256, "{sizes:?}");
+}
+
+/// A8 (H3). Before: an entry in `receipts` was admitted, never stored, and the home then served
+/// no history (404). Now it is malformed and nothing changes.
+#[test]
+fn a8_an_entry_in_the_receipts_array_is_malformed_and_storage_follows_state() {
+    let Some(mut w) = world("a8", "public", 1, false) else {
+        return;
+    };
+    let mut ctl = w.controller(NOW);
+    w.clocks(NOW);
+    let id = w.host.identity(33);
+    let req = request_for(&w.f, &w.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), NOW);
+    let seed = w.host.fresh();
+    let action = ctl.account().begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[w.f.d.clone()], seed).unwrap();
+    engine_finish(&mut ctl, &w.host, &w.src, action);
+    let all: Vec<(u64, Value)> = ctl.account().objects().entries.iter().map(|e| (entry_seq(e), serde_json::from_slice(e).unwrap())).collect();
+    let (_, entry) = all.iter().max_by_key(|(s, _)| *s).unwrap().clone();
+    let first = all.iter().find(|(s, _)| *s == 1).unwrap().1.clone();
+    let before = kinds(&w.a);
+    let head = w.a.get("/head").1;
+    let (s, b) = w.a.post("/authority", &json!({"from": 1, "entries": [first], "receipts": [entry]}));
+    assert_eq!((s, b), (422, json!({"result": "malformed"})));
+    assert_eq!(kinds(&w.a), before, "the history is served, unchanged");
+    assert_eq!(w.a.get("/head").1, head, "no head over anything new");
+}
+
+/// A10 (M2). Before: a peer's 422 `unavailable` moved the forwarding cursor past the objects,
+/// and the peer never received them. Now they are offered again until it takes them.
+#[test]
+fn a10_an_object_a_peer_refused_for_now_is_forwarded_again() {
+    let Some(mut w) = world_with("a10", "public", 1, true, false) else {
+        return;
+    };
+    let (ha, kb) = (w.ha.clone(), HomeKeys::new(0x78));
+    let x = T0 + 5_000;
+    let mut ctl = w.controller(x);
+    w.clocks(x);
+    // B runs but does not hold the history yet: it answers `unavailable`.
+    let b = Relay::start_on(&kb, w.f.account.id().as_str(), BASE_B, w.scratch[1].path(), x, &[(BASE_A, w.pa)], w.pb);
+    let d = w.f.d.clone();
+    propose_by(&mut w, &mut ctl, 600, &[d]);
+    let mut wire = w.wire();
+    let faults = relay_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, x + 1_000);
+    assert!(faults.is_empty(), "{faults:?}");
+    drop(wire);
+    std::thread::sleep(std::time::Duration::from_millis(800)); // A offers; B is not ready
+    first_upload(&b, &w.f, x + 1_500);
+    b.set_clock(x + 2_000);
+    w.a.set_clock(x + 2_000);
+    eventually("B received the transition and A's receipt by forwarding", 20, || {
+        let l = pending_list(&b);
+        kinds_of(&l, "transition") == 1 && kinds_of(&l, "receipt") >= 1
+    });
+}
+
+/// A11 (M5, M6). Before: the change feed listed a `members` account's history files to the
+/// slot's bearer token. Now the bearer authorizes nothing; an authorized call is served.
+#[test]
+fn a11_the_change_feed_is_served_only_to_an_authorized_caller() {
+    let Some(mut w) = world("a11", "members", 1, false) else {
+        return;
+    };
+    w.clocks(NOW);
+    let head = fresh_head(&w.a, "2026-11-11T11:00:00Z");
+    take_head(&mut w.f, head, NOW);
+    let (s, _, _) = http(w.a.port, "GET", &w.a.url("/changes"), &Relay::bearer(), &[]);
+    assert_eq!(s, 401, "a bearer token is not a credential here");
+    let c = home_call(&w.host, &w.f.account, BASE_A, "GET", "/changes", b"", NOW, fresh_request_id());
+    let (s, v) = get_with(&w.a, "/changes", Some(&c));
+    assert_eq!(s, 200);
+    assert!(v["entries"].as_array().unwrap().iter().any(|e| e["path"].as_str().unwrap().starts_with("authority/")));
+}
+
+/// Two honest homes at `headQuorum` 2 append byte-identical `activate`, `final` and `vetoed`.
+#[test]
+fn two_homes_at_quorum_2_append_identical_activate_vetoed_and_final() {
+    let Some(mut w) = world("identical", "public", 2, true) else {
+        return;
+    };
+    let (ha, hb) = (w.ha.clone(), w.hb.clone());
+    let d = w.f.d.clone();
+    let get = |r: &Relay| -> Vec<Value> {
+        let (_, body) = r.get("/authority?after=0&limit=64");
+        serde_json::from_slice::<Value>(&body).unwrap()["entries"].as_array().unwrap().clone()
+    };
+    // A transition that activates: `activate`, then `final`.
+    let mut ctl = w.controller(NOW);
+    w.clocks(NOW);
+    propose_by(&mut w, &mut ctl, 600, &[d.clone()]);
+    let mut wire = w.wire();
+    for (i, h) in [&ha, &hb].into_iter().enumerate() {
+        let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, NOW + 1_000 + i as i64);
+        assert!(faults.is_empty(), "{faults:?}");
+    }
+    drop(wire);
+    let b = w.b.as_ref().unwrap();
+    let before = kinds(&w.a).len();
+    let later = NOW + 3_600_000 + 400_000;
+    w.clocks(later);
+    eventually("activate and final at both", 60, || kinds(&w.a).len() >= before + 2 && kinds(b).len() >= before + 2);
+    // A second transition, vetoed in time: `vetoed`.
+    let t2 = later + 10_000;
+    let mut ctl = w.controller(t2);
+    w.clocks(t2);
+    let mut wire = w.wire();
+    for (i, h) in [&ha, &hb].into_iter().enumerate() {
+        let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, t2 + i as i64);
+        assert!(faults.is_empty(), "{faults:?}");
+    }
+    drop(wire);
+    let vetoed = propose_by(&mut w, &mut ctl, 900, &[d]);
+    let mut wire = w.wire();
+    for (i, h) in [&ha, &hb].into_iter().enumerate() {
+        let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, t2 + 1_000 + i as i64);
+        assert!(faults.is_empty(), "{faults:?}");
+    }
+    let p = w.f.p.clone();
+    let action = ctl.account().begin_veto(&vetoed, &[p]).unwrap();
+    engine_finish(&mut ctl, &w.host, &w.src, action);
+    for (i, h) in [&ha, &hb].into_iter().enumerate() {
+        let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, t2 + 3_000 + i as i64);
+        assert!(faults.is_empty(), "{faults:?}");
+    }
+    drop(wire);
+    w.clocks(t2 + 5_000);
+    let b = w.b.as_ref().unwrap();
+    eventually("vetoed at both", 60, || kinds(&w.a).len() >= before + 3 && kinds(b).len() >= before + 3);
+    let (ea, eb) = (get(&w.a), get(b));
+    let ka = kinds(&w.a);
+    assert_eq!(&ka[before..before + 3], &["activate", "final", "vetoed"], "{ka:?}");
+    for i in before..before + 3 {
+        assert_eq!(ea[i], eb[i], "{} is byte-identical at both homes", ka[i]);
+    }
+}

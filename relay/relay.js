@@ -342,7 +342,7 @@ function readBody(req, max) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0 }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false }) {
   if (!dataDir) throw new Error('dataDir is required');
   const effective = { ...DEFAULT_LIMITS, ...limits };
   await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -385,7 +385,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         if (isHome) {
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
-            clock, resolve,
+            clock, resolve, tracing,
             deps: { HttpError, send, readBody, clampInt },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });

@@ -33,6 +33,11 @@ jobs:
         run: cargo test -p colophon-core --test v05_engine --test v05_candidate -- --nocapture
       - name: Candidate vector generator check (byte for byte, no stray files)
         run: cargo test -p colophon-core --test v5_candidate -- --ignored v5_generator_check
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: The relay as a 0.5 home (builds the home module, Rust relay tests and Bun tests)
+        run: scripts/test-home.sh
       - name: Full native workspace suite
         run: cargo test --workspace
       - name: Build wasm target of consuming crate
