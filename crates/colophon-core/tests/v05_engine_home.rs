@@ -280,9 +280,12 @@ fn an_honest_pass_runs_the_head_then_authority_then_records_then_live_then_blobs
     let put_ops = first(&|r| r.starts_with("Put /records/ops/"));
     let put_hist = first(&|r| r.starts_with("Put /records/history/"));
     let put_state = first(&|r| r.starts_with("Put /records/state/"));
-    // The public head first, so a call can be built for what follows (§12.3 step 4).
+    // The public head first, so a call can be built for what follows (§12.3 step 4); the history
+    // is pulled only when the home's head covers more than this device holds (here it does not).
     assert!(
-        head < pull_auth && pull_auth < pending && pending < changes,
+        head < pending
+            && pending < changes
+            && (pull_auth == usize::MAX || (head < pull_auth && pull_auth < pending)),
         "{reqs:?}"
     );
     assert!(

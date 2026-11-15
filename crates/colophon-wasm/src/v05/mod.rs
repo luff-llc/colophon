@@ -150,6 +150,22 @@ impl AccountEngine {
     }
 }
 
+#[wasm_bindgen]
+impl AccountCreation {
+    /// The session over the stores `take_result` returned, unlocked as the creation left it.
+    pub fn open_engine(
+        &self,
+        source: JsSource,
+        listing: Vec<ListedPath>,
+        namespaces: Vec<String>,
+        batch: u64,
+        key: Vec<u8>,
+        now_ms: i64,
+    ) -> Result<AccountEngine, AccountError> {
+        self.open_engine_inner(Box::new(JsHost(source)), listing, namespaces, batch, key, now_ms)
+    }
+}
+
 /// What is thrown is a real JS `Error` subclass (`AccountFault`) with `kind`, `code`, `detail`
 /// and `reason` (the §19 reason of a `Refused` or `Denied`, else `undefined`): a typed error with
 /// its protocol code, never a message to parse.

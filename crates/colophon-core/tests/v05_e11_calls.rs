@@ -233,10 +233,23 @@ fn a_member_syncs_the_history_with_calls_when_the_history_is_for_members() {
     let p = pass(&mut e, &src, &home, &mut home_w, &mut host, &a, NOW);
     assert!(p.unbuilt.is_empty(), "the engine built every call: {p:?}");
     assert!(p.faults.is_empty(), "{p:?}");
-    assert!(p.calls >= 3, "the history, pending and change feed reads each carry a call: {p:?}");
+    assert!(p.calls >= 2, "the pending and change feed reads each carry a call: {p:?}");
     assert_eq!(home_w.refused, Vec::<(String, String)>::new());
     // The pass's first request is the head, which is public.
     assert_eq!(home_w.sim.requests.first().map(String::as_str), Some("Get /head"));
+
+    // The home moves on (another device is approved): the next pass pulls the history with a call.
+    f.host = host;
+    let other = f.host.identity(34);
+    admit(&mut f, &other, "Tablet", "device", terms_for(&[(NS, "write")]), terms_for(&[(NS, "write")]));
+    let mut host = std::mem::replace(&mut f.host, Host::new());
+    home_w.sim = SimHome::new(&f, &home, BASE, NOW);
+    let before = e.account().head().0;
+    let p = pass(&mut e, &src, &home, &mut home_w, &mut host, &a, NOW + 1_000);
+    assert!(p.unbuilt.is_empty() && p.faults.is_empty(), "{p:?}");
+    assert_eq!(e.account().head().0, before + 1, "the history was pulled");
+    assert!(home_w.sim.requests.iter().any(|r| r == "Get /authority"));
+    assert_eq!(home_w.refused, Vec::<(String, String)>::new());
 }
 
 /// Gap 2. A member writes and pushes its own records with `colophon.home.write` calls although
@@ -289,6 +302,7 @@ fn a_member_writes_its_own_records_with_calls_and_nothing_else() {
             method: method.into(),
             path: path.into(),
             body_sha256: hex(&Sha256::digest(body)),
+            as_of: None,
         };
         let action = m.account().begin_home_call(&host.ids[member].public().signing, &call, host.fresh()).unwrap();
         let sigs = host.sign(action.steps());
@@ -404,6 +418,7 @@ fn a_revoked_or_unknown_device_is_refused_by_its_own_check_or_by_the_home() {
         method: "GET".into(),
         path: "/authority?after=1&limit=64".into(),
         body_sha256: hex(&Sha256::digest(b"")),
+        as_of: None,
     };
     let action = old.account().begin_home_call(&host.ids[&c].public().signing, &call, host.fresh()).unwrap();
     let sigs = host.sign(action.steps());

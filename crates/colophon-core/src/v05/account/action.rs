@@ -292,6 +292,11 @@ pub struct HomeCall {
     pub path: String,
     /// The lowercase hex SHA-256 of the request body (of the empty string when none).
     pub body_sha256: String,
+    /// The highest seq the home is known to hold of this account's verified history, when it
+    /// is below the account's own head: the call's `asOf` is that entry (an entry the signer has
+    /// seen, §12.2, and one the home holds, so a device with entries not yet pushed can still
+    /// call). `None`: the account's head.
+    pub as_of: Option<u64>,
 }
 impl HomeCall {
     /// What the request writes: the records path after `/records/` of a `PUT`, read by the
@@ -1700,10 +1705,12 @@ impl Account {
             "the body digest is 64 lowercase hex",
         )?;
         let st = self.d.auth.state();
-        let seq = st.history().len() as u64;
-        let digest = st
-            .history()
-            .last()
+        let held = st.history().len() as u64;
+        let seq = call.as_of.filter(|s| (1..held).contains(s)).unwrap_or(held);
+        let digest = usize::try_from(seq)
+            .ok()
+            .and_then(|s| s.checked_sub(1))
+            .and_then(|i| st.history().get(i))
             .cloned()
             .ok_or_else(|| unavailable("no history"))?;
         let (signer, webauthn) = match &self.me {

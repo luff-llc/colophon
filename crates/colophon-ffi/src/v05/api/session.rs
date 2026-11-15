@@ -979,10 +979,41 @@ impl AccountEngine {
         wipe(&mut entropy);
         r
     }
+    pub(crate) fn exchange_call_inner(
+        &self,
+        home: String,
+        ticket: u64,
+        key: Vec<u8>,
+        entropy: Vec<u8>,
+    ) -> R<AccountAction> {
+        let mut entropy = entropy;
+        let r = guard(|| {
+            let sd = seeds32(&entropy, 1)?;
+            self.ensure_live()?;
+            let p = self.run(|e| Ok(e.exchange_begin_call(&home, ticket, &key, sd[0])?))?;
+            Ok(AccountAction::ready(p, self.owner, ActionKind::Call))
+        });
+        wipe(&mut entropy);
+        r
+    }
 }
 #[cfg(feature = "native05")]
 #[uniffi::export]
 impl AccountEngine {
+    /// Prepare the call a `NeedCall` step asked for (`ticket` of `home`), signed by this
+    /// session's own `key`: audience, purpose and `args` are read from the request the engine
+    /// built. 32 bytes of entropy (the request ID). `finish` judges it by the home's own rule over
+    /// what this account holds and returns the envelope as `artifact`, for
+    /// `exchange_provide_call`.
+    pub fn exchange_begin_call(
+        &self,
+        home: String,
+        ticket: u64,
+        key: Vec<u8>,
+        entropy: Vec<u8>,
+    ) -> Result<Arc<AccountAction>, AccountError> {
+        self.exchange_call_inner(home, ticket, key, entropy).map(Arc::new)
+    }
     /// Prepare a link (§12): `prior` the chain so far, `to_signing` the next key, `terms_json`
     /// the narrowed terms. No entropy. `finish` returns the link envelope as `artifact`.
     pub fn begin_link(
@@ -1016,6 +1047,17 @@ impl AccountEngine {
 #[cfg(feature = "web05")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 impl AccountEngine {
+    /// Prepare the call a `NeedCall` step asked for, signed by this session's own `key`. 32
+    /// bytes of entropy. `finish` returns the envelope as `artifact`.
+    pub fn exchange_begin_call(
+        &self,
+        home: String,
+        ticket: u64,
+        key: Vec<u8>,
+        entropy: Vec<u8>,
+    ) -> Result<AccountAction, AccountError> {
+        self.exchange_call_inner(home, ticket, key, entropy)
+    }
     /// Prepare a link (§12). No entropy. `finish` returns the link envelope as `artifact`.
     pub fn begin_link(
         &self,

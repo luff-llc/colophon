@@ -366,6 +366,8 @@ struct Home {
     /// This pass's head, when it names an entry the account does not hold yet: judged again once
     /// the authority pull is complete (§13.3: the history is fetched further if needed).
     ahead: Option<Vec<u8>>,
+    /// The seq this pass's head covers, when the account accepted it (it is on our branch).
+    head_seq: Option<u64>,
     /// The request in flight, and whether it carried a call (for the 401 retry).
     last_item: Option<Queued>,
     carried_call: bool,
@@ -413,6 +415,7 @@ impl Default for Home {
             awaiting: None,
             provided: None,
             ahead: None,
+            head_seq: None,
             last_item: None,
             carried_call: false,
             pass_pages: 0,
@@ -613,11 +616,13 @@ impl<S: RecordSource> Engine<S> {
             .find(|i| i.id == home)
             .and_then(|i| i.endpoints.first().map(|e| base_of(e)))
             .ok_or_else(|| malformed("the home names no endpoint"))?;
+        let acked = h.acked;
         let call = crate::v05::account::HomeCall {
             audience: endpoint,
             method: item.1.as_str().to_string(),
             path: item.2.clone(),
             body_sha256: super::hex(&super::sha(&item.3)),
+            as_of: (acked > 0).then_some(acked),
         };
         self.account.begin_home_call(key, &call, request_id)
     }
@@ -698,6 +703,7 @@ impl<S: RecordSource> Engine<S> {
             }
             if phase == Phase::Head {
                 h.ahead = None;
+                h.head_seq = None;
                 h.pass_pages = 0;
                 h.pass_entries = 0;
                 h.pass_seen.clear();
@@ -834,6 +840,12 @@ impl<S: RecordSource> Engine<S> {
             }
             Phase::PullAuthority => {
                 let after = self.account.head().0;
+                // The home's accepted head covers nothing beyond what we hold: there is nothing
+                // to pull, and the push needs no call (a device ahead of a home pushes to it
+                // even where reading the history needs a call it cannot build yet).
+                if self.home_mut(home).head_seq.is_some_and(|s| s <= after) {
+                    return Ok(());
+                }
                 self.enqueue(
                     home,
                     Tag::PullAuthority,
@@ -1858,6 +1870,7 @@ impl<S: RecordSource> Engine<S> {
                 let verified = self.account.head().0;
                 let h = self.home_mut(home);
                 h.acked = h.acked.max(s.min(verified));
+                h.head_seq = Some(s);
             }
         } else if !report.faults[before..]
             .iter()
@@ -1873,6 +1886,11 @@ impl<S: RecordSource> Engine<S> {
             report.faults.push(f);
             this.halt(home);
         };
+        // A home that holds nothing of this account yet (not appointed: a first upload is still
+        // to come, §13.1) serves no history (404): there is nothing to pull, and the push follows.
+        if r.status == 404 && self.home_mut(home).acked == 0 {
+            return Ok(());
+        }
         if r.status != 200 {
             bad(
                 self,
