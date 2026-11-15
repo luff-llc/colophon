@@ -19,6 +19,17 @@ import ColophonSession
 
     /// Only `https` homes, unless the testing option allows loopback `http`; the session neither appoints nor contacts
     /// one that is not.
+    /// Loopback `http` means `localhost`, a literal `127.0.0.0/8` address or `::1`, parsed, never a name that starts with `127.`.
+    @Test func loopbackIsALiteralAddress() {
+        for bad in ["http://127.attacker.example/", "http://127.0.0.1.attacker.example/", "http://localhost.attacker.example/",
+                    "http://evil.localhost/", "http://127.1/", "http://0x7f000001/"] {
+            #expect(!HomeLimits.isAllowed(URL(string: bad)!, allowingLoopbackHTTP: true), "\(bad)")
+        }
+        for good in ["http://127.0.0.1:8080/", "http://127.255.0.9/", "http://[::1]:9000/", "http://localhost/", "http://LOCALHOST:1/"] {
+            #expect(HomeLimits.isAllowed(URL(string: good)!, allowingLoopbackHTTP: true), "\(good)")
+        }
+    }
+
     @Test func onlyHTTPSHomesAreUsed() async throws {
         #expect(HomeLimits.isAllowed(URL(string: "https://home.example/v1/x")!, allowingLoopbackHTTP: false))
         #expect(!HomeLimits.isAllowed(URL(string: "http://home.example/")!, allowingLoopbackHTTP: false))
