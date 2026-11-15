@@ -27,6 +27,12 @@ import Foundation
     func acknowledgeActivation(seq: UInt64) async
     /// New in 0.5: opens a locked session again.
     func unlock() async
+    /// New in 0.5: hides the content and drops every secret the engine holds (the gate calls it when the scene leaves).
+    func lock() async
+    /// New in 0.5: what the host must do and say beyond `notices` (§17.5).
+    var duties: HostDuties { get }
+    /// New in 0.5: signs a dead transition this device signed again.
+    @discardableResult func resign(_ transition: String) async throws -> String
 }
 
 extension ColophonSession: LibrarySessionSource {}

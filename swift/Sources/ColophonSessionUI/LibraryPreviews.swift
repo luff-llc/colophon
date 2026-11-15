@@ -40,6 +40,9 @@ import SwiftUI
                                                   controllersWithoutSlot: notices.notices.controllersWithoutSlot, vaultRetiring: notices.notices.vaultRetiring, noHome: notices.noHome))
     }
     func unlock() async { phase = .ready }
+    func lock() async { phase = .locked }
+    var duties: HostDuties = .none
+    func resign(_ transition: String) async throws -> String { transition }
     static var host: LibraryHostActions {
         .init(containers: [
             .init(id: "cloud", title: "iCloud Drive", kind: .iCloud, location: .iCloud(container: "preview", libraryName: "Library")),
