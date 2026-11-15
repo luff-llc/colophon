@@ -297,14 +297,6 @@ fn journey(history: &str, homes: u8) {
             if f.is_empty() && w.unbuilt.is_empty() {
                 break;
             }
-            if std::env::var("E11_DEBUG").is_ok() {
-                for r in &w.relays {
-                    let (st, b) = r.send("GET", &format!("{}/head", r.base), &[], &[], w.now);
-                    let seq = serde_json::from_slice::<Value>(&b).ok().and_then(|v| v["body"].as_str().map(|x| x.to_string()));
-                    eprintln!("head {} {st} {:?}", r.base, seq.map(|b| String::from_utf8_lossy(&colophon_core::v05::encoding::decode_base64(&b, 4096).unwrap()).to_string()));
-                }
-                eprintln!("faults {} unbuilt {:?} local seq {}", show(&f), w.unbuilt, dev1.head_seq().unwrap());
-            }
             w.unbuilt.clear();
             std::thread::sleep(std::time::Duration::from_millis(200));
             f = sync(&mut w, &dev1, &mac, &m1);

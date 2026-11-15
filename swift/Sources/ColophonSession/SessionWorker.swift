@@ -40,6 +40,8 @@ struct SessionJournalFile: Codable, Sendable {
     var routes: [String: Bool] = [:]
     /// The change of each transition this device signed, by digest, so a dead one can be signed again.
     var signedChanges: [String: String] = [:]
+    /// Removal follow-ups the person answered (removed or kept), by activation seq.
+    var answeredRemovals: Set<UInt64> = []
     /// Ingress envelopes already written, by ID, with their operation (an envelope is never signed twice).
     var ingress: [UUID: String] = [:]
 }
@@ -214,10 +216,11 @@ actor SessionWorker {
         try await unlockIfPossible()
     }
 
-    /// A member opens its epoch shares with its own agreement key (silent for a Secure Enclave key).
+    /// A member opens its epoch shares with its own agreement key (silent for a Secure Enclave key): at first, and
+    /// again whenever new epochs were sealed to it (a revocation or a rekey makes new epochs; an unlocked engine
+    /// still has to open its shares of them before it can write).
     private func unlockIfPossible() async throws {
         guard let engine, let custody = memberCustody else { return }
-        if try await engine.run({ try $0.isUnlocked() }) { return }
         guard case .member = try await engine.run({ try $0.me() }).kind else { return }
         let agreements = try await engine.run { try $0.beginUnlockEpochs() }
         guard !agreements.isEmpty else { return }
@@ -377,6 +380,16 @@ actor SessionWorker {
                     detail: journal.routes[home.id] == false || configured?.registerRoutes == nil
                         ? "\(label) does not offer notices yet, so it cannot tell you about a pending change. This app checks for them itself."
                         : "Your ways to be reached are not registered with \(label) yet."))
+            }
+        }
+        let follow = try await engine.run { try $0.removalFollowUp() }.filter { !journal.answeredRemovals.contains($0.seq) }
+        if !follow.isEmpty {
+            let members = Dictionary(try await engine.run { try $0.members() }.map { ($0.id, $0.label) }, uniquingKeysWith: { first, _ in first })
+            let labels = Dictionary(controllers.map { ($0.id, $0.label) }, uniquingKeysWith: { first, _ in first })
+            duties.removals = follow.map { r in
+                RemovalFollowUp(seq: r.seq, removed: r.removed,
+                    members: r.members.map { RemovalFollowUp.Item(id: $0, label: members[$0] ?? String($0.prefix(8))) },
+                    controllers: r.controllers.map { RemovalFollowUp.Item(id: $0, label: labels[$0] ?? String($0.prefix(8))) })
             }
         }
         let delay = Int64(policy.recoveryDelay) / 6
@@ -568,6 +581,42 @@ actor SessionWorker {
             return try await reconcile()
         }
     }
+    /// The removal follow-up's one action (§17.5): revokes every member the removed key admitted (keeping what they
+    /// wrote) and removes every controller it added, signed by the owner, then records the follow-up as answered. What
+    /// the engine lists now is what is removed: an item already gone is not touched again.
+    func removeFollowUp(seq: UInt64) async throws -> SessionSnapshot {
+        try await gated {
+            if engine == nil { _ = try await reconcile() }
+            try await withOwner { owner, custody, ownerID in
+                guard let follow = try await owner.run({ try $0.removalFollowUp() }).first(where: { $0.seq == seq }) else { return }
+                for member in follow.members {
+                    let signers = try await signers(owner, ownerID: ownerID, need: .control)
+                    let written = try await owner.execute(custody: custody) {
+                        engine in try withEntropy(32) { try engine.beginRevoke(member: member, keep: RevokeKeep(mode: .everything, kept: [], heads: []), signers: signers, entropy: $0) }
+                    }
+                    try await persist(written, on: owner)
+                }
+                if !follow.controllers.isEmpty {
+                    let signers = try await signers(owner, ownerID: ownerID, need: .control)
+                    let list = follow.controllers
+                    let written = try await owner.execute(custody: custody) {
+                        engine in try withEntropy(32) { try engine.beginRemoveController(remove: list, keep: [], signers: signers, rule: .control, rotate: false, entropy: $0) }
+                    }
+                    try await persist(written, on: owner)
+                }
+            }
+            journal.answeredRemovals.insert(seq); try saveJournal()
+            return try await reconcile()
+        }
+    }
+    /// The person keeps what a removed key admitted: the follow-up is recorded as answered.
+    func keepFollowUp(seq: UInt64) async throws -> SessionSnapshot {
+        try await gated {
+            try loadJournal()
+            journal.answeredRemovals.insert(seq); try saveJournal()
+            return try await reconcile()
+        }
+    }
     /// One call: sign a veto of the pending transition with the keys this device holds, store it, and let the
     /// next exchange submit it to every home (§17.5).
     func veto(_ transition: String) async throws -> SessionSnapshot {
@@ -663,37 +712,40 @@ actor SessionWorker {
             }
             var policy = try JSONSerialization.jsonObject(with: Data(accountDefaultPolicy().utf8)) as? [String: Any] ?? [:]
             if let delay = configuration.recoveryDelay { policy["recoveryDelay"] = delay }
+            if let history = configuration.history { policy["history"] = history.rawValue }
+            if let quorum = configuration.headQuorum { policy["headQuorum"] = quorum }
             let policyJSON = String(decoding: try JSONSerialization.data(withJSONObject: policy, options: [.sortedKeys]), as: UTF8.self)
             let params = CreateParams(label: configuration.memberLabel, namespaces: configuration.libraryNamespaces.sorted(), controllers: controllers,
                 slots: slots, threshold: nil, recoverThreshold: nil, addThreshold: nil, countByHolders: false, policyJson: policyJSON,
                 signers: [ownerID], rekeySigners: [ownerID])
-            let created = try await AccountCreator.create(params: params, identity: AccountIdentity(kind: .controller, id: ownerID),
-                                                           custody: custody, nowMs: nowMs)
+            let (creation, created) = try await AccountCreator.create(params: params, identity: AccountIdentity(kind: .controller, id: ownerID),
+                                                                       custody: custody, nowMs: nowMs)
             try storage().write(created.stores.map { MediumWrite(path: $0.path, bytes: $0.bytes) })
             journal.account = created.account; accountID = created.account
             try saveJournal()
-            try await setUpFirstDevice(account: created.account, ownerID: ownerID, custody: custody)
+            // The creation's own engine: unlocked as the creation left it, so the owner is asked once at first run.
+            let owner = try await ColophonEngine.openCreated(creation, label: "org.luff.colophon.owner", source: MediumSource(try storage()),
+                listing: listed(try storage().listing()), account: created.account, identity: AccountIdentity(kind: .controller, id: ownerID),
+                namespaces: configuration.libraryNamespaces, deviceKey: try configuration.deviceSecrets.key(for: created.account), nowMs: nowMs)
+            try await setUpFirstDevice(owner, account: created.account, ownerID: ownerID, custody: custody)
             return try await reconcile()
         }
     }
 
-    /// Appoints the homes, records their activation and approves this device's member. It needs the
-    /// controller unlocked, and a creation leaves the session locked (the core has no engine constructor over
-    /// a created account yet), so a passkey owner is asked a second time here.
-    /// REMOVE `unlockCreatedAccount` when `Engine::from_account` is exported: use the creation's own engine.
-    private func setUpFirstDevice(account: String, ownerID: String, custody: KeyCustody) async throws {
-        let entries = try storage().listing()
-        let secret = try configuration.deviceSecrets.key(for: account)
-        let owner = try await ColophonEngine.open(label: "org.luff.colophon.owner", source: MediumSource(try storage()), listing: listed(entries),
-            identity: AccountIdentity(kind: .controller, id: ownerID), account: account, namespaces: configuration.libraryNamespaces,
-            saved: nil, deviceKey: secret, nowMs: nowMs)
+    /// Appoints the homes, records their activation and approves this device's member, with the creation's own
+    /// engine (unlocked: the owner is not asked again). Every home is appointed in one transition, recorded at once
+    /// (the state before it has no home to witness time, spec §13.1 "First upload").
+    private func setUpFirstDevice(_ owner: ColophonEngine, account: String, ownerID: String, custody: KeyCustody) async throws {
         do {
-            try await unlockCreatedAccount(owner, custody: custody, ownerID: ownerID)
+            var appoint: [[String: Any]] = []
             for home in configuration.homes {
                 guard let makeRequest = home.request else { continue }
                 let raw = try await makeRequest(account)
                 let info = try accountRequestInfo(raw: raw)
-                let change: [String: Any] = ["homes": ["appoint": [["request": raw.base64EncodedString(), "terms": (try JSONSerialization.jsonObject(with: Data(info.termsJson.utf8)))]]]]
+                appoint.append(["request": raw.base64EncodedString(), "terms": (try JSONSerialization.jsonObject(with: Data(info.termsJson.utf8)))])
+            }
+            if !appoint.isEmpty {
+                let change: [String: Any] = ["homes": ["appoint": appoint]]
                 let json = String(decoding: try JSONSerialization.data(withJSONObject: change, options: [.sortedKeys]), as: UTF8.self)
                 let signers = try await signers(owner, ownerID: ownerID, need: .control)
                 let written = try await owner.execute(custody: custody) { try $0.beginTransition(changeJson: json, signers: signers, rule: .control, entropy: Data()) }
@@ -707,9 +759,6 @@ actor SessionWorker {
             try await persist(approve, on: owner)
             await owner.lock()
         } catch { await owner.lock(); throw error }
-    }
-    private func unlockCreatedAccount(_ owner: ColophonEngine, custody: KeyCustody, ownerID: String) async throws {
-        try await unlockOwner(owner, custody: custody, ownerID: ownerID)
     }
     private func ownRequestBytesFor(account: String) async throws -> Data {
         memberID = try await KeyCustody.keyID(of: memberKeys)
@@ -805,9 +854,6 @@ actor SessionWorker {
     struct ExchangeResult: Sendable {
         var passes = 0; var faults: [HomeFault] = []; var issues: [HomeIssue] = []; var changed = false; var unauthorized = false
     }
-    /// The placeholder the engine attaches to a request whose call is built once the request is in hand (`signedRequest`).
-    static let placeholderCall = Data("colophon-call-placeholder".utf8)
-
     /// One pass with every home. The network calls run outside the gate; each engine step and the
     /// persistence of its stores run inside it, so an unpersisted answer is never visible to a refresh.
     /// A home is held to `HomeLimits`: steps per pass, the time of an exchange, the size of each response.
@@ -833,7 +879,6 @@ actor SessionWorker {
             let started = ContinuousClock.now
             var progress = true
             var passIndex = 0
-            var awaitingCall: CallNeed?
             var stopped: HomeProblem?
             // A pass can end before everything moved (the engine plans the next stage from what the home just
             // said): run passes until one moves nothing, at most `HomeLimits.passes`.
@@ -852,25 +897,23 @@ actor SessionWorker {
                 case .done, .waiting: break loop
                 case .needCall:
                     guard let need = step.need else { break loop }
-                    // Step one of two: the engine builds the request only once it holds a call, and `CallNeed` carries
-                    // no body, so it gets a placeholder; `signedRequest` signs the real call from the request.
-                    awaitingCall = need
-                    let placeholder = Self.placeholderCall
-                    try await gated { try await engine.run { try $0.exchangeProvideCall(home: need.home, ticket: need.ticket, call: placeholder) } }
+                    do { try await provideCall(for: need, home: home, configured: configured) }
+                    catch let problem as HomeProblem { stopped = problem; break homeLoop }
                 case .request:
-                    guard let emitted = step.request else { break loop }
-                    let request: HttpRequest
-                    if let need = awaitingCall {
-                        awaitingCall = nil
-                        do { request = try await signedRequest(emitted, for: need, configured: configured) }
-                        catch let problem as HomeProblem { stopped = problem; break homeLoop }
-                    } else { request = emitted }
-                    guard request.url.hasPrefix(Self.base(configured.endpoint.absoluteString)) else {
+                    guard let request = step.request else { break loop }
+                    // A request is for this home, except another home's public head (`headQuorum` above 1), which goes
+                    // to the transport configured for the home its URL names, with no credential.
+                    let target: HomeConfiguration
+                    if request.url.hasPrefix(Self.base(configured.endpoint.absoluteString) + "/") { target = configured }
+                    else if request.method == .get, request.url.hasSuffix("/head"), !request.headers.contains(where: { $0.name.lowercased() == "authorization" }),
+                            let other = configuration.homes.first(where: { request.url == Self.base($0.endpoint.absoluteString) + "/head" }), other.isAllowed {
+                        target = other
+                    } else {
                         stopped = .callNotBound("a request for another host than the configured home"); break homeLoop
                     }
                     if request.method != .get { progress = true }
                     let answer: HttpAnswer
-                    do { answer = try await configured.transport.send(request) }
+                    do { answer = try await target.transport.send(request) }
                     catch HomeTransportError.responseTooLarge(let limit) { stopped = .responseTooLarge(limit: limit); break homeLoop }
                     catch HomeTransportError.insecureEndpoint(let url) { stopped = .insecureEndpoint(url); break homeLoop }
                     catch {
@@ -913,44 +956,33 @@ actor SessionWorker {
     static func base(_ text: String) -> String { text.hasSuffix("/") ? String(text.dropLast()) : text }
     static func hex<D: Sequence>(_ digest: D) -> String where D.Element == UInt8 { digest.map { String(format: "%02x", $0) }.joined() }
 
-    /// Step two: a fresh `Authorization: Colophon` call for exactly this request, signed by this device's member key
-    /// (§12.4), put in place of the placeholder the engine attached.
-    ///
-    /// `args` are exactly `{"method": <HTTP method>, "path": <path and query relative to the home's base, as sent>,
-    /// "body": <lowercase hex SHA-256 of the request's body, of the empty string when there is none>}`, taken from the
-    /// request itself; the purpose is `colophon.home.read` for GET and `colophon.home.write` otherwise; the audience is
-    /// the engine's `need.audience`, the home's base URL (spec §14 "audience `{base}`", as the relay's home checks it).
-    /// The request must be the one the need named (ticket, method, URL, the configured home's host) and carry the
-    /// placeholder, else nothing is signed (`callNotBound`). The two steps exist because `CallNeed` carries neither the
-    /// relative path nor the body digest (an export gap, reported in the PR).
-    private func signedRequest(_ request: HttpRequest, for need: CallNeed, configured: HomeConfiguration) async throws -> HttpRequest {
+    /// The call a `NeedCall` asked for, built by the engine for exactly the request it will send (audience the home's
+    /// base, purpose by the method, `args` `{"method","path","body"}` from the need: `exchange_begin_call`), signed by
+    /// this device's member key and judged by the core with the home's own rule over what this device holds before it
+    /// is returned. A need for another home or audience than the configured one is not signed (`callNotBound`); a call
+    /// the core's own check refuses is `callRefused`.
+    private func provideCall(for need: CallNeed, home: Home, configured: HomeConfiguration) async throws {
         guard let engine, let custody = memberCustody, let id = memberID else { throw SessionError.notReady }
-        let base = Self.base(need.audience)
-        guard request.ticket == need.ticket, request.method == need.method, request.url == need.url, request.url.hasPrefix(base),
-              base == Self.base(configured.endpoint.absoluteString) else {
-            throw HomeProblem.callNotBound("the request for ticket \(request.ticket) is not the one the engine asked a call for")
+        guard need.home == home.id, Self.base(need.audience) == Self.base(configured.endpoint.absoluteString),
+              need.url == Self.base(need.audience) + need.path else {
+            throw HomeProblem.callNotBound("the engine asked a call for another home than the configured one")
         }
-        let placeholder = "Colophon " + Self.base64url(Self.placeholderCall)
-        guard let slot = request.headers.firstIndex(where: { $0.name.lowercased() == "authorization" && $0.value == placeholder }) else {
-            throw HomeProblem.callNotBound("the request does not carry the call slot the engine was given")
-        }
-        let path = String(request.url.dropFirst(base.count))
-        let method = switch request.method { case .get: "GET"; case .post: "POST"; case .put: "PUT" }
-        let purpose = request.method == .get ? "colophon.home.read" : "colophon.home.write"
-        guard need.purpose == purpose else { throw HomeProblem.callNotBound("the engine asked for purpose \(need.purpose) on \(method)") }
-        let argsObject: [String: String] = ["method": method, "path": path, "body": Self.hex(SHA256.hash(data: request.body))]
-        let args = String(decoding: try JSONSerialization.data(withJSONObject: argsObject, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
         let signing = try await custody.provider(for: id).publicKeys().signing
-        let target = CallTarget(audiences: [need.audience], callOrigins: [], controllerPurposes: [], homeEndpoints: [need.audience])
-        let written = try await gated {
-            try await engine.execute(custody: custody) {
-                engine in try withEntropy(32) { try engine.beginCall(key: signing, links: [], audience: need.audience, purpose: purpose, argsJson: args, target: target, entropy: $0) }
+        let written: Written
+        do {
+            written = try await gated {
+                try await engine.execute(custody: custody) { engine in
+                    try withEntropy(32) { try engine.exchangeBeginCall(home: need.home, ticket: need.ticket, key: signing, entropy: $0) }
+                }
+            }
+        } catch let error as ColophonError {
+            switch error {
+            case .refused, .unavailable, .denied: throw HomeProblem.callRefused(code: error.code)
+            default: throw error
             }
         }
         guard let artifact = written.artifact else { throw ColophonError.internalFailure(code: "internal", detail: "a call returned no envelope") }
-        var headers = request.headers
-        headers[slot] = Header(name: headers[slot].name, value: "Colophon " + Self.base64url(artifact))
-        return HttpRequest(ticket: request.ticket, home: request.home, method: request.method, url: request.url, headers: headers, body: request.body)
+        try await gated { try await engine.run { try $0.exchangeProvideCall(home: need.home, ticket: need.ticket, call: artifact) } }
     }
     static func base64url(_ data: Data) -> String {
         data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")

@@ -38,6 +38,25 @@ public actor ColophonEngine {
         return engine
     }
 
+    /// Opens the engine over the stores `creation.takeResult()` returned (stored and listed by the host), unlocked as
+    /// the creation left it (`AccountCreation.open_engine`): the owner is asked once at first run. One shot.
+    public static func openCreated(_ creation: AccountCreation, label: String = "org.luff.colophon.engine", source: any HostSource,
+                                   listing: [ListedPath], account: String, identity: AccountIdentity, namespaces: [String] = [],
+                                   batch: UInt64 = 0, deviceKey: SecretBytes, nowMs: Int64) async throws -> ColophonEngine {
+        let engine = ColophonEngine(label: label, account: account, identity: identity)
+        try await engine.startCreated(creation, source: source, listing: listing, namespaces: namespaces, batch: batch, deviceKey: deviceKey, nowMs: nowMs)
+        return engine
+    }
+
+    private func startCreated(_ creation: AccountCreation, source: any HostSource, listing: [ListedPath], namespaces: [String], batch: UInt64,
+                              deviceKey: SecretBytes, nowMs: Int64) throws {
+        do {
+            box.engine = try deviceKey.withUnsafeData { key in
+                try creation.openEngine(source: source, listing: listing, namespaces: namespaces, batch: batch, key: key, nowMs: nowMs)
+            }
+        } catch { throw ColophonError.wrap(error) }
+    }
+
     private init(label: String, account: String, identity: AccountIdentity) {
         queue = DispatchSerialQueue(label: label, qos: .userInitiated, autoreleaseFrequency: .workItem)
         self.account = account; self.identity = identity

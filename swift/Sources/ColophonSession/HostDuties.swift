@@ -58,6 +58,28 @@ public struct DeadTransition: Equatable, Sendable {
     }
 }
 
+/// The removal follow-up of one activation that removed controllers (§17.5): what the removed keys admitted since the
+/// transition's anchor and the removal did not remove. The person is offered to remove them in one action
+/// (`ColophonSession.removeFollowUp(seq:)`) or to keep them (`keepFollowUp(seq:)`).
+public struct RemovalFollowUp: Equatable, Sendable {
+    public struct Item: Equatable, Sendable {
+        public let id: String
+        public let label: String
+        public init(id: String, label: String) { self.id = id; self.label = label }
+    }
+    /// The activation's seq.
+    public let seq: UInt64
+    /// The removed controllers' IDs.
+    public let removed: [String]
+    /// Members whose grant a removed key signed.
+    public let members: [Item]
+    /// `approve` or `sign` controllers a removed key added by immediate entries.
+    public let controllers: [Item]
+    public init(seq: UInt64, removed: [String], members: [Item], controllers: [Item]) {
+        self.seq = seq; self.removed = removed; self.members = members; self.controllers = controllers
+    }
+}
+
 /// What a host must do and say beyond the engine's notices (§17.5), computed by the session from the account.
 public struct HostDuties: Equatable, Sendable {
     /// The account has one control key: a stolen sole device can't be vetoed (guide §5). Shown at setup and after.
@@ -67,6 +89,8 @@ public struct HostDuties: Equatable, Sendable {
     /// The latest submissions this session made, with their receipts.
     public var submissions: [Submission] = []
     public var deadTransitions: [DeadTransition] = []
+    /// Removals whose follow-up the person has not answered yet.
+    public var removals: [RemovalFollowUp] = []
     /// Home labels by ID, for receipt times.
     public var homeLabels: [String: String] = [:]
     /// How often the session polls the homes now: `recoveryDelay` / 6, or 15 s while something is pending.

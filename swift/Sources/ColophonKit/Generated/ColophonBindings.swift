@@ -1109,6 +1109,15 @@ public func FfiConverterTypeAccountCopyWrite_lower(_ value: AccountCopyWrite) ->
 public protocol AccountCreationProtocol: AnyObject, Sendable {
     
     /**
+     * The session over the stores `take_result` returned (the host stored them and lists them),
+     * unlocked as the creation left it, its records loaded: a passkey owner is asked once at
+     * first run. The engine checks that the source holds exactly what the creation made. One
+     * shot: the creation is spent after it, and dropped without it the unlocked account goes.
+     * Arguments as `AccountEngine.open` (no identity: the creation's; no saved state).
+     */
+    func openEngine(source: HostSource, listing: [ListedPath], namespaces: [String], batch: UInt64, key: Data, nowMs: Int64) throws  -> AccountEngine
+    
+    /**
      * The PRF assertions to make first; empty when none.
      */
     func prfRequests() throws  -> [PrfRequest]
@@ -1135,8 +1144,10 @@ public protocol AccountCreationProtocol: AnyObject, Sendable {
     func steps() throws  -> [AccountSigningStep]
     
     /**
-     * The created account: its ID and every object and record to store. The seed the creation
-     * held is dropped; open an `AccountEngine` over the stores and unlock it by a slot.
+     * The created account: its ID and every object and record to store. Store them, then
+     * call `open_engine` for the session over them, unlocked as the creation left it (the owner
+     * is not asked again). The creation keeps the unlocked account until then, or until it is
+     * dropped.
      */
     func takeResult() throws  -> Created
     
@@ -1215,6 +1226,28 @@ public static func begin(params: CreateParams, identity: AccountIdentity, nowMs:
 
     
     /**
+     * The session over the stores `take_result` returned (the host stored them and lists them),
+     * unlocked as the creation left it, its records loaded: a passkey owner is asked once at
+     * first run. The engine checks that the source holds exactly what the creation made. One
+     * shot: the creation is spent after it, and dropped without it the unlocked account goes.
+     * Arguments as `AccountEngine.open` (no identity: the creation's; no saved state).
+     */
+open func openEngine(source: HostSource, listing: [ListedPath], namespaces: [String], batch: UInt64, key: Data, nowMs: Int64)throws  -> AccountEngine  {
+    return try  FfiConverterTypeAccountEngine_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountcreation_open_engine(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceHostSource_lower(source),
+        FfiConverterSequenceTypeListedPath.lower(listing),
+        FfiConverterSequenceString.lower(namespaces),
+        FfiConverterUInt64.lower(batch),
+        FfiConverterData.lower(key),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * The PRF assertions to make first; empty when none.
      */
 open func prfRequests()throws  -> [PrfRequest]  {
@@ -1277,8 +1310,10 @@ open func steps()throws  -> [AccountSigningStep]  {
 }
     
     /**
-     * The created account: its ID and every object and record to store. The seed the creation
-     * held is dropped; open an `AccountEngine` over the stores and unlock it by a slot.
+     * The created account: its ID and every object and record to store. Store them, then
+     * call `open_engine` for the session over them, unlocked as the creation left it (the owner
+     * is not asked again). The creation keeps the unlocked account until then, or until it is
+     * dropped.
      */
 open func takeResult()throws  -> Created  {
     return try  FfiConverterTypeCreated_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
@@ -1728,6 +1763,14 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
     func rejudged() throws  -> [String]
     
     /**
+     * The removal follow-up (§17.5): per activation that removed controllers, the current
+     * members whose grant a removed key signed and the `approve`/`sign` controllers it added by
+     * immediate entries since the transition's anchor. The host offers to remove them in one
+     * action and remembers which activations it showed.
+     */
+    func removalFollowUp() throws  -> [RemovalFollowUp]
+    
+    /**
      * Chunk paths of required blobs this device does not hold.
      */
     func requiredBlobFetches(namespace: String) throws  -> [String]
@@ -1855,6 +1898,15 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
      * Abort a pass with `home`: the outstanding request is forgotten and a late answer refused.
      */
     func exchangeAbort(home: String) throws  -> Report
+    
+    /**
+     * Prepare the call a `NeedCall` step asked for (`ticket` of `home`), signed by this
+     * session's own `key`: audience, purpose and `args` are read from the request the engine
+     * built. 32 bytes of entropy (the request ID). `finish` judges it by the home's own rule over
+     * what this account holds and returns the envelope as `artifact`, for
+     * `exchange_provide_call`.
+     */
+    func exchangeBeginCall(home: String, ticket: UInt64, key: Data, entropy: Data) throws  -> AccountAction
     
     /**
      * Finish a step of the move on this engine (F, a copier's shares, a migration). F is
@@ -3047,6 +3099,21 @@ open func rejudged()throws  -> [String]  {
 }
     
     /**
+     * The removal follow-up (§17.5): per activation that removed controllers, the current
+     * members whose grant a removed key signed and the `approve`/`sign` controllers it added by
+     * immediate entries since the transition's anchor. The host offers to remove them in one
+     * action and remembers which activations it showed.
+     */
+open func removalFollowUp()throws  -> [RemovalFollowUp]  {
+    return try  FfiConverterSequenceTypeRemovalFollowUp.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_removal_follow_up(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Chunk paths of required blobs this device does not hold.
      */
 open func requiredBlobFetches(namespace: String)throws  -> [String]  {
@@ -3384,6 +3451,26 @@ open func exchangeAbort(home: String)throws  -> Report  {
     uniffi_colophon_ffi_fn_method_accountengine_exchange_abort(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(home),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Prepare the call a `NeedCall` step asked for (`ticket` of `home`), signed by this
+     * session's own `key`: audience, purpose and `args` are read from the request the engine
+     * built. 32 bytes of entropy (the request ID). `finish` judges it by the home's own rule over
+     * what this account holds and returns the envelope as `artifact`, for
+     * `exchange_provide_call`.
+     */
+open func exchangeBeginCall(home: String, ticket: UInt64, key: Data, entropy: Data)throws  -> AccountAction  {
+    return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_exchange_begin_call(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(home),
+        FfiConverterUInt64.lower(ticket),
+        FfiConverterData.lower(key),
+        FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
 }
@@ -8551,10 +8638,17 @@ public struct AccountMember: Equatable, Hashable {
     public let provisional: Bool
     public let home: Bool
     public let session: UInt64
+    /**
+     * The controllers that signed the entry that granted it (empty for a recording entry).
+     */
+    public let grantedBy: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, label: String, kind: AccountMemberKind, kindRaw: String?, grant: AccountGrant?, since: UInt64, revokedAt: UInt64?, writes: UInt64, expiresMs: Int64?, provisional: Bool, home: Bool, session: UInt64) {
+    public init(id: String, label: String, kind: AccountMemberKind, kindRaw: String?, grant: AccountGrant?, since: UInt64, revokedAt: UInt64?, writes: UInt64, expiresMs: Int64?, provisional: Bool, home: Bool, session: UInt64, 
+        /**
+         * The controllers that signed the entry that granted it (empty for a recording entry).
+         */grantedBy: [String]) {
         self.id = id
         self.label = label
         self.kind = kind
@@ -8567,6 +8661,7 @@ public struct AccountMember: Equatable, Hashable {
         self.provisional = provisional
         self.home = home
         self.session = session
+        self.grantedBy = grantedBy
     }
 
     
@@ -8596,7 +8691,8 @@ public struct FfiConverterTypeAccountMember: FfiConverterRustBuffer {
                 expiresMs: FfiConverterOptionInt64.read(from: &buf), 
                 provisional: FfiConverterBool.read(from: &buf), 
                 home: FfiConverterBool.read(from: &buf), 
-                session: FfiConverterUInt64.read(from: &buf)
+                session: FfiConverterUInt64.read(from: &buf), 
+                grantedBy: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -8613,6 +8709,7 @@ public struct FfiConverterTypeAccountMember: FfiConverterRustBuffer {
         FfiConverterBool.write(value.provisional, into: &buf)
         FfiConverterBool.write(value.home, into: &buf)
         FfiConverterUInt64.write(value.session, into: &buf)
+        FfiConverterSequenceString.write(value.grantedBy, into: &buf)
     }
 }
 
@@ -9201,7 +9298,9 @@ public func FfiConverterTypeByteString_lower(_ value: ByteString) -> RustBuffer 
 
 
 /**
- * A request that needs a fresh `Authorization: Colophon` call built for exactly it.
+ * A request that needs a fresh `Authorization: Colophon` call built for exactly it: the
+ * call's audience, purpose and `args` (`{"method","path","body"}`: the method, `path`, and
+ * `body_sha256`). `exchange_begin_call` builds it from these; `url` is `audience` + `path`.
  */
 public struct CallNeed: Equatable, Hashable {
     public let ticket: UInt64
@@ -9210,16 +9309,20 @@ public struct CallNeed: Equatable, Hashable {
     public let purpose: String
     public let method: HttpMethod
     public let url: String
+    public let path: String
+    public let bodySha256: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(ticket: UInt64, home: String, audience: String, purpose: String, method: HttpMethod, url: String) {
+    public init(ticket: UInt64, home: String, audience: String, purpose: String, method: HttpMethod, url: String, path: String, bodySha256: String) {
         self.ticket = ticket
         self.home = home
         self.audience = audience
         self.purpose = purpose
         self.method = method
         self.url = url
+        self.path = path
+        self.bodySha256 = bodySha256
     }
 
     
@@ -9243,7 +9346,9 @@ public struct FfiConverterTypeCallNeed: FfiConverterRustBuffer {
                 audience: FfiConverterString.read(from: &buf), 
                 purpose: FfiConverterString.read(from: &buf), 
                 method: FfiConverterTypeHttpMethod.read(from: &buf), 
-                url: FfiConverterString.read(from: &buf)
+                url: FfiConverterString.read(from: &buf), 
+                path: FfiConverterString.read(from: &buf), 
+                bodySha256: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -9254,6 +9359,8 @@ public struct FfiConverterTypeCallNeed: FfiConverterRustBuffer {
         FfiConverterString.write(value.purpose, into: &buf)
         FfiConverterTypeHttpMethod.write(value.method, into: &buf)
         FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.bodySha256, into: &buf)
     }
 }
 
@@ -9654,10 +9761,24 @@ public struct Controller: Equatable, Hashable {
     public let hasSlot: Bool
     public let provisional: Bool
     public let suspended: Bool
+    /**
+     * The seq of the entry that added it (1 for the genesis).
+     */
+    public let addedSeq: UInt64
+    /**
+     * The controllers that signed that entry (empty for the genesis or a recording entry).
+     */
+    public let addedBy: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, label: String, roles: [ControllerRole], rolesRaw: [String], key: KeyDescriptorView, form: SignForm, verification: Bool, holder: String?, hasSlot: Bool, provisional: Bool, suspended: Bool) {
+    public init(id: String, label: String, roles: [ControllerRole], rolesRaw: [String], key: KeyDescriptorView, form: SignForm, verification: Bool, holder: String?, hasSlot: Bool, provisional: Bool, suspended: Bool, 
+        /**
+         * The seq of the entry that added it (1 for the genesis).
+         */addedSeq: UInt64, 
+        /**
+         * The controllers that signed that entry (empty for the genesis or a recording entry).
+         */addedBy: [String]) {
         self.id = id
         self.label = label
         self.roles = roles
@@ -9669,6 +9790,8 @@ public struct Controller: Equatable, Hashable {
         self.hasSlot = hasSlot
         self.provisional = provisional
         self.suspended = suspended
+        self.addedSeq = addedSeq
+        self.addedBy = addedBy
     }
 
     
@@ -9697,7 +9820,9 @@ public struct FfiConverterTypeController: FfiConverterRustBuffer {
                 holder: FfiConverterOptionString.read(from: &buf), 
                 hasSlot: FfiConverterBool.read(from: &buf), 
                 provisional: FfiConverterBool.read(from: &buf), 
-                suspended: FfiConverterBool.read(from: &buf)
+                suspended: FfiConverterBool.read(from: &buf), 
+                addedSeq: FfiConverterUInt64.read(from: &buf), 
+                addedBy: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -9713,6 +9838,8 @@ public struct FfiConverterTypeController: FfiConverterRustBuffer {
         FfiConverterBool.write(value.hasSlot, into: &buf)
         FfiConverterBool.write(value.provisional, into: &buf)
         FfiConverterBool.write(value.suspended, into: &buf)
+        FfiConverterUInt64.write(value.addedSeq, into: &buf)
+        FfiConverterSequenceString.write(value.addedBy, into: &buf)
     }
 }
 
@@ -13703,6 +13830,75 @@ public func FfiConverterTypeRejection_lift(_ buf: RustBuffer) throws -> Rejectio
 #endif
 public func FfiConverterTypeRejection_lower(_ value: Rejection) -> RustBuffer {
     return FfiConverterTypeRejection.lower(value)
+}
+
+
+/**
+ * The removal follow-up of one activation that removed controllers (§17.5).
+ */
+public struct RemovalFollowUp: Equatable, Hashable {
+    public let seq: UInt64
+    public let anchorSeq: UInt64
+    public let removed: [String]
+    public let members: [String]
+    public let controllers: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(seq: UInt64, anchorSeq: UInt64, removed: [String], members: [String], controllers: [String]) {
+        self.seq = seq
+        self.anchorSeq = anchorSeq
+        self.removed = removed
+        self.members = members
+        self.controllers = controllers
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RemovalFollowUp: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRemovalFollowUp: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RemovalFollowUp {
+        return
+            try RemovalFollowUp(
+                seq: FfiConverterUInt64.read(from: &buf), 
+                anchorSeq: FfiConverterUInt64.read(from: &buf), 
+                removed: FfiConverterSequenceString.read(from: &buf), 
+                members: FfiConverterSequenceString.read(from: &buf), 
+                controllers: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RemovalFollowUp, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterUInt64.write(value.anchorSeq, into: &buf)
+        FfiConverterSequenceString.write(value.removed, into: &buf)
+        FfiConverterSequenceString.write(value.members, into: &buf)
+        FfiConverterSequenceString.write(value.controllers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRemovalFollowUp_lift(_ buf: RustBuffer) throws -> RemovalFollowUp {
+    return try FfiConverterTypeRemovalFollowUp.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRemovalFollowUp_lower(_ value: RemovalFollowUp) -> RustBuffer {
+    return FfiConverterTypeRemovalFollowUp.lower(value)
 }
 
 
@@ -24555,6 +24751,31 @@ fileprivate struct FfiConverterSequenceTypeRejection: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeRemovalFollowUp: FfiConverterRustBuffer {
+    typealias SwiftType = [RemovalFollowUp]
+
+    public static func write(_ value: [RemovalFollowUp], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRemovalFollowUp.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RemovalFollowUp] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RemovalFollowUp]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRemovalFollowUp.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSavedPart: FfiConverterRustBuffer {
     typealias SwiftType = [SavedPart]
 
@@ -26085,6 +26306,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountaction_steps() != 28543) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_accountcreation_open_engine() != 42819) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_accountcreation_prf_requests() != 11644) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26100,7 +26324,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountcreation_steps() != 58104) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accountcreation_take_result() != 61427) {
+    if (uniffi_colophon_ffi_checksum_method_accountcreation_take_result() != 47557) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountblobwriter_finish() != 2755) {
@@ -26331,6 +26555,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountengine_rejudged() != 45353) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_removal_follow_up() != 53938) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_accountengine_required_blob_fetches() != 25336) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26401,6 +26628,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_exchange_abort() != 46978) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_exchange_begin_call() != 45599) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_finish_move() != 42543) {

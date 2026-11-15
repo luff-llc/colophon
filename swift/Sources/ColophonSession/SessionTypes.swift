@@ -114,6 +114,14 @@ public struct HomeConfiguration: Sendable {
     public var isAllowed: Bool { HomeLimits.isAllowed(endpoint, allowingLoopbackHTTP: allowsLoopbackHTTP) }
 }
 
+/// Who may read an account's history at its homes (`policy.history`, spec §13.4).
+public enum HistoryAccess: String, Sendable {
+    /// Anyone.
+    case everyone = "public"
+    /// Callers presenting a valid call: current members and the controllers §13.4 names.
+    case members
+}
+
 public struct SessionConfiguration: Sendable {
     public let memberLabel: String
     public let memberKind: MemberKind
@@ -144,13 +152,19 @@ public struct SessionConfiguration: Sendable {
     public let now: @Sendable () -> Date
     /// `recoveryDelay` for a new account, in seconds (`policy.recoveryDelay`; spec §18: at least 3,600 with a home).
     public let recoveryDelay: Int?
+    /// `policy.history` for a new account (spec §13.4): who may read the history at a home. Nil: the default policy's.
+    public let history: HistoryAccess?
+    /// `policy.headQuorum` for a new account (spec §12.3): how many homes' fresh heads a call needs. Nil: the default.
+    public let headQuorum: Int?
     /// Whether the owner key alone is enough to sign the controller's own steps (no other control key).
     public init(memberLabel: String, memberKind: MemberKind = .app, namespaces: [String], access: [Access] = [.read, .write],
                 libraryNamespaces: [String]? = nil, location: StorageLocation, privateContainer: URL,
                 keys: any AsyncKeyProvider, ownerController: any AsyncKeyProvider, recoveryKeys: (any AsyncKeyProvider)? = nil,
                 enrollment: EnrollmentPolicy = .pairing, homes: [HomeConfiguration] = [], createWithoutHome: Bool = false, additionalControllers: [AdditionalController] = [],
                 deviceSecrets: any DeviceSecretStore = KeychainDeviceSecrets(), recoveryDelay: Int? = nil,
+                history: HistoryAccess? = nil, headQuorum: Int? = nil,
                 now: @escaping @Sendable () -> Date = { Date() }) {
+        self.history = history; self.headQuorum = headQuorum
         self.ownerController = ownerController; self.homes = homes; self.createWithoutHome = createWithoutHome
         self.additionalControllers = additionalControllers
         self.memberLabel = memberLabel; self.memberKind = memberKind; self.namespaces = namespaces

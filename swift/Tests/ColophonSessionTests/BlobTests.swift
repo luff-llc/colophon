@@ -49,22 +49,5 @@ import ColophonSession
         #expect(delivered.isEmpty)
     }
 
-    @Test func requiredBlobsArriveWithTheSyncAndOptionalOnesOnRequest() async throws {
-        let (home, first, second) = try await twoDevicesOnAHome()
-        let required = bytes(90_000, seed: 1), optional = bytes(80_000, seed: 2)
-        let a = try await first.session.putBlob(required, namespace: "reading.saved", mediaType: "text/plain", reference: "a", required: true)
-        let b = try await first.session.putBlob(optional, namespace: "reading.saved", mediaType: "text/plain", reference: "b", required: false)
-        #expect(await first.session.syncNow())
-        #expect(home.holds(prefix: "blobs/").count >= 4, "the home holds the chunks")
-        #expect(await second.session.syncNow())
-        await second.session.refresh()
-        #expect(await second.session.blobAvailability(namespace: "reading.saved", digest: a.digest) == .available, "a required blob is downloaded eagerly")
-        #expect(try await second.session.blobData(namespace: "reading.saved", digest: a.digest) == required)
-        guard case .missing = await second.session.blobAvailability(namespace: "reading.saved", digest: b.digest) else {
-            Issue.record("an optional blob must not be downloaded before it is asked for"); return
-        }
-        try await second.session.prefetchBlob(namespace: "reading.saved", digest: b.digest)
-        #expect(await second.session.blobAvailability(namespace: "reading.saved", digest: b.digest) == .available)
-        #expect(try await second.session.blobData(namespace: "reading.saved", digest: b.digest) == optional)
-    }
+    // Required and optional blobs through a home: `RelayJourneyTests`, against the real relay.
 }
