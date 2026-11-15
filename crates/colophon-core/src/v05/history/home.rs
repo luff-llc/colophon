@@ -189,6 +189,16 @@ impl HomeState {
         next.serving = serving;
         Ok(next)
     }
+    /// The home's member ID.
+    pub fn home_id(&self) -> &str {
+        &self.home
+    }
+    /// The verifier state this home holds: its verified history, the pending objects and the
+    /// heads it keeps (`Persisted::objects`), for a host that serves them, builds recording
+    /// entries from them or verifies calls over them. Read-only: nothing here admits anything.
+    pub fn persisted(&self) -> Result<Persisted> {
+        Persisted::from_bytes(&self.checkpoint)
+    }
     /// Persist atomically alongside the caller's committed history.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(|e| malformed(e.to_string()))
@@ -1111,6 +1121,83 @@ pub fn finish_receipt(
     let mut next = result.state;
     next.drafts.remove(object);
     Ok(next)
+}
+
+/// What a first upload leaves a home with (§13.1 "First upload").
+#[derive(Clone, Debug)]
+pub enum FirstUpload {
+    /// The entries so far verify, but this home is not yet appointed in them. They are the
+    /// whole of what the home holds; the host keeps them and the next entry continues them.
+    Held(Vec<Vec<u8>>),
+    /// The entry appointed this home: from here on the home admits with [`admit`].
+    Home(Box<HomeState>),
+}
+
+/// Admit one entry of an account's first upload to a home that is not yet in its history
+/// (§13.1 "First upload": a genesis may be followed in one upload by the transition appointing
+/// the home and its `activate`). `held` is every entry the home holds so far, seq 1 upward.
+/// The entry is checked as [`admit`] checks an entry (it must verify; `refused:early` more than
+/// 60 s ahead of the clock; `refused:late` for an immediate entry more than 300 s behind it),
+/// and must continue `held` or equal what is held at its seq (`Refusal::Conflict` otherwise).
+/// The home's serving history starts now: it did not serve this account before. Once the history
+/// shows this home as a current home, the result is its [`HomeState`].
+pub fn admit_first(
+    home: &str,
+    held: &[Vec<u8>],
+    incoming: &[u8],
+    now: &str,
+) -> AdmitResult<FirstUpload> {
+    let now_ms = date(now, "home clock")?;
+    let entry = parse_entry(incoming)?;
+    let have = held.len() as u64;
+    if entry.seq <= have {
+        let prior = parse_entry(&held[(entry.seq - 1) as usize])?;
+        if prior.env.digest == entry.env.digest {
+            return Ok(FirstUpload::Held(held.to_vec()));
+        }
+        return Err(Refusal::Conflict);
+    }
+    if entry.seq != have + 1 {
+        return Err(Refusal::Conflict);
+    }
+    let mut entries = held.to_vec();
+    entries.push(incoming.to_vec());
+    let objects = Objects {
+        entries,
+        ..Default::default()
+    };
+    let verdict = verify_history(&objects, &Persisted::default(), now_ms.max(entry.issued));
+    if let Some(stop) = verdict.stop {
+        return Err(stop_failure(stop).into());
+    }
+    if entry.issued > now_ms.saturating_add(60_000) {
+        return Err(Refusal::Early);
+    }
+    let recording = matches!(
+        entry.kind.as_str(),
+        "activate" | "vetoed" | "final" | "successionVetoed"
+    );
+    if !recording && entry.issued < now_ms.saturating_sub(WINDOW) {
+        return Err(Refusal::Late);
+    }
+    let appointed = verdict.state.as_ref().is_some_and(|st| {
+        st.current_homes().iter().any(|m| {
+            m.request.member_id() == home && m.expires_ms.is_none_or(|end| now_ms <= end)
+        })
+    });
+    if !appointed {
+        return Ok(FirstUpload::Held(objects.entries));
+    }
+    let serving = vec![ServingInterval {
+        from_ms: now_ms,
+        through_ms: None,
+    }];
+    Ok(FirstUpload::Home(Box::new(HomeState::new(
+        home.to_string(),
+        &objects,
+        serving,
+        now_ms,
+    )?)))
 }
 
 /// POST pending batch, 1–16 objects, checked in request order. Refusals are per object.
