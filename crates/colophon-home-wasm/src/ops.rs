@@ -821,6 +821,14 @@ fn check_record(req: &Value) -> R<Value> {
                         && &header.author == author
                         && &header.namespace == namespace
                 }
+                Kind::History => {
+                    header.live.is_some()
+                        && path
+                            == format!(
+                                "history/{}/{}/{:012}-{}.json",
+                                header.author, header.namespace, header.clock, header.id
+                            )
+                }
                 _ => header.check_path(path).is_ok(),
             };
             if !path_ok {

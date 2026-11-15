@@ -1,9 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Command-line entry for the reference relay.
 //   node relay/server.js                     start with env/config settings
 //   node relay/server.js --config file.json  start with a JSON config file
 //   node relay/server.js token               print a new bearer token and its SHA-256
 import { readFileSync } from 'node:fs';
+import { webcrypto } from 'node:crypto';
 import { newToken, startRelay } from './relay.js';
 
 function loadConfig(argv, env) {
@@ -20,7 +21,21 @@ function loadConfig(argv, env) {
   for (const name of (env.COLOPHON_RELAY_OPEN ?? '').split(',').filter(Boolean)) libraries[name] = { open: true };
   const tls = config.tls ?? (env.COLOPHON_RELAY_TLS_CERT && env.COLOPHON_RELAY_TLS_KEY
     ? { certFile: env.COLOPHON_RELAY_TLS_CERT, keyFile: env.COLOPHON_RELAY_TLS_KEY } : undefined);
+  // Home slots (0.5): COLOPHON_RELAY_HOME_SLOTS="slot=https://base,…" names each slot's endpoint URL.
+  for (const pair of (env.COLOPHON_RELAY_HOME_SLOTS ?? '').split(',').filter(Boolean)) {
+    const at = pair.indexOf('=');
+    if (at < 1) throw new Error('COLOPHON_RELAY_HOME_SLOTS entries are slot=base');
+    libraries[pair.slice(0, at)] = { ...(libraries[pair.slice(0, at)] ?? {}), home: true, base: pair.slice(at + 1) };
+  }
+  const keyText = env.COLOPHON_HOME_KEY ?? (env.COLOPHON_HOME_KEY_FILE ? readFileSync(env.COLOPHON_HOME_KEY_FILE, 'utf8') : config.home?.keyFile ? readFileSync(config.home.keyFile, 'utf8') : undefined);
+  const wasm = env.COLOPHON_HOME_WASM ?? config.home?.wasm;
+  // A test hook: the clock is the number of milliseconds in this file. Never set in production.
+  const clockFile = env.COLOPHON_RELAY_CLOCK_FILE;
   return {
+    home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
+    clock: clockFile ? () => Number(readFileSync(clockFile, 'utf8').trim()) : undefined,
+    tickMs: Number(env.COLOPHON_RELAY_TICK_MS ?? config.tickMs ?? 2000),
+    resolve: config.resolve,
     host: env.COLOPHON_RELAY_HOST ?? config.host ?? '127.0.0.1',
     port: Number(env.COLOPHON_RELAY_PORT ?? config.port ?? 8787),
     dataDir: env.COLOPHON_RELAY_DATA ?? config.dataDir ?? './relay-data',
@@ -30,7 +45,11 @@ function loadConfig(argv, env) {
   };
 }
 
-if (process.argv[2] === 'token') {
+if (process.argv[2] === 'home-key') {
+  // A new home key as a private JWK. Keep it secret: it signs this home's receipts and heads.
+  const pair = await webcrypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  process.stdout.write(JSON.stringify(await webcrypto.subtle.exportKey('jwk', pair.privateKey)) + '\n');
+} else if (process.argv[2] === 'token') {
   const { token, tokenSha256 } = newToken();
   process.stdout.write(JSON.stringify({ token, tokenSha256 }, null, 2) + '\n');
 } else {
