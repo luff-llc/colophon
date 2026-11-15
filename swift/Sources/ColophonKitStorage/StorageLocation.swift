@@ -6,12 +6,15 @@ public enum StorageLocation: Sendable {
     case iCloud(container: String, libraryName: String)
     case folder(URL)
     case memory(MemoryMedium)
+    /// A host-provided medium (a custom store, or a test's instrumented one). It must honour the `RecordMedium` contract.
+    case medium(any RecordMedium)
 
     /// Establishes this process's container access before using a persisted location. A failure never
     /// falls back to a private empty library.
     public func resolve() throws -> any RecordMedium {
         switch self {
         case .memory(let medium): return medium
+        case .medium(let medium): return medium
         case .privateContainer(let home): return FolderMedium(folder: home.appendingPathComponent("Library"))
         case .folder(let url): return FolderMedium(folder: url)
         case .appGroup(let identifier, let name):

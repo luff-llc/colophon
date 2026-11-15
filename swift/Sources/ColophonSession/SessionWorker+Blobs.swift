@@ -1,6 +1,11 @@
 import CryptoKit
 import Foundation
 
+enum BlobStagePlan: Sendable {
+    case published(BlobManifestInfo)
+    case write(AccountBlobWriter, any RecordMedium)
+}
+
 struct StagedBlob: Sendable {
     let digest: String
     let size: Int
@@ -10,27 +15,15 @@ struct StagedBlob: Sendable {
 }
 
 extension SessionWorker {
-    /// Stores the encrypted chunks of `input` before any manifest is published, or finds that the
-    /// content already is published. The chunks are immutable files named by their ciphertext digest.
-    func stageBlob(namespace: String, mediaType: String, input: BlobInput) async throws -> StagedBlob {
+    /// The engine half of an upload, inside the gate and quick: the published manifest when identical content is
+    /// already published, else a blob writer and the medium to store its chunks in. The chunks themselves are
+    /// encrypted and stored outside the gate (`BlobIO.store`), so a large upload holds no other session operation.
+    func beginBlobStage(namespace: String, mediaType: String, digest: String) async throws -> BlobStagePlan {
         try await inGate {
             let engine = try requireEngine()
-            var hasher = SHA256(); var size = 0
-            try await input.forEachChunk { chunk in hasher.update(data: chunk); size += chunk.count }
-            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-            if let existing = try? await blobManifestLocked(engine, namespace: namespace, digest: digest) {
-                return StagedBlob(digest: digest, size: Int(existing.size), mediaType: existing.mediaType, manifest: nil)
-            }
+            if let existing = try? await blobManifestLocked(engine, namespace: namespace, digest: digest) { return .published(existing) }
             let writer = try await engine.run { engine in try withEntropy(32) { try engine.beginBlob(namespace: namespace, mediaType: mediaType, entropy: $0) } }
-            var actual = SHA256(); var count = 0
-            try await input.forEachChunk { chunk in
-                actual.update(data: chunk); count += chunk.count
-                let sealed = try writer.push(plaintext: chunk)
-                try await persistStores([Store(path: sealed.path, bytes: sealed.bytes)])
-            }
-            guard actual.finalize().map({ String(format: "%02x", $0) }).joined() == digest, count == size else { throw BlobError.digestMismatch }
-            let manifest = Data(try writer.finish().utf8)
-            return StagedBlob(digest: digest, size: size, mediaType: mediaType, manifest: manifest)
+            return .write(writer, try storage())
         }
     }
 

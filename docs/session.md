@@ -101,6 +101,16 @@ The blob API keeps 0.4's names (`putBlob`, `blobAvailability`, `blobData`, `blob
 `downloadRequiredBlobs`, `setBlobReference`). Chunks are written before the manifest is published; a required blob arrives with
 the exchange, an optional one on `prefetchBlob`. `collectBlobGarbage` does nothing: the core collects none.
 
+No file work runs on the main actor or inside the session's gate. `putBlob(contentsOf:)` reads the file twice, 64 KiB at a
+time, on a background executor (once to address it, once to encrypt and store each chunk); only `begin_blob` and the final
+publish take the gate. `blobFile` is `@concurrent`: it pulls verified chunks one at a time (`blobStream` reads the next chunk
+only when asked, so a slow consumer never makes it buffer) and writes them to a private file that is moved into place after
+the digest checks. Both take an optional `progress` callback (`BlobProgress`: stage, bytes done, total), called off the main
+actor. `importRequest(from:)` reads the file off the main actor too, at most 40 MiB. The session's worker runs on its own
+serial queue, so the medium's synchronous record I/O never occupies the main actor or a cooperative-pool thread. The test
+`MainActorTests` moves a 200 MiB blob in and out with a 5 ms main-actor timer running (worst lateness about 6 ms, footprint
+growth about 35 MiB), and the blob executor stops on `dispatchPrecondition` if it is ever called on the main thread.
+
 ## What a person must see (spec §17.5, §18)
 
 `session.notices` (`SessionNotices`):

@@ -39,7 +39,7 @@ public actor ColophonEngine {
     }
 
     private init(label: String, account: String, identity: AccountIdentity) {
-        queue = DispatchSerialQueue(label: label, qos: .userInitiated)
+        queue = DispatchSerialQueue(label: label, qos: .userInitiated, autoreleaseFrequency: .workItem)
         self.account = account; self.identity = identity
     }
 

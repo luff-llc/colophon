@@ -5,8 +5,10 @@ import Foundation
 final class MediumSource: HostSource, @unchecked Sendable {
     let medium: any RecordMedium
     init(_ medium: any RecordMedium) { self.medium = medium }
-    func read(path: String) throws -> Data { try medium.read(path) }
-    func readBlob(path: String) throws -> Data { try medium.readBlob(path) }
+    // Each callback in its own autorelease pool: Foundation's file reads autorelease, and the engine's queue runs a
+    // whole engine call (many callbacks) as one job.
+    func read(path: String) throws -> Data { try autoreleasepool { try medium.read(path) } }
+    func readBlob(path: String) throws -> Data { try autoreleasepool { try medium.readBlob(path) } }
 }
 
 struct SessionSnapshot: Sendable {
@@ -39,6 +41,10 @@ struct SessionJournalFile: Codable, Sendable {
 /// operations across suspensions, including a passkey prompt and the persistence of the stores a
 /// finish returned: the engine is never ahead of the disk when another operation reads it.
 actor SessionWorker {
+    /// The worker's own serial queue is its executor (as `ColophonEngine` has one): the medium's synchronous record I/O
+    /// and the checkpoint cache run here, never on the main actor and never on a cooperative-pool thread.
+    private let queue = DispatchSerialQueue(label: "org.luff.colophon.session", qos: .userInitiated, autoreleaseFrequency: .workItem)
+    nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     let configuration: SessionConfiguration
     private var memberKeys: any AsyncKeyProvider
     private var medium: (any RecordMedium)?

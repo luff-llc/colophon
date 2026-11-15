@@ -170,8 +170,9 @@ import Observation
         do { let snapshot = try await worker.rejoin(keys: keys); guard lease == context else { return }; apply(snapshot); await startWatching(); startSyncLoop() }
         catch { if lease == context { fail(error) } }
     }
-    /// Takes a request that arrived out of band (a file, AirDrop, a code) and shows it for approval.
-    public func importRequest(from url: URL) async throws { try await importRequest(try Data(contentsOf: url)) }
+    /// Takes a request that arrived out of band (a file, AirDrop, a code) and shows it for approval. The file is read
+    /// on a background executor, never on the main actor.
+    public func importRequest(from url: URL) async throws { try await importRequest(try await BlobIO.readRequest(url)) }
     public func importRequest(_ data: Data) async throws {
         await restore()
         let lease = context
