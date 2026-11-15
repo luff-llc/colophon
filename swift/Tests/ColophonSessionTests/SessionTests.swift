@@ -109,7 +109,8 @@ import ColophonSession
 @MainActor struct RelaunchTests {
     /// A session over a real folder: created, written to, flushed, then a new process-like session reopens it from the
     /// folder and the sealed saved state (the device key and the member's key persist, as the Keychain does).
-    @Test func aSessionOverARealFolderSurvivesARelaunchAndResumes() async throws {
+    @Test(.enabled(if: FileCoordinationProbe.available, FileCoordinationProbe.reason))
+    func aSessionOverARealFolderSurvivesARelaunchAndResumes() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let library = root.appendingPathComponent("library"), privateDir = root.appendingPathComponent("private")

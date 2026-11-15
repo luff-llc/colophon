@@ -65,7 +65,8 @@ struct FolderMediumTests {
         #expect(throws: StorageError.self) { _ = try medium.read("authority/00000002.json") }
     }
 
-    @Test func theCoordinatedPathWorksAndAWriteWakesTheObserver() async throws {
+    @Test(.enabled(if: FileCoordinationProbe.available, FileCoordinationProbe.reason))
+    func theCoordinatedPathWorksAndAWriteWakesTheObserver() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let medium = FolderMedium(folder: root)
         var iterator = medium.changes().makeAsyncIterator()
