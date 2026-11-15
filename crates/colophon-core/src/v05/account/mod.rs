@@ -147,7 +147,7 @@ mod stored;
 mod unlock;
 
 pub use action::{
-    ActionInfo, AddController, AddMode, CallTarget, Change, Finished, KeyringEdit, PendingAction,
+    ActionInfo, AddController, AddMode, CallTarget, Change, Finished, HomeCall, KeyringEdit, PendingAction,
     RevokeKeep, SignerChoice,
 };
 pub use create::{default_policy, CreateParams, CreateProgress, Creation};

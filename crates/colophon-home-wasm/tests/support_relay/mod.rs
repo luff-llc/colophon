@@ -583,10 +583,10 @@ pub fn fresh_request_id() -> [u8; 32] {
     id
 }
 
-/// A sync pass against real relays, with real calls. The engine's `NeedCall` names the
-/// audience, purpose, method and URL but not the request body, so the call is built when the
-/// request itself is in hand (method, path relative to the base, body digest) and attached in
-/// place of the placeholder the engine was given.
+/// A sync pass against real relays, with real calls: for each `NeedCall` the engine builds the
+/// call for exactly the request it will send (`exchange_begin_call`: audience, purpose, method,
+/// path and body digest are the engine's), the host signs it with the engine principal's key, and
+/// `finish_write` returns it after the signer's own judgement by the home's rule.
 pub fn relay_pass<S: colophon_core::v05::engine::RecordSource>(
     e: &mut colophon_core::v05::engine::Engine<S>,
     src: &MemSource,
@@ -596,7 +596,6 @@ pub fn relay_pass<S: colophon_core::v05::engine::RecordSource>(
     now_ms: i64,
 ) -> Vec<colophon_core::v05::engine::exchange::Fault> {
     use colophon_core::v05::engine::exchange::Step;
-    const PLACEHOLDER: &[u8] = b"call-built-with-the-request";
     let mut faults = Vec::new();
     e.advance(now_ms).unwrap();
     e.refresh(src.listing()).unwrap();
@@ -604,9 +603,8 @@ pub fn relay_pass<S: colophon_core::v05::engine::RecordSource>(
         match e.exchange_next(home).unwrap() {
             Step::Done => return faults,
             Step::Waiting => panic!("the loop answers every request"),
-            Step::NeedCall(n) => e.exchange_provide_call(home, n.ticket, PLACEHOLDER).unwrap(),
-            Step::Request(mut r) => {
-                attach_call(e.account(), host, wire, &mut r, PLACEHOLDER, now_ms);
+            Step::NeedCall(n) => provide_call(e, host, home, &n),
+            Step::Request(r) => {
                 let a = wire.call(host, &r, now_ms);
                 let report = e.exchange_answer(home, r.ticket, a).unwrap();
                 for (p, b) in report.store {
@@ -629,13 +627,11 @@ pub fn relay_drain<S: colophon_core::v05::engine::RecordSource>(
     now_ms: i64,
 ) -> Vec<colophon_core::v05::engine::exchange::Fault> {
     use colophon_core::v05::engine::exchange::Step;
-    const PLACEHOLDER: &[u8] = b"call-built-with-the-request";
     let mut faults = Vec::new();
     loop {
         match e.exchange_next(home).unwrap() {
-            Step::NeedCall(n) => e.exchange_provide_call(home, n.ticket, PLACEHOLDER).unwrap(),
-            Step::Request(mut r) => {
-                attach_call(e.account(), host, wire, &mut r, PLACEHOLDER, now_ms);
+            Step::NeedCall(n) => provide_call(e, host, home, &n),
+            Step::Request(r) => {
                 let a = wire.call(host, &r, now_ms);
                 let report = e.exchange_answer(home, r.ticket, a).unwrap();
                 src.publish_stores(&report.store);
@@ -646,21 +642,21 @@ pub fn relay_drain<S: colophon_core::v05::engine::RecordSource>(
     }
 }
 
-/// Replace the placeholder call on `r` with a real one bound to `r`.
-pub fn attach_call(account: &Account, host: &Host, wire: &RealRelay, r: &mut Request, placeholder: &[u8], now_ms: i64) {
-    let marker = format!("Colophon {}", URL_SAFE_NO_PAD.encode(placeholder));
-    let Some(h) = r.headers.iter_mut().find(|(k, v)| k == "Authorization" && *v == marker) else {
-        return;
-    };
-    let relay = *wire.relays.iter().find(|x| r.url.starts_with(&x.base)).unwrap();
-    let method = match r.method {
-        Method::Get => "GET",
-        Method::Post => "POST",
-        Method::Put => "PUT",
-    };
-    let path = r.url.strip_prefix(&relay.base).unwrap();
-    let call = home_call(host, account, &relay.base, method, path, &r.body, now_ms, fresh_request_id());
-    h.1 = format!("Colophon {}", URL_SAFE_NO_PAD.encode(&call));
+/// Build, sign and give the call a `NeedCall` names, as a host does.
+pub fn provide_call<S: colophon_core::v05::engine::RecordSource>(
+    e: &mut colophon_core::v05::engine::Engine<S>,
+    host: &Host,
+    home: &str,
+    n: &colophon_core::v05::engine::exchange::CallNeed,
+) {
+    let me = e.account().identity().id().to_string();
+    let key = host.ids[&me].public().signing;
+    let action = e
+        .exchange_begin_call(home, n.ticket, &key, fresh_request_id())
+        .unwrap();
+    let sigs = host.sign(action.steps());
+    let w = e.finish_write(action, sigs).expect("the engine's own check of its call");
+    e.exchange_provide_call(home, n.ticket, &w.artifact.unwrap()).unwrap();
 }
 
 /// A test directory under the system's temporary directory, removed when dropped (also after a

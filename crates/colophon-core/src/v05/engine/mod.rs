@@ -585,6 +585,50 @@ impl<S: RecordSource> Engine<S> {
         Ok(e)
     }
 
+    /// Open an engine over the stores a creation returned, keeping the created account's
+    /// unlocked state (its seed and epoch keys), so the session that created the account is
+    /// unlocked at once and a passkey owner is asked once at first run. The host has stored
+    /// [`Account`]'s objects and records first and lists them: the engine opens over that listing
+    /// as [`Engine::open`] does (cold), checks that what it read is exactly what the creation
+    /// made (the same identity, account, verified head and object set; else `malformed` and
+    /// nothing is kept), then takes the created account in place of the one it opened and loads
+    /// the records. A creation is not a sealed state, so there is nothing to resume.
+    pub fn open_created(
+        source: S,
+        listing: Vec<String>,
+        created: Account,
+        options: EngineOptions,
+        now_ms: i64,
+    ) -> Result<Self> {
+        let me = created.identity().clone();
+        let mut e = Self::open(source, listing, me, options, None, now_ms)?;
+        let same_set = |a: &Objects, b: &Objects| {
+            let sorted = |v: &[Vec<u8>]| {
+                let mut v = v.to_vec();
+                v.sort();
+                v.dedup();
+                v
+            };
+            sorted(&a.entries) == sorted(&b.entries)
+                && sorted(&a.pending) == sorted(&b.pending)
+                && sorted(&a.predecessor) == sorted(&b.predecessor)
+        };
+        require(
+            created.id() == e.account.id()
+                && created.head() == e.account.head()
+                && same_set(created.objects(), e.account.objects()),
+            "the source does not hold exactly what the creation made",
+        )?;
+        let mut created = created;
+        created.advance(now_ms)?;
+        if !e.options.namespaces.is_empty() {
+            created.set_read_scope(e.options.namespaces.clone())?;
+        }
+        e.account = created;
+        e.load()?;
+        Ok(e)
+    }
+
     fn scope(&self) -> Vec<String> {
         let mut s = self.options.namespaces.clone();
         s.sort();

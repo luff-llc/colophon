@@ -68,11 +68,13 @@ pub enum Method {
 pub struct Request {
     /// The ticket to answer with.
     pub ticket: u64,
-    /// The home it is for.
+    /// The home whose pass it belongs to (answer it with this home).
     pub home: String,
     /// The method.
     pub method: Method,
-    /// The full URL.
+    /// The full URL. It is at `home`'s base, except for a `GET …/head` of another home of the
+    /// account (public, carrying no credential), fetched when `headQuorum` is above 1 because a
+    /// call needs that many homes' fresh heads: the host sends it to the home its URL names.
     pub url: String,
     /// Headers, including `Authorization` when the engine holds a credential for it.
     pub headers: Vec<(String, String)>,
@@ -228,8 +230,12 @@ pub enum Step {
     Done,
 }
 
-/// What one request needs a call for: the exact audience, purpose and request. A call given
-/// for this ticket cannot be attached to another request, home or purpose.
+/// What one request needs a call for: everything the host signs. The request is built by the
+/// engine and is already fixed when it asks, so a call made from these fields is exactly the
+/// call the home checks (§14): audience `audience`, purpose `purpose`, and `args` exactly
+/// [`crate::v05::calls::home_call_args`]`(method, path, body_sha256)`.
+/// [`Engine::exchange_begin_call`] builds it. A call given for this ticket cannot be attached
+/// to another request, home or purpose.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallNeed {
     /// The ticket the call is bound to.
@@ -242,13 +248,33 @@ pub struct CallNeed {
     pub purpose: String,
     /// The request's method.
     pub method: Method,
-    /// The request's URL.
+    /// The request's URL: `audience` followed by `path`.
     pub url: String,
+    /// The path and query relative to the home's base, exactly as the request will send it.
+    pub path: String,
+    /// The lowercase hex SHA-256 of the request's body (of the empty string when none).
+    pub body_sha256: String,
+}
+impl Method {
+    /// The method's name, upper case.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Tag {
     Head,
+    /// The head of another home of the account (`peer`, at its `base`): a call needs fresh heads
+    /// from `headQuorum` homes (§12.3 step 4), fetched before anything that needs a call.
+    PeerHead {
+        peer: String,
+        base: String,
+    },
     PullAuthority,
     PushAuthority {
         last: u64,
@@ -337,6 +363,9 @@ struct Home {
     /// A request waiting for its call, and the call given for it.
     awaiting: Option<(u64, Queued)>,
     provided: Option<(u64, String)>,
+    /// This pass's head, when it names an entry the account does not hold yet: judged again once
+    /// the authority pull is complete (§13.3: the history is fetched further if needed).
+    ahead: Option<Vec<u8>>,
     /// The request in flight, and whether it carried a call (for the 401 retry).
     last_item: Option<Queued>,
     carried_call: bool,
@@ -369,7 +398,7 @@ struct Home {
 impl Default for Home {
     fn default() -> Self {
         Self {
-            phase: Phase::PullAuthority,
+            phase: Phase::Head,
             queue: VecDeque::new(),
             pending_after: 0,
             changes_cursor: None,
@@ -383,6 +412,7 @@ impl Default for Home {
             require_write: false,
             awaiting: None,
             provided: None,
+            ahead: None,
             last_item: None,
             carried_call: false,
             pass_pages: 0,
@@ -464,7 +494,7 @@ pub struct State {
 fn is_public(tag: &Tag) -> bool {
     matches!(
         tag,
-        Tag::Head | Tag::PushAuthority { .. } | Tag::PushPending { .. }
+        Tag::Head | Tag::PeerHead { .. } | Tag::PushAuthority { .. } | Tag::PushPending { .. }
     )
 }
 /// The sequence number of an authority entry's body, for naming a predecessor file.
@@ -483,11 +513,7 @@ fn entry_seq(bytes: &[u8]) -> Option<u64> {
 /// Predecessor entries pulled or pushed in one pass.
 pub const MAX_PREDECESSOR_PER_PASS: usize = 256;
 fn purpose_of(method: Method) -> String {
-    if method == Method::Get {
-        "colophon.home.read".into()
-    } else {
-        "colophon.home.write".into()
-    }
+    crate::v05::calls::home_call_purpose(method.as_str()).into()
 }
 fn base_of(endpoint: &str) -> String {
     endpoint.trim_end_matches('/').to_string()
@@ -554,6 +580,48 @@ impl<S: RecordSource> Engine<S> {
         Ok(())
     }
 
+    /// Prepare the call for the request a `NeedCall` named (`ticket`), signed by this session's
+    /// own `key`: everything in it is read from the request the engine built (audience, purpose,
+    /// method, path and body digest), so it cannot be bound to anything else. The host signs its
+    /// one step, gets the envelope from [`Engine::finish_write`] (`artifact`; the signer's own
+    /// judgement by the home's rule) and gives it to [`Engine::exchange_provide_call`].
+    pub fn exchange_begin_call(
+        &self,
+        home: &str,
+        ticket: u64,
+        key: &[u8],
+        request_id: [u8; 32],
+    ) -> Result<crate::v05::account::PendingAction> {
+        self.check_ready()?;
+        let h = self
+            .exchange
+            .homes
+            .get(home)
+            .ok_or_else(|| malformed("no pass with this home"))?;
+        let item = match &h.awaiting {
+            Some((t, item)) if *t == ticket => item,
+            _ => {
+                return Err(malformed(
+                    "no request of this home is waiting for a call under this ticket",
+                ))
+            }
+        };
+        let endpoint = self
+            .account
+            .homes()
+            .into_iter()
+            .find(|i| i.id == home)
+            .and_then(|i| i.endpoints.first().map(|e| base_of(e)))
+            .ok_or_else(|| malformed("the home names no endpoint"))?;
+        let call = crate::v05::account::HomeCall {
+            audience: endpoint,
+            method: item.1.as_str().to_string(),
+            path: item.2.clone(),
+            body_sha256: super::hex(&super::sha(&item.3)),
+        };
+        self.account.begin_home_call(key, &call, request_id)
+    }
+
     /// The next request of a pass with `home`, a request that needs its own call, whether one is
     /// outstanding, or that the pass is done. A pass is strictly ordered: authority before
     /// records before live state before blobs. After `Done` the next call starts a new pass.
@@ -593,6 +661,8 @@ impl<S: RecordSource> Engine<S> {
                     purpose: purpose_of(item.1),
                     method: item.1,
                     url: format!("{endpoint}{}", item.2),
+                    path: item.2.clone(),
+                    body_sha256: super::hex(&super::sha(&item.3)),
                 };
                 h.awaiting = Some((ticket, item));
                 return Ok(Step::NeedCall(need));
@@ -620,13 +690,14 @@ impl<S: RecordSource> Engine<S> {
             // The queue is empty: plan the next phase, or finish.
             let phase = h.phase;
             if phase == Phase::Done {
-                h.phase = Phase::PullAuthority;
+                h.phase = Phase::Head;
                 h.halted = false;
                 h.stalls = 0;
                 h.verified_live.clear();
                 return Ok(Step::Done);
             }
-            if phase == Phase::PullAuthority {
+            if phase == Phase::Head {
+                h.ahead = None;
                 h.pass_pages = 0;
                 h.pass_entries = 0;
                 h.pass_seen.clear();
@@ -638,8 +709,8 @@ impl<S: RecordSource> Engine<S> {
                 h.verified_live.clear();
             }
             h.phase = match phase {
-                Phase::PullAuthority => Phase::Head,
-                Phase::Head => Phase::PushAuthority,
+                Phase::Head => Phase::PullAuthority,
+                Phase::PullAuthority => Phase::PushAuthority,
                 Phase::PushAuthority => Phase::Pending,
                 Phase::Pending => Phase::Changes,
                 Phase::Changes => Phase::PushBlobs,
@@ -669,7 +740,8 @@ impl<S: RecordSource> Engine<S> {
             h.last_item = None;
             h.carried_call = false;
             h.queue.clear();
-            h.phase = Phase::PullAuthority;
+            h.phase = Phase::Head;
+            h.ahead = None;
             h.halted = false;
             h.stalls = 0;
             h.verified_live.clear();
@@ -687,8 +759,14 @@ impl<S: RecordSource> Engine<S> {
         call: Option<String>,
     ) -> Request {
         let (tag, method, path, body, mut headers) = item.clone();
+        let endpoint = match &tag {
+            Tag::PeerHead { base, .. } => base.clone(),
+            _ => endpoint.to_string(),
+        };
         let h = self.home_mut(home);
-        if let Some(c) = &call {
+        if matches!(tag, Tag::PeerHead { .. }) {
+            // Another home's public head: no credential of this home goes with it.
+        } else if let Some(c) = &call {
             headers.push(("Authorization".into(), format!("Colophon {c}")));
         } else if let Some(b) = h.bearer.clone() {
             headers.push(("Authorization".into(), format!("Bearer {b}")));
@@ -730,7 +808,29 @@ impl<S: RecordSource> Engine<S> {
     fn plan(&mut self, home: &str, phase: Phase) -> Result<()> {
         match phase {
             Phase::Head => {
-                self.enqueue(home, Tag::Head, Method::Get, "/head".into(), vec![], vec![])
+                self.enqueue(home, Tag::Head, Method::Get, "/head".into(), vec![], vec![]);
+                // With `headQuorum` above 1 a call needs other homes' heads too: they are public,
+                // and fetched here, before anything that may need a call.
+                if self.account.policy().head_quorum > 1 {
+                    for peer in self.account.homes() {
+                        if peer.id == home {
+                            continue;
+                        }
+                        if let Some(base) = peer.endpoints.first().map(|e| base_of(e)) {
+                            self.enqueue(
+                                home,
+                                Tag::PeerHead {
+                                    peer: peer.id.clone(),
+                                    base,
+                                },
+                                Method::Get,
+                                "/head".into(),
+                                vec![],
+                                vec![],
+                            );
+                        }
+                    }
+                }
             }
             Phase::PullAuthority => {
                 let after = self.account.head().0;
@@ -1502,6 +1602,11 @@ impl<S: RecordSource> Engine<S> {
         // A 401/403: a home that wants a call for this kind of request says so once; the
         // request is asked again with a fresh call. A request that carried a call and was
         // refused, or a public one, ends the pass.
+        if let Tag::PeerHead { peer, .. } = &tag {
+            self.home_mut(home).last_item = None;
+            self.on_peer_head(peer, &response, &mut report)?;
+            return Ok(report);
+        }
         if matches!(response.status, 401 | 403) {
             let item = self.home_mut(home).last_item.take();
             let carried = self.home_mut(home).carried_call;
@@ -1536,6 +1641,7 @@ impl<S: RecordSource> Engine<S> {
         }
         match tag {
             Tag::Head => self.on_head(home, &response, &mut report)?,
+            Tag::PeerHead { .. } => {}
             Tag::PullAuthority => self.on_pull_authority(home, &response, &mut report)?,
             Tag::PushAuthority { last } => {
                 self.on_push_authority(home, last, &response, &mut report)?
@@ -1667,51 +1773,97 @@ impl<S: RecordSource> Engine<S> {
                     self.halt(home);
                     return Ok(());
                 }
-                let claimed = serde_json::from_slice::<Value>(&r.body)
-                    .ok()
-                    .and_then(|v| {
-                        crate::v05::encoding::decode_base64(v.get("body")?.as_str()?, 4_096)
-                            .ok()
-                            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                    })
-                    .and_then(|b| b["authority"]["seq"].as_u64());
-                let before = report.faults.len();
-                let o = Objects {
-                    heads: vec![r.body.clone()],
-                    ..Default::default()
-                };
-                self.merge_objects(o, report, home)?;
-                if report
-                    .changes
-                    .heads
-                    .refused
-                    .iter()
-                    .any(|(_, c)| c == "unavailable")
-                {
-                    // The head names an entry the pass could not fetch: it is ahead of what
-                    // the home serves (§13.3: not wrong, but not to be hidden).
-                    report.faults.push(Fault::HeadAhead { home: home.into() });
-                }
-                if report.faults.len() == before {
-                    // A head the verifier accepted says how far the home holds our history;
-                    // it bounds what we push and is evidence of nothing else.
-                    let accepted = report.changes.heads.accepted.iter().any(|h| h == home);
-                    if let (Some(s), true) = (claimed, accepted) {
-                        let verified = self.account.head().0;
-                        let h = self.home_mut(home);
-                        h.acked = h.acked.max(s.min(verified));
-                    }
-                } else if !report.faults[before..]
-                    .iter()
-                    .all(|f| matches!(f, Fault::HeadAhead { .. }))
-                {
-                    self.halt(home);
-                }
+                self.judge_head(home, r.body.clone(), false, report)?;
             }
             s => report.faults.push(Fault::Status {
                 home: home.into(),
                 status: s,
             }),
+        }
+        Ok(())
+    }
+
+    /// Another home's head, fetched for a call's quorum: taken if the account accepts it, and
+    /// otherwise reported against that home (never ending this home's pass). A head ahead of the
+    /// held history is kept as held and judged again by the next verification.
+    fn on_peer_head(&mut self, peer: &str, r: &Response, report: &mut Report) -> Result<()> {
+        match r.status {
+            200 if r.body.len() <= crate::v05::encoding::bounds::HEAD_BODY * 2 => {
+                let o = Objects {
+                    heads: vec![r.body.clone()],
+                    ..Default::default()
+                };
+                self.merge_objects(o, report, peer)?;
+            }
+            200 => report.faults.push(Fault::Malformed {
+                home: peer.into(),
+                why: "an oversized head".into(),
+            }),
+            404 => {}
+            s => report.faults.push(Fault::Status {
+                home: peer.into(),
+                status: s,
+            }),
+        }
+        Ok(())
+    }
+
+    /// Judge the home's head. The head is fetched first in a pass, so that a call can be built
+    /// for what follows (§12.3 step 4 needs fresh heads); a head that names an entry the account
+    /// does not hold yet is not wrong (§13.3: the verifier fetches further), and is judged again
+    /// once the authority pull is complete (`last`). Only then is it `HeadAhead`.
+    fn judge_head(
+        &mut self,
+        home: &str,
+        body: Vec<u8>,
+        last: bool,
+        report: &mut Report,
+    ) -> Result<()> {
+        let claimed = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| {
+                crate::v05::encoding::decode_base64(v.get("body")?.as_str()?, 4_096)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            })
+            .and_then(|b| b["authority"]["seq"].as_u64());
+        let before = report.faults.len();
+        let refused_before = report.changes.heads.refused.len();
+        let accepted_before = report.changes.heads.accepted.len();
+        let o = Objects {
+            heads: vec![body.clone()],
+            ..Default::default()
+        };
+        self.merge_objects(o, report, home)?;
+        let ahead = report.changes.heads.refused[refused_before.min(report.changes.heads.refused.len())..]
+            .iter()
+            .any(|(_, c)| c == "unavailable");
+        if ahead {
+            if last {
+                // The head names an entry the pass could not fetch: it is ahead of what the home
+                // serves (§13.3: not wrong, but not to be hidden).
+                report.faults.push(Fault::HeadAhead { home: home.into() });
+            } else {
+                self.home_mut(home).ahead = Some(body);
+            }
+        }
+        if report.faults.len() == before {
+            // A head the verifier accepted says how far the home holds our history; it bounds
+            // what we push and is evidence of nothing else.
+            let accepted = report.changes.heads.accepted
+                [accepted_before.min(report.changes.heads.accepted.len())..]
+                .iter()
+                .any(|h| h == home);
+            if let (Some(s), true) = (claimed, accepted) {
+                let verified = self.account.head().0;
+                let h = self.home_mut(home);
+                h.acked = h.acked.max(s.min(verified));
+            }
+        } else if !report.faults[before..]
+            .iter()
+            .all(|f| matches!(f, Fault::HeadAhead { .. }))
+        {
+            self.halt(home);
         }
         Ok(())
     }
@@ -1815,6 +1967,11 @@ impl<S: RecordSource> Engine<S> {
                 },
             );
             return Ok(());
+        }
+        if !more {
+            if let Some(head) = self.home_mut(home).ahead.take() {
+                self.judge_head(home, head, true, report)?;
+            }
         }
         if more {
             if moved {

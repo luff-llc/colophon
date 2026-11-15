@@ -280,6 +280,11 @@ impl State {
     pub fn veto_counts(&self) -> &BTreeMap<String, u64> {
         &self.v
     }
+    /// The seq of the entry that added controller `id` to the keyring (1 for the genesis; the
+    /// activation's seq for a transition).
+    pub fn controller_added_seq(&self, id: &str) -> Option<u64> {
+        self.meta.get(id).map(|m| m.added_seq)
+    }
     /// The provisional activation that added controller `id`, if any.
     pub fn controller_provisional(&self, id: &str) -> Option<u64> {
         self.meta.get(id).and_then(|m| m.provisional)

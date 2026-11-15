@@ -400,7 +400,29 @@ pub fn finish_call(
     view: &AccountView,
     cfg: &CallConfig<'_>,
 ) -> Result<Vec<u8>> {
-    let env = match (prepared.webauthn, &sig.assertion) {
+    let env = call_envelope(prepared, sig)?;
+    let mut store = MemoryReplayStore::new();
+    verify_call(&env, view, cfg, &mut store)?;
+    Ok(env)
+}
+
+/// Assemble a call to a home for exactly the request `req` and judge it as its signer
+/// ([`crate::v05::calls::check_home_call_as_signer`]: the home's own rule, over what the signer
+/// holds). The bytes are returned only when that judgement is `ok`.
+pub fn finish_home_call(
+    prepared: &PreparedCall,
+    sig: &SignatureResult,
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    req: &crate::v05::calls::HomeRequest<'_>,
+) -> Result<Vec<u8>> {
+    let env = call_envelope(prepared, sig)?;
+    crate::v05::calls::check_home_call_as_signer(&env, view, cfg, req)?;
+    Ok(env)
+}
+
+fn call_envelope(prepared: &PreparedCall, sig: &SignatureResult) -> Result<Vec<u8>> {
+    Ok(match (prepared.webauthn, &sig.assertion) {
         (true, Some((authenticator_data, client_data))) => canonical(&json!({
             "body": encode_base64(prepared.step.body()),
             "signature": encode_base64(&sig.signature),
@@ -411,10 +433,7 @@ pub fn finish_call(
         }))?,
         (true, None) => return Err(malformed("a WebAuthn signer needs an assertion")),
         (false, _) => raw_envelope(prepared.step.body(), raw_signature(sig)?)?,
-    };
-    let mut store = MemoryReplayStore::new();
-    verify_call(&env, view, cfg, &mut store)?;
-    Ok(env)
+    })
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -608,7 +608,7 @@ impl SimHome {
     pub fn head_seq(&self) -> u64 {
         self.entries.keys().max().copied().unwrap_or(0)
     }
-    fn head_env(&self, host: &Host, now_ms: i64) -> Option<Vec<u8>> {
+    pub fn head_env(&self, host: &Host, now_ms: i64) -> Option<Vec<u8>> {
         let seq = self.head_seq();
         if seq == 0 {
             return None;

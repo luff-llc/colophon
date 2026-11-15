@@ -1220,7 +1220,14 @@ fn check_one_call_is_replayed_on_every_request() {
     assert_eq!(distinct.len(), auth_headers.len(), "no call went out twice");
     assert!(!auth_headers.is_empty() && auth_headers.len() == needs.len());
     // A second pass needs fresh calls again (none carried over).
+    // The public head comes first (it carries no call), then the first read needs a new call.
     w.phone.advance(NOW + 2_000).unwrap();
+    let Step::Request(head) = w.phone.exchange_next(&home).unwrap() else {
+        panic!("the pass starts with the head")
+    };
+    assert!(head.url.ends_with("/head") && !head.headers.iter().any(|(k, _)| k == "Authorization"));
+    let a = wire.call(&w.host, &head, NOW + 2_000);
+    w.phone.exchange_answer(&home, head.ticket, a).unwrap();
     let first = w.phone.exchange_next(&home).unwrap();
     assert!(matches!(first, Step::NeedCall(_)), "{first:?}");
 }
