@@ -1,4 +1,103 @@
-# Android session SDK (0.3)
+# Android and Kotlin on Colophon 0.5
+
+`com.luff.colophon.session` is the Kotlin session over the 0.5 UniFFI exports: the same session the Swift SDK gives an
+Apple app ([session.md](session.md)), with the same names where Kotlin allows. It is plain Kotlin/JVM in `sdk/kotlin`
+(so its tests run on a Mac), and `sdk/android` packages it with the native library and the Android pieces in
+`org.luff.colophon.session`. The contract underneath is [bindings-05.md](bindings-05.md). Taupe for Android and Taupe
+for iPhone share one library through it.
+
+| Piece | Kotlin | What it is |
+| --- | --- | --- |
+| Session | `ColophonSession` | The one object an app holds. State is `state: StateFlow<SessionState>` (phase, revision, members, requests, notices, homes, duties, sync state, home faults and issues). Every call is `suspend` and safe to call from the main thread: the session's state changes on one serial lane, and all work runs in the worker. |
+| Worker | `SessionWorker` (internal) | A port of the Swift worker: a gate (mutex) around complete operations, reconcile, owner operations, creation with the creation's own engine, the exchange with every home, the journal and the sealed saved state. |
+| Engine | `ColophonEngine` | One `AccountEngine` on its own serial dispatcher; `execute(custody)` runs prepare, PRF, sign, finish. |
+| Keys | `AsyncKeyProvider`, `KeyCustody`, `SoftwareKeys`, `SecretBytes` | Custody answers the engine's signing steps, PRF requests, unlock inputs and epoch agreements; the core never calls a key provider. |
+| Storage | `RecordMedium`, `FolderMedium`, `MemoryMedium` | The record store the engine reads. `FolderMedium` writes each batch all or none across a kill (staged, a commit record, moved into place) and never follows a symbolic link. |
+| Homes | `HomeConfiguration`, `HomeTransport`, `HttpHomeTransport` | `HttpURLConnection`: no cookies, no cache, no redirects, `https` only (loopback `http` with the testing option), each response bounded. |
+| Android | `AndroidSession.medium`, `.privateDirectory`, `.memberKeys`, `.deviceSecrets`; `KeystoreDeviceSecrets`; `PasskeyController` | App-private storage in `noBackupFilesDir`; the member key in Android Keystore (the 0.4 `KeystoreKeys`, StrongBox first); the device key sealed by a Keystore AES key; the person's passkey through Credential Manager with PRF. |
+
+## Adopting it in an Android app
+
+Build the AAR (`bash scripts/build-android.sh`: the release library for `arm64-v8a` and `x86_64` with cargo-ndk, the
+bindings, then `assembleRelease`; the artefact is `sdk/android/build/colophon-android-0.3.0.aar`, the script's old
+name) and add it with its runtime:
+
+```kotlin
+dependencies {
+    implementation(files("libs/colophon-android-0.3.0.aar"))
+    implementation("org.jetbrains.kotlin:kotlin-stdlib:2.2.21")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("androidx.credentials:credentials:1.5.0") // passkeys
+}
+```
+
+One session per process and account, made in `Application`:
+
+```kotlin
+val session = ColophonSession(SessionConfiguration(
+    memberLabel = "Taupe", namespaces = listOf("reading.saved"),
+    medium = AndroidSession.medium(context), privateDirectory = AndroidSession.privateDirectory(context),
+    keys = AndroidSession.memberKeys(context, "org.luff.taupe.member"),          // this app's member (Keystore)
+    ownerController = PasskeyController(PasskeyProvider.restore(descriptor, CredentialManagerAdapter(activity)),
+                                        authorityOrigins = appPasskeyOrigins(context) + "https://id.luff.works"),
+    homes = listOf(HomeConfiguration("https://relay.toolsperson.com/v1/libraries/<slot>/",
+                                     request = { account -> homeService.memberRequest(account) })),
+    deviceSecrets = AndroidSession.deviceSecrets(context)))
+lifecycleScope.launch {
+    session.restore()
+    if (session.phase == SessionPhase.NoLibrary) session.create()        // appoints the home, approves this device
+    session.perform(DomainCommand("reading.saved", "capture", payloadJson), session.observedRevision)
+}
+session.state.collect { render(it.phase, it.notices) }                    // pending changes, no home, locked, ...
+```
+
+* **A second device** restores over a copy of the history (a shared folder) or with nothing, shows
+  `SessionPhase.WaitingForApproval(code)`, and hands `exportRequest()` to an owner device, which calls
+  `importRequest(bytes)` and `approve(request)`. The new device learns its approval through the home (`syncNow()`).
+* **Reads**: `query(namespace, name, argumentsJson)` and `view(namespace)`; there is no typed domain kit in Kotlin yet
+  (the Swift `ColophonSavedKit` has no Kotlin twin): an app passes the payload JSON its domain defines.
+* **Blobs**: `putBlob(bytes | file, ...)`, `blobAvailability`, `blobData`, `prefetchBlob`, `downloadRequiredBlobs`,
+  `setBlobReference`. A required blob arrives with the exchange, an optional one when asked.
+* **What a person must see**: `notices.pending` (with `vetoable`), `veto(digest)`, `proposeTransition(json)`,
+  `notices.unseenActivations` and `acknowledgeActivation(seq)`, `notices.noHome`, `duties` (sole device, delivery
+  routes, submissions, dead transitions, the removal follow-up with `removeFollowUp` / `keepFollowUp`).
+* **Lock** on `onStop` (`lock()`), `unlock()` on `onStart`. `shutdown()` locks the engine and stops the loops.
+* Background exchange polls every `duties.pollIntervalMs`; `requestSync()` wakes it, `stopSync()` stops it.
+
+## What is proven, and how
+
+| Claim | Test | Where it ran |
+| --- | --- | --- |
+| Two Kotlin devices sync through the real relay (`bun relay/server.js`, the Rust home module, calls required): create with the home, approve a second device that learns it through the home, both write and read with a required and an optional blob, approve then revoke a third (refused with exactly `refused:revoked`, by the home under `members`, by its own check under `public`), propose a policy change on one device and veto it on the other. Under `members`, `public`, and two homes at `headQuorum` 2. | `RelayJourneyTest` (`sdk/kotlin`) | JVM on macOS |
+| A pass cancelled mid-request abandons the pass; the next one starts from the head. | `ExchangeCancelTest` | JVM |
+| Creation without a home only by opt-out; `https` only; writes bound to the observed revision; lock and unlock; a folder store reopens from the sealed saved state; a second device approved over a shared store, then revoked (`Denied`); a failing owner key is a key failure. | `SessionTest` | JVM |
+| Keys, secrets wiped after their call, DER to `r||s`, custody refusals; the folder's all-or-none batches and crash recovery; transport bounds and redirects; the JSON reader. | `KeysTest`, `MediumTest`, `TransportTest`, `JsonTest` | JVM |
+| A passkey owner (synthetic Credential Manager client: real ES256 assertions, PRF `results.first`) creates the account with its PRF slot, opens it by PRF to approve a device; a passkey without PRF fails creation and stores nothing; the device key wrapping. | `AndroidSessionTest` (`sdk/android`, unit) | JVM |
+| On Android: the AAR's native library, member and owner keys in Android Keystore (signing and ECDH by Keystore), the device key sealed by a Keystore AES key, app-private folder storage: create, write, a blob, lock and unlock, a cold reopen from the sealed saved state. | `OnDeviceSessionTest` (`sdk/android`, instrumented) | API 36 arm64 emulator (`google_apis`), not a phone |
+
+`scripts/test-kotlin.sh` builds the release library, checks the committed bindings against the generator, builds the
+home module and runs every JVM test in `sdk/kotlin` (the 0.4 wrappers too), then fails if any relay process is left.
+`scripts/test-android.sh` runs `sdk/android`'s unit tests; the instrumented test needs a running emulator
+(`connectedDebugAndroidTest`).
+
+## Not built or not proven
+
+* **The relay journey on Android.** It runs on the JVM only; on the emulator the session ran without a home.
+* **A physical device**, StrongBox, and Keystore keys that require user authentication (`KeystorePresence`).
+* **Passkeys against Credential Manager.** `PasskeyController` is written over the 0.4 `PasskeyProvider` and
+  `CredentialManagerAdapter`; it has run only with a synthetic client. Registration is the 0.4 `PasskeyProvider.register`
+  (it keeps no registration PRF output). The Swift move's one-assertion two-salt ceremony is not implemented.
+* **Pairing and seed transfer** (`addController`, `transferSeed`, `acceptSeedTransfer`) are ported from Swift but not
+  exercised by a Kotlin test; the core's own journeys cover them through the exports.
+* Delivery-route registration is a host callback (the relay offers none). No ingress inbox, no Swift-move session
+  steps, no typed domain kits in Kotlin.
+* A Kotlin `FolderMedium` assumes one process per folder (Android app-private storage); it takes no file lock.
+
+## The 0.4 session (`org.luff.colophon`, still in the AAR)
+
+The 0.4 Android session below stays in the AAR for apps that have not moved yet; it uses the 0.4 exports, which are
+unchanged. New work uses the 0.5 session above.
 
 Sessions use the storage engine through `NativeEngine`, with member-protected checkpoints in
 `CheckpointCache`. Checkpoints are scheduled after one idle second; `flushCheckpoint()` is an
@@ -35,7 +134,7 @@ bash scripts/build-android.sh
 
 The artifact is `sdk/android/build/colophon-android-0.3.0.aar`.
 
-## Add the AAR to an app
+### Add the AAR to an app
 
 Copy the AAR into the app module (for example `app/libs/`) and declare the
 UniFFI/JNA runtime that a local AAR does not carry:
@@ -54,7 +153,7 @@ bindings load `libcolophon_ffi` through it. Keep `arm64-v8a` and `x86_64` in the
 app's `ndk.abiFilters` if you override ABIs. NDK r28+ aligns the native library
 for 16 KB pages; the app's packaging must allow that too.
 
-## Session usage
+### Session usage
 
 Own one session at the process entry point. Await `restore()` before dependent
 work; render `phase` explicitly and open product UI only on `Ready`.
@@ -102,7 +201,7 @@ in tests; a corrupt file is left in place. Writes carry the revision observed
 when the action began. Core FFI, storage, and signing run on one background
 thread.
 
-## How this differs from the Apple session
+### How this differs from the Apple session
 
 - Observation is `StateFlow<SessionPhase>` rather than an `@Observable @MainActor` type.
 - Storage is the app's private files directory. Immutable records try `link(2)`,

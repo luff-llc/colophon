@@ -653,7 +653,7 @@ including above 2^53 and `u64::MAX`; `u32` (an HTTP status) is a `number`; a `Nu
 `bigint` is a plain `TypeError`, and a negative `bigint` passed for a `u64` wraps (wasm-bindgen's own
 conversion). **Still not run on the web:** the checked `readBlob` and `translate` shims (the `read` shim is
 the same code), a browser (only Node and Bun), a bundler target, and the `FinalizationRegistry`'s timing.
-Also not run: Android/AAR/XCFramework builds, Kotlin on a JDK other than 17.
+Also not run: XCFramework builds, Kotlin on a JDK other than 17. (The AAR is built for `arm64-v8a` and `x86_64` and the Kotlin session runs from it on an API 36 arm64 emulator: [android.md](android.md).)
 
 **Known gaps** (named so an SDK does not assume them). Two are for the next round and each needs one
 thing:

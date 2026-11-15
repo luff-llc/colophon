@@ -115,7 +115,7 @@ stay as the record of what shipped.
 | Dependency | Version | Why |
 | --- | --- | --- |
 | `net.java.dev.jna:jna` (Android AAR) | 5.18.1 | UniFFI 0.32.2 Kotlin transport; the AAR ships `libjnidispatch` per ABI. The same library calls Android libc `renameat2(RENAME_NOREPLACE)` because private app storage denies `link(2)`. The JVM tests keep the JAR. |
-| `org.jetbrains.kotlinx:kotlinx-coroutines-core` / `android` | 1.10.2 | Session `StateFlow`, single-thread dispatcher, and `withContext` off the main thread. |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core` / `android` | 1.10.2 | Session `StateFlow`, single-thread dispatcher, and `withContext` off the main thread. Also the JVM library (`sdk/kotlin`) since the 0.5 session (`com.luff.colophon.session`); `-core` there, `-android` in the app. |
 | Android Gradle Plugin | 8.7.3 | Library AAR at compileSdk 35 / minSdk 33, matching Gradle 8.14.3. |
 | Kotlin | 2.2.21 | Same pin as the JVM bindings. |
 | JUnit 4.13.2 / AndroidX Test 1.6.x | — | JVM unit tests and the instrumented emulator journey. |
