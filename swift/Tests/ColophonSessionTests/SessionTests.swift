@@ -105,3 +105,34 @@ import ColophonSession
         await #expect(throws: SessionError.notReady) { _ = try await second.session.query(namespace: "reading.saved", name: "items", arguments: Data("{}".utf8)) }
     }
 }
+
+@MainActor struct RelaunchTests {
+    /// A session over a real folder: created, written to, flushed, then a new process-like session reopens it from the
+    /// folder and the sealed saved state (the device key and the member's key persist, as the Keychain does).
+    @Test func aSessionOverARealFolderSurvivesARelaunchAndResumes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let library = root.appendingPathComponent("library"), privateDir = root.appendingPathComponent("private")
+        let member = SoftwareKeys(), owner = SoftwareKeys(), secrets = MemoryDeviceSecrets()
+        func session() -> ColophonSession {
+            ColophonSession(configuration: .init(memberLabel: "Mac", namespaces: ["reading.saved"], location: .folder(library), privateContainer: privateDir,
+                keys: member, ownerController: owner, createWithoutHome: true, deviceSecrets: secrets))
+        }
+        let first = session()
+        await first.create()
+        #expect(first.phase == .ready, "\(first.phase) \(first.lastError ?? "")")
+        try await first.perform(try .saveLink(id: "a", url: URL(string: "https://example.org/a")!, title: "A"), observed: first.observedRevision)
+        try await first.flushCheckpoint()
+        #expect(FileManager.default.fileExists(atPath: library.appendingPathComponent("authority/00000001.json").path))
+        let second = session()
+        await second.restore()
+        #expect(second.phase == .ready, "\(second.phase) \(second.lastError ?? "")")
+        #expect(try await SavedStore(session: second).load(ItemsQuery(limit: 10)).get().total == 1)
+        // Someone else's key cannot open it: the same folder with another member is only waiting for approval.
+        let stranger = ColophonSession(configuration: .init(memberLabel: "Stranger", namespaces: ["reading.saved"], location: .folder(library),
+            privateContainer: root.appendingPathComponent("stranger"), keys: SoftwareKeys(), ownerController: SoftwareKeys(), createWithoutHome: true, deviceSecrets: MemoryDeviceSecrets()))
+        await stranger.restore()
+        guard case .waitingForApproval = stranger.phase else { Issue.record("a stranger must wait, got \(stranger.phase)"); return }
+        #expect(!stranger.hasUsableContent)
+    }
+}

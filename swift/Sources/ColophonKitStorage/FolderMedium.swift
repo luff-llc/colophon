@@ -21,9 +21,26 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     private let lock = NSLock()
     private var presenters: [UUID: FolderPresenter] = [:]
 
-    public init(folder: URL) { self.folder = folder.resolvingSymlinksInPath(); coordinated = true }
+    public init(folder: URL) { self.folder = Self.canonical(folder); coordinated = true }
     /// Test seam for restricted hosts without `filecoordinationd`. Never a production fallback.
-    init(folder: URL, coordinated: Bool) { self.folder = folder.resolvingSymlinksInPath(); self.coordinated = coordinated }
+    init(folder: URL, coordinated: Bool) { self.folder = Self.canonical(folder); self.coordinated = coordinated }
+
+    /// The real path of `url`, resolving every symbolic link of the part that exists (`resolvingSymlinksInPath` turns
+    /// `/private/var` into `/var`, which is not what the file system reports back). A folder that does not exist
+    /// yet keeps its remaining components.
+    static func canonical(_ url: URL) -> URL {
+        var tail: [String] = []
+        var base = url.standardizedFileURL
+        while true {
+            if let resolved = realpath(base.path, nil) {
+                defer { free(resolved) }
+                return tail.reversed().reduce(URL(fileURLWithPath: String(cString: resolved))) { $0.appendingPathComponent($1) }
+            }
+            guard base.path != "/" else { return url }
+            tail.append(base.lastPathComponent)
+            base = base.deletingLastPathComponent()
+        }
+    }
 
     deinit {
         for presenter in presenters.values {
@@ -162,7 +179,7 @@ public final class FolderMedium: RecordMedium, @unchecked Sendable {
     private func signal() { for presenter in lock.withLock({ Array(presenters.values) }) { presenter.signal() } }
 
     private func rejectSymlinks(_ path: String) throws {
-        guard folder.resolvingSymlinksInPath().path == folder.path else { throw StorageError.invalidPath(folder.path) }
+        guard Self.canonical(folder).path == folder.path else { throw StorageError.invalidPath(folder.path) }
         var url = folder
         for component in path.split(separator: "/") {
             url.appendPathComponent(String(component))
