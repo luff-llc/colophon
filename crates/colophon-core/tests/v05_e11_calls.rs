@@ -463,3 +463,59 @@ fn a_revoked_or_unknown_device_is_refused_by_its_own_check_or_by_the_home() {
     let _ = Method::Get;
     let _: Value = json!({});
 }
+
+/// A call signed by the controller `id` (whose key the host holds) over what `f.account` holds.
+fn controller_call(f: &Fixture, id: &str, purpose: &str, method: &str, path: &str) -> Vec<u8> {
+    use base64::engine::general_purpose::STANDARD;
+    let me = &f.host.ids[id];
+    let (seq, digest) = f.account.head();
+    let body = colophon_core::v05::encoding::canonical(&json!({
+        "protocol": "colophon/call/5",
+        "account": f.account.id().as_str(),
+        "asOf": {"seq": seq, "digest": digest},
+        "signer": {"controller": id},
+        "key": STANDARD.encode(me.public().signing),
+        "audience": BASE,
+        "purpose": purpose,
+        "args": {"method": method, "path": path, "body": hex(&Sha256::digest(b""))},
+        "requestId": URL_SAFE_NO_PAD.encode([path.len() as u8 ^ purpose.len() as u8; 32]),
+        "created": colophon_core::v05::write::format_date(NOW),
+    }))
+    .unwrap();
+    let sig = me.sign(&body).to_vec();
+    serde_json::to_vec(&json!({"body": STANDARD.encode(&body), "signature": STANDARD.encode(sig)}))
+        .unwrap()
+}
+
+/// §12.3 step 7 and §13.4: `colophon.history.read` reads the history and nothing else. A
+/// `recover`-only controller (the kit) may read the history with it, but a call with that purpose
+/// for the change feed, a record or a blob chunk is `refused:outOfScope`, as is its
+/// `colophon.home.read` call; a controller entitled to `colophon.home.read` reads them. Before,
+/// the home accepted `colophon.history.read` for every GET, so the kit read every record.
+#[test]
+fn history_read_reads_the_history_and_not_the_records() {
+    let mut f = fixture("members");
+    let home = appoint_home(&mut f);
+    let home_w = CallingHome::new(SimHome::new(&f, &home, BASE, NOW), false);
+    let blob = format!("/records/blobs/{}", "ab".repeat(32));
+    let op = format!("/records/ops/{}/{NS}/000000000001-{}.json", "0".repeat(32), "1".repeat(32));
+    let judge = |id: &str, purpose: &str, path: &str| {
+        let call = controller_call(&f, id, purpose, "GET", path);
+        home_w.judge(&f.host, &call, "GET", path, b"", NOW)
+    };
+    let out = Err("refused:outOfScope".to_string());
+    for path in ["/changes?limit=500", blob.as_str(), op.as_str()] {
+        assert_eq!(judge(&f.k, "colophon.history.read", path), out, "{path}");
+        assert_eq!(judge(&f.k, "colophon.home.read", path), out, "{path}");
+        assert_eq!(judge(&f.d, "colophon.history.read", path), out, "{path}");
+        assert_eq!(judge(&f.d, "colophon.home.read", path), Ok(()), "{path}");
+    }
+    for path in [
+        "/authority?after=0&limit=1",
+        "/pending",
+        "/records/authority/00000001.json",
+    ] {
+        assert_eq!(judge(&f.k, "colophon.history.read", path), Ok(()), "{path}");
+        assert_eq!(judge(&f.d, "colophon.home.read", path), Ok(()), "{path}");
+    }
+}

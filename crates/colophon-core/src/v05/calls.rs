@@ -1056,15 +1056,46 @@ pub fn home_call_purpose(method: &str) -> &'static str {
     }
 }
 
-/// The purposes a home accepts for a request with `method`: `colophon.home.read` (and
-/// `colophon.history.read`, which §13.4 names for the history) for GET and HEAD,
-/// `colophon.home.write` for anything else.
-pub fn home_purposes(method: &str) -> &'static [&'static str] {
-    if is_read(method) {
+/// The purposes a home accepts for a request with `method` at `path` (relative to the home's
+/// base, as sent): for GET and HEAD, `colophon.home.read`, and `colophon.history.read` too when
+/// the path serves the history ([`home_path_serves_history`]; §12.3 step 7 and §13.4 limit that
+/// purpose to the history); `colophon.home.write` for anything else.
+pub fn home_purposes(method: &str, path: &str) -> &'static [&'static str] {
+    if !is_read(method) {
+        &[HOME_WRITE]
+    } else if home_path_serves_history(path) {
         &[HOME_READ, HISTORY_READ]
     } else {
-        &[HOME_WRITE]
+        &[HOME_READ]
     }
+}
+
+/// Whether `path` (relative to a home's base, as sent, its query ignored) serves the history,
+/// transitions, vetoes, receipts or the head (§13.4): `/authority`, `/pending`,
+/// `/pending/<digest>`, and `/records/<p>` for `p` an authority entry, a predecessor's entry, a
+/// transition or veto, a receipt or a head by the record store's path grammar. Everything else
+/// (the change feed, records, live values, blob chunks, anything that does not parse) does not.
+pub fn home_path_serves_history(path: &str) -> bool {
+    use super::engine::paths::{classify, Kind};
+    let bare = path.split('?').next().unwrap_or_default();
+    if matches!(bare, "/authority" | "/pending") {
+        return true;
+    }
+    if let Some(d) = bare.strip_prefix("/pending/") {
+        return d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    bare.strip_prefix("/records/").is_some_and(|p| {
+        matches!(
+            classify(p),
+            Some(
+                Kind::Authority(_)
+                    | Kind::Predecessor(_)
+                    | Kind::Pending
+                    | Kind::Receipt
+                    | Kind::Head
+            )
+        )
+    })
 }
 
 fn is_read(method: &str) -> bool {
@@ -1111,7 +1142,7 @@ pub struct HomeRequest<'a> {
 }
 
 /// Verify a call that came with a request at a home (§12.3, §13.4, §14): its purpose fits the
-/// method ([`home_purposes`], else `refused:outOfScope`, before anything else is checked beyond
+/// method and path ([`home_purposes`], else `refused:outOfScope`, before anything else is checked beyond
 /// parsing); then [`verify_call`], or [`verify_home_write`] for a write that names what it writes;
 /// and the call's `args` are exactly [`home_call_args`] for this request (else
 /// `refused:outOfScope`, and nothing is reserved). The rule a home applies and a signer builds
@@ -1153,7 +1184,7 @@ fn home_request(
 ) -> Result<VerifiedCall> {
     let parsed = Call::parse(envelope)?;
     require_refused(
-        home_purposes(req.method).contains(&parsed.purpose.as_str()),
+        home_purposes(req.method, req.path).contains(&parsed.purpose.as_str()),
         Reason::OutOfScope,
     )?;
     let bound = home_call_args(req.method, req.path, req.body_sha256);

@@ -405,9 +405,11 @@ fn access(req: &Value) -> R<Value> {
     let call = B64.decode(call_text).map_err(|e| e.to_string())?;
     let refuse = |code: String| Ok(json!({"allowed": false, "status": 403, "result": code}));
     // Before any history work: a call that does not parse, or whose purpose does not fit the
-    // method (the core's rule, checked again in `verify_home_request`), is refused at once.
+    // method and path (the core's rule, checked again in `verify_home_request`: only a path that
+    // serves the history takes `colophon.history.read`), is refused at once.
+    let path = str_of(req, "path")?;
     match Call::parse(&call) {
-        Ok(c) if home_purposes(method).contains(&c.purpose.as_str()) => {}
+        Ok(c) if home_purposes(method, path).contains(&c.purpose.as_str()) => {}
         Ok(_) => return refuse("refused:outOfScope".into()),
         Err(f) => return refuse(f.code()),
     }
@@ -442,7 +444,7 @@ fn access(req: &Value) -> R<Value> {
     };
     let request = HomeRequest {
         method,
-        path: str_of(req, "path")?,
+        path,
         body_sha256: str_of(req, "bodySha256")?,
         writes,
     };

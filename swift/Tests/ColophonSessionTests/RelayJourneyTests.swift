@@ -31,8 +31,8 @@ import ColophonSession
         return (relays, configs)
     }
     /// The same homes for a device that does not appoint them.
-    private func joining(_ relays: [RelayHome]) -> [HomeConfiguration] {
-        relays.map { HomeConfiguration(endpoint: URL(string: $0.base + "/")!, transport: $0.transport()) }
+    private func joining(_ relays: [RelayHome], refusals: RelayHome.Refusals? = nil) -> [HomeConfiguration] {
+        relays.map { HomeConfiguration(endpoint: URL(string: $0.base + "/")!, transport: $0.transport(refusals: refusals)) }
     }
     private func items(_ device: Device) async throws -> Int {
         try await SavedStore(session: device.session).load(ItemsQuery(limit: 50)).get().total
@@ -95,8 +95,9 @@ import ColophonSession
         #expect(try await items(first) == 2, "the first device reads what the second wrote")
 
         // A third device is approved, then revoked: it reads nothing new and the home refuses it.
-        let third = Device(medium: MemoryMedium(files: first.medium.snapshot().filter { $0.key.hasPrefix("authority/") }), homes: joining(relays),
-                           createWithoutHome: false)
+        let thirdRefusals = RelayHome.Refusals()
+        let third = Device(medium: MemoryMedium(files: first.medium.snapshot().filter { $0.key.hasPrefix("authority/") }),
+                           homes: joining(relays, refusals: thirdRefusals), createWithoutHome: false)
         await third.session.restore()
         third.session.stopSync()
         try await first.session.importRequest(try await third.session.exportRequest())
@@ -110,13 +111,30 @@ import ColophonSession
         try await first.session.revoke(memberID: try #require(third.session.memberID))
         try await first.session.perform(try .saveLink(id: "c", url: URL(string: "https://example.org/c")!, title: "C"), observed: first.session.observedRevision)
         #expect(await settle(first), "\(describe(first))")
+        thirdRefusals.clear()
         _ = await third.session.syncNow()
-        let refused = third.session.homeFaults.contains { $0.fault.kind == .unauthorized }
-            || third.session.homeIssues.contains { if case .callRefused = $0.problem { true } else { false } }
-        #expect(refused, "the revoked device is refused (by the home, or by its own check once it holds its revocation): \(describe(third))")
+        // Under `members` the home refuses its call with `refused:revoked` (the home holds the revocation, the device
+        // cannot fetch it); under `public` it may fetch the revocation without a call, and then its own check refuses
+        // with the same code and sends nothing. Any other refusal fails the test.
+        let byHome = third.session.homeFaults.contains { $0.fault.kind == .unauthorized }
+        let byItself = third.session.homeIssues.contains { $0.problem == .callRefused(code: "refused:revoked") }
+        #expect(byHome || byItself, "the revoked device is refused: \(describe(third)) home said \(thirdRefusals.all)")
+        if byHome {
+            #expect(!thirdRefusals.all.isEmpty && thirdRefusals.all.allSatisfy { $0 == "refused:revoked" },
+                    "the home refuses it as revoked: \(thirdRefusals.all)")
+        }
+        if history == .members { #expect(byHome, "the home refuses the revoked device: \(describe(third))") }
+        #expect(third.session.homeIssues.allSatisfy { if case .callRefused(let code) = $0.problem { code == "refused:revoked" } else { true } },
+                "\(describe(third))")
         await third.session.refresh()
-        let readable = (try? await items(third)) ?? 0
-        #expect(readable <= 2, "the revoked device reads nothing new")
+        // A device that holds its own revocation is `denied` and serves no query (`notReady`); one the home refused
+        // before it could fetch the revocation still reads only what it had.
+        if byItself { #expect(third.session.phase == .denied, "\(describe(third))") }
+        if third.session.phase == .denied {
+            await #expect(throws: SessionError.notReady) { try await items(third) }
+        } else {
+            #expect(try await items(third) <= 2, "the revoked device reads nothing new: \(describe(third))")
+        }
 
         // A pending key change proposed on the first device is shown on the second and vetoed there.
         // A policy change (a longer recovery delay): a transition with a veto window, signed by the first device's owner.

@@ -125,16 +125,33 @@ final class RelayHome: @unchecked Sendable {
 
     /// The session's transport to this relay: the account's `https://` name goes to the process on loopback (`http`,
     /// allowed for loopback only, by the SDK's testing option), and the relay's clock is set to the device's first.
-    func transport() -> any HomeTransport { Transport(relay: self) }
+    /// With `refusals`, the `result` of every 403 the relay answers is recorded there (`-` when it names none; a 401 only
+    /// asks for a call).
+    func transport(refusals: Refusals? = nil) -> any HomeTransport { Transport(relay: self, refusals: refusals) }
     private struct Transport: HomeTransport {
         let relay: RelayHome
+        let refusals: Refusals?
         let inner = URLSessionHomeTransport(allowingLoopbackHTTP: true)
         func send(_ request: HttpRequest) async throws -> HttpAnswer {
             relay.setClock(RelayHome.nowMs())
             guard request.url.hasPrefix(relay.base) else { throw URLError(.unsupportedURL) }
             let local = "http://127.0.0.1:\(relay.port)/v1/libraries/home" + request.url.dropFirst(relay.base.count)
-            return try await inner.send(HttpRequest(ticket: request.ticket, home: request.home, method: request.method, url: local,
-                                                    headers: request.headers, body: request.body))
+            let answer = try await inner.send(HttpRequest(ticket: request.ticket, home: request.home, method: request.method, url: local,
+                                                          headers: request.headers, body: request.body))
+            if answer.status == 403 {
+                let result = (try? JSONSerialization.jsonObject(with: answer.body) as? [String: Any])?["result"] as? String
+                refusals?.append(result ?? "-")
+            }
+            return answer
         }
+    }
+
+    /// The refusals one device's transports saw, in order.
+    final class Refusals: @unchecked Sendable {
+        private let lock = NSLock()
+        private var codes: [String] = []
+        func append(_ code: String) { lock.withLock { codes.append(code) } }
+        var all: [String] { lock.withLock { codes } }
+        func clear() { lock.withLock { codes.removeAll() } }
     }
 }

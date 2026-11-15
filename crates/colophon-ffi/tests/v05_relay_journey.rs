@@ -38,6 +38,8 @@ struct World {
     now: i64,
     /// Calls the engine's own check refused (the pass with that home was abandoned), by code.
     unbuilt: Vec<String>,
+    /// The `result` of every 403 a home answered, in order.
+    refused: Vec<String>,
 }
 impl World {
     fn tick(&mut self) -> i64 {
@@ -98,6 +100,10 @@ fn sync(w: &mut World, engine: &AccountEngine, src: &MemSource, me: &str) -> Vec
                     };
                     let headers: Vec<(String, String)> = r.headers.iter().map(|h| (h.name.clone(), h.value.clone())).collect();
                     let (status, body) = w.relay_for(&r.url).send(method, &r.url, &headers, &r.body, now);
+                    if status == 403 {
+                        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                        w.refused.push(v["result"].as_str().unwrap_or("-").to_string());
+                    }
                     let report = engine
                         .exchange_answer(home.clone(), r.ticket, HttpAnswer { status: u32::from(status), headers: vec![], body })
                         .unwrap();
@@ -272,7 +278,7 @@ fn journey(history: &str, homes: u8) {
     let r1 = request(&host, &account, &m1, "Mac", AccountMemberKind::Device, terms.clone(), vec![]);
     let a = owner.begin_approve(r1.raw, terms.to_string(), vec![d.clone()], host.fresh(32)).unwrap();
     mac.store(&finish(&owner, &host, a).stores);
-    let mut w = World { host, relays, account: account.clone(), homes: home_ids, now: NOW, unbuilt: Vec::new() };
+    let mut w = World { host, relays, account: account.clone(), homes: home_ids, now: NOW, unbuilt: Vec::new(), refused: Vec::new() };
 
     // --- Device one: its member writes a note, a required and an optional blob, and syncs.
     let dev1 = member_engine(&w, &mac, &m1);
@@ -363,16 +369,28 @@ fn journey(history: &str, homes: u8) {
     dev1.finish_unlock_epochs(w.host.answer_epochs(&m1, &agreements)).unwrap();
     write_note(&mut w, &dev1, &mac, "n3");
     clean(sync(&mut w, &dev1, &mac, &m1), "");
+    w.refused.clear();
+    w.unbuilt.clear();
     let f = sync(&mut w, &dev3, &tablet, &m3);
-    // Under `members` the home refuses its call (it cannot fetch the revocation); under `public`
-    // it fetches the revocation without a call and then builds none (its own check: revoked).
+    // Under `members` the home refuses its call with `refused:revoked` (it holds the revocation;
+    // the device cannot fetch it); under `public` it fetches the revocation without a call and
+    // then builds none (its own check: `refused:revoked`). Any other refusal fails.
     let refused_by_home = f.iter().any(|f| f.kind == ExchangeFaultKind::Unauthorized);
     let refused_by_itself = w.unbuilt.iter().any(|c| c == "refused:revoked");
-    assert!(refused_by_home || refused_by_itself, "the revoked device is refused: {} {:?}", show(&f), w.unbuilt);
+    assert!(refused_by_home || refused_by_itself, "the revoked device is refused: {} {:?} {:?}", show(&f), w.unbuilt, w.refused);
+    if refused_by_home {
+        assert!(
+            !w.refused.is_empty() && w.refused.iter().all(|c| c == "refused:revoked"),
+            "the home refuses it as revoked: {:?}",
+            w.refused
+        );
+    }
+    assert!(w.unbuilt.iter().all(|c| c == "refused:revoked"), "{:?}", w.unbuilt);
     if history == "members" {
         assert!(refused_by_home, "the home refuses the revoked device");
     }
     w.unbuilt.clear();
+    w.refused.clear();
     let v: Value = serde_json::from_str(&dev3.view_json(NS.into()).unwrap()).unwrap();
     assert!(
         v["reason"] == "revoked" || v["value"]["admitted"].as_array().map(Vec::len) == Some(4),
