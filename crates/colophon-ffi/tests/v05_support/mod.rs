@@ -40,7 +40,7 @@ impl MemSource {
             .keys()
             .map(|p| ListedPath {
                 path: p.clone(),
-                version: String::new(),
+                version: None,
             })
             .collect()
     }

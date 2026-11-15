@@ -56,8 +56,8 @@ fn request(
         kind,
         terms_json: terms.to_string(),
         created: account_format_date(NOW - 2 * HOUR).unwrap(),
-        custody: String::new(),
-        operator: String::new(),
+        custody: None,
+        operator: None,
         endpoints,
     })
     .unwrap();
@@ -69,7 +69,7 @@ fn open_engine(src: &MemSource, identity: &str, account: &str) -> Arc<AccountEng
     AccountEngine::open(
         Box::new(src.clone()),
         src.listing(),
-        identity.into(),
+        ident(identity),
         account.into(),
         vec![],
         0,
@@ -121,7 +121,7 @@ fn create_params(host: &Host, ids: &[&str; 3], policy: Option<String>) -> Create
     CreateParams {
         label: "Test account".into(),
         namespaces: vec!["notes".into()],
-        controllers_json: vec![
+        controllers: vec![
             host.raw_controller(d, "Mac", &["approve", "control"]),
             host.passkey_controller("Passkey", &["approve", "control", "recover"]),
             host.raw_controller(k, "Kit", &["recover"]),
@@ -167,8 +167,13 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let mut policy: Value = serde_json::from_str(&account_default_policy().unwrap()).unwrap();
     policy["recoveryDelay"] = json!(3600);
     let params = create_params(&host, &[&d, &p, &k], Some(policy.to_string()));
-    let creation =
-        AccountCreation::begin(params, format!("controller:{d}"), T0, host.fresh(96)).unwrap();
+    let creation = AccountCreation::begin(
+        params,
+        ident(&format!("controller:{d}")),
+        T0,
+        host.fresh(96),
+    )
+    .unwrap();
     assert_eq!(creation.stage().unwrap(), CreateStage::Prf);
     assert_eq!(
         creation.prf_requests().unwrap().len(),
@@ -235,7 +240,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let approve = ctl
         .begin_approve(r1.raw, terms.to_string(), vec![d.clone()], host.fresh(32))
         .unwrap();
-    assert_eq!(approve.kind().unwrap(), "approve");
+    assert_eq!(approve.kind().unwrap(), ActionKind::Approve);
     let w = finish(&ctl, &host, approve);
     assert!(!w.stores.is_empty() && w.changes.members_added.len() == 1);
     auth.store(&w.stores);
@@ -457,7 +462,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let resumed = AccountEngine::open(
         Box::new(sa.clone()),
         sa.listing(),
-        format!("member:{m1}"),
+        ident(&format!("member:{m1}")),
         account.clone(),
         vec![],
         0,
@@ -472,7 +477,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let wrong = AccountEngine::open(
         Box::new(sa.clone()),
         sa.listing(),
-        format!("member:{m1}"),
+        ident(&format!("member:{m1}")),
         account.clone(),
         vec![],
         0,
@@ -493,7 +498,7 @@ fn a_prepared_action_cannot_be_altered_replayed_or_finished_elsewhere() {
     let params = CreateParams {
         label: "A".into(),
         namespaces: vec!["notes".into()],
-        controllers_json: vec![
+        controllers: vec![
             host.raw_controller(&d, "Mac", &["approve", "control"]),
             host.raw_controller(&k, "Kit", &["recover"]),
         ],
@@ -515,8 +520,13 @@ fn a_prepared_action_cannot_be_altered_replayed_or_finished_elsewhere() {
         signers: vec![d.clone()],
         rekey_signers: vec![d.clone()],
     };
-    let creation =
-        AccountCreation::begin(params, format!("controller:{d}"), T0, host.fresh(96)).unwrap();
+    let creation = AccountCreation::begin(
+        params,
+        ident(&format!("controller:{d}")),
+        T0,
+        host.fresh(96),
+    )
+    .unwrap();
     drive_creation(&creation, &host);
     let created = creation.take_result().unwrap();
     let src = MemSource::new();
@@ -607,7 +617,10 @@ fn a_prepared_action_cannot_be_altered_replayed_or_finished_elsewhere() {
         AccountEngine::open(
             Box::new(src.clone()),
             src.listing(),
-            "nobody".into(),
+            AccountIdentity {
+                kind: AccountIdentityKind::Controller,
+                id: "nobody".into(),
+            },
             created.account.clone(),
             vec![],
             0,
@@ -645,7 +658,7 @@ fn a_hostile_record_source_gets_typed_errors_not_panics_deadlocks_or_wrong_blame
     let params = CreateParams {
         label: "A".into(),
         namespaces: vec!["notes".into()],
-        controllers_json: vec![host.raw_controller(&d, "Mac", &["approve", "control"])],
+        controllers: vec![host.raw_controller(&d, "Mac", &["approve", "control"])],
         slots: vec![SlotPlan {
             controllers: vec![d.clone()],
             label: "Mac".into(),
@@ -658,8 +671,13 @@ fn a_hostile_record_source_gets_typed_errors_not_panics_deadlocks_or_wrong_blame
         signers: vec![d.clone()],
         rekey_signers: vec![d.clone()],
     };
-    let creation =
-        AccountCreation::begin(params, format!("controller:{d}"), T0, host.fresh(96)).unwrap();
+    let creation = AccountCreation::begin(
+        params,
+        ident(&format!("controller:{d}")),
+        T0,
+        host.fresh(96),
+    )
+    .unwrap();
     drive_creation(&creation, &host);
     let created = creation.take_result().unwrap();
     let account = created.account.clone();
@@ -669,7 +687,7 @@ fn a_hostile_record_source_gets_typed_errors_not_panics_deadlocks_or_wrong_blame
         AccountEngine::open(
             Box::new(s.clone()),
             s.listing(),
-            format!("controller:{d}"),
+            ident(&format!("controller:{d}")),
             account.clone(),
             vec![],
             0,
@@ -707,7 +725,7 @@ fn a_hostile_record_source_gets_typed_errors_not_panics_deadlocks_or_wrong_blame
         AccountEngine::open(
             Box::new(src.clone()),
             listing,
-            format!("controller:{d}"),
+            ident(&format!("controller:{d}")),
             account.clone(),
             vec![],
             0,
@@ -727,7 +745,7 @@ fn a_hostile_record_source_gets_typed_errors_not_panics_deadlocks_or_wrong_blame
     let mut with_junk = src.listing();
     with_junk.push(ListedPath {
         path: "not/a/path".into(),
-        version: String::new(),
+        version: None,
     });
     assert!(
         bad(DEVICE_KEY.to_vec(), with_junk).is_ok(),
@@ -771,7 +789,7 @@ fn a_hostile_record_source_gets_typed_errors_not_panics_deadlocks_or_wrong_blame
     let engine = AccountEngine::open(
         Box::new(Shared(re.clone())),
         src.listing(),
-        format!("controller:{d}"),
+        ident(&format!("controller:{d}")),
         account.clone(),
         vec![],
         0,
@@ -858,13 +876,13 @@ fn journey_two_upgrade_a_04_library_in_place_then_read_old_records_and_write_a_n
     let params = UpgradeParams {
         policy_json: policy.to_string(),
         add_threshold: 1,
-        count_by: "keys".into(),
+        count_by: CountBy::Keys,
         issued_ms: 1_794_000_000_000,
         signers: vec![controller_id],
     };
     let now = 1_794_100_000_000i64;
     let upgrade = AccountMove::begin_upgrade(history, params, now).unwrap();
-    assert_eq!(upgrade.kind().unwrap(), "upgrade");
+    assert_eq!(upgrade.kind().unwrap(), MoveKind::Upgrade);
     let steps = upgrade.steps().unwrap();
     assert_eq!(steps.len(), 1);
     let sig = Signature {
@@ -899,7 +917,7 @@ fn journey_two_upgrade_a_04_library_in_place_then_read_old_records_and_write_a_n
     let engine = AccountEngine::open(
         Box::new(src.clone()),
         src.listing(),
-        format!("member:{member}"),
+        ident(&format!("member:{member}")),
         account,
         vec![],
         0,
@@ -957,7 +975,7 @@ fn a_record_changed_under_the_engine_is_a_typed_integrity_failure() {
     let params = CreateParams {
         label: "A".into(),
         namespaces: vec!["notes".into()],
-        controllers_json: vec![host.raw_controller(&d, "Mac", &["approve", "control"])],
+        controllers: vec![host.raw_controller(&d, "Mac", &["approve", "control"])],
         slots: vec![SlotPlan {
             controllers: vec![d.clone()],
             label: "Mac".into(),
@@ -970,8 +988,13 @@ fn a_record_changed_under_the_engine_is_a_typed_integrity_failure() {
         signers: vec![d.clone()],
         rekey_signers: vec![d.clone()],
     };
-    let creation =
-        AccountCreation::begin(params, format!("controller:{d}"), T0, host.fresh(96)).unwrap();
+    let creation = AccountCreation::begin(
+        params,
+        ident(&format!("controller:{d}")),
+        T0,
+        host.fresh(96),
+    )
+    .unwrap();
     drive_creation(&creation, &host);
     let created = creation.take_result().unwrap();
     let src = MemSource::new();

@@ -4,7 +4,7 @@ use super::fault::AccountError;
 use super::types::*;
 use super::{guard, Cell};
 use colophon_core::v05::account::{finish_request, prepare_request, request_info};
-use colophon_core::v05::history::{swift, verify_history, Objects, Persisted, Stop};
+use colophon_core::v05::history::{swift, verify_history, Persisted, Stop};
 use colophon_core::v05::ids::{key_id, AccountId};
 use colophon_core::v05::signature::{
     webauthn_check, AssertionBytes, AuthorityRule, CheckMode, SigFailure,
@@ -35,6 +35,27 @@ fn blobs(v: Vec<ByteString>, what: &str) -> R<Vec<Vec<u8>>> {
         })
         .collect()
 }
+fn check_of(f: SigFailure) -> SignatureCheck {
+    match f {
+        SigFailure::Point => SignatureCheck::Point,
+        SigFailure::RawLength => SignatureCheck::RawLength,
+        SigFailure::Scalar => SignatureCheck::Scalar,
+        SigFailure::Der => SignatureCheck::Der,
+        SigFailure::Verify => SignatureCheck::Verify,
+        SigFailure::ClientData => SignatureCheck::ClientData,
+        SigFailure::ClientDataBound => SignatureCheck::ClientDataBound,
+        SigFailure::UnknownForm => SignatureCheck::UnknownForm,
+        SigFailure::Type => SignatureCheck::Type,
+        SigFailure::Challenge => SignatureCheck::Challenge,
+        SigFailure::Origin => SignatureCheck::Origin,
+        SigFailure::CrossOrigin => SignatureCheck::CrossOrigin,
+        SigFailure::RelyingParty => SignatureCheck::RelyingParty,
+        SigFailure::UserPresence => SignatureCheck::UserPresence,
+        SigFailure::UserVerification => SignatureCheck::UserVerification,
+        SigFailure::Form => SignatureCheck::Form,
+        SigFailure::CallOrigin => SignatureCheck::CallOrigin,
+    }
+}
 /// The stable name of the §4.3 check that failed (the order of the spec's steps).
 fn check_name(f: SigFailure) -> &'static str {
     match f {
@@ -60,6 +81,7 @@ fn check_name(f: SigFailure) -> &'static str {
 fn request_info_of(r: colophon_core::v05::account::AccessRequest) -> RequestInfo {
     RequestInfo {
         kind: cv::member_kind_from(&r.kind),
+        kind_raw: cv::member_kind_raw_from(&r.kind),
         raw: r.raw,
         member: r.member,
         label: r.label,
@@ -73,20 +95,19 @@ free_fn! {
     /// decided. It needs and keeps no state.
     pub fn account_verify_history(objects: AuthorityObjects, now_ms: i64) -> Result<HistoryReport, AccountError> {
         guard(|| {
-            let o = Objects {
-                entries: blobs(objects.entries, "an entry")?,
-                pending: blobs(objects.pending, "a pending object")?,
-                heads: blobs(objects.heads, "a head")?,
-                predecessor: blobs(objects.predecessor, "a predecessor entry")?,
-            };
+            let o = cv::authority_objects(objects)?;
             let v = verify_history(&o, &Persisted::default(), now_ms);
             let detail = match &v.stop {
                 Some(Stop::Failed { failure, .. }) => Some(failure.detail().to_string()),
                 Some(Stop::Held { why, .. }) => Some(why.clone()),
                 _ => None,
             };
+            let code = v.code();
+            let (kind, reason) = cv::status_parts(&code);
             Ok(HistoryReport {
-                code: v.code(),
+                code,
+                kind,
+                reason,
                 seq: v.seq(),
                 detail,
                 rollback: v.rollback,
@@ -104,6 +125,14 @@ free_fn! {
                 held_until_ms: v.held_until,
             })
         })
+    }
+}
+free_fn! {
+    /// The member kind a Swift predecessor's role migrates to (§15.4), exactly as the core
+    /// maps it: `device`, `app` or `web` (app), `agent`, `service` (server); none for a role
+    /// that has no mapping (the migration refuses it).
+    pub fn account_map_swift_role(role: String) -> Option<AccountMemberKind> {
+        colophon_core::v05::write::succession::map_swift_role(&role).map(cv::member_kind_from)
     }
 }
 free_fn! {
@@ -149,6 +178,7 @@ free_fn! {
                 Ok(ok) => Ok(WebauthnOk { uv: ok.uv, origin: ok.origin, counter: ok.counter }),
                 Err(f) => Err(AccountError::BadSignature {
                     code: format!("badSignature:{}", check_name(f)),
+                    check: Some(check_of(f)),
                     detail: check_name(f).into(),
                 }),
             }
@@ -257,11 +287,11 @@ impl AccountRequest {
                 signing: &spec.signing,
                 agreement: &spec.agreement,
                 label: &spec.label,
-                kind: cv::member_kind_of(spec.kind),
+                kind: cv::member_kind_of(spec.kind)?,
                 terms,
                 created: &spec.created,
-                custody: (!spec.custody.is_empty()).then_some(spec.custody.as_str()),
-                operator: (!spec.operator.is_empty()).then_some(spec.operator.as_str()),
+                custody: spec.custody.as_deref(),
+                operator: spec.operator.as_deref(),
                 endpoints,
             })?;
             Ok(Self {

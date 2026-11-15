@@ -56,6 +56,23 @@ pub struct CreateParams {
     pub epoch_seed: [u8; 32],
 }
 
+impl Drop for CreateParams {
+    /// The three seeds are secrets the host drew for this one creation: overwrite them with
+    /// zeros when the parameters (or a clone of them) are dropped, on every path.
+    fn drop(&mut self) {
+        for s in [
+            &mut self.vault_seed,
+            &mut self.entropy,
+            &mut self.epoch_seed,
+        ] {
+            s.fill(0);
+        }
+        std::hint::black_box(&self.vault_seed);
+        std::hint::black_box(&self.entropy);
+        std::hint::black_box(&self.epoch_seed);
+    }
+}
+
 impl std::fmt::Debug for CreateParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

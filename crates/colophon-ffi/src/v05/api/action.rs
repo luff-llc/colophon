@@ -21,7 +21,7 @@ pub(crate) struct ActState {
     pub pending: Option<PendingAction>,
     pub denial: Option<AccountDenial>,
     pub owner: u64,
-    pub kind: String,
+    pub kind: ActionKind,
 }
 
 /// A prepared action. One-shot: finishing (or a failed finish) consumes it.
@@ -32,23 +32,23 @@ pub struct AccountAction {
 }
 
 impl AccountAction {
-    pub(crate) fn ready(pending: PendingAction, owner: u64, kind: &str) -> Self {
+    pub(crate) fn ready(pending: PendingAction, owner: u64, kind: ActionKind) -> Self {
         Self {
             st: Cell::new(ActState {
                 pending: Some(pending),
                 denial: None,
                 owner,
-                kind: kind.into(),
+                kind,
             }),
         }
     }
-    pub(crate) fn denied(d: &colophon_core::model::Denial, owner: u64, kind: &str) -> Self {
+    pub(crate) fn denied(d: &colophon_core::model::Denial, owner: u64, kind: ActionKind) -> Self {
         Self {
             st: Cell::new(ActState {
                 pending: None,
                 denial: Some(cv::denial(d)),
                 owner,
-                kind: kind.into(),
+                kind,
             }),
         }
     }
@@ -73,16 +73,17 @@ impl AccountAction {
 #[cfg_attr(feature = "native05", uniffi::export)]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 impl AccountAction {
-    /// What kind of action this is (`approve`, `revoke`, `write`, ...).
-    pub fn kind(&self) -> Result<String, AccountError> {
-        guard(|| Ok(self.st.lock()?.kind.clone()))
+    /// What kind of action this is.
+    pub fn kind(&self) -> Result<ActionKind, AccountError> {
+        guard(|| Ok(self.st.lock()?.kind))
     }
     /// The access refusal of a write the account would not allow, or none. A denied action has
     /// no steps and cannot be finished.
     pub fn denial(&self) -> Result<Option<AccountDenial>, AccountError> {
         guard(|| {
             Ok(self.st.lock()?.denial.as_ref().map(|d| AccountDenial {
-                reason: d.reason.clone(),
+                reason: d.reason,
+                reason_raw: d.reason_raw.clone(),
                 detail: d.detail.clone(),
             }))
         })

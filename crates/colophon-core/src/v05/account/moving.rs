@@ -29,7 +29,8 @@
 use super::{Account, Changes, Finished, Incoming, PendingAction};
 use crate::model::Records as Legacy;
 use crate::v05::encoding::digest;
-use crate::v05::encoding::{decode_base64, strict_parse};
+use crate::v05::encoding::{bounds, decode_base64, strict_parse};
+use crate::v05::history::envelope::AuthEnvelope;
 use crate::v05::history::swift;
 use crate::v05::history::{succession_status, Objects, SuccessionStatus};
 use crate::v05::records::{Level, OperationHeader};
@@ -86,30 +87,74 @@ pub enum PendingMove {
     /// F, the freezing `layout` entry of the Swift predecessor.
     Freeze(PendingFreeze),
     /// The `migration` transition on the successor.
-    Migration(PendingBatch),
+    Migration(Stamped),
     /// A shares-only `renew` (§9.4).
-    Shares(PendingBatch),
+    Shares(Stamped),
+}
+/// A prepared batch with the head it was prepared on: it finishes only while that is still the
+/// head (as an ordinary action does), so two steps prepared at one head cannot both finish.
+#[derive(Debug)]
+pub struct Stamped {
+    batch: PendingBatch,
+    head: (u64, String),
 }
 impl PendingMove {
     /// What the host signs, in order.
     pub fn steps(&self) -> &[SigningStep] {
         match self {
             Self::Freeze(f) => f.steps(),
-            Self::Migration(b) | Self::Shares(b) => b.steps(),
+            Self::Migration(b) | Self::Shares(b) => b.batch.steps(),
         }
     }
 }
 
+/// Objects to store in the account's store, as `(path, bytes)`.
+pub type MoveStores = Vec<(String, Vec<u8>)>;
+
 /// What a finished step of the move produced.
+///
+/// Every step hands the host the objects to store ([`Moved::stores`]): a host that stores exactly
+/// these, at these paths, reopens at the same stage.
 #[derive(Debug)]
 pub enum Moved {
-    /// F's exact Swift-format bytes. They go to the Swift side's append; the account takes them
-    /// in with [`Account::accept_predecessor_entry`].
+    /// F's exact Swift-format bytes. They go to the Swift side's append, **and** the account
+    /// holds them: they are stored at `predecessor/authority/<seq>.json` in the account's store
+    /// (see [`Moved::stores`]), so that a reopen sees F and never builds a second one.
     Frozen(Frozen),
     /// The `migration` transition is held; it activates after its delay ([`Account::record_due`]).
-    Migration(Box<Changes>),
-    /// The shares-only `renew` is held.
-    Shares(Box<Changes>),
+    /// The second field is the objects to store: the transition at `transitions/<digest>.json`.
+    Migration(Box<Changes>, MoveStores),
+    /// The shares-only `renew` is held. The second field is the objects to store: the entry at
+    /// `authority/<seq>.json`.
+    Shares(Box<Changes>, MoveStores),
+}
+impl Moved {
+    /// The objects the host stores in the account's store, as `(path, bytes)`, in order.
+    pub fn stores(&self) -> MoveStores {
+        match self {
+            Self::Frozen(f) => vec![(
+                format!("predecessor/authority/{:08}.json", f.seq),
+                f.entry.clone(),
+            )],
+            Self::Migration(_, s) | Self::Shares(_, s) => s.clone(),
+        }
+    }
+}
+
+/// Where a pending object (a transition or a veto) is stored in the account's store.
+pub(crate) fn pending_store_path(bytes: &[u8]) -> Option<String> {
+    let e = AuthEnvelope::parse(
+        bytes,
+        bounds::TRANSITION_ENVELOPE,
+        bounds::TRANSITION_ENVELOPE,
+        true,
+    )
+    .ok()?;
+    let dir = match e.value.get("protocol").and_then(serde_json::Value::as_str) {
+        Some("colophon/veto/5") => "vetoes",
+        _ => "transitions",
+    };
+    Some(format!("{dir}/{}.json", e.digest))
 }
 
 /// The Swift entries of `all` up to `head_seq`, by their `seq`.
@@ -198,7 +243,20 @@ impl Account {
     /// the due time, after F or a recorded veto), for a key that is not eligible, and for fewer
     /// keys than the `handover` had.
     pub fn begin_swift_veto(&self, params: &SwiftVetoParams) -> Result<PendingSwiftVeto> {
-        self.stage_is(&[MoveStage::Waiting], "a veto is made during the wait")?;
+        let s = self.stage_is(&[MoveStage::Waiting], "a veto is made during the wait")?;
+        let held = self.objects.pending.iter().any(|p| {
+            AuthEnvelope::parse(p, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)
+                .ok()
+                .is_some_and(|e| {
+                    e.value.get("protocol").and_then(serde_json::Value::as_str)
+                        == Some("colophon/veto/5")
+                        && e.value
+                            .get("transition")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(s.status.genesis_digest.as_str())
+                })
+        });
+        require(!held, "a veto of this succession is already held")?;
         prepare_swift_veto(&self.objects, self.now_ms, params)
     }
 
@@ -417,7 +475,11 @@ impl Account {
         signers: &[String],
         seed: [u8; 32],
     ) -> Result<PendingMove> {
-        Ok(PendingMove::Shares(prepare_renew_shares(
+        require(
+            self.owed_shares().iter().any(|o| o.member == member),
+            "that member is owed no shares: the shares step is done, or not needed",
+        )?;
+        let batch = prepare_renew_shares(
             &self.d.effective,
             self.now_ms,
             signers,
@@ -425,7 +487,18 @@ impl Account {
             member,
             &self.d.keys,
             seed,
-        )?))
+        )?;
+        Ok(PendingMove::Shares(Stamped {
+            batch,
+            head: self.head(),
+        }))
+    }
+
+    /// A `migration` transition is already pending: a second one is never prepared or finished.
+    fn migration_pending(&self) -> bool {
+        self.pending()
+            .iter()
+            .any(|p| p.components.iter().any(|c| c == "migration"))
     }
 
     /// §15.4: prepare the `migration` transition from a finished copy. `members` is each
@@ -446,6 +519,10 @@ impl Account {
             &[MoveStage::Verified],
             "the migration is written after F and the copy",
         )?;
+        require(
+            !self.migration_pending(),
+            "a migration transition is already pending",
+        )?;
         let batch = prepare_migration(
             &self.objects,
             self.now_ms,
@@ -460,13 +537,19 @@ impl Account {
                 signers,
             },
         )?;
-        Ok(PendingMove::Migration(batch))
+        Ok(PendingMove::Migration(Stamped {
+            batch,
+            head: self.head(),
+        }))
     }
 
     /// Finish a step of the move with the host's signatures. F is returned as bytes **and held**:
     /// the account takes it into its predecessor objects at once, so it can never build a
-    /// second, different F. The migration transition and the shares entry are merged. A failure
-    /// changes nothing.
+    /// second, different F, and it is returned as an object to store
+    /// (`predecessor/authority/<seq>.json`: a reopen over the stored objects is `Frozen`, not
+    /// `Due`). The migration transition and the shares entry are merged **and returned** as
+    /// objects to store ([`Moved::stores`]). F is refused unless the succession is still `Due`
+    /// (another F, held meanwhile, makes this one a second F). A failure changes nothing.
     pub fn finish_move(
         &mut self,
         pending: PendingMove,
@@ -474,24 +557,54 @@ impl Account {
     ) -> Result<Moved> {
         match pending {
             PendingMove::Freeze(f) => {
+                self.stage_is(
+                    &[MoveStage::Due],
+                    "F is written once the succession is due, and only once",
+                )?;
                 let frozen = f.finish(signatures)?;
                 self.accept_predecessor_entry(frozen.entry.clone(), self.now_ms)?;
                 Ok(Moved::Frozen(frozen))
             }
             PendingMove::Migration(b) => {
-                Ok(Moved::Migration(Box::new(self.merge_batch(b, signatures)?)))
+                self.stage_is(
+                    &[MoveStage::Verified],
+                    "the migration is written after F and the copy",
+                )?;
+                require(
+                    !self.migration_pending(),
+                    "a migration transition is already pending",
+                )?;
+                let (c, stores) = self.merge_batch(b, signatures)?;
+                Ok(Moved::Migration(Box::new(c), stores))
             }
-            PendingMove::Shares(b) => Ok(Moved::Shares(Box::new(self.merge_batch(b, signatures)?))),
+            PendingMove::Shares(b) => {
+                let (c, stores) = self.merge_batch(b, signatures)?;
+                Ok(Moved::Shares(Box::new(c), stores))
+            }
         }
     }
 
     fn merge_batch(
         &mut self,
-        b: PendingBatch,
+        b: Stamped,
         signatures: Vec<SignatureResult>,
-    ) -> Result<Changes> {
-        let r = b.finish(signatures)?;
-        self.merge(
+    ) -> Result<(Changes, MoveStores)> {
+        // The head has moved since the step was prepared: refuse, as an ordinary action does.
+        if b.head != self.head() {
+            return Err(Failure::Refused(crate::v05::Reason::Fork));
+        }
+        let r = b.batch.finish(signatures)?;
+        let mut stores: Vec<(String, Vec<u8>)> = r
+            .entries
+            .iter()
+            .map(|(seq, e)| (format!("authority/{seq:08}.json"), e.clone()))
+            .collect();
+        for p in &r.pending {
+            let path = pending_store_path(p)
+                .ok_or_else(|| malformed("a pending object of the move has no path"))?;
+            stores.push((path, p.clone()));
+        }
+        let changes = self.merge(
             Incoming {
                 objects: Objects {
                     entries: r.entries.iter().map(|(_, e)| e.clone()).collect(),
@@ -501,7 +614,8 @@ impl Account {
                 records: Vec::new(),
             },
             self.now_ms,
-        )
+        )?;
+        Ok((changes, stores))
     }
 
     /// The Swift predecessor's verified history as this account holds it, for a host that shows

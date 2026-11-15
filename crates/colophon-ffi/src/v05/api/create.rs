@@ -3,11 +3,12 @@
 //! result is the account ID and everything to store, and the session then opens an
 //! `AccountEngine` over those stores and unlocks it by a slot as any session does.
 use super::convert as cv;
+use super::engine::identity_of as identity_of_record;
 use super::fault::AccountError;
 use super::types::*;
 use super::{guard, Cell};
 use colophon_core::v05::account::{
-    default_policy, Account, CreateParams as CoreParams, CreateProgress, Creation, Identity,
+    default_policy, Account, CreateParams as CoreParams, CreateProgress, Creation,
 };
 use colophon_core::v05::encoding::{digest, strict_parse};
 use colophon_core::v05::slots::SlotPlan as CoreSlotPlan;
@@ -28,25 +29,6 @@ pub struct AccountCreation {
     st: Cell<Stage>,
 }
 
-fn identity(text: &str) -> R<Identity> {
-    let (kind, id) = text
-        .split_once(':')
-        .ok_or_else(|| AccountError::bad("identity is `controller:<id>` or `member:<id>`"))?;
-    if id.len() != 32
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err(AccountError::bad("identity names a 32-hex key ID"));
-    }
-    match kind {
-        "controller" => Ok(Identity::Controller(id.into())),
-        "member" => Ok(Identity::Member(id.into())),
-        _ => Err(AccountError::bad(
-            "identity is `controller:<id>` or `member:<id>`",
-        )),
-    }
-}
 fn body_of(env: &[u8]) -> R<Value> {
     let v = strict_parse(env)?;
     let text = v
@@ -108,7 +90,7 @@ fn account_stores(a: &Account) -> R<Vec<Store>> {
 impl AccountCreation {
     fn begin_inner(
         params: CreateParams,
-        identity_text: String,
+        identity_of: AccountIdentity,
         now_ms: i64,
         entropy: Vec<u8>,
     ) -> R<Self> {
@@ -124,14 +106,14 @@ impl AccountCreation {
                 fixed::<32>(&entropy[32..64], "slot entropy")?,
                 fixed::<32>(&entropy[64..], "epoch seed")?,
             ];
-            let controllers = params
-                .controllers_json
-                .iter()
-                .map(|c| json(c, "a controller"))
-                .collect::<R<Vec<_>>>()?;
-            if controllers.len() > MAX_NAMES {
-                return Err(AccountError::bound("too many controllers"));
+            if params.controllers.len() > 64 {
+                return Err(AccountError::bound("a keyring has at most 64 controllers"));
             }
+            let controllers = params
+                .controllers
+                .iter()
+                .map(cv::controller_value)
+                .collect::<R<Vec<_>>>()?;
             let p = CoreParams {
                 label: params.label,
                 namespaces: names(params.namespaces, "namespaces")?,
@@ -153,7 +135,7 @@ impl AccountCreation {
                 policy: if params.policy_json.is_empty() {
                     None
                 } else {
-                    Some(json(&params.policy_json, "policy")?)
+                    Some(auth_json(&params.policy_json, "policy")?)
                 },
                 signers: names(params.signers, "signers")?,
                 rekey_signers: names(params.rekey_signers, "rekey signers")?,
@@ -161,7 +143,7 @@ impl AccountCreation {
                 entropy: seeds[1],
                 epoch_seed: seeds[2],
             };
-            let c = Creation::begin(p, identity(&identity_text)?, now_ms)?;
+            let c = Creation::begin(p, identity_of_record(&identity_of)?, now_ms)?;
             let stage = if c.prf_requests().is_empty() {
                 CreateStage::Genesis
             } else {
@@ -261,13 +243,13 @@ impl AccountCreation {
 #[cfg(feature = "native05")]
 #[uniffi::export]
 impl AccountCreation {
-    /// Start a creation as `identity` (`controller:<id>` or `member:<id>`) at `now_ms`.
-    /// `entropy` is 96 fresh bytes: the new vault's seed, the slots' entropy, the first epochs'
+    /// Start a creation as `identity` (a controller of the new keyring, or a member the account
+    /// will have) at `now_ms`. `entropy` is 96 fresh bytes: the new vault's seed, the slots' entropy, the first epochs'
     /// seed (wiped). The host chose the vault seed and so can read what is sealed to it.
     #[uniffi::constructor]
     pub fn begin(
         params: CreateParams,
-        identity: String,
+        identity: AccountIdentity,
         now_ms: i64,
         entropy: Vec<u8>,
     ) -> Result<std::sync::Arc<Self>, AccountError> {
@@ -277,10 +259,10 @@ impl AccountCreation {
 #[cfg(feature = "web05")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 impl AccountCreation {
-    /// Start a creation as `identity` (`controller:<id>` or `member:<id>`) at `now_ms`.
+    /// Start a creation as `identity` at `now_ms`.
     pub fn begin(
         params: CreateParams,
-        identity: String,
+        identity: AccountIdentity,
         now_ms: i64,
         entropy: Vec<u8>,
     ) -> Result<AccountCreation, AccountError> {
