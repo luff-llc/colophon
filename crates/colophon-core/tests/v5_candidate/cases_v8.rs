@@ -2361,6 +2361,127 @@ pub fn part3(o: &mut Out) {
         &["8.7", "9.3"],
         Some(ver(DUE0 + 60)),
     );
+    // §9.3 "A grant inside a transition": the component is exactly `{request, terms}`, and its
+    // member points and key IDs are new to the account, whatever principal had them.
+    let in_transition =
+        |label: &str, k: &Key, ag: &Key, change: &dyn Fn(Value) -> Value| -> Chain {
+            let mut c = ig.clone();
+            let mut terms =
+                json!({"records": [{"namespace": "notes", "access": "write"}], "import": true});
+            terms["expires"] = json!(ts(R0 + 7 * 86_400));
+            let req = request(
+                &aig,
+                k,
+                ag,
+                "device",
+                json!({"records": [{"namespace": "notes", "access": "write"}]}),
+                label,
+                None,
+            );
+            let t = transition(
+                &c,
+                change(json!({"request": req, "terms": terms})),
+                sg![a],
+                &ts(R0),
+                TOpt::default(),
+            );
+            activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+            c
+        };
+    let imp = derived("e12/import/signing");
+    let imp_a = derived("e12/import/agreement");
+    case_v(
+        o,
+        "t-grant-component-shares",
+        &in_transition("Importer", &imp, &imp_a, &|mut g| {
+            g["shares"] = json!([]);
+            json!({"grant": g})
+        }),
+        bad("malformed", 4),
+        "The valid import grant of `t-grant-import-device`, with a `shares` member in the `grant` component: a grant inside a transition carries no `shares`, so the `activate` is malformed and the history stops before it.",
+        &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    case_v(
+        o,
+        "t-grant-component-extra-field",
+        &in_transition("Importer", &imp, &imp_a, &|mut g| {
+            g["note"] = json!("not a grant field");
+            json!({"grant": g})
+        }),
+        bad("malformed", 4),
+        "The same grant with another member beside `request` and `terms`: the component is exactly `{request, terms}`, so the `activate` is malformed.",
+        &["2.3", "8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    case_v(
+        o,
+        "t-grant-component-home-key",
+        &in_transition("Importer", &h1k, &imp_a, &|g| json!({"grant": g})),
+        bad("malformed", 4),
+        "The same grant to a member whose signing point is that of the home appointed by the transition at seq 3: the point (and its key ID) was a principal's, so the member is not new to the account (§3.3) and the `activate` is malformed.",
+        &["3.3", "8.7", "9.2", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    let h2_appoint = home_appointment(&aig, &h2k, &h2a, "Home two");
+    let mut c = ig.clone();
+    let mut item = h2_appoint.clone();
+    item["shares"] = json!([]);
+    let t = transition(
+        &c,
+        json!({"homes": {"appoint": [item]}}),
+        sg![a],
+        &ts(R0),
+        TOpt::default(),
+    );
+    activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+    case_v(
+        o,
+        "t-appoint-item-shares",
+        &c,
+        bad("malformed", 4),
+        "A transition appointing a second home whose `homes.appoint` item carries `shares`: each item is exactly `{request, terms}`, as a grant inside a transition, so the `activate` is malformed.",
+        &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    let mut c = ig.clone();
+    let t = transition(
+        &c,
+        json!({"homes": {"appoint": [h2_appoint]}}),
+        sg![a],
+        &ts(R0),
+        TOpt::default(),
+    );
+    activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+    case_v(
+        o,
+        "t-appoint-item-plain",
+        &c,
+        ok_at(4),
+        "The same appointment without `shares`: the transition activates and the second home is added.",
+        &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    // §2.3: unknown content a transition's delta brings into the keyring is reported, never
+    // silently kept.
+    let mut c = ig.clone();
+    let t = transition(
+        &c,
+        json!({"policy": {"futureKnob": 1}}),
+        sg![a],
+        &ts(R0),
+        TOpt::default(),
+    );
+    activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+    case_v(
+        o,
+        "t-policy-unknown-field",
+        &c,
+        bad("newerFormat", 4),
+        "A transition setting a policy field this version does not define: the field is unknown content inside a known protocol, reported `newerFormat` at the `activate` once the delta is otherwise valid.",
+        &["1", "2.3", "8.7"],
+        Some(ver(DUE0 + 60)),
+    );
     let mut many: Vec<Key> = vec![a.clone()];
     many.extend((1..23).map(|i| derived(&format!("r7/many/{i}")))); // A owns the default genesis slot.
     let kr_m = keyring(

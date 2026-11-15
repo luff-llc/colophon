@@ -886,6 +886,15 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
                 }
             }
             "vault" => {
+                // `{vault, slots, previousVault}` (§8.3); another member is unknown content.
+                let m = comp
+                    .as_object()
+                    .ok_or_else(|| malformed("vault component"))?;
+                for f in m.keys() {
+                    if !matches!(f.as_str(), "vault" | "slots" | "previousVault") {
+                        c.unknown.push(format!("change.vault.{f}"));
+                    }
+                }
                 c.removal_only = false;
                 c.adds_anything = true;
                 let has_removal = change
@@ -946,6 +955,14 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
                 c.recovery_ok_if_full = false;
             }
             "layout" | "migration" | "successor" => {
+                // `successor` is `{account}` (§8.7); another member is unknown content.
+                if name == "successor" {
+                    for f in comp.as_object().into_iter().flat_map(|m| m.keys()) {
+                        if f != "account" {
+                            c.unknown.push(format!("change.successor.{f}"));
+                        }
+                    }
+                }
                 c.consent = true;
                 c.removal_only = false;
                 c.adds_anything = true;
@@ -1499,17 +1516,11 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     overrides.insert("slots".into(), Value::Array(slots));
     let raw_keyring = k.rebuild(&raw, &overrides);
     // Homes.
-    let mut new_members = Vec::new();
+    let (new_members, mut unknown) = transition_members(s, &t.change, act_seq, t.issued_ms)?;
+    if !new_members.is_empty() {
+        changed = true;
+    }
     if let Some(hc) = t.change.get("homes").and_then(Value::as_object) {
-        for a in hc
-            .get("appoint")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            new_members.push(member_from(s, a, act_seq, true, t.issued_ms)?);
-            changed = true;
-        }
         for id in hc
             .get("revoke")
             .and_then(Value::as_array)
@@ -1529,10 +1540,6 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
                 _ => {}
             }
         }
-    }
-    if let Some(g) = t.change.get("grant") {
-        new_members.push(member_from(s, g, act_seq, false, t.issued_ms)?);
-        changed = true;
     }
     if let Some(m) = t.change.get("migration") {
         super::succession::migration(&mut n, m, t.issued_ms)?;
@@ -1569,6 +1576,9 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     }
     let new_k = Keyring::parse(raw_keyring, 0)
         .map_err(|e| malformed(format!("void: the result breaks §6: {}", e.detail())))?;
+    // Unknown content the delta brought into the keyring (a policy field, a slot or vault
+    // member this reader does not know): the keyring before had none (§2.3).
+    unknown.0.extend(new_k.unknown.0.iter().cloned());
     for m in new_members {
         n.members.push(m);
     }
@@ -1595,44 +1605,85 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
         .policy
         .check_homes(&homes)
         .map_err(|e| malformed(format!("void: {}", e.detail())))?;
+    // Unknown content inside the delta is reported only once the delta is otherwise valid, as
+    // an immediate entry reports it after its checks (§1, §2.3).
+    unknown.check()?;
+    record_points(&mut n);
     Ok(n)
 }
 
-fn member_from(s: &State, v: &Value, seq: u64, home: bool, issued_ms: i64) -> Result<MemberRecord> {
-    let req_bytes = embedded_bytes(
-        v.get("request").unwrap_or(&Value::Null),
-        "request",
-        bounds::REQUEST_BODY * 2 + 4_096,
-    )?;
-    let request = Request::parse(&req_bytes, true)?;
-    crate::v05::require(
-        &request.account == s.account(),
-        "request names another account",
-    )?;
-    let terms = Terms::parse(
-        v.get("terms").cloned().unwrap_or(Value::Null),
-        TermsKind::Member,
-    )?;
-    crate::v05::require(
-        terms.covered_by(&request.terms),
-        "granted terms not covered by the request",
-    )?;
-    // The rules of an immediate grant (§9.2, §9.3), by the same function.
-    crate::v05::members::check_granted_terms(&request, &terms, &s.namespaces, issued_ms)?;
-    if home {
-        crate::v05::require(terms.serves_home(), "an appointed home must serve home")?;
-        crate::v05::require(
-            request.kind != MemberKind::Agent,
-            "serves is never granted to an agent",
-        )?;
+/// §3.3: every point and key ID any principal of the state uses (controllers, the vault,
+/// members) joins the set no later grant may reuse. Called after every entry, so whatever path
+/// added a principal (an immediate entry, a transition's delta, a vault rotation) the set holds
+/// it; nothing is ever removed.
+fn record_points(n: &mut State) {
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    for c in n.keyring.controllers.values() {
+        keys.push(c.key().signing().to_vec());
+        if let Some(a) = c.key().agreement() {
+            keys.push(a.to_vec());
+        }
     }
-    for p in [&request.signing, &request.agreement] {
-        crate::v05::require(
-            !s.points.contains(p),
-            "member key already used by a principal (§3.3)",
-        )?;
+    keys.push(n.keyring.vault.0.clone());
+    keys.push(n.keyring.vault.1.clone());
+    for m in &n.members {
+        keys.push(m.request.signing.clone());
+        keys.push(m.request.agreement.clone());
     }
-    Ok(MemberRecord {
+    for p in keys {
+        n.points.insert(key_id(&p).into_bytes());
+        n.points.insert(p);
+    }
+    let ids: Vec<String> = n.keyring.controllers.keys().cloned().collect();
+    for id in ids {
+        n.points.insert(id.into_bytes());
+    }
+}
+
+/// The members a transition's `change` adds (§9.3 "A grant inside a transition"): each
+/// `homes.appoint` item, then the `grant` component, judged by the immediate grant's rules
+/// ([`crate::v05::members::parse_transition_grant`]) against every point and key ID any
+/// principal has used, including the members added before it by the same change. Returns them
+/// with their unknown content (§2.3), which the caller reports after its own checks. The write
+/// side runs the same function before it asks anyone to sign.
+pub(crate) fn transition_members(
+    s: &State,
+    change: &Map<String, Value>,
+    act_seq: u64,
+    issued_ms: i64,
+) -> Result<(Vec<MemberRecord>, crate::v05::Unknown)> {
+    let mut known = s.points.clone();
+    let mut members = Vec::new();
+    let mut unknown = crate::v05::Unknown::default();
+    let appoint = change
+        .get("homes")
+        .and_then(|h| h.get("appoint"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|a| (a, "change.homes.appoint[]", true));
+    for (v, path, home) in appoint.chain(change.get("grant").map(|g| (g, "change.grant", false))) {
+        let (request, terms, u) = crate::v05::members::parse_transition_grant(
+            v.clone(),
+            path,
+            &s.account,
+            &s.namespaces,
+            &known,
+            issued_ms,
+            home,
+        )?;
+        unknown.0.extend(u.0);
+        for p in [&request.signing, &request.agreement] {
+            known.insert(p.clone());
+            known.insert(key_id(p).into_bytes());
+        }
+        members.push(member_record(request, terms, act_seq, home));
+    }
+    Ok((members, unknown))
+}
+
+fn member_record(request: Request, terms: Terms, seq: u64, home: bool) -> MemberRecord {
+    MemberRecord {
         expires_ms: terms.expires_ms(),
         request,
         terms,
@@ -1647,7 +1698,7 @@ fn member_from(s: &State, v: &Value, seq: u64, home: bool, issued_ms: i64) -> Re
         } else {
             HomeStatus::NotHome
         },
-    })
+    }
 }
 
 /// Make an activation final, with what it added (§8.7).
@@ -2402,6 +2453,9 @@ fn vault_entry(s: &State, e: &Entry) -> Step<State> {
     n.keyring = Keyring::parse(raw, 1)?;
     n.retiring = None;
     charge_rate(&mut n, e, false)?;
+    // Unknown content in the new vault or slots (§2.3), as for a `keyring` entry.
+    n.keyring.unknown.check()?;
+    record_points(&mut n);
     Ok(n)
 }
 
@@ -3072,6 +3126,7 @@ fn keyring_entry(
         n.points.insert(c.id().into_bytes());
         if let Some(a) = c.key().agreement() {
             n.points.insert(a.to_vec());
+            n.points.insert(key_id(a).into_bytes());
         }
     }
     n.keyring = new;

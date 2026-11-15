@@ -1,0 +1,1 @@
+{"description":"A transition appointing a second home whose `homes.appoint` item carries `shares`: each item is exactly `{request, terms}`, as a grant inside a transition, so the `activate` is malformed.","expected":{"result":"malformed","seq":4},"sections":["8.7","9.3"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

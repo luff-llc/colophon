@@ -72,6 +72,17 @@ pub fn check_admissible_transition(s: &State, transition: &[u8]) -> Result<(), F
     state::admission_transition(s, transition).map(|_| ())
 }
 
+/// The members a transition's `change` would add, judged as at activation in `s` with
+/// `issued_ms` (§9.3 "A grant inside a transition"): the same function the verifier applies, so
+/// the write side refuses at prepare what a verifier would find void.
+pub(crate) fn check_transition_members(
+    s: &State,
+    change: &serde_json::Map<String, serde_json::Value>,
+    issued_ms: i64,
+) -> Result<(), Failure> {
+    state::transition_members(s, change, s.seq() + 1, issued_ms).map(|_| ())
+}
+
 impl State {
     /// The `issued` of the last verified entry, in ms.
     pub fn last_issued_ms(&self) -> i64 {
