@@ -68,6 +68,7 @@ actor SessionWorker {
     private let journalURL: URL
     private let cache: CheckpointCache
     private var faults: [HomeFault] = []
+    private var issues: [HomeIssue] = []
 
     init(configuration: SessionConfiguration) {
         self.configuration = configuration; memberKeys = SessionKeys(base: configuration.keys)
@@ -512,6 +513,7 @@ actor SessionWorker {
                 throw SessionError.destinationChanged
             }
             guard !configuration.homes.isEmpty || configuration.createWithoutHome else { throw SessionError.noHome }
+            guard configuration.homes.allSatisfy(\.isAllowed) else { throw SessionError.insecureHome }
             journal.left = false
             let baseCustody = try await ownerCustody()
             let ownerKey = try await configuration.ownerController.keyDescriptor()
@@ -674,10 +676,15 @@ actor SessionWorker {
         return configuration.homes.first { configured in home.endpoints.contains { base($0) == base(configured.endpoint.absoluteString) } }
     }
 
-    struct ExchangeResult: Sendable { var passes = 0; var faults: [HomeFault] = []; var changed = false; var unauthorized = false }
+    struct ExchangeResult: Sendable {
+        var passes = 0; var faults: [HomeFault] = []; var issues: [HomeIssue] = []; var changed = false; var unauthorized = false
+    }
+    /// The call this host signed for a ticket: what the engine's next request for that ticket must be.
+    private struct BoundCall { let ticket: UInt64; let method: HttpMethod; let url: String; let bodyDigest: String }
 
     /// One pass with every home. The network calls run outside the gate; each engine step and the
     /// persistence of its stores run inside it, so an unpersisted answer is never visible to a refresh.
+    /// A home is held to `HomeLimits`: steps per pass, the time of an exchange, the size of each response.
     func exchange(nowMsOverride: Int64? = nil) async throws -> ExchangeResult {
         try await gated { if engine == nil { _ = try await reconcile() } }
         var result = ExchangeResult()
@@ -685,6 +692,10 @@ actor SessionWorker {
         let homes = try await engine.run { try $0.exchangeHomes() }
         for home in homes {
             guard let configured = transport(for: home) else { continue }
+            guard configured.isAllowed else {
+                result.issues.append(HomeIssue(home: home.id, problem: .insecureEndpoint(configured.endpoint.absoluteString)))
+                continue
+            }
             if let token = configured.bearerToken { _ = try await engine.run { try $0.exchangeSetBearer(home: home.id, token: token) } }
             // The pass starts from fresh local state.
             try await gated {
@@ -693,28 +704,51 @@ actor SessionWorker {
                 _ = try await engine.run { try $0.refresh(listing: list) }
                 try await unlockIfPossible()
             }
+            let started = ContinuousClock.now
             var progress = true
             var passIndex = 0
+            var bound: BoundCall?
+            var stopped: HomeProblem?
             // A pass can end before everything moved (the engine plans the next stage from what the home just
-            // said): run passes until one moves nothing, at most four.
-            while progress, passIndex < 4 {
+            // said): run passes until one moves nothing, at most `HomeLimits.passes`.
+            homeLoop: while progress, passIndex < HomeLimits.passes {
             progress = false; passIndex += 1
             var steps = 0
-            loop: while steps < 100_000 {
+            loop: while true {
                 steps += 1
                 try Task.checkCancellation()
+                if steps > HomeLimits.stepsPerPass { stopped = .tooManySteps(HomeLimits.stepsPerPass); break homeLoop }
+                if ContinuousClock.now - started > HomeLimits.exchangeTime {
+                    stopped = .tooSlow(seconds: Int(HomeLimits.exchangeTime.components.seconds)); break homeLoop
+                }
                 let step = try await gated { try await engine.run { try $0.exchangeNext(home: home.id) } }
                 switch step.kind {
                 case .done, .waiting: break loop
                 case .needCall:
                     guard let need = step.need else { break loop }
-                    let call = try await buildCall(need)
-                    try await gated { try await engine.run { try $0.exchangeProvideCall(home: need.home, ticket: need.ticket, call: call) } }
+                    let call: (envelope: Data, bound: BoundCall)
+                    do { call = try await buildCall(need, configured: configured) }
+                    catch let problem as HomeProblem { stopped = problem; break homeLoop }
+                    bound = call.bound
+                    try await gated { try await engine.run { try $0.exchangeProvideCall(home: need.home, ticket: need.ticket, call: call.envelope) } }
                 case .request:
                     guard let request = step.request else { break loop }
+                    if let expected = bound, expected.ticket == request.ticket {
+                        // Never send a call with any request but the one it was signed for.
+                        guard request.method == expected.method, request.url == expected.url,
+                              Self.hex(SHA256.hash(data: request.body)) == expected.bodyDigest else {
+                            stopped = .callNotBound("the request for ticket \(request.ticket) is not the one its call was signed for"); break homeLoop
+                        }
+                    }
+                    bound = nil
+                    guard request.url.hasPrefix(Self.base(configured.endpoint.absoluteString)) else {
+                        stopped = .callNotBound("a request for another host than the configured home"); break homeLoop
+                    }
                     if request.method != .get { progress = true }
                     let answer: HttpAnswer
                     do { answer = try await configured.transport.send(request) }
+                    catch HomeTransportError.responseTooLarge(let limit) { stopped = .responseTooLarge(limit: limit); break homeLoop }
+                    catch HomeTransportError.insecureEndpoint(let url) { stopped = .insecureEndpoint(url); break homeLoop }
                     catch {
                         try await gated {
                             let report = try await engine.run { try $0.exchangeAbort(home: home.id) }
@@ -722,6 +756,9 @@ actor SessionWorker {
                         }
                         throw error
                     }
+                    // A transport the host supplied is held to the same bound.
+                    let limit = HomeLimits.responseBytes(for: request.url)
+                    guard answer.body.count <= limit else { stopped = .responseTooLarge(limit: limit); break homeLoop }
                     let report = try await gated { () -> Report in
                         let report = try await engine.run { try $0.exchangeAnswer(home: home.id, ticket: request.ticket, answer: answer) }
                         try await persist(report.store)
@@ -736,28 +773,66 @@ actor SessionWorker {
             }
             result.passes += 1
             }
+            if let stopped {
+                result.issues.append(HomeIssue(home: home.id, problem: stopped))
+                try await gated {
+                    let report = try await engine.run { try $0.exchangeAbort(home: home.id) }
+                    try await persist(report.store)
+                }
+            }
         }
         faults = result.faults
+        issues = result.issues
         return result
     }
 
+    static func base(_ text: String) -> String { text.hasSuffix("/") ? String(text.dropLast()) : text }
+    static func hex<D: Sequence>(_ digest: D) -> String where D.Element == UInt8 { digest.map { String(format: "%02x", $0) }.joined() }
+
     /// A fresh `Authorization: Colophon` call for exactly this request, signed by this device's member key (§12.4).
-    private func buildCall(_ need: CallNeed) async throws -> Data {
+    ///
+    /// `args` are exactly `{"method": <HTTP method>, "path": <path and query relative to the home's base, as sent>,
+    /// "body": <lowercase hex SHA-256 of the body, of the empty string when there is none>}`; the purpose is
+    /// `colophon.home.read` for GET and `colophon.home.write` otherwise. The audience is the engine's `need.audience`,
+    /// which is the home's base URL (the engine and the home's §12.3 check both use the base, not the home's key ID).
+    /// The engine's `CallNeed` does not carry the body, so the host takes it from what it holds: no body for a GET, the
+    /// stored bytes for a `PUT {base}/records/<path>`. Any other request that needs a call is `callNotBound` (nothing is
+    /// signed). The request the engine then produces is checked against this before it is sent.
+    private func buildCall(_ need: CallNeed, configured: HomeConfiguration) async throws -> (envelope: Data, bound: BoundCall) {
         guard let engine, let custody = memberCustody, let id = memberID else { throw SessionError.notReady }
-        let signing = try await custody.provider(for: id).publicKeys().signing
+        let base = Self.base(need.audience)
+        guard need.url.hasPrefix(base), base == Self.base(configured.endpoint.absoluteString) else {
+            throw HomeProblem.callNotBound("a call for another host than the configured home")
+        }
+        let path = String(need.url.dropFirst(base.count))
         let method = switch need.method { case .get: "GET"; case .post: "POST"; case .put: "PUT" }
-        let args = String(decoding: try JSONSerialization.data(withJSONObject: ["method": method, "url": need.url], options: [.sortedKeys]), as: UTF8.self)
-        let target = CallTarget(audiences: [need.audience], callOrigins: [], controllerPurposes: [], homeEndpoints: [])
+        let purpose = need.method == .get ? "colophon.home.read" : "colophon.home.write"
+        guard need.purpose == purpose else { throw HomeProblem.callNotBound("the engine asked for purpose \(need.purpose) on \(method)") }
+        let body: Data
+        if need.method == .get { body = Data() }
+        else if need.method == .put, path.hasPrefix("/records/") {
+            let encoded = String(path.dropFirst("/records/".count).split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0])
+            let record = encoded.removingPercentEncoding ?? encoded
+            body = RecordPaths.isBlob(record) ? try storage().readBlob(record) : try storage().read(record)
+        } else {
+            throw HomeProblem.callNotBound("\(method) \(path): the body of this request is not known before it is built")
+        }
+        let digest = Self.hex(SHA256.hash(data: body))
+        let argsObject: [String: String] = ["method": method, "path": path, "body": digest]
+        let args = String(decoding: try JSONSerialization.data(withJSONObject: argsObject, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        let signing = try await custody.provider(for: id).publicKeys().signing
+        let target = CallTarget(audiences: [need.audience], callOrigins: [], controllerPurposes: [], homeEndpoints: [need.audience])
         let written = try await gated {
             try await engine.execute(custody: custody) {
-                engine in try withEntropy(32) { try engine.beginCall(key: signing, links: [], audience: need.audience, purpose: need.purpose, argsJson: args, target: target, entropy: $0) }
+                engine in try withEntropy(32) { try engine.beginCall(key: signing, links: [], audience: need.audience, purpose: purpose, argsJson: args, target: target, entropy: $0) }
             }
         }
         guard let artifact = written.artifact else { throw ColophonError.internalFailure(code: "internal", detail: "a call returned no envelope") }
-        return artifact
+        return (artifact, BoundCall(ticket: need.ticket, method: need.method, url: need.url, bodyDigest: digest))
     }
 
     var homeFaults: [HomeFault] { faults }
+    var homeIssues: [HomeIssue] { issues }
     var hasConfiguredHomes: Bool { !configuration.homes.isEmpty }
 
     /// Records transitions that came due (§8.7). A schedule calls it; refresh calls it too.

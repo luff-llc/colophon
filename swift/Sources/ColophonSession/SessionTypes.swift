@@ -39,6 +39,8 @@ public enum SessionError: Error, Equatable, Sendable {
     /// New in 0.5: a step needs the owner controller (the person's passkey or owner key) and this
     /// configuration holds none that the account's keyring names.
     case ownerRequired
+    /// New in 0.5: a configured home's endpoint is not `https` (see `HomeConfiguration.allowsLoopbackHTTP`).
+    case insecureHome
 }
 
 /// A command is bound to the context and revision observed before the user's action began.
@@ -92,10 +94,17 @@ public struct HomeConfiguration: Sendable {
     /// Storage bearer token for the home (access to its store only, never membership).
     public let bearerToken: String?
     public let transport: any HomeTransport
+    /// Testing option: allow a plain `http` endpoint on a loopback address. Every other home must be `https`; a session
+    /// neither appoints nor contacts one that is not (`HomeProblem.insecureEndpoint`).
+    public let allowsLoopbackHTTP: Bool
     public init(endpoint: URL, label: String = "Home", request: (@Sendable (_ account: String) async throws -> Data)? = nil, bearerToken: String? = nil,
-                transport: any HomeTransport = URLSessionHomeTransport()) {
-        self.endpoint = endpoint; self.label = label; self.request = request; self.bearerToken = bearerToken; self.transport = transport
+                transport: (any HomeTransport)? = nil, allowsLoopbackHTTP: Bool = false) {
+        self.endpoint = endpoint; self.label = label; self.request = request; self.bearerToken = bearerToken
+        self.transport = transport ?? URLSessionHomeTransport(allowingLoopbackHTTP: allowsLoopbackHTTP)
+        self.allowsLoopbackHTTP = allowsLoopbackHTTP
     }
+    /// Whether this endpoint may be used (`https`, or loopback `http` with the testing option).
+    public var isAllowed: Bool { HomeLimits.isAllowed(endpoint, allowingLoopbackHTTP: allowsLoopbackHTTP) }
 }
 
 public struct SessionConfiguration: Sendable {
@@ -210,6 +219,7 @@ extension SessionError: LocalizedError {
         case .invalidCommand: "This command or extension envelope is invalid."
         case .noHome: "This account has no home. Without one there is no witness of time or order for your changes; add a home before relying on it."
         case .ownerRequired: "This step needs the account owner's key."
+        case .insecureHome: "A home must be reached over HTTPS. This one is not, so it was not used."
         }
     }
 }

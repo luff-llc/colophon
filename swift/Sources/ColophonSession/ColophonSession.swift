@@ -28,6 +28,9 @@ import Observation
     public private(set) var lastSynced: Date?
     /// Faults of the latest exchange: what a home did that the engine did not follow.
     public private(set) var homeFaults: [HomeFault] = []
+    /// What this host refused about a home in the latest exchange (an endpoint that is not `https`, a response over its
+    /// bound, a pass over its step or time budget, a call it could not bind to its request).
+    public private(set) var homeIssues: [HomeIssue] = []
     /// In-progress blob downloads by digest; absent when nothing is downloading.
     public internal(set) var blobDownloads: [String: BlobAvailability] = [:]
     @ObservationIgnored let worker: SessionWorker
@@ -277,7 +280,7 @@ import Observation
         if syncState != .syncing { syncState = .syncing }
         do {
             let result = try await worker.exchange()
-            homeFaults = result.faults
+            homeFaults = result.faults; homeIssues = result.issues
             lastSynced = .now
             syncState = result.unauthorized ? .unauthorized : .idle
             if result.changed || phase != .ready { await refresh(preservingCommandFailure: true) }

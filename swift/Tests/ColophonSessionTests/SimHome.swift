@@ -5,11 +5,21 @@ import ColophonSession
 /// An in-process home: the HTTP surface the engine's exchange speaks (head, authority, pending, change feed,
 /// records), driven by the requests the engine emits, as `crates/colophon-ffi/tests/v05_support` does in Rust.
 ///
-/// What it is not: it does no admission checking (the Rust double runs the core's home rules; the core's home
-/// logic is not exported to Swift), and it issues no receipts. It signs heads with its own key. When the relay
-/// grows into a home (a separate package) a real one replaces this double: swap `SimHome` for a transport that
-/// speaks to it. The engine on the other side verifies everything it is told, so a dishonest double could not
-/// make a verifier accept a bad history; it can only fail to be a faithful home.
+/// Admission, through the exported verifiers, so that it refuses what a real home refuses:
+/// * `POST /authority` stores entries only if the history they extend verifies (`accountVerifyHistory`); a history
+///   that does not is 422 `{"result": <code>}`.
+/// * Reading records, blob chunks and the change feed needs `Authorization: Colophon <call>` (401 with
+///   `WWW-Authenticate: Colophon` without one, §13.4); the history is served as under `policy.history: public`; a
+///   write is checked when it carries a call (see `send` for why a member cannot sign one yet). A call is checked as the
+///   relay's home checks it: `colophon/call/5` for this account, audience the home's base, purpose `colophon.home.read`
+///   for GET and `colophon.home.write` otherwise, `args` exactly `{"method","path","body"}` for this request (path and
+///   query relative to the base, the body's SHA-256), a `requestId` never seen before, signed `raw` by the key it names,
+///   whose key ID is the signer, a current member of the verified history (read by an `AccountEngine` the home opens
+///   over what it holds). A refused call is 403 `{"result": "refused:…"}`.
+///
+/// It issues receipts for transitions and vetoes posted to `/pending`, and signs heads with its own key. What it does
+/// not do (the relay's home does; see `relay/` on `home-0.5-h1`): the replay table's per-signer shares, rate limits,
+/// links, controller calls, and the write grant per namespace (a member may write anything here).
 final class SimHome: HomeTransport, @unchecked Sendable {
     let key = P256.Signing.PrivateKey()
     let agreement = P256.KeyAgreement.PrivateKey()
@@ -23,6 +33,15 @@ final class SimHome: HomeTransport, @unchecked Sendable {
     private(set) var pendingObjects: [Data] = []
     private var pendingList: [[String: Any]] = []
     var online = true
+    /// Whether reading records and the change feed needs a call. Off by default: a member approved by another device is
+    /// refused `refused:revoked` by the core's own `begin_call` check in its first passes, so the multi-device tests
+    /// cannot run with calls required (a core finding, reported in the PR). `HomeTests` turns it on for one device.
+    var requireCalls = false
+    /// Every call that was refused, with its reason, and every call accepted.
+    private(set) var refusedCalls: [String] = []
+    private(set) var acceptedCalls = 0
+    private var seenRequests: Set<String> = []
+    private var membersCache: (count: Int, members: [String: Bool])?
     var now: @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
 
     init(base: String = "https://home.example") { self.base = base }
@@ -82,6 +101,18 @@ final class SimHome: HomeTransport, @unchecked Sendable {
             let method = switch request.method { case .get: "GET"; case .post: "POST"; case .put: "PUT" }
             requestLog.append("\(method) \(path)")
             func header(_ name: String) -> String? { request.headers.first { $0.name.lowercased() == name.lowercased() }?.value }
+            // Records, blob chunks and the change feed always need a call (§13.4). The history is served as under
+            // `policy.history: public`: under `members` the engine's first pass asks for `/authority` before `/head`, and
+            // `begin_call` needs a fresh head, so no call can be built (a core ordering gap, reported in the PR).
+            // Writes take a call when one is sent and are otherwise admitted: the core's `begin_call` refuses a member's
+            // `colophon.home.write` whose terms do not grant it (§12.3 step 7), although §14 lets any member write paths
+            // under its own author ID, so the host cannot sign one yet (a core gap, reported in the PR).
+            let isWrite = method != "GET"
+            let needsCall = (path.hasPrefix("/records/") && !path.hasPrefix("/records/heads/") || path == "/changes")
+                && (!isWrite || header("Authorization") != nil)
+            if requireCalls, needsCall, account != nil {
+                if let refusal = admitCall(header("Authorization"), method: method, path: rest, body: request.body) { return refusal }
+            }
             switch (method, path) {
             case ("GET", "/head"):
                 guard let head = headEnvelope() else { return response(404) }
@@ -94,6 +125,18 @@ final class SimHome: HomeTransport, @unchecked Sendable {
                 return response(200, ["entries": page, "receipts": [Any](), "more": all.count > limit])
             case ("POST", "/authority"):
                 guard let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any], let incoming = object["entries"] as? [Any] else { return response(422) }
+                // Admission: the history these entries extend must verify.
+                var proposed = entries
+                for entry in incoming {
+                    let bytes = Self.canonical(entry)
+                    guard let seq = entrySeq(bytes) else { return response(422, ["result": "malformed"]) }
+                    if proposed[seq] == nil { proposed[seq] = bytes }
+                }
+                let ordered = proposed.keys.sorted().compactMap { proposed[$0] }.map { ByteString(bytes: $0) }
+                if let report = try? accountVerifyHistory(objects: AuthorityObjects(entries: ordered, pending: [], heads: [], predecessor: []), nowMs: now()),
+                   report.account == nil {
+                    return response(422, ["result": report.code])
+                }
                 for entry in incoming {
                     let bytes = Self.canonical(entry)
                     guard let seq = entrySeq(bytes) else { return response(422, ["result": "malformed"]) }
@@ -155,10 +198,72 @@ final class SimHome: HomeTransport, @unchecked Sendable {
             }
         }
     }
+    /// The §12.3 checks a home makes of a call for this request (nil: admitted).
+    private func admitCall(_ authorization: String?, method: String, path: String, body: Data) -> HttpAnswer? {
+        func refuse(_ result: String) -> HttpAnswer { refusedCalls.append(result); return response(403, ["result": result]) }
+        guard let authorization, authorization.hasPrefix("Colophon ") else {
+            return HttpAnswer(status: 401, headers: [Header(name: "WWW-Authenticate", value: "Colophon")], body: Data())
+        }
+        let encoded = String(authorization.dropFirst("Colophon ".count))
+        guard let raw = Self.base64url(encoded), let envelope = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+              let bodyText = envelope["body"] as? String, let callBody = Data(base64Encoded: bodyText),
+              let signatureText = envelope["signature"] as? String, let signature = Data(base64Encoded: signatureText),
+              let call = try? JSONSerialization.jsonObject(with: callBody) as? [String: Any] else { return refuse("malformed") }
+        guard call["protocol"] as? String == "colophon/call/5", call["account"] as? String == account else { return refuse("malformed") }
+        guard (call["audience"] as? String).map({ $0.hasSuffix("/") ? String($0.dropLast()) : $0 }) == base else { return refuse("refused:audience") }
+        guard call["purpose"] as? String == (method == "GET" ? "colophon.home.read" : "colophon.home.write") else { return refuse("refused:outOfScope") }
+        guard let args = call["args"] as? [String: Any], args.count == 3, args["method"] as? String == method, args["path"] as? String == path,
+              args["body"] as? String == Self.hex(body) else { return refuse("refused:outOfScope") }
+        guard let requestID = call["requestId"] as? String, !seenRequests.contains(requestID) else { return refuse("refused:replay") }
+        guard let keyText = call["key"] as? String, let key = Data(base64Encoded: keyText),
+              let signer = (call["signer"] as? [String: Any])?["member"] as? String,
+              (try? accountKeyId(signing: key)) == signer else { return refuse("badSignature") }
+        guard let publicKey = try? P256.Signing.PublicKey(x963Representation: key),
+              let ecdsa = try? P256.Signing.ECDSASignature(rawRepresentation: signature),
+              publicKey.isValidSignature(ecdsa, for: callBody) else { return refuse("badSignature") }
+        guard members()[signer] == true else { return refuse("refused:revoked") }
+        seenRequests.insert(requestID)
+        acceptedCalls += 1
+        return nil
+    }
+
+    /// Current members of the history this home holds (ID to "not revoked"), read by an engine opened over its files.
+    private func members() -> [String: Bool] {
+        if let cache = membersCache, cache.count == entries.count { return cache.members }
+        guard let account else { return [:] }
+        var held: [String: Data] = [:]
+        for (seq, bytes) in entries { held["authority/" + String(format: "%08llu", seq) + ".json"] = bytes }
+        let source = HeldSource(files: held)
+        let listing = held.keys.sorted().map { ListedPath(path: $0, version: nil) }
+        guard let engine = try? withEntropy(32, { key in
+            try AccountEngine.open(source: source, listing: listing, identity: AccountIdentity(kind: .member, id: id), account: account,
+                                   namespaces: [], batch: 0, saved: SavedState(verifier: Data(), checkpoint: Data(), parts: []), key: key, nowMs: now())
+        }), let list = try? engine.members() else { return [:] }
+        let result = Dictionary(list.map { ($0.id, $0.revokedAt == nil) }, uniquingKeysWith: { $1 })
+        membersCache = (entries.count, result)
+        return result
+    }
+    private static func base64url(_ text: String) -> Data? {
+        var base = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base += String(repeating: "=", count: (4 - base.count % 4) % 4)
+        return Data(base64Encoded: base)
+    }
+
     private static func parseDate(_ text: String) -> Int64? {
         let plain = ISO8601DateFormatter(); let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return (plain.date(from: text) ?? fractional.date(from: text)).map { Int64($0.timeIntervalSince1970 * 1000) }
     }
     private func store(_ path: String, _ bytes: Data) { files[path] = bytes; log.append(path) }
+}
+
+/// The home's own files as a record source for its engine.
+private final class HeldSource: HostSource, @unchecked Sendable {
+    let files: [String: Data]
+    init(files: [String: Data]) { self.files = files }
+    func read(path: String) throws -> Data {
+        guard let bytes = files[path] else { throw StorageError.unavailable("Missing record: " + path) }
+        return bytes
+    }
+    func readBlob(path: String) throws -> Data { Data() }
 }
