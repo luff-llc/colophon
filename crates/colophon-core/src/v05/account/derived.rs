@@ -109,16 +109,16 @@ impl HeadSet {
     fn insert(&mut self, k: (u64, String, String, String)) {
         let t = Self::term(&k.3);
         if self.keys.insert(k) {
-            for i in 0..4 {
-                self.acc[i] = self.acc[i].wrapping_add(t[i]);
+            for (a, x) in self.acc.iter_mut().zip(t) {
+                *a = a.wrapping_add(x);
             }
         }
     }
     fn remove(&mut self, k: &(u64, String, String, String)) {
         let t = Self::term(&k.3);
         if self.keys.remove(k) {
-            for i in 0..4 {
-                self.acc[i] = self.acc[i].wrapping_sub(t[i]);
+            for (a, x) in self.acc.iter_mut().zip(t) {
+                *a = a.wrapping_sub(x);
             }
         }
     }

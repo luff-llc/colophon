@@ -8,6 +8,10 @@
 //! equals a cold `Account::open`, a cold engine open, and a resumed open from a checkpoint saved
 //! at a random earlier step. `E10_SEEDS=n E10_STEPS=n` run longer.
 #![allow(
+    unused_mut,
+    unused_assignments,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::bind_instead_of_map,
     clippy::unwrap_used,
     clippy::too_many_arguments,
     clippy::type_complexity,
