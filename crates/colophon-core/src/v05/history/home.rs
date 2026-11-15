@@ -15,6 +15,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const WINDOW: i64 = 300_000;
+/// The persisted format of [`HomeState`]: 2 stores bytes as base64 and keeps the checkpoint's
+/// pending objects and heads replaced, not merged.
+const STATE_VERSION: u32 = 2;
 const WEEK: i64 = 7 * 86_400_000;
 
 /// A named local admission refusal. Verification failures retain their §1 code.
@@ -73,6 +76,20 @@ struct Fact {
     serving: Vec<ServingInterval>,
     refuse_activation: bool,
 }
+/// Bytes in the persisted home state as base64 text, not a JSON array of numbers (a byte as
+/// "123," costs four characters; base64 costs 1.33).
+mod b64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        STANDARD.decode(text).map_err(serde::de::Error::custom)
+    }
+}
+
 /// One immutable pending listing item. Cursors belong to this home, never to the account.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingObject {
@@ -83,6 +100,7 @@ pub struct PendingObject {
     /// `transition`, `veto`, or `receipt`.
     pub kind: String,
     /// Exact first stored envelope bytes.
+    #[serde(with = "b64_bytes")]
     pub envelope: Vec<u8>,
     target: String,
     /// For a transition, its proposer's unit (§13.1 step 1); for a veto, its signers' units.
@@ -111,6 +129,7 @@ pub struct ReceiptToSign {
     /// Receipted body's digest.
     pub object: String,
     /// Exact canonical body, including the original receipt time.
+    #[serde(with = "b64_bytes")]
     pub body: Vec<u8>,
 }
 /// Atomic, versioned, locally trusted home state; never accept this from peers.
@@ -118,6 +137,10 @@ pub struct ReceiptToSign {
 pub struct HomeState {
     version: u32,
     home: String,
+    /// The verifier checkpoint. Its pending objects are exactly `pending` and its heads are
+    /// pruned to what the guard and the verifier need ([`refresh_checkpoint`]), so it is never
+    /// stale and does not grow with every head.
+    #[serde(with = "b64_bytes")]
     checkpoint: Vec<u8>,
     pending: Vec<PendingObject>,
     next_cursor: u64,
@@ -131,6 +154,7 @@ pub struct HomeState {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ObservedReceipt {
+    #[serde(with = "b64_bytes")]
     envelope: Vec<u8>,
     first_seen_ms: i64,
     serving: Vec<ServingInterval>,
@@ -169,8 +193,8 @@ impl HomeState {
         for head in &objects.heads {
             validate_head(st, head, now_ms)?;
         }
-        Ok(Self {
-            version: 1,
+        let mut state = Self {
+            version: STATE_VERSION,
             home,
             checkpoint: Persisted::checkpoint(objects, &Persisted::default(), now_ms).to_bytes()?,
             pending: Vec::new(),
@@ -180,7 +204,9 @@ impl HomeState {
             serving,
             unmatched_receipts: Vec::new(),
             signed_heads: Vec::new(),
-        })
+        };
+        refresh_checkpoint(&mut state, None, now_ms)?;
+        Ok(state)
     }
     /// Update serving history supplied by the host, without rewriting past per-object facts.
     pub fn with_serving(&self, serving: Vec<ServingInterval>) -> Result<Self> {
@@ -193,19 +219,13 @@ impl HomeState {
     pub fn home_id(&self) -> &str {
         &self.home
     }
-    /// The verifier state this home holds: its verified history, the pending objects and the
-    /// heads it keeps (`Persisted::objects`), for a host that serves them, builds recording
-    /// entries from them or verifies calls over them. Read-only: nothing here admits anything.
+    /// The verifier state this home holds: its verified history, exactly the pending objects it
+    /// stores and the heads it keeps (`Persisted::objects`), for a host that serves them, builds
+    /// recording entries from them or verifies calls over them. Never stale: every admission that
+    /// changes the pending objects or the heads replaces the checkpoint's copy of them.
+    /// Read-only: nothing here admits anything.
     pub fn persisted(&self) -> Result<Persisted> {
         Persisted::from_bytes(&self.checkpoint)
-    }
-    /// Everything this home holds as verifier input: the entries and heads of its checkpoint and
-    /// every pending object it stores (the checkpoint's own copy of those is refreshed only when an
-    /// entry is admitted). What a host builds recording entries and call views from.
-    pub fn held_objects(&self) -> Result<Objects> {
-        let mut objects = self.persisted()?.objects().cloned().unwrap_or_default();
-        objects.pending = self.pending.iter().map(|p| p.envelope.clone()).collect();
-        Ok(objects)
     }
     /// Persist atomically alongside the caller's committed history.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -214,7 +234,10 @@ impl HomeState {
     /// Restore trusted local state, including admission decisions and cursor allocation.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let state: Self = serde_json::from_slice(bytes).map_err(|e| malformed(e.to_string()))?;
-        require(state.version == 1, "unknown home checkpoint version")?;
+        require(
+            state.version == STATE_VERSION,
+            "unknown home checkpoint version",
+        )?;
         Persisted::from_bytes(&state.checkpoint)?;
         check_intervals(&state.serving)?;
         require(
@@ -306,8 +329,17 @@ impl HomeState {
             .max()
             .unwrap_or(0);
         let latest = next.signed_heads.iter().map(|(_, _, i)| *i).max();
-        next.signed_heads
-            .retain(|(q, _, i)| *q > settled || Some(*i) == latest);
+        // At one `(seq, digest)` only the newest signing matters to the guard (a second digest
+        // at a seq is judged against the digest, and `issued` against the latest), so heads
+        // re-signed over an unchanged history do not accumulate.
+        let mut newest: BTreeMap<(u64, String), i64> = BTreeMap::new();
+        for (q, d, i) in &next.signed_heads {
+            let at = newest.entry((*q, d.clone())).or_insert(*i);
+            *at = (*at).max(*i);
+        }
+        next.signed_heads.retain(|(q, d, i)| {
+            Some(*i) == latest || (*q > settled && newest.get(&(*q, d.clone())) == Some(i))
+        });
         Ok((next, token()))
     }
     fn context(&self, now_ms: i64) -> Result<(Persisted, State)> {
@@ -583,6 +615,7 @@ fn chosen_receipts(home: &HomeState, st: &State, env: &AuthEnvelope) -> Result<V
 pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
     let mut next = home.clone();
     let mut receipts = Vec::new();
+    let mut admitted_head: Option<Vec<u8>> = None;
     let result = (|| -> AdmitResult<()> {
         let now_ms = date(now, "home clock")?;
         let (persisted, st) = home.context(now_ms)?;
@@ -890,9 +923,8 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
             }
             "colophon/head/5" => {
                 validate_head(&st, incoming, now_ms)?;
-                let mut objects = Objects::default();
-                objects.heads.push(incoming.to_vec());
-                next.checkpoint = Persisted::checkpoint(&objects, &persisted, now_ms).to_bytes()?;
+                // Kept or pruned with the other heads below ([`refresh_checkpoint`]).
+                admitted_head = Some(incoming.to_vec());
             }
             "colophon/authority/5" => {
                 admit_entry(&mut next, &persisted, &st, &env, incoming, now_ms)?
@@ -901,11 +933,113 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
         }
         Ok(())
     })();
+    // The checkpoint's pending objects and heads are replaced whenever they change (a refusal
+    // can store a late transition too), so `persisted()` is never stale.
+    let changed = admitted_head.is_some() || next.pending.len() != home.pending.len();
+    if changed || result.is_ok() {
+        let refreshed = date(now, "home clock")
+            .and_then(|now_ms| refresh_checkpoint(&mut next, admitted_head.as_deref(), now_ms));
+        if let Err(f) = refreshed {
+            return Admission {
+                state: home.clone(),
+                result: Err(f.into()),
+                receipts: Vec::new(),
+            };
+        }
+    }
     Admission {
         state: next,
         result,
         receipts,
     }
+}
+
+/// The heads a home keeps (§13.3: "a home keeps only what the guard needs"; the verifier's
+/// share is the same): per home and `(seq, digest)` only the newest `issued`, and of those each
+/// home's latest plus every head at a seq after the highest final activation (`settled`), where
+/// §8.6 can still ask which homes covered an entry or `final` can still need a witness. A head
+/// over an unchanged history therefore replaces the previous one instead of adding to it.
+fn kept_heads(heads: &[Vec<u8>], settled: u64) -> Vec<Vec<u8>> {
+    struct Held<'a> {
+        by: String,
+        seq: u64,
+        digest: String,
+        issued: i64,
+        bytes: &'a Vec<u8>,
+    }
+    let parsed: Vec<Held> = heads
+        .iter()
+        .filter_map(|b| {
+            let raw = RawEnvelope::parse(b, bounds::HEAD_BODY, false).ok()?;
+            let v = &raw.value;
+            let a = v.get("authority")?;
+            Some(Held {
+                by: v.get("by")?.as_str()?.to_string(),
+                seq: a.get("seq")?.as_u64()?,
+                digest: a.get("digest")?.as_str()?.to_string(),
+                issued: crate::v05::encoding::parse_date(v.get("issued")?.as_str()?)?,
+                bytes: b,
+            })
+        })
+        .collect();
+    let newer = |a: &Held, b: &Held| (a.issued, a.bytes) > (b.issued, b.bytes);
+    let mut best: BTreeMap<(&str, u64, &str), &Held> = BTreeMap::new();
+    let mut latest: BTreeMap<&str, &Held> = BTreeMap::new();
+    for h in &parsed {
+        let slot = best.entry((&h.by, h.seq, &h.digest)).or_insert(h);
+        if newer(h, slot) {
+            *slot = h;
+        }
+        let l = latest.entry(&h.by).or_insert(h);
+        if newer(h, l) {
+            *l = h;
+        }
+    }
+    best.into_values()
+        .filter(|h| h.seq > settled || latest.get(h.by.as_str()).is_some_and(|l| std::ptr::eq(*l, *h)))
+        .map(|h| h.bytes.clone())
+        .collect()
+}
+
+/// Replace the checkpoint's pending objects with exactly what the home stores and its heads with
+/// [`kept_heads`] (plus `new_head`, when one was just admitted). The checkpoint is rebuilt from
+/// those objects, not merged with the old ones, so nothing dropped comes back; the head marks,
+/// the succession flag and the higher high-water mark are kept.
+fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64) -> Result<()> {
+    let p = Persisted::from_bytes(&next.checkpoint)?;
+    let before = p.objects().cloned().unwrap_or_default();
+    let mut heads = before.heads.clone();
+    if let Some(h) = new_head {
+        if !heads.iter().any(|x| x == h) {
+            heads.push(h.to_vec());
+        }
+    }
+    let settled = verify_history(&Objects::default(), &p, now_ms)
+        .state
+        .and_then(|st| st.activations().iter().filter(|a| a.final_).map(|a| a.seq).max())
+        .unwrap_or(0);
+    let heads = kept_heads(&heads, settled);
+    let pending: Vec<Vec<u8>> = next.pending.iter().map(|o| o.envelope.clone()).collect();
+    if heads == before.heads && pending == before.pending {
+        return Ok(());
+    }
+    let objects = Objects {
+        entries: before.entries,
+        pending,
+        heads,
+        predecessor: before.predecessor,
+    };
+    let mut rebuilt = Persisted::rebuild(&objects, &next.checkpoint, now_ms);
+    let lower = match (&p.high_water, &rebuilt.high_water) {
+        (Some((old, _)), Some((new, _))) => old > new,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if lower {
+        rebuilt.high_water = p.high_water.clone();
+    }
+    next.checkpoint = rebuilt.to_bytes()?;
+    Ok(())
 }
 
 fn admit_entry(
@@ -1142,15 +1276,22 @@ pub enum FirstUpload {
 }
 
 /// Admit one entry of an account's first upload to a home that is not yet in its history
-/// (§13.1 "First upload": a genesis may be followed in one upload by the transition appointing
-/// the home and its `activate`). `held` is every entry the home holds so far, seq 1 upward.
-/// The entry is checked as [`admit`] checks an entry (it must verify; `refused:early` more than
-/// 60 s ahead of the clock; `refused:late` for an immediate entry more than 300 s behind it),
-/// and must continue `held` or equal what is held at its seq (`Refusal::Conflict` otherwise).
-/// The home's serving history starts now: it did not serve this account before. Once the history
-/// shows this home as a current home, the result is its [`HomeState`].
+/// (§13.1 "First upload"). `account` is the account this home slot was provisioned for: the
+/// first entry must be that account's genesis (its body digest is the account ID), and nothing
+/// else is held, so nobody else's history can occupy the slot. `held` is every entry the home
+/// holds so far, seq 1 upward.
+///
+/// The entry must verify under §8 with what is held, continue `held` or equal what is held at
+/// its seq (`Refusal::Conflict` otherwise), and is `refused:early` more than 60 s ahead of the
+/// clock. The rest of the clock rule (`refused:late`, 300 s behind) and the receipt windows apply
+/// **from this home's appointment on**: every entry handled here is at or before the entry that
+/// appoints the home, written while the home did not serve the account, so its clock witnessed
+/// none of them (an account created last week can appoint a new home today and upload its
+/// history). Once the history shows this home as a current home, the result is its
+/// [`HomeState`], whose serving history starts now, and later entries go through [`admit`].
 pub fn admit_first(
     home: &str,
+    account: &str,
     held: &[Vec<u8>],
     incoming: &[u8],
     now: &str,
@@ -1168,6 +1309,10 @@ pub fn admit_first(
     if entry.seq != have + 1 {
         return Err(Refusal::Conflict);
     }
+    if have == 0 && crate::v05::ids::AccountId::of_genesis(&entry.env.body).as_str() != account {
+        // Not this slot's account: refused, and nothing is held.
+        return Err(Failure::Refused(crate::v05::Reason::OutOfScope).into());
+    }
     let mut entries = held.to_vec();
     entries.push(incoming.to_vec());
     let objects = Objects {
@@ -1180,13 +1325,6 @@ pub fn admit_first(
     }
     if entry.issued > now_ms.saturating_add(60_000) {
         return Err(Refusal::Early);
-    }
-    let recording = matches!(
-        entry.kind.as_str(),
-        "activate" | "vetoed" | "final" | "successionVetoed"
-    );
-    if !recording && entry.issued < now_ms.saturating_sub(WINDOW) {
-        return Err(Refusal::Late);
     }
     let appointed = verdict.state.as_ref().is_some_and(|st| {
         st.current_homes().iter().any(|m| {
