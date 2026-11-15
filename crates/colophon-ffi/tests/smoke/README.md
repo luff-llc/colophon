@@ -51,15 +51,29 @@ java -cp "$CP" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -no-reflect -no-stdlib
 java -Djna.library.path=$CARGO_TARGET_DIR/debug -cp /tmp/b1-kt-out:$M/kotlin-stdlib-2.2.21.jar:$JNA SmokeKt
 ```
 
-## Web (Node 24)
+## Web (Node 24 and Bun)
 
-`js/smoke.mjs` needs the wasm-bindgen glue, which needs the CLI to match the crate (0.2.130):
+`js/smoke.mjs` needs the wasm-bindgen glue, and the CLI must match the crate's wasm-bindgen exactly (0.2.130).
+The matching tool is installed at `~/.cargo/tools/wasm-bindgen-0.2.130/bin/wasm-bindgen` (the 0.2.127 in
+`~/.cargo/bin` is for other projects: put the 0.2.130 folder first on `PATH` only for these commands).
 
 ```sh
+export PATH=$HOME/.cargo/tools/wasm-bindgen-0.2.130/bin:$PATH
+wasm-bindgen --version                      # wasm-bindgen 0.2.130
+W=/tmp/b2-web
 cargo build --locked -p colophon-wasm --target wasm32-unknown-unknown --release
-wasm-bindgen --target nodejs --out-dir /tmp/b1-wasm target/wasm32-unknown-unknown/release/colophon_wasm.wasm
-echo '{"type":"commonjs"}' > /tmp/b1-wasm/package.json
-node crates/colophon-ffi/tests/smoke/js/smoke.mjs /tmp/b1-wasm
+wasm-bindgen --target nodejs --out-dir $W $CARGO_TARGET_DIR/wasm32-unknown-unknown/release/colophon_wasm.wasm
+echo '{"type":"commonjs"}' > $W/package.json
+echo '{"type":"module"}' > $W/snippets/package.json   # the inline JS helper is an ES module
+node crates/colophon-ffi/tests/smoke/js/smoke.mjs $W
+bun  crates/colophon-ffi/tests/smoke/js/smoke.mjs $W
 ```
 
-`wasm-bindgen --version` must print 0.2.130 (`js/scripts/build.sh` checks the same).
+It covers an engine over a JS source, an unlock, an action through `begin_*` and `finish`, a replay refused as
+`Consumed`, a `Promise`, `undefined` and an `Array` returned by `read` (a `Host` error naming
+`JsSource.read`), a throwing source (`Host` with its message), a caught `AccountFault` that is a real `Error`
+with `kind`, `code`, `detail` and `reason`, `u64` and `i64` above 2^53 crossing exactly as `bigint`, a
+`Number` where a `bigint` is expected (a plain `TypeError`), `lock` and `Locked`, and the zero-on-free
+allocator on the wasm heap (a held secret is found in the heap; once freed it is zero). Built without the
+allocator (`cargo build ... --no-default-features --features web05`, a second glue directory) the same program
+run with `COLOPHON_ALLOCATOR_OFF=1` reports the secret still in the freed heap: the positive control.

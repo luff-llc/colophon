@@ -626,13 +626,19 @@ Native (UniFFI crate), all through the exports:
 Swift and Kotlin: `tests/smoke/`, both pass on generated sources, now including the successor genesis
 (with a real WebAuthn assertion made by the host language's crypto).
 
-**Not run (unproven):** the web build. The wasm crate compiles for `wasm32-unknown-unknown`
-and its exports were read from the module, and the shared sources run natively, but nothing was executed
-through the wasm-bindgen glue because the installed CLI (0.2.127) does not match the crate's wasm-bindgen
-(0.2.130). So unproven until the glue is generated: that the glue builds; the checked callback shims
-(`callRead`, `callReadBlob`, `callTranslate`, which are inline JavaScript); `AccountFault` with `reason`; the
-consumed-by-value behaviour of §3b; the zero-on-free allocator on a wasm32 heap; and `smoke.mjs`. Also not
-run: Android/AAR/XCFramework builds, Kotlin on a JDK other than 17.
+**The web build ran** (after B2's fix round): `colophon-wasm` built for `wasm32-unknown-unknown` in release,
+glue generated with wasm-bindgen 0.2.130 (see `tests/smoke/README.md` for the tool and the exact commands),
+and `smoke.mjs` passes under **Node 24 and Bun 1.4**. It shows, through the glue: an engine over a JS source;
+an action through `begin_*` and `finish`; an `AccountFault` that is a real `Error` with `kind`, `code`,
+`detail` and `reason`; a throwing source arriving as `Host`; a `Promise`, `undefined` or `Array` returned by
+`read` arriving as a typed `Host` error naming `JsSource.read`; the allocator zeroing a freed secret on the
+wasm heap (with the allocator-off build as the positive control). **Numbers on the web:** `u64` and `i64`
+(seq, clocks, times in ms, sizes, counters, entropy-independent ids) are `bigint` and cross exactly,
+including above 2^53 and `u64::MAX`; `u32` (an HTTP status) is a `number`; a `Number` passed for a
+`bigint` is a plain `TypeError`, and a negative `bigint` passed for a `u64` wraps (wasm-bindgen's own
+conversion). **Still not run on the web:** the checked `readBlob` and `translate` shims (the `read` shim is
+the same code), a browser (only Node and Bun), a bundler target, and the `FinalizationRegistry`'s timing.
+Also not run: Android/AAR/XCFramework builds, Kotlin on a JDK other than 17.
 
 **Known gaps** (named so an SDK does not assume them). Two are for the next round and each needs one
 thing:
@@ -641,8 +647,8 @@ thing:
   assertion, then the unlock by a slot) and again for the successor genesis. It needs an engine constructor
   over a created `Account` (`Engine::from_account`, in `v05/engine/`, which another builder owns). Adding it
   later changes no existing signature.
-* **The web build is unproven** (see above). It needs a `wasm-bindgen` CLI of exactly the crate's version,
-  0.2.130, to generate the glue, then `smoke.mjs` and a run of the shims in a browser.
+* **The web build is only run under Node and Bun** (see above); a browser run of the shims and a
+  bundler target are still to do.
 
 And these, shippable: `BlobAvailability` for `Complete` reports `present: 0, total: 0` (the core gives no
 counts); `suggest_signers` has no `SignerNeed` for a pending transition's recovery-set consent;
