@@ -252,10 +252,21 @@ fn multiset_subset(a: &[Value], b: &[Value]) -> bool {
     }
     true
 }
-/// Replay a predecessor in any arrival order. Duplicate body envelopes are idempotent;
-/// differing bodies at a sequence are rejected as a fork, never selected by arrival.
+/// Replay a predecessor in any arrival order. Several envelopes over one body are one entry,
+/// valid when any of them is (the first in byte order that verifies, never the first to
+/// arrive); differing bodies at a sequence are rejected as a fork, never selected by arrival.
+///
+/// An envelope is over a body when its outer JSON parses and its `body` decodes; those bytes
+/// are the body (§2.2: equality is equality of body bytes). What is wrong with the body itself
+/// (its JSON, `seq`, `issued`, `signer`) is wrong for every envelope over it, so it fails the
+/// predecessor whatever the order. What is wrong with one envelope's wrapper (`signature`,
+/// `assertion`, `cosignatures`) is that envelope not verifying: it is ignored where another
+/// envelope over the body verifies (§2.2), and reported only when none does, the first in byte
+/// order of the envelope bytes.
 pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
-    let mut parsed: BTreeMap<u64, BTreeMap<String, Record>> = BTreeMap::new();
+    // Envelope bytes to the record they carry, or why their wrapper is unusable.
+    type Envelopes = BTreeMap<Vec<u8>, Result<Record>>;
+    let mut parsed: BTreeMap<u64, BTreeMap<String, Envelopes>> = BTreeMap::new();
     for bytes in entries {
         require(bytes.len() <= 2_097_152, "Swift envelope bound")?;
         let outer = strict_parse(bytes)?;
@@ -274,26 +285,32 @@ pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
         } else {
             String::new()
         };
-        let mut signatures = vec![item(&outer, signer)?];
-        if let Some(cos) = outer.get("cosignatures") {
-            for c in cos
-                .as_array()
-                .ok_or_else(|| malformed("Swift cosignatures"))?
-            {
-                signatures.push(item(c, text(c, "signer")?.into())?);
+        let wrapper = || -> Result<Vec<SigItem>> {
+            let mut signatures = vec![item(&outer, signer)?];
+            if let Some(cos) = outer.get("cosignatures") {
+                for c in cos
+                    .as_array()
+                    .ok_or_else(|| malformed("Swift cosignatures"))?
+                {
+                    signatures.push(item(c, text(c, "signer")?.into())?);
+                }
             }
-        }
-        let record = Record {
-            digest: digest(&body),
+            Ok(signatures)
+        };
+        let body_digest = digest(&body);
+        let record = wrapper().map(|signatures| Record {
+            digest: body_digest.clone(),
             body,
             value,
             issued_ms,
             signatures,
-        };
+        });
         parsed
             .entry(seq)
             .or_default()
-            .entry(record.digest.clone())
+            .entry(body_digest)
+            .or_default()
+            .entry(bytes.clone())
             .or_insert(record);
     }
     let mut out = History {
@@ -305,11 +322,16 @@ pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
         require(seq == out.entries.len() as u64 + 1, "Swift sequence gap")?;
         let mut valid = Vec::new();
         let mut first = None;
-        for e in candidates.into_values() {
-            match append(&out, e) {
-                Ok(next) => valid.push(next),
-                Err(e) if first.is_none() => first = Some(e),
-                Err(_) => {}
+        for envelopes in candidates.into_values() {
+            for e in envelopes.into_values() {
+                match e.and_then(|e| append(&out, e)) {
+                    Ok(next) => {
+                        valid.push(next);
+                        break;
+                    }
+                    Err(e) if first.is_none() => first = Some(e),
+                    Err(_) => {}
+                }
             }
         }
         if valid.len() > 1 {

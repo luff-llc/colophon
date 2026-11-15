@@ -105,25 +105,242 @@ fn verdict_is_independent_of_object_order() {
     let mut r = Rng(0x0bde_c0de);
     let mut checked = 0;
     for (dir, now) in cases() {
-        let base = objects_of(&dir);
-        let want = summary(&verify_history(&base, &Persisted::default(), now));
-        for _ in 0..8 {
-            let mut o = base.clone();
-            shuffle(&mut r, &mut o.entries);
-            shuffle(&mut r, &mut o.pending);
-            shuffle(&mut r, &mut o.heads);
-            // Duplicates of an object change nothing either.
-            if r.chance(1, 3) && !o.entries.is_empty() {
-                let i = r.below(o.entries.len() as u64) as usize;
-                let dup = o.entries[i].clone();
-                o.entries.push(dup);
+        // The vector, and the vector with broken envelopes over one of its bodies.
+        let plain = objects_of(&dir);
+        let mut broken = plain.clone();
+        if !broken.entries.is_empty() {
+            let i = r.below(broken.entries.len() as u64) as usize;
+            let copies = broken_copies(&broken.entries[i]);
+            broken.entries.extend(copies);
+        }
+        for base in [plain, broken] {
+            let want = full(&verify_history(&base, &Persisted::default(), now));
+            for _ in 0..8 {
+                let mut o = base.clone();
+                shuffle(&mut r, &mut o.entries);
+                shuffle(&mut r, &mut o.pending);
+                shuffle(&mut r, &mut o.heads);
+                // Duplicates of an object change nothing either.
+                if r.chance(1, 3) && !o.entries.is_empty() {
+                    let i = r.below(o.entries.len() as u64) as usize;
+                    let dup = o.entries[i].clone();
+                    o.entries.push(dup);
+                }
+                let got = full(&verify_history(&o, &Persisted::default(), now));
+                assert_eq!(got, want, "{}", dir.display());
+                checked += 1;
             }
-            let got = summary(&verify_history(&o, &Persisted::default(), now));
-            assert_eq!(got, want, "{}", dir.display());
-            checked += 1;
+        }
+    }
+    assert!(checked > 1200, "{checked}");
+}
+
+/// The other history vectors, as the conformance runner builds them: `account`, `upgrade/*`
+/// (a `/4` prefix incorporated by an `upgrade`) and `succession/*` (a `/5` or Swift
+/// predecessor beside the successor).
+fn other_cases() -> Vec<(PathBuf, Objects, i64)> {
+    let mut v = vec![(
+        cand().join("account"),
+        objects_of(&cand().join("account")),
+        parse_date("2026-11-11T09:01:00Z").unwrap(),
+    )];
+    for top in ["upgrade", "succession"] {
+        let mut dirs: Vec<PathBuf> = fs::read_dir(cand().join(top))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.join("case.json").exists())
+            .collect();
+        dirs.sort();
+        for d in dirs {
+            if top == "upgrade" {
+                let o = objects_of(&d);
+                v.push((d, o, parse_date("2026-12-01T00:00:00Z").unwrap()));
+                continue;
+            }
+            let case: Value =
+                serde_json::from_slice(&fs::read(d.join("case.json")).unwrap()).unwrap();
+            let mut o = Objects {
+                entries: files(&d.join("successor/authority")),
+                predecessor: files(&d.join("predecessor/authority")),
+                ..Default::default()
+            };
+            for (name, list) in [
+                ("genesis-receipt.json", &mut o.pending),
+                ("successor-head.json", &mut o.heads),
+            ] {
+                if d.join(name).exists() {
+                    list.push(fs::read(d.join(name)).unwrap());
+                }
+            }
+            let now = parse_date(
+                case["expected"]["now"]
+                    .as_str()
+                    .unwrap_or("2026-11-14T10:15:00Z"),
+            )
+            .unwrap();
+            v.push((d, o, now));
+        }
+    }
+    v
+}
+/// The whole verdict, for comparisons that must be exact: every field of the verdict (branch,
+/// stop, rollback, conflicts, held_until) and the whole folded state, by its `Debug` form and by
+/// its serialized form (policy, namespaces, members, suspensions, succession, migration...).
+fn full(v: &Verdict) -> String {
+    format!(
+        "{v:?}\n{}",
+        serde_json::to_string(&v.state).expect("the state serializes")
+    )
+}
+
+/// §8.6: the verdict is a function of the object set, for every history vector, however the
+/// entries, pending objects, heads and predecessor entries arrive: as stored, reversed, in byte
+/// order and shuffled, and the same on every repeat.
+#[test]
+fn every_history_vector_has_one_verdict_whatever_the_order() {
+    let mut r = Rng(0x05de_0dde);
+    let mut checked = 0;
+    for (dir, plain, now) in other_cases() {
+        // The vector, and the vector with broken envelopes over one body of its entries and one
+        // of its predecessor entries: the set changes, so its verdict may too, but not with order.
+        let mut broken = plain.clone();
+        for list in [&mut broken.entries, &mut broken.predecessor] {
+            if !list.is_empty() {
+                let i = r.below(list.len() as u64) as usize;
+                let copies = broken_copies(&list[i]);
+                list.extend(copies);
+            }
+        }
+        for base in [plain, broken] {
+            let want = full(&verify_history(&base, &Persisted::default(), now));
+            for variant in 0..8 {
+                let mut o = base.clone();
+                match variant {
+                    0 => {}
+                    1 => {
+                        o.entries.reverse();
+                        o.pending.reverse();
+                        o.heads.reverse();
+                        o.predecessor.reverse();
+                    }
+                    2 => {
+                        o.entries.sort();
+                        o.pending.sort();
+                        o.heads.sort();
+                        o.predecessor.sort();
+                    }
+                    _ => {
+                        shuffle(&mut r, &mut o.entries);
+                        shuffle(&mut r, &mut o.pending);
+                        shuffle(&mut r, &mut o.heads);
+                        shuffle(&mut r, &mut o.predecessor);
+                    }
+                }
+                let got = full(&verify_history(&o, &Persisted::default(), now));
+                assert_eq!(got, want, "{} (variant {variant})", dir.display());
+                checked += 1;
+            }
         }
     }
     assert!(checked > 600, "{checked}");
+}
+
+/// Copies of an envelope over the same body that do not verify, each broken another way:
+/// one bit of the signature flipped (the rest of the bytes as published), a signature that is
+/// not base64, and `cosignatures` that is not an array. The `body` field is never touched.
+fn broken_copies(envelope: &[u8]) -> Vec<Vec<u8>> {
+    let text = std::str::from_utf8(envelope).unwrap();
+    let v: Value = serde_json::from_str(text).unwrap();
+    let mut out = Vec::new();
+    if let Some(sig) = v["signature"].as_str() {
+        let mut raw = STANDARD.decode(sig).unwrap();
+        *raw.last_mut().unwrap() ^= 1;
+        let flipped = STANDARD.encode(raw);
+        assert_eq!(flipped.len(), sig.len());
+        out.push(text.replacen(sig, &flipped, 1).into_bytes());
+        let mut w = v.clone();
+        w["signature"] = Value::String("!not base64!".into());
+        out.push(serde_json::to_vec(&w).unwrap());
+    }
+    let mut w = v.clone();
+    w["cosignatures"] = Value::from(7);
+    out.push(serde_json::to_vec(&w).unwrap());
+    for c in &out {
+        assert_ne!(c.as_slice(), envelope);
+        let cv: Value = serde_json::from_slice(c).unwrap();
+        assert_eq!(cv["body"], v["body"]);
+    }
+    out
+}
+
+/// §2.2: several envelopes over one body are one object, valid where any envelope held over it
+/// verifies; an envelope that does not verify is ignored and never makes the object fail. A
+/// broken envelope over a valid body (a flipped signature bit, a signature that is not base64,
+/// `cosignatures` that is not an array) must not stand in for the valid one or defeat it, in a
+/// `/5` history, in a `/4` prefix incorporated by an upgrade (§16.1) or in a Swift predecessor
+/// (§16.3). Each broken copy is put first, then last: the whole verdict is that of the vector.
+#[test]
+fn a_broken_envelope_over_a_valid_body_never_stands_in_for_it() {
+    fn check(
+        what: &str,
+        base: &Objects,
+        now: i64,
+        indices: &[usize],
+        list: fn(&mut Objects) -> &mut Vec<Vec<u8>>,
+    ) {
+        let want = full(&verify_history(base, &Persisted::default(), now));
+        for &i in indices {
+            let mut probe = base.clone();
+            let copies = broken_copies(&list(&mut probe)[i]);
+            assert!(copies.len() >= 2, "{what} entry {}", i + 1);
+            for (k, bad) in copies.into_iter().enumerate() {
+                for first in [true, false] {
+                    let mut o = base.clone();
+                    if first {
+                        list(&mut o).insert(0, bad.clone());
+                    } else {
+                        list(&mut o).push(bad.clone());
+                    }
+                    let v = verify_history(&o, &Persisted::default(), now);
+                    assert_eq!(
+                        full(&v),
+                        want,
+                        "{what} entry {} copy {k} first={first}: {} at {}",
+                        i + 1,
+                        v.code(),
+                        v.seq()
+                    );
+                }
+            }
+        }
+    }
+
+    // `/5`: the genesis and the entry at seq 3 of a valid history.
+    let (base, now) = vector("i-add-approve");
+    let plain = verify_history(&base, &Persisted::default(), now);
+    assert_eq!((plain.code(), plain.seq()), ("ok".to_string(), 3));
+    check("/5", &base, now, &[0, 2], |o| &mut o.entries);
+
+    // `/4` prefix: the 0.4 genesis and the `upgrade` entry.
+    let base = objects_of(&cand().join("upgrade/accept"));
+    let now = parse_date("2026-12-01T00:00:00Z").unwrap();
+    let plain = verify_history(&base, &Persisted::default(), now);
+    assert_eq!((plain.code(), plain.seq()), ("ok".to_string(), 3));
+    check("/4", &base, now, &[0, 2], |o| &mut o.entries);
+
+    // Swift predecessor: its genesis and the entry after it.
+    let (_, base, now) = other_cases()
+        .into_iter()
+        .find(|(d, _, _)| d.ends_with("succession/swift-keyring"))
+        .unwrap();
+    let plain = verify_history(&base, &Persisted::default(), now);
+    assert!(plain
+        .state
+        .as_ref()
+        .is_some_and(|s| s.verified_succession().is_some()));
+    check("Swift predecessor", &base, now, &[0, 1], |o| {
+        &mut o.predecessor
+    });
 }
 
 #[test]
