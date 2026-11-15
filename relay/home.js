@@ -292,6 +292,7 @@ export class HomeSlot {
       if (method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
       if (!HEX64.test(rest)) throw new HttpError(404, 'Not found');
       await this.access(req, 'history');
+      if (!this.status().appointed) throw new HttpError(404, 'Not found');
       const r = this.wasm.call({ op: 'pending_object', state: this.state, now: this.clock(), digest: rest });
       if (!r.found) throw new HttpError(404, 'Not found');
       send(res, 200, { envelope: JSON.parse(unb64(r.envelope)), receipts: r.receipts.map((x) => JSON.parse(unb64(x))) });
@@ -461,7 +462,11 @@ export class HomeSlot {
       if (!endpoint) continue;
       const base = (this.resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
       const row = (this.forward.peers[peer.id] ??= { after: 0, head: '' });
-      try { await this.forwardTo(base, row); } catch (error) { console.error(`forwarding to home ${peer.id} failed (it will be retried): ${error.message}`); }
+      try { await this.forwardTo(base, row); row.said = ''; } catch (error) {
+        const said = `forwarding to home ${peer.id} failed (it will be retried): ${error.message}`;
+        if (said !== row.said) console.error(said); // once per distinct failure, not once per tick
+        row.said = said;
+      }
     }
   }
 

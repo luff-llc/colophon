@@ -50,6 +50,7 @@ struct Setup {
     f: Fixture,
     home: String,
     relay: Relay,
+    #[allow(dead_code)]
     keys: HomeKeys,
     authority: MemSource,
 }
