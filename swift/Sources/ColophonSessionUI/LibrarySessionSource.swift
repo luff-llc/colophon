@@ -23,8 +23,8 @@ import Foundation
     func revoke(memberID: String) async throws
     /// New in 0.5: one call to veto a pending change; the session stores it and submits it to every home.
     func veto(_ transition: String) async throws
-    /// New in 0.5: the person saw the notices.
-    func acknowledgeNotices() async
+    /// New in 0.5: the person saw one activation. Pending transitions are not affected.
+    func acknowledgeActivation(seq: UInt64) async
     /// New in 0.5: opens a locked session again.
     func unlock() async
 }

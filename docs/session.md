@@ -120,7 +120,7 @@ growth about 35 MiB), and the blob executor stops on `dispatchPrecondition` if i
   the owner signs, the veto is stored, and the session submits it to every home, retrying until each has receipted it or 300 s
   have passed.
 * `unseenActivations`: every activation since this host last showed the history that no key on this device signed, with when
-  each home receipted it. `acknowledgeNotices()` records that the person saw them (kept in the private journal).
+  each home receipted it. `acknowledgeActivation(seq:)` records that the person saw that one activation (kept in the private journal); it never dismisses a pending transition, which stays until it is vetoed, activates or is dead.
 * `noHome`: the warning of guide §5. `NoticeWords` holds the words the specification asks for.
 
 ## Lock
@@ -177,12 +177,12 @@ An app written against 0.4's session reads the same where the meaning is unchang
   `AccessRequest` (`id`, `label`, `kind: AccountMemberKind`, `termsJSON`, `pairingCode` `XXXX-XXXX`, `record`, and `namespaces` /
   `access` read from its terms). `syncConflicts` is `homeFaults`. `syncState` is `HomeSyncState` (`RelaySyncState` is an alias).
   Removed: `performMigration`, `migrationBlob`, `restoreDevice(using:)`, `recoveryKeys()`. New: `notices`, `homes`, `lock()`,
-  `unlock()`, `veto(_:)`, `acknowledgeNotices()`, `addController`, `transferSeed`, `acceptSeedTransfer`, `exportRequest()`,
+  `unlock()`, `veto(_:)`, `acknowledgeActivation(seq:)`, `addController`, `transferSeed`, `acceptSeedTransfer`, `exportRequest()`,
   `importRequest(_ data:)`, `receipts(for:)`.
 * `SessionPhase.locked`; `SessionError.noHome`, `.ownerRequired`; `SessionKeyFailure` is public.
 * `IngressEnvelope.libraryID` is the 64-hex account ID.
 * `AsyncKeyProvider.keyDescriptor()` is a requirement with a default (raw keys). `KeyDescriptor.view` is the 0.5 form.
-* `LibrarySessionSource` gains `notices`, `veto`, `acknowledgeNotices`, `unlock` and loses `ledger`; `ColophonLedgerView` and
+* `LibrarySessionSource` gains `notices`, `veto`, `acknowledgeActivation`, `unlock` and loses `ledger`; `ColophonLedgerView` and
   `SupportReport.ledgerEntryCount` are removed.
 * `ColophonMigration`: the 0.4 clean copy (`LibraryMigration`, `LegacyLibrarySource`, `MigrationState`) is removed (its engine, the
   0.4 session, is gone). The 0.4 `NativeEngine`/`Library` wrappers in ColophonKit remain for tools that read a 0.4 library.

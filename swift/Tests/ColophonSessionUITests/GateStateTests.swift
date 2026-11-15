@@ -27,7 +27,7 @@ import ColophonSession
     func approve(_ request: AccessRequest, grant: GrantOptions?) async throws {}
     func revoke(memberID: String) async throws {}
     func veto(_ transition: String) async throws { vetoed.append(transition) }
-    func acknowledgeNotices() async { acknowledged += 1; notices = .empty }
+    func acknowledgeActivation(seq: UInt64) async { acknowledged += 1; notices = .empty }
     func unlock() async { unlocked += 1; phase = .ready }
 }
 
@@ -77,7 +77,7 @@ private func activation() -> SeenActivation {
         #expect(session.unlocked == 1 && session.phase == .ready)
         session.notices = SessionNotices(notices: Notices(pending: [], activations: [activation()], owed: [], controllersWithoutSlot: [], vaultRetiring: false, noHome: false))
         #expect(session.notices.unseenActivations.count == 1)
-        await session.acknowledgeNotices()
+        await session.acknowledgeActivation(seq: 7)
         #expect(session.notices.unseenActivations.isEmpty && session.acknowledged == 1)
     }
 

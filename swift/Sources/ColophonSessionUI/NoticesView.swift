@@ -37,11 +37,11 @@ public struct NoticesView: View {
                             Text("Signed by " + activation.signers.map { String($0.prefix(8)) }.joined(separator: ", ")).font(.footnote)
                             Text(activation.receipted.isEmpty ? "No home has receipted it." :
                                     "Receipted by \(activation.receipted.count) home\(activation.receipted.count == 1 ? "" : "s").").font(.footnote).foregroundStyle(.secondary)
-                        }.accessibilityElement(children: .combine).accessibilityIdentifier("library.notice.activation.\(activation.seq)")
+                            Button("I’ve Seen This") { Task { await action.run { await session.acknowledgeActivation(seq: activation.seq) } } }
+                                .accessibilityIdentifier("library.notice.acknowledge.\(activation.seq)")
+                        }.accessibilityElement(children: .contain).accessibilityIdentifier("library.notice.activation.\(activation.seq)")
                     }
                     Text(NoticeWords.waiting).font(.footnote).foregroundStyle(.secondary)
-                    Button("I’ve Seen This") { Task { await action.run { await session.acknowledgeNotices() } } }
-                        .accessibilityIdentifier("library.notice.acknowledge")
                 }
             }
             LibraryErrorView(message: action.error)

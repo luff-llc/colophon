@@ -33,6 +33,8 @@ struct SessionJournalFile: Codable, Sendable {
     var left = false
     var shownSeq: UInt64 = 0
     var shownTransitions: [String] = []
+    /// Activations above `shownSeq` the person marked seen one by one (an activation is marked alone, never with others).
+    var seenActivations: Set<UInt64> = []
     /// Ingress envelopes already written, by ID, with their operation (an envelope is never signed twice).
     var ingress: [UUID: String] = [:]
 }
@@ -304,19 +306,35 @@ actor SessionWorker {
                     dueMs: p.dueMs, vetoDeadlineMs: p.vetoDeadlineMs, fullSet: p.fullSet, components: p.components, removes: p.removes,
                     adds: p.adds, vetoes: p.vetoes, vetoable: ownerMayVeto && p.fullSet != true && (p.vetoDeadlineMs.map { now <= $0 } ?? false))
         }
-        return SessionNotices(notices: Notices(pending: pending, activations: raw.activations, owed: raw.owed,
+        let activations = raw.activations.filter { !journal.seenActivations.contains($0.seq) }
+        return SessionNotices(notices: Notices(pending: pending, activations: activations, owed: raw.owed,
                                                controllersWithoutSlot: raw.controllersWithoutSlot, vaultRetiring: raw.vaultRetiring, noHome: raw.noHome))
     }
-    /// Marks what the person has now seen: activations up to the current head and the pending transitions listed.
-    func acknowledgeNotices() async throws -> SessionSnapshot {
+    /// Marks one activation seen, and nothing else: a pending transition is never dismissed by it (it stays until it is
+    /// vetoed, activates or is dead). `shownSeq` moves up only over activations that are all seen, so an activation the
+    /// person has not seen keeps being shown.
+    func acknowledgeActivation(seq: UInt64) async throws -> SessionSnapshot {
         try await gated {
-            guard let engine else { return snapshot(phase: lastPhase) }
-            journal.shownSeq = try await engine.run { try $0.headSeq() }
-            let current = try await currentNotices()
-            journal.shownTransitions = Array(Set(journal.shownTransitions + current.pending.map(\.digest)).suffix(255))
+            guard engine != nil else { return snapshot(phase: lastPhase) }
+            try loadJournal()
+            journal.seenActivations.insert(seq)
+            let raw = try await rawActivations()
+            var floor = journal.shownSeq
+            for activation in raw.sorted(by: { $0.seq < $1.seq }) {
+                guard journal.seenActivations.contains(activation.seq) else { break }
+                floor = max(floor, activation.seq)
+            }
+            journal.shownSeq = floor
+            journal.seenActivations = journal.seenActivations.filter { $0 > floor }
             try saveJournal()
             return try await build()
         }
+    }
+    private func rawActivations() async throws -> [SeenActivation] {
+        guard let engine else { return [] }
+        let keys = await localKeyIDs()
+        let seq = journal.shownSeq, shown = journal.shownTransitions
+        return try await engine.run { try $0.notices(shownSeq: seq, shownTransitions: shown, localKeys: keys) }.activations
     }
 
     // MARK: Requests (a member asking, an owner approving)

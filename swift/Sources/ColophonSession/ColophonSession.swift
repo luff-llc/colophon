@@ -228,9 +228,10 @@ import Observation
         do { apply(try await worker.veto(transition)) } catch { handleCommandError(error); throw error }
         await submitUntilReceipted(transition)
     }
-    /// Records that the person has seen the current notices (activations up to the head, pending transitions listed).
-    public func acknowledgeNotices() async {
-        do { apply(try await worker.acknowledgeNotices()) } catch { lastError = error.localizedDescription }
+    /// Records that the person has seen one activation (`notices.unseenActivations`). It marks that activation only:
+    /// a pending transition stays in `notices.pending` until it is vetoed, activates or is dead.
+    public func acknowledgeActivation(seq: UInt64) async {
+        do { apply(try await worker.acknowledgeActivation(seq: seq)) } catch { lastError = error.localizedDescription }
     }
     /// How many homes hold a verified receipt for a transition, out of how many the account names.
     public func receipts(for object: String) async throws -> (receipted: Int, homes: Int) { try await worker.receipts(for: object) }

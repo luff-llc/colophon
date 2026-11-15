@@ -93,7 +93,7 @@ import ColophonSessionUI
         await later.session.refresh()
         let unseen = later.session.notices.unseenActivations
         #expect(!unseen.isEmpty, "an activation no key on this device signed is shown")
-        await later.session.acknowledgeNotices()
+        for activation in unseen { await later.session.acknowledgeActivation(seq: activation.seq) }
         #expect(later.session.notices.unseenActivations.isEmpty, "acknowledged")
     }
 }

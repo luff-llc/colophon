@@ -35,7 +35,10 @@ import SwiftUI
     func approve(_ request: AccessRequest, grant: GrantOptions?) async throws { requests.removeAll { $0.id == request.id }; revision += 1 }
     func revoke(memberID: String) async throws { revision += 1 }
     func veto(_ transition: String) async throws { notices = .empty }
-    func acknowledgeNotices() async { notices = .empty }
+    func acknowledgeActivation(seq: UInt64) async {
+        notices = SessionNotices(notices: Notices(pending: notices.pending, activations: notices.unseenActivations.filter { $0.seq != seq }, owed: notices.owed,
+                                                  controllersWithoutSlot: notices.notices.controllersWithoutSlot, vaultRetiring: notices.notices.vaultRetiring, noHome: notices.noHome))
+    }
     func unlock() async { phase = .ready }
     static var host: LibraryHostActions {
         .init(containers: [
