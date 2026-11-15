@@ -170,7 +170,7 @@ class FolderMedium(val root: File) : RecordMedium {
             val staged = File(dir, n)
             if (!staged.exists()) continue
             val target = file(path)
-            target.parentFile.mkdirs()
+            target.parentFile?.mkdirs()
             move(staged, target)
         }
         dir.deleteRecursively()
