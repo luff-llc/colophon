@@ -19,6 +19,8 @@ type R<T> = Result<T, AccountError>;
 enum Stage {
     Open(Box<Creation>, CreateStage),
     Done(Box<Account>),
+    /// The result was taken: the account is kept, unlocked, for `open_engine`.
+    Taken(Box<Account>),
     Spent,
 }
 
@@ -166,7 +168,7 @@ impl AccountCreation {
         guard(|| {
             Ok(match &*self.st.lock()? {
                 Stage::Open(_, s) => *s,
-                Stage::Done(_) => CreateStage::Done,
+                Stage::Done(_) | Stage::Taken(_) => CreateStage::Done,
                 Stage::Spent => CreateStage::Spent,
             })
         })
@@ -221,16 +223,22 @@ impl AccountCreation {
             })
         })
     }
-    /// The created account: its ID and every object and record to store. The seed the creation
-    /// held is dropped; open an `AccountEngine` over the stores and unlock it by a slot.
+    /// The created account: its ID and every object and record to store. Store them, then
+    /// call `open_engine` for the session over them, unlocked as the creation left it (the owner
+    /// is not asked again). The creation keeps the unlocked account until then, or until it is
+    /// dropped.
     pub fn take_result(&self) -> Result<Created, AccountError> {
         guard(|| {
             let mut g = self.st.lock()?;
             match std::mem::replace(&mut *g, Stage::Spent) {
-                Stage::Done(a) => Ok(Created {
-                    account: a.id().as_str().to_string(),
-                    stores: account_stores(&a)?,
-                }),
+                Stage::Done(a) => {
+                    let created = Created {
+                        account: a.id().as_str().to_string(),
+                        stores: account_stores(&a)?,
+                    };
+                    *g = Stage::Taken(a);
+                    Ok(created)
+                }
                 other => {
                     *g = other;
                     Err(AccountError::consumed("the creation is not finished"))
@@ -240,9 +248,62 @@ impl AccountCreation {
     }
 }
 
+impl AccountCreation {
+    pub(crate) fn open_engine_inner(
+        &self,
+        source: Box<dyn super::HostSource>,
+        listing: Vec<ListedPath>,
+        namespaces: Vec<String>,
+        batch: u64,
+        key: Vec<u8>,
+        now_ms: i64,
+    ) -> R<super::engine::AccountEngine> {
+        let mut key = key;
+        let taken = guard(|| {
+            let mut g = self.st.lock()?;
+            match std::mem::replace(&mut *g, Stage::Spent) {
+                Stage::Taken(a) | Stage::Done(a) => Ok(a),
+                other => {
+                    *g = other;
+                    Err(AccountError::consumed(
+                        "the creation is not finished, or its engine was opened",
+                    ))
+                }
+            }
+        });
+        let account = match taken {
+            Ok(a) => a,
+            Err(e) => {
+                wipe(&mut key);
+                return Err(e);
+            }
+        };
+        super::engine::AccountEngine::open_created_inner(
+            source, listing, *account, namespaces, batch, key, now_ms,
+        )
+    }
+}
+
 #[cfg(feature = "native05")]
 #[uniffi::export]
 impl AccountCreation {
+    /// The session over the stores `take_result` returned (the host stored them and lists them),
+    /// unlocked as the creation left it, its records loaded: a passkey owner is asked once at
+    /// first run. The engine checks that the source holds exactly what the creation made. One
+    /// shot: the creation is spent after it, and dropped without it the unlocked account goes.
+    /// Arguments as `AccountEngine.open` (no identity: the creation's; no saved state).
+    pub fn open_engine(
+        &self,
+        source: Box<dyn super::HostSource>,
+        listing: Vec<ListedPath>,
+        namespaces: Vec<String>,
+        batch: u64,
+        key: Vec<u8>,
+        now_ms: i64,
+    ) -> Result<std::sync::Arc<super::engine::AccountEngine>, AccountError> {
+        self.open_engine_inner(source, listing, namespaces, batch, key, now_ms)
+            .map(std::sync::Arc::new)
+    }
     /// Start a creation as `identity` (a controller of the new keyring, or a member the account
     /// will have) at `now_ms`. `entropy` is 96 fresh bytes: the new vault's seed, the slots' entropy, the first epochs'
     /// seed (wiped). The host chose the vault seed and so can read what is sealed to it.

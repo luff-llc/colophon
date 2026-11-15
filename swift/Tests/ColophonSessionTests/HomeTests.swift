@@ -14,58 +14,8 @@ import ColophonSession
         return Device(medium: medium, owner: owner, homes: [transport], createWithoutHome: false)
     }
 
-    /// Device one creates an account with the in-process home appointed (spec §18), writes, and syncs. Device two
-    /// has its own folder (a copy of the authority objects, as iCloud would deliver them), asks for access
-    /// through its request, is approved, and reads what device one wrote through the home.
-    @Test func twoSessionsSyncThroughAnInProcessHome() async throws {
-        let home = SimHome()
-        let first = configured(home, appoint: true)
-        await first.session.create()
-        first.session.stopSync()
-        #expect(first.session.phase == .ready, "\(first.session.phase) \(first.session.lastError ?? "")")
-        #expect(first.session.homes.count == 1, "the home is appointed at creation")
-        #expect(!first.session.notices.noHome, "an account with a home does not warn")
-        try await first.session.perform(try .saveLink(id: "a", url: URL(string: "https://example.org/a")!, title: "A"), observed: first.session.observedRevision)
-        #expect(await first.session.syncNow())
-        #expect(home.holds(prefix: "ops/").count == 1, "the home holds the member's record")
-        #expect(home.entryCount >= 4)
-
-        let second = configured(home, medium: MemoryMedium(files: first.medium.snapshot().filter { $0.key.hasPrefix("authority/") }), appoint: false)
-        await second.session.restore()
-        second.session.stopSync()
-        guard case .waitingForApproval = second.session.phase else { Issue.record("expected waiting, got \(second.session.phase)"); return }
-        try await first.session.importRequest(try await second.session.exportRequest())
-        try await first.session.approve(try #require(first.session.requests.first))
-        #expect(await first.session.syncNow())
-        #expect(await second.session.syncNow())
-        await second.session.refresh()
-        #expect(second.session.phase == .ready, "\(second.session.phase) \(second.session.lastError ?? "")")
-        #expect(await second.session.syncNow())
-        #expect(try await SavedStore(session: second.session).load(ItemsQuery(limit: 10)).get().total == 1, "the second device reads what the first wrote")
-        try await second.session.perform(try .saveLink(id: "b", url: URL(string: "https://example.org/b")!, title: "B"), observed: second.session.observedRevision)
-        #expect(await second.session.syncNow())
-        #expect(await first.session.syncNow())
-        #expect(try await SavedStore(session: first.session).load(ItemsQuery(limit: 10)).get().total == 2)
-        #expect(second.session.homeFaults.isEmpty && first.session.homeFaults.isEmpty, "an honest home raises no fault")
-        #expect(first.session.homeIssues.isEmpty && second.session.homeIssues.isEmpty)
-    }
-
-    /// A home that demands calls for records and the change feed (§13.4): every such read goes with a call whose `args`
-    /// are exactly `{"method","path","body"}` for that request, audience the home's base, and the home (checking as the
-    /// relay does, signature and membership included) refuses none.
-    @Test func readsAtAHomeThatDemandsCallsCarryCallsBoundToTheirRequest() async throws {
-        let home = SimHome()
-        home.requireCalls = true
-        let device = configured(home, appoint: true)
-        await device.session.create()
-        device.session.stopSync()
-        try await device.session.perform(try .saveLink(id: "a", url: URL(string: "https://example.org/a")!, title: "A"), observed: device.session.observedRevision)
-        #expect(await device.session.syncNow(), "\(device.session.syncState) \(device.session.homeIssues)")
-        #expect(await device.session.syncNow())
-        #expect(home.acceptedCalls >= 2 && home.refusedCalls.isEmpty, "accepted \(home.acceptedCalls), refused \(home.refusedCalls)")
-        #expect(home.holds(prefix: "ops/").count == 1)
-        #expect(device.session.homeIssues.isEmpty)
-    }
+    // The honest two-device journey and the calls a home requires run against the real relay: `RelayJourneyTests`.
+    // What stays here needs a home the test controls: one that is offline, over its bound, or not `https`.
 
     /// Only `https` homes, unless the testing option allows loopback `http`; the session neither appoints nor contacts
     /// one that is not.

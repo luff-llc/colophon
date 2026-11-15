@@ -57,10 +57,11 @@ error is `retry` or `waitingForDownload`, never an empty library.
 
 ## Creating, opening, joining
 
-* `create()` runs the creation (the owner's PRF for its slot, the genesis, the first rekey), appoints the homes, records their
-  activation, and approves this device's member. **A passkey owner is asked more than once at first run**: the core's creation
-  leaves the session locked, so a second PRF ceremony unlocks the controller that sets the device up. That step is one function
-  (`SessionWorker.unlockCreatedAccount`) and goes when the core exports an engine constructor over a created account.
+* `create()` runs the creation (the owner's PRF for its slot, the genesis, the first rekey), appoints every configured home in
+  one transition and records its activation, and approves this device's member, all with the creation's own engine
+  (`ColophonEngine.openCreated`, over `AccountCreation.open_engine`): it is unlocked as the creation left it, so **a passkey
+  owner is asked once at first run**. `SessionConfiguration.history` and `headQuorum` set `policy.history` and
+  `policy.headQuorum` of a new account.
 * `restore()` lists the medium, discovers the account ID from its verified history (cached in the private journal), opens the
   member's engine from the sealed saved state when it can, and opens the member's epoch shares. A member that is not approved
   yet is `waitingForApproval(code:)`; its engine is loaded without keys so the exchange can bring the approval in.
@@ -80,9 +81,15 @@ watcher, foreground entry and `flushExternalChanges()` call it.
 
 `syncNow()` is one exchange per home (passes are never concurrent: callers queue). The loop is the engine's: `exchange_next`
 returns a request, a "needs a call", waiting or done; the session performs the request through the home's `HomeTransport`
-(`URLSessionHomeTransport` by default: no cookies, no cache, redirects refused so the engine reports them), builds a fresh
-`Authorization: Colophon` call for exactly the request that needs one (signed by the member key), answers it, and writes the
-stores of the report before the next step. `More` and every other fault are the engine's: faults are published as `homeFaults`.
+(`URLSessionHomeTransport` by default: no cookies, no cache, redirects refused so the engine reports them), answers it, and
+writes the stores of the report before the next step. For a "needs a call" the engine has already built the request: the
+session asks it for the call (`exchange_begin_call`: audience the home's base, purpose by the method, `args` the method, the
+path relative to the base and the body digest), signs it with the member key, and the core judges it with the home's own rule
+before returning it (a call the core refuses is `HomeProblem.callRefused`, and nothing is sent). A pass starts with the public
+head (at `headQuorum` above 1 also the other homes' heads, each sent to the home its URL names). A device that holds a copy of
+the history from before its approval learns the approval through the home even under `policy.history: members`: its call is
+judged at what it holds, and the home decides. A brand-new device with nothing can fetch only the head under `members` (it
+cannot name an `asOf`): it needs the history from the shared folder or another source. `More` and every other fault are the engine's: faults are published as `homeFaults`.
 A transport failure aborts the pass (`exchange_abort`) and the loop backs off (capped, jittered); a local change or
 `requestSync()` cuts the wait short. Passes repeat until one moves nothing (at most four), because the engine plans the next
 stage from what the home just said.
@@ -122,6 +129,10 @@ growth about 35 MiB), and the blob executor stops on `dispatchPrecondition` if i
 * `unseenActivations`: every activation since this host last showed the history that no key on this device signed, with when
   each home receipted it. `acknowledgeActivation(seq:)` records that the person saw that one activation (kept in the private journal); it never dismisses a pending transition, which stays until it is vetoed, activates or is dead.
 * `noHome`: the warning of guide §5. `NoticeWords` holds the words the specification asks for.
+* `duties.removals` (§17.5 removal follow-up): when a controller's removal activates, what it admitted since the transition's
+  anchor and the removal did not remove (members whose grant it signed, `approve`/`sign` keys it added by immediate entries),
+  from the core's `removal_follow_up`. `removeFollowUp(seq:)` revokes and removes them in one action (signed by the owner);
+  `keepFollowUp(seq:)` keeps them. Either is remembered in the private journal and the card goes.
 
 ## Lock
 
@@ -186,3 +197,15 @@ An app written against 0.4's session reads the same where the meaning is unchang
   `SupportReport.ledgerEntryCount` are removed.
 * `ColophonMigration`: the 0.4 clean copy (`LibraryMigration`, `LegacyLibrarySource`, `MigrationState`) is removed (its engine, the
   0.4 session, is gone). The 0.4 `NativeEngine`/`Library` wrappers in ColophonKit remain for tools that read a 0.4 library.
+
+## Proven against the real relay
+
+`RelayJourneyTests` (in `swift/Tests/ColophonSessionTests`) start the real relay (`bun relay/server.js --test-clock` with a
+temporary data directory, on loopback, the home module in WebAssembly) as one home, and as two homes at `headQuorum` 2, and run
+two devices of one person through it under `policy.history: members` and `public`: creation with the home, a second device
+approved and syncing, writes and reads through `ColophonSavedKit` with a required and an optional blob, a third device
+approved then revoked and refused, and a pending change shown on the other device and vetoed. The relay requires a call for
+everything §13.4 and §14 say needs one. `scripts/test-swift.sh` builds the home module first; without Bun or the module these
+tests fail. `SimHome` remains only for unit tests that need a home the test controls (offline, over its bound, not `https`,
+route registration, a change that goes dead). The same journey through the Rust exports is
+`crates/colophon-ffi/tests/v05_relay_journey.rs`.

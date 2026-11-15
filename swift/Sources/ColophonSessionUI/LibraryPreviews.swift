@@ -21,7 +21,7 @@ import SwiftUI
     }
     static func member(_ id: String, _ label: String, _ kind: AccountMemberKind, _ namespaces: [String], _ access: [AccessKind]) -> AccountMember {
         AccountMember(id: id, label: label, kind: kind, kindRaw: nil, grant: AccountGrant(namespaces: namespaces, access: access, expires: nil, writeBudget: nil, import: false),
-                      since: 3, revokedAt: nil, writes: 0, expiresMs: nil, provisional: false, home: false, session: 0)
+                      since: 3, revokedAt: nil, writes: 0, expiresMs: nil, provisional: false, home: false, session: 0, grantedBy: [])
     }
     static let request = AccessRequest(id: "request", label: "My iPad", kind: .device,
         termsJSON: #"{"records":[{"namespace":"reading.books","access":"write"},{"namespace":"notes","access":"write"}]}"#, record: Data())
@@ -43,6 +43,8 @@ import SwiftUI
     func lock() async { phase = .locked }
     var duties: HostDuties = .none
     func resign(_ transition: String) async throws -> String { transition }
+    func removeFollowUp(seq: UInt64) async throws {}
+    func keepFollowUp(seq: UInt64) async throws {}
     static var host: LibraryHostActions {
         .init(containers: [
             .init(id: "cloud", title: "iCloud Drive", kind: .iCloud, location: .iCloud(container: "preview", libraryName: "Library")),

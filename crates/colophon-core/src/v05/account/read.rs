@@ -42,6 +42,12 @@ pub struct ControllerInfo {
     pub provisional: bool,
     /// Suspended by a pending transition at the account's clock.
     pub suspended: bool,
+    /// The seq of the entry that added it (1 for the genesis, the activation's for a transition).
+    pub added_seq: u64,
+    /// The controllers that signed that entry, sorted: the signers of an immediate `keyring`
+    /// entry; empty for the genesis and for a recording entry (spec §17.5 "Removal follow-up":
+    /// what a removed controller added by immediate entries).
+    pub added_by: Vec<String>,
 }
 
 /// A member, with the 0.4 shape and what 0.5 adds.
@@ -58,6 +64,10 @@ pub struct MemberInfo {
     pub home: bool,
     /// How many times its sessions were ended (the current session number, §9.6).
     pub session: u64,
+    /// The controllers that signed the entry that granted it (seq `member.since`), sorted;
+    /// empty when a recording entry admitted it (a home appointed by a transition). Spec §17.5
+    /// "Removal follow-up": every member whose grant a removed controller signed.
+    pub granted_by: Vec<String>,
 }
 
 /// A home (§13.1).
@@ -150,6 +160,23 @@ pub struct SeenActivation {
     pub components: Vec<String>,
     /// When each home receipted it: `(home ID, received ms)`.
     pub receipted: Vec<(String, i64)>,
+}
+
+/// The removal follow-up of one activation that removed controllers (§17.5): what the removed
+/// keys admitted since that transition's anchor and the removal did not already remove.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovalFollowUp {
+    /// The `activate` entry's seq.
+    pub seq: u64,
+    /// The transition's anchor seq.
+    pub anchor_seq: u64,
+    /// The controllers it removed.
+    pub removed: Vec<String>,
+    /// Current members whose grant a removed key signed after the anchor.
+    pub members: Vec<String>,
+    /// Current `approve` or `sign` controllers a removed key added by an immediate entry after
+    /// the anchor.
+    pub controllers: Vec<String>,
 }
 
 /// What the person must be shown (§17.5).
@@ -393,6 +420,13 @@ impl Account {
             .filter_map(|v| Slot::from_value(v).ok())
             .flat_map(|s| s.controllers().to_vec())
             .collect();
+        let added: BTreeSet<u64> = k
+            .controllers
+            .keys()
+            .filter_map(|id| st.controller_added_seq(id))
+            .filter(|s| *s > 1)
+            .collect();
+        let signers = self.entry_signers(&added);
         k.controllers
             .values()
             .map(|c| ControllerInfo {
@@ -424,12 +458,167 @@ impl Account {
                     .active_suspensions(self.now_ms)
                     .iter()
                     .any(|s| s.key == c.id()),
+                added_seq: st.controller_added_seq(&c.id()).unwrap_or(1),
+                added_by: st
+                    .controller_added_seq(&c.id())
+                    .and_then(|seq| signers.get(&seq).cloned())
+                    .unwrap_or_default(),
             })
             .collect()
     }
 
+    /// The removal follow-up (§17.5 "Removal follow-up"): for each activation on the verified
+    /// branch that removed controllers, every current member whose grant a removed key signed and
+    /// every current `approve` or `sign` controller a removed key added by an immediate entry,
+    /// since that transition's anchor. Activations with nothing left to follow up are omitted;
+    /// the host offers to remove what is listed in one action and remembers what it showed.
+    pub fn removal_follow_up(&self) -> Vec<RemovalFollowUp> {
+        let branch: BTreeMap<&String, u64> = self
+            .d
+            .verdict
+            .branch
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d, i as u64 + 1))
+            .collect();
+        let mut removals: Vec<(u64, u64, Vec<String>)> = Vec::new();
+        for b in &self.objects.entries {
+            let Ok(env) = AuthEnvelope::parse(
+                b,
+                bounds::AUTHORITY_BODY,
+                bounds::AUTHORITY_BODY.saturating_mul(2),
+                false,
+            ) else {
+                continue;
+            };
+            let Some(&seq) = branch.get(&env.digest) else {
+                continue;
+            };
+            if env.value.get("kind").and_then(Value::as_str) != Some("activate") {
+                continue;
+            }
+            let Some(t) = env
+                .value
+                .get("transition")
+                .and_then(Value::as_str)
+                .and_then(|t| decode_base64(t, bounds::TRANSITION_ENVELOPE * 2).ok())
+                .and_then(|raw| {
+                    AuthEnvelope::parse(
+                        &raw,
+                        bounds::TRANSITION_ENVELOPE,
+                        bounds::TRANSITION_ENVELOPE,
+                        true,
+                    )
+                    .ok()
+                })
+            else {
+                continue;
+            };
+            let removed: Vec<String> = t
+                .value
+                .get("change")
+                .and_then(|c| c.get("keyring"))
+                .and_then(|k| k.get("remove"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let Some(anchor) = t
+                .value
+                .get("anchor")
+                .and_then(|a| a.get("seq"))
+                .and_then(Value::as_u64)
+            else {
+                continue;
+            };
+            if !removed.is_empty() {
+                removals.push((seq, anchor, removed));
+            }
+        }
+        if removals.is_empty() {
+            return Vec::new();
+        }
+        removals.sort();
+        let members = self.members();
+        let controllers = self.controllers();
+        removals
+            .into_iter()
+            .filter_map(|(seq, anchor_seq, removed)| {
+                let by_removed = |signers: &[String]| signers.iter().any(|s| removed.contains(s));
+                let m: Vec<String> = members
+                    .iter()
+                    .filter(|m| {
+                        m.member.revoked_at.is_none()
+                            && !m.home
+                            && m.member.since > anchor_seq
+                            && by_removed(&m.granted_by)
+                    })
+                    .map(|m| m.member.id.clone())
+                    .collect();
+                let c: Vec<String> = controllers
+                    .iter()
+                    .filter(|c| {
+                        c.added_seq > anchor_seq
+                            && by_removed(&c.added_by)
+                            && c.roles.iter().any(|r| r == "approve" || r == "sign")
+                    })
+                    .map(|c| c.id.clone())
+                    .collect();
+                (!m.is_empty() || !c.is_empty()).then_some(RemovalFollowUp {
+                    seq,
+                    anchor_seq,
+                    removed,
+                    members: m,
+                    controllers: c,
+                })
+            })
+            .collect()
+    }
+
+    /// The controllers that signed each entry at `seqs` of the verified branch, sorted (absent
+    /// for an entry not held; empty for a recording entry). One pass over the held entries.
+    fn entry_signers(&self, seqs: &BTreeSet<u64>) -> BTreeMap<u64, Vec<String>> {
+        let wanted: BTreeMap<&String, u64> = seqs
+            .iter()
+            .filter_map(|seq| {
+                let i = usize::try_from(*seq).ok()?.checked_sub(1)?;
+                Some((self.d.verdict.branch.get(i)?, *seq))
+            })
+            .collect();
+        let mut out = BTreeMap::new();
+        if wanted.is_empty() {
+            return out;
+        }
+        for b in &self.objects.entries {
+            let Ok(e) = crate::v05::history::envelope::AuthEnvelope::parse(
+                b,
+                crate::v05::encoding::bounds::AUTHORITY_BODY,
+                crate::v05::encoding::bounds::AUTHORITY_BODY.saturating_mul(2),
+                false,
+            ) else {
+                continue;
+            };
+            if let Some(seq) = wanted.get(&e.digest) {
+                out.insert(*seq, e.signer_ids());
+            }
+        }
+        out
+    }
+
     /// The members: 0.4's counts of admitted writes are derived from admission, not counters.
     pub fn members(&self) -> Vec<MemberInfo> {
+        let granted: BTreeSet<u64> = self
+            .d
+            .auth
+            .state()
+            .members()
+            .iter()
+            .map(|m| m.granted_seq)
+            .collect();
+        let signers = self.entry_signers(&granted);
         self.d
             .auth
             .state()
@@ -451,6 +640,7 @@ impl Account {
                     provisional: m.provisional.is_some(),
                     home: m.home != HomeStatus::NotHome,
                     session: m.end_sessions.len() as u64,
+                    granted_by: signers.get(&m.granted_seq).cloned().unwrap_or_default(),
                 }
             })
             .collect()

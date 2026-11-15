@@ -38,6 +38,10 @@ import ColophonSession
     var duties: HostDuties = .none
     func lock() async { locked += 1; phase = .locked }
     func resign(_ transition: String) async throws -> String { resigned.append(transition); return transition }
+    var removedFollowUps: [UInt64] = []
+    var keptFollowUps: [UInt64] = []
+    func removeFollowUp(seq: UInt64) async throws { removedFollowUps.append(seq); duties.removals.removeAll { $0.seq == seq } }
+    func keepFollowUp(seq: UInt64) async throws { keptFollowUps.append(seq); duties.removals.removeAll { $0.seq == seq } }
 }
 
 private func pending(vetoable: Bool = true, digest: String = "ab") -> Pending {
@@ -183,6 +187,31 @@ private func activation() -> SeenActivation {
         #expect(dead?.lines == [NoticeWords.dead(receipted: 0, quorum: 2)] && dead?.controls.map(\.action) == [.resign(pending().digest)])
     }
 
+    /// The removal follow-up (§17.5): when a controller's removal activated, what it admitted since the anchor is listed,
+    /// with one action that removes it all and one that keeps it; each reaches the session with the activation's seq.
+    @Test func aRemovalFollowUpListsWhatTheRemovedKeyAdmittedAndOffersOneAction() async throws {
+        var duties = HostDuties()
+        duties.removals = [RemovalFollowUp(seq: 12, removed: ["66666666666666666666666666666666"],
+            members: [.init(id: "77777777777777777777777777777777", label: "Unknown phone")],
+            controllers: [.init(id: "88888888888888888888888888888888", label: "Laptop")])]
+        let cards = GateModel.notices(.empty, duties: duties)
+        let card = try #require(cards.first { $0.id == "library.notice.removal.12" })
+        #expect(card.lines.contains("Members: Unknown phone (77777777)") && card.lines.contains("Keys: Laptop (88888888)"))
+        #expect(card.lines.first?.contains("66666666") == true)
+        #expect(card.controls.map(\.action) == [.removeFollowUp(12), .keepFollowUp(12)])
+        #expect(card.controls[0].weight == .destructive && card.controls[0].identifier == "library.notice.removeFollowUp.12")
+        #expect(!GateModel.notices(.empty, duties: .none).contains { $0.id.hasPrefix("library.notice.removal") }, "no removal, no card")
+        let session = FakeSession(.ready)
+        session.duties = duties
+        let model = LibraryActionModel()
+        await GateModel.perform(card.controls[0].action, session: session, host: .init(), model: model) { _ in }
+        #expect(session.removedFollowUps == [12] && session.duties.removals.isEmpty)
+        session.duties = duties
+        await GateModel.perform(card.controls[1].action, session: session, host: .init(), model: model) { _ in }
+        #expect(session.keptFollowUps == [12])
+        #expect(model.error == nil)
+    }
+
     @Test func theWordsSayWhatTheSpecificationAsksTheHostToSay() {
         #expect(NoticeWords.noHome.contains("no home") && NoticeWords.noHome.contains("Add a home"))
         #expect(NoticeWords.waiting.hasPrefix("Waiting protects who controls your account."))
@@ -204,7 +233,7 @@ private func activation() -> SeenActivation {
     @Test func memberWordsDescribeGrantsAndKinds() {
         let member = AccountMember(id: "m", label: "Mac", kind: .app, kindRaw: nil,
             grant: AccountGrant(namespaces: ["reading.saved"], access: [.read, .write], expires: nil, writeBudget: 5, import: false),
-            since: 3, revokedAt: nil, writes: 2, expiresMs: nil, provisional: false, home: false, session: 0)
+            since: 3, revokedAt: nil, writes: 2, expiresMs: nil, provisional: false, home: false, session: 0, grantedBy: [])
         #expect(LibraryWords.grant(member).contains("Read and change") && LibraryWords.grant(member).contains("Up to 5 changes; 2 made"))
         #expect(LibraryWords.kind(AccountMemberKind.unknown) == "Unknown kind")
     }

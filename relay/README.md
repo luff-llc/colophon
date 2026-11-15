@@ -97,8 +97,9 @@ or a call; records, blob chunks and the change feed always need a call. A call i
 `Authorization: Colophon <base64url call envelope>`, verified under §12.3 with `{base}` as the
 audience, and bound to its request: its `args` are exactly
 `{"method": <HTTP method>, "path": <path and query relative to {base}, as sent>, "body": <hex SHA-256 of the body>}`,
-its purpose `colophon.home.read` for GET and HEAD (`colophon.history.read` is accepted for the
-history too) and `colophon.home.write` otherwise. A current member may write records, live
+its purpose `colophon.home.read` for GET and HEAD (`colophon.history.read` is accepted on the
+history paths only, never for records, blob chunks or the change feed) and `colophon.home.write`
+otherwise. A current member may write records, live
 values and blob chunks under its own author ID in namespaces its terms grant; a revoked member is
 refused as soon as the revocation is in the history the home holds. Refused: 401 with
 `WWW-Authenticate: Colophon` when there is no call, 403 `{"result":"<§1 code>"}` for a call that

@@ -28,6 +28,8 @@ public enum GateAction: Hashable, Sendable {
     case veto(String)
     case acknowledgeActivation(UInt64)
     case resign(String)
+    case removeFollowUp(UInt64)
+    case keepFollowUp(UInt64)
 }
 
 /// One control the person can use: its words, its accessibility identifier, its weight, what it does.
@@ -181,6 +183,15 @@ public enum GateModel {
                 lines: [NoticeWords.dead(receipted: transition.receipted, quorum: transition.quorum)],
                 controls: transition.canResign ? [GateControl(.resign(transition.digest), "Sign It Again", "library.notice.resign.\(transition.digest.prefix(8))", .prominent)] : []))
         }
+        for removal in duties.removals {
+            var lines = ["A key that was removed (\(removal.removed.map { String($0.prefix(8)) }.joined(separator: ", "))) had admitted others while its removal was pending."]
+            if !removal.members.isEmpty { lines.append("Members: " + removal.members.map { "\($0.label) (\(String($0.id.prefix(8))))" }.joined(separator: ", ")) }
+            if !removal.controllers.isEmpty { lines.append("Keys: " + removal.controllers.map { "\($0.label) (\(String($0.id.prefix(8))))" }.joined(separator: ", ")) }
+            lines.append("Remove them unless you added them yourself.")
+            cards.append(NoticeCard(id: "library.notice.removal.\(removal.seq)", title: "Remove what the removed key added?", lines: lines,
+                controls: [GateControl(.removeFollowUp(removal.seq), "Remove Them", "library.notice.removeFollowUp.\(removal.seq)", .destructive),
+                           GateControl(.keepFollowUp(removal.seq), "Keep Them", "library.notice.keepFollowUp.\(removal.seq)")]))
+        }
         for activation in notices.unseenActivations {
             var lines = ["Entry \(activation.seq)", "Signed by " + activation.signers.map { String($0.prefix(8)) }.joined(separator: ", ")]
             if activation.receipted.isEmpty { lines.append("No home has receipted it.") }
@@ -211,6 +222,8 @@ public enum GateModel {
         case .veto(let digest): await model.run { try await session.veto(digest) }
         case .acknowledgeActivation(let seq): await model.run { await session.acknowledgeActivation(seq: seq) }
         case .resign(let digest): await model.run { try await session.resign(digest) }
+        case .removeFollowUp(let seq): await model.run { try await session.removeFollowUp(seq: seq) }
+        case .keepFollowUp(let seq): await model.run { try await session.keepFollowUp(seq: seq) }
         }
     }
 }

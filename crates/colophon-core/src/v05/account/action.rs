@@ -28,7 +28,7 @@ use crate::v05::write::authority::{
     prepare_vetoed, PendingBatch, TransitionParams, TransitionRule, VetoParams,
 };
 use crate::v05::write::calls::{
-    finish_call, finish_link, prepare_call, prepare_link, CallSignerSpec, CallSpec, LinkSpec,
+    finish_call, finish_home_call, finish_link, prepare_call, prepare_link, CallSignerSpec, CallSpec, LinkSpec,
     PreparedCall, PreparedLink,
 };
 use crate::v05::write::records::{
@@ -274,6 +274,42 @@ enum Work {
     Operation(Box<PreparedOperation>),
     Link(Box<PreparedLink>),
     Call(Box<PreparedCall>, Box<CallTarget>),
+    HomeCall(Box<PreparedCall>, Box<HomeCall>),
+}
+
+/// One request at a home that needs its own call (§14): what the engine's
+/// [`CallNeed`](crate::v05::engine::exchange::CallNeed) names. The call's audience is `audience`,
+/// its purpose follows the method ([`crate::v05::calls::home_call_purpose`]) and its `args` are
+/// [`crate::v05::calls::home_call_args`] for exactly this request; what a `PUT` writes is read
+/// from its path ([`crate::v05::calls::home_record_writes`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HomeCall {
+    /// The home's base URL: the call's audience and the verifier's own endpoint.
+    pub audience: String,
+    /// The HTTP method, upper case.
+    pub method: String,
+    /// The path and query relative to the base, exactly as it will be sent.
+    pub path: String,
+    /// The lowercase hex SHA-256 of the request body (of the empty string when none).
+    pub body_sha256: String,
+    /// The highest seq the home is known to hold of this account's verified history, when it
+    /// is below the account's own head: the call's `asOf` is that entry (an entry the signer has
+    /// seen, §12.2, and one the home holds, so a device with entries not yet pushed can still
+    /// call). `None`: the account's head.
+    pub as_of: Option<u64>,
+}
+impl HomeCall {
+    /// What the request writes: the records path after `/records/` of a `PUT`, read by the
+    /// home's own rule; nothing for anything else.
+    pub fn writes(&self) -> Vec<crate::v05::calls::HomeWrite> {
+        if self.method != "PUT" {
+            return Vec::new();
+        }
+        let path = self.path.split('?').next().unwrap_or_default();
+        path.strip_prefix("/records/")
+            .and_then(crate::v05::calls::home_record_writes)
+            .unwrap_or_default()
+    }
 }
 
 /// What a call's verifier is configured with (§12.3): the target service's own audiences,
@@ -1645,6 +1681,74 @@ impl Account {
         ))
     }
 
+    /// A call for one request at a home (§12.2, §14), signed by this session's own key (a
+    /// member's, or a controller's): audience the home's base, purpose by the method, `args`
+    /// bound to exactly this request. `finish` judges it with the home's own rule over what this
+    /// account holds ([`crate::v05::calls::check_home_call_as_signer`]) and returns the envelope
+    /// as `artifact`. `asOf` is the head of the verified history.
+    pub fn begin_home_call(
+        &self,
+        key: &[u8],
+        call: &HomeCall,
+        request_id: [u8; 32],
+    ) -> Result<PendingAction> {
+        require(
+            call.method.bytes().all(|b| b.is_ascii_uppercase()) && !call.method.is_empty(),
+            "the method is an upper-case HTTP method",
+        )?;
+        require(
+            call.path.starts_with('/') && call.path.len() <= 4_096,
+            "the path starts with / and is at most 4,096 bytes",
+        )?;
+        require(
+            crate::v05::encoding::is_lower_hex(&call.body_sha256, 64),
+            "the body digest is 64 lowercase hex",
+        )?;
+        let st = self.d.auth.state();
+        let held = st.history().len() as u64;
+        let seq = call.as_of.filter(|s| (1..held).contains(s)).unwrap_or(held);
+        let digest = usize::try_from(seq)
+            .ok()
+            .and_then(|s| s.checked_sub(1))
+            .and_then(|i| st.history().get(i))
+            .cloned()
+            .ok_or_else(|| unavailable("no history"))?;
+        let (signer, webauthn) = match &self.me {
+            super::Identity::Member(id) => (CallSignerSpec::Member(id.clone()), false),
+            super::Identity::Controller(id) => {
+                let c = st
+                    .keyring()
+                    .controllers
+                    .get(id)
+                    .ok_or(Failure::Refused(Reason::Revoked))?;
+                (
+                    CallSignerSpec::Controller(id.clone()),
+                    c.key().webauthn().is_some(),
+                )
+            }
+        };
+        let created = format_date(self.now_ms);
+        let prepared = prepare_call(&CallSpec {
+            account: self.d.auth.account(),
+            as_of: (seq, &digest),
+            signer,
+            key,
+            links: &[],
+            audience: &call.audience,
+            purpose: crate::v05::calls::home_call_purpose(&call.method),
+            args: crate::v05::calls::home_call_args(&call.method, &call.path, &call.body_sha256),
+            request_id,
+            created: &created,
+            webauthn,
+        })?;
+        let steps = vec![prepared.step().clone()];
+        Ok(self.pending_for(
+            "call",
+            Work::HomeCall(Box::new(prepared), Box::new(call.clone())),
+            steps,
+        ))
+    }
+
     // -----------------------------------------------------------------------------------------
     // Finish.
 
@@ -1724,6 +1828,32 @@ impl Account {
                     home_endpoints: &target.home_endpoints,
                 };
                 finished.artifact = Some(finish_call(&c, &sig, &view, &cfg)?);
+                return Ok(finished);
+            }
+            Work::HomeCall(c, call) => {
+                require(signatures.len() == 1, "one signature per step")?;
+                let view = self.call_view()?;
+                let sig = signatures
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| malformed("signature"))?;
+                let audiences = [call.audience.clone()];
+                let origins = std::collections::BTreeMap::new();
+                let cfg = CallConfig {
+                    now_ms: self.now_ms,
+                    audiences: &audiences,
+                    call_origins: &origins,
+                    controller_purposes: &[],
+                    home_endpoints: &audiences,
+                };
+                let writes = call.writes();
+                let req = crate::v05::calls::HomeRequest {
+                    method: &call.method,
+                    path: &call.path,
+                    body_sha256: &call.body_sha256,
+                    writes: &writes,
+                };
+                finished.artifact = Some(finish_home_call(&c, &sig, &view, &cfg, &req)?);
                 return Ok(finished);
             }
         }

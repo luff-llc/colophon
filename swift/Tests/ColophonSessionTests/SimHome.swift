@@ -2,24 +2,13 @@ import CryptoKit
 import Foundation
 import ColophonSession
 
-/// An in-process home: the HTTP surface the engine's exchange speaks (head, authority, pending, change feed,
-/// records), driven by the requests the engine emits, as `crates/colophon-ffi/tests/v05_support` does in Rust.
-///
-/// Admission, through the exported verifiers, so that it refuses what a real home refuses:
-/// * `POST /authority` stores entries only if the history they extend verifies (`accountVerifyHistory`); a history
-///   that does not is 422 `{"result": <code>}`.
-/// * Reading records, blob chunks and the change feed needs `Authorization: Colophon <call>` (401 with
-///   `WWW-Authenticate: Colophon` without one, §13.4); the history is served as under `policy.history: public`; a
-///   write is checked when it carries a call (see `send` for why a member cannot sign one yet). A call is checked as the
-///   relay's home checks it: `colophon/call/5` for this account, audience the home's base, purpose `colophon.home.read`
-///   for GET and `colophon.home.write` otherwise, `args` exactly `{"method","path","body"}` for this request (path and
-///   query relative to the base, the body's SHA-256), a `requestId` never seen before, signed `raw` by the key it names,
-///   whose key ID is the signer, a current member of the verified history (read by an `AccountEngine` the home opens
-///   over what it holds). A refused call is 403 `{"result": "refused:…"}`.
-///
-/// It issues receipts for transitions and vetoes posted to `/pending`, and signs heads with its own key. What it does
-/// not do (the relay's home does; see `relay/` on `home-0.5-h1`): the replay table's per-signer shares, rate limits,
-/// links, controller calls, and the write grant per namespace (a member may write anything here).
+/// An in-process home, for unit tests that need a home the test controls: one that is offline, answers past its bound,
+/// is not `https`, offers (or does not offer) delivery-route registration, or never receipts so a change goes dead.
+/// It is NOT the home the SDK is proven against: two devices syncing through a home that requires calls run against the
+/// real relay (`RelayHome`, `RelayJourneyTests`). Its admission is partial: `POST /authority` is checked with
+/// `accountVerifyHistory`; it receipts transitions and vetoes posted to `/pending` and signs heads with its own key; with
+/// `requireCalls` it checks a call's shape, audience, purpose, args, replay, signature and membership. It has none of the
+/// relay's replay shares, rate limits, links, controller calls or per-namespace write grants.
 final class SimHome: HomeTransport, @unchecked Sendable {
     let key = P256.Signing.PrivateKey()
     let agreement = P256.KeyAgreement.PrivateKey()
@@ -33,9 +22,7 @@ final class SimHome: HomeTransport, @unchecked Sendable {
     private(set) var pendingObjects: [Data] = []
     private var pendingList: [[String: Any]] = []
     var online = true
-    /// Whether reading records and the change feed needs a call. Off by default: a member approved by another device is
-    /// refused `refused:revoked` by the core's own `begin_call` check in its first passes, so the multi-device tests
-    /// cannot run with calls required (a core finding, reported in the PR). `HomeTests` turns it on for one device.
+    /// Whether reading records and the change feed needs a call.
     var requireCalls = false
     /// Every call that was refused, with its reason, and every call accepted.
     private(set) var refusedCalls: [String] = []

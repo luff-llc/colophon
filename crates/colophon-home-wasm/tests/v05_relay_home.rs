@@ -652,6 +652,55 @@ fn a4_one_caller_over_its_share_is_refused_alone() {
     assert_eq!(get_with(&a, path, Some(&c)).0, 200, "another principal is not locked out");
 }
 
+/// §12.3 step 7 and §13.4 over the relay: `colophon.history.read` reads the history only. The
+/// kit (a `recover`-only controller) reads `/authority` with it, but its call for the change feed
+/// or an existing blob chunk is 403 `refused:outOfScope`; a controller holding `control` reads
+/// both with `colophon.home.read`. Before, every GET took `colophon.history.read` (200).
+#[test]
+fn a12_history_read_reads_the_history_and_not_the_records() {
+    use sha2::{Digest, Sha256};
+    if prerequisites().is_none() {
+        return;
+    }
+    let ka = HomeKeys::new(0x77);
+    let mut f = create_with(&[NS], "members", 1);
+    appoint_homes(&mut f, &[(&ka, BASE_A)]);
+    let scratch = Scratch::new("a12");
+    let a = Relay::start(&ka, f.account.id().as_str(), BASE_A, scratch.path(), T0 + 1_000, &[]);
+    first_upload(&a, &f, T0 + 1_000);
+    a.set_clock(NOW);
+    let head = fresh_head(&a, "2026-11-11T11:00:00Z");
+    take_head(&mut f, head, NOW);
+    let (d, k) = (f.d.clone(), f.k.clone());
+    let call = |id: &str, purpose: &str, method: &str, path: &str, body: &[u8]| {
+        let args = json!({"method": method, "path": path, "body": hex(&Sha256::digest(body))});
+        call_as(&f.host, &f.account, "controller", id, BASE_A, purpose, args, NOW, fresh_request_id())
+    };
+    // A blob chunk the home holds, written by the controller.
+    let chunk = b"a synthetic blob chunk".to_vec();
+    let blob = format!("/records/blobs/{}", hex(&Sha256::digest(&chunk)));
+    let c = call(&d, "colophon.home.write", "PUT", &blob, &chunk);
+    let h = vec![
+        ("Authorization".to_string(), format!("Colophon {}", URL_SAFE_NO_PAD.encode(&c))),
+        ("If-None-Match".to_string(), "*".to_string()),
+    ];
+    let (s, _, _) = http(a.port, "PUT", &a.url(&blob), &h, &chunk);
+    assert!((200..300).contains(&s), "the blob is stored: {s}");
+
+    let refused = (403, json!({"result": "refused:outOfScope"}));
+    for path in ["/changes?limit=500", blob.as_str()] {
+        let c = call(&k, "colophon.history.read", "GET", path, b"");
+        assert_eq!(get_with(&a, path, Some(&c)), refused, "{path}");
+        let c = call(&k, "colophon.home.read", "GET", path, b"");
+        assert_eq!(get_with(&a, path, Some(&c)), refused, "{path}");
+        let c = call(&d, "colophon.home.read", "GET", path, b"");
+        assert_eq!(get_with(&a, path, Some(&c)).0, 200, "{path}");
+    }
+    let path = "/authority?after=0&limit=1";
+    let c = call(&k, "colophon.history.read", "GET", path, b"");
+    assert_eq!(get_with(&a, path, Some(&c)).0, 200, "the kit reads the history");
+}
+
 /// A6 (H4) over the relay: `home-state.json` after 1 and 40 heads (before: 277,762 and 617,654
 /// bytes).
 #[test]

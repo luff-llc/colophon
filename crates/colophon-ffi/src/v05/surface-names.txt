@@ -11,6 +11,7 @@ AccountBlobWriter.finish
 AccountBlobWriter.push
 AccountCopyWrite.steps
 AccountCreation.begin
+AccountCreation.open_engine
 AccountCreation.prf_requests
 AccountCreation.provide_prf
 AccountCreation.provide_signatures
@@ -61,6 +62,7 @@ AccountEngine.budget_scope_unavailable
 AccountEngine.controllers
 AccountEngine.exchange_abort
 AccountEngine.exchange_answer
+AccountEngine.exchange_begin_call
 AccountEngine.exchange_homes
 AccountEngine.exchange_next
 AccountEngine.exchange_provide_call
@@ -108,6 +110,7 @@ AccountEngine.record_due
 AccountEngine.record_verdict
 AccountEngine.refresh
 AccountEngine.rejudged
+AccountEngine.removal_follow_up
 AccountEngine.required_blob_fetches
 AccountEngine.revision
 AccountEngine.revisions
@@ -425,6 +428,7 @@ record:AccountIdentity
 record:AccountMember
 record:AccountMember.expires_ms
 record:AccountMember.grant
+record:AccountMember.granted_by
 record:AccountMember.home
 record:AccountMember.id
 record:AccountMember.kind
@@ -467,8 +471,10 @@ record:BlobChunk
 record:ByteString
 record:CallNeed
 record:CallNeed.audience
+record:CallNeed.body_sha256
 record:CallNeed.home
 record:CallNeed.method
+record:CallNeed.path
 record:CallNeed.purpose
 record:CallNeed.ticket
 record:CallNeed.url
@@ -499,6 +505,8 @@ record:Changes.status
 record:Changes.vault_changed
 record:Conflict
 record:Controller
+record:Controller.added_by
+record:Controller.added_seq
 record:Controller.form
 record:Controller.has_slot
 record:Controller.holder
@@ -692,6 +700,12 @@ record:PrfRequest.salt
 record:Receipted
 record:RecordVerdict
 record:RefusedHead
+record:RemovalFollowUp
+record:RemovalFollowUp.anchor_seq
+record:RemovalFollowUp.controllers
+record:RemovalFollowUp.members
+record:RemovalFollowUp.removed
+record:RemovalFollowUp.seq
 record:Replaces
 record:Report
 record:Report.changes

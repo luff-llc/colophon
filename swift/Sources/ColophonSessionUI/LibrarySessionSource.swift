@@ -33,6 +33,9 @@ import Foundation
     var duties: HostDuties { get }
     /// New in 0.5: signs a dead transition this device signed again.
     @discardableResult func resign(_ transition: String) async throws -> String
+    /// New in 0.5: the removal follow-up's one action, and keeping what a removed key admitted (§17.5).
+    func removeFollowUp(seq: UInt64) async throws
+    func keepFollowUp(seq: UInt64) async throws
 }
 
 extension ColophonSession: LibrarySessionSource {}

@@ -101,6 +101,9 @@ public enum HomeProblem: Error, Equatable, Sendable {
     /// A request needed a call this host cannot bind to its exact body, or the request the engine then produced was not
     /// the one the call was signed for. No call was sent.
     case callNotBound(String)
+    /// This device's own check of the call it would send refused it, by the home's rule over what the device holds
+    /// (for example it holds its own revocation, or too few homes' fresh heads). No call was sent.
+    case callRefused(code: String)
 }
 
 public struct HomeIssue: Equatable, Sendable {

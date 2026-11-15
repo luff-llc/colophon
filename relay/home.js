@@ -378,6 +378,10 @@ export class HomeSlot {
     const key = allowed.reserve?.key;
     if (!section || section === 'changes') return false;
     if (section === 'head') {
+      // A head due a refresh (§13.3: at least every headMaxAge / 2, the module decides) is signed
+      // before it is served, so a caller never waits a scheduler tick for a fresh head.
+      try { await this.lock(async () => { if (this.status().appointed) await this.ensureHead(); }); }
+      catch (error) { if (!(error instanceof ModuleError)) throw error; }
       const head = await this.headEnvelope();
       if (!head) throw new HttpError(404, 'No head');
       send(res, 200, head);

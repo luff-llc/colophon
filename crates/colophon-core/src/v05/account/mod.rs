@@ -147,7 +147,7 @@ mod stored;
 mod unlock;
 
 pub use action::{
-    ActionInfo, AddController, AddMode, CallTarget, Change, Finished, KeyringEdit, PendingAction,
+    ActionInfo, AddController, AddMode, CallTarget, Change, Finished, HomeCall, KeyringEdit, PendingAction,
     RevokeKeep, SignerChoice,
 };
 pub use create::{default_policy, CreateParams, CreateProgress, Creation};
@@ -155,7 +155,7 @@ pub use moving::{CopyWrite, MoveStage, Moved, PendingMove, SwiftSuccession};
 pub use read::Standing;
 pub use read::{
     ControllerInfo, HomeInfo, LedgerLine, MemberInfo, Notices, OwedInfo, PendingTransition, Policy,
-    ProposalInfo, SeenActivation,
+    ProposalInfo, RemovalFollowUp, SeenActivation,
 };
 pub use unlock::{EpochAgreement, EpochSecret, SlotOption};
 

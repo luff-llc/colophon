@@ -226,6 +226,17 @@ import Observation
         do { apply(try await worker.acceptSeedTransfer(key: key, pairing: pairing, sealed: sealed, label: label)) }
         catch { handleCommandError(error); throw error }
     }
+    /// The removal follow-up (§17.5, `duties.removals`): in one action, revokes the members and removes the controllers a
+    /// removed key admitted since its removal's anchor.
+    public func removeFollowUp(seq: UInt64) async throws {
+        await restore()
+        do { apply(try await worker.removeFollowUp(seq: seq)) } catch { handleCommandError(error); throw error }
+    }
+    /// The person keeps what a removed key admitted; the follow-up is not shown again.
+    public func keepFollowUp(seq: UInt64) async throws {
+        await restore()
+        do { apply(try await worker.keepFollowUp(seq: seq)) } catch { handleCommandError(error); throw error }
+    }
     /// One call to veto a pending transition (§17.5): signs with the keys this device holds, stores the
     /// veto, and submits it to every home, retrying until each has receipted it or 300 s have passed.
     public func veto(_ transition: String) async throws {

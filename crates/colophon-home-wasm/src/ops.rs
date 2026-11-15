@@ -10,7 +10,8 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use colophon_core::v05::account::{Account, Identity};
 use colophon_core::v05::calls::{
-    verify_call, verify_home_write, AccountView, Call, CallConfig, CallSigner, HomeWrite,
+    home_purposes, home_record_writes, verify_home_request, AccountView, Call, CallConfig,
+    CallSigner, HomeRequest, HomeWrite,
 };
 use colophon_core::v05::descriptor::HistoryAccess;
 use colophon_core::v05::encoding::{bounds, canonical, digest, parse_date, strict_parse};
@@ -313,13 +314,6 @@ enum Class {
     Write(Vec<HomeWrite>),
 }
 
-/// `history/<author>/<namespace>/…`: the engine's grammar names no fields for it.
-fn author_namespace(path: &str) -> Option<(String, String)> {
-    let mut parts = path.split('/');
-    let (_, author, namespace) = (parts.next()?, parts.next()?, parts.next()?);
-    Some((author.to_string(), namespace.to_string()))
-}
-
 fn answer(status: u16) -> R<Value> {
     Ok(json!({"allowed": false, "status": status}))
 }
@@ -376,19 +370,15 @@ fn access(req: &Value) -> R<Value> {
                 (true, _, Kind::Predecessor(_)) => return answer(404),
                 (true, _, _) => Class::RecordsRead,
                 (false, "PUT", Kind::Head) => Class::Admit,
-                (false, "PUT", Kind::Op { author, namespace, .. }) => {
-                    Class::Write(vec![HomeWrite::Record { author, namespace }])
-                }
-                (false, "PUT", Kind::History) => match author_namespace(p) {
-                    Some((author, namespace)) => {
-                        Class::Write(vec![HomeWrite::Record { author, namespace }])
-                    }
+                // What a write writes is the core's rule, the one a signer builds its call by.
+                (
+                    false,
+                    "PUT",
+                    Kind::Op { .. } | Kind::History | Kind::Live { .. } | Kind::Blob(_),
+                ) => match home_record_writes(p) {
+                    Some(writes) => Class::Write(writes),
                     None => return answer(400),
                 },
-                (false, "PUT", Kind::Live { author, namespace, .. }) => {
-                    Class::Write(vec![HomeWrite::Live { author, namespace }])
-                }
-                (false, "PUT", Kind::Blob(_)) => Class::Write(vec![HomeWrite::Blob]),
                 // History objects arrive by POST /authority and POST /pending.
                 (false, _, _) => return not_allowed("GET"),
             }
@@ -413,23 +403,15 @@ fn access(req: &Value) -> R<Value> {
         return answer(401);
     };
     let call = B64.decode(call_text).map_err(|e| e.to_string())?;
-    // The purpose fits the method: `colophon.home.read` for GET and HEAD (and
-    // `colophon.history.read`, which §13.4 names for the history), `colophon.home.write` for
-    // anything else. The classes above already follow the method.
-    let wanted: &[&str] = match &class {
-        Class::History | Class::RecordsRead if read => {
-            &["colophon.home.read", "colophon.history.read"]
-        }
-        Class::Write(_) if !read => &["colophon.home.write"],
-        _ => &[],
-    };
     let refuse = |code: String| Ok(json!({"allowed": false, "status": 403, "result": code}));
-    let parsed = match Call::parse(&call) {
-        Ok(c) => c,
+    // Before any history work: a call that does not parse, or whose purpose does not fit the
+    // method and path (the core's rule, checked again in `verify_home_request`: only a path that
+    // serves the history takes `colophon.history.read`), is refused at once.
+    let path = str_of(req, "path")?;
+    match Call::parse(&call) {
+        Ok(c) if home_purposes(method, path).contains(&c.purpose.as_str()) => {}
+        Ok(_) => return refuse("refused:outOfScope".into()),
         Err(f) => return refuse(f.code()),
-    };
-    if !wanted.contains(&parsed.purpose.as_str()) {
-        return refuse("refused:outOfScope".into());
     }
     let base = str_of(req, "base")?.to_string();
     let objects = held(h)?;
@@ -452,25 +434,24 @@ fn access(req: &Value) -> R<Value> {
         controller_purposes: &[],
         home_endpoints: &audiences,
     };
-    let verified = match &class {
-        Class::Write(writes) => verify_home_write(&call, &account_view, &cfg, &mut store, writes),
-        _ => verify_call(&call, &account_view, &cfg, &mut store),
+    // The purpose fits the method, the call passes §12.3 (a write as §14 allows it, by what it
+    // writes), and it is bound to the request it arrived on: `args` is exactly the method, the
+    // path and query relative to the home's base as sent, and the SHA-256 of the body. One rule
+    // in the core, the one a signer builds its call by; nothing is reserved for a refused call.
+    let writes: &[HomeWrite] = match &class {
+        Class::Write(writes) => writes,
+        _ => &[],
     };
-    let vc = match verified {
+    let request = HomeRequest {
+        method,
+        path,
+        body_sha256: str_of(req, "bodySha256")?,
+        writes,
+    };
+    let vc = match verify_home_request(&call, &account_view, &cfg, &mut store, &request) {
         Ok(vc) => vc,
         Err(f) => return refuse(f.code()),
     };
-    // The call is bound to the request it arrived on: `args` is exactly the method, the path and
-    // query relative to the home's base as sent, and the SHA-256 of the body. A call made for
-    // another request is out of its scope (§12.3 step 7), and nothing is reserved for it.
-    let bound = json!({
-        "method": method,
-        "path": str_of(req, "path")?,
-        "body": str_of(req, "bodySha256")?,
-    });
-    if vc.call.args != bound {
-        return refuse("refused:outOfScope".into());
-    }
     // The replay table (§12.4): this principal's live rows, against its share of the table.
     let signer = signer_text(&vc.call.signer);
     let mut live = 0usize;

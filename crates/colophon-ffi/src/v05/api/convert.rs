@@ -472,6 +472,8 @@ pub(crate) fn controller(c: &acc::ControllerInfo) -> Controller {
         has_slot: c.has_slot,
         provisional: c.provisional,
         suspended: c.suspended,
+        added_seq: c.added_seq,
+        added_by: c.added_by.clone(),
     }
 }
 fn member_kind(s: Option<&str>) -> AccountMemberKind {
@@ -568,6 +570,7 @@ pub(crate) fn member(m: &acc::MemberInfo) -> Result<AccountMember, AccountError>
         provisional: m.provisional,
         home: m.home,
         session: m.session,
+        granted_by: m.granted_by.clone(),
     })
 }
 fn strs(v: Option<&Value>) -> Vec<String> {

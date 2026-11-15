@@ -20,9 +20,10 @@ import ColophonSession
         #expect(session.libraryID?.count == 64)
         #expect(session.notices.noHome, "an account with no home warns (spec §18)")
         #expect(session.members.contains { $0.label == "Mac" && $0.grant?.namespaces == ["reading.saved"] })
-        // The known gap: creation leaves the session locked, so the passkey is asked for the creation's own
-        // PRF (the new slot) and a second time to unlock the controller that sets the device up.
-        #expect(passkey.prfRequests >= 2)
+        // A passkey owner is asked once at first run: the creation's own PRF (its new slot). The session that sets the
+        // device up is the creation's own engine, unlocked (`AccountCreation.open_engine`); before, a second PRF
+        // ceremony unlocked it.
+        #expect(passkey.prfRequests == 1, "asked \(passkey.prfRequests) times")
         let paths = medium.snapshot().keys
         #expect(paths.contains("authority/00000001.json") && !paths.contains { $0.hasPrefix(".") })
     }

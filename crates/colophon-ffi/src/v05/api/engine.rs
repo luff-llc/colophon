@@ -329,13 +329,44 @@ impl AccountEngine {
         namespaces: Vec<String>,
         batch: u64,
         saved: SavedState,
-        mut key: Vec<u8>,
+        key: Vec<u8>,
         now_ms: i64,
+    ) -> R<Self> {
+        let saved = saved_in(saved);
+        let identity = identity_of(&identity);
+        Self::open_with(host, listing, account, namespaces, batch, key, |src, paths, options| {
+            let saved = saved?;
+            Ok(Engine::open(src, paths, identity?, options, saved.as_ref(), now_ms)?)
+        })
+    }
+    /// An engine over the stores a creation returned, keeping the created account unlocked
+    /// (`AccountCreation::open_engine`).
+    pub(crate) fn open_created_inner(
+        host: Box<dyn HostSource>,
+        listing: Vec<ListedPath>,
+        created: colophon_core::v05::account::Account,
+        namespaces: Vec<String>,
+        batch: u64,
+        key: Vec<u8>,
+        now_ms: i64,
+    ) -> R<Self> {
+        let account = created.id().as_str().to_string();
+        Self::open_with(host, listing, account, namespaces, batch, key, |src, paths, options| {
+            Ok(Engine::open_created(src, paths, created, options, now_ms)?)
+        })
+    }
+    fn open_with(
+        host: Box<dyn HostSource>,
+        listing: Vec<ListedPath>,
+        account: String,
+        namespaces: Vec<String>,
+        batch: u64,
+        mut key: Vec<u8>,
+        open: impl FnOnce(Source, Vec<String>, EngineOptions) -> R<Engine<Source>>,
     ) -> R<Self> {
         let r = guard(|| {
             let k = fixed::<32>(&key, "the sealed-state key")?;
             list_len(&listing, "the listing")?;
-            let me = identity_of(&identity)?;
             let ns = names(namespaces, "namespaces")?;
             let versions: Versions = Arc::new(Mutex::new(HashMap::new()));
             let fault: HostFault = Arc::new(Mutex::new(None));
@@ -352,13 +383,11 @@ impl AccountEngine {
             options.namespaces = ns;
             options.batch = usize::try_from(if batch == 0 { DEFAULT_BATCH } else { batch })
                 .map_err(|_| AccountError::bound("batch"))?;
-            let saved = saved_in(saved)?;
             let busy: super::InCallback = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let src = Source::new(host, versions.clone(), fault.clone(), busy.clone());
-            let e = match Engine::open(src, paths, me, options, saved.as_ref(), now_ms) {
+            let e = match open(src, paths, options) {
                 Ok(e) => e,
-                Err(f) => {
-                    let e = AccountError::from(f);
+                Err(e) => {
                     if matches!(e, AccountError::Unavailable { .. }) {
                         if let Some(h) = fault.lock().ok().and_then(|mut h| h.take()) {
                             return Err(AccountError::host(h));
@@ -743,6 +772,24 @@ impl AccountEngine {
     /// Pending transitions.
     pub fn pending(&self) -> Result<Vec<Pending>, AccountError> {
         self.acct(|a| Ok(a.pending().iter().map(cv::pending).collect()))
+    }
+    /// The removal follow-up (§17.5): per activation that removed controllers, the current
+    /// members whose grant a removed key signed and the `approve`/`sign` controllers it added by
+    /// immediate entries since the transition's anchor. The host offers to remove them in one
+    /// action and remembers which activations it showed.
+    pub fn removal_follow_up(&self) -> Result<Vec<RemovalFollowUp>, AccountError> {
+        self.acct(|a| {
+            Ok(a.removal_follow_up()
+                .into_iter()
+                .map(|r| RemovalFollowUp {
+                    seq: r.seq,
+                    anchor_seq: r.anchor_seq,
+                    removed: r.removed,
+                    members: r.members,
+                    controllers: r.controllers,
+                })
+                .collect())
+        })
     }
     /// Shares members are owed (§9.4).
     pub fn owed_shares(&self) -> Result<Vec<Owed>, AccountError> {
@@ -1250,6 +1297,8 @@ impl AccountEngine {
                         purpose: n.purpose,
                         method: method(n.method),
                         url: n.url,
+                        path: n.path,
+                        body_sha256: n.body_sha256,
                     }),
                 },
                 Step::Done => ExchangeStep {

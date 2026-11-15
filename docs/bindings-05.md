@@ -40,7 +40,7 @@ field; `u64` and `i64` are `bigint`; `optional<T>` is `undefined`.
 | --- | --- |
 | `AccountEngine` | The session: reads the host's record source; unlock; refresh; reads; every action; live state; blobs; imports; saved state; the exchange. The only object a session needs. |
 | `AccountAction` | A prepared action held in Rust. One-shot. |
-| `AccountCreation` | Creation before any store exists: PRF, genesis, first `rekey`; the result is the account ID and the stores. |
+| `AccountCreation` | Creation before any store exists: PRF, genesis, first `rekey`; the result is the account ID and the stores; `open_engine(source, listing, namespaces, batch, key, now_ms)` then opens the session over the stored result, unlocked as the creation left it (the owner is asked once at first run). |
 | `SwiftSuccessorCreation` | The genesis of the account that succeeds a Swift library: the carried controllers, the rebuilt slots (one passkey assertion each), the `handover`; the result is the account ID and the stores. Every other step of the Swift move needs an account made this way. |
 | `AccountRequest` | A device's membership request before it is a member (public values only). |
 | `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | The pairing ceremony (§7.3). |
@@ -90,13 +90,13 @@ SavedState, key, now_ms)` (`identity` is a record: `kind` Controller or Member a
 `SavedState` means none). Reads: `id identity status head_seq
 head_digest controllers homes policy pending owed_shares notices(shown_seq, shown_transitions, local_keys)
 slots is_unlocked begin_unlock_slot(index) begin_unlock_epochs fork_candidates suggest_signers(available, need)
-latest_epoch write_denial record_verdict verdict_of (each `optional<RecordVerdict>`) live_heads open_info stats access revision revisions me
+latest_epoch write_denial record_verdict verdict_of (each `optional<RecordVerdict>`) live_heads open_info stats access revision revisions removal_follow_up me
 members`, and JSON: `proposals_json tools_json ledger_json view_json query_json history_json
 operation_at_json blob_manifest_json`. Progress: `load refresh(listing) apply_paths(list<ListedPath>) advance
 finish_unlock_slot(index, list<UnlockSecret>) finish_unlock_epochs(list<EpochAnswer>) apply_live stale_live
 live_verdicts missing_covered budget_scope_unavailable rejudged save(nonce_seed) verify_batch(limit)`. Blobs:
 `begin_blob open_blob_chunk blob_chunk read_blob blob_availability required_blob_fetches`. Live: `begin_live_write
-finish_live_write`. Exchange: `exchange_homes exchange_set_bearer exchange_next(home) exchange_provide_call
+finish_live_write`. Exchange: `exchange_homes exchange_set_bearer exchange_next(home) exchange_begin_call exchange_provide_call
 exchange_answer(home, ticket, HttpAnswer) exchange_want_blob receipted_by`. Session: `record_due set_read_scope lock is_locked
 transfer_seed accept_seed_transfer accept_predecessor_entry exchange_abort source_faults version_paths
 begin_link begin_call` (a link or call's envelope is `Written.artifact`). Move: `swift_succession
@@ -104,9 +104,23 @@ swift_predecessor begin_swift_veto begin_swift_freeze begin_swift_copier_shares 
 finish_move swift_copy_destination begin_swift_copy_write finish_swift_copy_write finish_swift_copy`.
 
 The exchange: `exchange_next` returns an `ExchangeStep`: `Request` (with `request: HttpRequest`: ticket, home,
-method, url, headers, body), `NeedCall` (with `need: CallNeed`: ticket, home, audience, purpose, method, url;
-build the call for exactly that and give it to `exchange_provide_call`), `Waiting` or `Done`. The host performs
-the request and answers it; the `Report` has `store` (persist), `changes` and `faults: list<ExchangeFault>`.
+method, url, headers, body), `NeedCall` (with `need: CallNeed`: ticket, home, audience, purpose, method, url,
+path, body_sha256), `Waiting` or `Done`. The host performs the request and answers it; the `Report` has `store`
+(persist), `changes` and `faults: list<ExchangeFault>`.
+
+A call for a `NeedCall`: the engine has already built the request, so the need carries everything the host signs.
+`exchange_begin_call(home, ticket, key, entropy)` prepares it (audience `need.audience`, the home's base; purpose
+`need.purpose`, `colophon.home.read` for GET, `colophon.home.write` otherwise; `args` exactly
+`{"method","path","body"}` = the method, `need.path` (path and query relative to the base, as sent) and
+`need.body_sha256` (lowercase hex SHA-256 of the body, of the empty string when none)). The host signs its one step
+with the session's key and calls `finish`: the core judges the call with the home's own rule
+(`colophon_core::v05::calls::check_home_call_as_signer`, the same code a home runs) over what the account holds,
+and returns the envelope as `artifact`; give it to `exchange_provide_call(home, ticket, artifact)`. The next
+`exchange_next` returns the request carrying it. A host that builds calls itself uses the same fields. A pass
+starts with the public head (and, at `headQuorum` above 1, the other homes' public heads: a `Request` whose URL is
+at another home of the account, sent to that home, answered with this home) so a call can be built for what
+follows. A signer behind a home's fresh head is judged at what it holds; one that does not find itself there may
+still read with its own key at a home it is behind (an approval it has not fetched), and the home decides.
 
 Standalone: `account_verify_history`, `account_webauthn_check(KeyDescriptorView, body, der_signature,
 authenticator_data, client_data, WebauthnMode)`, `account_verify_swift_predecessor`, `account_key_id`,
@@ -230,7 +244,7 @@ Which objects hold secrets or locks, and when each is released:
 | --- | --- | --- |
 | `AccountEngine` | The vault seed and epoch keys once unlocked, the device key, the opened plaintext; one lock. | `lock()` overwrites the keys and the opened plaintext; the object itself is freed when dropped. **Call `lock()` before dropping** whenever the session ends with secrets open: dropping erases the core's keys too (best effort), but only `lock` also clears the opened plaintext at a moment you choose. |
 | `AccountAction`, `AccountMove`, `AccountCopyWrite`, `AccountLiveWrite` | A prepared action's retained state (entropy-derived seeds and bodies). | The call that finishes or consumes it, or its drop. A prepared action does not finish after `lock`: `Locked`, and the action is not consumed. Prepare again on a new engine. |
-| `AccountCreation`, `SwiftSuccessorCreation` | The new vault seed until `take_result` (or a failed step, which ends it). The creation parameters erase the seeds they held when they drop. | `take_result`, a failed step, or drop. |
+| `AccountCreation`, `SwiftSuccessorCreation` | The new vault seed until `take_result` (`AccountCreation`: until `open_engine`, which hands it to the engine, or drop; or a failed step, which ends it). The creation parameters erase the seeds they held when they drop. | `take_result`, a failed step, or drop. |
 | `SwiftSource` | The opened Swift vault and namespace keys. | Drop. There is no wipe call: drop it as soon as the copy is finished. |
 | `AccountBlobWriter` | An epoch key. | `finish`, or drop. |
 | `PairingTransferKey`, `AccountPairing` | The transfer key's private scalar; the pairing's session secrets. | Consumed by the call that uses them, or drop. |
@@ -446,9 +460,9 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `RefusedHead` | `home: String`, `code: String` | A head a home sent that was refused. |
 | `Changes` | `authority_from_seq: u64`, `authority_to_seq: u64`, `entries: list<EntryChange>`, `members_added: list<String>`, `members_revoked: list<String>`, `controllers_added: list<String>`, `controllers_removed: list<String>`, `vault_changed: bool`, `policy_changed: bool`, `reorganized: bool`, `namespaces: list<NamespaceRevision>`, `pending_added: list<String>`, `pending_gone: list<String>`, `pending_now: list<String>`, `heads_accepted: list<String>`, `heads_refused: list<RefusedHead>`, `foreign: u64`, `status: optional<Status>` | What a call changed in the account. |
 | `Written` | `stores: list<Store>`, `changes: Changes`, `artifact: optional<bytes>` | What a finished action produced: store these bytes at these paths, in order. `artifact` is the envelope of a link or a call (§12), which is not stored: for the host to use. |
-| `Controller` | `id: String`, `label: String`, `roles: list<ControllerRole>`, `roles_raw: list<String>`, `key: KeyDescriptorView`, `form: SignForm`, `verification: bool`, `holder: optional<String>`, `has_slot: bool`, `provisional: bool`, `suspended: bool` | A controller of the verified keyring. |
+| `Controller` | `id: String`, `label: String`, `roles: list<ControllerRole>`, `roles_raw: list<String>`, `key: KeyDescriptorView`, `form: SignForm`, `verification: bool`, `holder: optional<String>`, `has_slot: bool`, `provisional: bool`, `suspended: bool`, `added_seq: u64`, `added_by: list<String>` | A controller of the verified keyring; `added_by` the controllers that signed the entry that added it (empty for the genesis or a recording entry), for the removal follow-up (§17.5). |
 | `AccountGrant` | `namespaces: list<String>`, `access: list<AccessKind>`, `expires: optional<String>`, `write_budget: optional<u64>`, `import: bool` | What a grant allows (the 0.4 shape). |
-| `AccountMember` | `id: String`, `label: String`, `kind: AccountMemberKind`, `kind_raw: optional<String>`, `grant: optional<AccountGrant>`, `since: u64`, `revoked_at: optional<u64>`, `writes: u64`, `expires_ms: optional<i64>`, `provisional: bool`, `home: bool`, `session: u64` | A member with its standing. |
+| `AccountMember` | `id: String`, `label: String`, `kind: AccountMemberKind`, `kind_raw: optional<String>`, `grant: optional<AccountGrant>`, `since: u64`, `revoked_at: optional<u64>`, `writes: u64`, `expires_ms: optional<i64>`, `provisional: bool`, `home: bool`, `session: u64`, `granted_by: list<String>` | A member with its standing; `granted_by` the controllers that signed its grant (empty for a recording entry), for the removal follow-up (§17.5). |
 | `Standing` | `kind: StandingKind`, `controller: optional<Controller>`, `member: optional<AccountMember>`, `unknown_id: optional<String>` | What this session is. Exactly one of `controller`, `member`, `unknown_id` is set, by `kind`. |
 | `Home` | `id: String`, `label: String`, `status: HomeStatus`, `status_raw: optional<String>`, `endpoints: list<String>`, `primary: bool` | A home the account names. |
 | `Policy` | `threshold: u64`, `recover_threshold: u64`, `add_threshold: u64`, `count_by_holders: bool`, `call_window: u64`, `head_max_age: u64`, `head_quorum: u64`, `link_max_age: u64`, `member_rule: String`, `recovery_delay: u64`, `primary_home: optional<String>` | The effective policy (§6.3). |
@@ -468,7 +482,8 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `ForkCandidate` | `seq: u64`, `first: String`, `second: String` | Two candidates at a seq a `resolve` may choose between. |
 | `Header` | `name: String`, `value: String` | A header of an HTTP message. |
 | `HttpRequest` | `ticket: u64`, `home: String`, `method: HttpMethod`, `url: String`, `headers: list<Header>`, `body: bytes` | A request for the host to send. |
-| `CallNeed` | `ticket: u64`, `home: String`, `audience: String`, `purpose: String`, `method: HttpMethod`, `url: String` | A request that needs a fresh `Authorization: Colophon` call built for exactly it. |
+| `RemovalFollowUp` | `seq: u64`, `anchor_seq: u64`, `removed: list<String>`, `members: list<String>`, `controllers: list<String>` | `AccountEngine.removal_follow_up()`: per activation that removed controllers, the current members whose grant a removed key signed and the `approve`/`sign` controllers it added by immediate entries since the transition's anchor (§17.5). |
+| `CallNeed` | `ticket: u64`, `home: String`, `audience: String`, `purpose: String`, `method: HttpMethod`, `url: String`, `path: String`, `body_sha256: String` | A request that needs a fresh `Authorization: Colophon` call built for exactly it: audience, purpose and `args` `{"method","path","body"}` from these fields (`exchange_begin_call`). |
 | `ExchangeStep` | `kind: ExchangeStepKind`, `request: optional<HttpRequest>`, `need: optional<CallNeed>` | The next step of an exchange pass. `request` is set for `Request`, `need` for `NeedCall`. |
 | `HttpAnswer` | `status: u32`, `headers: list<Header>`, `body: bytes` | What the host got back. |
 | `ExchangeFault` | `kind: ExchangeFaultKind`, `home: String`, `path: optional<String>`, `feed: optional<String>`, `code: optional<String>`, `what: optional<String>`, `why: optional<String>`, `purpose: optional<String>`, `audience: optional<String>`, `endpoints: list<String>`, `status: optional<u32>` | A fault of a home. Which fields are set depends on `kind`: `path` (Mismatch, Conflict, Race), `feed` (NoProgress, More), `code` (BadObject, Refused), `what` (Refused), `why` (Malformed), `purpose` and `audience` (Unauthorized), `endpoints` (Redirect), `status` (Status). |

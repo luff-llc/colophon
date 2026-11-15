@@ -52,6 +52,25 @@ pub fn verify_head_with_mark(
     ctx: HeadContext<'_>,
     mark: Option<(u64, &str)>,
 ) -> Result<Head> {
+    verify_inner(envelope, ctx, mark, false)
+}
+
+/// [`verify_head`] for a **signer** that has not fetched as far as the head names: every check
+/// but the last (shape, `by` a current unexpired home whose key verifies, the clock), and a head
+/// whose `authority.seq` is beyond the held history is returned rather than `unavailable`
+/// ([`Head::seq`] is what it names). A different digest at a held seq is still `refused:fork`.
+/// Only a call's signer uses it, to judge its own call before it has the history the call is
+/// for (`crate::v05::calls`); a verifier never does (§12.3 step 4: it fetches first).
+pub(crate) fn verify_head_ahead(envelope: &[u8], ctx: HeadContext<'_>) -> Result<Head> {
+    verify_inner(envelope, ctx, None, true)
+}
+
+fn verify_inner(
+    envelope: &[u8],
+    ctx: HeadContext<'_>,
+    mark: Option<(u64, &str)>,
+    allow_ahead: bool,
+) -> Result<Head> {
     let env = RawEnvelope::parse(envelope, bounds::HEAD_BODY, false)?;
     let mut o = Obj::new(env.value.clone(), "head")?;
     require(
@@ -84,6 +103,13 @@ pub fn verify_head_with_mark(
         .ok()
         .and_then(|i| ctx.history.get(i));
     match held {
+        None if allow_ahead => Ok(Head {
+            by,
+            seq,
+            digest,
+            issued_ms,
+            body_digest: super::encoding::digest(&env.body),
+        }),
         None => Err(Failure::Unavailable(
             "history not held up to the head".into(),
         )),

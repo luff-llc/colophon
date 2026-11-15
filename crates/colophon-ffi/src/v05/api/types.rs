@@ -409,6 +409,10 @@ record! {
         pub has_slot: bool,
         pub provisional: bool,
         pub suspended: bool,
+        /// The seq of the entry that added it (1 for the genesis).
+        pub added_seq: u64,
+        /// The controllers that signed that entry (empty for the genesis or a recording entry).
+        pub added_by: Vec<String>,
     }
 }
 record! {
@@ -436,6 +440,8 @@ record! {
         pub provisional: bool,
         pub home: bool,
         pub session: u64,
+        /// The controllers that signed the entry that granted it (empty for a recording entry).
+        pub granted_by: Vec<String>,
     }
 }
 record! {
@@ -509,6 +515,16 @@ record! {
         pub signers: Vec<String>,
         pub components: Vec<String>,
         pub receipted: Vec<Receipted>,
+    }
+}
+record! {
+    /// The removal follow-up of one activation that removed controllers (§17.5).
+    pub struct RemovalFollowUp {
+        pub seq: u64,
+        pub anchor_seq: u64,
+        pub removed: Vec<String>,
+        pub members: Vec<String>,
+        pub controllers: Vec<String>,
     }
 }
 record! {
@@ -601,7 +617,9 @@ record! {
     }
 }
 record! {
-    /// A request that needs a fresh `Authorization: Colophon` call built for exactly it.
+    /// A request that needs a fresh `Authorization: Colophon` call built for exactly it: the
+    /// call's audience, purpose and `args` (`{"method","path","body"}`: the method, `path`, and
+    /// `body_sha256`). `exchange_begin_call` builds it from these; `url` is `audience` + `path`.
     pub struct CallNeed {
         pub ticket: u64,
         pub home: String,
@@ -609,6 +627,8 @@ record! {
         pub purpose: String,
         pub method: HttpMethod,
         pub url: String,
+        pub path: String,
+        pub body_sha256: String,
     }
 }
 record! {

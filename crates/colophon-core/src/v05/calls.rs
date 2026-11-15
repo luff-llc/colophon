@@ -18,7 +18,7 @@ use super::descriptor::{Controller, KeyForm, Policy, Role};
 use super::encoding::{
     bounds, canonical, canonical_body, decode_base64, decode_request_id, digest, is_digest, Obj,
 };
-use super::heads::{verify_head, HeadContext};
+use super::heads::{verify_head, verify_head_ahead, HeadContext};
 use super::ids::{key_id, AccountId};
 use super::members::MemberKind;
 use super::replay::{ReplayKey, ReplayStore, Reservation, MAX_WINDOW_MS};
@@ -34,7 +34,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The purpose a `recover`-only (or suspended) controller may call (§12.3 step 5, §13.4).
 pub const HISTORY_READ: &str = "colophon.history.read";
 /// The purposes a home accepts at its own endpoints without configuration (§12.3 step 7).
-pub const HOME_PURPOSES: [&str; 3] = [HISTORY_READ, "colophon.home.read", "colophon.home.write"];
+pub const HOME_PURPOSES: [&str; 3] = [HISTORY_READ, HOME_READ, HOME_WRITE];
+/// The purpose of a call that reads at a home (§14).
+pub const HOME_READ: &str = "colophon.home.read";
+/// The purpose of a call that writes at a home (§14).
+pub const HOME_WRITE: &str = "colophon.home.write";
 
 /// A controller's status from pending transitions (§8.7), supplied by the history verifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -753,6 +757,16 @@ fn index(seq: u64) -> Result<usize> {
 /// §12.3 step 4: S, the highest seq covered by `headQuorum` fresh heads of current homes, and
 /// the policy at S made stricter by every later held policy.
 fn evaluate_at_s(view: &AccountView, now_ms: i64) -> Result<(u64, Policy)> {
+    evaluate(view, now_ms, false).map(|(s, p, _)| (s, p))
+}
+
+/// [`evaluate_at_s`], for a verifier (`signer` false) or for a call's own signer judging its call
+/// before sending it (`signer` true). A signer may not hold the history its call is to fetch: a
+/// fresh head that verifies but names an entry beyond the held history counts, for a signer
+/// only, as covering the held history (S is never beyond what is held), and the third value says
+/// that the signer is behind a home (§13.3: such a head is not wrong, the history is fetched
+/// further). A verifier is never lenient: it fetches first (§12.3 step 4).
+fn evaluate(view: &AccountView, now_ms: i64, signer: bool) -> Result<(u64, Policy, bool)> {
     let v = &view.v;
     let held = v.history.len() as u64;
     let latest_policy = view
@@ -760,6 +774,7 @@ fn evaluate_at_s(view: &AccountView, now_ms: i64) -> Result<(u64, Policy)> {
         .ok_or_else(|| Failure::Unavailable("no policy".into()))?;
     let homes = view.current_homes(now_ms);
     let mut best: BTreeMap<String, u64> = BTreeMap::new();
+    let mut behind = false;
     for envelope in &v.heads {
         let ctx = HeadContext {
             account: &v.account,
@@ -767,10 +782,16 @@ fn evaluate_at_s(view: &AccountView, now_ms: i64) -> Result<(u64, Policy)> {
             homes: &homes,
             now_ms,
         };
-        match verify_head(envelope, ctx) {
+        let judged = if signer {
+            verify_head_ahead(envelope, ctx)
+        } else {
+            verify_head(envelope, ctx)
+        };
+        match judged {
             Ok(h) if h.fresh(now_ms, latest_policy.head_max_age()) => {
+                behind |= h.seq() > held;
                 let e = best.entry(h.by().to_string()).or_insert(0);
-                *e = (*e).max(h.seq());
+                *e = (*e).max(h.seq().min(held));
             }
             Ok(_) => {}
             Err(Failure::Refused(Reason::Fork)) => return Err(refused(Reason::Fork)),
@@ -799,7 +820,7 @@ fn evaluate_at_s(view: &AccountView, now_ms: i64) -> Result<(u64, Policy)> {
     for (_, later) in v.policies.iter().filter(|(seq, _)| *seq > s) {
         policy = policy.restrict_for_calls(later);
     }
-    Ok((s, policy))
+    Ok((s, policy, behind))
 }
 
 /// §12.3 step 5 for a member: present, not revoked, not added without finality, not expired.
@@ -966,7 +987,7 @@ pub fn verify_call(
     cfg: &CallConfig<'_>,
     store: &mut dyn ReplayStore,
 ) -> Result<VerifiedCall> {
-    verify(envelope, view, cfg, store, &[])
+    verify(envelope, view, cfg, store, Mode::default())
 }
 
 /// One record a `colophon.home.write` call writes at a home (§14), as its path names it.
@@ -1005,7 +1026,180 @@ pub fn verify_home_write(
     writes: &[HomeWrite],
 ) -> Result<VerifiedCall> {
     require(!writes.is_empty(), "a home write names what it writes")?;
-    verify(envelope, view, cfg, store, writes)
+    verify(
+        envelope,
+        view,
+        cfg,
+        store,
+        Mode {
+            writes,
+            ..Mode::default()
+        },
+    )
+}
+
+/// The `args` a home binds a call to (§14, as a home checks it): exactly the method, the path
+/// and query relative to the home's base as sent, and the lowercase hex SHA-256 of the request
+/// body (of the empty string when there is none). One function, used by a home to check a call
+/// and by a signer to build one.
+pub fn home_call_args(method: &str, path: &str, body_sha256: &str) -> Value {
+    serde_json::json!({"method": method, "path": path, "body": body_sha256})
+}
+
+/// The purpose a signer gives a call to a home: `colophon.home.read` for GET and HEAD,
+/// `colophon.home.write` otherwise (§14).
+pub fn home_call_purpose(method: &str) -> &'static str {
+    if is_read(method) {
+        HOME_READ
+    } else {
+        HOME_WRITE
+    }
+}
+
+/// The purposes a home accepts for a request with `method` at `path` (relative to the home's
+/// base, as sent): for GET and HEAD, `colophon.home.read`, and `colophon.history.read` too when
+/// the path serves the history ([`home_path_serves_history`]; §12.3 step 7 and §13.4 limit that
+/// purpose to the history); `colophon.home.write` for anything else.
+pub fn home_purposes(method: &str, path: &str) -> &'static [&'static str] {
+    if !is_read(method) {
+        &[HOME_WRITE]
+    } else if home_path_serves_history(path) {
+        &[HOME_READ, HISTORY_READ]
+    } else {
+        &[HOME_READ]
+    }
+}
+
+/// Whether `path` (relative to a home's base, as sent, its query ignored) serves the history,
+/// transitions, vetoes, receipts or the head (§13.4): `/authority`, `/pending`,
+/// `/pending/<digest>`, and `/records/<p>` for `p` an authority entry, a predecessor's entry, a
+/// transition or veto, a receipt or a head by the record store's path grammar. Everything else
+/// (the change feed, records, live values, blob chunks, anything that does not parse) does not.
+pub fn home_path_serves_history(path: &str) -> bool {
+    use super::engine::paths::{classify, Kind};
+    let bare = path.split('?').next().unwrap_or_default();
+    if matches!(bare, "/authority" | "/pending") {
+        return true;
+    }
+    if let Some(d) = bare.strip_prefix("/pending/") {
+        return d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    bare.strip_prefix("/records/").is_some_and(|p| {
+        matches!(
+            classify(p),
+            Some(
+                Kind::Authority(_)
+                    | Kind::Predecessor(_)
+                    | Kind::Pending
+                    | Kind::Receipt
+                    | Kind::Head
+            )
+        )
+    })
+}
+
+fn is_read(method: &str) -> bool {
+    matches!(method, "GET" | "HEAD")
+}
+
+/// What a `PUT {base}/records/<record_path>` writes, by the record store's path grammar (§14): a
+/// record or engagement evidence under its author and namespace, a live value, or a blob chunk.
+/// `None` for anything else (a head, the history, which arrive otherwise, or a path that does not
+/// parse). One function, used by a home to judge a write and by a signer to build its call.
+pub fn home_record_writes(record_path: &str) -> Option<Vec<HomeWrite>> {
+    use super::engine::paths::{classify, Kind};
+    match classify(record_path)? {
+        Kind::Op {
+            author, namespace, ..
+        } => Some(vec![HomeWrite::Record { author, namespace }]),
+        Kind::History => {
+            let mut parts = record_path.split('/');
+            let (_, author, namespace) = (parts.next()?, parts.next()?, parts.next()?);
+            Some(vec![HomeWrite::Record {
+                author: author.to_string(),
+                namespace: namespace.to_string(),
+            }])
+        }
+        Kind::Live {
+            author, namespace, ..
+        } => Some(vec![HomeWrite::Live { author, namespace }]),
+        Kind::Blob(_) => Some(vec![HomeWrite::Blob]),
+        _ => None,
+    }
+}
+
+/// One request at a home, as the home received it (or as a signer will send it).
+#[derive(Clone, Copy, Debug)]
+pub struct HomeRequest<'a> {
+    /// The HTTP method, upper case.
+    pub method: &'a str,
+    /// The path and query relative to the home's base, exactly as sent.
+    pub path: &'a str,
+    /// The lowercase hex SHA-256 of the request body (of the empty string when none).
+    pub body_sha256: &'a str,
+    /// What the request writes ([`home_record_writes`]); empty for a read.
+    pub writes: &'a [HomeWrite],
+}
+
+/// Verify a call that came with a request at a home (§12.3, §13.4, §14): its purpose fits the
+/// method and path ([`home_purposes`], else `refused:outOfScope`, before anything else is checked beyond
+/// parsing); then [`verify_call`], or [`verify_home_write`] for a write that names what it writes;
+/// and the call's `args` are exactly [`home_call_args`] for this request (else
+/// `refused:outOfScope`, and nothing is reserved). The rule a home applies and a signer builds
+/// by ([`check_home_call_as_signer`]).
+pub fn verify_home_request(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    req: &HomeRequest<'_>,
+) -> Result<VerifiedCall> {
+    home_request(envelope, view, cfg, store, req, false)
+}
+
+/// The signer's own judgement of a call it built for a request at a home, before it sends it:
+/// [`verify_home_request`] with a fresh replay store, except where the signer cannot know what
+/// the home knows because it is behind the home's fresh head (it has not fetched the history the
+/// call is for): S is then judged at the signer's held history, and a signer that does not find
+/// itself there may still read with its own key (an approval it has not fetched yet). Everything
+/// the signer does know is judged by the verifier's own code: a signer that holds its own
+/// revocation, expiry or ended session, or a call for another request, is refused.
+pub fn check_home_call_as_signer(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    req: &HomeRequest<'_>,
+) -> Result<()> {
+    let mut store = super::replay::MemoryReplayStore::new();
+    home_request(envelope, view, cfg, &mut store, req, true).map(|_| ())
+}
+
+fn home_request(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    req: &HomeRequest<'_>,
+    signer: bool,
+) -> Result<VerifiedCall> {
+    let parsed = Call::parse(envelope)?;
+    require_refused(
+        home_purposes(req.method, req.path).contains(&parsed.purpose.as_str()),
+        Reason::OutOfScope,
+    )?;
+    let bound = home_call_args(req.method, req.path, req.body_sha256);
+    let writes = if is_read(req.method) { &[][..] } else { req.writes };
+    verify(
+        envelope,
+        view,
+        cfg,
+        store,
+        Mode {
+            writes,
+            bound: Some(&bound),
+            signer,
+        },
+    )
 }
 
 /// Whether the member `m` may make `writes` under its own author ID (see [`verify_home_write`]).
@@ -1031,13 +1225,23 @@ fn own_writes(m: &ViewMember, writes: &[HomeWrite]) -> bool {
         })
 }
 
+/// How [`verify`] runs: what a home write writes, the `args` a home binds the call to, and
+/// whether the call's own signer is judging it.
+#[derive(Clone, Copy, Default)]
+struct Mode<'a> {
+    writes: &'a [HomeWrite],
+    bound: Option<&'a Value>,
+    signer: bool,
+}
+
 fn verify(
     envelope: &[u8],
     view: &AccountView,
     cfg: &CallConfig<'_>,
     store: &mut dyn ReplayStore,
-    writes: &[HomeWrite],
+    mode: Mode<'_>,
 ) -> Result<VerifiedCall> {
+    let writes = mode.writes;
     let v = &view.v;
     // 1. Parse.
     let call = Call::parse(envelope)?;
@@ -1087,17 +1291,23 @@ fn verify(
     if &v.history[index(*as_of_seq)?] != as_of_digest {
         return Err(refused(Reason::Fork));
     }
-    let (s, policy) = evaluate_at_s(view, cfg.now_ms)?;
+    let (s, policy, behind) = evaluate(view, cfg.now_ms, mode.signer)?;
     require_refused(
         within(call.created_ms, cfg.now_ms, secs(policy.call_window())),
         Reason::Window,
     )?;
+    let at_home = cfg.home_endpoints.iter().any(|e| e == &call.audience)
+        && HOME_PURPOSES.contains(&call.purpose.as_str());
     if v.vouched_fork {
         return Err(refused(Reason::Fork));
     }
     // 5. Signer at S, with removals beyond S applied.
     let mut undecidable = false;
     let mut member: Option<&ViewMember> = None;
+    // A signer behind a home that does not find itself in what it holds cannot know its own
+    // standing (an approval it has not fetched yet): it may still ask a home it is behind to read
+    // with its own key, and the home, which holds the history, decides (§12.3 step 5 there).
+    let mut standing_unknown = false;
     match &call.signer {
         CallSigner::Controller(id) => {
             let vc = v
@@ -1174,10 +1384,20 @@ fn verify(
                 require_refused(allowed, Reason::Origin)?;
             }
         }
-        CallSigner::Member(id) => {
-            let m = member_at_s(view, id, s, cfg.now_ms)?;
-            member = Some(m);
-        }
+        CallSigner::Member(id) => match member_at_s(view, id, s, cfg.now_ms) {
+            Ok(m) => member = Some(m),
+            Err(_)
+                if mode.signer
+                    && behind
+                    && at_home
+                    && call.links.is_empty()
+                    && call.purpose != HOME_WRITE
+                    && !v.members.iter().any(|m| &m.id == id) =>
+            {
+                standing_unknown = true;
+            }
+            Err(e) => return Err(e),
+        },
     }
     // 6. Chain: first every binding and the acting key (badSignature), then link by link.
     if let Some(m) = member {
@@ -1196,15 +1416,14 @@ fn verify(
         )?;
     }
     // 7. Purpose. Conditions are three-valued: false refuses, unknown waits for step 8.
-    let at_home = cfg.home_endpoints.iter().any(|e| e == &call.audience)
-        && HOME_PURPOSES.contains(&call.purpose.as_str());
     let mut condition_unknown = false;
     match member {
+        // A home read with the member's own key, as a current member may (checked above).
+        None if standing_unknown => {}
         Some(m) => {
-            let home_read =
-                at_home && call.links.is_empty() && call.purpose != "colophon.home.write";
+            let home_read = at_home && call.links.is_empty() && call.purpose != HOME_WRITE;
             let home_write = at_home
-                && call.purpose == "colophon.home.write"
+                && call.purpose == HOME_WRITE
                 && own_writes(m, writes)
                 && call
                     .links
@@ -1245,6 +1464,11 @@ fn verify(
         return Err(Failure::NewerFormat(
             "the controller's key has an unknown form".into(),
         ));
+    }
+    // A home's binding of the call to the request it arrived on (§14 as the home checks it): a
+    // call made for another request is out of its scope, and nothing is reserved for it.
+    if let Some(bound) = mode.bound {
+        require_refused(&call.args == bound, Reason::OutOfScope)?;
     }
     // Reservation, after every step and before any effect.
     match store.reserve(&replay_key, &call.digest, cfg.now_ms) {
