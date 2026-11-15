@@ -14,7 +14,7 @@ public actor StorageLibrary {
         let key: NativeCheckpointKey
         if let checkpoint {
             let opening = try NativeCheckpointOpening(bytes: checkpoint, libraryId: libraryID, member: member)
-            key = try opening.finish(shared: await keys.agree(peer: opening.agreementPeer()))
+            key = try opening.finish(shared: wipingData(copying: await keys.sharedSecret(peer: opening.agreementPeer())))
         } else {
             let preparation = try NativeCheckpointPreparation(libraryId: libraryID, member: member, entropy: HostInputs.entropy())
             key = try preparation.finish(signature: await keys.sign(body: preparation.signingBody()))
@@ -42,7 +42,7 @@ public actor StorageLibrary {
     public func merge(records: [String: Data]) throws { _ = try native.merge(records: records) }
     public func ready() async throws {
         var results: [UnlockResult] = []
-        for step in try native.beginUnlock() { results.append(try await UnlockResult(step: step, shared: keys.agree(peer: step.peer))) }
+        for step in try native.beginUnlock() { results.append(try await UnlockResult(step: step, shared: wipingData(copying: keys.sharedSecret(peer: step.peer)))) }
         try native.finishUnlockMany(results: results)
     }
     public func query(namespace: String, name: String, arguments: Data) throws -> Outcome<Data> {

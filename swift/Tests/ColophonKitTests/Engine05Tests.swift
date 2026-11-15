@@ -92,36 +92,36 @@ struct Engine05Tests {
                 addThreshold: nil, countByHolders: false, policyJson: "", signers: [], rekeySigners: []), identity: AccountIdentity(kind: .controller, id: account.id), nowMs: 0, entropy: Data([1]))
         }
         let engine = try await ColophonEngine.open(source: account.files, listing: account.files.listing(), identity: AccountIdentity(kind: .controller, id: account.id),
-            account: account.accountID, deviceKey: Data.secret(Data(repeating: 9, count: 32)), nowMs: account.now)
+            account: account.accountID, deviceKey: SecretBytes(copying: [UInt8](repeating: 9, count: 32)), nowMs: account.now)
         let slot = try await engine.run { try $0.slots() }[0]
         let inputs = try await engine.run { try $0.beginUnlockSlot(index: slot.index) }
         let custody = try await KeyCustody([SoftwareKeysAdapter(account)])
         let secrets = try await custody.answer(unlock: inputs)
-        _ = try await engine.run { try $0.finishUnlockSlot(index: slot.index, secrets: secrets) }
+        _ = try await engine.finishUnlockSlot(index: slot.index, secrets: secrets)
         // Bound: a write needs exactly 32 bytes of entropy.
         do { _ = try await engine.run { try $0.beginWrite(namespace: "notes", kind: "createNotebook", payloadJson: "{}", entropy: Data([1])) }; Issue.record("bound") }
         catch let error as ColophonError { if case .bound = error {} else { Issue.record("expected bound, got \(error)") } }
         // Consumed: finishing a finished action again.
-        let action = try await engine.run { try $0.beginRekey(namespaces: ["notes"], signers: [account.id], entropy: try colophonEntropy(32)) }
+        let action = try await engine.run { try $0.beginRekey(namespaces: ["notes"], signers: [account.id], entropy: Data(repeating: 7, count: 32)) }
         let steps = try action.steps()
         let signatures = try steps.map { try account.sign($0) }
         _ = try await engine.run { try $0.finish(action: action, signatures: signatures) }
         do { _ = try await engine.run { try $0.finish(action: action, signatures: signatures) }; Issue.record("replay") }
         catch let error as ColophonError { if case .consumed = error {} else { Issue.record("expected consumed, got \(error)") } }
         // BadSignature: a signature over other bytes.
-        let other = try await engine.run { try $0.beginRekey(namespaces: ["notes"], signers: [account.id], entropy: try colophonEntropy(32)) }
+        let other = try await engine.run { try $0.beginRekey(namespaces: ["notes"], signers: [account.id], entropy: Data(repeating: 7, count: 32)) }
         let bad = Signature(signature: try account.signing.signature(for: Data("not the body".utf8)).rawRepresentation, authenticatorData: nil, clientData: nil)
         do { _ = try await engine.run { try $0.finish(action: other, signatures: [bad]) }; Issue.record("bad signature") }
         catch let error as ColophonError { if case .badSignature = error {} else { Issue.record("expected badSignature, got \(error)") } }
         // WrongObject: an action of this engine finished on another.
         let elsewhere = try account.openRaw()
-        let foreign = try await engine.run { try $0.beginRekey(namespaces: ["notes"], signers: [account.id], entropy: try colophonEntropy(32)) }
+        let foreign = try await engine.run { try $0.beginRekey(namespaces: ["notes"], signers: [account.id], entropy: Data(repeating: 7, count: 32)) }
         do { _ = try elsewhere.finish(action: foreign, signatures: []); Issue.record("wrong object") }
         catch let error as AccountError { if case .WrongObject = error {} else { Issue.record("expected wrongObject, got \(error)") } }
         // Locked: after lock(), nothing prepares and the typed error is `.locked`.
         await engine.lock()
         #expect(await engine.isLocked)
-        do { _ = try await engine.run { try $0.beginRekey(namespaces: ["notes"], signers: [account.id], entropy: try colophonEntropy(32)) }; Issue.record("locked") }
+        do { _ = try await engine.run { try $0.beginRekey(namespaces: ["notes"], signers: [account.id], entropy: Data(repeating: 7, count: 32)) }; Issue.record("locked") }
         catch let error as ColophonError { if case .locked = error {} else { Issue.record("expected locked, got \(error)") } }
     }
 
@@ -132,7 +132,7 @@ struct Engine05Tests {
         // Throwing: the host's own failure arrives as `.host` with the host's message.
         account.files.mode = 2
         do { _ = try await ColophonEngine.open(source: account.files, listing: account.files.listing(), identity: AccountIdentity(kind: .controller, id: account.id),
-            account: account.accountID, deviceKey: Data.secret(Data(repeating: 9, count: 32)), nowMs: account.now)
+            account: account.accountID, deviceKey: SecretBytes(copying: [UInt8](repeating: 9, count: 32)), nowMs: account.now)
             // An open may not read; the first read happens at unlock.
             let engine = try account.openRaw()
             _ = try engine.slots(); try account.unlock(engine); Issue.record("a throwing source unlocked") }
@@ -160,17 +160,33 @@ struct Engine05Tests {
 
     // MARK: Secrets
 
-    @Test func secretRecordsNeverPrintTheirBytesAndWipeClearsAValue() {
-        let answer = PrfAnswer(authenticatorData: Data([1]), clientData: Data([2]), signature: Data([3]), output: Data.secret([0xde, 0xad, 0xbe, 0xef]))
+    @Test func secretRecordsNeverPrintTheirBytes() {
+        let answer = PrfAnswer(authenticatorData: Data([1]), clientData: Data([2]), signature: Data([3]), output: Data([0xde, 0xad, 0xbe, 0xef]))
         for text in [String(describing: answer), String(reflecting: answer), { var out = ""; dump(answer, to: &out); return out }()] {
             #expect(!text.contains("222") && !text.lowercased().contains("deadbeef") && !text.contains("deadbeef"), "no secret in \(text)")
         }
-        #expect(String(describing: UnlockSecret(kind: .ecdh, secret: Data.secret([9, 9]))) == "UnlockSecret(redacted)")
-        #expect(String(describing: EpochAnswer(namespace: "n", epoch: 1, shared: Data.secret([9, 9]))) == "EpochAnswer(redacted)")
-        var value = Data.secret([1, 2, 3, 4])
-        value.wipe()
-        #expect(value.isEmpty)
+        #expect(String(describing: UnlockSecret(kind: .ecdh, secret: Data([9, 9]))) == "UnlockSecret(redacted)")
+        #expect(String(describing: EpochAnswer(namespace: "n", epoch: 1, shared: Data([9, 9]))) == "EpochAnswer(redacted)")
         #expect(ColophonError(AccountError.Host(code: "host", detail: "disk")).localizedDescription == "host: disk")
+    }
+
+    /// `SecretBytes` owns its memory: a lent `Data` points at it (no copy), its descriptions say nothing, and the
+    /// host-side answers that carry one are redacted too.
+    @Test func secretBytesLendWithoutCopyingAndNeverPrint() throws {
+        let secret = SecretBytes(copying: [UInt8](repeating: 0xab, count: 32))
+        let owned = secret.withUnsafeBytes { $0.baseAddress }
+        let lent = secret.withUnsafeData { data in data.withUnsafeBytes { $0.baseAddress } }
+        #expect(owned != nil && owned == lent, "the lent Data refers to the owned memory")
+        let texts = [String(describing: secret), String(reflecting: secret), "\(secret)",
+                     String(describing: HostUnlockSecret(kind: .ecdh, secret: secret)),
+                     String(describing: HostEpochAnswer(namespace: "n", epoch: 1, shared: secret))]
+        for text in texts { #expect(!text.lowercased().contains("abab"), "no secret in \(text)") }
+        let a = try SecretBytes.random(count: 32), b = try SecretBytes.random(count: 32)
+        #expect(a.count == 32 && !a.constantTimeEquals(b) && a.constantTimeEquals(a))
+        // Several secrets lent to one generated list keep their identity too.
+        let list = [HostUnlockSecret(kind: .ecdh, secret: a), HostUnlockSecret(kind: .prf, secret: b)]
+        let addresses = try list.withRecords { records in records.map { record in record.secret.withUnsafeBytes { $0.baseAddress } } }
+        #expect(addresses == [a.withUnsafeBytes { $0.baseAddress }, b.withUnsafeBytes { $0.baseAddress }])
     }
 }
 
@@ -185,7 +201,7 @@ private struct SoftwareKeysAdapter: AsyncKeyProvider {
     init(_ account: Account) { self.account = account }
     func publicKeys() async throws -> PublicKeys { PublicKeys(signing: account.signing.publicKey.x963Representation, agreement: account.agreement.publicKey.x963Representation) }
     func sign(body: Data) async throws -> Data { try account.signing.signature(for: body).rawRepresentation }
-    func agree(peer: Data) async throws -> Data {
-        try account.agreement.sharedSecretFromKeyAgreement(with: try P256.KeyAgreement.PublicKey(x963Representation: peer)).withUnsafeBytes { Data($0) }
+    func sharedSecret(peer: Data) async throws -> SecretBytes {
+        SecretBytes(copying: try account.agreement.sharedSecretFromKeyAgreement(with: try P256.KeyAgreement.PublicKey(x963Representation: peer)))
     }
 }

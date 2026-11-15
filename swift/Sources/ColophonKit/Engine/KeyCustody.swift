@@ -44,7 +44,7 @@ public struct KeyCustody: Sendable {
             case .webauthn:
                 guard let challenge = step.challenge else { throw KeyCustodyError.missingChallenge }
                 guard let result = try await provider.assert(challenge: challenge, prfSalt: nil) else { throw KeyCustodyError.unsupported }
-                out.append(Signature(signature: result.signature, authenticatorData: result.authenticatorData, clientData: result.clientData))
+                out.append(result.signatureValue)
             case .unknown:
                 throw KeyCustodyError.unsupported
             }
@@ -53,44 +53,44 @@ public struct KeyCustody: Sendable {
     }
 
     /// One assertion per request, evaluating the request's salt: `results.first` is the PRF output.
-    public func answer(_ requests: [PrfRequest]) async throws -> [PrfAnswer] {
-        var out: [PrfAnswer] = []
+    public func answer(_ requests: [PrfRequest]) async throws -> [HostPrfAnswer] {
+        var out: [HostPrfAnswer] = []
         for request in requests {
             try Task.checkCancellation()
             let provider = try provider(for: request.controller)
             let challenge = Self.base64url(request.challenge)
             guard let result = try await provider.assert(challenge: challenge, prfSalt: request.salt),
                   let prf = result.prf, prf.count == 32 else { throw KeyCustodyError.unsupported }
-            out.append(PrfAnswer(authenticatorData: result.authenticatorData, clientData: result.clientData,
-                                 signature: result.signature, output: Data.secret(prf)))
+            out.append(HostPrfAnswer(authenticatorData: result.authenticatorData, clientData: result.clientData,
+                                     signature: result.signature, output: prf))
         }
         return out
     }
 
     /// The raw results of a slot's routes, in input order: ECDH against `enc`, or the PRF of `salt`.
-    public func answer(unlock inputs: [UnlockInput]) async throws -> [UnlockSecret] {
-        var out: [UnlockSecret] = []
+    public func answer(unlock inputs: [UnlockInput]) async throws -> [HostUnlockSecret] {
+        var out: [HostUnlockSecret] = []
         for input in inputs {
             try Task.checkCancellation()
             let provider = try provider(for: input.controller)
             switch input.kind {
-            case .ecdh: out.append(UnlockSecret(kind: .ecdh, secret: Data.secret(try await provider.agree(peer: input.enc))))
+            case .ecdh: out.append(HostUnlockSecret(kind: .ecdh, secret: try await provider.sharedSecret(peer: input.enc)))
             case .prf:
                 guard let prf = try await provider.prf(salt: input.salt), prf.count == 32 else { throw KeyCustodyError.unsupported }
-                out.append(UnlockSecret(kind: .prf, secret: Data.secret(prf)))
+                out.append(HostUnlockSecret(kind: .prf, secret: prf))
             }
         }
         return out
     }
 
     /// The ECDH results a member's host performs to open its epoch shares.
-    public func answer(epochs agreements: [EpochAgreement]) async throws -> [EpochAnswer] {
-        var out: [EpochAnswer] = []
+    public func answer(epochs agreements: [EpochAgreement]) async throws -> [HostEpochAnswer] {
+        var out: [HostEpochAnswer] = []
         for agreement in agreements {
             try Task.checkCancellation()
             let provider = try provider(for: agreement.recipient)
-            out.append(EpochAnswer(namespace: agreement.namespace, epoch: agreement.epoch,
-                                   shared: Data.secret(try await provider.agree(peer: agreement.peer))))
+            out.append(HostEpochAnswer(namespace: agreement.namespace, epoch: agreement.epoch,
+                                       shared: try await provider.sharedSecret(peer: agreement.peer)))
         }
         return out
     }
@@ -115,5 +115,54 @@ extension KeyCustodyError: LocalizedError {
         case .missingChallenge: "A WebAuthn step carried no challenge."
         case .unsupported: "This key cannot perform the requested ceremony."
         }
+    }
+}
+
+/// The host's answer to a `PrfRequest`, its output held as `SecretBytes` until the one export call that takes it.
+public struct HostPrfAnswer: Sendable, CustomStringConvertible {
+    public let authenticatorData: Data
+    public let clientData: Data
+    public let signature: Data
+    public let output: SecretBytes
+    public init(authenticatorData: Data, clientData: Data, signature: Data, output: SecretBytes) {
+        self.authenticatorData = authenticatorData; self.clientData = clientData; self.signature = signature; self.output = output
+    }
+    public var description: String { "HostPrfAnswer(redacted)" }
+}
+
+/// One slot route's raw secret, held as `SecretBytes` until `finish_unlock_slot`.
+public struct HostUnlockSecret: Sendable, CustomStringConvertible {
+    public let kind: UnlockKind
+    public let secret: SecretBytes
+    public init(kind: UnlockKind, secret: SecretBytes) { self.kind = kind; self.secret = secret }
+    public var description: String { "HostUnlockSecret(redacted)" }
+}
+
+/// One epoch share's ECDH result, held as `SecretBytes` until `finish_unlock_epochs`.
+public struct HostEpochAnswer: Sendable, CustomStringConvertible {
+    public let namespace: String
+    public let epoch: UInt64
+    public let shared: SecretBytes
+    public init(namespace: String, epoch: UInt64, shared: SecretBytes) { self.namespace = namespace; self.epoch = epoch; self.shared = shared }
+    public var description: String { "HostEpochAnswer(redacted)" }
+}
+
+/// Lending the secrets to the generated records for exactly one export call. The records refer to the owned memory
+/// (no Swift copy); they must not escape `body`.
+extension Array where Element == HostPrfAnswer {
+    public func withRecords<R>(_ body: ([PrfAnswer]) throws -> R) throws -> R {
+        try withUnsafeData(map(\.output)) { outputs in
+            try body(zip(self, outputs).map { PrfAnswer(authenticatorData: $0.authenticatorData, clientData: $0.clientData, signature: $0.signature, output: $1) })
+        }
+    }
+}
+extension Array where Element == HostUnlockSecret {
+    public func withRecords<R>(_ body: ([UnlockSecret]) throws -> R) throws -> R {
+        try withUnsafeData(map(\.secret)) { secrets in try body(zip(self, secrets).map { UnlockSecret(kind: $0.kind, secret: $1) }) }
+    }
+}
+extension Array where Element == HostEpochAnswer {
+    public func withRecords<R>(_ body: ([EpochAnswer]) throws -> R) throws -> R {
+        try withUnsafeData(map(\.shared)) { shares in try body(zip(self, shares).map { EpochAnswer(namespace: $0.namespace, epoch: $0.epoch, shared: $1) }) }
     }
 }

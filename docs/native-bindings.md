@@ -31,7 +31,7 @@ bash scripts/check-apple-swift.sh          # every product for the iOS and visio
 * Signatures: `SignForm.raw` steps get `r||s` from `AsyncKeyProvider.sign`; `webauthn` steps get an assertion (DER, authenticator
   data and client data as bytes) for the step's challenge. PRF requests and `UnlockInput`s are answered by the same providers.
 * Errors: `AccountError` becomes `ColophonError` at the engine boundary.
-* Records that carry a secret are redacted in `description` and reflection; secret `Data` is made with `Data.secret`.
+* Records that carry a secret are redacted in `description` and reflection; secrets are `SecretBytes` (owned memory, zeroed on release) lent to an export for one call through `withUnsafeData`.
 
 ## Not in the Apple build
 

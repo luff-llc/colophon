@@ -14,13 +14,13 @@ import ColophonSessionUI
         // The engine is the owner's (it holds the owner's slot); the signature is the laptop's.
         let engine = try await ColophonEngine.open(source: MediumSource(device.medium), listing: listing,
             identity: AccountIdentity(kind: .controller, id: ownerID), account: account, namespaces: ["reading.saved"],
-            deviceKey: try colophonEntropy(32), nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+            deviceKey: try SecretBytes.random(count: 32), nowMs: Int64(Date().timeIntervalSince1970 * 1000))
         let custody = try await KeyCustody([device.owner, laptop])
         let slot = try #require(try await engine.run { try $0.slots() }.first { $0.controllers.contains { $0.id == ownerID } })
         let index = slot.index
         let inputs = try await engine.run { try $0.beginUnlockSlot(index: index) }
         let secrets = try await custody.answer(unlock: inputs)
-        _ = try await engine.run { try $0.finishUnlockSlot(index: index, secrets: secrets) }
+        _ = try await engine.finishUnlockSlot(index: index, secrets: secrets)
         let home = SimHome()
         let raw = try home.memberRequest(account: account, createdMs: Int64(Date().timeIntervalSince1970 * 1000) - 5000)
         let change = "{\"homes\":{\"appoint\":[{\"request\":\"\(raw.base64EncodedString())\",\"terms\":{\"serves\":[\"home\"]}}]}}"

@@ -15,19 +15,19 @@ final class TestPasskey: AsyncKeyProvider, @unchecked Sendable {
     private(set) var prfRequests = 0
     init(rp: String = "id.luff.works", credential: Data = Data([1, 2, 3])) { self.rp = rp; self.credential = credential }
     var form: KeyForm { .webauthn }
-    static func prfOutput(_ salt: Data) -> Data { Data(SHA256.hash(data: Data("test-prf".utf8) + salt)) }
-    func assert(challenge: String, prfSalt: Data?) async throws -> WebauthnResult? {
+    static func prfOutput(_ salt: Data) -> SecretBytes { SecretBytes(copying: SHA256.hash(data: Data("test-prf".utf8) + salt)) }
+    func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion? {
         lock.withLock { assertions += 1; if prfSalt != nil { prfRequests += 1 } }
         let clientData = Data("{\"challenge\":\"\(challenge)\",\"origin\":\"https://\(rp)\",\"type\":\"webauthn.get\"}".utf8)
         var authData = Data(SHA256.hash(data: Data(rp.utf8)))
         authData.append(contentsOf: [0x05, 0, 0, 0, 0])
         let signature = try key.signature(for: authData + Data(SHA256.hash(data: clientData))).derRepresentation
-        return WebauthnResult(signature: signature, authenticatorData: authData, clientData: clientData, prf: prfSalt.map(Self.prfOutput))
+        return KeyAssertion(signature: signature, authenticatorData: authData, clientData: clientData, prf: prfSalt.map(Self.prfOutput))
     }
-    func prf(salt: Data) async throws -> Data? { lock.withLock { prfRequests += 1 }; return Self.prfOutput(salt) }
+    func prf(salt: Data) async throws -> SecretBytes? { lock.withLock { prfRequests += 1 }; return Self.prfOutput(salt) }
     func publicKeys() async throws -> PublicKeys { PublicKeys(signing: key.publicKey.x963Representation, agreement: Data()) }
     func sign(body: Data) async throws -> Data { throw KeyProviderError.unsupportedHere }
-    func agree(peer: Data) async throws -> Data { throw KeyProviderError.unsupportedHere }
+    func sharedSecret(peer: Data) async throws -> SecretBytes { throw KeyProviderError.unsupportedHere }
     func keyDescriptor() async throws -> KeyDescriptorView {
         KeyDescriptorView(form: .webauthn, signing: key.publicKey.x963Representation, agreement: nil, rp: rp, credential: credential,
                           origins: [], authorityOrigins: [])

@@ -28,11 +28,11 @@ public actor ColophonEngine {
     public nonisolated let identity: AccountIdentity
 
     /// Opens the engine over `source` on its own queue. See `AccountEngine.open` for the arguments.
-    /// `key` is the 32-byte device-held key that seals saved state; it is consumed (the bindings wipe
-    /// their copy), so pass a `Data.secret` value.
+    /// `deviceKey` is the 32-byte device-held key that seals saved state. It is lent to the export without a Swift
+    /// copy; the bindings wipe their transfer copy.
     public static func open(label: String = "org.luff.colophon.engine", source: any HostSource, listing: [ListedPath],
                             identity: AccountIdentity, account: String, namespaces: [String] = [], batch: UInt64 = 0,
-                            saved: SavedState? = nil, deviceKey: Data, nowMs: Int64) async throws -> ColophonEngine {
+                            saved: SavedState? = nil, deviceKey: SecretBytes, nowMs: Int64) async throws -> ColophonEngine {
         let engine = ColophonEngine(label: label, account: account, identity: identity)
         try await engine.start(source: source, listing: listing, namespaces: namespaces, batch: batch, saved: saved, deviceKey: deviceKey, nowMs: nowMs)
         return engine
@@ -44,11 +44,14 @@ public actor ColophonEngine {
     }
 
     private func start(source: any HostSource, listing: [ListedPath], namespaces: [String], batch: UInt64, saved: SavedState?,
-                       deviceKey: Data, nowMs: Int64) throws {
+                       deviceKey: SecretBytes, nowMs: Int64) throws {
         do {
-            box.engine = try AccountEngine.open(source: source, listing: listing, identity: identity, account: account,
-                namespaces: namespaces, batch: batch, saved: saved ?? SavedState(verifier: Data(), checkpoint: Data(), parts: []),
-                key: deviceKey, nowMs: nowMs)
+            let identity = identity, account = account
+            box.engine = try deviceKey.withUnsafeData { key in
+                try AccountEngine.open(source: source, listing: listing, identity: identity, account: account,
+                    namespaces: namespaces, batch: batch, saved: saved ?? SavedState(verifier: Data(), checkpoint: Data(), parts: []),
+                    key: key, nowMs: nowMs)
+            }
         } catch { throw ColophonError.wrap(error) }
     }
 
@@ -68,6 +71,15 @@ public actor ColophonEngine {
         guard let engine = box.engine else { return }
         _ = try? engine.lock()
         box.engine = nil
+    }
+
+    /// Opens a slot with the host's raw route secrets (`finish_unlock_slot`), lending them for the call only.
+    public func finishUnlockSlot(index: UInt64, secrets: [HostUnlockSecret]) throws -> Changes {
+        try run { engine in try secrets.withRecords { try engine.finishUnlockSlot(index: index, secrets: $0) } }
+    }
+    /// Opens a member's epoch shares (`finish_unlock_epochs`), lending the ECDH results for the call only.
+    public func finishUnlockEpochs(answers: [HostEpochAnswer]) throws -> Changes {
+        try run { engine in try answers.withRecords { try engine.finishUnlockEpochs(answers: $0) } }
     }
 
     /// Drops the engine after the call that ended in `.integrity` (it is unusable; do not call `lock`).
@@ -93,7 +105,7 @@ public actor ColophonEngine {
         let requests = try action.prfRequests()
         if !requests.isEmpty {
             let answers = try await custody.answer(requests)
-            try run { try $0.providePrf(action: action, results: answers) }
+            try run { engine in try answers.withRecords { try engine.providePrf(action: action, results: $0) } }
         }
         let signatures = try await custody.sign(try action.steps())
         return try run { try $0.finish(action: action, signatures: signatures) }

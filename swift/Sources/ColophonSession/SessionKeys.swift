@@ -9,12 +9,12 @@ public struct SessionKeyFailure: Error, Sendable, LocalizedError {
 struct SessionKeys: AsyncKeyProvider {
     let base: any AsyncKeyProvider
     var form: KeyForm { base.form }
-    func assert(challenge: String, prfSalt: Data?) async throws -> WebauthnResult? {
+    func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion? {
         do { return try await base.assert(challenge: challenge, prfSalt: prfSalt) }
         catch is CancellationError { throw CancellationError() }
         catch { throw SessionKeyFailure(detail: error.localizedDescription) }
     }
-    func prf(salt: Data) async throws -> Data? {
+    func prf(salt: Data) async throws -> SecretBytes? {
         do { return try await base.prf(salt: salt) }
         catch is CancellationError { throw CancellationError() }
         catch { throw SessionKeyFailure(detail: error.localizedDescription) }
@@ -34,8 +34,8 @@ struct SessionKeys: AsyncKeyProvider {
         catch is CancellationError { throw CancellationError() }
         catch { throw SessionKeyFailure(detail: error.localizedDescription) }
     }
-    func agree(peer: Data) async throws -> Data {
-        do { return try await base.agree(peer: peer) }
+    func sharedSecret(peer: Data) async throws -> SecretBytes {
+        do { return try await base.sharedSecret(peer: peer) }
         catch is CancellationError { throw CancellationError() }
         catch { throw SessionKeyFailure(detail: error.localizedDescription) }
     }

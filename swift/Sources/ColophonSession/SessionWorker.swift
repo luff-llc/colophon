@@ -208,7 +208,7 @@ actor SessionWorker {
         let agreements = try await engine.run { try $0.beginUnlockEpochs() }
         guard !agreements.isEmpty else { return }
         let answers = try await custody.answer(epochs: agreements)
-        _ = try await engine.run { try $0.finishUnlockEpochs(answers: answers) }
+        _ = try await engine.finishUnlockEpochs(answers: answers)
         memberOpened = true
     }
 
@@ -220,8 +220,7 @@ actor SessionWorker {
         try await gated {
             guard let engine, let account = accountID, phaseIsReady else { return }
             _ = try await engine.run { try $0.verifyBatch(limit: 128) }
-            let seed = try colophonEntropy(32)
-            let state = try await engine.run { try $0.save(nonceSeed: seed) }
+            let state = try await engine.run { engine in try withEntropy(32) { try engine.save(nonceSeed: $0) } }
             try await cache.save(JSONEncoder().encode(SavedFile(state)), libraryID: account)
         }
     }
@@ -404,7 +403,7 @@ actor SessionWorker {
                 ?? slots.first(where: { $0.controllers.contains { $0.id == ownerID } }) else { throw SessionError.ownerRequired }
         let inputs = try await owner.run { try $0.beginUnlockSlot(index: slot.index) }
         let secrets = try await custody.answer(unlock: inputs)
-        _ = try await owner.run { try $0.finishUnlockSlot(index: slot.index, secrets: secrets) }
+        _ = try await owner.finishUnlockSlot(index: slot.index, secrets: secrets)
     }
     private func signers(_ owner: ColophonEngine, ownerID: String, need: SignerNeed) async throws -> [String] {
         let chosen = try await owner.run { try $0.suggestSigners(available: [ownerID], need: need) }
@@ -417,7 +416,7 @@ actor SessionWorker {
             try await withOwner { owner, custody, ownerID in
                 let signers = try await signers(owner, ownerID: ownerID, need: .member)
                 let terms = terms ?? request.termsJSON
-                let written = try await owner.execute(custody: custody) { try $0.beginApprove(request: request.record, termsJson: terms, signers: signers, entropy: try colophonEntropy(32)) }
+                let written = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: request.record, termsJson: terms, signers: signers, entropy: $0) } }
                 try await persist(written, on: owner)
             }
             return try await reconcile()
@@ -429,7 +428,7 @@ actor SessionWorker {
             try await withOwner { owner, custody, ownerID in
                 let signers = try await signers(owner, ownerID: ownerID, need: .control)
                 let written = try await owner.execute(custody: custody) {
-                    try $0.beginRevoke(member: member, keep: RevokeKeep(mode: .everything, kept: [], heads: []), signers: signers, entropy: try colophonEntropy(32))
+                    engine in try withEntropy(32) { try engine.beginRevoke(member: member, keep: RevokeKeep(mode: .everything, kept: [], heads: []), signers: signers, entropy: $0) }
                 }
                 try await persist(written, on: owner)
             }
@@ -470,8 +469,7 @@ actor SessionWorker {
         try await gated {
             if engine == nil { _ = try await reconcile() }
             return try await withOwner { owner, _, _ in
-                let seed = try colophonEntropy(32)
-                return try await owner.run { try $0.transferSeed(pairing: pairing, entropy: seed) }
+                return try await owner.run { engine in try withEntropy(32) { try engine.transferSeed(pairing: pairing, entropy: $0) } }
             }
         }
     }
@@ -490,7 +488,7 @@ actor SessionWorker {
                 _ = try await owner.run { try $0.acceptSeedTransfer(key: key, pairing: pairing, sealed: sealed) }
                 _ = try await owner.run { try $0.load() }
                 let written = try await owner.execute(custody: custody) {
-                    try $0.beginAddSlot(signer: ownerID, plan: SlotPlan(controllers: [ownerID], label: label), entropy: try colophonEntropy(32))
+                    engine in try withEntropy(32) { try engine.beginAddSlot(signer: ownerID, plan: SlotPlan(controllers: [ownerID], label: label), entropy: $0) }
                 }
                 try await persist(written, on: owner)
                 await owner.lock()
@@ -571,7 +569,7 @@ actor SessionWorker {
             let memberRaw = try await ownRequestBytesFor(account: account)
             let terms = termsJSON(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil)
             let signers = try await signers(owner, ownerID: ownerID, need: .member)
-            let approve = try await owner.execute(custody: custody) { try $0.beginApprove(request: memberRaw, termsJson: terms, signers: signers, entropy: try colophonEntropy(32)) }
+            let approve = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: memberRaw, termsJson: terms, signers: signers, entropy: $0) } }
             try await persist(approve, on: owner)
             await owner.lock()
         } catch { await owner.lock(); throw error }
@@ -621,7 +619,7 @@ actor SessionWorker {
             }
             let payload = String(decoding: command.payload, as: UTF8.self)
             let written = try await engine.execute(custody: custody) {
-                try $0.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: try colophonEntropy(32))
+                engine in try withEntropy(32) { try engine.beginWrite(namespace: command.namespace, kind: command.kind, payloadJson: payload, entropy: $0) }
             }
             try await persist(written)
             let operation = Self.operationID(in: written.stores) ?? ""
@@ -746,7 +744,7 @@ actor SessionWorker {
         let target = CallTarget(audiences: [need.audience], callOrigins: [], controllerPurposes: [], homeEndpoints: [])
         let written = try await gated {
             try await engine.execute(custody: custody) {
-                try $0.beginCall(key: signing, links: [], audience: need.audience, purpose: need.purpose, argsJson: args, target: target, entropy: try colophonEntropy(32))
+                engine in try withEntropy(32) { try engine.beginCall(key: signing, links: [], audience: need.audience, purpose: need.purpose, argsJson: args, target: target, entropy: $0) }
             }
         }
         guard let artifact = written.artifact else { throw ColophonError.internalFailure(code: "internal", detail: "a call returned no envelope") }

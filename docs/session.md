@@ -14,7 +14,7 @@ engine's; the session only chooses what to show and what to call next. The contr
 
 | Module | What it is |
 | --- | --- |
-| `ColophonFFI` / `ColophonKit` | The XCFramework (built locally, git-ignored) and the generated Swift (committed). Wrappers: `ColophonError` (the typed `AccountError`), `ColophonEngine`, `KeyCustody` (answers the engine's signing steps, PRF requests, unlock inputs and epoch agreements through `AsyncKeyProvider`), `Data.secret` and `Data.wipe()`. |
+| `ColophonFFI` / `ColophonKit` | The XCFramework (built locally, git-ignored) and the generated Swift (committed). Wrappers: `ColophonError` (the typed `AccountError`), `ColophonEngine`, `KeyCustody` (answers the engine's signing steps, PRF requests, unlock inputs and epoch agreements through `AsyncKeyProvider`), `SecretBytes` (secret memory the SDK owns and zeroes) and `withEntropy`. |
 | `ColophonKitStorage` | `RecordMedium`: the synchronous record store the engine reads (`listing()` with versions in one batch, `read`, `readBlob`, `write` all-or-none, `changes()`). `FolderMedium` (private container, App Group, iCloud: file coordination, symlink refusal, iCloud placeholders are `unavailable`, never absence) and `MemoryMedium` (tests, with fault injection). |
 | `ColophonKeys` | Passkeys (`PasskeyProvider`, `SecurityKeyProvider`) with `authorityOrigins` at registration, the protocol descriptor (`KeyDescriptor.view`), `user.id` per spec §17.4 (`PasskeyProvider.userID(account:)`), Secure Enclave owner keys. |
 | `ColophonSession` | The session, the gate's source, blobs, the in-flight exchange loop, the owner operations. |
@@ -134,10 +134,24 @@ on disk.
 
 ## Secrets
 
-Nothing secret is kept in Swift longer than a call. `Data.secret` memory is overwritten when the last `Data` that refers to it
-is released; `PrfAnswer`, `UnlockSecret` and `EpochAnswer` print as `…(redacted)`. What Swift cannot do: copies it makes
-itself, a provider's own copies, swapped pages, and the UniFFI lowering copy (the Rust side overwrites that one through the
-zero-on-free allocator, which the XCFramework has on). No secret is in an error, a `description` or a `Codable` output.
+Every secret the Swift side handles lives in a `SecretBytes`: memory the SDK allocates, writes once and overwrites with
+zeros when the last reference goes. PRF outputs, ECDH results, epoch shares, the device-held sealed-state key, action entropy
+and (debug and simulator builds only) software private scalars are taken into one at the moment the platform hands them over,
+inside the platform's own `withUnsafeBytes` (CryptoKit's `SharedSecret`, the PRF `SymmetricKey`, the Keychain's `CFData`), and
+reach an export only through `withUnsafeData`, which lends a `Data` over that memory for the one call (no Swift copy). The key
+providers return `SecretBytes` (`AsyncKeyProvider.sharedSecret(peer:)`, `prf(salt:)`, `KeyAssertion.prf`).
+
+What the SDK cannot reach, exactly: the copies a platform API keeps before it hands the value over (AuthenticationServices'
+credential object, CryptoKit's own key and secret storage, which CryptoKit zeroes on release, the `CFData` a Keychain read
+returns and the Keychain's own buffers), registers and stack slots during the copy-in, swapped pages, and the UniFFI lowering
+copy (the Rust side overwrites that one through the zero-on-free allocator, which the XCFramework has on). The 0.4 exports
+(`Library`, `StorageLibrary`) take `Data` in expression position; their secrets are single allocations zeroed on release.
+`PrfAnswer`, `UnlockSecret`, `EpochAnswer`, `SecretBytes` and the `Host…` answers print as redacted. No secret is in an error,
+a `description` or a `Codable` output.
+
+`KeychainKeys` is a Secure Enclave identity in production. Its software backend exists only in debug and simulator builds
+(`#if DEBUG || targetEnvironment(simulator)`), keeps the scalars in a fixed binary layout (never JSON) and decodes them per
+operation (nothing cached).
 
 ## Public differences from the 0.4 session
 

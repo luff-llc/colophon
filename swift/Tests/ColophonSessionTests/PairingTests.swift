@@ -7,12 +7,12 @@ import ColophonSession
 
     /// The pairing ceremony of spec §7.3 through the exports: both screens show one six-digit code.
     private func ceremony(account: String) throws -> Ceremony {
-        let key = try PairingTransferKey.create(entropy: try colophonEntropy(32))
-        let joiner = try AccountPairing.join(account: account, e: try key.public(), nb: try colophonEntropy(32))
+        let key = try withEntropy(32) { try PairingTransferKey.create(entropy: $0) }
+        let joiner = try withEntropy(32) { try AccountPairing.join(account: account, e: key.public(), nb: $0) }
         let limiter = try PairingFailureLimiter.fromState(state: "")
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let existing = try AccountPairing.existingReceiveCommitment(account: account, commitment: try joiner.commitment(), limiter: limiter, nowMs: now)
-        let nonce = try existing.sendNonce(na: try colophonEntropy(32))
+        let nonce = try withEntropy(32) { try existing.sendNonce(na: $0) }
         let reveal = try #require(try joiner.receiveNonce(na: nonce))
         let shown = try existing.receiveReveal(e: reveal.e, nb: reveal.nb, limiter: limiter, nowMs: now)
         #expect(shown == (try joiner.digits()), "both screens show the same code")

@@ -87,9 +87,8 @@ public actor Library {
 
     public func ready() async throws {
         for step in try native.beginUnlock() {
-            var secret = try await keys.agree(peer: step.peer)
-            defer { secret.resetBytes(in: secret.startIndex..<secret.endIndex) }
-            _ = try native.finishUnlock(step: step, shared: secret)
+            let secret = try await keys.sharedSecret(peer: step.peer)
+            _ = try secret.withUnsafeData { try native.finishUnlock(step: step, shared: $0) }
         }
     }
 
@@ -187,12 +186,12 @@ public actor Library {
                 switch input {
                 case .ecdh(let controller, let enc):
                     guard let provider = available[controller] else { throw BindingError.KeyProvider(detail: "Missing controller") }
-                    secrets.append(.ecdh(secret: try await provider.agree(peer: enc)))
+                    secrets.append(.ecdh(secret: wipingData(copying: try await provider.sharedSecret(peer: enc))))
                 case .prf(let controller, let salt):
                     guard let provider = available[controller], let output = try await provider.prf(salt: salt) else {
                         throw BindingError.KeyProvider(detail: "WebAuthn PRF unsupported or missing results.first")
                     }
-                    secrets.append(.prf(output: output))
+                    secrets.append(.prf(output: wipingData(copying: output)))
                 }
             }
             try Task.checkCancellation()
@@ -220,12 +219,12 @@ public actor Library {
             throw BindingError.KeyProvider(detail: "WebAuthn assertion or PRF unsupported")
         }
         try Task.checkCancellation()
-        return try native.finishPrfSlot(action: action, result: result, label: label, newSeed: newSeed, entropy: HostInputs.entropy())
+        return try native.finishPrfSlot(action: action, result: result.legacyRecord, label: label, newSeed: newSeed, entropy: HostInputs.entropy())
     }
     /// Verify new PRF assertions, build fresh part secrets and reopen the complete combined route.
     public func buildCombinedSlot(parts: [CombinedRoutePart], label: String, newSeed: Data? = nil) async throws -> Data {
         var inputs: [CombinedSlotPart] = []
-        var outputs: [Data?] = []
+        var outputs: [SecretBytes?] = []
         for part in parts {
             if part.provider.form == .raw {
                 inputs.append(.sealed(controller: part.controller)); outputs.append(nil)
@@ -234,7 +233,7 @@ public actor Library {
                 guard let result = try await part.provider.assert(challenge: action.challenge(), prfSalt: action.salt()), let output = result.prf else {
                     throw BindingError.KeyProvider(detail: "WebAuthn assertion or PRF unsupported")
                 }
-                inputs.append(.prf(controller: part.controller, action: action, result: result)); outputs.append(output)
+                inputs.append(.prf(controller: part.controller, action: action, result: result.legacyRecord)); outputs.append(output)
             }
         }
         try Task.checkCancellation()
@@ -242,10 +241,10 @@ public actor Library {
         var secrets: [SlotSecret] = []
         for (index, input) in action.inputs().enumerated() {
             switch input {
-            case .ecdh(_, let enc): secrets.append(.ecdh(secret: try await parts[index].provider.agree(peer: enc)))
+            case .ecdh(_, let enc): secrets.append(.ecdh(secret: wipingData(copying: try await parts[index].provider.sharedSecret(peer: enc))))
             case .prf:
                 guard let output = outputs[index] else { throw BindingError.KeyProvider(detail: "Missing combined PRF output") }
-                secrets.append(.prf(output: output))
+                secrets.append(.prf(output: wipingData(copying: output)))
             }
         }
         try Task.checkCancellation()
@@ -303,7 +302,7 @@ public actor Library {
                 guard let assertion = try await provider.assert(challenge: challenge, prfSalt: nil) else {
                     throw BindingError.KeyProvider(detail: "WebAuthn assertion unsupported")
                 }
-                results.append(SignatureResult(signature: assertion.signature, assertion: assertion))
+                results.append(SignatureResult(signature: assertion.signature, assertion: assertion.legacyRecord))
             } else {
                 results.append(SignatureResult(signature: try await provider.sign(body: step.body), assertion: nil))
             }

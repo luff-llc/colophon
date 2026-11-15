@@ -21,8 +21,7 @@ extension SessionWorker {
             if let existing = try? await blobManifestLocked(engine, namespace: namespace, digest: digest) {
                 return StagedBlob(digest: digest, size: Int(existing.size), mediaType: existing.mediaType, manifest: nil)
             }
-            let seed = try colophonEntropy(32)
-            let writer = try await engine.run { try $0.beginBlob(namespace: namespace, mediaType: mediaType, entropy: seed) }
+            let writer = try await engine.run { engine in try withEntropy(32) { try engine.beginBlob(namespace: namespace, mediaType: mediaType, entropy: $0) } }
             var actual = SHA256(); var count = 0
             try await input.forEachChunk { chunk in
                 actual.update(data: chunk); count += chunk.count

@@ -257,11 +257,11 @@ private actor FakeCeremonies: WebAuthnCeremonies {
         let auth = authenticatorData(rp: rpID)
         let signature = try signing.signature(for: auth + Data(SHA256.hash(data: client))).derRepresentation
         let output = prfSalt.map { salt in
-            Data(HMAC<SHA256>.authenticationCode(for: salt, using: SymmetricKey(data: Data(repeating: 99, count: 32))))
+            SecretBytes(copying: HMAC<SHA256>.authenticationCode(for: salt, using: SymmetricKey(data: Data(repeating: 99, count: 32))))
         }
         return AssertionResult(credentialID: wrongCredential ? Data([9]) : credential,
             signature: corruptSignature ? Data([0]) : signature, authenticatorData: auth, clientData: client,
-            prfOutput: missingPRF ? nil : wrongPRFSize ? Data([1]) : output)
+            prfOutput: missingPRF ? nil : wrongPRFSize ? SecretBytes(copying: [UInt8(1)]) : output)
     }
     func attestation(rp: String) -> Data {
         let point = signing.publicKey.x963Representation
@@ -285,7 +285,7 @@ private actor FakeOwnerBackend: OwnerKeyBackend {
     func presence(scope: String) -> any AsyncKeyProvider { scopes.append(scope); return self }
     func publicKeys() throws -> PublicKeys { PublicKeys(signing: try keys.signingPublicKey(), agreement: try keys.agreementPublicKey()) }
     func sign(body: Data) throws -> Data { signatures += 1; return try keys.sign(body: body) }
-    func agree(peer: Data) throws -> Data { try keys.agree(peer: peer) }
+    func sharedSecret(peer: Data) async throws -> SecretBytes { try await keys.sharedSecret(peer: peer) }
 }
 
 extension ColophonKeysTests {

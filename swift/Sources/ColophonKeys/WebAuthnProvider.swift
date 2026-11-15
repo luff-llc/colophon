@@ -23,7 +23,7 @@ struct WebAuthnProvider: Sendable {
         return descriptor
     }
 
-    func assert(challenge: String, prfSalt: Data?) async throws -> WebauthnResult {
+    func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion {
         try Self.checkPlatform(kind: kind, ceremonies: ceremonies)
         if let prfSalt {
             guard prfSalt.count == 32, ceremonies.supportsPRF(kind: kind) else { throw KeyProviderError.unsupportedHere }
@@ -44,11 +44,11 @@ struct WebAuthnProvider: Sendable {
         if prfSalt != nil {
             guard result.prfOutput?.count == 32 else { throw KeyProviderError.unsupportedHere }
         }
-        return WebauthnResult(signature: result.signature, authenticatorData: result.authenticatorData,
-                              clientData: result.clientData, prf: prfSalt == nil ? nil : result.prfOutput)
+        return KeyAssertion(signature: result.signature, authenticatorData: result.authenticatorData,
+                            clientData: result.clientData, prf: prfSalt == nil ? nil : result.prfOutput)
     }
 
-    func prf(salt: Data) async throws -> Data? {
+    func prf(salt: Data) async throws -> SecretBytes? {
         // Existing-slot opening has no body to sign. New slots MUST instead use assert with the core challenge.
         let challenge = try randomBytes().base64EncodedString().replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")

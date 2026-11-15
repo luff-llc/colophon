@@ -22,17 +22,17 @@ public struct SecurityKeyProvider: AsyncKeyProvider {
     }
 
     /// Restricts get to this credential; use the core's fresh challenge and salt when building a slot.
-    public func assert(challenge: String, prfSalt: Data?) async throws -> WebauthnResult? {
+    public func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion? {
         try await base.assert(challenge: challenge, prfSalt: prfSalt)
     }
     /// Evaluates an existing slot's exact salt. Missing PRF fails explicitly without a fallback.
-    public func prf(salt: Data) async throws -> Data? { try await base.prf(salt: salt) }
+    public func prf(salt: Data) async throws -> SecretBytes? { try await base.prf(salt: salt) }
     /// Returns the signing point; WebAuthn has no agreement key, represented here by empty bytes.
     public func publicKeys() async throws -> PublicKeys { PublicKeys(signing: descriptor.signing, agreement: Data()) }
     /// WebAuthn requires assert so its authenticatorData and clientData cannot be discarded.
     public func sign(body: Data) async throws -> Data { throw KeyProviderError.unsupportedHere }
     /// WebAuthn credentials do not expose ECDH.
-    public func agree(peer: Data) async throws -> Data { throw KeyProviderError.unsupportedHere }
+    public func sharedSecret(peer: Data) async throws -> SecretBytes { throw KeyProviderError.unsupportedHere }
     /// The protocol descriptor of this credential, with its `authorityOrigins`.
     public func keyDescriptor() async throws -> KeyDescriptorView { descriptor.view }
 }
