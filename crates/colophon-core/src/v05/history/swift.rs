@@ -264,8 +264,9 @@ fn multiset_subset(a: &[Value], b: &[Value]) -> bool {
 /// envelope over the body verifies (§2.2), and reported only when none does, the first in byte
 /// order of the envelope bytes.
 pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
-    let mut parsed: BTreeMap<u64, BTreeMap<String, BTreeMap<Vec<u8>, Result<Record>>>> =
-        BTreeMap::new();
+    // Envelope bytes to the record they carry, or why their wrapper is unusable.
+    type Envelopes = BTreeMap<Vec<u8>, Result<Record>>;
+    let mut parsed: BTreeMap<u64, BTreeMap<String, Envelopes>> = BTreeMap::new();
     for bytes in entries {
         require(bytes.len() <= 2_097_152, "Swift envelope bound")?;
         let outer = strict_parse(bytes)?;
