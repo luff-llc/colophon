@@ -114,7 +114,11 @@ pub(super) fn bootstrap(
     now_ms: i64,
 ) -> Option<std::result::Result<State, Stop>> {
     type Candidate = (Vec<u8>, AuthorityEnvelope, Value);
-    let mut groups: BTreeMap<u64, BTreeMap<String, Candidate>> = BTreeMap::new();
+    // Candidates by seq, then by body digest. Several envelopes over one body are one object
+    // (§2.2): every envelope is kept, keyed by its bytes, and judged in byte order, so that the
+    // input order never picks the envelope (a keyless or broken one cannot stand in for a valid
+    // one by arriving first).
+    let mut groups: BTreeMap<u64, BTreeMap<String, BTreeMap<Vec<u8>, Candidate>>> = BTreeMap::new();
     let mut legacy = false;
     for bytes in &objects.entries {
         if let Ok(env) = AuthorityEnvelope::from_json(bytes) {
@@ -128,6 +132,8 @@ pub(super) fn bootstrap(
                             .entry(seq)
                             .or_default()
                             .entry(encoding::digest(&env.body))
+                            .or_default()
+                            .entry(bytes.clone())
                             .or_insert((bytes.clone(), env, v));
                     }
                 }
@@ -150,24 +156,31 @@ pub(super) fn bootstrap(
             };
             let mut accepted = Vec::new();
             let mut first = None;
-            for (digest, (bytes, env, value)) in candidates {
-                let mut proposed = records.clone();
-                proposed.insert(format!("authority/{seq:08}.json"), bytes.clone());
-                let result = if value["kind"] == "upgrade" {
-                    Authority::replay(&records)
-                        .map_err(failure)
-                        .and_then(|prior| {
-                            let k = check_upgrade(&prior, env, value, &account)?;
-                            state::from_upgrade(&prior, k, &proposed, seq)
-                        })
-                        .map(Some)
-                } else {
-                    Authority::replay(&proposed).map_err(failure).map(|_| None)
-                };
-                match result {
-                    Ok(state) => accepted.push((digest, proposed, state)),
-                    Err(f) if first.is_none() => first = Some(f),
-                    Err(_) => {}
+            for (digest, envelopes) in candidates {
+                // One body: valid when any of its envelopes is (the first in byte order that
+                // verifies); only when none is does the first one's failure count.
+                for (bytes, env, value) in envelopes.values() {
+                    let mut proposed = records.clone();
+                    proposed.insert(format!("authority/{seq:08}.json"), bytes.clone());
+                    let result = if value["kind"] == "upgrade" {
+                        Authority::replay(&records)
+                            .map_err(failure)
+                            .and_then(|prior| {
+                                let k = check_upgrade(&prior, env, value, &account)?;
+                                state::from_upgrade(&prior, k, &proposed, seq)
+                            })
+                            .map(Some)
+                    } else {
+                        Authority::replay(&proposed).map_err(failure).map(|_| None)
+                    };
+                    match result {
+                        Ok(state) => {
+                            accepted.push((digest, proposed, state));
+                            break;
+                        }
+                        Err(f) if first.is_none() => first = Some(f),
+                        Err(_) => {}
+                    }
                 }
             }
             if accepted.len() > 1 {

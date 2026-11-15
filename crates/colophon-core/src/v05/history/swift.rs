@@ -252,10 +252,11 @@ fn multiset_subset(a: &[Value], b: &[Value]) -> bool {
     }
     true
 }
-/// Replay a predecessor in any arrival order. Duplicate body envelopes are idempotent;
-/// differing bodies at a sequence are rejected as a fork, never selected by arrival.
+/// Replay a predecessor in any arrival order. Several envelopes over one body are one entry,
+/// valid when any of them is (the first in byte order that verifies, never the first to
+/// arrive); differing bodies at a sequence are rejected as a fork, never selected by arrival.
 pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
-    let mut parsed: BTreeMap<u64, BTreeMap<String, Record>> = BTreeMap::new();
+    let mut parsed: BTreeMap<u64, BTreeMap<String, BTreeMap<Vec<u8>, Record>>> = BTreeMap::new();
     for bytes in entries {
         require(bytes.len() <= 2_097_152, "Swift envelope bound")?;
         let outer = strict_parse(bytes)?;
@@ -294,6 +295,8 @@ pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
             .entry(seq)
             .or_default()
             .entry(record.digest.clone())
+            .or_default()
+            .entry(bytes.clone())
             .or_insert(record);
     }
     let mut out = History {
@@ -305,11 +308,16 @@ pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
         require(seq == out.entries.len() as u64 + 1, "Swift sequence gap")?;
         let mut valid = Vec::new();
         let mut first = None;
-        for e in candidates.into_values() {
-            match append(&out, e) {
-                Ok(next) => valid.push(next),
-                Err(e) if first.is_none() => first = Some(e),
-                Err(_) => {}
+        for envelopes in candidates.into_values() {
+            for e in envelopes.into_values() {
+                match append(&out, e) {
+                    Ok(next) => {
+                        valid.push(next);
+                        break;
+                    }
+                    Err(e) if first.is_none() => first = Some(e),
+                    Err(_) => {}
+                }
             }
         }
         if valid.len() > 1 {
