@@ -287,3 +287,35 @@ private actor FakeOwnerBackend: OwnerKeyBackend {
     func sign(body: Data) throws -> Data { signatures += 1; return try keys.sign(body: body) }
     func agree(peer: Data) throws -> Data { try keys.agree(peer: peer) }
 }
+
+extension ColophonKeysTests {
+    @Test(arguments: [CredentialKind.passkey, .securityKey])
+    func registrationCarriesAuthorityOriginsAndReportsTheProtocolDescriptor(kind: CredentialKind) async throws {
+        let ceremony = FakeCeremonies()
+        let origins = ["https://keys.example", "android:apk-key-hash:abc", "https://id.keys.example", "https://keys.example"]
+        let descriptor: KeyDescriptor
+        switch kind {
+        case .passkey:
+            descriptor = try await PasskeyProvider.register(relyingParty: "keys.example", userID: Data([2]), userName: "Person", challenge: Data(repeating: 1, count: 32),
+                authorityOrigins: origins, ceremonies: ceremony)
+        case .securityKey:
+            descriptor = try await SecurityKeyProvider.register(relyingParty: "keys.example", userID: Data([2]), userName: "Person", challenge: Data(repeating: 1, count: 32),
+                authorityOrigins: origins, ceremonies: ceremony)
+        }
+        // Distinct and strictly ascending by bytes (spec §3.1).
+        #expect(descriptor.authorityOrigins == ["android:apk-key-hash:abc", "https://id.keys.example", "https://keys.example"])
+        let view = try await provider(kind, descriptor, ceremony).keyDescriptor()
+        #expect(view.form == .webauthn && view.rp == "keys.example" && view.credential == Data([1]) && view.agreement == nil)
+        #expect(view.signing == ceremony.signing.publicKey.x963Representation && view.authorityOrigins == descriptor.authorityOrigins)
+        // The core accepts the descriptor as a controller key.
+        let spec = ControllerSpec(key: view, label: "Passkey", roles: [.approve], verification: true, holder: nil, audiences: [])
+        #expect(spec.key.signing.count == 65)
+    }
+
+    @Test func theUserHandleIsTheAccountIDWhenItExistsAndRandomOtherwise() throws {
+        let account = String(repeating: "ab", count: 32)
+        #expect(try PasskeyProvider.userID(account: account) == Data(account.utf8))
+        let one = try PasskeyProvider.userID(account: nil), two = try PasskeyProvider.userID(account: nil)
+        #expect(one.count == 32 && two.count == 32 && one != two)
+    }
+}

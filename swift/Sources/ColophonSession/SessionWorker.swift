@@ -374,6 +374,7 @@ actor SessionWorker {
 
     /// Opens a controller engine for the owner, unlocks it by the owner's slot, runs `body`, locks it.
     /// A passkey owner is asked once per call (the PRF ceremony). The owner key must be a controller of the account.
+    func withOwnerForMove<T: Sendable>(_ body: (ColophonEngine, KeyCustody, String) async throws -> T) async throws -> T { try await withOwner(body) }
     private func withOwner<T: Sendable>(_ body: (ColophonEngine, KeyCustody, String) async throws -> T) async throws -> T {
         guard let account = accountID else { throw SessionError.notReady }
         let custody = try await ownerCustody()

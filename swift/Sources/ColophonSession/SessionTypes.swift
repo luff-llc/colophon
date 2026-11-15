@@ -188,6 +188,7 @@ public struct AccessRequest: Equatable, Sendable, Identifiable {
 /// What a person may be shown about this account that is not content (§17.5, §18).
 public struct SessionNotices: Equatable, Sendable {
     public let notices: Notices
+    public init(notices: Notices) { self.notices = notices }
     /// Transitions not yet shown or still pending, with signers, first-seen seq, deadline and `vetoable`.
     public var pending: [Pending] { notices.pending }
     /// Activations no key on this device signed that the person has not seen.
