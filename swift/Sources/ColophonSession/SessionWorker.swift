@@ -805,8 +805,8 @@ actor SessionWorker {
     struct ExchangeResult: Sendable {
         var passes = 0; var faults: [HomeFault] = []; var issues: [HomeIssue] = []; var changed = false; var unauthorized = false
     }
-    /// The call this host signed for a ticket: what the engine's next request for that ticket must be.
-    private struct BoundCall { let ticket: UInt64; let method: HttpMethod; let url: String; let bodyDigest: String }
+    /// The placeholder the engine attaches to a request whose call is built once the request is in hand (`signedRequest`).
+    static let placeholderCall = Data("colophon-call-placeholder".utf8)
 
     /// One pass with every home. The network calls run outside the gate; each engine step and the
     /// persistence of its stores run inside it, so an unpersisted answer is never visible to a refresh.
@@ -833,7 +833,7 @@ actor SessionWorker {
             let started = ContinuousClock.now
             var progress = true
             var passIndex = 0
-            var bound: BoundCall?
+            var awaitingCall: CallNeed?
             var stopped: HomeProblem?
             // A pass can end before everything moved (the engine plans the next stage from what the home just
             // said): run passes until one moves nothing, at most `HomeLimits.passes`.
@@ -852,21 +852,19 @@ actor SessionWorker {
                 case .done, .waiting: break loop
                 case .needCall:
                     guard let need = step.need else { break loop }
-                    let call: (envelope: Data, bound: BoundCall)
-                    do { call = try await buildCall(need, configured: configured) }
-                    catch let problem as HomeProblem { stopped = problem; break homeLoop }
-                    bound = call.bound
-                    try await gated { try await engine.run { try $0.exchangeProvideCall(home: need.home, ticket: need.ticket, call: call.envelope) } }
+                    // Step one of two: the engine builds the request only once it holds a call, and `CallNeed` carries
+                    // no body, so it gets a placeholder; `signedRequest` signs the real call from the request.
+                    awaitingCall = need
+                    let placeholder = Self.placeholderCall
+                    try await gated { try await engine.run { try $0.exchangeProvideCall(home: need.home, ticket: need.ticket, call: placeholder) } }
                 case .request:
-                    guard let request = step.request else { break loop }
-                    if let expected = bound, expected.ticket == request.ticket {
-                        // Never send a call with any request but the one it was signed for.
-                        guard request.method == expected.method, request.url == expected.url,
-                              Self.hex(SHA256.hash(data: request.body)) == expected.bodyDigest else {
-                            stopped = .callNotBound("the request for ticket \(request.ticket) is not the one its call was signed for"); break homeLoop
-                        }
-                    }
-                    bound = nil
+                    guard let emitted = step.request else { break loop }
+                    let request: HttpRequest
+                    if let need = awaitingCall {
+                        awaitingCall = nil
+                        do { request = try await signedRequest(emitted, for: need, configured: configured) }
+                        catch let problem as HomeProblem { stopped = problem; break homeLoop }
+                    } else { request = emitted }
                     guard request.url.hasPrefix(Self.base(configured.endpoint.absoluteString)) else {
                         stopped = .callNotBound("a request for another host than the configured home"); break homeLoop
                     }
@@ -915,36 +913,32 @@ actor SessionWorker {
     static func base(_ text: String) -> String { text.hasSuffix("/") ? String(text.dropLast()) : text }
     static func hex<D: Sequence>(_ digest: D) -> String where D.Element == UInt8 { digest.map { String(format: "%02x", $0) }.joined() }
 
-    /// A fresh `Authorization: Colophon` call for exactly this request, signed by this device's member key (§12.4).
+    /// Step two: a fresh `Authorization: Colophon` call for exactly this request, signed by this device's member key
+    /// (§12.4), put in place of the placeholder the engine attached.
     ///
     /// `args` are exactly `{"method": <HTTP method>, "path": <path and query relative to the home's base, as sent>,
-    /// "body": <lowercase hex SHA-256 of the body, of the empty string when there is none>}`; the purpose is
-    /// `colophon.home.read` for GET and `colophon.home.write` otherwise. The audience is the engine's `need.audience`,
-    /// which is the home's base URL (the engine and the home's §12.3 check both use the base, not the home's key ID).
-    /// The engine's `CallNeed` does not carry the body, so the host takes it from what it holds: no body for a GET, the
-    /// stored bytes for a `PUT {base}/records/<path>`. Any other request that needs a call is `callNotBound` (nothing is
-    /// signed). The request the engine then produces is checked against this before it is sent.
-    private func buildCall(_ need: CallNeed, configured: HomeConfiguration) async throws -> (envelope: Data, bound: BoundCall) {
+    /// "body": <lowercase hex SHA-256 of the request's body, of the empty string when there is none>}`, taken from the
+    /// request itself; the purpose is `colophon.home.read` for GET and `colophon.home.write` otherwise; the audience is
+    /// the engine's `need.audience`, the home's base URL (spec §14 "audience `{base}`", as the relay's home checks it).
+    /// The request must be the one the need named (ticket, method, URL, the configured home's host) and carry the
+    /// placeholder, else nothing is signed (`callNotBound`). The two steps exist because `CallNeed` carries neither the
+    /// relative path nor the body digest (an export gap, reported in the PR).
+    private func signedRequest(_ request: HttpRequest, for need: CallNeed, configured: HomeConfiguration) async throws -> HttpRequest {
         guard let engine, let custody = memberCustody, let id = memberID else { throw SessionError.notReady }
         let base = Self.base(need.audience)
-        guard need.url.hasPrefix(base), base == Self.base(configured.endpoint.absoluteString) else {
-            throw HomeProblem.callNotBound("a call for another host than the configured home")
+        guard request.ticket == need.ticket, request.method == need.method, request.url == need.url, request.url.hasPrefix(base),
+              base == Self.base(configured.endpoint.absoluteString) else {
+            throw HomeProblem.callNotBound("the request for ticket \(request.ticket) is not the one the engine asked a call for")
         }
-        let path = String(need.url.dropFirst(base.count))
-        let method = switch need.method { case .get: "GET"; case .post: "POST"; case .put: "PUT" }
-        let purpose = need.method == .get ? "colophon.home.read" : "colophon.home.write"
+        let placeholder = "Colophon " + Self.base64url(Self.placeholderCall)
+        guard let slot = request.headers.firstIndex(where: { $0.name.lowercased() == "authorization" && $0.value == placeholder }) else {
+            throw HomeProblem.callNotBound("the request does not carry the call slot the engine was given")
+        }
+        let path = String(request.url.dropFirst(base.count))
+        let method = switch request.method { case .get: "GET"; case .post: "POST"; case .put: "PUT" }
+        let purpose = request.method == .get ? "colophon.home.read" : "colophon.home.write"
         guard need.purpose == purpose else { throw HomeProblem.callNotBound("the engine asked for purpose \(need.purpose) on \(method)") }
-        let body: Data
-        if need.method == .get { body = Data() }
-        else if need.method == .put, path.hasPrefix("/records/") {
-            let encoded = String(path.dropFirst("/records/".count).split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0])
-            let record = encoded.removingPercentEncoding ?? encoded
-            body = RecordPaths.isBlob(record) ? try storage().readBlob(record) : try storage().read(record)
-        } else {
-            throw HomeProblem.callNotBound("\(method) \(path): the body of this request is not known before it is built")
-        }
-        let digest = Self.hex(SHA256.hash(data: body))
-        let argsObject: [String: String] = ["method": method, "path": path, "body": digest]
+        let argsObject: [String: String] = ["method": method, "path": path, "body": Self.hex(SHA256.hash(data: request.body))]
         let args = String(decoding: try JSONSerialization.data(withJSONObject: argsObject, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
         let signing = try await custody.provider(for: id).publicKeys().signing
         let target = CallTarget(audiences: [need.audience], callOrigins: [], controllerPurposes: [], homeEndpoints: [need.audience])
@@ -954,7 +948,12 @@ actor SessionWorker {
             }
         }
         guard let artifact = written.artifact else { throw ColophonError.internalFailure(code: "internal", detail: "a call returned no envelope") }
-        return (artifact, BoundCall(ticket: need.ticket, method: need.method, url: need.url, bodyDigest: digest))
+        var headers = request.headers
+        headers[slot] = Header(name: headers[slot].name, value: "Colophon " + Self.base64url(artifact))
+        return HttpRequest(ticket: request.ticket, home: request.home, method: request.method, url: request.url, headers: headers, body: request.body)
+    }
+    static func base64url(_ data: Data) -> String {
+        data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
     }
 
     var homeFaults: [HomeFault] { faults }
