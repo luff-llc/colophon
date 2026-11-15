@@ -33,13 +33,28 @@ public enum HomeLimits {
     /// The longest one exchange with one home may take.
     public static let exchangeTime: Duration = .seconds(180)
 
-    /// Whether `endpoint` may be a home: `https`, or `http` to `localhost`, `127.0.0.0/8` or `::1` when
-    /// `allowingLoopbackHTTP` (tests and a home on this machine during development).
+    /// Whether `endpoint` may be a home: `https`, or `http` to a loopback address when `allowingLoopbackHTTP` (tests and a
+    /// home on this machine during development): `localhost`, a literal `127.0.0.0/8` address (four decimal octets) or
+    /// `::1`. Parsed, never matched by prefix: `127.attacker.example` is a remote host.
     public static func isAllowed(_ endpoint: URL, allowingLoopbackHTTP: Bool) -> Bool {
         guard let scheme = endpoint.scheme?.lowercased(), let host = endpoint.host?.lowercased(), !host.isEmpty else { return false }
         if scheme == "https" { return true }
         guard scheme == "http", allowingLoopbackHTTP else { return false }
-        return host == "localhost" || host.hasSuffix(".localhost") || host == "::1" || host == "[::1]" || host.hasPrefix("127.")
+        return isLoopbackLiteral(host)
+    }
+    static func isLoopbackLiteral(_ host: String) -> Bool {
+        if host == "localhost" { return true }
+        let bare = host.hasPrefix("[") && host.hasSuffix("]") ? String(host.dropFirst().dropLast()) : host
+        if bare == "::1" || bare == "0:0:0:0:0:0:0:1" { return true }
+        let parts = bare.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        var octets: [Int] = []
+        for part in parts {
+            guard (1...3).contains(part.count), part.allSatisfy({ $0 >= "0" && $0 <= "9" }), !(part.count > 1 && part.first == "0"),
+                  let value = Int(part), value <= 255 else { return false }
+            octets.append(value)
+        }
+        return octets[0] == 127
     }
 }
 

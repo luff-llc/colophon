@@ -880,6 +880,8 @@ actor SessionWorker {
             var progress = true
             var passIndex = 0
             var stopped: HomeProblem?
+            var recovered = false
+            do {
             // A pass can end before everything moved (the engine plans the next stage from what the home just
             // said): run passes until one moves nothing, at most `HomeLimits.passes`.
             homeLoop: while progress, passIndex < HomeLimits.passes {
@@ -894,7 +896,13 @@ actor SessionWorker {
                 }
                 let step = try await gated { try await engine.run { try $0.exchangeNext(home: home.id) } }
                 switch step.kind {
-                case .done, .waiting: break loop
+                case .done: break loop
+                // This loop answers every request it is given, so an outstanding one belongs to a pass that was interrupted
+                // (a cancelled caller): abandon it and run the pass again, once.
+                case .waiting:
+                    await abortPass(engine, home: home.id)
+                    if !recovered { recovered = true; progress = true }
+                    break loop
                 case .needCall:
                     guard let need = step.need else { break loop }
                     do { try await provideCall(for: need, home: home, configured: configured) }
@@ -916,13 +924,6 @@ actor SessionWorker {
                     do { answer = try await target.transport.send(request) }
                     catch HomeTransportError.responseTooLarge(let limit) { stopped = .responseTooLarge(limit: limit); break homeLoop }
                     catch HomeTransportError.insecureEndpoint(let url) { stopped = .insecureEndpoint(url); break homeLoop }
-                    catch {
-                        try await gated {
-                            let report = try await engine.run { try $0.exchangeAbort(home: home.id) }
-                            try await persist(report.store)
-                        }
-                        throw error
-                    }
                     // A transport the host supplied is held to the same bound.
                     let limit = HomeLimits.responseBytes(for: request.url)
                     guard answer.body.count <= limit else { stopped = .responseTooLarge(limit: limit); break homeLoop }
@@ -940,17 +941,28 @@ actor SessionWorker {
             }
             result.passes += 1
             }
+            } catch {
+                // A transport failure, an engine error or a cancelled caller: the request in flight is forgotten, what was
+                // pulled and verified is kept, and the next pass starts clean. The abort runs even for a cancelled caller.
+                await abortPass(engine, home: home.id)
+                throw error
+            }
             if let stopped {
                 result.issues.append(HomeIssue(home: home.id, problem: stopped))
-                try await gated {
-                    let report = try await engine.run { try $0.exchangeAbort(home: home.id) }
-                    try await persist(report.store)
-                }
+                await abortPass(engine, home: home.id)
             }
         }
         faults = result.faults
         issues = result.issues
         return result
+    }
+
+    /// Abandons the pass with `home` (`exchange_abort`) and persists what it took. It enters the gate without checking
+    /// cancellation, so a cancelled caller still leaves the engine with no request outstanding.
+    private func abortPass(_ engine: ColophonEngine, home: String) async {
+        await enter(); defer { exit() }
+        guard let report = try? await engine.run({ try $0.exchangeAbort(home: home) }) else { return }
+        try? await persist(report.store)
     }
 
     static func base(_ text: String) -> String { text.hasSuffix("/") ? String(text.dropLast()) : text }
