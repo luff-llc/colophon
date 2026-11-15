@@ -261,6 +261,17 @@ import Observation
     /// Runs one exchange pass with every home now and refreshes when something arrived. Returns false when it failed.
     @discardableResult public func syncNow() async -> Bool {
         guard homesConfigured else { return false }
+        // Passes never overlap: a caller waits for the pass in flight, then runs its own.
+        let previous = syncChain
+        let task = Task { [weak self] () -> Bool in
+            _ = await previous?.value
+            return await self?.runSync() ?? false
+        }
+        syncChain = task
+        return await task.value
+    }
+    @ObservationIgnored private var syncChain: Task<Bool, Never>?
+    private func runSync() async -> Bool {
         await restore()
         if syncState != .syncing { syncState = .syncing }
         do {

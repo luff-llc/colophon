@@ -183,13 +183,15 @@ actor SessionWorker {
             identity: AccountIdentity(kind: .member, id: keyID), account: account, namespaces: configuration.libraryNamespaces,
             saved: saved, deviceKey: key, nowMs: nowMs)
         engine = opened; accountID = account
+        // A member that is not approved yet holds no keys; the records can still be read and the exchange can
+        // still bring the approval in. A member opens its epoch shares in `unlockIfPossible`.
+        if try await opened.run({ try $0.me() }).kind != .member { _ = try await opened.run { try $0.load() } }
         if journal.account == nil { journal.account = account; try saveJournal() }
         try await unlockIfPossible()
     }
 
     private func refreshEngine(_ entries: [MediumEntry]) async throws {
         guard let engine else { return }
-        if !memberOpened { await engine.discard(); self.engine = nil; try await openEngine(entries); return }
         let list = listed(entries)
         let at = nowMs
         _ = try await engine.run { try $0.advance(nowMs: at) }
@@ -266,7 +268,8 @@ actor SessionWorker {
         if phase == .ready { for r in try await engine.run({ try $0.revisions() }) where configuration.libraryNamespaces.contains(r.namespace) { revisions[r.namespace] = r.revision } }
         let notices = try await currentNotices()
         let head = try await engine.run { try $0.headSeq() }
-        if head != lastHead { lastHead = head; revisions["colophon.authority", default: 0] = head }
+        lastHead = head
+        if phase == .ready { revisions["colophon.authority"] = head }
         let visible = phase == .ready
         return snapshot(phase: phase, members: members, requests: pending, notices: notices, revisions: visible ? revisions : [:], homes: homes)
     }
@@ -530,7 +533,8 @@ actor SessionWorker {
         do {
             try await unlockCreatedAccount(owner, custody: custody, ownerID: ownerID)
             for home in configuration.homes {
-                guard let raw = home.request else { continue }
+                guard let makeRequest = home.request else { continue }
+                let raw = try await makeRequest(account)
                 let info = try accountRequestInfo(raw: raw)
                 let change: [String: Any] = ["homes": ["appoint": [["request": raw.base64EncodedString(), "terms": (try JSONSerialization.jsonObject(with: Data(info.termsJson.utf8)))]]]]
                 let json = String(decoding: try JSONSerialization.data(withJSONObject: change, options: [.sortedKeys]), as: UTF8.self)
@@ -654,7 +658,14 @@ actor SessionWorker {
                 let entries = try storage().listing(); let list = listed(entries); let at = nowMs
                 _ = try await engine.run { try $0.advance(nowMs: at) }
                 _ = try await engine.run { try $0.refresh(listing: list) }
+                try await unlockIfPossible()
             }
+            var progress = true
+            var passIndex = 0
+            // A pass can end before everything moved (the engine plans the next stage from what the home just
+            // said): run passes until one moves nothing, at most four.
+            while progress, passIndex < 4 {
+            progress = false; passIndex += 1
             var steps = 0
             loop: while steps < 100_000 {
                 steps += 1
@@ -668,6 +679,7 @@ actor SessionWorker {
                     try await gated { try await engine.run { try $0.exchangeProvideCall(home: need.home, ticket: need.ticket, call: call) } }
                 case .request:
                     guard let request = step.request else { break loop }
+                    if request.method != .get { progress = true }
                     let answer: HttpAnswer
                     do { answer = try await configured.transport.send(request) }
                     catch {
@@ -686,10 +698,11 @@ actor SessionWorker {
                         result.faults.append(HomeFault(home: home.id, fault: fault))
                         if fault.kind == .unauthorized { result.unauthorized = true }
                     }
-                    if !report.store.isEmpty || report.changes.authorityToSeq != report.changes.authorityFromSeq || !report.changes.namespaces.isEmpty { result.changed = true }
+                    if !report.store.isEmpty || report.changes.authorityToSeq != report.changes.authorityFromSeq || !report.changes.namespaces.isEmpty { result.changed = true; progress = true }
                 }
             }
             result.passes += 1
+            }
         }
         faults = result.faults
         return result

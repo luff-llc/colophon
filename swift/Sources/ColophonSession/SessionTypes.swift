@@ -84,14 +84,15 @@ public struct HomeConfiguration: Sendable {
     /// The home's base URL, as named in the account (`Home.endpoints`).
     public let endpoint: URL
     public let label: String
-    /// The home's own signed member request (§9.1), to appoint it when this host creates the account. A
-    /// relay or home service publishes it; the SDK cannot know it. Nil: the home is not appointed here
-    /// (it is reached only if the account already names it).
-    public let request: Data?
+    /// Asks the home service for its own signed member request (§9.1) for a new account, to appoint it when
+    /// this host creates the account. A request names the account, so it cannot exist before creation: the
+    /// session calls this with the new account's ID. Nil: the home is not appointed here (it is reached only
+    /// if the account already names it).
+    public let request: (@Sendable (_ account: String) async throws -> Data)?
     /// Storage bearer token for the home (access to its store only, never membership).
     public let bearerToken: String?
     public let transport: any HomeTransport
-    public init(endpoint: URL, label: String = "Home", request: Data? = nil, bearerToken: String? = nil,
+    public init(endpoint: URL, label: String = "Home", request: (@Sendable (_ account: String) async throws -> Data)? = nil, bearerToken: String? = nil,
                 transport: any HomeTransport = URLSessionHomeTransport()) {
         self.endpoint = endpoint; self.label = label; self.request = request; self.bearerToken = bearerToken; self.transport = transport
     }
