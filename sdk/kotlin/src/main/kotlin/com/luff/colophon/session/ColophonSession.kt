@@ -9,7 +9,7 @@ import com.luff.colophon.ControllerSpec
 import com.luff.colophon.PairingTransferKey
 import com.luff.colophon.SealedSeed
 import com.luff.colophon.SignForm
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -106,20 +106,20 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     }
 
     /** A shared completion barrier: dependent startup work awaits this before using the session. */
-    suspend fun restore(): Unit = facade {
-        val existing = restoreJob
-        if (existing != null) { existing.await(); return@facade }
-        val done = CompletableDeferred<Unit>()
-        restoreJob = done
+    suspend fun restore() {
+        // The first call starts the restore in the session's own scope (as a Swift Task): a caller that is cancelled
+        // stops waiting, the restore itself completes.
+        facade { restoreJob ?: scope.async { runRestore() }.also { restoreJob = it } }.await()
+    }
+    private suspend fun runRestore() {
         val lease = context
         startWatching()
         try {
             val snapshot = worker.restore()
             if (lease == context) apply(snapshot)
-        } catch (e: CancellationException) { done.complete(Unit); throw e
+        } catch (e: CancellationException) { throw e
         } catch (e: Exception) { if (lease == context) fail(e) }
         startSyncLoop(); startDueLoop()
-        done.complete(Unit)
     }
 
     suspend fun refresh() = refresh(false)

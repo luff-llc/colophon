@@ -87,9 +87,9 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     private val lane: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1, "colophon-session")
     private val gate = Mutex()
     private var memberKeys: AsyncKeyProvider = SessionKeys(configuration.keys)
-    private var engine: ColophonEngine? = null
+    @Volatile private var engine: ColophonEngine? = null
         set(value) { field = value; if (value == null) memberOpened = false }
-    private var memberCustody: KeyCustody? = null
+    @Volatile private var memberCustody: KeyCustody? = null
     var accountId: String? = null; private set
     var memberId: String? = null; private set
     private var journal = SessionJournal()
