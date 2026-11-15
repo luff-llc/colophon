@@ -86,6 +86,44 @@ pub(super) struct Folded {
     pub keys: Vec<(u64, String, String, String)>,
 }
 
+/// The heads of one namespace: their fold positions in order, and an additive hash of their
+/// digests (a set hash: a head added or taken away changes it by one term, whatever the order
+/// the heads arrived in).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct HeadSet {
+    pub keys: BTreeSet<(u64, String, String, String)>,
+    acc: [u64; 4],
+}
+impl HeadSet {
+    fn term(digest: &str) -> [u64; 4] {
+        use sha2::{Digest, Sha256};
+        let h: [u8; 32] = Sha256::digest(digest.as_bytes()).into();
+        let mut t = [0u64; 4];
+        for (i, c) in h.chunks_exact(8).enumerate() {
+            let mut e = [0u8; 8];
+            e.copy_from_slice(c);
+            t[i] = u64::from_le_bytes(e);
+        }
+        t
+    }
+    fn insert(&mut self, k: (u64, String, String, String)) {
+        let t = Self::term(&k.3);
+        if self.keys.insert(k) {
+            for i in 0..4 {
+                self.acc[i] = self.acc[i].wrapping_add(t[i]);
+            }
+        }
+    }
+    fn remove(&mut self, k: &(u64, String, String, String)) {
+        let t = Self::term(&k.3);
+        if self.keys.remove(k) {
+            for i in 0..4 {
+                self.acc[i] = self.acc[i].wrapping_sub(t[i]);
+            }
+        }
+    }
+}
+
 /// The overlaid namespaces answered so far, by namespace, with the merged-chain key each was made for.
 pub(super) type OverlayCache = BTreeMap<String, ([u8; 32], Arc<Overlaid>)>;
 
@@ -118,7 +156,9 @@ pub(super) struct Derived {
     pub live: crate::v05::live::LiveJudgement,
     /// The positions `(generation, author, id, digest)` of the heads, by namespace, in fold
     /// order: what the change token and the overlay merge the durable fold with.
-    pub head_order: BTreeMap<String, BTreeSet<(u64, String, String, String)>>,
+    pub head_order: BTreeMap<String, HeadSet>,
+    /// The live paths the latest extension judged again.
+    pub touched_live: BTreeSet<String>,
     /// Which slots a new durable record can change.
     pub live_idx: crate::v05::live::LiveIndex,
     /// The overlaid namespaces answered so far, by namespace: the merged-chain key they were
@@ -413,6 +453,7 @@ impl Derived {
             judgement,
             durable,
             head_order,
+            touched_live: BTreeSet::new(),
             live,
             live_idx,
             overlays: Mutex::new(BTreeMap::new()),
@@ -577,6 +618,7 @@ impl Derived {
         if !affected.is_empty() {
             self.rejudge_live(inputs.live, &affected, &mut cache);
         }
+        self.touched_live = affected;
         drop(cache);
         self.fold_applied = 0;
         // Each namespace's fold takes the new operations after its last; operations that land
@@ -669,7 +711,7 @@ impl Derived {
             }
             // Over a long replay, only the snapshots that will be kept are made.
             let total = f.keys.len() + items.len();
-            let keep_from = total.saturating_sub(policy.every * SNAPSHOTS_KEPT);
+            let keep_from = total.saturating_sub(policy.every.saturating_mul(SNAPSHOTS_KEPT));
             for (pos, view, mk, dg) in &items {
                 let ctx = self.auth.member(&view.author).map(|m| AuthorContext {
                     kind: model_kind(mk),
@@ -696,6 +738,8 @@ impl Derived {
             self.fold_applied += applied;
             if is_late {
                 f.fold.applied = f.keys.len() as u64;
+                // Recomputed, not carried: the largest clock among the operations folded.
+                f.fold.clock = f.admitted.iter().map(|v| v.clock).max().unwrap_or(0);
             }
             f.revision = Self::revision_of(&f.fold);
         }
@@ -715,10 +759,8 @@ impl Derived {
             h.digest.clone(),
         )
     }
-    fn head_order_of(
-        live: &crate::v05::live::LiveJudgement,
-    ) -> BTreeMap<String, BTreeSet<(u64, String, String, String)>> {
-        let mut m: BTreeMap<String, BTreeSet<(u64, String, String, String)>> = BTreeMap::new();
+    fn head_order_of(live: &crate::v05::live::LiveJudgement) -> BTreeMap<String, HeadSet> {
+        let mut m: BTreeMap<String, HeadSet> = BTreeMap::new();
         for h in &live.heads {
             m.entry(h.namespace.clone())
                 .or_default()
@@ -731,7 +773,7 @@ impl Derived {
             let k = Self::head_key(old);
             if let Some(set) = self.head_order.get_mut(&old.namespace) {
                 set.remove(&k);
-                if set.is_empty() {
+                if set.keys.is_empty() {
                     self.head_order.remove(&old.namespace);
                 }
             }
@@ -851,41 +893,35 @@ impl Derived {
     /// (the namespace's change token comes from it). `None` when the namespace holds no head or
     /// is not folded here.
     fn merge_plan(&self, ns: &str) -> Option<(usize, [u8; 32])> {
+        use sha2::{Digest, Sha256};
         let base = self.folded.get(ns)?;
         let heads = self.head_order.get(ns)?;
-        let first = heads.iter().next()?;
+        let first = heads.keys.iter().next()?;
         let p = base.keys.partition_point(|k| k < first);
-        let mut h = base.fold.hashes.get(p).copied()?;
-        let mut i = p;
-        let mut hs = heads.iter().peekable();
-        loop {
-            let head_first = match (hs.peek(), base.keys.get(i)) {
-                (Some(hd), Some(k)) => *hd < k,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => break,
-            };
-            if head_first {
-                let hd = hs.next()?;
-                h = crate::engine::roll(h, &hd.3);
-            } else {
-                h = crate::engine::roll(h, base.fold.order.get(i)?);
-                i += 1;
-            }
+        // What the readers' view of the namespace is made of: the durable fold (its rolled
+        // hash covers every durable operation and their order) and the set of heads. The
+        // position `p` is a function of both.
+        let mut h = Sha256::new();
+        h.update(base.fold.hashes.last().copied().unwrap_or([0; 32]));
+        for w in heads.acc {
+            h.update(w.to_le_bytes());
         }
-        Some((p, h))
+        h.update((heads.keys.len() as u64).to_le_bytes());
+        Some((p, h.finalize().into()))
     }
 
-    /// The change token of `ns` as readers see it, the live heads included.
+    /// The change token of `ns` as readers see it, the live heads included: a function of the
+    /// durable operations and the set of heads, found without a pass over either.
     pub(super) fn revision_of_ns(&self, ns: &str) -> u64 {
         match self.merge_plan(ns) {
-            Some((_, h)) => {
-                let mut eight = [0u8; 8];
-                eight.copy_from_slice(&h[..8]);
-                u64::from_be_bytes(eight) & crate::v05::encoding::bounds::MAX_INTEGER
-            }
+            Some((_, h)) => Self::token_of(&h),
             None => self.folded.get(ns).map_or(0, |f| f.revision),
         }
+    }
+    fn token_of(h: &[u8; 32]) -> u64 {
+        let mut eight = [0u8; 8];
+        eight.copy_from_slice(&h[..8]);
+        u64::from_be_bytes(eight) & crate::v05::encoding::bounds::MAX_INTEGER
     }
 
     /// The namespace as readers see it when it holds live heads: the durable fold with each
@@ -902,12 +938,14 @@ impl Derived {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some((k, o)) = c.get(ns) {
-                if *k == chain {
+                // The merged order and the position where the heads begin: a head that
+                // becomes a durable record moves the position and not the order.
+                if *k == chain && o.split == p {
                     return Some(o.clone());
                 }
             }
         }
-        let o = Arc::new(self.build_overlay(ns, self.head_items(ns), p)?);
+        let o = Arc::new(self.build_overlay(ns, self.head_items(ns), p, Self::token_of(&chain))?);
         self.overlays
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -915,7 +953,13 @@ impl Derived {
         Some(o)
     }
 
-    fn build_overlay(&self, ns: &str, heads: Vec<FoldItem>, p: usize) -> Option<Overlaid> {
+    fn build_overlay(
+        &self,
+        ns: &str,
+        heads: Vec<FoldItem>,
+        p: usize,
+        revision: u64,
+    ) -> Option<Overlaid> {
         let base = self.folded.get(ns)?;
         // Where the replay starts: the snapshot at or before `p` the durable fold still holds.
         let snap = base
@@ -952,8 +996,7 @@ impl Derived {
                 tail.push(view.clone());
             }
         }
-        let mut eight = [0u8; 8];
-        eight.copy_from_slice(&h[..8]);
+        let _ = h;
         Some(Overlaid {
             fold: {
                 let mut n = crate::engine::Namespace::new(ns);
@@ -962,7 +1005,7 @@ impl Derived {
             },
             admitted: tail,
             split: p,
-            revision: u64::from_be_bytes(eight) & crate::v05::encoding::bounds::MAX_INTEGER,
+            revision,
         })
     }
 
@@ -1031,7 +1074,7 @@ impl Derived {
                 every: 0,
                 retain: 0,
             };
-            let keep_from = ops.len().saturating_sub(every * SNAPSHOTS_KEPT);
+            let keep_from = ops.len().saturating_sub(every.saturating_mul(SNAPSHOTS_KEPT));
             // A fold taken from before (a checkpoint's or the last derivation's) is a place to
             // rewind to as well.
             if start > 0 && fold.checkpoints.last().is_none_or(|s| s.position != start) {

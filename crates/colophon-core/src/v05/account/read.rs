@@ -427,14 +427,6 @@ impl Account {
 
     /// The members: 0.4's counts of admitted writes are derived from admission, not counters.
     pub fn members(&self) -> Vec<MemberInfo> {
-        let mut writes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for j in &self.d.judgement.records {
-            if j.outcome == Admission::Admitted {
-                if let (Some(a), Some(i)) = (&j.author, &j.id) {
-                    writes.entry(a).or_default().insert(i);
-                }
-            }
-        }
         self.d
             .auth
             .state()
@@ -450,7 +442,7 @@ impl Account {
                         grant: Some(grant_of(m)),
                         since: m.granted_seq,
                         revoked_at: m.revoked_seq,
-                        writes: writes.get(id.as_str()).map_or(0, |s| s.len() as u64),
+                        writes: self.d.durable.writes_of(&id),
                     },
                     expires_ms: m.expires_ms,
                     provisional: m.provisional.is_some(),

@@ -325,7 +325,7 @@ impl<S: RecordSource> Engine<S> {
             let ops = crate::v05::records::operation_path(&p.author, &p.namespace, ph.clock, &p.id);
             if relies
                 && !self.ix.have.contains_key(&ops)
-                && !self.account.records().iter().any(|r| r.path == ops)
+                && !self.account.holds_path(&ops)
             {
                 let fetched = self
                     .source

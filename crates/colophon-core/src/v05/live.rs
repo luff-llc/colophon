@@ -228,6 +228,8 @@ pub(crate) struct DurableIndex {
     admitted: BTreeMap<String, BTreeSet<(u64, String, String)>>,
     retained: BTreeSet<String>,
     ids: BTreeSet<(String, String)>,
+    /// Distinct admitted operations per author: what a member has spent of a write budget.
+    writes: BTreeMap<String, u64>,
 }
 impl DurableIndex {
     /// The index of a whole judgement.
@@ -249,7 +251,9 @@ impl DurableIndex {
             j.id.as_deref(),
             j.digest.as_deref(),
         ) {
-            self.ids.insert((a.to_string(), id.to_string()));
+            if self.ids.insert((a.to_string(), id.to_string())) {
+                *self.writes.entry(a.to_string()).or_default() += 1;
+            }
             self.admitted.entry(ns.to_string()).or_default().insert((
                 j.clock,
                 a.to_string(),
@@ -265,6 +269,10 @@ impl DurableIndex {
                 .next_back()
                 .map_or(0, |k| k.0)
         })
+    }
+    /// The distinct operations of `author` admitted.
+    pub(crate) fn writes_of(&self, author: &str) -> u64 {
+        self.writes.get(author).copied().unwrap_or(0)
     }
     /// The highest admitted durable clock in `ns` (0 if none).
     pub(crate) fn highest(&self, ns: &str) -> u64 {

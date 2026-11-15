@@ -1210,7 +1210,7 @@ impl<S: RecordSource> Engine<S> {
             let ops =
                 crate::v05::records::operation_path(&h.author, &h.namespace, h.generation, &h.id);
             if self.ix.have.contains_key(&ops)
-                || self.account.records().iter().any(|r| r.path == ops)
+                || self.account.holds_path(&ops)
             {
                 continue;
             }
@@ -1358,6 +1358,14 @@ impl<S: RecordSource> Engine<S> {
         };
         let mut c = self.account.set_read_scope(wanted)?;
         self.options.namespaces = namespaces;
+        // The account dropped what is out of scope: those paths are unread again.
+        let options = &self.options;
+        self.ix.have.retain(|p, _| {
+            !matches!(paths::classify(p), Some(Kind::Op { namespace, .. }) if !in_scope(options, &namespace))
+        });
+        self.ix.live_have.retain(|p, _| {
+            !matches!(paths::classify(p), Some(Kind::Live { namespace, .. }) if !in_scope(options, &namespace))
+        });
         let listing: Vec<String> = self.ix.listing.iter().cloned().collect();
         classify_listing(
             &self.options,

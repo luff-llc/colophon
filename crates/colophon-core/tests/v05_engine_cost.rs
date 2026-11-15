@@ -354,6 +354,97 @@ fn sessions(n: usize) {
     row("advance one second", &before, &ea.stats(), t);
 }
 
+/// The listening app's realistic session: N durable records in the listening namespace, a
+/// position written, then a durable action, then another position (a live head before a durable
+/// operation). The live update and the view that follows it, five times.
+fn listening_session(n: usize) {
+    const LISTEN: &str = "listening.podcasts";
+    println!("N = {n} (listening, live heads before durable operations)");
+    let (mut s, ids) = setup(LISTEN, &[("Phone", 31, "write")]);
+    let id = ids[0].clone();
+    let src = device_source(&s);
+    let mut host = std::mem::replace(&mut s.f.host, Host::new());
+    let mut e = member_engine(&s.f, &host, &src, &id, NOW);
+    engine_write(
+        &mut e,
+        &mut host,
+        &src,
+        LISTEN,
+        "follow",
+        json!({"id": "show", "url": "https://example.org/f", "title": "T"}),
+    );
+    for i in 0..n {
+        engine_write(
+            &mut e,
+            &mut host,
+            &src,
+            LISTEN,
+            "follow",
+            json!({"id": format!("f{i}"), "url": "https://example.org/f", "title": "T"}),
+        );
+    }
+    for k in 0..6 {
+        // A position, then a durable action: the head sits before a durable operation.
+        engine_live(
+            &mut e,
+            &mut host,
+            &src,
+            json!({"id": "ep0", "show": "show", "seconds": k as f64}),
+        );
+        engine_write(
+            &mut e,
+            &mut host,
+            &src,
+            LISTEN,
+            "follow",
+            json!({"id": format!("g{k}"), "url": "https://example.org/f", "title": "T"}),
+        );
+        let before = e.stats();
+        let t = Instant::now();
+        engine_live(
+            &mut e,
+            &mut host,
+            &src,
+            json!({"id": "ep0", "show": "show", "seconds": 100.0 + k as f64}),
+        );
+        row("live update (head before ops)", &before, &e.stats(), t);
+        let t = Instant::now();
+        let v = e.view(LISTEN).unwrap();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        drop(v);
+        println!("  {:<34} {:>9.1} ms", "view after the live update", ms);
+        let t = Instant::now();
+        let r = e.revision(LISTEN);
+        println!(
+            "  {:<34} {:>9.3} ms (token {})",
+            "change token",
+            t.elapsed().as_secs_f64() * 1e3,
+            r
+        );
+        let t = Instant::now();
+        let q = e.query(LISTEN, "read", json!({})).unwrap();
+        drop(q);
+        println!(
+            "  {:<34} {:>9.1} ms",
+            "query, same state (cached)",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn cost_of_a_listening_session_with_heads_before_durable_operations() {
+    let sizes: Vec<usize> = std::env::var("COST_SIZES")
+        .unwrap_or_else(|_| "1000,10000".into())
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    for n in sizes {
+        listening_session(n);
+    }
+}
+
 #[test]
 #[ignore]
 fn cost_of_what_real_sessions_do() {

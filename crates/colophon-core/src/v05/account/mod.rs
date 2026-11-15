@@ -506,6 +506,19 @@ fn union_records(into: &mut Vec<HeldRecord>, from: &[HeldRecord]) {
     into.sort_by(|a, b| (&a.path, &a.bytes).cmp(&(&b.path, &b.bytes)));
 }
 
+/// Whether the record or live path `path` is in a read scope (a path that names no namespace
+/// always is).
+fn path_in_scope(scope: &Option<BTreeSet<String>>, path: &str) -> bool {
+    let Some(set) = scope else {
+        return true;
+    };
+    let mut parts = path.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("ops" | "state"), Some(_), Some(ns)) => set.contains(ns),
+        _ => true,
+    }
+}
+
 impl Account {
     /// Open an account from its objects and records as `me` at the clock `now_ms`, and
     /// optionally the verifier's stored state (§17.2): the bytes [`Account::export_persisted`]
@@ -739,6 +752,8 @@ impl Account {
             merged.extend(old_it);
             self.records = merged;
         }
+        let touched = std::mem::take(&mut self.d.touched_live);
+        self.settle_live(Some(&touched));
         Some(before)
     }
 
@@ -837,6 +852,7 @@ impl Account {
         self.records = records;
         self.persisted = persisted;
         self.now_ms = now_ms;
+        self.settle_live(None);
         self.note_pending();
         let now = self.pending_digests();
         changes.pending.gone.retain(|g| !now.contains(g));
@@ -1038,9 +1054,24 @@ impl Account {
                 "the maintained derivation differs from a rebuild over the same inputs: {part}"
             )));
         }
+        let mut spent: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for j in &self.d.judgement.records {
+            if j.outcome == crate::v05::records::Outcome::Admitted {
+                if let (Some(a), Some(i)) = (&j.author, &j.id) {
+                    spent.entry(a).or_default().insert(i);
+                }
+            }
+        }
+        for m in self.d.auth.state().members() {
+            let id = m.request.member_id();
+            require(
+                self.d.durable.writes_of(&id) == spent.get(id.as_str()).map_or(0, |s| s.len() as u64),
+                "the write counts differ from the judged records",
+            )?;
+        }
         for ns in self.d.auth.namespaces() {
             require(
-                self.durable_clock(ns) == self.highest_admitted_clock(ns),
+                self.durable_clock(ns) == self.scan_highest_admitted_clock(ns),
                 "the durable clock index differs from the judged records",
             )?;
         }
@@ -1049,12 +1080,16 @@ impl Account {
             let Some(o) = self.d.overlaid(ns) else {
                 continue;
             };
-            let Some((rev, state, _)) = derived::reference_merged(&self.d, ns) else {
+            let Some((_, state, admitted)) = derived::reference_merged(&self.d, ns) else {
                 continue;
             };
+            let mut all: Vec<_> = self.d.folded[ns].admitted
+                [..o.split.min(self.d.folded[ns].admitted.len())]
+                .to_vec();
+            all.extend(o.admitted.iter().cloned());
             require(
-                rev == o.revision
-                    && state == serde_json::to_string(&o.fold.state).unwrap_or_default(),
+                state == serde_json::to_string(&o.fold.state).unwrap_or_default()
+                    && admitted == serde_json::to_string(&all).unwrap_or_default(),
                 "the live overlay differs from a fold of the merged order",
             )?;
         }
@@ -1112,6 +1147,12 @@ impl Account {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .import_memo(memo);
     }
+    /// The live candidates held (sorted by path and bytes): what is left after each is judged
+    /// and what can no longer matter is dropped. A merge of exactly these into an account with
+    /// the same history and records holds exactly these and judges them the same.
+    pub fn live_held(&self) -> &[HeldRecord] {
+        &self.live
+    }
     /// The current live heads (0.3 §5.1): verified, current, folded.
     pub fn live_heads(&self) -> &[crate::v05::live::LiveHead] {
         &self.d.live.heads
@@ -1128,6 +1169,10 @@ impl Account {
     /// failure.
     pub fn merge_live(&mut self, candidates: Vec<HeldRecord>, now_ms: i64) -> Result<Changes> {
         crate::v05::write::check_issued(now_ms)?;
+        let candidates: Vec<HeldRecord> = candidates
+            .into_iter()
+            .filter(|c| path_in_scope(&self.scope, &c.path))
+            .collect();
         require(
             candidates.len() <= 16_384
                 && candidates
@@ -1249,21 +1294,7 @@ impl Account {
         // positions of the earlier ones hold.
         done.sort_by(|a, b| (b.0.from, &b.0.path).cmp(&(a.0.from, &a.0.path)));
         for (g, keep, j) in done {
-            let jumped = j
-                .verdicts
-                .iter()
-                .any(|v| matches!(v, crate::v05::live::LiveVerdict::Refused("clockJump")));
-            self.d.live.verdicts.splice(
-                g.from..g.to,
-                keep.iter()
-                    .zip(j.verdicts)
-                    .map(|(c, v)| (c.path.clone(), v)),
-            );
-            self.d.set_head_of(&g.path, j.head);
-            self.d
-                .live_idx
-                .set_group(&g.path, j.metas.into_iter().flatten().collect(), jumped);
-            self.live.splice(g.from..g.to, keep);
+            self.splice_live_group(&g.path, g.from, g.to, keep, j);
         }
         let mut c = self.diff(&self.d, &self.objects);
         // `diff` of a derivation with itself names no namespace: the touched ones are compared.
@@ -1275,6 +1306,87 @@ impl Account {
         }
         c.status = Some(Status::of(&self.d.verdict));
         Ok(c)
+    }
+
+    /// Put the candidates `keep` (judged as `j`) in place of the ones held at `from..to`, which
+    /// are at `path`: the held set, the verdicts, the head and the live index.
+    fn splice_live_group(
+        &mut self,
+        path: &str,
+        from: usize,
+        to: usize,
+        keep: Vec<HeldRecord>,
+        j: crate::v05::live::GroupJudgement,
+    ) {
+        let jumped = j
+            .verdicts
+            .iter()
+            .any(|v| matches!(v, crate::v05::live::LiveVerdict::Refused("clockJump")));
+        self.d.live.verdicts.splice(
+            from..to,
+            keep.iter()
+                .zip(j.verdicts)
+                .map(|(c, v)| (c.path.clone(), v)),
+        );
+        self.d.set_head_of(path, j.head);
+        self.d
+            .live_idx
+            .set_group(path, j.metas.into_iter().flatten().collect(), jumped);
+        self.live.splice(from..to, keep);
+    }
+
+    /// Keep what can still matter in the live paths `only` (every path when `None`): a path
+    /// whose verdicts now allow a candidate to go (a superseded one past the two highest, a
+    /// candidate that is no live record) loses it, and the rest is judged again. Run after
+    /// anything that can change a verdict, so the held set is the one a merge of the held
+    /// candidates leaves, whichever way they arrived.
+    pub(super) fn settle_live(&mut self, only: Option<&BTreeSet<String>>) {
+        use crate::v05::live::{judge_group, prune_group, GroupJudgement};
+        if self.live.is_empty() || self.d.live.verdicts.len() != self.live.len() {
+            return;
+        }
+        let mut work: Vec<(usize, usize, String, Vec<HeldRecord>)> = Vec::new();
+        let mut i = 0;
+        while i < self.live.len() {
+            let path = self.live[i].path.clone();
+            let to = i + self.live[i..].iter().take_while(|h| h.path == path).count();
+            if only.is_none_or(|o| o.contains(&path)) {
+                let g = GroupJudgement {
+                    verdicts: self.d.live.verdicts[i..to]
+                        .iter()
+                        .map(|(_, v)| v.clone())
+                        .collect(),
+                    head: None,
+                    metas: Vec::new(),
+                };
+                let keep = prune_group(&self.live[i..to], &g);
+                if keep.len() != to - i {
+                    work.push((i, to, path, keep));
+                }
+            }
+            i = to;
+        }
+        let cache_handle = self.d.cache.clone();
+        let mut judged = Vec::new();
+        {
+            let mut cache = cache_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (from, to, path, keep) in work {
+                let j = judge_group(
+                    &self.d.auth,
+                    &self.d.keys,
+                    &self.d.durable,
+                    &keep,
+                    None,
+                    Some(&mut cache),
+                );
+                judged.push((from, to, path, keep, j));
+            }
+        }
+        for (from, to, path, keep, j) in judged.into_iter().rev() {
+            self.splice_live_group(&path, from, to, keep, j);
+        }
     }
 
     /// [`Account::merge_live`] judging every held live candidate and rebuilding the derivation.
@@ -1400,6 +1512,11 @@ impl Account {
     /// The highest clock of an admitted, authenticated operation in `namespace` (0 if none): a
     /// writer's next clock is one past it (§11.4).
     pub fn highest_admitted_clock(&self, namespace: &str) -> u64 {
+        self.d.durable.highest(namespace)
+    }
+    /// The same by a pass over the judged records: what `verify_derivation` compares the index
+    /// with.
+    fn scan_highest_admitted_clock(&self, namespace: &str) -> u64 {
         self.d
             .judgement
             .records
@@ -1412,6 +1529,11 @@ impl Account {
             .map(|j| j.clock)
             .max()
             .unwrap_or(0)
+    }
+    /// Whether a record is held at `path` (a search: the records are sorted by path).
+    pub fn holds_path(&self, path: &str) -> bool {
+        let at = self.records.partition_point(|r| r.path.as_str() < path);
+        self.records.get(at).is_some_and(|r| r.path == path)
     }
     /// The highest generation among the live candidates held for `author`'s `slot` in
     /// `namespace` that are live records at all (0 if none): a new sample goes above it, so a
@@ -1558,11 +1680,34 @@ impl Account {
                 "invalid namespace in the read scope",
             )?;
         }
-        let old = self.scope.replace(namespaces.into_iter().collect());
+        // What a reader holds is what it reads: records of a namespace out of the scope are
+        // dropped (a header it holds can decide the standing of another namespace's records,
+        // through a revoked member's kept walk, so a replica that once read a namespace and one
+        // that never did must not differ). Widening the scope reads them again.
+        let set: BTreeSet<String> = namespaces.into_iter().collect();
+        let new_scope = Some(set.clone());
+        let in_scope = |path: &str| path_in_scope(&new_scope, path);
+        let kept: Vec<HeldRecord> = self
+            .records
+            .iter()
+            .filter(|r| in_scope(&r.path))
+            .cloned()
+            .collect();
+        let kept_live: Vec<HeldRecord> = self
+            .live
+            .iter()
+            .filter(|r| in_scope(&r.path))
+            .cloned()
+            .collect();
+        let old = self.scope.replace(set);
+        let old_records = std::mem::replace(&mut self.records, kept);
+        let old_live = std::mem::replace(&mut self.live, kept_live);
         match self.rebuild_in_place() {
             Ok(c) => Ok(c),
             Err(e) => {
                 self.scope = old;
+                self.records = old_records;
+                self.live = old_live;
                 Err(e)
             }
         }
@@ -1652,6 +1797,10 @@ impl Account {
         let now = now_ms.max(self.now_ms);
         // Another account's genesis is not part of this account's object set.
         let mut incoming = incoming;
+        // What is out of the read scope is not held.
+        incoming
+            .records
+            .retain(|r| path_in_scope(&self.scope, &r.path));
         let ours = self.d.verdict.branch.first().cloned();
         let before = incoming.objects.entries.len();
         incoming.objects.entries.retain(|b| {
