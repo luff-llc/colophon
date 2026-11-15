@@ -1209,9 +1209,7 @@ impl<S: RecordSource> Engine<S> {
             }
             let ops =
                 crate::v05::records::operation_path(&h.author, &h.namespace, h.generation, &h.id);
-            if self.ix.have.contains_key(&ops)
-                || self.account.holds_path(&ops)
-            {
+            if self.ix.have.contains_key(&ops) || self.account.holds_path(&ops) {
                 continue;
             }
             let fetched = self

@@ -852,6 +852,14 @@ impl Account {
         self.records = records;
         self.persisted = persisted;
         self.now_ms = now_ms;
+        // A garbage twin of a real record is dropped whichever way the account was rebuilt (a
+        // merge and an open do it, a clock or a key that rebuilds must too).
+        if let Some(keep) = without_junk(&self.records, &self.d) {
+            if let Ok(d2) = self.candidate(&self.objects, &keep, &self.persisted, self.now_ms) {
+                self.d = d2;
+                self.records = keep;
+            }
+        }
         self.settle_live(None);
         self.note_pending();
         let now = self.pending_digests();
@@ -1065,7 +1073,8 @@ impl Account {
         for m in self.d.auth.state().members() {
             let id = m.request.member_id();
             require(
-                self.d.durable.writes_of(&id) == spent.get(id.as_str()).map_or(0, |s| s.len() as u64),
+                self.d.durable.writes_of(&id)
+                    == spent.get(id.as_str()).map_or(0, |s| s.len() as u64),
                 "the write counts differ from the judged records",
             )?;
         }

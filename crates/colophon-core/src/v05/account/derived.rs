@@ -1074,7 +1074,9 @@ impl Derived {
                 every: 0,
                 retain: 0,
             };
-            let keep_from = ops.len().saturating_sub(every.saturating_mul(SNAPSHOTS_KEPT));
+            let keep_from = ops
+                .len()
+                .saturating_sub(every.saturating_mul(SNAPSHOTS_KEPT));
             // A fold taken from before (a checkpoint's or the last derivation's) is a place to
             // rewind to as well.
             if start > 0 && fold.checkpoints.last().is_none_or(|s| s.position != start) {

@@ -323,10 +323,7 @@ impl<S: RecordSource> Engine<S> {
         if let Some(p) = prior {
             let (ph, _) = OperationHeader::parse(&p.bytes)?;
             let ops = crate::v05::records::operation_path(&p.author, &p.namespace, ph.clock, &p.id);
-            if relies
-                && !self.ix.have.contains_key(&ops)
-                && !self.account.holds_path(&ops)
-            {
+            if relies && !self.ix.have.contains_key(&ops) && !self.account.holds_path(&ops) {
                 let fetched = self
                     .source
                     .read(&p.path)
