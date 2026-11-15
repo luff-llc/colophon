@@ -116,7 +116,7 @@ the exchange, an optional one on `prefetchBlob`. `collectBlobGarbage` does nothi
 ## Lock
 
 `lock()` overwrites the engine's keys and opened plaintext, drops it, and publishes `locked`; call it when the app enters the
-background. `unlock()`, `restore()` or `refresh()` open it again (silent for a Secure Enclave member key).
+background. `unlock()` opens it again (silent for a Secure Enclave member key); `LibraryGate` calls it when the scene becomes active. `restore()` and `refresh()` leave a locked session locked.
 
 ## The Swift move
 

@@ -136,3 +136,28 @@ import ColophonSession
         #expect(!stranger.hasUsableContent)
     }
 }
+
+@MainActor struct DenialTests {
+    /// The owner approves the second device for reading only. The device's own configuration allows writing, so the
+    /// session lets the attempt through to the engine, which refuses it as a value the SDK throws as `ColophonError.denied`.
+    @Test func aReadOnlyMemberIsRefusedAWriteWithATypedDenialAndNothingIsStored() async throws {
+        let first = Device()
+        await first.session.create()
+        let second = Device(medium: first.medium)
+        await second.session.restore()
+        await first.session.refresh()
+        try await first.session.approve(try #require(first.session.requests.first),
+                                        grant: GrantOptions(namespaces: ["reading.saved"], access: [.read], expires: nil, writeBudget: nil))
+        await second.session.refresh()
+        #expect(second.session.phase == .ready)
+        let before = first.medium.snapshot().count
+        do {
+            try await second.session.perform(try .saveLink(url: URL(string: "https://example.org/x")!, title: "X"), observed: second.session.observedRevision)
+            Issue.record("a read-only member wrote")
+        } catch let error as ColophonError {
+            guard case .denied(_, let reason, _, _) = error else { Issue.record("expected denied, got \(error)"); return }
+            #expect(reason == .notGranted)
+        }
+        #expect(first.medium.snapshot().count == before, "a refused write stores nothing")
+    }
+}

@@ -245,7 +245,7 @@ import Observation
     // MARK: Lock
 
     /// Hides the content and drops every secret the engine holds: call it when the app enters the background.
-    /// `unlock()`, `restore()` or `refresh()` open it again.
+    /// `unlock()` opens it again (`LibraryGate` calls it on foreground entry); `restore()` and `refresh()` leave a locked session locked.
     public func lock() async {
         guard let snapshot = try? await worker.lock() else { return }
         usable = false; apply(snapshot)
@@ -400,6 +400,11 @@ import Observation
     }
     private func handleCommandError(_ error: any Error) {
         switch error {
+        case ColophonError.denied:
+            // A refused command does not decide the phase: the engine's access check does, on the next refresh (a read-only
+            // member keeps reading; a revoked one becomes `denied` there).
+            lastError = error.localizedDescription
+            Task { await refresh(preservingCommandFailure: false) }
         case is ColophonError, is StorageError, is SessionKeyFailure, is KeyCustodyError:
             commandFailureRevision &+= 1
             fail(error)

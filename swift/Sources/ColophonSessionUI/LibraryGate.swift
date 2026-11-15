@@ -50,7 +50,10 @@ public struct LibraryGate<Artwork: View, Content: View>: View {
             }
         }
         .task { await session.restore() }
-        .task(id: scenePhase) { if scenePhase == .active { await session.refresh() } }
+        .task(id: scenePhase) {
+            // Foreground entry: a locked session opens again (silent for a Secure Enclave member key); otherwise refresh.
+            if scenePhase == .active { if session.phase == .locked { await session.unlock() } else { await session.refresh() } }
+        }
         .sheet(isPresented: $joining) {
             LibrarySheet(title: "Use Your Library") { ConnectLibraryView(host: host, purpose: .join) }
         }

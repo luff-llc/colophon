@@ -625,7 +625,11 @@ actor SessionWorker {
             }
             try await persist(written)
             let operation = Self.operationID(in: written.stores) ?? ""
-            if let ingress { journal.ingress[ingress.id] = operation; try saveJournal() }
+            if let ingress {
+                // Receipts only matter while an envelope can still be drained (they expire within 7 days): keep the newest few thousand.
+                if journal.ingress.count >= 4096 { journal.ingress = Dictionary(uniqueKeysWithValues: Array(journal.ingress.prefix(2048))) }
+                journal.ingress[ingress.id] = operation; try saveJournal()
+            }
             return (.saved(operationID: operation), try await build())
         }
     }
