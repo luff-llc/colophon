@@ -966,6 +966,78 @@ pub fn verify_call(
     cfg: &CallConfig<'_>,
     store: &mut dyn ReplayStore,
 ) -> Result<VerifiedCall> {
+    verify(envelope, view, cfg, store, &[])
+}
+
+/// One record a `colophon.home.write` call writes at a home (§14), as its path names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HomeWrite {
+    /// `ops/<author>/<namespace>/…` or `history/<author>/<namespace>/…`.
+    Record {
+        /// The author ID the path names.
+        author: String,
+        /// The namespace the path names.
+        namespace: String,
+    },
+    /// `state/<author>/<namespace>/<slot>.json`.
+    Live {
+        /// The author ID the path names.
+        author: String,
+        /// The namespace the path names.
+        namespace: String,
+    },
+    /// `blobs/<digest>`: content-addressed, it names no author.
+    Blob,
+}
+
+/// [`verify_call`] at a home for a `colophon.home.write` call that writes `writes` (§14: "to
+/// any member writing only paths under its own author ID"). Besides what [`verify_call`] allows,
+/// a current member is allowed when every write is under its own author ID in a namespace its
+/// terms grant (`propose` or more for a record, `write` for a live value), or is a blob chunk
+/// and its terms grant `propose` or more in some namespace; through links, every link's terms
+/// must also grant `colophon.home.write` at the audience. Nothing else changes: the member must
+/// pass steps 1–6 as for any call, so a revoked, expired or ended member is refused there.
+pub fn verify_home_write(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    writes: &[HomeWrite],
+) -> Result<VerifiedCall> {
+    require(!writes.is_empty(), "a home write names what it writes")?;
+    verify(envelope, view, cfg, store, writes)
+}
+
+/// Whether the member `m` may make `writes` under its own author ID (see [`verify_home_write`]).
+fn own_writes(m: &ViewMember, writes: &[HomeWrite]) -> bool {
+    use super::terms::Access;
+    let grants = |ns: &str, needed: Access| {
+        m.terms
+            .records()
+            .is_some_and(|rs| rs.iter().any(|e| e.namespace == ns && e.access >= needed))
+    };
+    !writes.is_empty()
+        && writes.iter().all(|w| match w {
+            HomeWrite::Record { author, namespace } => {
+                author == &m.id && grants(namespace, Access::Propose)
+            }
+            HomeWrite::Live { author, namespace } => {
+                author == &m.id && grants(namespace, Access::Write)
+            }
+            HomeWrite::Blob => m
+                .terms
+                .records()
+                .is_some_and(|rs| rs.iter().any(|e| e.access >= Access::Propose)),
+        })
+}
+
+fn verify(
+    envelope: &[u8],
+    view: &AccountView,
+    cfg: &CallConfig<'_>,
+    store: &mut dyn ReplayStore,
+    writes: &[HomeWrite],
+) -> Result<VerifiedCall> {
     let v = &view.v;
     // 1. Parse.
     let call = Call::parse(envelope)?;
@@ -1131,7 +1203,15 @@ pub fn verify_call(
         Some(m) => {
             let home_read =
                 at_home && call.links.is_empty() && call.purpose != "colophon.home.write";
+            let home_write = at_home
+                && call.purpose == "colophon.home.write"
+                && own_writes(m, writes)
+                && call
+                    .links
+                    .iter()
+                    .all(|l| l.terms.allows(&call.audience, &call.purpose));
             let allowed = home_read
+                || home_write
                 || (m.terms.allows(&call.audience, &call.purpose)
                     && call
                         .links
