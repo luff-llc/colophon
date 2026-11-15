@@ -1,0 +1,1 @@
+{"description":"The predecessor of `swift-keyring`, plus an envelope whose `body` is a number, not base64 bytes: no seq can be read from it, so it names no place in the predecessor and is ignored; the succession verifies as without it.","expected":{"succession":"verified"},"sections":["15.1","16.3"]}

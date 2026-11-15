@@ -3940,6 +3940,77 @@ pub fn part3(o: &mut Out) {
         60,
         vec![],
     );
+    // §16.3 "Envelopes": an envelope that cannot be read is ignored where something readable
+    // stands at its seq; it fails the predecessor only when nothing else is there.
+    let unreadable_issued = |rec: &Value| -> Vec<u8> {
+        let mut b = body_json(rec);
+        b["issued"] = json!("the first of November");
+        let mut d =
+            canonical(&json!({"body": b64(&canonical(&b)), "signature": rec["signature"]}));
+        d.push(b'\n');
+        d
+    };
+    for (name, why, extra, replace) in [
+        (
+            "swift-unreadable-issued-beside",
+            "The predecessor of `swift-keyring`, plus a second envelope at seq 2 whose body's `issued` cannot be read: it is ignored, because the readable entry at seq 2 stands, and the succession verifies as without it.",
+            Some(("00000002-unreadable.json", unreadable_issued(&recs[1]))),
+            false,
+        ),
+        (
+            "swift-body-unreadable-beside",
+            "The predecessor of `swift-keyring`, plus an envelope whose `body` is a number, not base64 bytes: no seq can be read from it, so it names no place in the predecessor and is ignored; the succession verifies as without it.",
+            Some((
+                "00000002-no-body.json",
+                [
+                    canonical(&json!({"body": 2, "signature": recs[1]["signature"]})),
+                    b"\n".to_vec(),
+                ]
+                .concat(),
+            )),
+            false,
+        ),
+        (
+            "swift-unreadable-issued-alone",
+            "The predecessor of `swift-keyring` with its entry at seq 2 replaced by the envelope whose `issued` cannot be read: nothing else stands at seq 2, so the predecessor is malformed and the succession is not verified.",
+            None,
+            true,
+        ),
+    ] {
+        let mut g = new_genesis(&recs, 2, sg![a], "Library");
+        let expected = if replace {
+            json!({"succession": "unverified"})
+        } else {
+            json!({"succession": "verified"})
+        };
+        swift_case(
+            o,
+            name,
+            &recs,
+            &mut g,
+            after,
+            expected,
+            why,
+            &a,
+            false,
+            60,
+            vec![],
+        );
+        if let Some((file, bytes)) = extra {
+            write_raw(
+                o,
+                &format!("succession/{name}/predecessor/authority/{file}"),
+                bytes,
+            );
+        }
+        if replace {
+            write_raw(
+                o,
+                &format!("succession/{name}/predecessor/authority/00000002.json"),
+                unreadable_issued(&recs[1]),
+            );
+        }
+    }
     // §15.4: the `migration` entry of a Swift succession, as a transition the owner's control
     // keys sign and the successor home receipts; recorded once, after its due time. The counts
     // must add up (`copied` + `omitted` = `source`), the view is the digest of the sorted copied
