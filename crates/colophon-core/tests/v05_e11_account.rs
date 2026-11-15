@@ -3,7 +3,8 @@
 #![allow(clippy::unwrap_used, clippy::cloned_ref_to_slice_refs)]
 #[path = "v05_engine_support/mod.rs"]
 mod support;
-use colophon_core::v05::account::{CreateProgress, Creation, Identity, KeyringEdit};
+use colophon_core::v05::account::{Change, CreateProgress, Creation, Identity, KeyringEdit};
+use colophon_core::v05::write::authority::TransitionRule;
 use colophon_core::v05::engine::{Engine, EngineOptions};
 use colophon_core::v05::records::Level;
 use serde_json::json;
@@ -88,4 +89,39 @@ fn members_and_controllers_say_who_signed_their_admission() {
     assert_eq!(laptop.added_seq, f.account.head().0);
     let mac = controllers.iter().find(|c| c.id == f.d).unwrap();
     assert!(mac.added_by.is_empty() && mac.added_seq == 1, "the genesis has no adder");
+}
+
+/// The removal follow-up (§17.5): when a controller's removal activates, the members whose grant
+/// it signed and the `approve` controllers it added by immediate entries since the transition's
+/// anchor (its proposal) are listed; what it admitted before, and what another key admitted, is not.
+#[test]
+fn a_removal_lists_what_the_removed_key_admitted_since_the_anchor() {
+    let mut f = create(&["notes"]);
+    let early = f.host.identity(30);
+    admit(&mut f, &early, "Old phone", "device", terms_for(&[("notes", "write")]), terms_for(&[("notes", "write")]));
+    let s = f.host.identity(40);
+    let mut change = Change::default();
+    change.0.insert("keyring".into(), json!({"remove": [f.d.clone()], "keep": [s.clone()]}));
+    let proposal = f.account.begin_transition(&change, &[f.k.clone(), f.p.clone()], TransitionRule::Recovery);
+    let action = match proposal {
+        Ok(a) => a,
+        Err(e) => panic!("{e:?}"),
+    };
+    run(&mut f.account, &f.host, action);
+    // While the removal is pending, the Mac key admits a member and adds an approve key.
+    let late = f.host.identity(31);
+    admit(&mut f, &late, "Phone", "device", terms_for(&[("notes", "write")]), terms_for(&[("notes", "write")]));
+    let added = f.host.raw_controller(&s, "Laptop", &["approve"]);
+    let action = f.account.begin_keyring(&KeyringEdit { add_controllers: vec![added], ..Default::default() }, &[f.d.clone()]).unwrap();
+    run(&mut f.account, &f.host, action);
+    assert!(f.account.removal_follow_up().is_empty(), "nothing is removed yet");
+    let rec = f.account.record_due().unwrap();
+    assert_eq!(rec.len(), 1, "the removal activates (no home: at once)");
+    assert!(!f.account.controllers().iter().any(|c| c.id == f.d), "the Mac key is removed");
+    let follow = f.account.removal_follow_up();
+    assert_eq!(follow.len(), 1, "{follow:?}");
+    let r = &follow[0];
+    assert_eq!(r.removed, vec![f.d.clone()]);
+    assert_eq!(r.members, vec![late.clone()], "only what it admitted since the anchor: {r:?}");
+    assert_eq!(r.controllers, vec![s.clone()], "the kept approve key it added: {r:?}");
 }

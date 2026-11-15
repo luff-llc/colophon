@@ -1529,7 +1529,7 @@ impl<S: RecordSource> Engine<S> {
                 continue;
             }
             for p in self.required_blob_fetches(&ns)? {
-                if seen.insert(p.clone()) && remote.contains_key(&p) {
+                if seen.insert(p.clone()) && self.home_may_hold(&remote, &p) {
                     self.enqueue(
                         home,
                         Tag::PullBlob { path: p.clone() },
@@ -1567,7 +1567,7 @@ impl<S: RecordSource> Engine<S> {
                 self.source.read_blob(&c.path),
                 Ok(crate::blobs::BlobRead::Available(_))
             );
-            if !held && remote.contains_key(&c.path) {
+            if !held && self.home_may_hold(&remote, &c.path) {
                 self.enqueue(
                     home,
                     Tag::PullBlob {
@@ -2829,8 +2829,20 @@ impl<S: RecordSource> Engine<S> {
         }
     }
 
+    /// Whether to ask `home` for the blob chunk `path`: when its change feed listed it, or when
+    /// the feed is read for some namespaces only, which by 0.3 §8.4 never lists blob chunks (they
+    /// name no namespace): a verified manifest names the chunk, and the chunk's name is the hash
+    /// of its bytes, so it is asked for directly and a 404 is only "not there yet".
+    fn home_may_hold(&self, remote: &BTreeMap<String, String>, path: &str) -> bool {
+        remote.contains_key(path) || !self.options.namespaces.is_empty()
+    }
+
     fn on_pull_blob(&mut self, home: &str, path: &str, r: &Response, report: &mut Report) {
         let name = path.strip_prefix("blobs/").unwrap_or_default();
+        if r.status == 404 && !self.home_mut(home).remote.contains_key(path) {
+            // Asked for directly (a namespace-scoped feed lists no chunk): not there yet.
+            return;
+        }
         if r.status != 200 {
             report.faults.push(Fault::Status {
                 home: home.into(),

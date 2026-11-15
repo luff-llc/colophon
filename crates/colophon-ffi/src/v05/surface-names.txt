@@ -110,6 +110,7 @@ AccountEngine.record_due
 AccountEngine.record_verdict
 AccountEngine.refresh
 AccountEngine.rejudged
+AccountEngine.removal_follow_up
 AccountEngine.required_blob_fetches
 AccountEngine.revision
 AccountEngine.revisions
@@ -699,6 +700,12 @@ record:PrfRequest.salt
 record:Receipted
 record:RecordVerdict
 record:RefusedHead
+record:RemovalFollowUp
+record:RemovalFollowUp.anchor_seq
+record:RemovalFollowUp.controllers
+record:RemovalFollowUp.members
+record:RemovalFollowUp.removed
+record:RemovalFollowUp.seq
 record:Replaces
 record:Report
 record:Report.changes

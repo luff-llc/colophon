@@ -155,7 +155,7 @@ pub use moving::{CopyWrite, MoveStage, Moved, PendingMove, SwiftSuccession};
 pub use read::Standing;
 pub use read::{
     ControllerInfo, HomeInfo, LedgerLine, MemberInfo, Notices, OwedInfo, PendingTransition, Policy,
-    ProposalInfo, SeenActivation,
+    ProposalInfo, RemovalFollowUp, SeenActivation,
 };
 pub use unlock::{EpochAgreement, EpochSecret, SlotOption};
 

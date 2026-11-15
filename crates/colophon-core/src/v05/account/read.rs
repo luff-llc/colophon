@@ -162,6 +162,23 @@ pub struct SeenActivation {
     pub receipted: Vec<(String, i64)>,
 }
 
+/// The removal follow-up of one activation that removed controllers (§17.5): what the removed
+/// keys admitted since that transition's anchor and the removal did not already remove.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovalFollowUp {
+    /// The `activate` entry's seq.
+    pub seq: u64,
+    /// The transition's anchor seq.
+    pub anchor_seq: u64,
+    /// The controllers it removed.
+    pub removed: Vec<String>,
+    /// Current members whose grant a removed key signed after the anchor.
+    pub members: Vec<String>,
+    /// Current `approve` or `sign` controllers a removed key added by an immediate entry after
+    /// the anchor.
+    pub controllers: Vec<String>,
+}
+
 /// What the person must be shown (§17.5).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notices {
@@ -446,6 +463,117 @@ impl Account {
                     .controller_added_seq(&c.id())
                     .and_then(|seq| signers.get(&seq).cloned())
                     .unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// The removal follow-up (§17.5 "Removal follow-up"): for each activation on the verified
+    /// branch that removed controllers, every current member whose grant a removed key signed and
+    /// every current `approve` or `sign` controller a removed key added by an immediate entry,
+    /// since that transition's anchor. Activations with nothing left to follow up are omitted;
+    /// the host offers to remove what is listed in one action and remembers what it showed.
+    pub fn removal_follow_up(&self) -> Vec<RemovalFollowUp> {
+        let branch: BTreeMap<&String, u64> = self
+            .d
+            .verdict
+            .branch
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d, i as u64 + 1))
+            .collect();
+        let mut removals: Vec<(u64, u64, Vec<String>)> = Vec::new();
+        for b in &self.objects.entries {
+            let Ok(env) = AuthEnvelope::parse(
+                b,
+                bounds::AUTHORITY_BODY,
+                bounds::AUTHORITY_BODY.saturating_mul(2),
+                false,
+            ) else {
+                continue;
+            };
+            let Some(&seq) = branch.get(&env.digest) else {
+                continue;
+            };
+            if env.value.get("kind").and_then(Value::as_str) != Some("activate") {
+                continue;
+            }
+            let Some(t) = env
+                .value
+                .get("transition")
+                .and_then(Value::as_str)
+                .and_then(|t| decode_base64(t, bounds::TRANSITION_ENVELOPE * 2).ok())
+                .and_then(|raw| {
+                    AuthEnvelope::parse(
+                        &raw,
+                        bounds::TRANSITION_ENVELOPE,
+                        bounds::TRANSITION_ENVELOPE,
+                        true,
+                    )
+                    .ok()
+                })
+            else {
+                continue;
+            };
+            let removed: Vec<String> = t
+                .value
+                .get("change")
+                .and_then(|c| c.get("keyring"))
+                .and_then(|k| k.get("remove"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let Some(anchor) = t
+                .value
+                .get("anchor")
+                .and_then(|a| a.get("seq"))
+                .and_then(Value::as_u64)
+            else {
+                continue;
+            };
+            if !removed.is_empty() {
+                removals.push((seq, anchor, removed));
+            }
+        }
+        if removals.is_empty() {
+            return Vec::new();
+        }
+        removals.sort();
+        let members = self.members();
+        let controllers = self.controllers();
+        removals
+            .into_iter()
+            .filter_map(|(seq, anchor_seq, removed)| {
+                let by_removed = |signers: &[String]| signers.iter().any(|s| removed.contains(s));
+                let m: Vec<String> = members
+                    .iter()
+                    .filter(|m| {
+                        m.member.revoked_at.is_none()
+                            && !m.home
+                            && m.member.since > anchor_seq
+                            && by_removed(&m.granted_by)
+                    })
+                    .map(|m| m.member.id.clone())
+                    .collect();
+                let c: Vec<String> = controllers
+                    .iter()
+                    .filter(|c| {
+                        c.added_seq > anchor_seq
+                            && by_removed(&c.added_by)
+                            && c.roles.iter().any(|r| r == "approve" || r == "sign")
+                    })
+                    .map(|c| c.id.clone())
+                    .collect();
+                (!m.is_empty() || !c.is_empty()).then_some(RemovalFollowUp {
+                    seq,
+                    anchor_seq,
+                    removed,
+                    members: m,
+                    controllers: c,
+                })
             })
             .collect()
     }

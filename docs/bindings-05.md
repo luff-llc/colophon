@@ -90,7 +90,7 @@ SavedState, key, now_ms)` (`identity` is a record: `kind` Controller or Member a
 `SavedState` means none). Reads: `id identity status head_seq
 head_digest controllers homes policy pending owed_shares notices(shown_seq, shown_transitions, local_keys)
 slots is_unlocked begin_unlock_slot(index) begin_unlock_epochs fork_candidates suggest_signers(available, need)
-latest_epoch write_denial record_verdict verdict_of (each `optional<RecordVerdict>`) live_heads open_info stats access revision revisions me
+latest_epoch write_denial record_verdict verdict_of (each `optional<RecordVerdict>`) live_heads open_info stats access revision revisions removal_follow_up me
 members`, and JSON: `proposals_json tools_json ledger_json view_json query_json history_json
 operation_at_json blob_manifest_json`. Progress: `load refresh(listing) apply_paths(list<ListedPath>) advance
 finish_unlock_slot(index, list<UnlockSecret>) finish_unlock_epochs(list<EpochAnswer>) apply_live stale_live
@@ -482,6 +482,7 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `ForkCandidate` | `seq: u64`, `first: String`, `second: String` | Two candidates at a seq a `resolve` may choose between. |
 | `Header` | `name: String`, `value: String` | A header of an HTTP message. |
 | `HttpRequest` | `ticket: u64`, `home: String`, `method: HttpMethod`, `url: String`, `headers: list<Header>`, `body: bytes` | A request for the host to send. |
+| `RemovalFollowUp` | `seq: u64`, `anchor_seq: u64`, `removed: list<String>`, `members: list<String>`, `controllers: list<String>` | `AccountEngine.removal_follow_up()`: per activation that removed controllers, the current members whose grant a removed key signed and the `approve`/`sign` controllers it added by immediate entries since the transition's anchor (§17.5). |
 | `CallNeed` | `ticket: u64`, `home: String`, `audience: String`, `purpose: String`, `method: HttpMethod`, `url: String`, `path: String`, `body_sha256: String` | A request that needs a fresh `Authorization: Colophon` call built for exactly it: audience, purpose and `args` `{"method","path","body"}` from these fields (`exchange_begin_call`). |
 | `ExchangeStep` | `kind: ExchangeStepKind`, `request: optional<HttpRequest>`, `need: optional<CallNeed>` | The next step of an exchange pass. `request` is set for `Request`, `need` for `NeedCall`. |
 | `HttpAnswer` | `status: u32`, `headers: list<Header>`, `body: bytes` | What the host got back. |

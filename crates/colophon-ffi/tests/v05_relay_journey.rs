@@ -116,7 +116,9 @@ fn open(src: &MemSource, identity: &str, account: &str, now: i64) -> Arc<Account
         src.listing(),
         ident(identity),
         account.into(),
-        vec![],
+        // The read scope an app gives (its namespaces): its change feed is scoped, and lists no
+        // blob chunk (0.3 §8.4), so required chunks are asked for by the manifest's names.
+        vec![NS.into()],
         0,
         SavedState { verifier: vec![], checkpoint: vec![], parts: vec![] },
         DEVICE_KEY.to_vec(),

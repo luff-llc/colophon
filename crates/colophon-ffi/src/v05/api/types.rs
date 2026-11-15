@@ -518,6 +518,16 @@ record! {
     }
 }
 record! {
+    /// The removal follow-up of one activation that removed controllers (§17.5).
+    pub struct RemovalFollowUp {
+        pub seq: u64,
+        pub anchor_seq: u64,
+        pub removed: Vec<String>,
+        pub members: Vec<String>,
+        pub controllers: Vec<String>,
+    }
+}
+record! {
     /// A share a member is owed (§9.4).
     pub struct Owed {
         pub member: String,

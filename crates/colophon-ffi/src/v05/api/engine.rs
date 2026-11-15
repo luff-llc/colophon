@@ -773,6 +773,24 @@ impl AccountEngine {
     pub fn pending(&self) -> Result<Vec<Pending>, AccountError> {
         self.acct(|a| Ok(a.pending().iter().map(cv::pending).collect()))
     }
+    /// The removal follow-up (§17.5): per activation that removed controllers, the current
+    /// members whose grant a removed key signed and the `approve`/`sign` controllers it added by
+    /// immediate entries since the transition's anchor. The host offers to remove them in one
+    /// action and remembers which activations it showed.
+    pub fn removal_follow_up(&self) -> Result<Vec<RemovalFollowUp>, AccountError> {
+        self.acct(|a| {
+            Ok(a.removal_follow_up()
+                .into_iter()
+                .map(|r| RemovalFollowUp {
+                    seq: r.seq,
+                    anchor_seq: r.anchor_seq,
+                    removed: r.removed,
+                    members: r.members,
+                    controllers: r.controllers,
+                })
+                .collect())
+        })
+    }
     /// Shares members are owed (§9.4).
     pub fn owed_shares(&self) -> Result<Vec<Owed>, AccountError> {
         self.acct(|a| Ok(a.owed_shares().iter().map(cv::owed).collect()))
