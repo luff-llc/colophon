@@ -156,7 +156,7 @@ export class HomeSlot {
     if (st.account !== this.account) throw new Error(`Home slot ${this.slot.name} was provisioned for account ${st.account}, not ${this.account}`);
     // Reconcile storage with the state before serving: a crash between a commit and its files
     // (a missing entry, a head file older than the committed head) heals here, not later.
-    await this.materialize(this.wasm.call({ op: 'objects', state: this.state }).files);
+    await this.materialize(this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files);
     await this.openReplay();
     this.forward = await this.readJson('forward.json', { peers: {} });
   }
@@ -177,15 +177,16 @@ export class HomeSlot {
     this.state = state;
   }
 
-  /** Store the files the module listed. A `heads/` path is replaced; any other path is written
-   * once (§14: the home keeps the envelope it stored), and a different file already there is
+  /** Store the files the module listed. A path the module marks `replace` (a head; an entry
+   * whose seq another candidate now stands at, §8.6) is replaced; any other path is written once
+   * (§14: the home keeps the envelope it stored), and a different file already there is
    * corruption, not something to overwrite. */
   async materialize(files) {
-    for (const { path: p, bytes } of files ?? []) {
+    for (const { path: p, bytes, replace } of files ?? []) {
       const body = unb64(bytes);
       const have = this.slot.current.get(p);
       if (have && have.sha256 === sha(body)) continue;
-      if (p.startsWith('heads/')) await this.slot.replaceRequest(p, body);
+      if (replace) await this.slot.replaceRequest(p, body);
       else if (!have) await this.slot.putImmutable(p, body);
       else throw new Error(`Home slot ${this.slot.name}: ${p} on disk differs from the state`);
     }

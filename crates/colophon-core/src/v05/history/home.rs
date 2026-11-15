@@ -350,6 +350,23 @@ impl HomeState {
         }
         Ok((p, v.state.ok_or_else(|| malformed("no home history"))?))
     }
+    /// The verified state the home holds and, when its history stops at an unresolved fork
+    /// (§8.6 rule 3), the seq of the fork: the state is then the verified prefix before it. Any
+    /// other stop is an error, as in [`HomeState::context`].
+    fn context_any(&self, now_ms: i64) -> Result<(Persisted, State, Option<u64>)> {
+        let p = Persisted::from_bytes(&self.checkpoint)?;
+        let v = verify_history(&Objects::default(), &p, now_ms);
+        let fork = match v.stop {
+            None => None,
+            Some(Stop::Fork { seq }) => Some(seq),
+            Some(stop) => return Err(stop_failure(stop)),
+        };
+        Ok((p, v.state.ok_or_else(|| malformed("no home history"))?, fork))
+    }
+    /// The seq of the unresolved fork the home's history stops at, if it does.
+    pub fn fork_seq(&self, now_ms: i64) -> Result<Option<u64>> {
+        Ok(self.context_any(now_ms)?.2)
+    }
     fn add(
         &mut self,
         env: &AuthEnvelope,
@@ -389,7 +406,7 @@ impl HomeState {
     /// GET pending, after a local cursor. Access authorization is the caller's §13.4 call check.
     pub fn pending_page(&self, after: u64, limit: usize, now_ms: i64) -> Result<PendingPage> {
         require((1..=64).contains(&limit), "pending page limit must be 1–64")?;
-        let (_, state) = self.context(now_ms)?;
+        let (_, state, _) = self.context_any(now_ms)?;
         let mut iter = self
             .pending
             .iter()
@@ -402,7 +419,7 @@ impl HomeState {
     }
     /// GET pending/digest, with every held receipt, or absent. The caller authorizes the read.
     pub fn pending_object(&self, digest: &str, now_ms: i64) -> Result<Option<PendingDetail>> {
-        let (_, state) = self.context(now_ms)?;
+        let (_, state, _) = self.context_any(now_ms)?;
         let Some(object) = self
             .pending
             .iter()
@@ -513,6 +530,10 @@ fn validate_head(st: &State, bytes: &[u8], now_ms: i64) -> Result<()> {
     match crate::v05::heads::verify_head(bytes, ctx) {
         Ok(_) => Ok(()),
         Err(Failure::Unavailable(why)) if why == "history not held up to the head" => Ok(()),
+        // A current home's head over another digest at a held seq is the evidence of a fork
+        // (§8.6 rules 2 and 3 weigh the heads covering each candidate): kept, bounded per home
+        // ([`kept_heads`]), and never a reason to sign or serve anything else.
+        Err(Failure::Refused(crate::v05::Reason::Fork)) => Ok(()),
         Err(f) => Err(f),
     }
 }
@@ -613,12 +634,20 @@ fn chosen_receipts(home: &HomeState, st: &State, env: &AuthEnvelope) -> Result<V
 
 /// Admit one incoming object at an explicit §2.2 clock date. No IO or signature creation.
 pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
+    admit_with(home, incoming, &[], now)
+}
+
+/// [`admit`] for one entry of an upload, with the entries that follow it in the same request
+/// (`later`). They are used for one thing only: whether a primary head covers this entry
+/// (§13.1 "Other homes store them once a primary head covers them"), since the primary's head may
+/// name a later entry of the same upload. Nothing in `later` is admitted here.
+pub fn admit_with(home: &HomeState, incoming: &[u8], later: &[Vec<u8>], now: &str) -> Admission {
     let mut next = home.clone();
     let mut receipts = Vec::new();
     let mut admitted_head: Option<Vec<u8>> = None;
     let result = (|| -> AdmitResult<()> {
         let now_ms = date(now, "home clock")?;
-        let (persisted, st) = home.context(now_ms)?;
+        let (persisted, prefix, fork) = home.context_any(now_ms)?;
         let env = AuthEnvelope::parse(
             incoming,
             bounds::AUTHORITY_BODY,
@@ -645,11 +674,28 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
             .and_then(Value::as_str)
             .unwrap_or_default();
         require(
-            st.current_homes().iter().any(|m| {
+            prefix.current_homes().iter().any(|m| {
                 m.request.member_id() == home.home && m.expires_ms.is_none_or(|end| now_ms <= end)
             }),
             "home is no longer current and unexpired",
         )?;
+        // At an unresolved fork (§8.6 rule 3) the home answers `refused:fork` for everything that
+        // depends on either branch until a `resolve` activates: a `resolve` transition, its
+        // vetoes and their receipts are judged on the branch the transition is anchored on (the
+        // branch it keeps); entries and heads against what the home holds.
+        let st = match fork {
+            None => prefix,
+            Some(_) => match protocol {
+                "colophon/transition/5" | "colophon/veto/5" | "colophon/receipt/5" => {
+                    match resolve_anchor(&next, &env, protocol) {
+                        Some(anchor) => branch_state(&persisted, &anchor, now_ms)?,
+                        None if protocol == "colophon/receipt/5" => prefix,
+                        None => return Err(Failure::Refused(crate::v05::Reason::Fork).into()),
+                    }
+                }
+                _ => prefix,
+            },
+        };
         let issued = env
             .value
             .get("issued")
@@ -927,7 +973,7 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
                 admitted_head = Some(incoming.to_vec());
             }
             "colophon/authority/5" => {
-                admit_entry(&mut next, &persisted, &st, &env, incoming, now_ms)?
+                admit_entry(&mut next, &persisted, &st, &env, incoming, now_ms, fork, later)?
             }
             _ => return Err(malformed("unknown home object protocol").into()),
         }
@@ -959,7 +1005,7 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
 /// home's latest plus every head at a seq after the highest final activation (`settled`), where
 /// §8.6 can still ask which homes covered an entry or `final` can still need a witness. A head
 /// over an unchanged history therefore replaces the previous one instead of adding to it.
-fn kept_heads(heads: &[Vec<u8>], settled: u64) -> Vec<Vec<u8>> {
+fn kept_heads(heads: &[Vec<u8>], settled: u64, branch: &[String]) -> Vec<Vec<u8>> {
     struct Held<'a> {
         by: String,
         seq: u64,
@@ -995,11 +1041,37 @@ fn kept_heads(heads: &[Vec<u8>], settled: u64) -> Vec<Vec<u8>> {
             *l = h;
         }
     }
-    best.into_values()
+    let kept: Vec<&Held> = best
+        .into_values()
         .filter(|h| h.seq > settled || latest.get(h.by.as_str()).is_some_and(|l| std::ptr::eq(*l, *h)))
+        .collect();
+    // Fork evidence (a head over another digest than the home's history holds at that seq) is
+    // kept too, but at most `OFF_BRANCH` per home, the newest: a hostile home cannot grow the
+    // state by signing heads over digests nobody holds.
+    let off = |h: &Held| {
+        usize::try_from(h.seq.saturating_sub(1))
+            .ok()
+            .and_then(|i| branch.get(i))
+            .is_some_and(|d| *d != h.digest)
+    };
+    let mut off_count: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut newest_first: Vec<&&Held> = kept.iter().filter(|h| off(h)).collect();
+    newest_first.sort_by(|a, b| (b.issued, b.bytes).cmp(&(a.issued, a.bytes)));
+    let mut dropped: BTreeSet<*const Held> = BTreeSet::new();
+    for h in newest_first {
+        let n = off_count.entry(h.by.as_str()).or_insert(0);
+        *n += 1;
+        if *n > OFF_BRANCH {
+            dropped.insert(std::ptr::from_ref::<Held>(h));
+        }
+    }
+    kept.into_iter()
+        .filter(|h| !dropped.contains(&std::ptr::from_ref::<Held>(h)))
         .map(|h| h.bytes.clone())
         .collect()
 }
+/// Fork-evidence heads kept per home ([`kept_heads`]).
+const OFF_BRANCH: usize = 4;
 
 /// Replace the checkpoint's pending objects with exactly what the home stores and its heads with
 /// [`kept_heads`] (plus `new_head`, when one was just admitted). The checkpoint is rebuilt from
@@ -1014,11 +1086,13 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
             heads.push(h.to_vec());
         }
     }
-    let settled = verify_history(&Objects::default(), &p, now_ms)
-        .state
+    let st = verify_history(&Objects::default(), &p, now_ms).state;
+    let settled = st
+        .as_ref()
         .and_then(|st| st.activations().iter().filter(|a| a.final_).map(|a| a.seq).max())
         .unwrap_or(0);
-    let heads = kept_heads(&heads, settled);
+    let branch = st.as_ref().map(|s| s.history().to_vec()).unwrap_or_default();
+    let heads = kept_heads(&heads, settled, &branch);
     let pending: Vec<Vec<u8>> = next.pending.iter().map(|o| o.envelope.clone()).collect();
     if heads == before.heads && pending == before.pending {
         return Ok(());
@@ -1049,21 +1123,61 @@ fn admit_entry(
     env: &AuthEnvelope,
     incoming: &[u8],
     now_ms: i64,
+    fork: Option<u64>,
+    later: &[Vec<u8>],
 ) -> AdmitResult<()> {
     let entry = parse_entry(incoming)?;
-    if entry.seq <= st.seq() {
-        if st.history().get(entry.seq.saturating_sub(1) as usize) == Some(&env.digest) {
-            return Ok(());
-        }
-        return Err(Refusal::Conflict);
-    }
-    if entry.seq != st.seq() + 1 {
-        return Err(Refusal::Conflict);
+    let held: Vec<Vec<u8>> = persisted
+        .objects()
+        .map(|o| o.entries.clone())
+        .unwrap_or_default();
+    let held_entries: Vec<super::Entry> = held.iter().filter_map(|b| parse_entry(b).ok()).collect();
+    // Equality is by body: an entry held already, on the branch or as a candidate, is stored.
+    if held_entries.iter().any(|e| e.env.digest == env.digest) {
+        return Ok(());
     }
     let recording = matches!(
         entry.kind.as_str(),
         "activate" | "vetoed" | "final" | "successionVetoed"
     );
+    // §13.1 Ordering: a non-primary home stores an immediate entry once a primary head covers
+    // it. The head may name a later entry of the same upload (`later`), so those count as the
+    // entry's descendants here; nothing else is taken from them.
+    let primary = st.primary_home().filter(|p| *p != next.home);
+    let covered = !recording
+        && primary.as_ref().is_some_and(|p| {
+            let extra: Vec<super::Entry> = std::iter::once(incoming)
+                .chain(later.iter().map(Vec::as_slice))
+                .filter_map(|b| parse_entry(b).ok())
+                .collect();
+            let refs: Vec<&super::Entry> = held_entries.iter().chain(extra.iter()).collect();
+            let heads = HeadSet::parse(
+                &persisted
+                    .objects()
+                    .map(|o| o.heads.clone())
+                    .unwrap_or_default(),
+            );
+            state::covered_by_home_head(st, &heads, &refs, &entry, p)
+        });
+    let extends = fork.is_none()
+        && entry.seq == st.seq() + 1
+        && entry.previous.as_ref() == st.history().last();
+    if !extends {
+        if fork.is_none() && entry.seq > st.seq() + 1 {
+            return Err(Refusal::Conflict); // a gap
+        }
+        return admit_candidate(
+            next,
+            persisted,
+            st,
+            &entry,
+            incoming,
+            now_ms,
+            fork,
+            &held_entries,
+            covered,
+        );
+    }
     let mut objects = Objects {
         entries: vec![incoming.to_vec()],
         ..Default::default()
@@ -1171,38 +1285,187 @@ fn admit_entry(
             return Err(Refusal::Late);
         }
     }
-    if (!recording || full) && entry.issued < now_ms.saturating_sub(WINDOW) {
+    // §13.1 Clock: an immediate entry or a full set more than 300 s behind the clock is
+    // `refused:late`, except at a non-primary home for an immediate entry a primary head
+    // covers: the primary admitted it in time (its clock is the one the rule is about), and a
+    // home that was offline must be able to take what the primary admitted meanwhile.
+    if (!recording || full) && !covered && entry.issued < now_ms.saturating_sub(WINDOW) {
         return Err(Refusal::Late);
     }
-    if !recording && st.primary_home().is_some_and(|p| p != next.home) {
-        let all: Vec<_> = persisted
-            .objects()
-            .into_iter()
-            .flat_map(|o| &o.entries)
-            .chain(std::iter::once(&incoming.to_vec()))
-            .filter_map(|b| parse_entry(b).ok())
-            .collect();
-        let refs: Vec<_> = all.iter().collect();
-        let heads = HeadSet::parse(
-            &persisted
-                .objects()
-                .map(|o| o.heads.clone())
-                .unwrap_or_default(),
-        );
-        let primary = st.primary_home().ok_or_else(|| malformed("no primary"))?;
-        if !state::covered_by_home_head(st, &heads, &refs, &entry, &primary) {
-            let endpoints = st
-                .current_homes()
-                .into_iter()
-                .find(|m| m.request.member_id() == primary)
-                .and_then(|m| m.request.endpoints.clone())
-                .unwrap_or_default();
-            return Err(Refusal::PrimaryRequired(endpoints));
+    if !recording && !covered {
+        if let Some(p) = &primary {
+            return Err(Refusal::PrimaryRequired(endpoints_of(st, p)));
         }
     }
     objects.pending = next.pending.iter().map(|p| p.envelope.clone()).collect();
     next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
     Ok(())
+}
+
+fn endpoints_of(st: &State, home: &str) -> Vec<String> {
+    st.current_homes()
+        .into_iter()
+        .find(|m| m.request.member_id() == home)
+        .and_then(|m| m.request.endpoints.clone())
+        .unwrap_or_default()
+}
+
+/// An entry that does not extend the home's branch: one at a seq the home holds with other
+/// bytes (a candidate, §8.6), one continuing another candidate's branch, or any entry while the
+/// home's history stops at an unresolved fork. It is stored only when it is valid in its place
+/// (its own branch verifies through it) and either it stands (the verdict with it puts it on the
+/// branch: a displacement under §8.6 rule 1 or 2, or the `resolve` that settles a fork), or it is
+/// an immediate entry a primary head covers and the home now holds a fork (§13.1: a non-primary
+/// home stores what a primary head covers; §8.6 rule 3). Otherwise: `refused:fork` at a fork,
+/// 421 at a non-primary home for an entry no primary head covers, 409 (§14) at the primary.
+#[allow(clippy::too_many_arguments)]
+fn admit_candidate(
+    next: &mut HomeState,
+    persisted: &Persisted,
+    st: &State,
+    entry: &super::Entry,
+    incoming: &[u8],
+    now_ms: i64,
+    fork: Option<u64>,
+    held: &[super::Entry],
+    covered: bool,
+) -> AdmitResult<()> {
+    let recording = matches!(
+        entry.kind.as_str(),
+        "activate" | "vetoed" | "final" | "successionVetoed"
+    );
+    let Some(parent) = entry.previous.as_ref().filter(|p| held.iter().any(|e| &e.env.digest == *p)) else {
+        return Err(Refusal::Conflict);
+    };
+    if entry.issued > now_ms.saturating_add(60_000) {
+        return Err(Refusal::Early);
+    }
+    let pending: Vec<Vec<u8>> = next.pending.iter().map(|p| p.envelope.clone()).collect();
+    let heads = persisted.objects().map(|o| o.heads.clone()).unwrap_or_default();
+    // Valid in its place: the entry's own branch, from the genesis, verifies through it.
+    let mut chain = ancestry(held, parent);
+    chain.push(incoming.to_vec());
+    let own = verify_history(
+        &Objects {
+            entries: chain,
+            pending: pending.clone(),
+            heads: heads.clone(),
+            predecessor: persisted.objects().map(|o| o.predecessor.clone()).unwrap_or_default(),
+        },
+        &Persisted::default(),
+        now_ms.max(entry.issued),
+    );
+    if let Some(stop) = own.stop {
+        return Err(stop_failure(stop).into());
+    }
+    // A held veto of the transition forbids storing its `activate` (§13.1), here as on the
+    // branch.
+    if entry.kind == "activate" {
+        let t = entry
+            .env
+            .value
+            .get("transition")
+            .and_then(|t| embedded_bytes(t, "transition", bounds::TRANSITION_ENVELOPE).ok())
+            .and_then(|b| AuthEnvelope::parse(&b, bounds::TRANSITION_ENVELOPE, bounds::TRANSITION_ENVELOPE, true).ok())
+            .map(|e| e.digest);
+        if next.pending.iter().any(|p| p.kind == "veto" && Some(&p.target) == t.as_ref()) {
+            return Err(malformed("home holds a veto of the transition").into());
+        }
+    }
+    let objects = Objects {
+        entries: vec![incoming.to_vec()],
+        pending,
+        ..Default::default()
+    };
+    let verdict = verify_history(&objects, persisted, now_ms.max(entry.issued));
+    let stands = verdict.stop.is_none()
+        && usize::try_from(entry.seq - 1)
+            .ok()
+            .and_then(|i| verdict.branch.get(i))
+            == Some(&entry.env.digest);
+    let forks = matches!(verdict.stop, Some(Stop::Fork { .. }));
+    if stands || (forks && covered) {
+        if !recording && !covered && entry.issued < now_ms.saturating_sub(WINDOW) {
+            return Err(Refusal::Late);
+        }
+        next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
+        return Ok(());
+    }
+    if fork.is_some() {
+        return Err(Failure::Refused(crate::v05::Reason::Fork).into());
+    }
+    if let Some(p) = st.primary_home().filter(|p| *p != next.home) {
+        if !recording && !covered {
+            return Err(Refusal::PrimaryRequired(endpoints_of(st, &p)));
+        }
+    }
+    Err(Refusal::Conflict)
+}
+
+/// The held entries from the genesis to `tip`, following `previous` (seq order).
+fn ancestry(held: &[super::Entry], tip: &str) -> Vec<Vec<u8>> {
+    let by: BTreeMap<&str, &super::Entry> = held.iter().map(|e| (e.env.digest.as_str(), e)).collect();
+    let mut out = Vec::new();
+    let mut at = Some(tip.to_string());
+    while let Some(d) = at {
+        let Some(e) = by.get(d.as_str()) else { break };
+        out.push(e.raw.clone());
+        at = e.previous.clone();
+    }
+    out.reverse();
+    out
+}
+
+/// The anchor digest of the `resolve` transition an object belongs to: the transition itself, a
+/// veto of a held one, or a receipt of either. `None` when it is not a `resolve`'s.
+fn resolve_anchor(home: &HomeState, env: &AuthEnvelope, protocol: &str) -> Option<String> {
+    let parse = |b: &[u8]| {
+        AuthEnvelope::parse(b, bounds::TRANSITION_ENVELOPE, bounds::TRANSITION_ENVELOPE, false).ok()
+    };
+    let held = |d: &str| home.pending.iter().find(|p| p.kind != "receipt" && p.digest == d);
+    let transition: Value = match protocol {
+        "colophon/transition/5" => env.value.clone(),
+        "colophon/veto/5" => parse(&held(env.value.get("transition")?.as_str()?)?.envelope)?.value,
+        _ => {
+            let object = held(env.value.get("object")?.as_str()?)?;
+            let v = parse(&object.envelope)?.value;
+            if object.kind == "veto" {
+                parse(&held(v.get("transition")?.as_str()?)?.envelope)?.value
+            } else {
+                v
+            }
+        }
+    };
+    transition.get("change")?.get("resolve")?;
+    transition.get("anchor")?.get("digest")?.as_str().map(str::to_string)
+}
+
+/// The verified state of the branch ending at `anchor` (the entries that follow `previous`
+/// back from it), with every held pending object and head: where a `resolve` is judged while
+/// the home's history stops at the fork it settles (as `write::authority` builds its
+/// `activate`).
+fn branch_state(persisted: &Persisted, anchor: &str, now_ms: i64) -> Result<State> {
+    let o = persisted.objects().cloned().unwrap_or_default();
+    let held: Vec<super::Entry> = o.entries.iter().filter_map(|b| parse_entry(b).ok()).collect();
+    let chain = ancestry(&held, anchor);
+    require(
+        chain.last().and_then(|b| parse_entry(b).ok()).is_some_and(|e| e.env.digest == anchor),
+        "the resolve's anchor is not held",
+    )?;
+    let v = verify_history(
+        &Objects {
+            entries: chain,
+            pending: o.pending,
+            heads: o.heads,
+            predecessor: o.predecessor,
+        },
+        &Persisted::default(),
+        now_ms,
+    );
+    if let Some(stop) = v.stop {
+        return Err(stop_failure(stop));
+    }
+    v.state.ok_or_else(|| malformed("no branch state"))
 }
 
 /// Verify and store the host's raw signature over a previously returned receipt body.
@@ -1227,7 +1490,7 @@ pub fn finish_receipt(
         raw.body == draft.body,
         "receipt differs from signing request",
     )?;
-    let (_, state) = home.context(now_ms)?;
+    let (_, state, _) = home.context_any(now_ms)?;
     let key = state
         .home_key(&home.home)
         .ok_or_else(|| bad_signature("not a current home"))?;

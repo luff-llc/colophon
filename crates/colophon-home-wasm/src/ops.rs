@@ -19,9 +19,9 @@ use colophon_core::v05::engine::paths::{self, Kind};
 use colophon_core::v05::heads::HeadContext;
 use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
-    admit, admit_first, admit_pending_batch, FirstUpload, HomeState, ReceiptToSign, Refusal,
+    admit, admit_first, admit_pending_batch, admit_with, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
-use colophon_core::v05::history::{verify_history, Objects, Persisted, State};
+use colophon_core::v05::history::{verify_history, Objects, Persisted, State, Stop};
 use colophon_core::v05::ids::{key_id, AccountId};
 use colophon_core::v05::records::{OperationHeader, RecordAuthority};
 use colophon_core::v05::replay::{
@@ -229,16 +229,21 @@ fn limits() -> Value {
 
 struct View {
     persisted: Persisted,
+    /// The verified state; at an unresolved fork, the verified prefix before it.
     state: State,
+    /// The seq of the unresolved fork the history stops at (§8.6 rule 3), if any.
+    fork: Option<u64>,
 }
 fn view(h: &HomeState, now_ms: i64) -> R<View> {
     let persisted = h.persisted().map_err(|e| e.to_string())?;
     let v = verify_history(&Objects::default(), &persisted, now_ms);
-    if v.stop.is_some() {
-        return Err(format!("history: {}", v.code()));
-    }
+    let fork = match &v.stop {
+        None => None,
+        Some(Stop::Fork { seq }) => Some(*seq),
+        Some(_) => return Err(format!("history: {}", v.code())),
+    };
     let state = v.state.ok_or("no verified history")?;
-    Ok(View { persisted, state })
+    Ok(View { persisted, state, fork })
 }
 
 fn status(req: &Value) -> R<Value> {
@@ -273,6 +278,7 @@ fn status(req: &Value) -> R<Value> {
         "headMaxAge": policy.head_max_age(),
         "headQuorum": policy.head_quorum(),
         "peers": peers,
+        "fork": v.fork,
     }))
 }
 
@@ -660,10 +666,37 @@ fn served_heads(objects: &Objects) -> BTreeMap<String, Vec<u8>> {
 }
 
 /// Every file a held object set occupies: entries, pending objects and the served heads.
-fn files_of(objects: &Objects) -> R<BTreeMap<String, Vec<u8>>> {
+fn files_of(objects: &Objects, now_ms: i64) -> R<BTreeMap<String, Vec<u8>>> {
     let mut out = BTreeMap::new();
+    // `authority/<seq>.json` holds the entry the home's branch has at that seq. When the home
+    // holds more than one candidate at a seq (§8.6), the verdict says which one stands; at an
+    // unresolved fork the candidates from the fork on have no file (they are served from the
+    // state, `authority_page`).
+    let mut by_seq: BTreeMap<u64, Vec<(String, &Vec<u8>)>> = BTreeMap::new();
     for e in &objects.entries {
-        out.insert(entry_path(entry_seq(e)?), e.clone());
+        let d = AuthEnvelope::parse(e, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)
+            .map_err(|e| e.to_string())?
+            .digest;
+        let at = by_seq.entry(entry_seq(e)?).or_default();
+        if !at.iter().any(|(x, _)| *x == d) {
+            at.push((d, e));
+        }
+    }
+    let branch: Option<Vec<String>> = by_seq
+        .values()
+        .any(|c| c.len() > 1)
+        .then(|| verify_history(objects, &Persisted::default(), now_ms).branch);
+    for (seq, candidates) in by_seq {
+        let chosen = match &branch {
+            None => candidates.first().map(|(_, b)| *b),
+            Some(br) => {
+                let want = usize::try_from(seq - 1).ok().and_then(|i| br.get(i));
+                candidates.iter().find(|(d, _)| Some(d) == want).map(|(_, b)| *b)
+            }
+        };
+        if let Some(b) = chosen {
+            out.insert(entry_path(seq), b.clone());
+        }
     }
     for p in &objects.pending {
         let Ok(env) = AuthEnvelope::parse(
@@ -694,17 +727,23 @@ fn files_of(objects: &Objects) -> R<BTreeMap<String, Vec<u8>>> {
     out.extend(served_heads(objects));
     Ok(out)
 }
+/// The files as the host stores them. `replace`: the path holds what the state says now and its
+/// bytes may change (a head; an entry when §8.6 changes which candidate stands at a seq); every
+/// other path is written once.
 fn file_list(files: BTreeMap<String, Vec<u8>>) -> Vec<Value> {
     files
         .into_iter()
-        .map(|(p, b)| json!({"path": p, "bytes": b64(&b)}))
+        .map(|(p, b)| {
+            let replace = p.starts_with("heads/") || p.starts_with("authority/");
+            json!({"path": p, "bytes": b64(&b), "replace": replace})
+        })
         .collect()
 }
 /// What `after` holds that `before` did not (a head path whose bytes changed included).
-fn new_files(before: &Objects, after: &Objects) -> R<Vec<Value>> {
-    let had = files_of(before)?;
+fn new_files(before: &Objects, after: &Objects, now_ms: i64) -> R<Vec<Value>> {
+    let had = files_of(before, now_ms)?;
     Ok(file_list(
-        files_of(after)?
+        files_of(after, now_ms)?
             .into_iter()
             .filter(|(p, b)| had.get(p) != Some(b))
             .collect(),
@@ -800,7 +839,9 @@ fn post_authority(req: &Value) -> R<Value> {
         }
         let result: Result<(), Refusal> = match l.home.take() {
             Some(h) => {
-                let a = admit(&h, &b, &now);
+                let later: Vec<Vec<u8>> =
+                    entries[i + 1..].iter().filter_map(|e| canonical(e).ok()).collect();
+                let a = admit_with(&h, &b, &later, &now);
                 l.home = Some(a.state);
                 sign.extend(signs(&a.receipts));
                 a.result
@@ -848,7 +889,7 @@ fn post_authority(req: &Value) -> R<Value> {
     let after = files_before(&l)?;
     let mut out = outcome;
     out["state"] = json!(l.dump()?);
-    out["store"] = json!(new_files(&before, &after)?);
+    out["store"] = json!(new_files(&before, &after, now_ms)?);
     out["sign"] = json!(sign);
     out["accepted"] = json!(accepted);
     out["appointed"] = json!(l.home.is_some());
@@ -906,7 +947,7 @@ fn post_pending(req: &Value) -> R<Value> {
         "outcome": if refused.is_empty() { "ok" } else { "refused" },
         "results": refused,
         "state": l2.dump()?,
-        "store": new_files(&before, &after)?,
+        "store": new_files(&before, &after, now_ms)?,
         "sign": signs(&receipts),
     }))
 }
@@ -954,7 +995,7 @@ fn admit_one(req: &Value) -> R<Value> {
         Ok(()) => json!({"outcome": "ok"}),
         Err(r) => refusal(r),
     };
-    out["store"] = json!(new_files(&before, &after)?);
+    out["store"] = json!(new_files(&before, &after, now_ms)?);
     out["sign"] = json!(signs(&a.receipts));
     l.home = Some(a.state);
     out["state"] = json!(l.dump()?);
@@ -983,7 +1024,7 @@ fn op_finish_receipt(req: &Value) -> R<Value> {
     Ok(json!({
         "state": l.dump()?,
         "envelope": b64(&env),
-        "store": new_files(&before, &after)?,
+        "store": new_files(&before, &after, now_ms)?,
     }))
 }
 
@@ -1016,6 +1057,11 @@ fn head_request(req: &Value) -> R<Value> {
         return Ok(json!({"sign": null, "why": "not appointed", "state": req["state"]}));
     };
     let v = view(&h, now_ms)?;
+    if v.fork.is_some() {
+        // §8.6 rule 3: until a `resolve` activates, the home's verified history is the prefix
+        // before the fork; it signs no head (a head over the prefix would be behind its own).
+        return Ok(json!({"sign": null, "why": "the history stops at an unresolved fork", "state": req["state"]}));
+    }
     let st = &v.state;
     let seq = st.history().len() as u64;
     let digest = st.history().last().cloned().ok_or("empty history")?;
@@ -1121,7 +1167,7 @@ fn op_finish_head(req: &Value) -> R<Value> {
     Ok(json!({
         "state": l.dump()?,
         "envelope": b64(&env),
-        "store": new_files(&before, &after)?,
+        "store": new_files(&before, &after, now_ms)?,
     }))
 }
 
@@ -1158,8 +1204,32 @@ fn authority_page(req: &Value) -> R<Value> {
         let bytes = by_digest.get(d).ok_or("an entry on the branch is not held")?;
         entries.push(b64(bytes));
     }
-    let more = after + (entries.len() as u64) < history.len() as u64;
-    Ok(json!({"entries": entries, "more": more}))
+    let mut more = after + (entries.len() as u64) < history.len() as u64;
+    // At an unresolved fork the home serves the fork (§8.6: every verifier holding the same
+    // objects reaches the same verdict): after the verified prefix, every candidate it holds
+    // from the fork's seq on, in seq then digest order, never splitting one seq across pages.
+    if let Some(fork) = v.fork {
+        let mut rest: Vec<(u64, String, &Vec<u8>)> = by_digest
+            .iter()
+            .filter_map(|(d, b)| entry_seq(b).ok().map(|s| (s, d.clone(), *b)))
+            .filter(|(s, _, _)| *s >= fork && *s > after)
+            .collect();
+        rest.sort();
+        if !more && !rest.is_empty() {
+            let mut i = 0;
+            while i < rest.len() {
+                let seq = rest[i].0;
+                let n = rest[i..].iter().take_while(|(s, _, _)| *s == seq).count();
+                if !entries.is_empty() && entries.len() + n > limit as usize {
+                    more = true;
+                    break;
+                }
+                entries.extend(rest[i..i + n].iter().map(|(_, _, b)| b64(b)));
+                i += n;
+            }
+        }
+    }
+    Ok(json!({"entries": entries, "more": more, "fork": v.fork}))
 }
 
 fn pending_page(req: &Value) -> R<Value> {
@@ -1301,7 +1371,7 @@ fn record_due(req: &Value) -> R<Value> {
     l.home = Some(h);
     Ok(json!({
         "state": l.dump()?,
-        "store": new_files(&before, &after)?,
+        "store": new_files(&before, &after, now_ms)?,
         "sign": sign,
         "result": result,
         "note": note,
@@ -1421,5 +1491,6 @@ fn check_record(req: &Value) -> R<Value> {
 
 fn objects(req: &Value) -> R<Value> {
     let l = load(req)?;
-    Ok(json!({"files": file_list(files_of(&files_before(&l)?)?)}))
+    let now_ms = req.get("now").and_then(Value::as_i64).unwrap_or(i64::MAX / 2);
+    Ok(json!({"files": file_list(files_of(&files_before(&l)?, now_ms)?)}))
 }

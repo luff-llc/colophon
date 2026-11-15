@@ -114,9 +114,27 @@ fn digest_of(env: &Value) -> String {
     colophon_core::v05::encoding::digest(&STANDARD.decode(env["body"].as_str().unwrap()).unwrap())
 }
 
+/// The digests a recording entry settles: an `activate`'s transition, a `vetoed`'s transition
+/// and veto.
+fn settled_by(entries: &[Value]) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for e in entries {
+        let b = body_of(e);
+        for field in ["transition", "veto"] {
+            if let Some(text) = b[field].as_str() {
+                let env: Value = serde_json::from_slice(&STANDARD.decode(text).unwrap()).unwrap();
+                out.insert(digest_of(&env));
+            }
+        }
+    }
+    out
+}
+
 /// State and storage agree, no head is over an entry not served, one receipt per home and
-/// object, and every receipt is the one first seen (`receipts`: object -> body).
-fn check(port: u16, receipts: &mut BTreeMap<String, Value>) -> Vec<Value> {
+/// object, and every receipt is the one first seen (`receipts`: object -> body). Every
+/// transition and veto the home answered 200 for (`admitted`: digest -> `transitions` or
+/// `vetoes`) is kept: stored at its path, and listed until a recording entry settles it.
+fn check(port: u16, receipts: &mut BTreeMap<String, Value>, admitted: &BTreeMap<String, &str>) -> Vec<Value> {
     // The head first: entries only grow, so a head read before them must be over one of them.
     let (head_status, head) = get_json(port, "/head");
     let mut entries = Vec::new();
@@ -160,6 +178,26 @@ fn check(port: u16, receipts: &mut BTreeMap<String, Value>) -> Vec<Value> {
         let (s, file) = get_json(port, &path);
         assert_eq!((s, &file), (200, env), "{path} is stored as listed");
     }
+    // Nothing admitted is dropped: stored, and listed until settled (the listing is read after
+    // the entries, so an object settled in between is listed or settled by what was read).
+    let listed: std::collections::BTreeSet<String> = pending["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["kind"] != "receipt")
+        .map(|o| o["digest"].as_str().unwrap().to_string())
+        .collect();
+    let mut later = entries.clone();
+    if pending["more"] != true {
+        let (_, page) = get_json(port, &format!("/authority?after={}&limit=64", entries.len()));
+        later.extend(page["entries"].as_array().unwrap().iter().cloned());
+    }
+    let settled = settled_by(&later);
+    for (d, dir) in admitted {
+        let (s, _) = get_json(port, &format!("/records/{dir}/{d}.json"));
+        assert_eq!(s, 200, "the admitted {dir} {d} is kept");
+        assert!(listed.contains(d) || settled.contains(d), "the admitted {dir} {d} is listed until settled");
+    }
     entries
 }
 
@@ -189,6 +227,10 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     src.store_account(&f.account);
     let host = std::mem::replace(&mut f.host, Host::new());
     let d = f.d.clone();
+    let p = f.p.clone();
+    let mut admitted: BTreeMap<String, &str> = BTreeMap::new();
+    let mut want = 3usize;
+    let mut vetoes = 0usize;
     let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut rnd = |n: u64| {
         seed ^= seed << 13;
@@ -203,6 +245,9 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     for k in 0..rounds {
         let t = T0 + HOUR_MS + k * 3 * HOUR_MS;
         clock(t);
+        // After a `vetoed`, a transition its signer's unit signs alone fails escalation (§8.7):
+        // the next one is signed by both units.
+        let signers = if k % 3 == 2 { vec![d.clone(), p.clone()] } else { vec![d.clone()] };
         // The controller catches up with the home, then proposes a transition.
         let mut ctl = controller_engine(&f, &host, &src, &d, t);
         let peer = Relay::attached(port, BASE_A, &account, &dir);
@@ -211,7 +256,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
         assert!(faults.is_empty(), "round {k}: {faults:?}");
         let action = ctl
             .account()
-            .begin_transition(&Change::policy(json!({"callWindow": 600 + k})), std::slice::from_ref(&d), TransitionRule::Control)
+            .begin_transition(&Change::policy(json!({"callWindow": 600 + k})), &signers, TransitionRule::Control)
             .unwrap();
         engine_finish(&mut ctl, &host, &src, action);
         let digest = ctl.account().pending().last().unwrap().digest.clone();
@@ -238,31 +283,84 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             kills += 1;
             let answered = sender.join().unwrap();
             relay = start(&keys, &account, &dir, port);
-            check(relay.port, &mut receipts);
+            check(relay.port, &mut receipts, &admitted);
             // The client retries until it has the home's answer.
             if !answered.is_some_and(|(s, _)| s == 200) {
                 let retry = try_http(port, "POST", "/pending", post.as_bytes());
                 assert_eq!(retry.map(|(s, _)| s), Some(200), "round {k}: the retry");
             }
+            admitted.insert(digest.clone(), "transitions");
+            check(relay.port, &mut receipts, &admitted);
         }
-        // Due: the home records `activate`, signs a head, then records `final`. Killed at random
-        // points while it does.
+        // Every third round the owner vetoes it in time, from the other unit (the passkey),
+        // killed at a random point while the home admits and receipts the veto: the veto is kept,
+        // and the transition is `vetoed`, never activated.
+        let vetoed = k % 3 == 1;
+        if vetoed {
+            clock(t + 2_000);
+            let peer = Relay::attached(port, BASE_A, &account, &dir);
+            let mut wire = RealRelay::new(&peer);
+            let faults = relay_pass(&mut ctl, &src, &keys.id, &mut wire, &host, t + 2_000);
+            assert!(faults.is_empty(), "round {k}: {faults:?}");
+            let action = ctl.account().begin_veto(&digest, std::slice::from_ref(&p)).unwrap();
+            engine_finish(&mut ctl, &host, &src, action);
+            let veto: Value = ctl
+                .account()
+                .objects()
+                .pending
+                .iter()
+                .filter(|b| pending_path(b).starts_with("vetoes/"))
+                .find(|b| body_of(&serde_json::from_slice::<Value>(b).unwrap())["transition"] == digest.as_str())
+                .map(|b| serde_json::from_slice(b).unwrap())
+                .expect("the veto");
+            let veto_digest = digest_of(&veto);
+            let post = json!({"objects": [veto]}).to_string();
+            clock(t + 3_000);
+            let delay = rnd(30_000);
+            let sender = {
+                let body = post.clone();
+                std::thread::spawn(move || try_http(port, "POST", "/pending", body.as_bytes()))
+            };
+            std::thread::sleep(std::time::Duration::from_micros(delay));
+            inside += usize::from(relay.kill());
+            kills += 1;
+            let answered = sender.join().unwrap();
+            relay = start(&keys, &account, &dir, port);
+            check(relay.port, &mut receipts, &admitted);
+            if !answered.is_some_and(|(s, _)| s == 200) {
+                let retry = try_http(port, "POST", "/pending", post.as_bytes());
+                assert_eq!(retry.map(|(s, _)| s), Some(200), "round {k}: the veto's retry");
+            }
+            admitted.insert(veto_digest, "vetoes");
+            check(relay.port, &mut receipts, &admitted);
+        }
+        // Restarts before it is due: everything admitted is still kept and listed.
+        clock(t + 60_000);
+        for _ in 0..2 {
+            std::thread::sleep(std::time::Duration::from_micros(rnd(40_000)));
+            inside += usize::from(relay.kill());
+            kills += 1;
+            relay = start(&keys, &account, &dir, port);
+            check(relay.port, &mut receipts, &admitted);
+        }
+        // Due: the home records `activate`, signs a head, then records `final` (or, vetoed, the
+        // `vetoed`). Killed at random points while it does.
         let due = t + HOUR_MS + 400_000;
         clock(due);
-        for _ in 0..7 {
+        for _ in 0..5 {
             std::thread::sleep(std::time::Duration::from_micros(rnd(120_000)));
             inside += usize::from(relay.kill());
             kills += 1;
             relay = start(&keys, &account, &dir, port);
-            check(relay.port, &mut receipts);
+            check(relay.port, &mut receipts, &admitted);
         }
         // A real clock moves on: a head over the `activate` needs an `issued` after the head
         // the home may have signed at the same clock reading (strictly increasing, §13.3).
         clock(due + 2_000);
-        let want = 3 + 2 * (k as usize + 1);
+        want += if vetoed { 1 } else { 2 };
         let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let entries = loop {
-            let e = check(relay.port, &mut receipts);
+            let e = check(relay.port, &mut receipts, &admitted);
             if e.len() >= want || std::time::Instant::now() > end {
                 break e;
             }
@@ -270,11 +368,27 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
         };
         let kinds: Vec<String> = entries.iter().map(|e| body_of(e)["kind"].as_str().unwrap().to_string()).collect();
         assert_eq!(kinds.len(), want, "round {k}: {kinds:?}");
-        assert_eq!(&kinds[want - 2..], &["activate".to_string(), "final".to_string()], "round {k}");
+        if vetoed {
+            assert_eq!(kinds[want - 1], "vetoed", "round {k}");
+            vetoes += 1;
+        } else {
+            assert_eq!(&kinds[want - 2..], &["activate".to_string(), "final".to_string()], "round {k}");
+        }
+        // Settled, and still kept: the transition (and its veto) stay stored after they leave
+        // the listing, across one more restart.
+        inside += usize::from(relay.kill());
+        kills += 1;
+        relay = start(&keys, &account, &dir, port);
+        let entries = check(relay.port, &mut receipts, &admitted);
+        assert!(settled_by(&entries).contains(&digest), "round {k}: settled");
         eprintln!("kill loop: round {k} done, {kills} kills so far ({inside} inside record_due), {:?}", started.elapsed());
     }
     let _ = relay.kill();
-    eprintln!("kill loop: {kills} kills, {inside} of them inside record_due, {rounds} transitions activated and final");
+    eprintln!(
+        "kill loop: {kills} kills, {inside} of them inside record_due, {} transitions activated and final, {vetoes} vetoed, {} transitions and vetoes kept",
+        rounds as usize - vetoes,
+        admitted.len()
+    );
     assert!(kills >= 200, "{kills}");
     assert!(inside > 0, "some kills landed inside record_due");
 }
