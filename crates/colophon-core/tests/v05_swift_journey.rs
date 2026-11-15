@@ -687,7 +687,7 @@ fn copier_session(j: &mut Journey) -> Account {
     let sigs = sign(&j.host, p.steps());
     assert!(matches!(
         j.acct.finish_move(p, sigs).unwrap(),
-        Moved::Shares(_)
+        Moved::Shares(_, _)
     ));
     assert!(j.acct.owed_shares().is_empty());
     let copier = j
@@ -917,7 +917,7 @@ fn journey_with(o: Opts) {
         .begin_swift_migration(&result, members, from, until, until, signers)
         .unwrap();
     let sigs = sign(&j.host, p.steps());
-    let Moved::Migration(ch) = j.acct.finish_move(p, sigs).unwrap() else {
+    let Moved::Migration(ch, _) = j.acct.finish_move(p, sigs).unwrap() else {
         panic!()
     };
     assert_eq!(ch.pending.added.len(), 1);

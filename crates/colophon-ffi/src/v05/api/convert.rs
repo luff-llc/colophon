@@ -33,7 +33,7 @@ pub(crate) fn descriptor_view(d: &KeyDescriptor) -> KeyDescriptorView {
                 .map(<[String]>::to_vec)
                 .unwrap_or_default(),
         ),
-        CoreForm::Unknown(_) => (SignForm::Raw, None, None, None, vec![], vec![]),
+        CoreForm::Unknown(_) => (SignForm::Unknown, None, None, None, vec![], vec![]),
     };
     KeyDescriptorView {
         form,
@@ -48,6 +48,11 @@ pub(crate) fn descriptor_view(d: &KeyDescriptor) -> KeyDescriptorView {
 pub(crate) fn descriptor_from_view(v: &KeyDescriptorView) -> Result<KeyDescriptor, AccountError> {
     bytes_ok(&v.signing, 65, "a signing point")?;
     Ok(match v.form {
+        SignForm::Unknown => {
+            return Err(AccountError::bad(
+                "a key of an unknown form cannot be created or checked here",
+            ))
+        }
         SignForm::Raw => KeyDescriptor::new_raw(v.signing.clone(), v.agreement.clone())?,
         SignForm::Webauthn => {
             let opt = |l: &Vec<String>| (!l.is_empty()).then(|| l.clone());
@@ -212,10 +217,10 @@ pub(crate) fn agreements(a: Vec<acc::EpochAgreement>) -> Vec<EpochAgreement> {
 /// Match the host's answers to the account's own request, then consume and wipe them.
 pub(crate) fn epoch_secrets(
     want: Vec<acc::EpochAgreement>,
-    mut v: Vec<EpochAnswer>,
+    v: &mut [EpochAnswer],
 ) -> Result<Vec<acc::EpochSecret>, AccountError> {
     let r = (|| {
-        list_len(&v, "answers")?;
+        list_len(v, "answers")?;
         v.iter()
             .map(|a| {
                 let step = want
@@ -230,7 +235,7 @@ pub(crate) fn epoch_secrets(
             })
             .collect()
     })();
-    for a in &mut v {
+    for a in v.iter_mut() {
         wipe(&mut a.shared);
     }
     r
@@ -240,7 +245,8 @@ pub(crate) fn slots(a: &acc::Account) -> Result<Vec<SlotInfo>, AccountError> {
         .into_iter()
         .map(|s| SlotInfo {
             index: s.index as u64,
-            kind: s.kind,
+            kind: slot_kind(&s.kind),
+            kind_raw: slot_kind_raw(&s.kind),
             label: s.label,
             controllers: s
                 .controllers
@@ -250,10 +256,155 @@ pub(crate) fn slots(a: &acc::Account) -> Result<Vec<SlotInfo>, AccountError> {
         })
         .collect())
 }
+pub(crate) fn slot_kind_raw(s: &str) -> Option<String> {
+    (slot_kind(s) == SlotKind::Unknown).then(|| s.to_string())
+}
+/// A slot's protocol spelling as a typed kind.
+pub(crate) fn slot_kind(s: &str) -> SlotKind {
+    match s {
+        "sealed" => SlotKind::Sealed,
+        "prf" => SlotKind::Prf,
+        "combined" => SlotKind::Combined,
+        _ => SlotKind::Unknown,
+    }
+}
+/// The §1 result code split into its kind and the reason after `refused:`.
+pub(crate) fn status_parts(code: &str) -> (StatusKind, Option<String>) {
+    match code {
+        "ok" => (StatusKind::Ok, None),
+        "held" => (StatusKind::Held, None),
+        "malformed" => (StatusKind::Malformed, None),
+        "badSignature" => (StatusKind::BadSignature, None),
+        "newerFormat" => (StatusKind::NewerFormat, None),
+        "unavailable" => (StatusKind::Unavailable, None),
+        c => match c.strip_prefix("refused:") {
+            Some(r) => (StatusKind::Refused, Some(r.to_string())),
+            None => (StatusKind::Unavailable, Some(c.to_string())),
+        },
+    }
+}
+/// A record verdict (`admitted`, `held:<why>`, `refused:<reason>`, a failure code) as a typed
+/// value.
+pub(crate) fn record_verdict(v: Option<String>) -> Option<RecordVerdict> {
+    let v = v?;
+    Some(match v.as_str() {
+        "admitted" => RecordVerdict {
+            kind: VerdictKind::Admitted,
+            reason: None,
+        },
+        "malformed" => RecordVerdict {
+            kind: VerdictKind::Malformed,
+            reason: None,
+        },
+        "badSignature" => RecordVerdict {
+            kind: VerdictKind::BadSignature,
+            reason: None,
+        },
+        "newerFormat" => RecordVerdict {
+            kind: VerdictKind::NewerFormat,
+            reason: None,
+        },
+        "unavailable" => RecordVerdict {
+            kind: VerdictKind::Unavailable,
+            reason: None,
+        },
+        other => match (other.strip_prefix("held:"), other.strip_prefix("refused:")) {
+            (Some(r), _) => RecordVerdict {
+                kind: VerdictKind::Held,
+                reason: Some(r.to_string()),
+            },
+            (_, Some(r)) => RecordVerdict {
+                kind: VerdictKind::Refused,
+                reason: Some(r.to_string()),
+            },
+            _ => RecordVerdict {
+                kind: VerdictKind::Unavailable,
+                reason: Some(other.to_string()),
+            },
+        },
+    })
+}
+pub(crate) fn controller_role(r: &str) -> ControllerRole {
+    match r {
+        "approve" => ControllerRole::Approve,
+        "control" => ControllerRole::Control,
+        "recover" => ControllerRole::Recover,
+        "sign" => ControllerRole::Sign,
+        _ => ControllerRole::Unknown,
+    }
+}
+fn role_text(r: ControllerRole) -> Result<&'static str, AccountError> {
+    Ok(match r {
+        ControllerRole::Approve => "approve",
+        ControllerRole::Control => "control",
+        ControllerRole::Recover => "recover",
+        ControllerRole::Sign => "sign",
+        ControllerRole::Unknown => {
+            return Err(AccountError::bad(
+                "a controller is created with a known role",
+            ))
+        }
+    })
+}
+/// A typed controller to its protocol JSON (§6.1); the core validates it again.
+pub(crate) fn controller_value(c: &ControllerSpec) -> Result<Value, AccountError> {
+    use colophon_core::v05::encoding::encode_base64;
+    let d = descriptor_from_view(&c.key)?;
+    let mut key = serde_json::Map::new();
+    key.insert("signing".into(), Value::String(encode_base64(d.signing())));
+    match d.form() {
+        CoreForm::Raw { agreement } => {
+            key.insert("form".into(), "raw".into());
+            if let Some(a) = agreement {
+                key.insert("agreement".into(), Value::String(encode_base64(a)));
+            }
+        }
+        CoreForm::WebAuthn(w) => {
+            key.insert("form".into(), "webauthn".into());
+            key.insert("rp".into(), w.rp().into());
+            key.insert(
+                "credential".into(),
+                Value::String(encode_base64(w.credential())),
+            );
+            if !w.origins().is_empty() {
+                key.insert("origins".into(), serde_json::json!(w.origins()));
+            }
+            if let Some(o) = w.authority_origins() {
+                key.insert("authorityOrigins".into(), serde_json::json!(o));
+            }
+        }
+        CoreForm::Unknown(_) => {
+            return Err(AccountError::bad("an unknown key form cannot be created"))
+        }
+    }
+    let mut roles: Vec<&'static str> = c
+        .roles
+        .iter()
+        .map(|r| role_text(*r))
+        .collect::<Result<_, _>>()?;
+    roles.sort_unstable();
+    let mut o = serde_json::Map::new();
+    o.insert("key".into(), Value::Object(key));
+    o.insert("label".into(), c.label.clone().into());
+    o.insert("roles".into(), serde_json::json!(roles));
+    if c.verification {
+        o.insert("verification".into(), Value::Bool(true));
+    }
+    if let Some(h) = &c.holder {
+        o.insert("holder".into(), h.clone().into());
+    }
+    if !c.audiences.is_empty() {
+        o.insert("audiences".into(), serde_json::json!(c.audiences));
+    }
+    Ok(Value::Object(o))
+}
 pub(crate) fn status(s: &acc::Status) -> Status {
+    let (kind, reason) = status_parts(&s.code);
     Status {
         seq: s.seq,
         code: s.code.clone(),
+        kind,
+        reason,
         stop_seq: s.stop_seq,
         detail: s.detail.clone(),
         rollback: s.rollback,
@@ -308,11 +459,13 @@ pub(crate) fn controller(c: &acc::ControllerInfo) -> Controller {
     Controller {
         id: c.id.clone(),
         label: c.label.clone(),
-        roles: c.roles.clone(),
-        form: if c.form == "webauthn" {
-            SignForm::Webauthn
-        } else {
-            SignForm::Raw
+        roles: c.roles.iter().map(|r| controller_role(r)).collect(),
+        roles_raw: c.roles.clone(),
+        key: descriptor_view(&c.key),
+        form: match c.form.as_str() {
+            "webauthn" => SignForm::Webauthn,
+            "raw" => SignForm::Raw,
+            _ => SignForm::Unknown,
         },
         verification: c.verification,
         holder: c.holder.clone(),
@@ -323,22 +476,57 @@ pub(crate) fn controller(c: &acc::ControllerInfo) -> Controller {
 }
 fn member_kind(s: Option<&str>) -> AccountMemberKind {
     match s {
+        Some("device") => AccountMemberKind::Device,
         Some("app") => AccountMemberKind::App,
         Some("agent") => AccountMemberKind::Agent,
         Some("server") => AccountMemberKind::Server,
-        _ => AccountMemberKind::Device,
+        _ => AccountMemberKind::Unknown,
     }
 }
-pub(crate) fn member_kind_of(k: AccountMemberKind) -> &'static str {
-    match k {
+/// The raw text of a kind this reader does not know, else none.
+fn kind_raw(k: AccountMemberKind, s: Option<&str>) -> Option<String> {
+    (k == AccountMemberKind::Unknown).then(|| s.unwrap_or_default().to_string())
+}
+pub(crate) fn member_kind_of(k: AccountMemberKind) -> Result<&'static str, AccountError> {
+    Ok(match k {
         AccountMemberKind::Device => "device",
         AccountMemberKind::App => "app",
         AccountMemberKind::Agent => "agent",
         AccountMemberKind::Server => "server",
-    }
+        AccountMemberKind::Unknown => {
+            return Err(AccountError::bad(
+                "a member of an unknown kind cannot be created",
+            ))
+        }
+    })
 }
 pub(crate) fn member_kind_from(s: &str) -> AccountMemberKind {
     member_kind(Some(s))
+}
+pub(crate) fn member_kind_raw_from(s: &str) -> Option<String> {
+    kind_raw(member_kind(Some(s)), Some(s))
+}
+pub(crate) fn denial_reason(s: &str) -> (AccountDenialReason, Option<String>) {
+    match s {
+        "notGranted" => (AccountDenialReason::NotGranted, None),
+        "revoked" => (AccountDenialReason::Revoked, None),
+        "expired" => (AccountDenialReason::Expired, None),
+        "budgetSpent" => (AccountDenialReason::BudgetSpent, None),
+        "notReadable" => (AccountDenialReason::NotReadable, None),
+        "unavailable" => (AccountDenialReason::Unavailable, None),
+        other => (AccountDenialReason::Unknown, Some(other.to_string())),
+    }
+}
+pub(crate) fn denial_reason_text(r: AccountDenialReason, raw: &Option<String>) -> String {
+    match r {
+        AccountDenialReason::NotGranted => "notGranted".into(),
+        AccountDenialReason::Revoked => "revoked".into(),
+        AccountDenialReason::Expired => "expired".into(),
+        AccountDenialReason::BudgetSpent => "budgetSpent".into(),
+        AccountDenialReason::NotReadable => "notReadable".into(),
+        AccountDenialReason::Unavailable => "unavailable".into(),
+        AccountDenialReason::Unknown => raw.clone().unwrap_or_default(),
+    }
 }
 pub(crate) fn member(m: &acc::MemberInfo) -> Result<AccountMember, AccountError> {
     let v = serde_json::to_value(&m.member)
@@ -371,6 +559,7 @@ pub(crate) fn member(m: &acc::MemberInfo) -> Result<AccountMember, AccountError>
         id: v["id"].as_str().unwrap_or_default().to_string(),
         label: v["label"].as_str().unwrap_or_default().to_string(),
         kind: member_kind(v["kind"].as_str()),
+        kind_raw: kind_raw(member_kind(v["kind"].as_str()), v["kind"].as_str()),
         grant,
         since: v["since"].as_u64().unwrap_or(0),
         revoked_at: v["revokedAt"].as_u64(),
@@ -416,7 +605,13 @@ pub(crate) fn home(h: &acc::HomeInfo) -> Home {
     Home {
         id: h.id.clone(),
         label: h.label.clone(),
-        status: h.status.clone(),
+        status: match h.status.as_str() {
+            "home" => HomeStatus::Home,
+            "revocationPending" => HomeStatus::RevocationPending,
+            _ => HomeStatus::Unknown,
+        },
+        status_raw: (!matches!(h.status.as_str(), "home" | "revocationPending"))
+            .then(|| h.status.clone()),
         endpoints: h.endpoints.clone(),
         primary: h.primary,
     }
@@ -497,8 +692,10 @@ pub(crate) fn notices(n: &acc::Notices) -> Notices {
     }
 }
 pub(crate) fn denial(d: &colophon_core::model::Denial) -> AccountDenial {
+    let (reason, reason_raw) = denial_reason(&d.reason);
     AccountDenial {
-        reason: d.reason.clone(),
+        reason,
+        reason_raw,
         detail: d.detail.clone(),
     }
 }
@@ -540,4 +737,99 @@ pub(crate) fn slot_plan(p: SlotPlan) -> Result<sl::SlotPlan, AccountError> {
         controllers: names(p.controllers, "slot controllers")?,
         label: p.label,
     })
+}
+
+/// The authority objects of one attempt (genesis, entries, receipts, heads), as the core holds
+/// them. Every list and the total are bounded before anything is copied.
+pub(crate) fn authority_objects(
+    o: AuthorityObjects,
+) -> Result<colophon_core::v05::history::Objects, AccountError> {
+    let mut total = 0usize;
+    let mut take = |v: Vec<ByteString>, what: &str| -> Result<Vec<Vec<u8>>, AccountError> {
+        list_len(&v, what)?;
+        v.into_iter()
+            .map(|b| {
+                bytes_ok(&b.bytes, MAX_BYTES, what)?;
+                total = total.saturating_add(b.bytes.len());
+                if total > MAX_BYTES {
+                    return Err(AccountError::bound("the objects are over 40 MiB in all"));
+                }
+                Ok(b.bytes)
+            })
+            .collect()
+    };
+    Ok(colophon_core::v05::history::Objects {
+        entries: take(o.entries, "an entry")?,
+        pending: take(o.pending, "a pending object")?,
+        heads: take(o.heads, "a head")?,
+        predecessor: take(o.predecessor, "a predecessor entry")?,
+    })
+}
+pub(crate) fn earlier_attempts(
+    v: Vec<AuthorityObjects>,
+) -> Result<Vec<colophon_core::v05::history::Objects>, AccountError> {
+    if v.len() > MAX_NAMES {
+        return Err(AccountError::bound("too many earlier attempts"));
+    }
+    v.into_iter().map(authority_objects).collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_result_code_splits_into_its_kind_and_reason() {
+        let cases = [
+            ("ok", StatusKind::Ok, None),
+            ("held", StatusKind::Held, None),
+            ("refused:fork", StatusKind::Refused, Some("fork")),
+            ("refused:rollback", StatusKind::Refused, Some("rollback")),
+            ("malformed", StatusKind::Malformed, None),
+            ("badSignature", StatusKind::BadSignature, None),
+            ("newerFormat", StatusKind::NewerFormat, None),
+            ("unavailable", StatusKind::Unavailable, None),
+        ];
+        for (code, kind, reason) in cases {
+            let (k, r) = status_parts(code);
+            assert_eq!((k, r.as_deref()), (kind, reason), "{code}");
+        }
+    }
+    #[test]
+    fn a_record_verdict_splits_into_its_kind_and_reason() {
+        let v = |s: &str| record_verdict(Some(s.to_string())).unwrap();
+        assert_eq!(v("admitted").kind, VerdictKind::Admitted);
+        let held = v("held:waitingForParent");
+        assert_eq!(
+            (held.kind, held.reason.as_deref()),
+            (VerdictKind::Held, Some("waitingForParent"))
+        );
+        let refused = v("refused:revoked");
+        assert_eq!(
+            (refused.kind, refused.reason.as_deref()),
+            (VerdictKind::Refused, Some("revoked"))
+        );
+        assert_eq!(v("newerFormat").kind, VerdictKind::NewerFormat);
+        assert_eq!(v("malformed").kind, VerdictKind::Malformed);
+        assert!(record_verdict(None).is_none());
+        assert_eq!(member_kind(Some("robot")), AccountMemberKind::Unknown);
+        assert_eq!(member_kind_raw_from("robot").as_deref(), Some("robot"));
+        assert_eq!(member_kind_raw_from("agent"), None);
+        assert!(member_kind_of(AccountMemberKind::Unknown).is_err());
+        let (r, raw) = denial_reason("somethingNew");
+        assert_eq!(
+            (r, raw.as_deref()),
+            (AccountDenialReason::Unknown, Some("somethingNew"))
+        );
+        assert_eq!(
+            denial_reason("revoked"),
+            (AccountDenialReason::Revoked, None)
+        );
+        assert_eq!(slot_kind_raw("strange").as_deref(), Some("strange"));
+        assert_eq!(slot_kind("combined"), SlotKind::Combined);
+        assert_eq!(slot_kind("strange"), SlotKind::Unknown);
+        assert_eq!(controller_role("approve"), ControllerRole::Approve);
+        assert_eq!(controller_role("strange"), ControllerRole::Unknown);
+    }
 }

@@ -38,8 +38,11 @@ use super::authority::{
 };
 use super::{envelope, format_date, Header, Kind, Records, Signature, SignatureResult};
 use super::{SigningStep, StepRole};
+use crate::crypto::Entropy;
 use crate::v05::descriptor::{Controller, KeyDescriptor, Role, WebAuthnKey};
-use crate::v05::encoding::{bounds, canonical, decode_base64, digest, encode_base64, parse_date};
+use crate::v05::encoding::{
+    bounds, canonical, decode_base64, digest, encode_base64, parse_date, strict_parse,
+};
 use crate::v05::history::keyring::Keyring;
 use crate::v05::history::succession::{
     choose_succession_receipts, handover_authorized, same_swift_key,
@@ -49,6 +52,9 @@ use crate::v05::history::{verify_history, Objects, Persisted, Stop};
 use crate::v05::ids::{key_id, AccountId};
 use crate::v05::signature::AuthorityRule;
 use crate::v05::slots::validate_slots;
+use crate::v05::slots::{PrfRequest, PrfResult, SlotBuild, SlotPlan, SlotTarget};
+use crate::v05::swift_slots::{MoveCeremony, SwiftLibrary};
+use crate::v05::vault::VaultSeed;
 use crate::v05::{bad_signature, malformed, require, Failure, Reason, Result};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -370,6 +376,19 @@ fn check_earlier_attempts(
                 state.verified_succession().is_none(),
                 "an earlier freezing entry's succession is verified: the predecessor is final",
             )?;
+            // An attempt that is merely not yet verified (due, F written after the due time,
+            // waiting for a home's head) is still live and blocks a new one. Only an attempt that
+            // can no longer verify frees the way: one that is vetoed, or whose F was written
+            // before the succession was due (premature: the window never opened, or F's date is
+            // earlier than the due time).
+            let status = succession_status(&state);
+            let dead = status.as_ref().is_none_or(|st| {
+                st.vetoed || st.timing.as_ref().is_none_or(|t| rec.issued_ms < t.due_ms)
+            });
+            require(
+                dead,
+                "an earlier succession attempt is still live (not yet verified): it blocks a new one unless it is vetoed or premature",
+            )?;
         }
         require(
             known,
@@ -548,6 +567,46 @@ fn new_genesis_steps(
         }
     }
     steps
+}
+
+/// Every check of [`prepare_swift_genesis`] that does not need the rebuilt slots, so that a
+/// genesis that cannot succeed is refused before the person is asked for a passkey assertion.
+/// `carried` are the controllers of the new keyring (the host's `swift_carried_controllers`).
+fn preflight_swift_genesis(
+    p: &SwiftSuccessorParams,
+    carried: &[Value],
+    predecessor: &[Vec<u8>],
+    now_ms: i64,
+) -> Result<()> {
+    super::check_issued(p.issued_ms)?;
+    let head = SwiftHead::read(predecessor)?;
+    let snap = head.snapshot()?;
+    require(
+        p.issued_ms >= head.issued_ms,
+        "genesis issued before the predecessor's head",
+    )?;
+    check_earlier_attempts(predecessor, &head.history, &p.earlier_attempts, now_ms)?;
+    let ids: BTreeSet<String> = carried
+        .iter()
+        .filter_map(|v| Controller::parse(v.clone(), "carried").ok())
+        .map(|c| c.id())
+        .collect();
+    require(!p.signers.is_empty(), "genesis needs a signer")?;
+    let distinct: BTreeSet<&String> = p.signers.iter().collect();
+    require(distinct.len() == p.signers.len(), "a signer appears twice")?;
+    require(
+        p.signers.iter().all(|s| ids.contains(s)),
+        "a genesis signer is not a controller of its keyring",
+    )?;
+    let hd: BTreeSet<&String> = p.handover.iter().collect();
+    require(hd.len() == p.handover.len(), "a handover key appears twice")?;
+    for id in &p.handover {
+        require(
+            snap.controllers.contains_key(id),
+            "a handover key is not a controller of the predecessor at head",
+        )?;
+    }
+    Ok(())
 }
 
 fn check_new_keyring(keyring: &Value, signers: &[String]) -> Result<Keyring> {
@@ -1418,4 +1477,310 @@ pub fn prepare_migration(
             change,
         },
     )
+}
+
+// ---------------------------------------------------------------------------------------------
+// The successor genesis of a Swift library (§15.1, §16.2, §16.3), as one composition.
+
+/// What the host chooses for the genesis of an account that succeeds a Swift library. The new
+/// vault seed and the slots' entropy are not here: they go to [`SwiftSuccessor::begin`] and are
+/// erased with the value.
+#[derive(Clone, Debug)]
+pub struct SwiftSuccessorParams {
+    /// 1–200 bytes.
+    pub label: String,
+    /// Declared namespaces: sorted, distinct.
+    pub namespaces: Vec<String>,
+    /// How the predecessor's controllers are carried: WebAuthn `authorityOrigins`, the agreement
+    /// points of raw controllers the predecessor does not show, and whether a root library's
+    /// stewards come along.
+    pub carry: CarryOptions,
+    /// `threshold` (default 1).
+    pub threshold: Option<u64>,
+    /// `recoverThreshold` (default 1 when any carried controller has `recover`, else 0).
+    pub recover_threshold: Option<u64>,
+    /// `addThreshold` (default 1).
+    pub add_threshold: Option<u64>,
+    /// `countBy: holders` (default `keys`).
+    pub count_by_holders: bool,
+    /// The policy (§6.3) as protocol JSON; `None` is the §18 person default.
+    pub policy: Option<serde_json::Value>,
+    /// The genesis's signers, controllers of the new keyring: the first is `by`.
+    pub signers: Vec<String>,
+    /// The predecessor's controller IDs whose `handover` signature the host can obtain.
+    pub handover: Vec<String>,
+    /// The genesis's `issued`, in ms: not earlier than the predecessor head's.
+    pub issued_ms: i64,
+    /// The objects of the successor each earlier freezing entry named (§15.1 "Competing
+    /// attempts").
+    pub earlier_attempts: Vec<Objects>,
+}
+
+/// One passkey ceremony that rebuilds one slot (§7.2): the host makes **one** assertion over
+/// `ceremony.new_request.challenge` evaluating the new salt first and the old salt second.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccessorCeremony {
+    /// Which of [`SwiftSuccessor::prf_requests`] this assertion answers.
+    pub request: usize,
+    /// The index of the Swift slot the old salt opens (answer it to the `SwiftLibrary`).
+    pub old_slot: usize,
+    /// The two salts, the challenge and the credential.
+    pub ceremony: MoveCeremony,
+}
+
+/// What a finished successor genesis gives the host to store.
+#[derive(Clone, Debug)]
+pub struct SuccessorGenesis {
+    /// The successor account's ID.
+    pub account: String,
+    /// The genesis envelope: stored at `authority/00000001.json`.
+    pub genesis: Vec<u8>,
+    /// The predecessor entries the genesis was checked against: stored at
+    /// `predecessor/authority/<seq>.json`, so the account opens with its predecessor.
+    pub predecessor: Vec<(u64, Vec<u8>)>,
+}
+
+/// A successor genesis in progress, in as many rounds as the ceremonies need: PRF assertions
+/// (one per passkey that had a slot), then the signatures.
+pub struct SwiftSuccessor {
+    now_ms: i64,
+    predecessor: Vec<Vec<u8>>,
+    stage: SuccessorStage,
+}
+enum SuccessorStage {
+    Prf {
+        params: Box<SwiftSuccessorParams>,
+        seed: VaultSeed,
+        carried: Vec<serde_json::Value>,
+        builds: Vec<SlotBuild>,
+        requests: Vec<PrfRequest>,
+        ceremonies: Vec<SuccessorCeremony>,
+        unpaired: Vec<String>,
+    },
+    Sign {
+        pending: Box<PendingSuccession>,
+    },
+}
+impl std::fmt::Debug for SwiftSuccessor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SwiftSuccessor({})",
+            match &self.stage {
+                SuccessorStage::Prf { .. } => "awaiting PRF",
+                SuccessorStage::Sign { .. } => "awaiting the genesis signatures",
+            }
+        )
+    }
+}
+
+impl SwiftSuccessor {
+    /// Start the successor genesis for `lib`'s library, whose authority entries are
+    /// `predecessor`. `vault_seed` and `entropy` are 32 fresh bytes each (the new vault's seed and
+    /// the slots' entropy). Every controller that had a slot is carried with a rebuilt slot, one
+    /// slot each; each passkey's slot is rebuilt with one assertion ([`Self::ceremonies`]).
+    pub fn begin(
+        lib: &SwiftLibrary,
+        predecessor: Vec<Vec<u8>>,
+        params: SwiftSuccessorParams,
+        vault_seed: [u8; 32],
+        entropy: [u8; 32],
+        now_ms: i64,
+    ) -> Result<Self> {
+        let carried = swift_carried_controllers(&predecessor, &params.carry)?;
+        preflight_swift_genesis(&params, &carried, &predecessor, now_ms)?;
+        let seed = VaultSeed::from_host_random(vault_seed);
+        let controllers: BTreeMap<String, Controller> = carried
+            .iter()
+            .map(|v| Controller::parse(v.clone(), "carried").map(|c| (c.id(), c)))
+            .collect::<Result<_>>()?;
+        let target = SlotTarget::genesis(&seed, &controllers)?;
+        let slotted = swift_slotted_controllers(&predecessor)?;
+        let mut e = Entropy::new(entropy);
+        let mut builds = Vec::new();
+        for (n, id) in slotted.iter().enumerate() {
+            let label = controllers
+                .get(id)
+                .map(|c| c.label().to_string())
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| format!("slot {n}"));
+            builds.push(SlotBuild::begin(
+                &SlotPlan {
+                    controllers: vec![id.clone()],
+                    label,
+                },
+                &target,
+                e.take::<32>().map_err(|e| malformed(e.to_string()))?,
+            )?);
+        }
+        let requests: Vec<PrfRequest> = builds
+            .iter()
+            .flat_map(|b| b.prf_requests().iter().cloned())
+            .collect();
+        // Pair each new request with the Swift slot whose PRF route has the same controller and
+        // credential: that pair is one assertion (new salt first, old salt second).
+        let mut ceremonies = Vec::new();
+        let mut unpaired = Vec::new();
+        for (ri, r) in requests.iter().enumerate() {
+            let mut found = None;
+            for slot in 0..lib.slots().len() {
+                let (paired, _) = lib.pair_ceremonies(slot, std::slice::from_ref(r))?;
+                if let Some(c) = paired.into_iter().next() {
+                    found = Some(SuccessorCeremony {
+                        request: ri,
+                        old_slot: slot,
+                        ceremony: c,
+                    });
+                    break;
+                }
+            }
+            match found {
+                Some(c) => ceremonies.push(c),
+                None => unpaired.push(r.controller.clone()),
+            }
+        }
+        let predecessor_copy = predecessor;
+        let me = Self {
+            now_ms,
+            predecessor: predecessor_copy,
+            stage: SuccessorStage::Prf {
+                params: Box::new(params),
+                seed,
+                carried,
+                builds,
+                requests,
+                ceremonies,
+                unpaired,
+            },
+        };
+        if me.prf_requests().is_empty() {
+            return me.provide_prf(Vec::new());
+        }
+        Ok(me)
+    }
+
+    /// The PRF assertions to make, in order. Empty once none are needed.
+    pub fn prf_requests(&self) -> &[PrfRequest] {
+        match &self.stage {
+            SuccessorStage::Prf { requests, .. } => requests,
+            SuccessorStage::Sign { .. } => &[],
+        }
+    }
+    /// The requests that rebuild an old PRF slot, each with its old salt: one assertion each
+    /// answers the new request **and** opens the old slot.
+    pub fn ceremonies(&self) -> &[SuccessorCeremony] {
+        match &self.stage {
+            SuccessorStage::Prf { ceremonies, .. } => ceremonies,
+            SuccessorStage::Sign { .. } => &[],
+        }
+    }
+    /// Controllers whose new request has no old PRF route (their own assertion, new salt only).
+    pub fn unpaired(&self) -> &[String] {
+        match &self.stage {
+            SuccessorStage::Prf { unpaired, .. } => unpaired,
+            SuccessorStage::Sign { .. } => &[],
+        }
+    }
+    /// The exact bodies to sign: the genesis, its possession proofs, then the `handover`
+    /// signatures.
+    pub fn steps(&self) -> &[SigningStep] {
+        match &self.stage {
+            SuccessorStage::Sign { pending } => pending.steps(),
+            SuccessorStage::Prf { .. } => &[],
+        }
+    }
+    /// Give the PRF assertions and outputs, one per request in order: the slots are built, opened
+    /// again and checked, and the genesis body is made.
+    pub fn provide_prf(self, mut results: Vec<PrfResult>) -> Result<Self> {
+        let Self {
+            now_ms,
+            predecessor,
+            stage,
+        } = self;
+        let SuccessorStage::Prf {
+            params,
+            seed,
+            carried,
+            builds,
+            requests,
+            ..
+        } = stage
+        else {
+            return Err(malformed("this successor needs no PRF assertions"));
+        };
+        require(
+            results.len() == requests.len(),
+            "one assertion and output per PRF request",
+        )?;
+        let mut slots = Vec::new();
+        for b in builds {
+            let n = b.prf_requests().len();
+            let mine: Vec<PrfResult> = results.drain(..n).collect();
+            slots.push(b.finish(&seed, &mine)?.to_value()?);
+        }
+        let any_recover = carried
+            .iter()
+            .filter_map(|c| Controller::parse(c.clone(), "carried").ok())
+            .any(|c| c.has(&Role::Recover));
+        let keyring = json!({
+            "controllers": carried,
+            "threshold": params.threshold.unwrap_or(1),
+            "recoverThreshold": params.recover_threshold.unwrap_or(u64::from(any_recover)),
+            "addThreshold": params.add_threshold.unwrap_or(1),
+            "countBy": if params.count_by_holders { "holders" } else { "keys" },
+            "policy": params.policy.clone().unwrap_or_else(crate::v05::account::default_policy),
+            "vault": seed.public()?.to_value(),
+            "slots": slots,
+        });
+        let pending = prepare_swift_genesis(
+            &SwiftGenesisParams {
+                label: params.label.clone(),
+                namespaces: params.namespaces.clone(),
+                keyring,
+                issued_ms: params.issued_ms,
+                predecessor: predecessor.clone(),
+                signers: params.signers.clone(),
+                handover: params.handover.clone(),
+                earlier_attempts: params.earlier_attempts.clone(),
+            },
+            now_ms,
+        )?;
+        Ok(Self {
+            now_ms,
+            predecessor,
+            stage: SuccessorStage::Sign {
+                pending: Box::new(pending),
+            },
+        })
+    }
+    /// Give the signatures for [`Self::steps`], in order. The genesis is checked by the history
+    /// verifier over the predecessor before it is returned.
+    pub fn finish(self, signatures: Vec<SignatureResult>) -> Result<SuccessorGenesis> {
+        let SuccessorStage::Sign { pending } = self.stage else {
+            return Err(malformed("the PRF assertions have not been provided"));
+        };
+        let account = pending.account().as_str().to_string();
+        let records = pending.finish(signatures)?;
+        let genesis = records
+            .entries
+            .into_iter()
+            .next()
+            .ok_or_else(|| malformed("the successor genesis produced no entry"))?
+            .1;
+        let predecessor = self
+            .predecessor
+            .iter()
+            .filter_map(|e| {
+                let env = strict_parse(e).ok()?;
+                let body = decode_base64(env.get("body")?.as_str()?, 1_048_576).ok()?;
+                let seq = strict_parse(&body).ok()?.get("seq")?.as_u64()?;
+                Some((seq, e.clone()))
+            })
+            .collect();
+        Ok(SuccessorGenesis {
+            account,
+            genesis,
+            predecessor,
+        })
+    }
 }

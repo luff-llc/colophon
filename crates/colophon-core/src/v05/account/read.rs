@@ -24,6 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct ControllerInfo {
     /// The controller ID.
     pub id: String,
+    /// The key descriptor: form, signing point, agreement or WebAuthn `rp` and credential.
+    pub key: crate::v05::descriptor::KeyDescriptor,
     /// The label.
     pub label: String,
     /// Roles, as the protocol spells them.
@@ -395,6 +397,7 @@ impl Account {
             .values()
             .map(|c| ControllerInfo {
                 id: c.id(),
+                key: c.key().clone(),
                 label: c.label().to_string(),
                 roles: c
                     .roles()
@@ -1088,6 +1091,7 @@ impl Account {
 
 /// What a session's identity is in the verified history.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum Standing {
     /// A controller.
     Controller(ControllerInfo),

@@ -212,14 +212,15 @@ pub fn scan(feature: &str, glue: Option<&Path>) -> BTreeSet<String> {
                 .into_iter()
                 .filter(|n| !n.starts_with("AccountFault.")),
         );
-        for line in text.lines() {
-            let t = line.trim_start();
-            if t.starts_with("fn ") && t.contains("this: &JsSource") {
-                let n = t["fn ".len()..].split('(').next().unwrap();
-                out.insert(format!("callback:HostSource.{n}"));
-            }
-            if t.starts_with("fn translate(this: &JsTranslator") {
-                out.insert("callback:SwiftTranslator.translate".to_string());
+        // The host callbacks are called through checked shims (`callRead`, `callReadBlob`,
+        // `callTranslate`): each must be declared in the glue source.
+        for (decl, name) in [
+            ("fn call_read(", "callback:HostSource.read"),
+            ("fn call_read_blob(", "callback:HostSource.read_blob"),
+            ("fn call_translate(", "callback:SwiftTranslator.translate"),
+        ] {
+            if text.contains(decl) {
+                out.insert(name.to_string());
             }
         }
     }

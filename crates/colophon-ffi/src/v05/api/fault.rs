@@ -1,9 +1,10 @@
 //! The error every export returns: a typed variant plus the protocol's code string.
+use super::types::{AccountDenialReason, SignatureCheck};
 use colophon_core::v05::Failure;
 
 /// A failed call. `code` is the protocol result code of §1 and §19 (`malformed`, `badSignature`,
 /// `newerFormat`, `unavailable`, `refused:<reason>`) or one of the binding's own codes (`host`,
-/// `reentered`, `consumed`, `wrongObject`, `bound`, `internal`). Hosts branch on the variant or
+/// `reentered`, `consumed`, `wrongObject`, `bound`, `locked`, `integrity`, `internal`). Hosts branch on the variant or
 /// the code, never on `detail`, which is for logs and never carries key material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "native05", derive(uniffi::Error))]
@@ -12,8 +13,10 @@ pub enum AccountError {
         code: String,
         detail: String,
     },
+    /// `check` names the failed WebAuthn check of §4.3 when `code` is `badSignature:<check>`.
     BadSignature {
         code: String,
+        check: Option<SignatureCheck>,
         detail: String,
     },
     NewerFormat {
@@ -63,12 +66,19 @@ pub enum AccountError {
     /// budgetSpent, notReadable or unavailable.
     Denied {
         code: String,
-        reason: String,
+        reason: AccountDenialReason,
+        reason_raw: Option<String>,
         detail: String,
     },
     /// The engine found its own source or home inconsistent and is unusable: discard it and
     /// open a new one. Not a mistake in the call.
     Integrity {
+        code: String,
+        detail: String,
+    },
+    /// `lock` was called: the engine no longer unlocks, loads, saves, prepares or finishes
+    /// anything. Open a new engine.
+    Locked {
         code: String,
         detail: String,
     },
@@ -98,7 +108,18 @@ impl AccountError {
             | Self::Bound { code, .. }
             | Self::Internal { code, .. }
             | Self::Denied { code, .. }
-            | Self::Integrity { code, .. } => code.clone(),
+            | Self::Integrity { code, .. }
+            | Self::Locked { code, .. } => code.clone(),
+        }
+    }
+    /// The §19 reason of a `Refused` or `Denied`, else none.
+    pub fn reason(&self) -> Option<String> {
+        match self {
+            Self::Refused { reason, .. } => Some(reason.clone()),
+            Self::Denied {
+                reason, reason_raw, ..
+            } => Some(super::convert::denial_reason_text(*reason, reason_raw)),
+            _ => None,
         }
     }
     pub fn detail(&self) -> String {
@@ -120,6 +141,7 @@ impl AccountError {
             Self::Internal { .. } => "Internal",
             Self::Denied { .. } => "Denied",
             Self::Integrity { .. } => "Integrity",
+            Self::Locked { .. } => "Locked",
         }
         .into()
     }
@@ -137,14 +159,23 @@ impl AccountError {
             | Self::Bound { detail, .. }
             | Self::Internal { detail, .. }
             | Self::Denied { detail, .. }
-            | Self::Integrity { detail, .. } => detail.clone(),
+            | Self::Integrity { detail, .. }
+            | Self::Locked { detail, .. } => detail.clone(),
         }
     }
     pub fn denied(reason: &str, detail: &str) -> Self {
+        let (r, raw) = super::convert::denial_reason(reason);
         Self::Denied {
             code: format!("denied:{reason}"),
-            reason: cap(reason),
+            reason: r,
+            reason_raw: raw,
             detail: cap(detail),
+        }
+    }
+    pub fn locked() -> Self {
+        Self::Locked {
+            code: "locked".into(),
+            detail: "the engine is locked: open a new one".into(),
         }
     }
     pub fn integrity(detail: impl AsRef<str>) -> Self {
@@ -203,7 +234,11 @@ impl From<Failure> for AccountError {
         let detail = cap(f.detail());
         match f {
             Failure::Malformed(_) => Self::Malformed { code, detail },
-            Failure::BadSignature(_) => Self::BadSignature { code, detail },
+            Failure::BadSignature(_) => Self::BadSignature {
+                code,
+                check: None,
+                detail,
+            },
             Failure::NewerFormat(_) => Self::NewerFormat { code, detail },
             Failure::Unavailable(_) => Self::Unavailable { code, detail },
             Failure::Refused(r) => Self::Refused {
@@ -252,6 +287,8 @@ pub const REFUSAL_REASONS: [&str; 20] = [
 #[cfg(feature = "native05")]
 impl From<uniffi::UnexpectedUniFFICallbackError> for AccountError {
     fn from(e: uniffi::UnexpectedUniFFICallbackError) -> Self {
-        Self::host(e.to_string())
+        // The foreign error's own message, first line only: a Kotlin exception's reason carries
+        // its whole stack trace.
+        Self::host(e.reason.lines().next().unwrap_or_default())
     }
 }

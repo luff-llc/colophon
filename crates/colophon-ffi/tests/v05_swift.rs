@@ -71,8 +71,13 @@ fn a_real_swift_library_is_opened_and_planned_through_the_exports() {
     assert!(src.problems().unwrap().is_empty());
     let slots = src.slots().unwrap();
     assert_eq!(
-        slots.iter().map(|s| s.kind.as_str()).collect::<Vec<_>>(),
-        ["sealed", "prf", "sealed", "sealed"]
+        slots.iter().map(|s| s.kind).collect::<Vec<_>>(),
+        [
+            SlotKind::Sealed,
+            SlotKind::Prf,
+            SlotKind::Sealed,
+            SlotKind::Sealed
+        ]
     );
     // The owner slot is sealed to an app key: the host answers the ECDH with that key.
     let scalar = decode_base64(keys["owner"]["agreementKey"].as_str().unwrap(), 64).unwrap();

@@ -63,12 +63,67 @@ cenum! {
     pub enum StepRole { Primary, Cosignature, Possession, Handover }
 }
 cenum! {
-    /// The signature form a signer uses.
-    pub enum SignForm { Raw, Webauthn }
+    /// The signature form a signer uses. `Unknown` is a form a newer writer made: it can be
+    /// shown and counted, never created or checked here.
+    pub enum SignForm { Raw, Webauthn, Unknown }
+}
+cenum! {
+    /// A controller's role (§6.1). `Unknown` is a role a newer writer made.
+    pub enum ControllerRole { Approve, Control, Recover, Sign, Unknown }
+}
+cenum! {
+    /// What kind of action a prepared action is.
+    pub enum ActionKind {
+        Approve, Renew, RenewShares, Revoke, EndSessions, EndMySessions, Rekey, Keyring,
+        AddController, AddSlot, RotateVault, RemoveController, Transition, Veto, Suspend, Resolve,
+        Write, Propose, Resolution, Import, Link, Call
+    }
+}
+cenum! {
+    /// What step of moving an old library a prepared move is. `Finished` once it was finished or
+    /// consumed.
+    pub enum MoveKind { Upgrade, SwiftVeto, SwiftFreeze, SwiftMigration, RenewShares, Finished }
+}
+cenum! {
+    /// How a vault slot opens. `Unknown` is a Swift slot of a form this reader does not know.
+    pub enum SlotKind { Sealed, Prf, Combined, Unknown }
+}
+cenum! {
+    /// Whether a home is serving, or its removal has not activated finally.
+    pub enum HomeStatus { Home, RevocationPending, Unknown }
+}
+cenum! {
+    /// Why access was refused (§19 access reasons). `Unknown` is a reason a newer writer made;
+    /// the raw text is in `reason_raw`.
+    pub enum AccountDenialReason { NotGranted, Revoked, Expired, BudgetSpent, NotReadable, Unavailable, Unknown }
+}
+cenum! {
+    /// The check of §4.3 that failed in a WebAuthn assertion, in the order of the spec's steps.
+    pub enum SignatureCheck {
+        Point, RawLength, Scalar, Der, Verify, ClientData, ClientDataBound, UnknownForm, Type,
+        Challenge, Origin, CrossOrigin, RelyingParty, UserPresence, UserVerification, Form,
+        CallOrigin
+    }
+}
+cenum! {
+    /// How a threshold counts signers.
+    pub enum CountBy { Keys, Holders }
+}
+cenum! {
+    /// The kind of an identity: a session is a controller or a member.
+    pub enum AccountIdentityKind { Controller, Member }
+}
+cenum! {
+    /// The §1 result of a verification, without the refusal's reason.
+    pub enum StatusKind { Ok, Held, Refused, Malformed, BadSignature, NewerFormat, Unavailable }
+}
+cenum! {
+    /// What the engine judged a record to be (§11.5), without the reason.
+    pub enum VerdictKind { Admitted, Held, Refused, NewerFormat, Malformed, BadSignature, Unavailable }
 }
 cenum! {
     /// A member's kind.
-    pub enum AccountMemberKind { Device, App, Agent, Server }
+    pub enum AccountMemberKind { Device, App, Agent, Server, Unknown }
 }
 cenum! {
     /// An HTTP method.
@@ -155,8 +210,8 @@ record! {
     pub struct Store { pub path: String, pub bytes: Vec<u8> }
 }
 record! {
-    /// A listed path with the provider's content-version token (empty for none).
-    pub struct ListedPath { pub path: String, pub version: String }
+    /// A listed path with the provider's content-version token (none for none).
+    pub struct ListedPath { pub path: String, pub version: Option<String> }
 }
 record! {
     /// One byte string (a list of them cannot be a field on every platform).
@@ -174,6 +229,28 @@ record! {
         pub origins: Vec<String>,
         pub authority_origins: Vec<String>,
     }
+}
+record! {
+    /// Who a session is: a controller of the keyring or a member, with its 32-hex key ID.
+    pub struct AccountIdentity { pub kind: AccountIdentityKind, pub id: String }
+}
+record! {
+    /// A controller to add, in the typed form (§6.1): the key as a descriptor, never base64
+    /// protocol JSON. `verification` is only for a `webauthn` key; `audiences` only for a `sign`
+    /// controller (a `sign` role is alone); `holder` is optional text.
+    pub struct ControllerSpec {
+        pub key: KeyDescriptorView,
+        pub label: String,
+        pub roles: Vec<ControllerRole>,
+        pub verification: bool,
+        pub holder: Option<String>,
+        pub audiences: Vec<String>,
+    }
+}
+record! {
+    /// The verdict on a record the engine holds or would hold: its kind, and the reason after
+    /// `held:` or `refused:` when there is one.
+    pub struct RecordVerdict { pub kind: VerdictKind, pub reason: Option<String> }
 }
 record! {
     /// The exact body and signer of one signature the host makes.
@@ -252,7 +329,8 @@ record! {
     /// One slot of the current vault, as a chooser shows it.
     pub struct SlotInfo {
         pub index: u64,
-        pub kind: String,
+        pub kind: SlotKind,
+        pub kind_raw: Option<String>,
         pub label: String,
         pub controllers: Vec<SlotController>,
     }
@@ -266,6 +344,8 @@ record! {
     pub struct Status {
         pub seq: u64,
         pub code: String,
+        pub kind: StatusKind,
+        pub reason: Option<String>,
         pub stop_seq: Option<u64>,
         pub detail: Option<String>,
         pub rollback: bool,
@@ -320,7 +400,9 @@ record! {
     pub struct Controller {
         pub id: String,
         pub label: String,
-        pub roles: Vec<String>,
+        pub roles: Vec<ControllerRole>,
+        pub roles_raw: Vec<String>,
+        pub key: KeyDescriptorView,
         pub form: SignForm,
         pub verification: bool,
         pub holder: Option<String>,
@@ -345,6 +427,7 @@ record! {
         pub id: String,
         pub label: String,
         pub kind: AccountMemberKind,
+        pub kind_raw: Option<String>,
         pub grant: Option<AccountGrant>,
         pub since: u64,
         pub revoked_at: Option<u64>,
@@ -369,7 +452,8 @@ record! {
     pub struct Home {
         pub id: String,
         pub label: String,
-        pub status: String,
+        pub status: HomeStatus,
+        pub status_raw: Option<String>,
         pub endpoints: Vec<String>,
         pub primary: bool,
     }
@@ -450,7 +534,7 @@ record! {
 record! {
     /// A write refused for access reasons: `reason` is one of notGranted, revoked, expired,
     /// budgetSpent, notReadable, unavailable.
-    pub struct AccountDenial { pub reason: String, pub detail: String }
+    pub struct AccountDenial { pub reason: AccountDenialReason, pub reason_raw: Option<String>, pub detail: String }
 }
 record! {
     /// Facts about a prepared action a host may show or follow up on.
@@ -620,12 +704,12 @@ record! {
     pub struct RevokeKeep { pub mode: KeepMode, pub kept: Vec<String>, pub heads: Vec<HeadRef> }
 }
 record! {
-    /// What to create. `controllers_json` holds one protocol controller object (§6.1) per item;
+    /// What to create. `controllers` are typed (§6.1);
     /// `policy_json` the §6.3 policy document (empty: the §18 person default).
     pub struct CreateParams {
         pub label: String,
         pub namespaces: Vec<String>,
-        pub controllers_json: Vec<String>,
+        pub controllers: Vec<ControllerSpec>,
         pub slots: Vec<SlotPlan>,
         pub threshold: Option<u64>,
         pub recover_threshold: Option<u64>,
@@ -650,8 +734,8 @@ record! {
         pub kind: AccountMemberKind,
         pub terms_json: String,
         pub created: String,
-        pub custody: String,
-        pub operator: String,
+        pub custody: Option<String>,
+        pub operator: Option<String>,
         pub endpoints: Vec<String>,
     }
 }
@@ -662,6 +746,7 @@ record! {
         pub member: String,
         pub label: String,
         pub kind: AccountMemberKind,
+        pub kind_raw: Option<String>,
         pub terms_json: String,
     }
 }
@@ -682,6 +767,8 @@ record! {
     /// The history verifier's verdict, with no host identity.
     pub struct HistoryReport {
         pub code: String,
+        pub kind: StatusKind,
+        pub reason: Option<String>,
         pub seq: u64,
         pub detail: Option<String>,
         pub rollback: bool,
@@ -726,7 +813,7 @@ record! {
     pub struct UpgradeParams {
         pub policy_json: String,
         pub add_threshold: u64,
-        pub count_by: String,
+        pub count_by: CountBy,
         pub issued_ms: i64,
         pub signers: Vec<String>,
     }
@@ -776,11 +863,62 @@ record! {
     }
 }
 record! {
-    /// What a finished step of a move produced: bytes to store, and for F the exact Swift
-    /// entry (`frozen_entry`) the host appends to the predecessor.
+    /// The `authorityOrigins` of one carried WebAuthn controller (1 to 32 strictly ascending
+    /// origins).
+    pub struct OriginsFor { pub controller: String, pub origins: Vec<String> }
+}
+record! {
+    /// The agreement point of one carried raw controller whose agreement key the predecessor
+    /// does not show.
+    pub struct AgreementFor { pub controller: String, pub agreement: Vec<u8> }
+}
+record! {
+    /// What the host chooses for the genesis of the account that succeeds a Swift library
+    /// (§15.1, §16.2). The predecessor's controllers are carried with the roles they held.
+    pub struct SwiftSuccessorParams {
+        pub label: String,
+        pub namespaces: Vec<String>,
+        pub include_stewards: bool,
+        pub authority_origins: Vec<OriginsFor>,
+        pub agreements: Vec<AgreementFor>,
+        pub threshold: Option<u64>,
+        pub recover_threshold: Option<u64>,
+        pub add_threshold: Option<u64>,
+        pub count_by_holders: bool,
+        pub policy_json: String,
+        pub signers: Vec<String>,
+        pub handover: Vec<String>,
+        pub issued_ms: i64,
+        pub earlier_attempts: Vec<AuthorityObjects>,
+    }
+}
+record! {
+    /// One passkey ceremony that rebuilds one slot (§7.2): ONE WebAuthn assertion over
+    /// `challenge` that evaluates `new_salt` first and `old_salt` second. Its first PRF output
+    /// answers `prf_requests[request]`; its second opens the Swift slot `old_slot` through
+    /// `SwiftSource.finish_open_slot`. `user_verification` is required.
+    pub struct SwiftCeremony {
+        pub request: u64,
+        pub old_slot: u64,
+        pub controller: String,
+        pub rp: String,
+        pub credential: Vec<u8>,
+        pub old_salt: Vec<u8>,
+        pub new_salt: Vec<u8>,
+        pub challenge: Vec<u8>,
+        pub user_verification: bool,
+    }
+}
+record! {
+    /// What a finished move step produced. `stores` are to be stored in the account's store as
+    /// given: F at `predecessor/authority/<seq>.json`, a copier's shares at
+    /// `authority/<seq>.json`, the migration at `transitions/<digest>.json`, a veto at
+    /// `vetoes/<digest>.json` (`veto_path`). For F, `frozen_entry` is also the exact Swift bytes
+    /// the Swift side appends to the predecessor.
     pub struct MoveResult {
         pub stores: Vec<Store>,
         pub veto: Option<Vec<u8>>,
+        pub veto_path: Option<String>,
         pub frozen_entry: Option<Vec<u8>>,
         pub frozen_seq: Option<u64>,
         pub succession_verified: bool,
@@ -813,7 +951,8 @@ record! {
     /// One slot of a Swift keyring. `controller` is the one it names, `problem` why it cannot be read.
     pub struct SwiftSlotInfo {
         pub index: u64,
-        pub kind: String,
+        pub kind: SlotKind,
+        pub kind_raw: Option<String>,
         pub label: String,
         pub controller: Option<String>,
         pub problem: Option<String>,
@@ -915,9 +1054,12 @@ pub const MAX_LIST: usize = 262_144;
 pub const MAX_NAMES: usize = 256;
 /// Largest binary argument: 40 MiB.
 pub const MAX_BYTES: usize = 40 << 20;
-/// Largest JSON text argument: 4 MiB (a document the host edits: policy, terms, controller,
-/// a record payload). Checked on the raw length before it is parsed.
-pub const MAX_JSON: usize = 4 << 20;
+/// Largest domain JSON document: 1 MiB (a record payload, an import batch, a translated batch).
+/// Chosen from the core's own bounds: a record payload is at most 1 MiB canonical
+/// (`domains/saved` validation, `Engine::begin_import`) and an import batch is at most
+/// `MAX_BATCH_BYTES` = 1 MiB, so no legitimate value needs more. It was 4 MiB, which let one
+/// item peak at 192 MiB. Checked on the raw length before anything is parsed.
+pub const MAX_JSON: usize = 1 << 20;
 
 pub(crate) type R<T> = Result<T, AccountError>;
 
@@ -944,12 +1086,111 @@ pub(crate) fn fixed<const N: usize>(b: &[u8], what: &str) -> R<[u8; N]> {
     b.try_into()
         .map_err(|_| AccountError::bound(&format!("{what} must be exactly {N} bytes")))
 }
-/// Parse a JSON argument after its raw length is checked against the cap.
-pub(crate) fn json(text: &str, what: &str) -> R<serde_json::Value> {
-    if text.len() > MAX_JSON {
-        return Err(AccountError::bound(&format!("{what} is over 4 MiB")));
+/// Largest authority-protocol JSON document (policy, terms, a `change`, a slot): 1 MiB, the
+/// authority body bound of §2.4 (`bounds::AUTHORITY_BODY`). Nothing that goes into one authority
+/// entry can be larger, so no legitimate value of this kind needs more.
+pub const MAX_AUTH_JSON: usize = 1 << 20;
+/// Most items in a list of JSON documents (slots, alternatives, blob manifests) and in a
+/// translated batch's children.
+pub const MAX_JSON_ITEMS: usize = 4096;
+
+/// The most a parse may cost, by the count of `within_budget`: 32 MiB. Chosen from the largest legitimate
+/// values: a 1 MiB payload of any shape costs at most about 17 MiB (524,288 one-byte-plus-comma
+/// numbers at 32 bytes each, or 175,000 short-key entries at about 100 bytes each); an import
+/// batch is at most 1 MiB (`MAX_BATCH_BYTES`) and an authority body at most 1 MiB, so the same.
+/// The budget leaves twofold room over those and refuses only a document that costs more than
+/// any legitimate one can, **when the parse reaches that point and never before**: a compact
+/// document of small numbers is as welcome as the same one with spaces.
+pub const PARSE_BUDGET: usize = 32 << 20;
+
+/// The cost of parsing `text`, counted as the text is scanned and abandoned the moment it passes
+/// the budget: 32 bytes per value (a `serde_json::Value`), a string's bytes, 64 bytes per object
+/// entry (the map node and key). A value is a comma, an opener's container and its first element,
+/// so the count over-estimates a little and never under-estimates. It is a count over the raw
+/// text, not a shape rule: a compact array of small numbers and the same with spaces cost alike.
+fn within_budget(text: &str) -> bool {
+    let (mut cost, mut in_str, mut esc) = (32usize, false, false);
+    for &b in text.as_bytes() {
+        if in_str {
+            cost += 1;
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b',' => cost += 32,
+                b'{' | b'[' => cost += 64,
+                b':' => cost += 64,
+                _ => {}
+            }
+        }
+        if cost > PARSE_BUDGET {
+            return false;
+        }
+    }
+    true
+}
+
+/// Parse a JSON document: its raw length is checked first, then its cost under the budget,
+/// which refuses (`Bound`) only a document that costs more than any legitimate one can.
+pub(crate) fn json_doc(text: &str, cap: usize, what: &str) -> R<serde_json::Value> {
+    if text.len() > cap {
+        return Err(AccountError::bound(&format!(
+            "{what} is over {} KiB",
+            cap >> 10
+        )));
+    }
+    if !within_budget(text) {
+        return Err(AccountError::bound(&format!(
+            "{what} costs more to parse than any legitimate document: over {} MiB",
+            PARSE_BUDGET >> 20
+        )));
     }
     serde_json::from_str(text).map_err(|_| AccountError::bad(format!("{what} is not JSON")))
+}
+/// A value the core itself produced and the host passes back (a `CopyItem`'s payload): no
+/// host-argument bound applies, only a length ceiling against a corrupted call.
+pub(crate) fn core_json(text: &str, what: &str) -> R<serde_json::Value> {
+    if text.len() > (16 << 20) {
+        return Err(AccountError::bound(&format!("{what} is over 16 MiB")));
+    }
+    serde_json::from_str(text).map_err(|_| AccountError::bad(format!("{what} is not JSON")))
+}
+/// A domain document (a record payload, an import batch, a translated child): at most 1 MiB.
+pub(crate) fn json(text: &str, what: &str) -> R<serde_json::Value> {
+    json_doc(text, MAX_JSON, what)
+}
+/// An authority-protocol document (policy, terms, a `change`, a slot): at most 1 MiB.
+pub(crate) fn auth_json(text: &str, what: &str) -> R<serde_json::Value> {
+    json_doc(text, MAX_AUTH_JSON, what)
+}
+/// A list of JSON documents, bounded in total before any item is parsed: at most `max_items`
+/// items whose raw lengths sum to at most `cap` (each item is then at most `cap` too).
+pub(crate) fn json_list(
+    items: &[String],
+    cap: usize,
+    max_items: usize,
+    what: &str,
+) -> R<Vec<serde_json::Value>> {
+    if items.len() > max_items {
+        return Err(AccountError::bound(&format!("{what}: too many items")));
+    }
+    let total = items
+        .iter()
+        .try_fold(0usize, |t, i| t.checked_add(i.len()))
+        .ok_or_else(|| AccountError::bound(&format!("{what} is too large")))?;
+    if total > cap {
+        return Err(AccountError::bound(&format!(
+            "{what}: the items together are over {} KiB",
+            cap >> 10
+        )));
+    }
+    items.iter().map(|i| json_doc(i, cap, what)).collect()
 }
 pub(crate) fn json_or_null(text: &str, what: &str) -> R<serde_json::Value> {
     if text.is_empty() {
@@ -965,4 +1206,62 @@ pub(crate) fn to_json(v: &serde_json::Value) -> R<String> {
 pub(crate) fn wipe(v: &mut [u8]) {
     v.fill(0);
     std::hint::black_box(&*v);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_values_are_accepted_whatever_their_shape() {
+        // 600 small numbers, compact (1.2 KB): the checker's case, refused by the density rule.
+        let nums: Vec<String> = (0..600).map(|i| (i % 10).to_string()).collect();
+        let doc = format!("[{}]", nums.join(","));
+        assert!(doc.len() < 1300);
+        assert!(json(&doc, "x").is_ok());
+        // 100,000 small numbers.
+        let doc = format!("[{}0]", "1,".repeat(99_999));
+        assert!(json(&doc, "x").is_ok());
+        // One long string of the whole 1 MiB.
+        let doc = format!("\"{}\"", "a".repeat(MAX_JSON - 2));
+        assert!(json(&doc, "x").is_ok());
+        // An import batch at the core's own maximum (1 MiB): records of 7 bytes and more.
+        let rec = "{\"id\":\"a1\",\"t\":\"x\"},";
+        let mut batch = String::from("{\"children\":[");
+        while batch.len() + rec.len() + 8 < MAX_JSON {
+            batch.push_str(rec);
+        }
+        batch.push_str("{}]}");
+        assert!(batch.len() <= MAX_JSON);
+        assert!(json(&batch, "x").is_ok());
+        // A document one byte over the length cap is `Bound`; garbage is `Malformed`.
+        assert!(matches!(
+            json(&"a".repeat(MAX_JSON + 1), "x"),
+            Err(AccountError::Bound { .. })
+        ));
+        assert!(matches!(
+            json("{", "x"),
+            Err(AccountError::Malformed { .. })
+        ));
+        assert!(matches!(
+            json("[1] 2", "x"),
+            Err(AccountError::Malformed { .. })
+        ));
+    }
+    #[test]
+    fn a_parse_is_refused_only_once_the_budget_is_passed() {
+        // Under the 1 MiB length cap no document can cost 32 MiB (a 1 MiB array of one-digit
+        // numbers costs 16 MiB), so the budget is a backstop. With a larger cap it bites, and
+        // only when the running cost passes it: 8 MiB of `0,` is 4 million values.
+        let big = format!("[{}0]", "0,".repeat(4 << 20));
+        assert!(matches!(
+            json_doc(&big, 16 << 20, "x"),
+            Err(AccountError::Bound { .. })
+        ));
+        // The same shape at 2 MiB (1 million values, 32 MiB) is within a hair; at 1 MiB it is
+        // well inside.
+        let fits = format!("[{}0]", "0,".repeat(MAX_JSON / 2 - 1));
+        assert!(json_doc(&fits, 2 << 20, "x").is_ok());
+    }
 }
