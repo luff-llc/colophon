@@ -21,16 +21,28 @@ function loadConfig(argv, env) {
   for (const name of (env.COLOPHON_RELAY_OPEN ?? '').split(',').filter(Boolean)) libraries[name] = { open: true };
   const tls = config.tls ?? (env.COLOPHON_RELAY_TLS_CERT && env.COLOPHON_RELAY_TLS_KEY
     ? { certFile: env.COLOPHON_RELAY_TLS_CERT, keyFile: env.COLOPHON_RELAY_TLS_KEY } : undefined);
-  // Home slots (0.5): COLOPHON_RELAY_HOME_SLOTS="slot=https://base,…" names each slot's endpoint URL.
+  // Home slots (0.5), provisioned for one account each:
+  // COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@https://base,…".
   for (const pair of (env.COLOPHON_RELAY_HOME_SLOTS ?? '').split(',').filter(Boolean)) {
     const at = pair.indexOf('=');
-    if (at < 1) throw new Error('COLOPHON_RELAY_HOME_SLOTS entries are slot=base');
-    libraries[pair.slice(0, at)] = { ...(libraries[pair.slice(0, at)] ?? {}), home: true, base: pair.slice(at + 1) };
+    const rest = pair.slice(at + 1);
+    const amp = rest.indexOf('@');
+    if (at < 1 || amp < 1) throw new Error('COLOPHON_RELAY_HOME_SLOTS entries are slot=<account ID>@<base URL>');
+    const { token, tokenSha256, ...kept } = libraries[pair.slice(0, at)] ?? {};
+    libraries[pair.slice(0, at)] = { ...kept, home: true, account: rest.slice(0, amp), base: rest.slice(amp + 1) };
   }
+  // The key file is preferred: a key in the environment is readable from the process. It is
+  // removed from this process's environment once read.
   const keyText = env.COLOPHON_HOME_KEY ?? (env.COLOPHON_HOME_KEY_FILE ? readFileSync(env.COLOPHON_HOME_KEY_FILE, 'utf8') : config.home?.keyFile ? readFileSync(config.home.keyFile, 'utf8') : undefined);
+  if (env.COLOPHON_HOME_KEY) delete env.COLOPHON_HOME_KEY;
   const wasm = env.COLOPHON_HOME_WASM ?? config.home?.wasm;
-  // A test hook: the clock is the number of milliseconds in this file. Never set in production.
+  // A test hook: the clock is the number of milliseconds in this file. It works only when the
+  // relay is started with --test-clock; without that flag the relay refuses to start with it.
   const clockFile = env.COLOPHON_RELAY_CLOCK_FILE;
+  if (clockFile && !argv.includes('--test-clock')) {
+    throw new Error('COLOPHON_RELAY_CLOCK_FILE is a test hook: start the relay with --test-clock to use it, or unset it');
+  }
+  if (!clockFile && argv.includes('--test-clock')) throw new Error('--test-clock needs COLOPHON_RELAY_CLOCK_FILE');
   return {
     home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
     clock: clockFile ? () => Number(readFileSync(clockFile, 'utf8').trim()) : undefined,
@@ -53,7 +65,11 @@ if (process.argv[2] === 'home-key') {
   const { token, tokenSha256 } = newToken();
   process.stdout.write(JSON.stringify({ token, tokenSha256 }, null, 2) + '\n');
 } else {
-  const config = loadConfig(process.argv.slice(2), process.env);
+  let config;
+  try { config = loadConfig(process.argv.slice(2), process.env); } catch (error) {
+    console.error(error.message);
+    process.exit(2);
+  }
   if (Object.keys(config.libraries).length === 0) {
     console.error('No library slots configured. Set COLOPHON_RELAY_TOKENS=slot=token or pass --config.');
     process.exit(2);

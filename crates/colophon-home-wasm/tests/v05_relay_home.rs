@@ -13,7 +13,7 @@ mod support;
 mod support_relay;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use colophon_core::v05::account::{CallTarget, Change};
+use colophon_core::v05::account::Change;
 use colophon_core::v05::engine::Engine;
 use colophon_core::v05::write::authority::TransitionRule;
 use serde_json::{json, Value};
@@ -36,6 +36,8 @@ struct World {
     pa: u16,
     pb: u16,
     src: MemSource,
+    /// Removed when the world is dropped (declared last: the relays stop first).
+    scratch: Vec<Scratch>,
 }
 
 fn dir(name: &str) -> PathBuf {
@@ -61,10 +63,12 @@ fn world_with(name: &str, history: &str, quorum: u64, two: bool, run_b: bool) ->
         appoint_homes(&mut f, &[(&ka, BASE_A)]);
     }
     let (pa, pb) = (free_port(), free_port());
-    let a = Relay::start_on(&ka, BASE_A, &dir(&format!("{name}-a")), T0, &[(BASE_B, pb)], pa);
+    let account = f.account.id().as_str().to_string();
+    let scratch = vec![Scratch::new(&format!("{name}-a")), Scratch::new(&format!("{name}-b")), Scratch::new(&format!("{name}-spare"))];
+    let a = Relay::start_on(&ka, &account, BASE_A, scratch[0].path(), T0, &[(BASE_B, pb)], pa);
     first_upload(&a, &f, T0 + 1_000);
     let b = run_b.then(|| {
-        let b = Relay::start_on(&kb, BASE_B, &dir(&format!("{name}-b")), T0, &[(BASE_A, pa)], pb);
+        let b = Relay::start_on(&kb, &account, BASE_B, scratch[1].path(), T0, &[(BASE_A, pa)], pb);
         first_upload(&b, &f, T0 + 1_000);
         b
     });
@@ -83,6 +87,7 @@ fn world_with(name: &str, history: &str, quorum: u64, two: bool, run_b: bool) ->
         kb,
         pa,
         pb,
+        scratch,
     })
 }
 
@@ -164,7 +169,7 @@ fn a_transition_is_receipted_due_activated_and_final_across_two_homes_at_quorum_
     let digest = propose_by(&mut w, &mut ctl, 600, &[d]);
     let mut wire = w.wire();
     for (i, h) in [&ha, &hb].into_iter().enumerate() {
-        let faults = sync_pass(&mut ctl, &w.src, h, &mut wire, &w.host, NOW + 1_000 + i as i64);
+        let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, NOW + 1_000 + i as i64);
         assert!(faults.is_empty(), "{faults:?}");
     }
     let mut seen = ctl.receipted_by(&digest);
@@ -201,10 +206,15 @@ fn a_transition_is_receipted_due_activated_and_final_across_two_homes_at_quorum_
             kinds(w.b.as_ref().unwrap())
         );
     }
+    // Each home appends the `final` once it holds both homes' heads over the activation.
+    for r in [&w.a, w.b.as_ref().unwrap()] {
+        eventually("the final at both homes", 30, || kinds(r).len() > before + 1);
+        assert_eq!(kinds(r)[before + 1], "final");
+    }
     // The real client takes it from the homes and verifies it: the policy changed, no pending.
     let mut wire = w.wire();
     for h in [&ha, &hb] {
-        let faults = sync_pass(&mut ctl, &w.src, h, &mut wire, &w.host, later + 2_000);
+        let faults = relay_pass(&mut ctl, &w.src, h, &mut wire, &w.host, later + 2_000);
         assert!(faults.is_empty(), "{faults:?}");
     }
     assert!(ctl.account().pending().is_empty(), "recorded, no longer pending");
@@ -287,14 +297,14 @@ fn a_veto_in_time_is_recorded_and_the_transition_never_activates() {
     let d = w.f.d.clone();
     let digest = propose_by(&mut w, &mut ctl, 600, &[d]);
     let mut wire = w.wire();
-    let faults = sync_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 1_000);
+    let faults = relay_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 1_000);
     assert!(faults.is_empty(), "{faults:?}");
     // The owner vetoes it, in time, from the other unit (the passkey).
     let before = kinds(&w.a).len();
     let p = w.f.p.clone();
     let action = ctl.account().begin_veto(&digest, &[p]).unwrap();
     engine_finish(&mut ctl, &w.host, &w.src, action);
-    let faults = sync_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 2_000);
+    let faults = relay_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 2_000);
     assert!(faults.is_empty(), "{faults:?}");
     eventually("vetoed", 30, || kinds(&w.a).len() > before);
     // Past the due time (issued + 300 s + the delay) the transition still does not activate.
@@ -324,12 +334,12 @@ fn a_late_transition_is_refused_but_kept_and_served_and_a_forged_one_is_neither(
     w.a.set_clock(NOW - 120_000);
     let (status, out) = w.a.post("/pending", &json!({"objects": [env.clone()]}));
     assert_eq!(status, 422, "{out}");
-    assert_eq!(out[0]["result"], "refused:early");
+    assert_eq!(out, json!(["refused:early"]), "one result per refused object, in order");
     // Late: more than 300 s after `issued`. Refused with no receipt, and still kept and served.
     w.a.set_clock(NOW + 400_000);
     let (status, out) = w.a.post("/pending", &json!({"objects": [env.clone()]}));
     assert_eq!(status, 422, "{out}");
-    assert_eq!(out[0]["result"], "refused:late");
+    assert_eq!(out, json!(["refused:late"]));
     let l = pending_list(&w.a);
     assert_eq!(kinds_of(&l, "transition"), 1, "served so the owner can veto it");
     assert_eq!(kinds_of(&l, "receipt"), 0, "and no receipt was signed");
@@ -366,59 +376,49 @@ fn calls_an_unauthorized_read_a_replayed_call_and_a_call_for_another_audience() 
             NOW,
         )
         .unwrap();
-    let d_point = w.host.ids[&w.f.d].public().signing;
-    let call = |audience: &str, id: u8, w: &mut World| -> Vec<u8> {
-        let action = w
-            .f
-            .account
-            .begin_call(
-                &d_point,
-                &[],
-                audience,
-                "colophon.history.read",
-                json!({}),
-                [id; 32],
-                CallTarget {
-                    audiences: vec![audience.to_string()],
-                    home_endpoints: vec![audience.to_string()],
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let sigs = w.host.sign(action.steps());
-        w.f.account.finish(action, sigs).unwrap().artifact.unwrap()
+    let path = "/authority?after=0&limit=2";
+    let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let with = |purpose: &str, audience: &str, args: Value, w: &World| -> Vec<u8> {
+        home_call_with(&w.host, &w.f.account, audience, purpose, args, NOW, fresh_request_id())
     };
-    let read = |relay: &Relay, call: Option<&[u8]>| -> (u16, Vec<u8>) {
+    let bound = |method: &str, p: &str, body: &str| json!({"method": method, "path": p, "body": body});
+    let read = |relay: &Relay, call: Option<&[u8]>| -> (u16, Value) {
         let mut h = vec![];
         if let Some(c) = call {
             h.push(("Authorization".into(), format!("Colophon {}", URL_SAFE_NO_PAD.encode(c))));
         }
-        let (s, _, b) = http(relay.port, "GET", &relay.url("/authority?after=0&limit=2"), &h, &[]);
-        (s, b)
+        let (s, _, b) = http(relay.port, "GET", &relay.url(path), &h, &[]);
+        (s, serde_json::from_slice(&b).unwrap_or(Value::Null))
     };
-    // No call: not served. A bearer token is storage access only: not served either.
+    // No call: not served, and the answer names the scheme. A bearer token authorizes nothing.
     assert_eq!(read(&w.a, None).0, 401);
-    let (s, _, _) = http(
-        w.a.port,
-        "GET",
-        &w.a.url("/authority?after=0&limit=2"),
-        &Relay::bearer(),
-        &[],
-    );
+    let (s, hs, _) = http(w.a.port, "GET", &w.a.url(path), &Relay::bearer(), &[]);
     assert_eq!(s, 401);
-    // A valid call: served.
-    let good = call(BASE_A, 1, &mut w);
+    assert!(hs.iter().any(|(k, v)| k == "www-authenticate" && v == "Colophon"));
+    // A call bound to this request: served.
+    let good = with("colophon.home.read", BASE_A, bound("GET", path, empty), &w);
     assert_eq!(read(&w.a, Some(&good)).0, 200);
-    // The same call again: `refused:replay`.
-    let (s, b) = read(&w.a, Some(&good));
-    assert_eq!(s, 403);
-    assert!(String::from_utf8_lossy(&b).contains("refused:replay"), "{}", String::from_utf8_lossy(&b));
-    // A call made for another audience.
-    let other = call(BASE_B, 2, &mut w);
-    let (s, b) = read(&w.a, Some(&other));
-    assert_eq!(s, 403);
-    assert!(String::from_utf8_lossy(&b).contains("refused:audience"), "{}", String::from_utf8_lossy(&b));
-    // A call with the wrong purpose for this endpoint.
+    // `colophon.history.read` (§13.4's purpose for the history) fits a GET too.
+    let hist = with("colophon.history.read", BASE_A, bound("GET", path, empty), &w);
+    assert_eq!(read(&w.a, Some(&hist)).0, 200);
+    // The same call again: `refused:replay`, with a body that is JSON once: {"result": …}.
+    assert_eq!(read(&w.a, Some(&good)), (403, json!({"result": "refused:replay"})));
+    // A call made for another home's audience.
+    let other = with("colophon.home.read", BASE_B, bound("GET", path, empty), &w);
+    assert_eq!(read(&w.a, Some(&other)), (403, json!({"result": "refused:audience"})));
+    // A purpose that does not fit the method.
+    let write = with("colophon.home.write", BASE_A, bound("GET", path, empty), &w);
+    assert_eq!(read(&w.a, Some(&write)), (403, json!({"result": "refused:outOfScope"})));
+    // Args for another request: another method, another path, another body.
+    for (what, args) in [
+        ("method", bound("PUT", path, empty)),
+        ("path", bound("GET", "/authority?after=0&limit=3", empty)),
+        ("body", bound("GET", path, &"0".repeat(64))),
+        ("no args", json!({})),
+    ] {
+        let c = with("colophon.home.read", BASE_A, args, &w);
+        assert_eq!(read(&w.a, Some(&c)), (403, json!({"result": "refused:outOfScope"})), "{what}");
+    }
 }
 
 #[test]
@@ -479,14 +479,14 @@ fn a_restart_in_the_middle_loses_nothing_receipts_nothing_twice_and_the_feed_res
     let d = w.f.d.clone();
     let first = propose_by(&mut w, &mut ctl, 600, &[d]);
     let mut wire = w.wire();
-    let faults = sync_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 1_000);
+    let faults = relay_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 1_000);
     assert!(faults.is_empty(), "{faults:?}");
     let before = pending_list(&w.a);
     assert_eq!(kinds_of(&before, "receipt"), 1);
     let ka = HomeKeys::new(0x77);
     drop(wire);
     // The process is killed and started again on the same data directory and port.
-    let a = std::mem::replace(&mut w.a, Relay::start(&ka, BASE_A, &dir("restart-spare"), NOW, &[]));
+    let a = std::mem::replace(&mut w.a, Relay::start(&ka, &w.f.account.id().as_str().to_string(), BASE_A, w.scratch[2].path(), NOW, &[]));
     w.a = a.restart(&ka, NOW + 2_000, &[]);
     let after = pending_list(&w.a);
     assert_eq!(before, after, "the same objects with the same cursors");
@@ -500,7 +500,7 @@ fn a_restart_in_the_middle_loses_nothing_receipts_nothing_twice_and_the_feed_res
     let d = w.f.d.clone();
     let second = propose_by(&mut w, &mut ctl, 601, &[d]);
     let mut wire = w.wire();
-    let faults = sync_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 3_000);
+    let faults = relay_pass(&mut ctl, &w.src, &ha, &mut wire, &w.host, NOW + 3_000);
     assert!(faults.is_empty(), "{faults:?}");
     let l = pending_list(&w.a);
     let new: Vec<u64> = l

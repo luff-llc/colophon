@@ -45,11 +45,21 @@ pub fn prerequisites() -> Option<(PathBuf, PathBuf)> {
         .status()
         .is_ok_and(|s| s.success());
     if !bun || !wasm.exists() || !relay.exists() {
-        eprintln!(
-            "SKIPPED: the relay journeys need `bun` and the wasm build ({}): \
-             cargo build --target wasm32-unknown-unknown --release -p colophon-home-wasm",
-            wasm.display()
+        let missing = format!(
+            "the relay tests need `bun` (found: {bun}) and the wasm build ({}, found: {}): \
+             run scripts/test-home.sh, or cargo build --target wasm32-unknown-unknown --release -p colophon-home-wasm",
+            wasm.display(),
+            wasm.exists()
         );
+        // On CI a test that cannot run fails; it never passes by skipping.
+        if std::env::var_os("CI").is_some() || std::env::var_os("COLOPHON_REQUIRE_RELAY").is_some() {
+            panic!("CI: {missing}");
+        }
+        eprintln!("SKIPPED: {missing}");
+        // Also to the terminal, past cargo's output capture.
+        if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+            let _ = writeln!(tty, "SKIPPED: {missing}");
+        }
         return None;
     }
     Some((relay, wasm))
@@ -133,19 +143,23 @@ pub struct Relay {
     pub dir: PathBuf,
     pub clock: PathBuf,
     pub base: String,
+    /// The account the slot is provisioned for.
+    pub account: String,
 }
 impl Relay {
     pub fn start(
         keys: &HomeKeys,
+        account: &str,
         base: &str,
         dir: &std::path::Path,
         clock_ms: i64,
         resolve: &[(&str, u16)],
     ) -> Self {
-        Self::start_on(keys, base, dir, clock_ms, resolve, 0)
+        Self::start_on(keys, account, base, dir, clock_ms, resolve, 0)
     }
     pub fn start_on(
         keys: &HomeKeys,
+        account: &str,
         base: &str,
         dir: &std::path::Path,
         clock_ms: i64,
@@ -169,12 +183,12 @@ impl Relay {
         std::fs::write(&config, json!({"resolve": resolve_map}).to_string()).unwrap();
         let mut child = Command::new("bun")
             .arg(relay)
+            .arg("--test-clock")
             .arg("--config")
             .arg(&config)
             .env("COLOPHON_RELAY_PORT", port.to_string())
             .env("COLOPHON_RELAY_DATA", dir.join("data"))
-            .env("COLOPHON_RELAY_TOKENS", format!("home={TOKEN}"))
-            .env("COLOPHON_RELAY_HOME_SLOTS", format!("home={base}"))
+            .env("COLOPHON_RELAY_HOME_SLOTS", format!("home={account}@{base}"))
             .env("COLOPHON_HOME_KEY", keys.jwk())
             .env("COLOPHON_HOME_WASM", wasm)
             .env("COLOPHON_RELAY_CLOCK_FILE", &clock)
@@ -195,6 +209,7 @@ impl Relay {
             dir: dir.to_path_buf(),
             clock,
             base: base.to_string(),
+            account: account.to_string(),
         }
     }
     pub fn set_clock(&self, ms: i64) {
@@ -228,8 +243,8 @@ impl Relay {
     pub fn restart(self, keys: &HomeKeys, clock_ms: i64, resolve: &[(&str, u16)]) -> Self {
         let mut me = self;
         me.stop();
-        let (dir, base, port) = (me.dir.clone(), me.base.clone(), me.port);
-        Self::start_on(keys, &base, &dir, clock_ms, resolve, port)
+        let (dir, base, port, account) = (me.dir.clone(), me.base.clone(), me.port, me.account.clone());
+        Self::start_on(keys, &account, &base, &dir, clock_ms, resolve, port)
     }
 }
 impl Drop for Relay {
@@ -273,13 +288,7 @@ impl Wire for RealRelay<'_> {
             "{method} {}",
             rest.split('?').next().unwrap_or(rest)
         ));
-        let mut headers = req.headers.clone();
-        if !headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-        {
-            headers.push(("Authorization".into(), format!("Bearer {TOKEN}")));
-        }
+        let headers = req.headers.clone();
         let (status, hs, body) = http(
             relay.port,
             method,
@@ -456,4 +465,177 @@ pub fn kinds(relay: &Relay) -> Vec<String> {
             b["kind"].as_str().unwrap().to_string()
         })
         .collect()
+}
+
+/// A call for one home request, in the shape the home binds it to (§12.2, §14): `args` is
+/// exactly `{"method", "path", "body"}` (the path and query relative to the home's base as sent,
+/// and the lowercase hex SHA-256 of the body), `purpose` is `colophon.home.read` for GET and HEAD
+/// and `colophon.home.write` otherwise, and `audience` is the home's base. Signed with the
+/// acting principal's own key (no links).
+pub fn home_call(
+    host: &Host,
+    account: &Account,
+    audience: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    now_ms: i64,
+    request_id: [u8; 32],
+) -> Vec<u8> {
+    use base64::engine::general_purpose::STANDARD;
+    use sha2::Digest as _;
+    let purpose = if matches!(method, "GET" | "HEAD") {
+        "colophon.home.read"
+    } else {
+        "colophon.home.write"
+    };
+    let args = json!({"method": method, "path": path, "body": hex(&sha2::Sha256::digest(body))});
+    home_call_with(host, account, audience, purpose, args, now_ms, request_id)
+}
+
+/// The same with `purpose` and `args` chosen (for the mismatch tests).
+pub fn home_call_with(
+    host: &Host,
+    account: &Account,
+    audience: &str,
+    purpose: &str,
+    args: Value,
+    now_ms: i64,
+    request_id: [u8; 32],
+) -> Vec<u8> {
+    use base64::engine::general_purpose::STANDARD;
+    let (kind, id) = match account.identity() {
+        Identity::Controller(id) => ("controller", id.clone()),
+        Identity::Member(id) => ("member", id.clone()),
+    };
+    let me = &host.ids[&id];
+    let (seq, digest) = account.head();
+    let body = colophon_core::v05::encoding::canonical(&json!({
+        "protocol": "colophon/call/5",
+        "account": account.id().as_str(),
+        "asOf": {"seq": seq, "digest": digest},
+        "signer": {kind: id},
+        "key": STANDARD.encode(me.public().signing),
+        "audience": audience,
+        "purpose": purpose,
+        "args": args,
+        "requestId": URL_SAFE_NO_PAD.encode(request_id),
+        "created": colophon_core::v05::write::format_date(now_ms),
+    }))
+    .unwrap();
+    let sig = me.sign(&body).to_vec();
+    serde_json::to_vec(&json!({"body": STANDARD.encode(&body), "signature": STANDARD.encode(sig)}))
+        .unwrap()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+static REQUEST_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub fn fresh_request_id() -> [u8; 32] {
+    let n = REQUEST_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut id = [0u8; 32];
+    id[..8].copy_from_slice(&n.to_le_bytes());
+    id[8..12].copy_from_slice(&std::process::id().to_le_bytes());
+    id
+}
+
+/// A sync pass against real relays, with real calls. The engine's `NeedCall` names the
+/// audience, purpose, method and URL but not the request body, so the call is built when the
+/// request itself is in hand (method, path relative to the base, body digest) and attached in
+/// place of the placeholder the engine was given.
+pub fn relay_pass<S: colophon_core::v05::engine::RecordSource>(
+    e: &mut colophon_core::v05::engine::Engine<S>,
+    src: &MemSource,
+    home: &str,
+    wire: &mut RealRelay,
+    host: &Host,
+    now_ms: i64,
+) -> Vec<colophon_core::v05::engine::exchange::Fault> {
+    use colophon_core::v05::engine::exchange::Step;
+    const PLACEHOLDER: &[u8] = b"call-built-with-the-request";
+    let mut faults = Vec::new();
+    e.advance(now_ms).unwrap();
+    e.refresh(src.listing()).unwrap();
+    for _ in 0..1_000_000 {
+        match e.exchange_next(home).unwrap() {
+            Step::Done => return faults,
+            Step::Waiting => panic!("the loop answers every request"),
+            Step::NeedCall(n) => e.exchange_provide_call(home, n.ticket, PLACEHOLDER).unwrap(),
+            Step::Request(mut r) => {
+                attach_call(e.account(), host, wire, &mut r, PLACEHOLDER, now_ms);
+                let a = wire.call(host, &r, now_ms);
+                let report = e.exchange_answer(home, r.ticket, a).unwrap();
+                for (p, b) in report.store {
+                    src.put(&p, b);
+                }
+                faults.extend(report.faults);
+            }
+        }
+    }
+    panic!("a pass did not end");
+}
+
+/// Answer what an engine has queued (no new pass), with real calls as [`relay_pass`] builds them.
+pub fn relay_drain<S: colophon_core::v05::engine::RecordSource>(
+    e: &mut colophon_core::v05::engine::Engine<S>,
+    src: &MemSource,
+    home: &str,
+    wire: &mut RealRelay,
+    host: &Host,
+    now_ms: i64,
+) -> Vec<colophon_core::v05::engine::exchange::Fault> {
+    use colophon_core::v05::engine::exchange::Step;
+    const PLACEHOLDER: &[u8] = b"call-built-with-the-request";
+    let mut faults = Vec::new();
+    loop {
+        match e.exchange_next(home).unwrap() {
+            Step::NeedCall(n) => e.exchange_provide_call(home, n.ticket, PLACEHOLDER).unwrap(),
+            Step::Request(mut r) => {
+                attach_call(e.account(), host, wire, &mut r, PLACEHOLDER, now_ms);
+                let a = wire.call(host, &r, now_ms);
+                let report = e.exchange_answer(home, r.ticket, a).unwrap();
+                src.publish_stores(&report.store);
+                faults.extend(report.faults);
+            }
+            _ => return faults,
+        }
+    }
+}
+
+/// Replace the placeholder call on `r` with a real one bound to `r`.
+pub fn attach_call(account: &Account, host: &Host, wire: &RealRelay, r: &mut Request, placeholder: &[u8], now_ms: i64) {
+    let marker = format!("Colophon {}", URL_SAFE_NO_PAD.encode(placeholder));
+    let Some(h) = r.headers.iter_mut().find(|(k, v)| k == "Authorization" && *v == marker) else {
+        return;
+    };
+    let relay = *wire.relays.iter().find(|x| r.url.starts_with(&x.base)).unwrap();
+    let method = match r.method {
+        Method::Get => "GET",
+        Method::Post => "POST",
+        Method::Put => "PUT",
+    };
+    let path = r.url.strip_prefix(&relay.base).unwrap();
+    let call = home_call(host, account, &relay.base, method, path, &r.body, now_ms, fresh_request_id());
+    h.1 = format!("Colophon {}", URL_SAFE_NO_PAD.encode(&call));
+}
+
+/// A test directory under the system's temporary directory, removed when dropped (also after a
+/// failed assertion), so runs leave nothing behind.
+pub struct Scratch(pub PathBuf);
+impl Scratch {
+    pub fn new(name: &str) -> Self {
+        let d = std::env::temp_dir().join(format!("colophon-relay-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        Self(d)
+    }
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }

@@ -4,7 +4,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsc, promises as fsp } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
-import { HomeKey, HomeModule, HomeSlot, classifyHomePath } from './home.js';
+import { HomeKey, HomeModule, HomeSlot } from './home.js';
 import path from 'node:path';
 
 export const PROTOCOL = 'colophon/relay/3';
@@ -17,7 +17,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   // Home slots only (not published at GET {base}):
   authorityBodyBytes: 16 * 1024 * 1024,
   pendingBodyBytes: 12 * 1024 * 1024,
-  replayRows: 4096,
+  replayRows: 65536, // replay rows per slot, shared out per principal by the home module
   requestsPerMinute: 1200, // per address; 0 = unlimited
 });
 
@@ -61,7 +61,8 @@ export function newToken() {
 }
 
 class HttpError extends Error {
-  constructor(status, message, headers = {}) { super(message); this.status = status; this.headers = headers; }
+  /** `body`, when given, is the JSON answer as it is (a home's `{"result":…}`), else `{"error"}`. */
+  constructor(status, message, headers = {}, body = undefined) { super(message); this.status = status; this.headers = headers; this.body = body; }
 }
 
 /** One library slot on disk: records/<path>, an append-only log.jsonl and meta.json. */
@@ -358,7 +359,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (!SLOT.test(name)) throw new Error(`Invalid library slot name: ${name}`);
     if (entry && entry.home) {
       if (typeof entry.base !== 'string' || !/^https?:\/\//.test(entry.base)) throw new Error(`Home slot ${name} needs base, the URL its account names as its endpoint`);
-      homeSlots.set(name, entry.base.replace(/\/+$/, ''));
+      // Provisioning: a home slot serves the one account the operator created it for.
+      if (typeof entry.account !== 'string' || !HEX64.test(entry.account)) throw new Error(`Home slot ${name} needs account, the 64-hex ID of the account it is provisioned for`);
+      homeSlots.set(name, { base: entry.base.replace(/\/+$/, ''), account: entry.account });
+      if (entry.token || entry.tokenSha256) console.error(`Home slot ${name}: a bearer token authorizes nothing at a 0.5 home and is ignored`);
+      continue;
     }
     if (entry && entry.open === true) auth.set(name, null);
     else if (entry && entry.home && !entry.token && !entry.tokenSha256) auth.set(name, Buffer.alloc(32)); // calls only: no bearer matches
@@ -373,13 +378,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (!opening.has(name)) {
       opening.set(name, (async () => {
         const isHome = homeSlots.has(name);
-        const s = new Slot(path.join(path.resolve(dataDir), name), name, effective, isHome ? classifyHomePath : classifyPath);
+        // A home slot's path grammar is the module's (the engine's paths).
+        const homeClassify = (p) => homeModule.call({ op: 'classify', path: p }).kind;
+        const s = new Slot(path.join(path.resolve(dataDir), name), name, effective, isHome ? homeClassify : classifyPath);
         await s.open();
         if (isHome) {
           s.home = new HomeSlot({
-            slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name), clock, resolve,
+            slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
+            clock, resolve,
             deps: { HttpError, send, readBody, clampInt },
-            auth: (req) => { try { authorize(req, name); return true; } catch { return false; } },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -472,7 +479,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   function listener(req, res) {
     handle(req, res).catch((error) => {
       if (res.headersSent || res.destroyed) { res.destroy(); return; }
-      if (error instanceof HttpError) send(res, error.status, { error: error.message }, error.headers);
+      if (error instanceof HttpError) send(res, error.status, error.body !== undefined ? error.body : { error: error.message }, error.headers);
       else { console.error(error); send(res, 500, { error: 'Internal relay error' }); }
     });
   }

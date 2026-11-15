@@ -37,8 +37,8 @@ fn b(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
 }
 impl Home {
-    fn new(keys: HomeKeys) -> Self {
-        let state = call(json!({"op": "init", "home": keys.id}))["state"]
+    fn new(keys: HomeKeys, account: &str) -> Self {
+        let state = call(json!({"op": "init", "home": keys.id, "account": account}))["state"]
             .as_str()
             .unwrap()
             .to_string();
@@ -118,7 +118,7 @@ fn setup(history: &str) -> Setup {
     let keys = HomeKeys::new(0x77);
     let mut f = create_with(&[NS], history, 1);
     appoint_homes(&mut f, &[(&keys, BASE_A)]);
-    let mut home = Home::new(keys);
+    let mut home = Home::new(keys, f.account.id().as_str());
     let entries = entries_json(&f);
     let values: Vec<Value> = entries.iter().map(|(_, e)| e.clone()).collect();
     let r = home.authority(1, &values, T0 + 1_000);
@@ -210,7 +210,7 @@ fn a_first_upload_may_arrive_in_pieces_and_is_checked_like_any_entry() {
     appoint_homes(&mut f, &[(&keys, BASE_A)]);
     let values: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
     assert_eq!(values.len(), 3, "genesis, rekey, the appointing activate");
-    let mut home = Home::new(keys);
+    let mut home = Home::new(keys, f.account.id().as_str());
     // The genesis alone: it verifies and is kept, but the home is not appointed in it yet.
     let r = home.authority(1, &values[..1], T0 + 1_000);
     assert_eq!((r["outcome"].as_str(), r["appointed"].as_bool()), (Some("ok"), Some(false)));
@@ -221,11 +221,12 @@ fn a_first_upload_may_arrive_in_pieces_and_is_checked_like_any_entry() {
     // Too early: more than 60 s ahead of the home's clock.
     let early = home.authority(2, &values[1..2], T0 - 120_000);
     assert_eq!((early["outcome"].as_str(), early["result"].as_str()), (Some("refused"), Some("refused:early")));
-    // Too late: an immediate entry more than 300 s behind the clock.
-    let late = home.authority(2, &values[1..2], T0 + 400_000);
-    assert_eq!(late["result"], "refused:late");
-    // The rest, in time: the home is appointed by the last entry.
-    let r = home.authority(2, &values[1..], T0 + 2_000);
+    // An entry written long before the home was appointed is not judged by the home's clock
+    // (M1: the clock rule applies from the appointment on): a week later, it is held.
+    let old = home.authority(2, &values[1..2], T0 + 7 * 24 * HOUR);
+    assert_eq!(old["outcome"], "ok", "{old}");
+    // The rest: the home is appointed by the last entry.
+    let r = home.authority(3, &values[2..], T0 + 7 * 24 * HOUR);
     assert_eq!((r["outcome"].as_str(), r["appointed"].as_bool()), (Some("ok"), Some(true)), "{}", r["result"]);
     // Nothing was stored for the refusals: three files, one per entry.
     let o = call(json!({"op": "objects", "state": home.state}));
@@ -248,4 +249,59 @@ fn a_record_is_stored_only_for_a_member_of_the_history_with_a_good_signature_and
     // A path outside the store.
     let other = call(json!({"op": "check_record", "state": s.home.state, "now": NOW, "path": "x/y.json", "bytes": b(b"{}")}));
     assert_eq!(other["code"], "malformed");
+}
+
+/// H1: a slot provisioned for one account holds nothing of another: a stranger's genesis is
+/// refused (`refused:outOfScope`) and the state is unchanged, so the owner's upload goes through.
+#[test]
+fn a_slot_holds_only_its_own_account_and_a_stranger_cannot_squat_it() {
+    let keys = HomeKeys::new(0x77);
+    let mut owner = create_with(&[NS], "members", 1);
+    appoint_homes(&mut owner, &[(&keys, BASE_A)]);
+    let stranger = create_with(&[NS], "public", 1);
+    let mut home = Home::new(keys, owner.account.id().as_str());
+    let before = home.state.clone();
+    let genesis = entries_json(&stranger)[0].1.clone();
+    let r = home.authority(1, &[genesis], T0 + 1_000);
+    assert_eq!((r["outcome"].as_str(), r["result"].as_str()), (Some("refused"), Some("refused:outOfScope")));
+    assert_eq!(home.state, before, "nothing is held");
+    assert!(r["store"].as_array().unwrap().is_empty());
+    let values: Vec<Value> = entries_json(&owner).into_iter().map(|(_, e)| e).collect();
+    let r = home.authority(1, &values, T0 + 1_000);
+    assert_eq!((r["outcome"].as_str(), r["appointed"].as_bool()), (Some("ok"), Some(true)), "{r}");
+}
+
+/// H3: `receipts` in `POST /authority` holds receipt envelopes only; anything else there is
+/// malformed and nothing of the request is admitted.
+#[test]
+fn an_entry_in_the_receipts_array_is_malformed_and_nothing_is_admitted() {
+    let keys = HomeKeys::new(0x77);
+    let mut f = create_with(&[NS], "public", 1);
+    appoint_homes(&mut f, &[(&keys, BASE_A)]);
+    let mut home = Home::new(keys, f.account.id().as_str());
+    let values: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    let before = home.state.clone();
+    let body = json!({"from": 1, "entries": [values[0]], "receipts": [values[2]]}).to_string();
+    let r = call(json!({"op": "post_authority", "state": home.state, "now": T0 + 1_000, "body": b(body.as_bytes())}));
+    assert_eq!((r["outcome"].as_str(), r["result"].as_str()), (Some("refused"), Some("malformed")));
+    assert_eq!(r["state"], json!(before));
+    assert!(r["store"].as_array().unwrap().is_empty());
+    home.take(&r);
+}
+
+/// H4 over the module: the slot state after 1, 40 and 1,000 heads over an unchanged history.
+#[test]
+fn the_slot_state_does_not_grow_with_heads() {
+    let s = setup("public");
+    let mut home = s.home;
+    let mut sizes = Vec::new();
+    for n in 1..=1_000i64 {
+        let at = NOW + n * 150_000;
+        assert!(home.head(at).is_some(), "head {n} is due");
+        if [1, 40, 1_000].contains(&n) {
+            sizes.push(home.state.len());
+        }
+    }
+    eprintln!("slot state bytes after 1, 40 and 1,000 heads: {sizes:?}");
+    assert!(sizes[2] <= sizes[0] + 256, "{sizes:?}");
 }

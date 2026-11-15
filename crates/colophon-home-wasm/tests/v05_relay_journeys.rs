@@ -14,7 +14,8 @@ use colophon_core::blobs::BlobRead;
 use colophon_core::model::Outcome;
 use colophon_core::v05::account::RevokeKeep;
 use colophon_core::v05::engine::blobs::BlobAvailability;
-use colophon_core::v05::engine::exchange::{Fault, Step};
+use colophon_core::v05::engine::exchange::Fault;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::{json, Value};
 use support::*;
 
@@ -22,8 +23,13 @@ const NOW: i64 = T0 + 3 * HOUR;
 const LISTEN: &str = "listening.podcasts";
 const SAVED: &str = "reading.saved";
 
-fn listed(relay: &Relay) -> Vec<String> {
-    let (status, _, body) = http(relay.port, "GET", &relay.url("/changes?limit=1000"), &Relay::bearer(), &[]);
+/// The change feed, read with a call by the engine `e`'s principal (a home serves it only to an
+/// authorized caller).
+fn listed(relay: &Relay, host: &Host, e: &colophon_core::v05::engine::Engine<MemSource>) -> Vec<String> {
+    let path = "/changes?limit=1000";
+    let call = home_call(host, e.account(), &relay.base, "GET", path, b"", e.account().now_ms(), fresh_request_id());
+    let auth = vec![("Authorization".to_string(), format!("Colophon {}", URL_SAFE_NO_PAD.encode(&call)))];
+    let (status, _, body) = http(relay.port, "GET", &relay.url(path), &auth, &[]);
     assert_eq!(status, 200);
     serde_json::from_slice::<Value>(&body).unwrap()["entries"]
         .as_array()
@@ -53,6 +59,7 @@ struct Setup {
     #[allow(dead_code)]
     keys: HomeKeys,
     authority: MemSource,
+    _scratch: Scratch,
 }
 fn setup(ns: &str, members: &[(&str, u8, &str)]) -> Option<(Setup, Vec<String>)> {
     prerequisites()?;
@@ -74,11 +81,10 @@ fn setup(ns: &str, members: &[(&str, u8, &str)]) -> Option<(Setup, Vec<String>)>
     }
     let authority = MemSource::new();
     authority.store_account(&f.account);
-    let dir = std::env::temp_dir().join(format!("colophon-relay-journey-{}-{}", std::process::id(), ns));
-    let _ = std::fs::remove_dir_all(&dir);
-    let relay = Relay::start(&keys, BASE_A, &dir, f.account.now_ms(), &[]);
+    let scratch = Scratch::new(&format!("journey-{ns}"));
+    let relay = Relay::start(&keys, f.account.id().as_str(), BASE_A, scratch.path(), f.account.now_ms(), &[]);
     first_upload(&relay, &f, f.account.now_ms() + 1_000);
-    Some((Setup { f, home, relay, keys, authority }, ids))
+    Some((Setup { f, home, relay, keys, authority, _scratch: scratch }, ids))
 }
 fn open_saved(
     f: &Fixture,
@@ -168,14 +174,14 @@ fn journey_listening_two_devices_a_live_position_a_transcript_and_an_offline_dev
         "then the slot"
     );
     assert_eq!(phone.account().live_heads().len(), 1);
-    let faults = sync_pass(&mut phone, &phone_src, &home, &mut wire, &host, NOW);
+    let faults = relay_pass(&mut phone, &phone_src, &home, &mut wire, &host, NOW);
     assert!(faults.is_empty(), "{faults:?}");
     assert!(
-        listed(&s.relay).iter().any(|p| p.starts_with("state/")),
+        listed(&s.relay, &host, &phone).iter().any(|p| p.starts_with("state/")),
         "the slot is on the home"
     );
     assert!(
-        listed(&s.relay).iter().any(|p| p.starts_with("blobs/")),
+        listed(&s.relay, &host, &phone).iter().any(|p| p.starts_with("blobs/")),
         "the chunks are on the home"
     );
 
@@ -197,7 +203,7 @@ fn journey_listening_two_devices_a_live_position_a_transcript_and_an_offline_dev
     );
 
     // It comes online: the pass pulls the phone's records and slot, pushes its own.
-    let faults = sync_pass(
+    let faults = relay_pass(
         &mut laptop,
         &laptop_src,
         &home,
@@ -207,7 +213,7 @@ fn journey_listening_two_devices_a_live_position_a_transcript_and_an_offline_dev
     );
     assert!(faults.is_empty(), "{faults:?}");
     // The phone syncs again and sees the laptop.
-    let faults = sync_pass(
+    let faults = relay_pass(
         &mut phone,
         &phone_src,
         &home,
@@ -251,7 +257,7 @@ fn journey_listening_two_devices_a_live_position_a_transcript_and_an_offline_dev
     // One more pass moves nothing: nothing is pushed twice, nothing is pulled again.
     let before = wire.requests.len();
     let mut laptop3 = laptop2;
-    let faults = sync_pass(
+    let faults = relay_pass(
         &mut laptop3,
         &laptop_src,
         &home,
@@ -343,7 +349,7 @@ fn journey_reading_a_required_original_an_optional_image_and_a_revoked_device() 
         "retainSource",
         json!({"id": manifest["id"], "item": "item", "manifest": manifest, "select": true, "expect": null}),
     );
-    let faults = sync_pass(&mut phone, &phone_src, &home, &mut wire, &host, NOW);
+    let faults = relay_pass(&mut phone, &phone_src, &home, &mut wire, &host, NOW);
     assert!(faults.is_empty(), "{faults:?}");
 
     // The old device writes an item of its own, and syncs it.
@@ -355,11 +361,11 @@ fn journey_reading_a_required_original_an_optional_image_and_a_revoked_device() 
         "capture",
         json!({"id": "from-old", "title": "Written by a device later revoked"}),
     );
-    let faults = sync_pass(&mut old, &old_src, &home, &mut wire, &host, NOW + 500);
+    let faults = relay_pass(&mut old, &old_src, &home, &mut wire, &host, NOW + 500);
     assert!(faults.is_empty(), "{faults:?}");
 
     // The tablet reads: the item, the required original (fetched in the pass), not yet the image.
-    let faults = sync_pass(
+    let faults = relay_pass(
         &mut tablet,
         &tablet_src,
         &home,
@@ -393,12 +399,8 @@ fn journey_reading_a_required_original_an_optional_image_and_a_revoked_device() 
         .exchange_want_blob(&home, SAVED, &image.digest)
         .unwrap();
     assert_eq!(n, 2, "70 000 bytes are two chunks");
-    while let Step::Request(r) = tablet.exchange_next(&home).unwrap() {
-        let a = wire.call(&host, &r, NOW + 2_000);
-        let rep = tablet.exchange_answer(&home, r.ticket, a).unwrap();
-        assert!(rep.faults.is_empty());
-        tablet_src.publish_stores(&rep.store);
-    }
+    let faults = relay_drain(&mut tablet, &tablet_src, &home, &mut wire, &host, NOW + 2_000);
+    assert!(faults.is_empty(), "{faults:?}");
     match tablet.read_blob(SAVED, &image.digest).unwrap() {
         BlobRead::Available(b) => assert_eq!(b, image_bytes),
         other => panic!("{other:?}"),
@@ -408,7 +410,7 @@ fn journey_reading_a_required_original_an_optional_image_and_a_revoked_device() 
     let mut ctl = controller_engine(&s.f, &host, &ctl_src, &s.f.d.clone(), NOW + 3_000);
     // The controller catches up with the home first: the old device's records are what `kept`
     // names (the heads are of what the controller holds).
-    let faults = sync_pass(&mut ctl, &ctl_src, &home, &mut wire, &host, NOW + 3_000);
+    let faults = relay_pass(&mut ctl, &ctl_src, &home, &mut wire, &host, NOW + 3_000);
     assert!(faults.is_empty(), "{faults:?}");
     let seed = host.fresh();
     let action = ctl
@@ -416,12 +418,27 @@ fn journey_reading_a_required_original_an_optional_image_and_a_revoked_device() 
         .begin_revoke(&old_id, &RevokeKeep::Everything, &[s.f.d.clone()], seed)
         .unwrap();
     engine_finish(&mut ctl, &host, &ctl_src, action);
-    let faults = sync_pass(&mut ctl, &ctl_src, &home, &mut wire, &host, NOW + 4_000);
+    let faults = relay_pass(&mut ctl, &ctl_src, &home, &mut wire, &host, NOW + 4_000);
     assert!(faults.is_empty(), "{faults:?}");
     assert_eq!(s.relay.get("/head").0, 200, "the home signed a head");
 
+    // Over HTTP, once the revocation is in the history the home holds, the revoked device's
+    // own calls are refused: its write under its own author ID, and its reads.
+    let as_old = |method: &str, path: &str, body: &[u8]| -> (u16, Value) {
+        let call = home_call(&host, old.account(), BASE_A, method, path, body, NOW + 4_500, fresh_request_id());
+        let auth = vec![("Authorization".to_string(), format!("Colophon {}", URL_SAFE_NO_PAD.encode(&call))),
+                        ("If-None-Match".to_string(), "*".to_string())];
+        let (st, _, b) = http(s.relay.port, method, &s.relay.url(path), &auth, body);
+        (st, serde_json::from_slice(&b).unwrap_or(Value::Null))
+    };
+    let write_path = format!("/records/ops/{old_id}/{SAVED}/000000000009-{}.json", "ab".repeat(16));
+    assert_eq!(as_old("PUT", &write_path, b"{}"), (403, json!({"result": "refused:revoked"})), "a revoked device's write");
+    assert_eq!(as_old("GET", "/changes?limit=10", b""), (403, json!({"result": "refused:revoked"})), "its change feed");
+    let blob = format!("/records/blobs/{}", "0".repeat(64));
+    assert_eq!(as_old("GET", &blob, b""), (403, json!({"result": "refused:revoked"})), "its record reads");
+
     // The tablet syncs and sees the revocation: the old device's kept record is still there.
-    let faults = sync_pass(
+    let faults = relay_pass(
         &mut tablet,
         &tablet_src,
         &home,

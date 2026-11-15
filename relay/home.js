@@ -1,16 +1,20 @@
 // Colophon 0.5 home (spec §13, §14) for the relay. I/O only.
 //
 // Every decision (admit or refuse an object, what to receipt, which recording entry to append
-// and its bytes, whether a head may be signed, whether a call is authorized) is made by the Rust
-// home module (`crates/colophon-home-wasm`, a plain C-ABI WebAssembly module). This file does
-// what a host does: sockets, files, a clock, the home's signing key, timers, and calls to other
-// homes. It holds no verifier rule. It signs only what the module asks it to sign.
-import { createHash, timingSafeEqual } from 'node:crypto';
+// and its bytes, whether a head may be signed and which head to serve, which class a path is,
+// whether a request is authorized, whether a caller is over its share of the replay table,
+// whether a peer's answer delivered a forwarded object) is made by the Rust home module
+// (`crates/colophon-home-wasm`, a plain C-ABI WebAssembly module). This file does what a host
+// does: sockets, files, a clock, the home's signing key, timers, and calls to other homes. It
+// holds no verifier rule. It signs only what the module asks it to sign.
+//
+// Storage follows state: every mutation commits the module's new state, then stores the files the
+// module lists, under one lock; at start-up the files are reconciled with the state before
+// anything is served.
+import { createHash } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
-const HEX64 = /^[0-9a-f]{64}$/;
-const HEX32 = /^[0-9a-f]{32}$/;
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -23,7 +27,7 @@ export class HomeModule {
     return new HomeModule(await WebAssembly.compile(await fsp.readFile(file)));
   }
 
-  /** One request, one response, both JSON. A response with `ok: false` throws. */
+  /** One request, one response, both JSON. A response with `ok: false` throws a ModuleError. */
   call(request) {
     this.instance ??= new WebAssembly.Instance(this.module, {});
     const { colophon_alloc: alloc, colophon_free: free, colophon_home: home, memory } = this.instance.exports;
@@ -39,13 +43,18 @@ export class HomeModule {
       // A page of memory that grew for one big request is not kept for ever.
       if (memory.buffer.byteLength > 512 * 1024 * 1024) this.instance = null;
       const out = JSON.parse(text);
-      if (!out.ok) throw new Error(`home module: ${out.error}`);
+      if (!out.ok) throw new ModuleError(out.error);
       return out;
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) this.instance = null;
       throw error;
     }
   }
+}
+
+/** The module refused or could not answer a request (not an I/O failure of the host). */
+export class ModuleError extends Error {
+  constructor(message) { super(`home module: ${message}`); }
 }
 
 /** The home's signing key: a P-256 private JWK, imported non-extractable. Never logged. */
@@ -57,6 +66,14 @@ export class HomeKey {
       throw new Error('The home key must be a private P-256 JWK');
     }
     const key = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+    // The public half must be the private key's: sign once and verify under x, y. A mismatch
+    // would make every receipt and head fail the module's check.
+    const pub = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    const probe = Buffer.from('colophon home key check');
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, probe);
+    if (!await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, sig, probe)) {
+      throw new Error('The home key\'s x and y are not the public half of its d');
+    }
     const point = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]);
     const { id } = module.call({ op: 'identity', signing: b64(point) });
     return new HomeKey(key, id, point);
@@ -68,124 +85,129 @@ export class HomeKey {
   }
 }
 
-/** The path grammar of a home slot: what kind of file a path names, or null. */
-export function classifyHomePath(p) {
-  if (typeof p !== 'string' || Buffer.byteLength(p) >= 512) return null;
-  const parts = p.split('/');
-  const ok = parts.every((c) => c.length > 0 && c !== '.' && c !== '..' && !c.startsWith('.') &&
-    !c.includes('\\') && !c.includes('\0') && !c.includes('%'));
-  if (!ok) return null;
-  const json = (s) => s.endsWith('.json');
-  const [a, b, c, d] = parts;
-  if (parts.length === 2 && a === 'authority') return /^\d{8}\.json$/.test(b) ? 'authority' : null;
-  if (parts.length === 2 && (a === 'transitions' || a === 'vetoes')) return HEX64.test(b.replace(/\.json$/, '')) && json(b) ? 'pending' : null;
-  if (parts.length === 3 && a === 'receipts') return HEX64.test(b) && HEX32.test(c.replace(/\.receipt\.json$/, '')) && c.endsWith('.receipt.json') ? 'pending' : null;
-  if (parts.length === 2 && a === 'heads') return json(b) && HEX32.test(b.slice(0, -5)) ? 'head' : null;
-  if (parts.length === 3 && a === 'predecessor' && b === 'authority') return /^\d{8}\.json$/.test(c) ? 'predecessor' : null;
-  if (parts.length === 2 && a === 'blobs') return HEX64.test(b) ? 'blob' : null;
-  if (parts.length === 4 && json(d) && HEX32.test(b)) {
-    if (a === 'ops' || a === 'history') return 'record';
-    if (a === 'state') return 'state';
-  }
-  return null;
-}
-
-/** Per-address request counting for the rate limit (§12.4 allows `refused:window`; §14 is silent). */
+/** Per-address request counting (a host's defence against floods; §12.4 replay shares are the
+ * module's). Rows whose minute has passed are dropped, never the whole table. */
 class RateLimit {
   constructor(perMinute) { this.perMinute = perMinute; this.rows = new Map(); }
   take(address, now) {
     if (!this.perMinute) return true;
-    if (this.rows.size > 10_000) this.rows.clear();
+    if (this.rows.size > 10_000) {
+      for (const [a, row] of this.rows) if (now - row.start >= 60_000) this.rows.delete(a);
+    }
     const row = this.rows.get(address);
-    if (!row || now - row.start >= 60_000) { this.rows.set(address, { start: now, count: 1 }); return true; }
+    if (!row || now - row.start >= 60_000) {
+      if (this.rows.size > 10_000) return false; // too many live addresses: refuse new ones
+      this.rows.set(address, { start: now, count: 1 });
+      return true;
+    }
     row.count += 1;
     return row.count <= this.perMinute;
   }
 }
 
-/** One account's home, on one library slot. */
+/** A promise-chain lock. */
+function chain() {
+  let tail = Promise.resolve();
+  return (fn) => {
+    const run = tail.then(fn, fn);
+    tail = run.catch(() => {});
+    return run;
+  };
+}
+
+/** One account's home, on one library slot provisioned for that account. */
 export class HomeSlot {
   /**
    * @param {object} o `slot` (the relay's Slot), `wasm` (HomeModule), `key` (HomeKey), `base` (the
-   * URL accounts name as this home's endpoint, also the call audience), `clock`, `resolve` (maps
-   * another home's endpoint to the URL to reach it), `deps` (the relay's HttpError, send, readBody,
-   * clampInt), `auth` (bearer check), `limits`.
+   * URL accounts name as this home's endpoint, also the call audience), `account` (the account ID
+   * the operator provisioned the slot for), `clock`, `resolve` (maps another home's endpoint to
+   * the URL to reach it), `deps` (the relay's HttpError, send, readBody, clampInt), `limits`.
    */
   constructor(o) {
     Object.assign(this, o);
-    this.chain = Promise.resolve();
+    this.lock = chain();
+    this.replayLock = chain();
     this.state = null;
-    this.replay = new Map();
+    this.rows = new Map(); // replay key -> { digest, at, signer }
+    this.bySigner = new Map(); // principal -> Set of keys
+    this.logLines = 0;
     this.forward = { peers: {} };
     this.rate = new RateLimit(o.limits.requestsPerMinute);
-    this.limit = this.wasm.call({ op: 'limits' });
+    this.said = new Map();
   }
 
   file(name) { return path.join(this.slot.root, name); }
 
-  lock(fn) {
-    const run = this.chain.then(fn, fn);
-    this.chain = run.catch(() => {});
-    return run;
+  /** Say something once per distinct message per topic, not once per tick. */
+  note(topic, message) {
+    if (this.said.get(topic) === message) return;
+    this.said.set(topic, message);
+    if (message) console.error(message);
   }
 
   async open() {
     this.state = await this.readJson('home-state.json', null);
     if (!this.state) {
-      this.state = this.wasm.call({ op: 'init', home: this.key.memberId }).state;
+      this.state = this.wasm.call({ op: 'init', home: this.key.memberId, account: this.account }).state;
       await this.writeJson('home-state.json', this.state);
     }
-    const replay = await this.readJson('replay.json', []);
-    this.replay = new Map(replay);
+    const st = this.status();
+    if (st.home !== this.key.memberId) throw new Error(`Home slot ${this.slot.name} holds the state of another home key`);
+    if (st.account !== this.account) throw new Error(`Home slot ${this.slot.name} was provisioned for account ${st.account}, not ${this.account}`);
+    // Reconcile storage with the state before serving: a crash between a commit and its files
+    // (a missing entry, a head file older than the committed head) heals here, not later.
+    await this.materialize(this.wasm.call({ op: 'objects', state: this.state }).files);
+    await this.openReplay();
     this.forward = await this.readJson('forward.json', { peers: {} });
-    // The state is the commit point; the files are derived from it. A crash between the two
-    // leaves a state whose files are missing: write them again (idempotent).
-    const { files, heads } = this.wasm.call({ op: 'objects', state: this.state });
-    await this.materialize([...files, ...heads]);
   }
 
   async readJson(name, fallback) {
     try { return JSON.parse(await fsp.readFile(this.file(name), 'utf8')); } catch { return fallback; }
   }
   async writeJson(name, value) {
-    const staged = path.join(this.slot.root, 'tmp', `${name}.${process.pid}.${Date.now()}`);
+    const staged = path.join(this.slot.root, 'tmp', `${name}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`);
     const handle = await fsp.open(staged, 'w', 0o600);
     try { await handle.write(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, this.file(name));
   }
 
   async commit(state) {
-    if (state === this.state) return;
+    if (!state || state === this.state) return;
     await this.writeJson('home-state.json', state);
     this.state = state;
   }
 
-  /** Store files the module said to store. A stored immutable file is never replaced (§14: the
-   * home keeps the envelope it stored); a head file is replaced only by the home that signed it, in `ensureHead`. */
+  /** Store the files the module listed. A `heads/` path is replaced; any other path is written
+   * once (§14: the home keeps the envelope it stored), and a different file already there is
+   * corruption, not something to overwrite. */
   async materialize(files) {
-    for (const { path: p, bytes } of files) {
+    for (const { path: p, bytes } of files ?? []) {
       const body = unb64(bytes);
       const have = this.slot.current.get(p);
       if (have && have.sha256 === sha(body)) continue;
-      if (!have) {
-        if (p.startsWith('heads/')) await this.slot.replaceRequest(p, body);
-        else await this.slot.putImmutable(p, body);
-      }
+      if (p.startsWith('heads/')) await this.slot.replaceRequest(p, body);
+      else if (!have) await this.slot.putImmutable(p, body);
+      else throw new Error(`Home slot ${this.slot.name}: ${p} on disk differs from the state`);
     }
   }
 
-  /** Sign what the module asked for, give each signature back, commit, and store the results. */
+  /** Sign what the module asked for, give each signature back, commit, and store the results.
+   * A request the module no longer accepts (its window ended, or it was signed already) yields
+   * nothing; an I/O failure is not swallowed. */
   async signReceipts(list) {
     const envelopes = [];
-    for (const item of list) {
-      const body = unb64(item.body);
-      const signature = b64(await this.key.sign(body));
+    for (const item of list ?? []) {
+      const signature = b64(await this.key.sign(unb64(item.body)));
+      let r;
       try {
-        const r = this.wasm.call({ op: 'finish_receipt', state: this.state, object: item.object, body: item.body, signature, now: this.clock() });
-        await this.commit(r.state);
-        await this.materialize(r.store);
-        envelopes.push(JSON.parse(unb64(r.envelope).toString('utf8')));
-      } catch { /* the window ended or it was signed already: nothing is returned for it */ }
+        r = this.wasm.call({ op: 'finish_receipt', state: this.state, object: item.object, body: item.body, signature, now: this.clock() });
+      } catch (error) {
+        if (error instanceof ModuleError) continue;
+        throw error;
+      }
+      await this.commit(r.state);
+      await this.materialize(r.store);
+      envelopes.push(JSON.parse(unb64(r.envelope).toString('utf8')));
     }
     return envelopes;
   }
@@ -199,62 +221,147 @@ export class HomeSlot {
     const signature = b64(await this.key.sign(unb64(r.sign.body)));
     const f = this.wasm.call({ op: 'finish_head', state: this.state, now, seq: r.sign.seq, digest: r.sign.digest, issued: r.sign.issued, signature });
     await this.commit(f.state);
-    await this.slot.replaceRequest(f.path, unb64(f.envelope));
+    await this.materialize(f.store);
     return true;
   }
 
   async headEnvelope() {
-    if (!this.slot.current.has(`heads/${this.key.memberId}.json`)) return null;
-    return JSON.parse((await this.slot.readFile(`heads/${this.key.memberId}.json`)).toString('utf8'));
+    const p = `heads/${this.key.memberId}.json`;
+    if (!this.slot.current.has(p)) return null;
+    return JSON.parse((await this.slot.readFile(p)).toString('utf8'));
   }
 
   status() { return this.wasm.call({ op: 'status', state: this.state, now: this.clock() }); }
 
   // -------------------------------------------------------------------------------------------
-  // Who may do what (§13.4, §14). A bearer token is storage access only: it never reads history.
+  // The replay table (§12.4). The module decides; this keeps the rows durable: an append-only
+  // log, a reservation line (fsynced) before any effect, a completion line after it, and
+  // recovery at start-up from the effect's own record.
 
-  async access(req, cls) {
-    const { HttpError } = this.deps;
-    if (cls !== 'history' && this.auth(req)) return;
-    const header = req.headers.authorization ?? '';
-    const m = /^Colophon ([A-Za-z0-9_-]+)$/.exec(header);
-    const st = this.status();
-    if (!st.appointed) {
-      if (cls === 'history') return; // nothing is held to be read
-      throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Colophon, Bearer' });
+  async openReplay() {
+    const file = this.file('replay.log');
+    let text = '';
+    try { text = await fsp.readFile(file, 'utf8'); } catch { text = ''; }
+    const end = text.lastIndexOf('\n');
+    if (end !== text.length - 1) text = text.slice(0, end + 1); // a torn last line
+    const pending = new Map();
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      let e; try { e = JSON.parse(line); } catch { continue; }
+      this.logLines += 1;
+      if (e.r) {
+        this.addRow(e.r, { digest: e.d, at: e.at, signer: e.s });
+        if (e.e && !e.t) pending.set(e.r, e.e); else pending.delete(e.r);
+      } else if (e.c) pending.delete(e.c);
     }
-    let call; let existing = null; let key = null;
-    if (m) {
-      call = b64(Buffer.from(m[1], 'base64url'));
-      const k = this.wasm.call({ op: 'call_key', call });
-      if (k.parsed) {
-        key = k.key;
-        const row = this.replay.get(key);
-        existing = row ? { at: row.at, digest: row.digest } : null;
-      }
-    }
-    const now = this.clock();
-    const r = this.wasm.call({ op: 'authorize', state: this.state, now, class: cls, base: this.base, call, existing });
-    if (r.allowed) {
-      if (r.reserve) await this.reserve(r.reserve);
-      return;
-    }
-    if (!m) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Colophon, Bearer' });
-    throw new HttpError(403, JSON.stringify({ result: r.code }));
+    // A reservation left pending by a crash: completed if its effect is there, else abandoned.
+    // Either way the row stays and the call is a replay.
+    const rows = [...pending].map(([key, effect]) => {
+      const now = this.slot.current.get(effect.path)?.sha256 ?? null;
+      return { key, present: now !== null && now !== (effect.prior ?? null) };
+    });
+    const lines = rows.length ? this.wasm.call({ op: 'replay_recover', rows }).states.map((s) => ({ c: s.key, t: s.state })) : [];
+    await this.compactReplay(lines);
   }
 
-  /** The replay reservation (§12.4), durable before any effect. The table is bounded: a full
-   * one refuses new calls (`refused:window`, which §12.4 allows a store to answer). */
-  async reserve({ key, at, digest }) {
+  addRow(key, row) {
+    this.rows.set(key, row);
+    let set = this.bySigner.get(row.signer);
+    if (!set) this.bySigner.set(row.signer, (set = new Set()));
+    set.add(key);
+  }
+  dropRows(keys) {
+    for (const key of keys ?? []) {
+      const row = this.rows.get(key);
+      if (!row) continue;
+      this.rows.delete(key);
+      const set = this.bySigner.get(row.signer);
+      set?.delete(key);
+      if (set && set.size === 0) this.bySigner.delete(row.signer);
+    }
+  }
+
+  /** Rewrite the log with the rows the module keeps (§12.4 retention), plus `extra` lines. */
+  async compactReplay(extra = []) {
+    const all = [...this.rows].map(([key, r]) => ({ key, at: r.at }));
+    const keep = new Set(this.wasm.call({ op: 'replay_keep', now: this.clock(), rows: all }).keep);
+    this.dropRows(all.map((r) => r.key).filter((k) => !keep.has(k)));
+    const lines = [...this.rows].map(([key, r]) => JSON.stringify({ r: key, d: r.digest, s: r.signer, at: r.at, t: 'completed' }));
+    for (const e of extra) lines.push(JSON.stringify(e));
+    const staged = path.join(this.slot.root, 'tmp', `replay.${process.pid}.${Date.now()}`);
+    const handle = await fsp.open(staged, 'w', 0o600);
+    try { await handle.write(lines.map((l) => l + '\n').join('')); await handle.sync(); } finally { await handle.close(); }
+    await fsp.rename(staged, this.file('replay.log'));
+    this.logLines = lines.length;
+  }
+
+  async appendReplay(entry, durable) {
+    const handle = await fsp.open(this.file('replay.log'), 'a', 0o600);
+    try { await handle.write(JSON.stringify(entry) + '\n'); if (durable) await handle.sync(); } finally { await handle.close(); }
+    this.logLines += 1;
+  }
+
+  /** The reservation, durable before any effect. A read's effect is not durable, so its
+   * reservation is written completed (`completed(result, none)`); a write's names its effect
+   * (the path and what was there before), so recovery can tell whether it happened. */
+  async reserve(row, effect) {
+    const line = { r: row.key, d: row.digest, s: row.signer, at: row.at, ...(effect ? { e: effect } : { t: 'completed' }) };
+    await this.appendReplay(line, true);
+    this.addRow(row.key, { digest: row.digest, at: row.at, signer: row.signer });
+    if (this.logLines > 2 * this.rows.size + 1024) await this.compactReplay();
+  }
+  async complete(key, t) { await this.appendReplay({ c: key, t }, false); }
+
+  // -------------------------------------------------------------------------------------------
+  // Who may do what (§13.4, §14): the module's `access` decision, all of it.
+
+  async access(req, section, rest, effect, body) {
     const { HttpError } = this.deps;
-    for (const [k, row] of this.replay) if (at - row.at > this.limit.retentionMs) this.replay.delete(k);
-    if (this.replay.size >= this.limits.replayRows) throw new HttpError(429, JSON.stringify({ result: 'refused:window' }), { 'retry-after': '60' });
-    this.replay.set(key, { at, digest });
-    await this.writeJson('replay.json', [...this.replay]);
+    const header = req.headers.authorization ?? '';
+    const m = /^Colophon ([A-Za-z0-9_-]+)$/.exec(header);
+    const call = m ? b64(Buffer.from(m[1], 'base64url')) : null;
+    return this.replayLock(async () => {
+      let existing = null; let signerRows = [];
+      if (call) {
+        const k = this.wasm.call({ op: 'call_key', call });
+        if (k.parsed) {
+          const row = this.rows.get(k.key);
+          existing = row ? { at: row.at, digest: row.digest } : null;
+          signerRows = [...(this.bySigner.get(k.signer) ?? [])].map((key) => ({ key, at: this.rows.get(key).at }));
+        }
+      }
+      const r = this.wasm.call({
+        op: 'access', state: this.state, now: this.clock(), method: req.method, section, rest,
+        call, existing, signerRows, replayRows: this.limits.replayRows, base: this.base,
+        path: this.relativePath(req), bodySha256: sha(body ?? Buffer.alloc(0)),
+      });
+      this.dropRows(r.drop);
+      if (r.allowed) {
+        if (r.reserve) await this.reserve(r.reserve, effect);
+        return r;
+      }
+      switch (r.status) {
+        case 401: throw new HttpError(401, 'A Colophon call is required', { 'www-authenticate': 'Colophon' });
+        case 403: throw new HttpError(403, 'Forbidden', {}, { result: r.result });
+        case 429: throw new HttpError(429, 'Too many requests', { 'retry-after': String(r.retryAfter ?? 60) }, { result: r.result });
+        case 405: throw new HttpError(405, 'Method not allowed', { allow: r.allow });
+        case 400: throw new HttpError(400, r.error ?? 'Bad request');
+        default: throw new HttpError(r.status ?? 404, 'Not found');
+      }
+    });
+  }
+
+  /** The request's path and query relative to the slot's base, exactly as sent: what a call's
+   * `args.path` names. */
+  relativePath(req) {
+    const prefix = `/v1/libraries/${this.slot.name}`;
+    const raw = req.url ?? '';
+    return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
   }
 
   // -------------------------------------------------------------------------------------------
-  // HTTP. Returns true when it answered; false to let the relay's generic record code go on.
+  // HTTP. Returns true when it answered; false to let the relay's generic code serve the file,
+  // the change feed or `GET {base}` (after the module allowed it).
 
   async handle(req, res, url, section, rest) {
     const { HttpError, send, readBody, clampInt } = this.deps;
@@ -262,92 +369,111 @@ export class HomeSlot {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
     }
     const method = req.method;
-    if (!section) {
-      if (method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
-      return false;
-    }
+    const writing = section === 'records' && method === 'PUT';
+    const effect = writing ? { path: rest, prior: this.slot.current.get(rest)?.sha256 ?? null } : null;
+    // A write's body is read (bounded) before its call is judged: the call is bound to its digest.
+    const recordWrite = writing && typeof rest === 'string' && !rest.startsWith('heads/');
+    const body = recordWrite ? await readBody(req, rest.startsWith('blobs/') ? this.limits.blobBytes : this.limits.recordBytes) : null;
+    const allowed = await this.access(req, section ?? '', rest ?? null, effect, body);
+    const key = allowed.reserve?.key;
+    if (!section || section === 'changes') return false;
     if (section === 'head') {
-      if (method !== 'GET' || rest !== undefined) throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
       const head = await this.headEnvelope();
       if (!head) throw new HttpError(404, 'No head');
       send(res, 200, head);
       return true;
     }
     if (section === 'authority') {
-      if (rest !== undefined) throw new HttpError(404, 'Not found');
-      if (method === 'GET') { await this.getAuthority(req, res, url); return true; }
-      if (method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'GET, POST' });
+      if (method === 'GET') {
+        const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
+        const limit = clampInt(url.searchParams.get('limit'), 64, 1, 64);
+        let page;
+        try { page = this.wasm.call({ op: 'authority_page', state: this.state, now: this.clock(), after, limit }); }
+        catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot serve its history now'); throw error; }
+        send(res, 200, { entries: page.entries.map((e) => JSON.parse(unb64(e))), receipts: [], more: page.more });
+        return true;
+      }
       const body = await readBody(req, this.limits.authorityBodyBytes);
       await this.lock(() => this.postAuthority(res, body));
       return true;
     }
     if (section === 'pending') {
-      if (rest === undefined) {
-        if (method === 'GET') { await this.getPending(req, res, url); return true; }
-        if (method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'GET, POST' });
+      if (method === 'POST') {
         const body = await readBody(req, this.limits.pendingBodyBytes);
         await this.lock(() => this.postPending(res, body));
         return true;
       }
-      if (method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
-      if (!HEX64.test(rest)) throw new HttpError(404, 'Not found');
-      await this.access(req, 'history');
-      if (!this.status().appointed) throw new HttpError(404, 'Not found');
+      if (rest === undefined || rest === null) {
+        const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
+        const limit = clampInt(url.searchParams.get('limit'), 64, 1, 64);
+        let page;
+        try { page = this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after, limit }); }
+        catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot list its pending objects now'); throw error; }
+        send(res, 200, {
+          objects: page.objects.map((o) => ({ seq: o.seq, digest: o.digest, kind: o.kind, envelope: JSON.parse(unb64(o.envelope)) })),
+          more: page.more,
+        });
+        return true;
+      }
       const r = this.wasm.call({ op: 'pending_object', state: this.state, now: this.clock(), digest: rest });
       if (!r.found) throw new HttpError(404, 'Not found');
       send(res, 200, { envelope: JSON.parse(unb64(r.envelope)), receipts: r.receipts.map((x) => JSON.parse(unb64(x))) });
       return true;
     }
-    if (section === 'predecessor') throw new HttpError(404, 'This home serves no predecessor');
-    if (section === 'changes') {
-      if (method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
-      await this.access(req, 'records_read');
-      return false;
+    if (section === 'records') {
+      if (!writing) return false; // a read the module allowed: the relay serves the file
+      if (url.search) throw new HttpError(400, 'Record URLs take no query');
+      if (rest.startsWith('heads/')) { await this.putHead(req, res, rest); return true; }
+      try { await this.putRecord(req, res, rest, body); } finally { if (key) await this.complete(key, 'completed'); }
+      return true;
     }
-    if (section === 'records') return this.records(req, res, url, rest);
-    return false;
+    throw new HttpError(404, 'Not found');
   }
 
-  async getAuthority(req, res, url) {
-    const { send, clampInt } = this.deps;
-    await this.access(req, 'history');
-    const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
-    const limit = clampInt(url.searchParams.get('limit'), 64, 1, 64);
-    const st = this.status();
-    const seq = st.appointed && !st.error ? st.seq : 0;
-    const entries = [];
-    for (let s = after + 1; s <= seq && entries.length < limit; s += 1) {
-      entries.push(JSON.parse((await this.slot.readFile(`authority/${String(s).padStart(8, '0')}.json`)).toString('utf8')));
-    }
-    send(res, 200, { entries, receipts: [], more: after + entries.length < seq });
+  /** A head forwarded by another current home (§13.1). Anyone may send one: the module checks
+   * it, and says which head to serve for that home. */
+  async putHead(req, res, recordPath) {
+    const { readBody } = this.deps;
+    const body = await readBody(req, 8192);
+    await this.lock(async () => {
+      const r = this.wasm.call({ op: 'admit_one', state: this.state, now: this.clock(), bytes: b64(body), path: recordPath });
+      await this.commit(r.state);
+      await this.materialize(r.store);
+      if (r.outcome !== 'ok') { await this.answerOutcome(res, r); return; }
+      res.writeHead(200, { 'content-length': 0 });
+      res.end();
+    });
   }
 
-  async getPending(req, res, url) {
-    const { send, clampInt, HttpError } = this.deps;
-    await this.access(req, 'history');
-    const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
-    const limit = clampInt(url.searchParams.get('limit'), 64, 1, 64);
-    if (!this.status().appointed) return send(res, 200, { objects: [], more: false });
-    let page;
-    try { page = this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after, limit }); }
-    catch { throw new HttpError(503, 'The home cannot list its pending objects now'); }
-    send(res, 200, {
-      objects: page.objects.map((o) => ({ seq: o.seq, digest: o.digest, kind: o.kind, envelope: JSON.parse(unb64(o.envelope)) })),
-      more: page.more,
+  async putRecord(req, res, recordPath, body) {
+    const { HttpError, send } = this.deps;
+    await this.lock(async () => {
+      const check = this.wasm.call({ op: 'check_record', state: this.state, now: this.clock(), path: recordPath, bytes: b64(body) });
+      if (!check.allowed) { send(res, 422, { result: check.code }); return; }
+      const conditional = req.headers['if-none-match'];
+      let status;
+      if (conditional === '*') status = await this.slot.putImmutable(recordPath, body);
+      else if (conditional !== undefined) throw new HttpError(400, 'Only If-None-Match: * is supported');
+      else if (recordPath.startsWith('state/')) {
+        const expected = req.headers['if-match'];
+        if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
+        status = await this.slot.replaceRequest(recordPath, body, expected);
+      } else throw new HttpError(428, 'Immutable records require If-None-Match: *');
+      res.writeHead(status, { etag: `"${sha(body)}"`, 'content-length': 0 });
+      res.end();
     });
   }
 
   async answerOutcome(res, r) {
     const { send } = this.deps;
-    if (r.outcome === 'conflict') return send(res, 409, (await this.headEnvelope()) ?? {});
+    if (r.outcome === 'conflict') return send(res, 409, (await this.headEnvelope()) ?? null);
     if (r.outcome === 'primary') return send(res, 421, { endpoints: r.endpoints });
     return send(res, 422, { result: r.result });
   }
 
   async postAuthority(res, body) {
     const { send } = this.deps;
-    const now = this.clock();
-    const r = this.wasm.call({ op: 'post_authority', state: this.state, now, body: b64(body) });
+    const r = this.wasm.call({ op: 'post_authority', state: this.state, now: this.clock(), body: b64(body) });
     await this.commit(r.state); // even a refusal changes state (§13.1)
     await this.materialize(r.store);
     const receipts = await this.signReceipts(r.sign);
@@ -362,70 +488,8 @@ export class HomeSlot {
     await this.commit(r.state);
     await this.materialize(r.store);
     const receipts = await this.signReceipts(r.sign);
-    if (r.outcome !== 'ok') return send(res, 422, r.results?.length ? r.results : { result: r.result });
+    if (r.outcome !== 'ok') return send(res, 422, r.results);
     return send(res, 200, { receipts });
-  }
-
-  /** `records/…` of a home: history files, heads, and the record store behind the module's check. */
-  async records(req, res, url, recordPath) {
-    const { HttpError, send, readBody } = this.deps;
-    const kind = classifyHomePath(recordPath ?? '');
-    if (!kind) throw new HttpError(400, 'Invalid record path');
-    if (url.search) throw new HttpError(400, 'Record URLs take no query');
-    const method = req.method;
-    if (method === 'GET' || method === 'HEAD') {
-      await this.access(req, ['authority', 'pending', 'head', 'predecessor'].includes(kind) ? 'history' : 'records_read');
-      return false;
-    }
-    if (method !== 'PUT') throw new HttpError(405, 'Method not allowed', { allow: 'GET, PUT' });
-    if (kind === 'head') {
-      // A head forwarded by another current home (§13.1). Anyone may send one: it is checked.
-      const body = await readBody(req, 8192);
-      let parsed; let by; let issued;
-      try {
-        parsed = JSON.parse(body.toString('utf8'));
-        const head = JSON.parse(Buffer.from(parsed.body, 'base64').toString('utf8'));
-        by = head.by; issued = Date.parse(head.issued);
-      } catch { throw new HttpError(400, 'Not a head'); }
-      if (`heads/${by}.json` !== recordPath || by === this.key.memberId) throw new HttpError(400, 'A head is stored under its home');
-      await this.lock(async () => {
-        const r = this.wasm.call({ op: 'admit_one', state: this.state, now: this.clock(), bytes: b64(body) });
-        await this.commit(r.state);
-        if (r.outcome !== 'ok') { await this.answerOutcome(res, r); return; }
-        // Serve the newest head each home has sent.
-        let newer = true;
-        if (this.slot.current.has(recordPath)) {
-          const old = JSON.parse(Buffer.from(JSON.parse((await this.slot.readFile(recordPath)).toString('utf8')).body, 'base64').toString('utf8'));
-          newer = issued > Date.parse(old.issued);
-        }
-        if (newer) await this.slot.replaceRequest(recordPath, Buffer.from(JSON.stringify(parsed)));
-        res.writeHead(200, { 'content-length': 0 });
-        res.end();
-      });
-      return true;
-    }
-    if (kind === 'authority' || kind === 'pending' || kind === 'predecessor') {
-      throw new HttpError(405, 'Use POST /authority or POST /pending', { allow: 'GET' });
-    }
-    await this.access(req, 'records_write');
-    const max = kind === 'blob' ? this.limits.blobBytes : this.limits.recordBytes;
-    const body = await readBody(req, max);
-    return this.lock(async () => {
-      const check = this.wasm.call({ op: 'check_record', state: this.state, now: this.clock(), path: recordPath, bytes: b64(body) });
-      if (!check.allowed) return send(res, 422, { result: check.code }), true;
-      const conditional = req.headers['if-none-match'];
-      let status;
-      if (conditional === '*') status = await this.slot.putImmutable(recordPath, body);
-      else if (conditional !== undefined) throw new HttpError(400, 'Only If-None-Match: * is supported');
-      else if (kind === 'state') {
-        const expected = req.headers['if-match'];
-        if (!expected || !/^"[0-9a-f]{64}"$/.test(expected)) throw new HttpError(428, 'Live replacement requires If-Match');
-        status = await this.slot.replaceRequest(recordPath, body, expected);
-      } else throw new HttpError(428, 'Immutable records require If-None-Match: *');
-      res.writeHead(status, { etag: `"${sha(body)}"`, 'content-length': 0 });
-      res.end();
-      return true;
-    });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -442,9 +506,8 @@ export class HomeSlot {
     await this.lock(async () => {
       if (!this.status().appointed) return;
       const r = this.wasm.call({ op: 'record_due', state: this.state, now: this.clock() });
-      const said = r.result === 'ok' && !r.note ? '' : `${r.result} ${r.note ?? ''}`;
-      if (said && said !== this.lastSaid) console.error(`recording entries for slot ${this.slot.name}: ${said}`);
-      this.lastSaid = said;
+      const said = r.result === 'ok' && !r.note ? '' : `recording entries for slot ${this.slot.name}: ${r.result} ${r.note ?? ''}`;
+      this.note('record', said);
       await this.commit(r.state);
       await this.materialize(r.store);
       await this.signReceipts(r.sign);
@@ -461,49 +524,69 @@ export class HomeSlot {
       const endpoint = (peer.endpoints ?? [])[0];
       if (!endpoint) continue;
       const base = (this.resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
-      const row = (this.forward.peers[peer.id] ??= { after: 0, head: '' });
-      try { await this.forwardTo(base, row); row.said = ''; } catch (error) {
-        const said = `forwarding to home ${peer.id} failed (it will be retried): ${error.message}`;
-        if (said !== row.said) console.error(said); // once per distinct failure, not once per tick
-        row.said = said;
+      const row = (this.forward.peers[peer.id] ??= { after: 0, retry: [], head: '' });
+      row.retry ??= [];
+      try { await this.forwardTo(base, row, peer.id); this.note(`forward ${peer.id}`, ''); } catch (error) {
+        this.note(`forward ${peer.id}`, `forwarding to home ${peer.id} failed (it will be retried): ${error.message}`);
       }
     }
   }
 
-  async forwardTo(base, row) {
-    const init = (extra) => ({ signal: AbortSignal.timeout(5000), ...extra });
-    // Pending objects, in the order this home first stored them, from this peer's cursor.
+  /** Offer one pending object to a peer. Returns whether it was delivered (the module reads the
+   * peer's answer); receipts the peer returns are admitted like any forwarded receipt. */
+  async offer(base, object, peerId) {
+    const r = await fetch(`${base}/pending`, { signal: AbortSignal.timeout(5000), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects: [object] }) });
+    const body = Buffer.from(await r.arrayBuffer());
+    const a = this.wasm.call({ op: 'peer_answer', status: r.status, body: b64(body) });
+    if (a.receipts?.length) {
+      await this.lock(async () => {
+        const back = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(Buffer.from(JSON.stringify({ objects: a.receipts.slice(0, 16) }))) });
+        await this.commit(back.state);
+        await this.materialize(back.store);
+      });
+    }
+    if (!a.delivered) this.note(`offer ${peerId}`, `home ${peerId} did not take a forwarded object yet (${a.why}); it will be offered again`);
+    return a.delivered;
+  }
+
+  /** The object this home still lists at exactly `seq`, or null. */
+  async listed(seq) {
+    const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: seq - 1, limit: 1 }));
+    const o = page.objects[0];
+    return o && o.seq === seq ? JSON.parse(unb64(o.envelope)) : null;
+  }
+
+  /** Forward to one peer (§13.1: a home MUST forward). The cursor moves past an object once it
+   * was offered; an object the peer did not take (not delivered, by the module's reading of the
+   * answer) is kept in `retry` and offered again every pass while this home still lists it. */
+  async forwardTo(base, row, peerId) {
+    const save = () => this.writeJson('forward.json', this.forward);
+    const retry = [];
+    for (const seq of row.retry) {
+      const object = await this.listed(seq);
+      if (!object) continue; // recorded or expired: no longer listed, nothing left to forward
+      if (!await this.offer(base, object, peerId)) retry.push(seq);
+    }
+    row.retry = retry;
+    await save();
     for (;;) {
       const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: 16 }));
       if (page.objects.length === 0) break;
-      const objects = page.objects.map((o) => JSON.parse(unb64(o.envelope)));
-      const r = await fetch(`${base}/pending`, init({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) }));
-      if (r.status !== 200 && r.status !== 422) throw new Error(`peer answered ${r.status}`);
-      if (r.status === 200) {
-        // Its receipts of what we sent come back; we take them like any forwarded receipt.
-        const { receipts } = await r.json();
-        if (Array.isArray(receipts) && receipts.length) {
-          await this.lock(async () => {
-            const back = this.wasm.call({ op: 'post_pending', state: this.state, now: this.clock(), body: b64(Buffer.from(JSON.stringify({ objects: receipts.slice(0, 16) }))) });
-            await this.commit(back.state);
-            await this.materialize(back.store);
-          });
-        }
+      for (const o of page.objects) {
+        if (!await this.offer(base, JSON.parse(unb64(o.envelope)), peerId)) row.retry.push(o.seq);
+        row.after = o.seq;
+        await save();
       }
-      row.after = page.objects[page.objects.length - 1].seq;
-      await this.writeJson('forward.json', this.forward);
       if (!page.more) break;
     }
     const head = await this.headEnvelope();
     if (head) {
       const text = JSON.stringify(head);
       if (sha(text) !== row.head) {
-        const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, init({ method: 'PUT', headers: { 'content-type': 'application/json' }, body: text }));
-        if (r.status === 200) { row.head = sha(text); await this.writeJson('forward.json', this.forward); }
-        else console.error(`peer refused our head: ${r.status} ${(await r.text()).slice(0, 200)}`);
+        const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: AbortSignal.timeout(5000), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
+        if (r.status === 200) { row.head = sha(text); await save(); this.note(`head ${peerId}`, ''); }
+        else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
       }
     }
   }
 }
-
-export { timingSafeEqual };
