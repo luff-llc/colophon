@@ -486,7 +486,8 @@ fn a_restart_in_the_middle_loses_nothing_receipts_nothing_twice_and_the_feed_res
     let ka = HomeKeys::new(0x77);
     drop(wire);
     // The process is killed and started again on the same data directory and port.
-    let a = std::mem::replace(&mut w.a, Relay::start(&ka, &w.f.account.id().as_str().to_string(), BASE_A, w.scratch[2].path(), NOW, &[]));
+    let account = w.f.account.id().as_str().to_string();
+    let a = std::mem::replace(&mut w.a, Relay::start(&ka, &account, BASE_A, w.scratch[2].path(), NOW, &[]));
     w.a = a.restart(&ka, NOW + 2_000, &[]);
     let after = pending_list(&w.a);
     assert_eq!(before, after, "the same objects with the same cursors");

@@ -211,7 +211,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
         assert!(faults.is_empty(), "round {k}: {faults:?}");
         let action = ctl
             .account()
-            .begin_transition(&Change::policy(json!({"callWindow": 600 + k})), &[d.clone()], TransitionRule::Control)
+            .begin_transition(&Change::policy(json!({"callWindow": 600 + k})), std::slice::from_ref(&d), TransitionRule::Control)
             .unwrap();
         engine_finish(&mut ctl, &host, &src, action);
         let digest = ctl.account().pending().last().unwrap().digest.clone();
@@ -227,7 +227,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
         // client retries until it has the home's answer.
         let post = json!({"objects": [env]}).to_string();
         clock(t + 1_000);
-        loop {
+        {
             let delay = rnd(30_000);
             let sender = {
                 let body = post.clone();
@@ -239,12 +239,10 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             let answered = sender.join().unwrap();
             relay = start(&keys, &account, &dir, port);
             check(relay.port, &mut receipts);
-            if answered.is_some_and(|(s, _)| s == 200) {
-                break;
-            }
-            match try_http(port, "POST", "/pending", post.as_bytes()) {
-                Some((200, _)) => break,
-                other => panic!("round {k}: the retry was answered {other:?}"),
+            // The client retries until it has the home's answer.
+            if !answered.is_some_and(|(s, _)| s == 200) {
+                let retry = try_http(port, "POST", "/pending", post.as_bytes());
+                assert_eq!(retry.map(|(s, _)| s), Some(200), "round {k}: the retry");
             }
         }
         // Due: the home records `activate`, signs a head, then records `final`. Killed at random

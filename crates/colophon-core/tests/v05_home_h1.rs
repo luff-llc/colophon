@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use colophon_core::v05::{
     encoding::{canonical, digest, parse_date},
     history::home::{
-        admit, admit_pending_batch, finish_receipt, HomeState, Refusal, ServingInterval,
+        admit, finish_receipt, HomeState, Refusal, ServingInterval,
     },
     history::{verify_history, Objects, Persisted},
 };
