@@ -123,18 +123,31 @@ class MemoryMedium(files: Map<String, ByteArray> = mapOf()) : RecordMedium {
 
 /**
  * A folder of record files (an app's private directory on Android, a temporary directory in tests). Each [write] is
- * all or none, across a kill at any step: the batch is staged under `.colophon/staging/<id>/`, a commit record naming
- * its paths is published by an atomic rename (the commit point), the files are moved into place, and the record is
- * removed. The next call in any process finishes a committed batch and discards an uncommitted one. Paths are
- * validated, never followed through a symbolic link, and hidden files are not listed. Thread-safe within one process;
- * one process per folder (Android app-private storage).
+ * all or none, across a failure or a kill at any step, as the Swift `FolderMedium`'s journal is:
+ *
+ * 1. nothing is staged until no write conflicts;
+ * 2. every file of the batch is written and synchronised in `.colophon/staging/<id>/`;
+ * 3. a commit record naming each path, its staged file and its SHA-256 is written, synchronised and renamed to
+ *    `.colophon/commit-<id>`: this is the commit point;
+ * 4. each file moves into place;
+ * 5. the record is removed, then the staging directory.
+ *
+ * A failure before the commit point removes what was staged and throws: nothing is published. A failure after it
+ * throws and leaves the record and every staged file not yet moved: the batch rolls forward, and every later call of
+ * this or any process (listing, read, write) completes it first, so a reader never sees half a batch (if it cannot be
+ * completed, the call throws `Unavailable` instead). Staging without a record is removed at the first call. Paths
+ * are validated, never followed through a symbolic link, and hidden files are not listed. Thread-safe within one
+ * process; one process per folder (Android app-private storage).
  */
 class FolderMedium(val root: File) : RecordMedium {
     private val lock = Any()
     private val control = File(root, ".colophon")
     private val staging = File(control, "staging")
     private val hints = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-    @Volatile private var recovered = false
+    /** True while a committed batch may be waiting (at the first call, and after a failure past the commit point). */
+    @Volatile private var unsettled = true
+    /** Test hook: called before each step (`stage:<path>`, `commit`, `move:<path>`); a throw is an injected failure. */
+    internal var fault: ((String) -> Unit)? = null
 
     private fun file(path: String): File {
         RecordPaths.validate(path)
@@ -148,38 +161,59 @@ class FolderMedium(val root: File) : RecordMedium {
         return f
     }
 
-    private fun recover() {
-        if (recovered) return
+    /** Completes every committed batch and removes staging that never reached a record. Throws if a batch cannot be completed. */
+    private fun settle() {
+        if (!unsettled) return
         synchronized(lock) {
-            if (recovered) return
+            if (!unsettled) return
             if (!root.isDirectory && !root.mkdirs()) throw StorageException.Unavailable("cannot create ${root.path}")
-            control.listFiles()?.filter { it.name.startsWith("commit-") }?.forEach { commit -> applyCommit(commit) }
-            staging.listFiles()?.forEach { it.deleteRecursively() }
-            recovered = true
+            try {
+                control.listFiles()?.filter { it.name.startsWith("commit-") }?.sortedBy { it.lastModified() }?.forEach { applyCommit(it) }
+                staging.listFiles()?.forEach { dir -> if (!File(control, "commit-${dir.name}").exists()) dir.deleteRecursively() }
+                control.listFiles()?.filter { it.name.startsWith(".commit-") }?.forEach { it.delete() }
+            } catch (e: StorageException) {
+                throw e
+            } catch (e: Exception) {
+                throw StorageException.Unavailable("a recorded batch could not be completed: ${e.message}")
+            }
+            unsettled = false
         }
     }
 
-    /** Moves a committed batch's staged files into place (idempotent), then removes the commit record. */
+    private class Entry(val staged: String, val digest: String, val path: String)
+    private fun entries(commit: File): List<Entry> = commit.readLines(Charsets.UTF_8).filter { it.isNotEmpty() }.map { line ->
+        val parts = line.split(' ', limit = 3)
+        if (parts.size != 3) throw StorageException.Unavailable("unreadable batch record ${commit.name}")
+        Entry(parts[0], parts[1], parts[2])
+    }
+
+    /**
+     * Moves a committed batch's staged files into place (idempotent: an entry whose staged file is gone must already be
+     * in place with its bytes), then removes the record and the staging directory. A failure leaves both for the next call.
+     */
     private fun applyCommit(commit: File) {
         val id = commit.name.removePrefix("commit-")
         val dir = File(staging, id)
-        for (line in commit.readLines(Charsets.UTF_8)) {
-            if (line.isEmpty()) continue
-            val n = line.substringBefore(' ')
-            val path = line.substringAfter(' ')
-            val staged = File(dir, n)
-            if (!staged.exists()) continue
-            val target = file(path)
+        for (e in entries(commit)) {
+            val staged = File(dir, e.staged)
+            val target = file(e.path)
+            if (!staged.exists()) {
+                val present = if (target.isFile) Files.readAllBytes(target.toPath()) else null
+                if (present == null || sha256(present) != e.digest) throw StorageException.Unavailable("batch $id lost the staged file of ${e.path}")
+                continue
+            }
+            fault?.invoke("move:${e.path}")
             target.parentFile?.mkdirs()
             move(staged, target)
         }
-        dir.deleteRecursively()
+        fsyncDir(root)
         commit.delete()
         fsyncDir(control)
+        dir.deleteRecursively()
     }
 
     override fun listing(): List<MediumEntry> {
-        recover()
+        settle()
         synchronized(lock) {
             val out = ArrayList<MediumEntry>()
             fun walk(dir: File, prefix: String) {
@@ -202,7 +236,7 @@ class FolderMedium(val root: File) : RecordMedium {
     }
 
     override fun read(path: String): ByteArray {
-        recover()
+        settle()
         val f = file(path)
         try {
             if (Files.size(f.toPath()) > RecordPaths.MAXIMUM_BYTES) throw StorageException.LimitExceeded()
@@ -217,14 +251,14 @@ class FolderMedium(val root: File) : RecordMedium {
     }
 
     override fun readBlob(path: String): ByteArray {
-        recover()
+        settle()
         val f = file(path)
         if (!f.exists()) return ByteArray(0)
         return try { Files.readAllBytes(f.toPath()) } catch (e: IOException) { throw StorageException.Unavailable("Cannot read $path: ${e.message}") }
     }
 
     override fun write(writes: List<MediumWrite>) {
-        recover()
+        settle()
         if (writes.isEmpty()) return
         synchronized(lock) {
             for (w in writes) {
@@ -245,24 +279,33 @@ class FolderMedium(val root: File) : RecordMedium {
             if (changes.isEmpty()) return
             val id = UUID.randomUUID().toString()
             val dir = File(staging, id)
+            val commit = File(control, "commit-$id")
+            // Before the commit point: a failure removes what was staged and nothing is published.
             try {
                 if (!dir.mkdirs()) throw StorageException.Unavailable("cannot stage a write in ${dir.path}")
                 val lines = StringBuilder()
                 changes.entries.forEachIndexed { n, (path, bytes) ->
+                    fault?.invoke("stage:$path")
                     FileOutputStream(File(dir, n.toString())).use { out -> out.write(bytes); out.fd.sync() }
-                    lines.append(n).append(' ').append(path).append('\n')
+                    lines.append(n).append(' ').append(sha256(bytes)).append(' ').append(path).append('\n')
                 }
                 fsyncDir(dir)
                 val pending = File(control, ".commit-$id")
                 FileOutputStream(pending).use { out -> out.write(lines.toString().toByteArray(Charsets.UTF_8)); out.fd.sync() }
-                val commit = File(control, "commit-$id")
+                fault?.invoke("commit")
                 move(pending, commit)
                 fsyncDir(control)
+            } catch (e: Exception) {
+                File(control, ".commit-$id").delete()
+                dir.deleteRecursively()
+                throw e as? StorageException ?: StorageException.Unavailable("Cannot write: ${e.message}")
+            }
+            // After it: the batch rolls forward. A failure keeps the record and the staged files for the next call.
+            try {
                 applyCommit(commit)
-            } catch (e: StorageException) {
-                dir.deleteRecursively(); throw e
-            } catch (e: IOException) {
-                dir.deleteRecursively(); throw StorageException.Unavailable("Cannot write: ${e.message}")
+            } catch (e: Exception) {
+                unsettled = true
+                throw StorageException.Unavailable("The batch is recorded and will be completed by the next call: ${e.message}")
             }
         }
         hints.tryEmit(Unit)
@@ -270,6 +313,7 @@ class FolderMedium(val root: File) : RecordMedium {
 
     override fun changes(): Flow<Unit> = hints.asSharedFlow()
 
+    private fun sha256(bytes: ByteArray) = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     private fun move(from: File, to: File) {
         try {
             Files.move(from.toPath(), to.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)

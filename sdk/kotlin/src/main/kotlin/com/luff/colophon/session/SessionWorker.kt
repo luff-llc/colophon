@@ -54,6 +54,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.Base64
 import kotlin.coroutines.cancellation.CancellationException
@@ -105,14 +106,15 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     // Gate
 
     /**
-     * One complete operation under the gate. Cancellation is checked once, on entry; once begun, the operation runs to
-     * its end (as a Swift task does, which is only cancelled where it checks): a finish whose stores were not yet
-     * persisted must never be abandoned, or the engine would be ahead of the disk.
+     * One complete operation under the gate (a mutex). It stays cancellable, as a Swift task is: waiting on a person (a
+     * passkey prompt, a key that never answers) ends when the caller is cancelled. What must not be cut in half is made
+     * uncancellable where it happens: a finish and the persistence of its stores (`ColophonEngine.execute` with
+     * `persistOn`), an exchange answer and its stores, `record_due` and its stores, and the abort of a pass.
      */
     private suspend fun <T> gated(body: suspend () -> T): T = withContext(lane) {
         gate.withLock {
             currentCoroutineContext().ensureActive()
-            withContext(NonCancellable) { body() }
+            body()
         }
     }
     suspend fun <T> onLane(body: suspend () -> T): T = withContext(lane) { body() }
@@ -139,16 +141,33 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         }
     }
     private suspend fun persist(written: Written, on: ColophonEngine? = null) = persist(written.stores, on)
+    /** Persists a finish's stores in the same uncancellable step as the finish (`ColophonEngine.execute`). */
+    private fun persistOn(on: ColophonEngine?): suspend (Written) -> Unit = { persist(it, on) }
 
     // Opening
 
     suspend fun restore(): SessionSnapshot = gated { reconcile() }
     suspend fun refresh(): SessionSnapshot = gated { reconcile() }
 
-    suspend fun lock(): SessionSnapshot = gated {
-        engine?.lock(); engine = null; locked = true; memberOpened = false
-        snapshot(SessionPhase.Locked)
+    /**
+     * Locks at once, whatever holds the gate: the member engine and every open owner engine are locked (their keys and
+     * opened plaintext overwritten) without waiting for the operation in flight, which then fails as `Locked`. The
+     * gate is taken only briefly, if it frees soon, so the snapshot is ordered; a prompt that never returns is not
+     * waited for. Never cancelled half way.
+     */
+    suspend fun lock(): SessionSnapshot = withContext(lane + NonCancellable) {
+        locked = true
+        val e = engine
+        engine = null; memberOpened = false
+        e?.lock()
+        synchronized(openOwners) { openOwners.toList() }.forEach { it.lock() }
+        val held = withTimeoutOrNull(2_000) { gate.lock(); true } ?: false
+        try { snapshot(SessionPhase.Locked) } finally { if (held) gate.unlock() }
     }
+    /** Owner engines open right now (each lives for one owner operation), so `lock` can lock them too. */
+    private val openOwners = HashSet<ColophonEngine>()
+    private fun <T : ColophonEngine?> tracked(owner: T): T { if (owner != null) synchronized(openOwners) { openOwners.add(owner) }; return owner }
+    private suspend fun release(owner: ColophonEngine) { owner.lock(); synchronized(openOwners) { openOwners.remove(owner) } }
     suspend fun unlock(): SessionSnapshot = gated { locked = false; reconcile() }
 
     private fun listed(entries: List<MediumEntry>) = entries.map { ListedPath(it.path, it.version) }
@@ -194,6 +213,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                 identity = AccountIdentity(AccountIdentityKind.MEMBER, keyId), account = account,
                 namespaces = configuration.libraryNamespaces, saved = saved, deviceKey = key, nowMs = nowMs)
         }
+        if (locked) { opened.lock(); throw AccountException.Locked("locked", "the session was locked while it opened") }
         engine = opened; accountId = account
         // A member that is not approved yet holds no keys; the records can still be read and the exchange can still
         // bring the approval in. A member opens its epoch shares in `unlockIfPossible`.
@@ -208,7 +228,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val at = nowMs
         engine.run { it.advance(at) }
         engine.run { it.refresh(list) }
-        for (written in engine.run { it.recordDue() }) persist(written)
+        withContext(NonCancellable) { for (written in engine.run { it.recordDue() }) persist(written) }
         unlockIfPossible()
     }
 
@@ -398,8 +418,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         if (engine == null) reconcile()
         val digest = withOwner { owner, custody, ownerId ->
             val signers = signers(owner, ownerId, SignerNeed.CONTROL)
-            val written = owner.execute(custody) { it.beginTransition(changeJson, signers, rule, ByteArray(0)) }
-            persist(written, owner)
+            val written = owner.execute(custody, persistOn(owner)) { it.beginTransition(changeJson, signers, rule, ByteArray(0)) }
             objectDigest(written.stores, "transitions/") ?: ""
         }
         loadJournal()
@@ -415,8 +434,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     suspend fun suspend(key: String, transition: String): Pair<String, SessionSnapshot> = gated {
         if (engine == null) reconcile()
         val digest = withOwner { owner, custody, ownerId ->
-            val written = owner.execute(custody) { e -> withEntropy(32) { e.beginSuspend(key, transition, ownerId, it) } }
-            persist(written, owner)
+            val written = owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginSuspend(key, transition, ownerId, it) } }
             objectDigest(written.stores, "") ?: ""
         }
         digest to reconcile()
@@ -474,17 +492,17 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val custody = ownerCustody()
         val ownerId = KeyCustody.keyId(configuration.ownerController)
         val entries = storage().listing()
-        val owner = configuration.deviceSecrets.key(account).use { key ->
+        val owner = tracked(configuration.deviceSecrets.key(account).use { key ->
             ColophonEngine.open(label = "colophon-owner", source = MediumSource(storage()), listing = listed(entries),
                 identity = AccountIdentity(AccountIdentityKind.CONTROLLER, ownerId), account = account,
                 namespaces = configuration.libraryNamespaces, saved = null, deviceKey = key, nowMs = nowMs)
-        }
+        })
         try {
             if (owner.run { it.controllers() }.none { it.id == ownerId }) throw SessionError.OwnerRequired()
             unlockOwner(owner, custody, ownerId)
             return body(owner, custody, ownerId)
         } finally {
-            owner.lock()
+            release(owner)
         }
     }
     private suspend fun ownerCustody(): KeyCustody =
@@ -508,7 +526,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         withOwner { owner, custody, ownerId ->
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
             val t = terms ?: request.termsJson
-            persist(owner.execute(custody) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, it) } }, owner)
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, it) } }
         }
         reconcile()
     }
@@ -516,7 +534,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         if (engine == null) reconcile()
         withOwner { owner, custody, ownerId ->
             val signers = signers(owner, ownerId, SignerNeed.CONTROL)
-            persist(owner.execute(custody) { e -> withEntropy(32) { e.beginRevoke(member, RevokeKeep(KeepMode.EVERYTHING, listOf(), listOf()), signers, it) } }, owner)
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginRevoke(member, RevokeKeep(KeepMode.EVERYTHING, listOf(), listOf()), signers, it) } }
         }
         reconcile()
     }
@@ -527,11 +545,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             val follow = owner.run { it.removalFollowUp() }.firstOrNull { it.seq == seq } ?: return@withOwner
             for (member in follow.members) {
                 val signers = signers(owner, ownerId, SignerNeed.CONTROL)
-                persist(owner.execute(custody) { e -> withEntropy(32) { e.beginRevoke(member, RevokeKeep(KeepMode.EVERYTHING, listOf(), listOf()), signers, it) } }, owner)
+                owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginRevoke(member, RevokeKeep(KeepMode.EVERYTHING, listOf(), listOf()), signers, it) } }
             }
             if (follow.controllers.isNotEmpty()) {
                 val signers = signers(owner, ownerId, SignerNeed.CONTROL)
-                persist(owner.execute(custody) { e -> withEntropy(32) { e.beginRemoveController(follow.controllers, listOf(), signers, RuleKind.CONTROL, false, it) } }, owner)
+                owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginRemoveController(follow.controllers, listOf(), signers, RuleKind.CONTROL, false, it) } }
             }
         }
         loadJournal()
@@ -548,7 +566,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         if (engine == null) reconcile()
         withOwner { owner, custody, ownerId ->
             val signers = signers(owner, ownerId, SignerNeed.VETO)
-            persist(owner.execute(custody) { it.beginVeto(transition, signers, ByteArray(0)) }, owner)
+            owner.execute(custody, persistOn(owner)) { it.beginVeto(transition, signers, ByteArray(0)) }
         }
         reconcile()
     }
@@ -558,7 +576,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         withOwner { owner, ownerCustody, ownerId ->
             val custody = ownerCustody.merging(accountKeyId(spec.key.signing), SessionKeys(possession))
             val signers = signers(owner, ownerId, SignerNeed.CONTROL)
-            persist(owner.execute(custody) { it.beginAddController(spec, mode, signers, RuleKind.CONTROL, ByteArray(0)) }, owner)
+            owner.execute(custody, persistOn(owner)) { it.beginAddController(spec, mode, signers, RuleKind.CONTROL, ByteArray(0)) }
         }
         reconcile()
     }
@@ -574,18 +592,17 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         accountId = account
         val custody = ownerCustody()
         val ownerId = KeyCustody.keyId(configuration.ownerController)
-        val owner = configuration.deviceSecrets.key(account).use { secret ->
+        val owner = tracked(configuration.deviceSecrets.key(account).use { secret ->
             ColophonEngine.open(label = "colophon-owner", source = MediumSource(storage()), listing = listed(storage().listing()),
                 identity = AccountIdentity(AccountIdentityKind.CONTROLLER, ownerId), account = account,
                 namespaces = configuration.libraryNamespaces, saved = null, deviceKey = secret, nowMs = nowMs)
-        }
+        })
         try {
             owner.run { it.acceptSeedTransfer(key, pairing, sealed) }
             owner.run { it.load() }
-            val written = owner.execute(custody) { e -> withEntropy(32) { e.beginAddSlot(ownerId, SlotPlan(listOf(ownerId), label), it) } }
-            persist(written, owner)
+            val written = owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginAddSlot(ownerId, SlotPlan(listOf(ownerId), label), it) } }
         } finally {
-            owner.lock()
+            release(owner)
         }
         reconcile()
     }
@@ -628,11 +645,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             journal.account = created.account; accountId = created.account
             saveJournal()
             // The creation's own engine: unlocked as the creation left it, so the owner is asked once at first run.
-            val owner = configuration.deviceSecrets.key(created.account).use { key ->
+            val owner = tracked(configuration.deviceSecrets.key(created.account).use { key ->
                 ColophonEngine.openCreated(creation, label = "colophon-owner", source = MediumSource(storage()), listing = listed(storage().listing()),
                     account = created.account, identity = AccountIdentity(AccountIdentityKind.CONTROLLER, ownerId),
                     namespaces = configuration.libraryNamespaces, deviceKey = key, nowMs = nowMs)
-            }
+            })
             setUpFirstDevice(owner, created.account, ownerId, custody)
         }
         reconcile()
@@ -651,17 +668,17 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             if (appoint.isNotEmpty()) {
                 val change = Json.write(mapOf("homes" to mapOf("appoint" to appoint)))
                 val signers = signers(owner, ownerId, SignerNeed.CONTROL)
-                persist(owner.execute(custody) { it.beginTransition(change, signers, RuleKind.CONTROL, ByteArray(0)) }, owner)
-                for (due in owner.run { it.recordDue() }) persist(due, owner)
+                owner.execute(custody, persistOn(owner)) { it.beginTransition(change, signers, RuleKind.CONTROL, ByteArray(0)) }
+                withContext(NonCancellable) { for (due in owner.run { it.recordDue() }) persist(due, owner) }
             }
             memberId = KeyCustody.keyId(memberKeys)
             accountId = account
             val memberRaw = ownRequestBytes()
             val terms = terms(configuration.namespaces, configuration.access, null, null)
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
-            persist(owner.execute(custody) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, it) } }, owner)
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, it) } }
         } finally {
-            owner.lock()
+            release(owner)
         }
     }
 
@@ -690,8 +707,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         if (command.namespace !in configuration.namespaces || AccessKind.WRITE !in configuration.access) throw SessionError.InvalidCommand()
         val ceiling = if (command.kind == "colophon.blobPublish") 1024 * 1024 else 256 * 1024
         if (command.payloadJson.toByteArray(Charsets.UTF_8).size > ceiling) throw SessionError.InvalidCommand()
-        val written = engine.execute(custody) { e -> withEntropy(32) { e.beginWrite(command.namespace, command.kind, command.payloadJson, it) } }
-        persist(written)
+        val written = engine.execute(custody, persistOn(null)) { e -> withEntropy(32) { e.beginWrite(command.namespace, command.kind, command.payloadJson, it) } }
         WriteReceipt.Saved(operationId(written.stores) ?: "") to build()
     }
 
@@ -749,7 +765,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                     steps++
                     currentCoroutineContext().ensureActive()
                     if (steps > HomeLimits.STEPS_PER_PASS) { stopped = HomeProblem.TooManySteps(HomeLimits.STEPS_PER_PASS); break@homeLoop }
-                    if ((System.nanoTime() - started) / 1_000_000 > HomeLimits.EXCHANGE_TIME_MS) { stopped = HomeProblem.TooSlow((HomeLimits.EXCHANGE_TIME_MS / 1000).toInt()); break@homeLoop }
+                    if ((System.nanoTime() - started) / 1_000_000 > exchangeTimeMs) { stopped = HomeProblem.TooSlow((exchangeTimeMs / 1000).toInt()); break@homeLoop }
                     val step = gated { engine.run { it.exchangeNext(home.id) } }
                     when (step.kind) {
                         ExchangeStepKind.DONE -> break
@@ -771,16 +787,22 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                                 else { stopped = HomeProblem.CallNotBound("a request for another host than the configured home"); break@homeLoop }
                             }
                             if (request.method != HttpMethod.GET) progress = true
-                            val answer: HttpAnswer = try {
-                                target.transport.send(request)
+                            // The exchange deadline covers the transport: a home that does not answer in the time left ends the pass.
+                            val left = exchangeTimeMs - (System.nanoTime() - started) / 1_000_000
+                            val sent: HttpAnswer? = try {
+                                withTimeoutOrNull(maxOf(1L, left)) { target.transport.send(request) }
                             } catch (e: HomeTransportException.ResponseTooLarge) { stopped = HomeProblem.ResponseTooLarge(e.limit); break@homeLoop
                             } catch (e: HomeTransportException.InsecureEndpoint) { stopped = HomeProblem.InsecureEndpoint(e.url); break@homeLoop }
+                            val answer: HttpAnswer = sent ?: run { stopped = HomeProblem.TooSlow((exchangeTimeMs / 1000).toInt()); break@homeLoop }
                             val limit = HomeLimits.responseBytes(request.url)
                             if (answer.body.size > limit) { stopped = HomeProblem.ResponseTooLarge(limit); break@homeLoop }
+                            // The answer and the persistence of its stores are one step: never abandoned half way.
                             val report: Report = gated {
-                                val report = engine.run { it.exchangeAnswer(home.id, request.ticket, answer) }
-                                persist(report.store)
-                                report
+                                withContext(NonCancellable) {
+                                    val report = engine.run { it.exchangeAnswer(home.id, request.ticket, answer) }
+                                    persist(report.store)
+                                    report
+                                }
                             }
                             for (fault in report.faults) {
                                 result.faults.add(HomeFault(home.id, fault))
@@ -843,7 +865,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val engine = engine ?: return@gated reconcile()
         val at = nowMs
         engine.run { it.advance(at) }
-        for (written in engine.run { it.recordDue() }) persist(written)
+        withContext(NonCancellable) { for (written in engine.run { it.recordDue() }) persist(written) }
         build()
     }
     /** How many homes hold a verified receipt for `object`, and how many the account names. */
@@ -851,6 +873,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val engine = engine ?: throw SessionError.NotReady()
         engine.run { it.receiptedBy(obj) }.size to engine.run { it.exchangeHomes() }.size
     }
+
+    // Test hooks
+    internal fun engineForTests(): ColophonEngine? = engine
+    /** The longest one exchange with one home may take (tests shorten it). */
+    internal var exchangeTimeMs: Long = HomeLimits.EXCHANGE_TIME_MS
 
     // Engine access for blobs
 

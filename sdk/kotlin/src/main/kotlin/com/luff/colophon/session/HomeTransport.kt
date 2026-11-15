@@ -48,14 +48,30 @@ object HomeLimits {
     /** The longest one exchange with one home may take. */
     const val EXCHANGE_TIME_MS = 180_000L
 
-    /** `https`, or `http` to `localhost`, `127.0.0.0/8` or `::1` when `allowingLoopbackHttp` (tests). */
+    /**
+     * `https`, or `http` to a loopback address when `allowingLoopbackHttp` (tests): `localhost`, a literal IPv4 address
+     * in `127.0.0.0/8` (four decimal octets) or the literal `::1`. Parsed, never matched by prefix: a name such as
+     * `127.attacker.example` is a remote host.
+     */
     fun isAllowed(endpoint: String, allowingLoopbackHttp: Boolean): Boolean {
         val uri = try { URI(endpoint) } catch (_: Exception) { return false }
         val scheme = uri.scheme?.lowercase() ?: return false
         val host = uri.host?.lowercase()?.takeIf { it.isNotEmpty() } ?: return false
         if (scheme == "https") return true
         if (scheme != "http" || !allowingLoopbackHttp) return false
-        return host == "localhost" || host.endsWith(".localhost") || host == "::1" || host == "[::1]" || host.startsWith("127.")
+        return isLoopbackLiteral(host)
+    }
+    internal fun isLoopbackLiteral(host: String): Boolean {
+        if (host == "localhost") return true
+        val h = host.removePrefix("[").removeSuffix("]")
+        if (h == "::1" || h == "0:0:0:0:0:0:0:1") return true
+        val parts = h.split('.')
+        if (parts.size != 4) return false
+        val octets = parts.map { p ->
+            if (p.isEmpty() || p.length > 3 || !p.all { it in '0'..'9' } || (p.length > 1 && p[0] == '0')) return false
+            p.toInt()
+        }
+        return octets.all { it in 0..255 } && octets[0] == 127
     }
 }
 

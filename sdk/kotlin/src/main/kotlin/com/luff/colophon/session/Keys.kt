@@ -212,6 +212,11 @@ class HostUnlockSecret(val kind: UnlockKind, val secret: SecretBytes) { override
 class HostEpochAnswer(val namespace: String, val epoch: ULong, val shared: SecretBytes) { override fun toString() = "HostEpochAnswer(redacted)" }
 
 /** Lends the secrets to the generated records for exactly one export call, then wipes them. */
+/** Wipes every secret of these answers (idempotent); for a path that never reached the export call. */
+@JvmName("closePrf") fun List<HostPrfAnswer>.closeAll() = forEach { it.output.close() }
+@JvmName("closeUnlock") fun List<HostUnlockSecret>.closeAll() = forEach { it.secret.close() }
+@JvmName("closeEpochs") fun List<HostEpochAnswer>.closeAll() = forEach { it.shared.close() }
+
 fun <R> List<HostPrfAnswer>.withRecords(body: (List<PrfAnswer>) -> R): R =
     lendAll(map { it.output }) { outs -> body(mapIndexed { n, a -> PrfAnswer(a.authenticatorData, a.clientData, a.signature, outs[n]) }) }
 @JvmName("withUnlockRecords")
@@ -235,6 +240,21 @@ class KeyCustody(val providers: Map<String, AsyncKeyProvider>) {
     fun holds(id: String) = providers.containsKey(id)
     fun merging(id: String, provider: AsyncKeyProvider) = KeyCustody(providers + (id to provider))
 
+    /**
+     * Builds one answer per item; if any item fails (a provider throws, a prompt is cancelled), every secret built so
+     * far is wiped before the failure propagates.
+     */
+    private inline fun <I, A> collect(items: List<I>, secretOf: (A) -> SecretBytes, make: (I) -> A): List<A> {
+        val out = ArrayList<A>(items.size)
+        try {
+            for (item in items) out.add(make(item))
+            return out
+        } catch (e: Throwable) {
+            out.forEach { secretOf(it).close() }
+            throw e
+        }
+    }
+
     /** One signature per step, in order: raw `r||s`, or the WebAuthn assertion for the step's challenge. */
     suspend fun sign(steps: List<AccountSigningStep>): List<Signature> = steps.map { step ->
         val provider = provider(step.signer)
@@ -251,7 +271,7 @@ class KeyCustody(val providers: Map<String, AsyncKeyProvider>) {
     }
 
     /** One assertion per request, evaluating the request's salt: `results.first` is the PRF output. */
-    suspend fun answer(requests: List<PrfRequest>): List<HostPrfAnswer> = requests.map { request ->
+    suspend fun answer(requests: List<PrfRequest>): List<HostPrfAnswer> = collect(requests, { it.output }) { request ->
         val result = provider(request.controller).assert(P256.base64url(request.challenge), request.salt) ?: throw KeyCustodyException.Unsupported()
         val prf = result.prf
         if (prf == null || prf.size != 32) { prf?.close(); throw KeyCustodyException.Unsupported() }
@@ -259,7 +279,7 @@ class KeyCustody(val providers: Map<String, AsyncKeyProvider>) {
     }
 
     /** The raw results of a slot's routes, in input order: ECDH against `enc`, or the PRF of `salt`. */
-    suspend fun answerUnlock(inputs: List<UnlockInput>): List<HostUnlockSecret> = inputs.map { input ->
+    suspend fun answerUnlock(inputs: List<UnlockInput>): List<HostUnlockSecret> = collect(inputs, { it.secret }) { input ->
         val provider = provider(input.controller)
         when (input.kind) {
             UnlockKind.ECDH -> HostUnlockSecret(UnlockKind.ECDH, provider.sharedSecret(input.enc))
@@ -272,7 +292,7 @@ class KeyCustody(val providers: Map<String, AsyncKeyProvider>) {
     }
 
     /** The ECDH results a member's host performs to open its epoch shares. */
-    suspend fun answerEpochs(agreements: List<EpochAgreement>): List<HostEpochAnswer> = agreements.map {
+    suspend fun answerEpochs(agreements: List<EpochAgreement>): List<HostEpochAnswer> = collect(agreements, { it.shared }) {
         HostEpochAnswer(it.namespace, it.epoch, provider(it.recipient).sharedSecret(it.peer))
     }
 }

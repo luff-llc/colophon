@@ -120,7 +120,8 @@ class MediumTest {
             // A kill after the commit point: the staged files and the commit record exist, nothing moved yet.
             val committed = File(root, ".colophon/staging/a").apply { mkdirs() }
             File(committed, "0").writeBytes(byteArrayOf(5))
-            File(root, ".colophon/commit-a").writeText("0 ops/n/x.json\n")
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(byteArrayOf(5)).joinToString("") { "%02x".format(it) }
+            File(root, ".colophon/commit-a").writeText("0 $digest ops/n/x.json\n")
             // A kill before it: staged, no commit record.
             val loose = File(root, ".colophon/staging/b").apply { mkdirs() }
             File(loose, "0").writeBytes(byteArrayOf(6))

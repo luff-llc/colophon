@@ -163,9 +163,16 @@ object Json {
                             'b' -> out.append('\b'); 'f' -> out.append('\u000c'); 'n' -> out.append('\n')
                             'r' -> out.append('\r'); 't' -> out.append('\t')
                             'u' -> {
-                                if (i + 4 > s.length) fail("bad escape")
-                                out.append(s.substring(i, i + 4).toIntOrNull(16)?.toChar() ?: fail("bad escape"))
-                                i += 4
+                                val c1 = hex4()
+                                // Spec §2.3: a surrogate escape is valid only as a high-low pair.
+                                if (c1.isLowSurrogate()) fail("lone low surrogate")
+                                if (c1.isHighSurrogate()) {
+                                    if (!s.startsWith("\\u", i)) fail("lone high surrogate")
+                                    i += 2
+                                    val c2 = hex4()
+                                    if (!c2.isLowSurrogate()) fail("lone high surrogate")
+                                    out.append(c1).append(c2)
+                                } else out.append(c1)
                             }
                             else -> fail("bad escape '$e'")
                         }
@@ -174,6 +181,13 @@ object Json {
                     else -> out.append(c)
                 }
             }
+        }
+        fun hex4(): Char {
+            if (i + 4 > s.length) fail("bad escape")
+            val text = s.substring(i, i + 4)
+            if (!text.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) fail("bad escape")
+            i += 4
+            return text.toInt(16).toChar()
         }
         fun num(): Any {
             val start = i

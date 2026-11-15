@@ -13,6 +13,7 @@ import com.luff.colophon.SavedState
 import com.luff.colophon.Written
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
 /** The typed code of every engine error (`malformed`, `refused:<reason>`, `denied:<reason>`, ...). */
@@ -86,7 +87,7 @@ class ColophonEngine private constructor(val account: String, val identity: Acco
     val isLocked: Boolean get() = engine == null
 
     /** Overwrites the engine's keys and opened plaintext and releases it. Further calls are `Locked`. */
-    suspend fun lock() = withContext(lane) {
+    suspend fun lock() = withContext(lane + NonCancellable) {
         val e = engine ?: return@withContext
         engine = null
         try { e.lock() } catch (_: AccountException) {}
@@ -94,21 +95,21 @@ class ColophonEngine private constructor(val account: String, val identity: Acco
     }
 
     /** Drops the engine after a call that ended in `Integrity` (it is unusable; `lock` is not called). */
-    suspend fun discard() = withContext(lane) { engine?.close(); engine = null }
+    suspend fun discard() = withContext(lane + NonCancellable) { engine?.close(); engine = null }
 
     suspend fun finishUnlockSlot(index: ULong, secrets: List<HostUnlockSecret>): Changes =
-        run { e -> secrets.withRecords { e.finishUnlockSlot(index, it) } }
+        try { run { e -> secrets.withRecords { e.finishUnlockSlot(index, it) } } } finally { secrets.closeAll() }
 
     suspend fun finishUnlockEpochs(answers: List<HostEpochAnswer>): Changes =
-        run { e -> answers.withRecords { e.finishUnlockEpochs(it) } }
+        try { run { e -> answers.withRecords { e.finishUnlockEpochs(it) } } } finally { answers.closeAll() }
 
     /**
      * An action from `begin` to `Written`: prepare, answer PRF requests, sign every step, finish. The key ceremonies
      * in between run in `custody`, off the engine's lane, so a person's pause never holds the engine. A write refused
      * for access reasons throws `AccountException.Denied` (a value in the bindings). A failed finish changes nothing
-     * and consumes the action.
+     * and consumes the action. `then` runs with the finished stores inside the same uncancellable step.
      */
-    suspend fun execute(custody: KeyCustody, begin: (AccountEngine) -> AccountAction): Written {
+    suspend fun execute(custody: KeyCustody, then: (suspend (Written) -> Unit)? = null, begin: (AccountEngine) -> AccountAction): Written {
         val action = run(begin)
         try {
             run { action.denial() }?.let { d ->
@@ -117,10 +118,16 @@ class ColophonEngine private constructor(val account: String, val identity: Acco
             val requests = run { action.prfRequests() }
             if (requests.isNotEmpty()) {
                 val answers = custody.answer(requests)
-                run { e -> answers.withRecords { e.providePrf(action, it) } }
+                try { run { e -> answers.withRecords { e.providePrf(action, it) } } } finally { answers.closeAll() }
             }
             val signatures = custody.sign(run { action.steps() })
-            return run { it.finish(action, signatures) }
+            // The finish and what the caller does with its stores (`then`: persist them) are one uncancellable step: a
+            // cancelled caller never leaves the engine ahead of the disk. Waiting on the person above stays cancellable.
+            return withContext(NonCancellable) {
+                val written = this@ColophonEngine.run { it.finish(action, signatures) }
+                then?.invoke(written)
+                written
+            }
         } finally {
             action.close()
         }
