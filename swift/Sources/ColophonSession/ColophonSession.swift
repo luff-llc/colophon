@@ -23,6 +23,10 @@ import Observation
     public private(set) var notices: SessionNotices = .empty
     /// Homes the account names.
     public private(set) var homes: [Home] = []
+    /// What the host must do and say beyond `notices` (§17.5): the sole-device warning, delivery routes per home, the
+    /// outcome of each submission, dead transitions, the poll interval.
+    public private(set) var duties: HostDuties = .none
+    @ObservationIgnored private var submissions: [String: Submission] = [:]
     /// Home exchange state. `.disabled` without a configured home.
     public private(set) var syncState: HomeSyncState = .disabled
     public private(set) var lastSynced: Date?
@@ -108,6 +112,7 @@ import Observation
             let snapshot = try await worker.create()
             guard lease == context else { return }
             apply(snapshot); retryCreate = false; await startWatching(); startSyncLoop(); startDueLoop()
+            if homesConfigured, let registered = try? await worker.registerRoutes() { apply(registered) }
         } catch {
             if lease == context {
                 if case SessionError.noHome = error { retryCreate = false; lastError = error.localizedDescription; phase = .noLibrary }
@@ -226,7 +231,31 @@ import Observation
     public func veto(_ transition: String) async throws {
         await restore()
         do { apply(try await worker.veto(transition)) } catch { handleCommandError(error); throw error }
-        await submitUntilReceipted(transition)
+        await submitUntilReceipted(transition, kind: .veto)
+    }
+    /// Proposes a change to the account (spec §8.7: homes, keyring, policy), signed with the owner's keys, and submits it
+    /// to every current home, retrying until each has receipted it or 300 s have passed (`duties.submissions`).
+    @discardableResult public func proposeTransition(_ changeJSON: String) async throws -> String {
+        await restore()
+        let digest: String
+        do { let (d, snapshot) = try await worker.submitTransition(changeJSON); digest = d; apply(snapshot) } catch { handleCommandError(error); throw error }
+        await submitUntilReceipted(digest, kind: .transition)
+        return digest
+    }
+    /// Signs a dead transition this device signed again (§17.5 quorum rule) and submits the new one.
+    @discardableResult public func resign(_ transition: String) async throws -> String {
+        await restore()
+        let digest: String
+        do { let (d, snapshot) = try await worker.resign(transition); digest = d; apply(snapshot) } catch { handleCommandError(error); throw error }
+        await submitUntilReceipted(digest, kind: .transition)
+        return digest
+    }
+    /// Suspends `key` while `transition` is pending (§8.7), and submits it to every home like a veto.
+    public func suspend(key: String, while transition: String) async throws {
+        await restore()
+        let digest: String
+        do { let (d, snapshot) = try await worker.suspend(key: key, transition: transition); digest = d; apply(snapshot) } catch { handleCommandError(error); throw error }
+        await submitUntilReceipted(digest, kind: .suspend)
     }
     /// Records that the person has seen one activation (`notices.unseenActivations`). It marks that activation only:
     /// a pending transition stays in `notices.pending` until it is vetoed, activates or is dead.
@@ -236,15 +265,28 @@ import Observation
     /// How many homes hold a verified receipt for a transition, out of how many the account names.
     public func receipts(for object: String) async throws -> (receipted: Int, homes: Int) { try await worker.receipts(for: object) }
 
-    private func submitUntilReceipted(_ object: String, deadline: Duration = .seconds(300)) async {
-        guard homesConfigured else { return }
+    /// §17.5 submission: an exchange with every home (which submits pending objects to each directly), repeated until
+    /// each home has receipted the object or `deadline` has passed. The outcome is published in `duties.submissions`.
+    func submitUntilReceipted(_ object: String, kind: Submission.Kind, deadline: Duration = .seconds(300)) async {
+        guard homesConfigured, !object.isEmpty else { return }
         let end = ContinuousClock.now + deadline
         var delay = 0.5
+        var last = Submission(object: object, kind: kind, receipted: 0, homes: homes.count, finished: false)
+        record(last)
         while ContinuousClock.now < end, !Task.isCancelled {
             _ = await syncNow()
-            if let counts = try? await worker.receipts(for: object), counts.homes == 0 || counts.receipted >= counts.homes { return }
+            if let counts = try? await worker.receipts(for: object) {
+                last = Submission(object: object, kind: kind, receipted: counts.receipted, homes: counts.homes, finished: false)
+                record(last)
+                if counts.homes == 0 || counts.receipted >= counts.homes { break }
+            }
             try? await Task.sleep(for: .seconds(delay)); delay = min(delay * 2, 15)
         }
+        record(Submission(object: object, kind: kind, receipted: last.receipted, homes: last.homes, finished: true))
+    }
+    private func record(_ submission: Submission) {
+        submissions[submission.object] = submission
+        duties.submissions = submissions.values.sorted { $0.object < $1.object }
     }
 
     // MARK: Lock
@@ -316,9 +358,11 @@ import Observation
                 let ok = await self.syncNow()
                 failures = ok ? 0 : failures + 1
                 let signal = self.syncSignal
-                // Success: poll again after 20 s (spec §17.5 asks for at least every recoveryDelay / 6) or when a
-                // local change arrives. Failure: capped, jittered exponential backoff.
-                let wait = ok ? 20.0 : min(60.0, pow(2.0, Double(max(0, failures - 1)))) * Double.random(in: 0.5...1.0)
+                // Success: poll again after `duties.pollInterval` (recoveryDelay / 6, as §17.5 asks at least; 15 s while a
+                // change is pending) or when a local change arrives. Failure: capped, jittered exponential backoff.
+                let interval = self.duties.pollInterval.components
+                let poll = Double(interval.seconds) + Double(interval.attoseconds) / 1e18
+                let wait = ok ? poll : min(60.0, pow(2.0, Double(max(0, failures - 1)))) * Double.random(in: 0.5...1.0)
                 await withTaskGroup(of: Void.self) { group in
                     group.addTask { await signal.wait() }
                     group.addTask { try? await Task.sleep(for: .seconds(wait)) }
@@ -394,6 +438,7 @@ import Observation
         phase = snapshot.phase; revision = snapshot.revision; namespaceRevisions = snapshot.namespaceRevisions
         libraryID = snapshot.libraryID ?? libraryID; memberID = snapshot.memberID ?? memberID
         members = snapshot.members; requests = snapshot.requests; notices = snapshot.notices; homes = snapshot.homes
+        var duties = snapshot.duties; duties.submissions = submissions.values.sorted { $0.object < $1.object }; self.duties = duties
         usable = !lost
         if !lost { scheduleCheckpoint() }
         for invalidate in caches.values { invalidate(changed, lost) }

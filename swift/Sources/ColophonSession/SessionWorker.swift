@@ -21,6 +21,7 @@ struct SessionSnapshot: Sendable {
     var requests: [AccessRequest] = []
     var notices: SessionNotices = .empty
     var homes: [Home] = []
+    var duties: HostDuties = .none
     var usable: Bool { [.ready, .refreshing, .waitingForDownload, .retry].contains(phase) }
 }
 
@@ -35,6 +36,10 @@ struct SessionJournalFile: Codable, Sendable {
     var shownTransitions: [String] = []
     /// Activations above `shownSeq` the person marked seen one by one (an activation is marked alone, never with others).
     var seenActivations: Set<UInt64> = []
+    /// Homes that hold this host's delivery routes (home ID to true), or said they offer no registration (false).
+    var routes: [String: Bool] = [:]
+    /// The change of each transition this device signed, by digest, so a dead one can be signed again.
+    var signedChanges: [String: String] = [:]
     /// Ingress envelopes already written, by ID, with their operation (an envelope is never signed twice).
     var ingress: [UUID: String] = [:]
 }
@@ -237,11 +242,11 @@ actor SessionWorker {
     // MARK: Snapshot
 
     private func snapshot(phase: SessionPhase, members: [AccountMember] = [], requests: [AccessRequest] = [],
-                          notices: SessionNotices = .empty, revisions: [String: UInt64] = [:], homes: [Home] = []) -> SessionSnapshot {
+                          notices: SessionNotices = .empty, revisions: [String: UInt64] = [:], homes: [Home] = [], duties: HostDuties = .none) -> SessionSnapshot {
         if phase != lastPhase || revisions != lastRevisions { revision &+= 1 }
         lastPhase = phase; lastRevisions = revisions
         return SessionSnapshot(phase: phase, revision: revision, namespaceRevisions: revisions, libraryID: accountID, memberID: memberID,
-                               members: members, requests: requests, notices: notices, homes: homes)
+                               members: members, requests: requests, notices: notices, homes: homes, duties: duties)
     }
 
     private func build() async throws -> SessionSnapshot {
@@ -279,7 +284,8 @@ actor SessionWorker {
         lastHead = head
         if phase == .ready { revisions["colophon.authority"] = head }
         let visible = phase == .ready
-        return snapshot(phase: phase, members: members, requests: pending, notices: notices, revisions: visible ? revisions : [:], homes: homes)
+        let duties = try await hostDuties(notices: notices, homes: homes)
+        return snapshot(phase: phase, members: members, requests: pending, notices: notices, revisions: visible ? revisions : [:], homes: homes, duties: duties)
     }
 
     private func localKeyIDs() async -> [String] {
@@ -335,6 +341,108 @@ actor SessionWorker {
         let keys = await localKeyIDs()
         let seq = journal.shownSeq, shown = journal.shownTransitions
         return try await engine.run { try $0.notices(shownSeq: seq, shownTransitions: shown, localKeys: keys) }.activations
+    }
+
+    // MARK: Host duties (§17.5)
+
+    private func hostDuties(notices: SessionNotices, homes: [Home]) async throws -> HostDuties {
+        guard let engine else { return .none }
+        var duties = HostDuties()
+        let controllers = try await engine.run { try $0.controllers() }
+        duties.soleDevice = controllers.filter { $0.roles.contains(.control) && !$0.suspended }.count <= 1
+        duties.homeLabels = Dictionary(homes.map { ($0.id, $0.label) }, uniquingKeysWith: { first, _ in first })
+        let policy = try await engine.run { try $0.policy() }
+        let quorum = Int(max(1, policy.headQuorum))
+        let now = nowMs
+        if !homes.isEmpty {
+            for pending in notices.pending where now > pending.issuedMs + 300_000 {
+                let receipted = try await engine.run { try $0.receiptedBy(object: pending.digest) }.count
+                if receipted < quorum {
+                    duties.deadTransitions.append(DeadTransition(digest: pending.digest, receipted: receipted, quorum: quorum,
+                                                                 canResign: journal.signedChanges[pending.digest] != nil))
+                }
+            }
+        }
+        for home in homes {
+            let configured = transport(for: home)
+            let routes = configured?.deliveryRoutes ?? []
+            let label = home.label
+            if Set(routes.map(\.reaches)).count < 2 {
+                duties.routes.append(RouteState(home: home.id, label: label, registered: false,
+                    detail: "This app has fewer than two ways to reach you about changes to your account (on different devices or services). Add a second one."))
+            } else if journal.routes[home.id] == true {
+                duties.routes.append(RouteState(home: home.id, label: label, registered: true, detail: ""))
+            } else {
+                duties.routes.append(RouteState(home: home.id, label: label, registered: false,
+                    detail: journal.routes[home.id] == false || configured?.registerRoutes == nil
+                        ? "\(label) does not offer notices yet, so it cannot tell you about a pending change. This app checks for them itself."
+                        : "Your ways to be reached are not registered with \(label) yet."))
+            }
+        }
+        let delay = Int64(policy.recoveryDelay) / 6
+        duties.pollInterval = notices.pending.isEmpty ? .seconds(max(60, delay)) : .seconds(15)
+        return duties
+    }
+
+    /// Registers this host's delivery routes with every home that offers it and has not got them (§17.5).
+    func registerRoutes() async throws -> SessionSnapshot {
+        try await gated {
+            guard let engine, let account = accountID else { return snapshot(phase: lastPhase) }
+            try loadJournal()
+            for home in try await engine.run({ try $0.homes() }) where journal.routes[home.id] != true {
+                guard let configured = transport(for: home), Set(configured.deliveryRoutes.map(\.reaches)).count >= 2 else { continue }
+                guard let register = configured.registerRoutes else { journal.routes[home.id] = false; continue }
+                journal.routes[home.id] = try await register(account, configured.deliveryRoutes)
+            }
+            try saveJournal()
+            return try await build()
+        }
+    }
+
+    /// Signs a transition with the owner's keys, stores it, and keeps its change so a dead one can be signed again.
+    /// Returns its digest; the session then submits it to every home.
+    func submitTransition(_ changeJSON: String, rule: RuleKind = .control) async throws -> (String, SessionSnapshot) {
+        try await gated {
+            if engine == nil { _ = try await reconcile() }
+            let digest = try await withOwner { owner, custody, ownerID -> String in
+                let signers = try await signers(owner, ownerID: ownerID, need: .control)
+                let written = try await owner.execute(custody: custody) { try $0.beginTransition(changeJson: changeJSON, signers: signers, rule: rule, entropy: Data()) }
+                try await persist(written, on: owner)
+                return Self.objectDigest(in: written.stores, prefix: "transitions/") ?? ""
+            }
+            try loadJournal()
+            if !digest.isEmpty { journal.signedChanges[digest] = changeJSON; try saveJournal() }
+            return (digest, try await reconcile())
+        }
+    }
+    /// Signs the same change again (a dead transition this device signed).
+    func resign(_ digest: String) async throws -> (String, SessionSnapshot) {
+        try loadJournal()
+        guard let change = journal.signedChanges[digest] else { throw SessionError.invalidCommand }
+        return try await submitTransition(change)
+    }
+    /// Suspends `key` while `transition` is pending (§8.7), signed by the owner key.
+    func suspend(key: String, transition: String) async throws -> (String, SessionSnapshot) {
+        try await gated {
+            if engine == nil { _ = try await reconcile() }
+            let digest = try await withOwner { owner, custody, ownerID -> String in
+                let written = try await owner.execute(custody: custody) { engine in
+                    try withEntropy(32) { try engine.beginSuspend(key: key, transition: transition, signer: ownerID, entropy: $0) }
+                }
+                try await persist(written, on: owner)
+                return Self.objectDigest(in: written.stores, prefix: "") ?? ""
+            }
+            return (digest, try await reconcile())
+        }
+    }
+    /// The digest an object's store path names (`transitions/<digest>.json`), or for an authority entry the SHA-256 of its
+    /// body as the engine names it.
+    static func objectDigest(in stores: [Store], prefix: String) -> String? {
+        for store in stores where prefix.isEmpty || store.path.hasPrefix(prefix) {
+            let name = (store.path as NSString).lastPathComponent.replacingOccurrences(of: ".json", with: "")
+            if name.count == 64, name.allSatisfy({ $0.isHexDigit }) { return name }
+        }
+        return nil
     }
 
     // MARK: Requests (a member asking, an owner approving)

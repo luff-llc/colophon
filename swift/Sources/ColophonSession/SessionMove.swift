@@ -40,11 +40,17 @@ extension ColophonSession {
     public func swiftSuccession() async throws -> SwiftSuccession { await restore(); return try await worker.swiftSuccession() }
 
     /// One call to veto a succession during its wait: the owner signs, the veto is stored at `vetoes/<digest>.json`,
-    /// and the next exchange submits it to every home. Returns the veto bytes and path the move produced.
+    /// and it is submitted to every current home at once, retried until each has receipted it or 300 s have passed
+    /// (§17.5, as an ordinary veto; the outcome is in `duties.submissions`). Returns the veto bytes and path.
     public func vetoSwiftSuccession() async throws -> MoveResult {
         await restore()
-        do { let result = try await worker.vetoSwiftSuccession(); await refresh(); return result }
-        catch { throw error }
+        let result = try await worker.vetoSwiftSuccession()
+        await refresh()
+        if let path = result.vetoPath {
+            let digest = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+            await submitUntilReceipted(digest, kind: .veto)
+        }
+        return result
     }
 
     /// Another device takes in the freezing entry the freezing device appended to the Swift library (`MoveResult.frozenEntry`).

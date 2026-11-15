@@ -94,12 +94,19 @@ public struct HomeConfiguration: Sendable {
     /// Storage bearer token for the home (access to its store only, never membership).
     public let bearerToken: String?
     public let transport: any HomeTransport
+    /// Delivery routes to register with this home at setup (§17.5): at least two, reaching different devices or services.
+    public let deliveryRoutes: [DeliveryRoute]
+    /// Registers `routes` for `account` with the home; returns false when the home offers no registration. 0.5 gives
+    /// notices no wire format, so the host supplies the call (the relay does not implement notices yet). Nil: not offered.
+    public let registerRoutes: (@Sendable (_ account: String, _ routes: [DeliveryRoute]) async throws -> Bool)?
     /// Testing option: allow a plain `http` endpoint on a loopback address. Every other home must be `https`; a session
     /// neither appoints nor contacts one that is not (`HomeProblem.insecureEndpoint`).
     public let allowsLoopbackHTTP: Bool
     public init(endpoint: URL, label: String = "Home", request: (@Sendable (_ account: String) async throws -> Data)? = nil, bearerToken: String? = nil,
-                transport: (any HomeTransport)? = nil, allowsLoopbackHTTP: Bool = false) {
+                transport: (any HomeTransport)? = nil, allowsLoopbackHTTP: Bool = false, deliveryRoutes: [DeliveryRoute] = [],
+                registerRoutes: (@Sendable (_ account: String, _ routes: [DeliveryRoute]) async throws -> Bool)? = nil) {
         self.endpoint = endpoint; self.label = label; self.request = request; self.bearerToken = bearerToken
+        self.deliveryRoutes = deliveryRoutes; self.registerRoutes = registerRoutes
         self.transport = transport ?? URLSessionHomeTransport(allowingLoopbackHTTP: allowsLoopbackHTTP)
         self.allowsLoopbackHTTP = allowsLoopbackHTTP
     }
