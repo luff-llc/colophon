@@ -8,7 +8,6 @@ public struct SupportReport: Encodable, Equatable, Sendable {
     public let failureCategory: String?
     public let memberCount: Int
     public let requestCount: Int
-    public let ledgerEntryCount: Int
     public let system: String
     @MainActor public init(session: any LibrarySessionSource) {
         switch session.phase {
@@ -25,6 +24,7 @@ public struct SupportReport: Encodable, Equatable, Sendable {
         case .refreshing: phase = "refreshing"
         case .retry: phase = "retry"
         case .failed: phase = "failed"
+        case .locked: phase = "locked"
         }
         switch session.phase {
         case .failed(.keysUnavailable): failureCategory = "keysUnavailable"
@@ -33,7 +33,6 @@ public struct SupportReport: Encodable, Equatable, Sendable {
         default: failureCategory = nil
         }
         memberCount = session.members.count; requestCount = session.requests.count
-        ledgerEntryCount = session.ledger.count
         let version = ProcessInfo.processInfo.operatingSystemVersion
         #if os(macOS)
         let platform = "macOS"

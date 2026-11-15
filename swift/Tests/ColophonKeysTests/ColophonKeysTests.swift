@@ -257,11 +257,11 @@ private actor FakeCeremonies: WebAuthnCeremonies {
         let auth = authenticatorData(rp: rpID)
         let signature = try signing.signature(for: auth + Data(SHA256.hash(data: client))).derRepresentation
         let output = prfSalt.map { salt in
-            Data(HMAC<SHA256>.authenticationCode(for: salt, using: SymmetricKey(data: Data(repeating: 99, count: 32))))
+            SecretBytes(copying: HMAC<SHA256>.authenticationCode(for: salt, using: SymmetricKey(data: Data(repeating: 99, count: 32))))
         }
         return AssertionResult(credentialID: wrongCredential ? Data([9]) : credential,
             signature: corruptSignature ? Data([0]) : signature, authenticatorData: auth, clientData: client,
-            prfOutput: missingPRF ? nil : wrongPRFSize ? Data([1]) : output)
+            prfOutput: missingPRF ? nil : wrongPRFSize ? SecretBytes(copying: [UInt8(1)]) : output)
     }
     func attestation(rp: String) -> Data {
         let point = signing.publicKey.x963Representation
@@ -285,5 +285,37 @@ private actor FakeOwnerBackend: OwnerKeyBackend {
     func presence(scope: String) -> any AsyncKeyProvider { scopes.append(scope); return self }
     func publicKeys() throws -> PublicKeys { PublicKeys(signing: try keys.signingPublicKey(), agreement: try keys.agreementPublicKey()) }
     func sign(body: Data) throws -> Data { signatures += 1; return try keys.sign(body: body) }
-    func agree(peer: Data) throws -> Data { try keys.agree(peer: peer) }
+    func sharedSecret(peer: Data) async throws -> SecretBytes { try await keys.sharedSecret(peer: peer) }
+}
+
+extension ColophonKeysTests {
+    @Test(arguments: [CredentialKind.passkey, .securityKey])
+    func registrationCarriesAuthorityOriginsAndReportsTheProtocolDescriptor(kind: CredentialKind) async throws {
+        let ceremony = FakeCeremonies()
+        let origins = ["https://keys.example", "android:apk-key-hash:abc", "https://id.keys.example", "https://keys.example"]
+        let descriptor: KeyDescriptor
+        switch kind {
+        case .passkey:
+            descriptor = try await PasskeyProvider.register(relyingParty: "keys.example", userID: Data([2]), userName: "Person", challenge: Data(repeating: 1, count: 32),
+                authorityOrigins: origins, ceremonies: ceremony)
+        case .securityKey:
+            descriptor = try await SecurityKeyProvider.register(relyingParty: "keys.example", userID: Data([2]), userName: "Person", challenge: Data(repeating: 1, count: 32),
+                authorityOrigins: origins, ceremonies: ceremony)
+        }
+        // Distinct and strictly ascending by bytes (spec §3.1).
+        #expect(descriptor.authorityOrigins == ["android:apk-key-hash:abc", "https://id.keys.example", "https://keys.example"])
+        let view = try await provider(kind, descriptor, ceremony).keyDescriptor()
+        #expect(view.form == .webauthn && view.rp == "keys.example" && view.credential == Data([1]) && view.agreement == nil)
+        #expect(view.signing == ceremony.signing.publicKey.x963Representation && view.authorityOrigins == descriptor.authorityOrigins)
+        // The core accepts the descriptor as a controller key.
+        let spec = ControllerSpec(key: view, label: "Passkey", roles: [.approve], verification: true, holder: nil, audiences: [])
+        #expect(spec.key.signing.count == 65)
+    }
+
+    @Test func theUserHandleIsTheAccountIDWhenItExistsAndRandomOtherwise() throws {
+        let account = String(repeating: "ab", count: 32)
+        #expect(try PasskeyProvider.userID(account: account) == Data(account.utf8))
+        let one = try PasskeyProvider.userID(account: nil), two = try PasskeyProvider.userID(account: nil)
+        #expect(one.count == 32 && two.count == 32 && one != two)
+    }
 }

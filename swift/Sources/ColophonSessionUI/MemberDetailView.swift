@@ -3,11 +3,11 @@ import SwiftUI
 
 public struct MemberDetailView: View {
     let session: any LibrarySessionSource
-    let member: Member
+    let member: AccountMember
     @State private var model: MemberAccessModel
     @State private var confirmsRevocation = false
     @Environment(\.dismiss) private var dismiss
-    public init(member: Member, session: any LibrarySessionSource) {
+    public init(member: AccountMember, session: any LibrarySessionSource) {
         self.member = member; self.session = session
         _model = State(initialValue: MemberAccessModel(member: member, session: session))
     }

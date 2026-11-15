@@ -8,11 +8,11 @@ import ColophonNotesKit
 
 @MainActor final class DomainHarness {
     let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    let memory = MemoryRecordStore()
+    let memory = MemoryMedium()
     let session: ColophonSession
     var exercised: Set<String> = []
     init() {
-        session = ColophonSession(configuration: .init(memberLabel: "Owner", namespaces: ["reading.books", "listening.podcasts", "reading.saved", "notes"], location: .memory(memory), privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys()))
+        session = ColophonSession(configuration: .init(memberLabel: "Owner", namespaces: ["reading.books", "listening.podcasts", "reading.saved", "notes"], location: .memory(memory), privateContainer: home, keys: SoftwareKeys(), ownerController: SoftwareKeys(), createWithoutHome: true, deviceSecrets: MemoryDeviceSecrets()))
     }
     isolated deinit { try? FileManager.default.removeItem(at: home) }
     func start() async throws { await session.create(); try #require(session.phase == .ready) }
@@ -48,7 +48,7 @@ import ColophonNotesKit
         #expect(rows.isEmpty, "Unexpected core diagnostics: \(rows)")
     }
     func agent() async throws -> ColophonSession {
-        let agent = ColophonSession(configuration: .init(memberLabel: "Worker", memberKind: .agent, namespaces: ["listening.podcasts"], location: .memory(memory), privateContainer: home.appendingPathComponent("agent"), keys: SoftwareKeys(), ownerController: SoftwareKeys()))
+        let agent = ColophonSession(configuration: .init(memberLabel: "Worker", memberKind: .agent, namespaces: ["listening.podcasts"], location: .memory(memory), privateContainer: home.appendingPathComponent("agent"), keys: SoftwareKeys(), ownerController: SoftwareKeys(), deviceSecrets: MemoryDeviceSecrets()))
         await agent.restore(); await session.refresh()
         let request = try #require(session.requests.first)
         try await session.approve(request)

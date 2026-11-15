@@ -1,258 +1,188 @@
-# Apple app SDK contracts
+# The Apple session on Colophon 0.5
 
-Sessions use the storage engine through `NativeEngine`, with member-protected checkpoints in
-`CheckpointCache`. Checkpoints are scheduled after one idle second; `flushCheckpoint()` is an
-explicit persistence barrier. A valid cache skips covered history verification/decryption;
-named queries and passive writes use engine state and namespace revisions. Public session,
-domain-store, write and blob APIs remain source-compatible.
+`ColophonSession` is the one object an Apple app holds over a Colophon 0.5 account. It is an `@Observable @MainActor`
+facade: it publishes state and never does work on the main actor. Everything else (engine calls, key ceremonies, file I/O,
+HTTP) runs in `SessionWorker`, an actor that serialises complete operations (a key prompt in the middle of a write cannot
+let a refresh read an engine that is ahead of its files). The engine itself is `ColophonEngine` (ColophonKit): one
+`AccountEngine` on its own `DispatchSerialQueue`, never on the main actor and never on the cooperative pool.
 
-The compatibility `ledger` is now lazy: Swift materializes on property access; Kotlin on List
-inspection (size, indexing, iteration or equality). Reading a large ledger can block the calling
-thread and is outside the fast launch path. Kotlin publishes lazy snapshot identities without
-forcing List equality during StateFlow updates. A retained, not-yet-inspected Kotlin ledger reads
-engine history when first inspected; it is not a frozen historical snapshot. Use named queries
-for app screens. See [design, checks and limitations](handoff-engine-sessions.md).
+What the session decides: nothing about the account. Every verdict (phase, access, notices, deadlines, who may veto) is the
+engine's; the session only chooses what to show and what to call next. The contract it is written against is
+[bindings-05.md](bindings-05.md).
 
-Storage providers may supply complete change deltas. Built-in memory stores do; folder providers
-continue to enumerate metadata and compare versions. Providers without a synchronous Swift
-`engineReader()` implementation use the protocol's conservative snapshot fallback. Custom readers
-must be thread-safe, synchronous, coherent, and must not call the engine recursively.
+## The pieces
 
-`ColophonKitStorage` and `ColophonSession` are additive 0.3 products in the root Swift package.
-They have no third-party Swift dependencies and compile in Swift 6 language mode. The 0.1
-products remain unchanged. The sample is a starting template, not acceptance evidence from
-Later, Taupe, Shelf or Scribenda.
+| Module | What it is |
+| --- | --- |
+| `ColophonFFI` / `ColophonKit` | The XCFramework (built locally, git-ignored) and the generated Swift (committed). Wrappers: `ColophonError` (the typed `AccountError`), `ColophonEngine`, `KeyCustody` (answers the engine's signing steps, PRF requests, unlock inputs and epoch agreements through `AsyncKeyProvider`), `SecretBytes` (secret memory the SDK owns and zeroes) and `withEntropy`. |
+| `ColophonKitStorage` | `RecordMedium`: the synchronous record store the engine reads (`listing()` with versions in one batch, `read`, `readBlob`, `write` all-or-none, `changes()`). `FolderMedium` (private container, App Group, iCloud: each `write` is published through a journal in `.colophon.nosync/` (staged and synchronised files, a synchronised batch record as the commit point, then links and renames into place) under an exclusive `flock` inside file coordination, so a batch is all or none across a kill at any step and any process's later open completes or discards it; listings and reads take the same lock shared, so an app extension never lists half a batch; every path is opened component by component with `O_NOFOLLOW` from a directory handle; iCloud placeholders are `unavailable`, never absence) and `MemoryMedium` (tests, with fault injection). |
+| `ColophonKeys` | Passkeys (`PasskeyProvider`, `SecurityKeyProvider`) with `authorityOrigins` at registration, the protocol descriptor (`KeyDescriptor.view`), `user.id` per spec §17.4 (`PasskeyProvider.userID(account:)`), Secure Enclave owner keys. |
+| `ColophonSession` | The session, the gate's source, blobs, the in-flight exchange loop, the owner operations. |
+| `ColophonSessionUI` | `LibraryGate` and its states, `NoticesView`. |
+| `ColophonSavedKit`, `ColophonBooksKit`, `ColophonListeningKit`, `ColophonNotesKit` | Typed commands and queries over `session.perform` and `session.query`. Unchanged by 0.5. |
+| `ColophonMigration` | The session-level steps of the Swift move (below). |
 
-## Storage, restoration and private state
+## Configuration
 
-`FolderRecordStore` stores the spec's `authority`, `requests`, `ops`, `state` and `history`
-paths. Each write batch uses `NSFileCoordinator`; files are staged with mode 0600, synchronized,
-and linked into place. Immutable paths never replace different bytes; `state/` live slots may.
-Refresh and publication read only the records that changed. Directory synchronization precedes success. Publication is atomic
-per record, **not across a batch**. Partial batches remain retryable; an incomplete authority
-chain never produces a ready session. Records are capped at 16 MiB per file in this adapter.
+```swift
+let session = ColophonSession(configuration: .init(
+    memberLabel: "Later", namespaces: ["reading.saved"],
+    location: .appGroup(identifier: "group.org.luff.later", libraryName: "Library"),
+    privateContainer: privateURL,
+    keys: KeychainKeys(service: "org.luff.later"),                 // this app's member key (Secure Enclave)
+    ownerController: passkeyProvider,                              // the person's passkey: approve, veto, add a device
+    recoveryKeys: nil,
+    homes: [HomeConfiguration(endpoint: url, request: { account in try await service.memberRequest(for: account) })]))
+```
 
-Reads enumerate immutable records off-main. iCloud placeholder files and non-current download
-status request hydration and throw `unavailable`; enumeration/read/permission failures are not
-absence. Previously observed paths are retained in the private journal, including across
-restart, and disappearing records also produce `unavailable`. The first complete observation
-cannot prove an unseen remote record exists; there is no remote completeness oracle.
+* `keys` is the content member: it signs records and opens the member's epoch shares (an ECDH, silent for a Secure
+  Enclave key). `ownerController` is a controller of the account (the person's passkey or an owner key). It is asked only for
+  owner operations: creation, approving a member, revoking, adding a controller, veto, seed transfer.
+* **Homes (spec §18).** A host MUST create every account with at least one home and MUST warn when there is none.
+  `create()` therefore refuses with `SessionError.noHome` unless `homes` is non-empty or `createWithoutHome` is set. A home's
+  signed member request names the account, which does not exist before creation, so `HomeConfiguration.request` is a closure
+  the session calls with the new account ID; the home service answers with its request. The session appoints the home in a
+  transition signed by the owner and records its activation at once.
+* `additionalControllers` creates the account with more control keys (the §18 reference has several). `recoveryKeys` adds a
+  `recover`-only controller with its own slot.
+* `deviceSecrets` holds the 32-byte device key that seals saved state (Keychain by default; it is a cache key, not an identity).
+* `now` is the clock the engine judges by; tests move it.
 
-An `NSFilePresenter` on the library directory emits bounded wake-up hints. The session
-coalesces bursts into a 75 ms batch and rereads once; duplicate snapshots do not bump revisions.
-`flushExternalChanges()` is an explicit completion barrier, useful for tests and host refresh.
-Foreground entry should always call `refresh()`; presenter delivery alone is not a guarantee
-that a suspended process received every provider notification.
+## Phases
 
-App Group/iCloud resolution is performed for this process, before opening records. Failure
-never falls back to a private empty library. `.folder` is for an already accessible, host-owned
-location; arbitrary document-picker bookmarks and live profile switching are not implemented.
-Private-container mode stores the library in `home/Library`. Keep session state, checkpoints
-and identity providers outside the shared library/App Group. iOS private staging uses
-`completeUntilFirstUserAuthentication`; macOS uses private POSIX permissions without requesting
-unsupported iOS file-protection flags. Existing files remain intact when staging fails.
+`opening`, `noLibrary`, `creating`, `waitingForApproval(code:)`, `ready`, `refreshing`, `waitingForDownload`, `retry`,
+`denied`, `unavailable(reason:)`, `updateRequired`, `failed`, `migrating` (kept for apps), and **`locked`** (new).
+`updateRequired` is the engine's `newerFormat`: nothing is lost and nothing is changed. A revoked member is `denied`. A storage
+error is `retry` or `waitingForDownload`, never an empty library.
 
-`KeychainKeys` stores software scalars or opaque Secure Enclave references in a process-private,
-ThisDeviceOnly Keychain item. The backend selects initial creation; reopening preserves the
-stored identity/backend. No keychain error regenerates keys or silently falls back. Hardware
-and protected-data failures propagate. Supply a separate persistent recovery provider when
-creating a library. If omitted, ColophonKit creates an ephemeral recovery provider available
-through `recoveryKeys()`; the host must protect it before relying on recovery. The sample
-supplies a separate persistent provider, but it does not implement recovery-kit export UI.
+## Creating, opening, joining
 
-`CheckpointCache(privateContainer:)` bounds opaque cache bytes and keys them by validated
-library ID, sets backup exclusion and can discard/reload them. Sessions store member-protected
-engine checkpoints here; restoration uses the engine's verified-prefix validation, never an app
-revision counter. Cache persistence errors are explicit. No cache is an authority or backup.
+* `create()` runs the creation (the owner's PRF for its slot, the genesis, the first rekey), appoints the homes, records their
+  activation, and approves this device's member. **A passkey owner is asked more than once at first run**: the core's creation
+  leaves the session locked, so a second PRF ceremony unlocks the controller that sets the device up. That step is one function
+  (`SessionWorker.unlockCreatedAccount`) and goes when the core exports an engine constructor over a created account.
+* `restore()` lists the medium, discovers the account ID from its verified history (cached in the private journal), opens the
+  member's engine from the sealed saved state when it can, and opens the member's epoch shares. A member that is not approved
+  yet is `waitingForApproval(code:)`; its engine is loaded without keys so the exchange can bring the approval in.
+* **A device that asks for access** publishes its signed request (`requests/<id>.json` in the library folder, or
+  `exportRequest()` bytes for a file, AirDrop or a code) and shows a code derived from its key ID. An owner device lists
+  `requests`, compares the code, and calls `approve(_:grant:)` (the owner key signs). `importRequest(_:)` takes a request that came
+  out of band.
+* **Adding a device by pairing and seed transfer** (a second controller): `addController(_:label:roles:immediate:)` names the new
+  key; both screens run the ceremony (`AccountPairing`, six digits); the existing device calls `transferSeed(pairing:)`; the new
+  device calls `acceptSeedTransfer(key:pairing:sealed:label:)`, which opens a controller engine from the seed and builds its own
+  slot, so it unlocks alone afterwards.
 
-## Session and engine boundary
+## Refresh and the exchange with each home
 
-Create one session per app process, shared by windows, intents and feature stores. `restore()`
-is a shared completion barrier. The session owns phase, identity, ledger, pairing requests,
-global revision and per-namespace revisions. Inaccessible namespaces prevent `ready`; views
-are invalidated immediately on loss of readiness. Revocation and expiry are checked on every
-refresh and command; an expiry task schedules a recheck even without a file notification.
+`refresh()` lists the medium and gives the engine the listing with versions (`advance`, `refresh`, `record_due`). The folder
+watcher, foreground entry and `flushExternalChanges()` call it.
 
-Session storage, signing, FFI and query work runs on background actors; explicit synchronous
-compatibility-ledger access is the exception described above. `SessionWorker` has a
-suspension-aware FIFO gate around complete operations: a key-provider suspension cannot let a
-second write/rejoin interleave with its persistence. Leave completes preceding operations
-before invalidating the context. `ObservedRevision` binds an action to session context and
-global revision. The worker refreshes before signing and rejects stale observations. It never
-silently retries an unsigned stale command. Cancellation is checked before core signing/commit;
-a committed operation must still be persisted. The API does not promise a cross-process CAS:
-concurrent authority writers may produce immutable-path conflicts, which stop publication.
+`syncNow()` is one exchange per home (passes are never concurrent: callers queue). The loop is the engine's: `exchange_next`
+returns a request, a "needs a call", waiting or done; the session performs the request through the home's `HomeTransport`
+(`URLSessionHomeTransport` by default: no cookies, no cache, redirects refused so the engine reports them), builds a fresh
+`Authorization: Colophon` call for exactly the request that needs one (signed by the member key), answers it, and writes the
+stores of the report before the next step. `More` and every other fault are the engine's: faults are published as `homeFaults`.
+A transport failure aborts the pass (`exchange_abort`) and the loop backs off (capped, jittered); a local change or
+`requestSync()` cuts the wait short. Passes repeat until one moves nothing (at most four), because the engine plans the next
+stage from what the home just said.
 
-`SessionCore` is the internal engine protocol; `BindingSessionCore` now uses `NativeEngine`.
-It obtains named records (`recordsAt`) and compares engine revision tokens to avoid invalidating
-unrelated namespace caches. Provider deltas avoid full listings where available. SwiftUI domain
-stores read cached query values. `NamespaceStore<Query, Result>` decodes
-on a concurrent executor, fences completion by context and namespace revision, bounds query
-entries, and publishes cold-load completion separately from journal changes. Cache registrations are removed on deinit; `close()` also allows explicit early disposal.
+`record_due` runs on every refresh and on a 60-second schedule. The background loop polls every 20 s on success (spec §17.5:
+at least every `recoveryDelay / 6`).
 
-## Exactly what is automatic
+## Writes, reads, blobs
 
-By default: restore the configured location, establish container access, refresh observations,
-create/persist this identity's **signed pairing request** when it is ungranted, and recognize
-an approved grant. No App Group, member label, folder selection, request kind or transport
-credential authorizes approval. Agents and servers always wait for explicit approval.
+`perform(_:observed:)` is 0.4's call: refresh, require `observed == revision`, prepare, sign, finish, **write the stores all
+or none**, then publish the new state. `.saved(operationID:)` means durable in this device's medium; homes receive it on the next
+exchange. If the disk refuses the stores, the engine is ahead of the disk: it is discarded and reopened from what is really
+stored, and the error is thrown. Reads are `query(namespace:name:arguments:)` and the typed stores of the domain kits.
 
-`EnrollmentPolicy.deviceOnlyAppGroup(starterKeys:)` is an explicit suite-only opt-in, matching
-Marginalia's device-only starter-root policy. It applies only to `.app` members at an `.appGroup`
-location. The host supplies the actual device-only starter root and must cease supplying it
-when protecting/moving the library. Creation makes that starter the root, then the app writes
-its own pairing request. Joining also writes a real request. A second core handle using the
-starter signs a grant with **exactly the request's namespaces/access**, never all supported
-library namespaces. Core authority must still recognize that starter as current root; a
-former starter is refused and the app remains in the normal pairing phase. There is no
-label allowlist or automatic root-key discovery. The SDK does not copy starter/root secrets
-into the App Group or implement the old 0.1 starter-to-protected-root migration.
+The blob API keeps 0.4's names (`putBlob`, `blobAvailability`, `blobData`, `blobFile`, `blobStream`, `prefetchBlob`,
+`downloadRequiredBlobs`, `setBlobReference`). Chunks are written before the manifest is published; a required blob arrives with
+the exchange, an optional one on `prefetchBlob`. `collectBlobGarbage` does nothing: the core collects none.
 
-`leave()` disconnects locally and persists the choice; it neither revokes membership nor
-deletes records. `rejoin(keys:)` reconnects. A revoked member must use a fresh independently
-persisted identity and request, because requests are immutable. Configure that same new key
-provider on subsequent launches. Pending signed publication must be retried before leave or
-rejoin. Profile replacement in place and account-selection UI remain host responsibilities.
+No file work runs on the main actor or inside the session's gate. `putBlob(contentsOf:)` reads the file twice, 64 KiB at a
+time, on a background executor (once to address it, once to encrypt and store each chunk); only `begin_blob` and the final
+publish take the gate. `blobFile` is `@concurrent`: it pulls verified chunks one at a time (`blobStream` reads the next chunk
+only when asked, so a slow consumer never makes it buffer) and writes them to a private file that is moved into place after
+the digest checks. Both take an optional `progress` callback (`BlobProgress`: stage, bytes done, total), called off the main
+actor. `importRequest(from:)` reads the file off the main actor too, at most 40 MiB. The session's worker runs on its own
+serial queue, so the medium's synchronous record I/O never occupies the main actor or a cooperative-pool thread. The test
+`MainActorTests` moves a 200 MiB blob in and out with a 5 ms main-actor timer running (worst lateness about 6 ms, footprint
+growth about 35 MiB), and the blob executor stops on `dispatchPrecondition` if it is ever called on the main thread.
 
-## Extension inbox and retry
+## What a person must see (spec §17.5, §18)
 
-Extensions enqueue `IngressEnvelope` values into `IngressInbox(appGroupContainer:)`. Each
-contains a UUID, destination library **and member**, expiration, and a bounded domain command.
-They never receive a signing key. Default limits are 128 files, 64 KiB encoded per envelope,
-32 KiB command payload and seven-day maximum lifetime. A nonblocking advisory lock bounds
-concurrent extension publication; malformed/oversized files stop the bounded scan. Enqueue
-returns `.queued`, never `.saved`. Destination-route UI/publication is product policy; use the
-foreground session's ready library/member IDs, and remove stale routes when it loses access.
+`session.notices` (`SessionNotices`):
 
-Foreground `drain` refreshes and validates exact destination, expiry, current namespace and
-write grant before core signing. Signed records plus the envelope's operation receipt are
-atomically journaled in the app's private container before public publication. It retries the
-**same bytes**, verifies readback, then acknowledges the queue file. Durable receipt matching
-prevents a lost acknowledgement/restart from signing again. A post-commit provider failure
-binds its receipt to the core-emitted operation path; retry checks admitted evidence before
-acknowledging. An ambiguous publication stays queued for review instead of re-signing. Expired receipt entries are pruned
-before accepting new requests; at most 4096 active receipts are retained. Conflicting IDs,
-wrong destinations, denied grants and expired unsigned envelopes remain queued for review.
-A partial batch or write failure is not a saved receipt. Foreground refresh, external changes
-or explicit Retry resume publication. There is no background network scheduler and no promise
-of remote iCloud upload completion: saved means durable in the selected local store.
+* `pending`: each transition not yet shown, with its signers' labels and key IDs, first-seen seq, veto deadline, and
+  `vetoable` (this device holds an owner key that may veto and the engine's deadline has not passed). `veto(_:)` is the one call:
+  the owner signs, the veto is stored, and the session submits it to every home, retrying until each has receipted it or 300 s
+  have passed.
+* `unseenActivations`: every activation since this host last showed the history that no key on this device signed, with when
+  each home receipted it. `acknowledgeActivation(seq:)` records that the person saw that one activation (kept in the private journal); it never dismisses a pending transition, which stays until it is vetoed, activates or is dead.
+* `noHome`: the warning of guide §5. `NoticeWords` holds the words the specification asks for.
 
-## Acceptance limits
+## Lock
 
-Tests use actual Rust-backed sessions and independent keys/private homes. The two-process-style
-folder test uses separate folder-store objects and explicit change barriers. Its internal test
-initializer disables coordination because filecoordinationd is inaccessible in this sandbox;
-production has no uncoordinated fallback. Actual OS presenter delivery, iCloud hydration,
-App Group entitlement/bootstrap, Secure Enclave, Keychain prompts, Share/Safari/widget host
-journeys and two real consuming apps still need unrestricted/device acceptance. The sample
-uses a private folder and explicit pairing-request import, including agent approval/revocation.
+`lock()` overwrites the engine's keys and opened plaintext, drops it, and publishes `locked`; call it when the app enters the
+background. `unlock()` opens it again (silent for a Secure Enclave member key); `LibraryGate` calls it when the scene becomes active. `restore()` and `refresh()` leave a locked session locked.
 
-## Named domain queries
+## The Swift move
 
-The four `Colophon*Kit` domain stores use `NamespaceStore`'s additive async-loader initializer.
-`ColophonSession.query(namespace:name:arguments:)` serializes the core read through the worker's
-FIFO gate, checks the session context/namespace revision around suspension, and sends no signing
-request. `Library.query` calls the core's named query API directly, avoiding tool-name collisions.
-The typed decoder runs on a concurrent executor, and only its completed plain value enters the
-bounded cache. No compatibility whole-state projection is decoded to answer a domain query.
-Closing a store invalidates pending load completions as well as existing cache entries.
+`ColophonSession.swiftSuccession()`, `vetoSwiftSuccession()`, `acceptPredecessorEntry(_:)` and `swiftMoveNextStep()` (ColophonMigration)
+are the session-level steps. The successor genesis, the copy with the app's own translator and the migration are driven with the
+generated objects (`SwiftSuccessorCreation`, `SwiftSource`, `SwiftCopyPlan`) by the app, which has the record translators and
+can write the freezing entry to its Swift library. Not built here: translators, and a passkey ceremony with two PRF salts
+(the Swift move needs one assertion with the new salt first and the old second; `AsyncKeyProvider.assert` takes one).
 
-This does not replace the existing session snapshot adapter: writes and refreshes still collect
-full views off-main as described above. The new stores make no claim that the entire session
-pipeline is incremental at 100k operations. The core now supplies authenticated member kinds to
-role-sensitive reducers on append/replay. Both checkpoint APIs authenticate the reducer schema
-generation, so caches from before those semantics fall back to replay. Named queries must keep
-using projection state directly; they must not call `view`, `materialize_library`, or read all
-history to reconstruct a result. Storage-backed history remains separately paged and lazy.
+## Errors
 
-## Upgrade barriers, durable import writes and key failures
+Every engine error is a `ColophonError` with `code`, `detail` and, for `refused`/`denied`, `reason`. Key failures are
+`KeyProviderError` (cancelled, presence, unsupported, missing, hardware) and `KeyCustodyError`. A refused write leaves nothing
+on disk.
 
-`SessionPhase.migrating` means “Your library is being upgraded.” Configure every suite app
-participating in one migration scope with the same `SessionConfiguration.migrationMarker` URL
-outside the destination record tree. Independent scoped migrations use separate markers and
-journals; apps still on another 0.1 namespace are not gated by books completion. See
-[scoped migration](migration.md) for multi-scope coordination.
-An active marker takes precedence over an empty destination, enrollment and ordinary writes.
-Foreground `refresh()` observes marker changes; the marker itself is not a new sync protocol or
-authority record. The root's dedicated migration session sets `migrationWriter: true`; only
-the host’s `LegacyLibrarySource` adapter verifies possession of the existing source root
-before `ColophonMigration` imports it. Other app sessions use
-normal enrollment, including the existing explicit App Group starter policy where applicable.
-Old members are reported as needing to rejoin; no agent or grant is automatically restored.
+## Secrets
 
-`performMigration(_:outputKey:)` uses the same serialized session write/publication path as
-ordinary commands. A non-expiring receipt binds the full source output key and a command digest
-to the signed operation ID. The receipt and exact pending signed bytes are journaled together
-before publication, then read back from storage. A restart reuses those bytes and receipts;
-a conflicting command for the same key fails. Creation collisions with native objects/tombstones stop with `migrationCollision` before signing;
-occurrence remapping requires the engine reservation seam. Payloads are not duplicated as plaintext
-in the migration receipt. These receipts currently grow with history and share the 64 MiB session
-journal bound; a scalable transactional import receipt API remains an engine integration gap.
+Every secret the Swift side handles lives in a `SecretBytes`: memory the SDK allocates, writes once and overwrites with
+zeros when the last reference goes. PRF outputs, ECDH results, epoch shares, the device-held sealed-state key, action entropy
+and (debug and simulator builds only) software private scalars are taken into one at the moment the platform hands them over,
+inside the platform's own `withUnsafeBytes` (CryptoKit's `SharedSecret`, the PRF `SymmetricKey`, the Keychain's `CFData`), and
+reach an export only through `withUnsafeData`, which lends a `Data` over that memory for the one call (no Swift copy). The key
+providers return `SecretBytes` (`AsyncKeyProvider.sharedSecret(peer:)`, `prf(salt:)`, `KeyAssertion.prf`).
 
-Provider failures carry `SessionFailure.keysUnavailable(detail:)`; unrelated failures retain
-`.other(detail:)`. The sample displays the actionable reason. `retry()` remembers a failed
-create and otherwise refreshes restore/enrollment. It never regenerates an identity in response
-to a key failure. The sample's `--demo-key-failure` mode fails the first provider access and
-allows Retry using that same identity in a temporary, separate demo library.
+What the SDK cannot reach, exactly: the copies a platform API keeps before it hands the value over (AuthenticationServices'
+credential object, CryptoKit's own key and secret storage, which CryptoKit zeroes on release, the `CFData` a Keychain read
+returns and the Keychain's own buffers), registers and stack slots during the copy-in, swapped pages, and the UniFFI lowering
+copy (the Rust side overwrites that one through the zero-on-free allocator, which the XCFramework has on). The 0.4 exports
+(`Library`, `StorageLibrary`) take `Data` in expression position; their secrets are single allocations zeroed on release.
+`PrfAnswer`, `UnlockSecret`, `EpochAnswer`, `SecretBytes` and the `Host…` answers print as redacted. No secret is in an error,
+a `description` or a `Codable` output.
 
-## Engine3 migration publication
+`KeychainKeys` is a Secure Enclave identity in production. Its software backend exists only in debug and simulator builds
+(`#if DEBUG || targetEnvironment(simulator)`), keeps the scalars in a fixed binary layout (never JSON) and decodes them per
+operation (nothing cached).
 
-The migration writer now sends one `colophon.importBatch` command per source unit through the
-existing gated signing/outbox/readback path. Only these migration batches receive the engine's
-1 MiB ceiling; ordinary session commands keep their 256 KiB ceiling. Permanent local receipts
-bind the batch command digest and signed parent operation; synchronized `importReceipt` binds
-its virtual children. Migration checks that receipt after refreshed admission before advancing
-source progress. Child authorship is the importer; original attribution remains evidence.
+## Public differences from the 0.4 session
 
-`migrationBlob` streams 64 KiB plaintext chunks through the native writer, persists encrypted
-chunks through `BlobStore`, reads them back, and returns the manifest for atomic publication.
-`FolderRecordStore` implements blob storage separately from record snapshots. Chunks may arrive
-before their manifest but have no projected visibility until publication. Failed uploads can
-leave unreferenced encrypted chunks; hosts retain them until an explicit archival cleanup policy
-can prove removal safe. Sibling apps read evidence through their ordinary namespace grants.
+An app written against 0.4's session reads the same where the meaning is unchanged. Everything else:
 
-## Blobs and the incremental query cache
-
-`ColophonSession.putBlob(_:|contentsOf:namespace:mediaType:reference:required:)` streams content in
-64 KiB chunks, seals them under the namespace epoch key through the native writer, persists and
-reads back each chunk, then publishes a signed `colophon.blobPublish` manifest through the ordinary
-journaled write path (`receipt` is `.saved` or `.queued`). Identical content is addressed first and
-only gains a reference. `blobAvailability` reports `unpublished`, `missing`, `downloading`,
-`available` or `inaccessible` without downloading; `blobData`, `blobFile` and `blobStream` fetch
-missing chunks from the relay on demand and verify each chunk and the whole descriptor (current
-grant, address, AEAD, digests). `collectBlobGarbage` removes only chunks this session wrote or
-downloaded (a private `blob-index.log`), never another app's chunks in a shared store. See
-[handoff-blobs.md](handoff-blobs.md).
-
-`NamespaceStore` entries are keyed by namespace revision. After a change `cached` returns nil, but
-`latest` keeps the last value (with `current: false`) so views do not blank; only queries loaded
-again are re-read, concurrent loads share one read, and the bound evicts stale entries first. The
-generated `*Store` types expose the same `latest`.
-
-## Colophon 0.3 readiness and storage
-
-Both sessions distinguish opening, waiting for download, ready, refreshing, retry and update-required.
-`hasUsableContent` retains verified content from the same connection during refresh/retry; pending
-content never establishes an empty library. Writes still refresh and validate the exact observed
-session revision and connection before signing. Query completion also checks the connection and
-namespace revision. Rejoin invalidates results from the previous identity. Unsupported authenticated
-layouts stop at authority, including the relay download path, without touching content or resetting keys.
-
-Native refresh enumerates only requested namespace paths, authority/requests and legacy flat paths
-whose namespace must be verified. It excludes engagement `history/`. Built-in stores report provider
-versions, so unchanged refresh reads zero record bodies and publication copies only written paths.
-Providers without version tokens conservatively reread candidates during refresh. Directory
-enumeration remains O(library indexes); snapshots use small engine revision maps. Native sessions
-restore persistent verified-prefix checkpoints and only verify/decrypt new history on a valid hit.
-
-Passive podcast positions use signed replaceable `state/` slots with append-only `history/` evidence.
-Built-in stores implement atomic `replaceLive(path, expected, bytes)`. Custom providers must implement
-that conditional operation to publish live state; the compatibility default fails explicitly.
-Relay sync verifies live generations before conditional replacement and publishes evidence first.
-Low-level `RelaySync` users must supply `verifyLive` and `validateAuthority` callbacks to obtain the
-same semantic barriers as sessions; a relay transport by itself cannot authenticate a library.
-
-`collectBlobGarbage(discardSoleCopy: true)` (Kotlin named argument `discardSoleCopy = true`) is an
-explicit owner-authorized discard. By default even zero-reference or stale-orphan chunks remain
-unless a relay receipt confirms another holder. A sibling member's reference is not treated as
-proof of custody. Required/referenced chunks retain the existing pinning rules.
+* `SessionConfiguration`: removed `relay`, `migrationMarker`, `migrationWriter`, `importExpires`, `importedFrom`. Added `homes`,
+  `createWithoutHome`, `additionalControllers`, `deviceSecrets`, `recoveryDelay`, `now`. (`RelayConfiguration` is
+  `HomeConfiguration`; `RelayToken` is unchanged and unused by the session.)
+* `StorageLocation.memory` takes a `MemoryMedium`. `RecordStore`, `FolderRecordStore`, `MemoryRecordStore`, `BlobStore`,
+  `RelayClient`, `RelaySync`, `RecordPath` are gone: `RecordMedium`, `FolderMedium`, `MemoryMedium`, `RecordPaths`.
+  `CheckpointCache` takes a 64-hex account ID.
+* `ColophonSession`: `members` is `[AccountMember]`; `ledger` (a property) is `ledger()` returning JSON; `requests` holds the new
+  `AccessRequest` (`id`, `label`, `kind: AccountMemberKind`, `termsJSON`, `pairingCode` `XXXX-XXXX`, `record`, and `namespaces` /
+  `access` read from its terms). `syncConflicts` is `homeFaults`. `syncState` is `HomeSyncState` (`RelaySyncState` is an alias).
+  Removed: `performMigration`, `migrationBlob`, `restoreDevice(using:)`, `recoveryKeys()`. New: `notices`, `homes`, `lock()`,
+  `unlock()`, `veto(_:)`, `acknowledgeActivation(seq:)`, `addController`, `transferSeed`, `acceptSeedTransfer`, `exportRequest()`,
+  `importRequest(_ data:)`, `receipts(for:)`.
+* `SessionPhase.locked`; `SessionError.noHome`, `.ownerRequired`; `SessionKeyFailure` is public.
+* `IngressEnvelope.libraryID` is the 64-hex account ID.
+* `AsyncKeyProvider.keyDescriptor()` is a requirement with a default (raw keys). `KeyDescriptor.view` is the 0.5 form.
+* `LibrarySessionSource` gains `notices`, `veto`, `acknowledgeActivation`, `unlock` and loses `ledger`; `ColophonLedgerView` and
+  `SupportReport.ledgerEntryCount` are removed.
+* `ColophonMigration`: the 0.4 clean copy (`LibraryMigration`, `LegacyLibrarySource`, `MigrationState`) is removed (its engine, the
+  0.4 session, is gone). The 0.4 `NativeEngine`/`Library` wrappers in ColophonKit remain for tools that read a 0.4 library.

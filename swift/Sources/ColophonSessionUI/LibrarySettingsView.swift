@@ -48,8 +48,6 @@ public struct LibrarySettingsView: View {
                     }
                 }
                 Section {
-                    NavigationLink { ColophonLedgerView(session: session) } label: { Label("Colophon", systemImage: "text.book.closed") }
-                        .accessibilityIdentifier("library.ledger.open")
                     NavigationLink { ConnectLibraryView(host: host) } label: { Label("Connect Another Device", systemImage: "plus.rectangle.on.rectangle") }
                         .accessibilityIdentifier("library.addDevice")
                 }

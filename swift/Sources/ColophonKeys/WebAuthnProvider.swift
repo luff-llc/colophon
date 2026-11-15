@@ -9,7 +9,7 @@ struct WebAuthnProvider: Sendable {
     let ceremonies: any WebAuthnCeremonies
 
     static func register(kind: CredentialKind, relyingParty: String, userID: Data, userName: String,
-                         challenge: Data, ceremonies: any WebAuthnCeremonies) async throws -> KeyDescriptor {
+                         challenge: Data, authorityOrigins: [String] = [], ceremonies: any WebAuthnCeremonies) async throws -> KeyDescriptor {
         try checkPlatform(kind: kind, ceremonies: ceremonies)
         let registration: Registration
         do {
@@ -18,12 +18,12 @@ struct WebAuthnProvider: Sendable {
                                                           userName: userName, challenge: challenge)
             try Task.checkCancellation()
         } catch { throw KeyProviderError.map(error) }
-        let descriptor = try KeyDescriptor(attestationObject: registration.attestationObject, relyingParty: relyingParty)
+        let descriptor = try KeyDescriptor(attestationObject: registration.attestationObject, relyingParty: relyingParty, authorityOrigins: authorityOrigins)
         guard descriptor.credential == registration.credentialID else { throw KeyProviderError.credentialMissing }
         return descriptor
     }
 
-    func assert(challenge: String, prfSalt: Data?) async throws -> WebauthnResult {
+    func assert(challenge: String, prfSalt: Data?) async throws -> KeyAssertion {
         try Self.checkPlatform(kind: kind, ceremonies: ceremonies)
         if let prfSalt {
             guard prfSalt.count == 32, ceremonies.supportsPRF(kind: kind) else { throw KeyProviderError.unsupportedHere }
@@ -44,11 +44,11 @@ struct WebAuthnProvider: Sendable {
         if prfSalt != nil {
             guard result.prfOutput?.count == 32 else { throw KeyProviderError.unsupportedHere }
         }
-        return WebauthnResult(signature: result.signature, authenticatorData: result.authenticatorData,
-                              clientData: result.clientData, prf: prfSalt == nil ? nil : result.prfOutput)
+        return KeyAssertion(signature: result.signature, authenticatorData: result.authenticatorData,
+                            clientData: result.clientData, prf: prfSalt == nil ? nil : result.prfOutput)
     }
 
-    func prf(salt: Data) async throws -> Data? {
+    func prf(salt: Data) async throws -> SecretBytes? {
         // Existing-slot opening has no body to sign. New slots MUST instead use assert with the core challenge.
         let challenge = try randomBytes().base64EncodedString().replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")

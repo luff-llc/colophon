@@ -7,7 +7,9 @@ private func json(_ text: String) -> Data { Data(text.utf8) }
 
 struct LibraryTests {
     @Test func agentJourney() async throws {
-        let owner = SoftwareKeys()
+        // The owner's scalars are the test's own (no accessor exports one), so the same identity can be rebuilt below.
+        let signingScalar = P256.Signing.PrivateKey().rawRepresentation, agreementScalar = P256.KeyAgreement.PrivateKey().rawRepresentation
+        let owner = try SoftwareKeys(signingPrivateKey: signingScalar, agreementPrivateKey: agreementScalar)
         let agentKeys = SoftwareKeys()
         let library = try await createLibrary(owner: owner, label: "Library", ownerLabel: "Owner",
                                             namespaces: ["notes", "reading.saved"])
@@ -37,7 +39,7 @@ struct LibraryTests {
                                                              payload: json(#"{"id":"later","notebook":"book","text":"No"}"#)) {
             #expect(denial.reason == .revoked)
         } else { Issue.record("Revoked agent wrote") }
-        let restoredKeys = try SoftwareKeys(signingPrivateKey: owner.signingPrivateKey, agreementPrivateKey: owner.agreementPrivateKey)
+        let restoredKeys = try SoftwareKeys(signingPrivateKey: signingScalar, agreementPrivateKey: agreementScalar)
         let restored = try await Library.open(records: library.records, me: restoredKeys)
         let view = try await restored.view(namespace: "notes").get()
         #expect(view.admitted.contains { $0.id == note.id && $0.origin == .ai && $0.authorLabel == "Muse" })
@@ -116,7 +118,7 @@ private actor PausingKeys: AsyncKeyProvider {
     private var continuation: CheckedContinuation<Void, Never>?
     private var observer: CheckedContinuation<Void, Never>?
     func publicKeys() async throws -> PublicKeys { try await base.publicKeys() }
-    func agree(peer: Data) async throws -> Data { try base.agree(peer: peer) }
+    func sharedSecret(peer: Data) async throws -> SecretBytes { try await base.sharedSecret(peer: peer) }
     func sign(body: Data) async throws -> Data {
         if armed {
             armed = false

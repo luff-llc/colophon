@@ -1,3 +1,4 @@
+import ColophonKit
 import Foundation
 
 /// AuthenticationServices credential family.
@@ -31,10 +32,10 @@ public struct AssertionResult: Sendable {
     public let authenticatorData: Data
     /// Original clientDataJSON bytes.
     public let clientData: Data
-    /// Exact WebAuthn PRF results.first, without a host-side transformation.
-    public let prfOutput: Data?
+    /// Exact WebAuthn PRF results.first, without a host-side transformation, in memory the SDK owns and zeroes.
+    public let prfOutput: SecretBytes?
     /// Creates evidence passed unchanged to ColophonKit for verification.
-    public init(credentialID: Data, signature: Data, authenticatorData: Data, clientData: Data, prfOutput: Data?) {
+    public init(credentialID: Data, signature: Data, authenticatorData: Data, clientData: Data, prfOutput: SecretBytes?) {
         self.credentialID = credentialID
         self.signature = signature
         self.authenticatorData = authenticatorData

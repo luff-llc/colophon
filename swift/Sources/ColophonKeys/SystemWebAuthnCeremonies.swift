@@ -1,4 +1,5 @@
 import AuthenticationServices
+import ColophonKit
 import CryptoKit
 import Foundation
 #if os(macOS)
@@ -47,6 +48,7 @@ public struct SystemWebAuthnCeremonies: WebAuthnCeremonies {
       let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: rpID)
       let request = provider.createCredentialRegistrationRequest(challenge: challenge, name: userName, userID: userID)
       request.userVerificationPreference = .required
+      request.attestationPreference = .none
       let authorization = try await Self.authorize(request)
       guard let credential = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration,
         let attestation = credential.rawAttestationObject else { throw KeyProviderError.credentialMissing }
@@ -91,10 +93,9 @@ public struct SystemWebAuthnCeremonies: WebAuthnCeremonies {
       guard let credential = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion else {
         throw KeyProviderError.credentialMissing
       }
-      var output: Data?
+      var output: SecretBytes?
       if #available(iOS 18, macOS 15, visionOS 2, *) {
-        output = credential.prf?.first.withUnsafeBytes { Data($0) }
-        if output?.isEmpty == true { output = nil }
+        output = Self.takePRF(credential.prf?.first)
       }
       return AssertionResult(credentialID: credential.credentialID, signature: credential.signature,
         authenticatorData: credential.rawAuthenticatorData, clientData: credential.rawClientDataJSON, prfOutput: output)
@@ -114,14 +115,24 @@ public struct SystemWebAuthnCeremonies: WebAuthnCeremonies {
       guard let credential = authorization.credential as? ASAuthorizationSecurityKeyPublicKeyCredentialAssertion else {
         throw KeyProviderError.credentialMissing
       }
-      var output: Data?
+      var output: SecretBytes?
       if #available(iOS 26.4, macOS 26.4, *) {
-        output = credential.prf?.first.withUnsafeBytes { Data($0) }
+        output = Self.takePRF(credential.prf?.first)
       }
       return AssertionResult(credentialID: credential.credentialID, signature: credential.signature,
         authenticatorData: credential.rawAuthenticatorData, clientData: credential.rawClientDataJSON, prfOutput: output)
       #endif
     }
+  }
+
+  /// Takes the PRF output into `SecretBytes` straight from the platform's `SymmetricKey` (one copy, inside its own
+  /// `withUnsafeBytes`); the caller drops the credential object at once. Copies the SDK cannot reach: the
+  /// `SymmetricKey`'s storage (CryptoKit zeroes it on release) and whatever AuthenticationServices keeps inside the
+  /// credential object and its XPC reply until they are released.
+  private static func takePRF(_ key: SymmetricKey?) -> SecretBytes? {
+    guard let key else { return nil }
+    let secret = SecretBytes(copying: key)
+    return secret.count == 0 ? nil : secret
   }
 
   @MainActor private static func authorize(_ request: ASAuthorizationRequest) async throws -> ASAuthorization {
