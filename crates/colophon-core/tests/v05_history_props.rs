@@ -105,25 +105,34 @@ fn verdict_is_independent_of_object_order() {
     let mut r = Rng(0x0bde_c0de);
     let mut checked = 0;
     for (dir, now) in cases() {
-        let base = objects_of(&dir);
-        let want = summary(&verify_history(&base, &Persisted::default(), now));
-        for _ in 0..8 {
-            let mut o = base.clone();
-            shuffle(&mut r, &mut o.entries);
-            shuffle(&mut r, &mut o.pending);
-            shuffle(&mut r, &mut o.heads);
-            // Duplicates of an object change nothing either.
-            if r.chance(1, 3) && !o.entries.is_empty() {
-                let i = r.below(o.entries.len() as u64) as usize;
-                let dup = o.entries[i].clone();
-                o.entries.push(dup);
+        // The vector, and the vector with broken envelopes over one of its bodies.
+        let plain = objects_of(&dir);
+        let mut broken = plain.clone();
+        if !broken.entries.is_empty() {
+            let i = r.below(broken.entries.len() as u64) as usize;
+            let copies = broken_copies(&broken.entries[i]);
+            broken.entries.extend(copies);
+        }
+        for base in [plain, broken] {
+            let want = full(&verify_history(&base, &Persisted::default(), now));
+            for _ in 0..8 {
+                let mut o = base.clone();
+                shuffle(&mut r, &mut o.entries);
+                shuffle(&mut r, &mut o.pending);
+                shuffle(&mut r, &mut o.heads);
+                // Duplicates of an object change nothing either.
+                if r.chance(1, 3) && !o.entries.is_empty() {
+                    let i = r.below(o.entries.len() as u64) as usize;
+                    let dup = o.entries[i].clone();
+                    o.entries.push(dup);
+                }
+                let got = full(&verify_history(&o, &Persisted::default(), now));
+                assert_eq!(got, want, "{}", dir.display());
+                checked += 1;
             }
-            let got = summary(&verify_history(&o, &Persisted::default(), now));
-            assert_eq!(got, want, "{}", dir.display());
-            checked += 1;
         }
     }
-    assert!(checked > 600, "{checked}");
+    assert!(checked > 1200, "{checked}");
 }
 
 /// The other history vectors, as the conformance runner builds them: `account`, `upgrade/*`
@@ -174,13 +183,13 @@ fn other_cases() -> Vec<(PathBuf, Objects, i64)> {
     }
     v
 }
-fn summary_with_succession(v: &Verdict) -> String {
+/// The whole verdict, for comparisons that must be exact: every field of the verdict (branch,
+/// stop, rollback, conflicts, held_until) and the whole folded state, by its `Debug` form and by
+/// its serialized form (policy, namespaces, members, suspensions, succession, migration...).
+fn full(v: &Verdict) -> String {
     format!(
-        "{} {:?}",
-        summary(v),
-        v.state
-            .as_ref()
-            .map(|s| s.verified_succession().map(|(q, d)| (q, d.to_string())))
+        "{v:?}\n{}",
+        serde_json::to_string(&v.state).expect("the state serializes")
     )
 }
 
@@ -191,106 +200,133 @@ fn summary_with_succession(v: &Verdict) -> String {
 fn every_history_vector_has_one_verdict_whatever_the_order() {
     let mut r = Rng(0x05de_0dde);
     let mut checked = 0;
-    for (dir, base, now) in other_cases() {
-        let want = summary_with_succession(&verify_history(&base, &Persisted::default(), now));
-        for variant in 0..8 {
-            let mut o = base.clone();
-            match variant {
-                0 => {}
-                1 => {
-                    o.entries.reverse();
-                    o.pending.reverse();
-                    o.heads.reverse();
-                    o.predecessor.reverse();
-                }
-                2 => {
-                    o.entries.sort();
-                    o.pending.sort();
-                    o.heads.sort();
-                    o.predecessor.sort();
-                }
-                _ => {
-                    shuffle(&mut r, &mut o.entries);
-                    shuffle(&mut r, &mut o.pending);
-                    shuffle(&mut r, &mut o.heads);
-                    shuffle(&mut r, &mut o.predecessor);
-                }
+    for (dir, plain, now) in other_cases() {
+        // The vector, and the vector with broken envelopes over one body of its entries and one
+        // of its predecessor entries: the set changes, so its verdict may too, but not with order.
+        let mut broken = plain.clone();
+        for list in [&mut broken.entries, &mut broken.predecessor] {
+            if !list.is_empty() {
+                let i = r.below(list.len() as u64) as usize;
+                let copies = broken_copies(&list[i]);
+                list.extend(copies);
             }
-            let got = summary_with_succession(&verify_history(&o, &Persisted::default(), now));
-            assert_eq!(got, want, "{} (variant {variant})", dir.display());
-            checked += 1;
+        }
+        for base in [plain, broken] {
+            let want = full(&verify_history(&base, &Persisted::default(), now));
+            for variant in 0..8 {
+                let mut o = base.clone();
+                match variant {
+                    0 => {}
+                    1 => {
+                        o.entries.reverse();
+                        o.pending.reverse();
+                        o.heads.reverse();
+                        o.predecessor.reverse();
+                    }
+                    2 => {
+                        o.entries.sort();
+                        o.pending.sort();
+                        o.heads.sort();
+                        o.predecessor.sort();
+                    }
+                    _ => {
+                        shuffle(&mut r, &mut o.entries);
+                        shuffle(&mut r, &mut o.pending);
+                        shuffle(&mut r, &mut o.heads);
+                        shuffle(&mut r, &mut o.predecessor);
+                    }
+                }
+                let got = full(&verify_history(&o, &Persisted::default(), now));
+                assert_eq!(got, want, "{} (variant {variant})", dir.display());
+                checked += 1;
+            }
         }
     }
-    assert!(checked > 300, "{checked}");
+    assert!(checked > 600, "{checked}");
 }
 
-/// A copy of an envelope whose signature no longer verifies: the same body, one bit of the
-/// signature flipped, the rest of the bytes as published.
-fn broken_copy(envelope: &[u8]) -> Vec<u8> {
+/// Copies of an envelope over the same body that do not verify, each broken another way:
+/// one bit of the signature flipped (the rest of the bytes as published), a signature that is
+/// not base64, and `cosignatures` that is not an array. The `body` field is never touched.
+fn broken_copies(envelope: &[u8]) -> Vec<Vec<u8>> {
     let text = std::str::from_utf8(envelope).unwrap();
     let v: Value = serde_json::from_str(text).unwrap();
-    let sig = v["signature"].as_str().unwrap();
-    let mut raw = STANDARD.decode(sig).unwrap();
-    *raw.last_mut().unwrap() ^= 1;
-    let broken = STANDARD.encode(raw);
-    assert_eq!(broken.len(), sig.len());
-    let out = text.replacen(sig, &broken, 1).into_bytes();
-    assert_ne!(out, envelope);
+    let mut out = Vec::new();
+    if let Some(sig) = v["signature"].as_str() {
+        let mut raw = STANDARD.decode(sig).unwrap();
+        *raw.last_mut().unwrap() ^= 1;
+        let flipped = STANDARD.encode(raw);
+        assert_eq!(flipped.len(), sig.len());
+        out.push(text.replacen(sig, &flipped, 1).into_bytes());
+        let mut w = v.clone();
+        w["signature"] = Value::String("!not base64!".into());
+        out.push(serde_json::to_vec(&w).unwrap());
+    }
+    let mut w = v.clone();
+    w["cosignatures"] = Value::from(7);
+    out.push(serde_json::to_vec(&w).unwrap());
+    for c in &out {
+        assert_ne!(c.as_slice(), envelope);
+        let cv: Value = serde_json::from_slice(c).unwrap();
+        assert_eq!(cv["body"], v["body"]);
+    }
     out
 }
 
-/// §2.2: several envelopes over one body are one object, valid when any of them is. A broken
-/// envelope over a valid body must not stand in for the valid one by arriving first, in a
-/// `/4` prefix incorporated by an upgrade (§16.1) or in a Swift predecessor (§16.3), as in a
-/// `/5` history. Each broken copy is put first, then last: the verdict is that of the vector.
+/// §2.2: several envelopes over one body are one object, valid where any envelope held over it
+/// verifies; an envelope that does not verify is ignored and never makes the object fail. A
+/// broken envelope over a valid body (a flipped signature bit, a signature that is not base64,
+/// `cosignatures` that is not an array) must not stand in for the valid one or defeat it, in a
+/// `/5` history, in a `/4` prefix incorporated by an upgrade (§16.1) or in a Swift predecessor
+/// (§16.3). Each broken copy is put first, then last: the whole verdict is that of the vector.
 #[test]
 fn a_broken_envelope_over_a_valid_body_never_stands_in_for_it() {
+    fn check(
+        what: &str,
+        base: &Objects,
+        now: i64,
+        indices: &[usize],
+        list: fn(&mut Objects) -> &mut Vec<Vec<u8>>,
+    ) {
+        let want = full(&verify_history(base, &Persisted::default(), now));
+        for &i in indices {
+            let mut probe = base.clone();
+            let copies = broken_copies(&list(&mut probe)[i]);
+            assert!(copies.len() >= 2, "{what} entry {}", i + 1);
+            for (k, bad) in copies.into_iter().enumerate() {
+                for first in [true, false] {
+                    let mut o = base.clone();
+                    if first {
+                        list(&mut o).insert(0, bad.clone());
+                    } else {
+                        list(&mut o).push(bad.clone());
+                    }
+                    let v = verify_history(&o, &Persisted::default(), now);
+                    assert_eq!(
+                        full(&v),
+                        want,
+                        "{what} entry {} copy {k} first={first}: {} at {}",
+                        i + 1,
+                        v.code(),
+                        v.seq()
+                    );
+                }
+            }
+        }
+    }
+
     // `/5`: the genesis and the entry at seq 3 of a valid history.
     let (base, now) = vector("i-add-approve");
     let plain = verify_history(&base, &Persisted::default(), now);
     assert_eq!((plain.code(), plain.seq()), ("ok".to_string(), 3));
-    let want = summary(&plain);
-    for i in [0, 2] {
-        for first in [true, false] {
-            let mut o = base.clone();
-            let bad = broken_copy(&o.entries[i]);
-            if first {
-                o.entries.insert(0, bad);
-            } else {
-                o.entries.push(bad);
-            }
-            let got = summary(&verify_history(&o, &Persisted::default(), now));
-            assert_eq!(got, want, "/5 entry {} first={first}", i + 1);
-        }
-    }
+    check("/5", &base, now, &[0, 2], |o| &mut o.entries);
 
     // `/4` prefix: the 0.4 genesis and the `upgrade` entry.
-    let dir = cand().join("upgrade/accept");
-    let base = objects_of(&dir);
+    let base = objects_of(&cand().join("upgrade/accept"));
     let now = parse_date("2026-12-01T00:00:00Z").unwrap();
     let plain = verify_history(&base, &Persisted::default(), now);
     assert_eq!((plain.code(), plain.seq()), ("ok".to_string(), 3));
-    let want = summary(&plain);
-    for i in [0, 2] {
-        for first in [true, false] {
-            let mut o = base.clone();
-            let bad = broken_copy(&o.entries[i]);
-            if first {
-                o.entries.insert(0, bad);
-            } else {
-                o.entries.push(bad);
-            }
-            let v = verify_history(&o, &Persisted::default(), now);
-            assert_eq!(
-                summary(&v),
-                want,
-                "/4 entry {} first={first}: {} at {}",
-                i + 1,
-                v.code(),
-                v.seq()
-            );
-        }
-    }
+    check("/4", &base, now, &[0, 2], |o| &mut o.entries);
 
     // Swift predecessor: its genesis and the entry after it.
     let (_, base, now) = other_cases()
@@ -298,27 +334,13 @@ fn a_broken_envelope_over_a_valid_body_never_stands_in_for_it() {
         .find(|(d, _, _)| d.ends_with("succession/swift-keyring"))
         .unwrap();
     let plain = verify_history(&base, &Persisted::default(), now);
-    let want = summary_with_succession(&plain);
-    assert!(
-        plain
-            .state
-            .as_ref()
-            .is_some_and(|s| s.verified_succession().is_some()),
-        "{want}"
-    );
-    for i in [0, 1] {
-        for first in [true, false] {
-            let mut o = base.clone();
-            let bad = broken_copy(&o.predecessor[i]);
-            if first {
-                o.predecessor.insert(0, bad);
-            } else {
-                o.predecessor.push(bad);
-            }
-            let got = summary_with_succession(&verify_history(&o, &Persisted::default(), now));
-            assert_eq!(got, want, "Swift predecessor entry {} first={first}", i + 1);
-        }
-    }
+    assert!(plain
+        .state
+        .as_ref()
+        .is_some_and(|s| s.verified_succession().is_some()));
+    check("Swift predecessor", &base, now, &[0, 1], |o| {
+        &mut o.predecessor
+    });
 }
 
 #[test]
