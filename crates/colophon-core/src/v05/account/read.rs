@@ -430,14 +430,6 @@ impl Account {
 
     /// The members: 0.4's counts of admitted writes are derived from admission, not counters.
     pub fn members(&self) -> Vec<MemberInfo> {
-        let mut writes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for j in &self.d.judgement.records {
-            if j.outcome == Admission::Admitted {
-                if let (Some(a), Some(i)) = (&j.author, &j.id) {
-                    writes.entry(a).or_default().insert(i);
-                }
-            }
-        }
         self.d
             .auth
             .state()
@@ -453,7 +445,7 @@ impl Account {
                         grant: Some(grant_of(m)),
                         since: m.granted_seq,
                         revoked_at: m.revoked_seq,
-                        writes: writes.get(id.as_str()).map_or(0, |s| s.len() as u64),
+                        writes: self.d.durable.writes_of(&id),
                     },
                     expires_ms: m.expires_ms,
                     provisional: m.provisional.is_some(),
@@ -765,15 +757,26 @@ impl Account {
             return Ok(Outcome::failure(d));
         }
         let folded = &self.d.folded[namespace];
+        // The durable fold, with the live heads applied at their positions when there are any.
+        let (admitted, state) = match self.d.overlaid(namespace) {
+            None => (
+                folded.admitted.clone(),
+                folded.fold.query("read", &json!({})),
+            ),
+            Some(o) => {
+                // Durable operations from the split on are in the overlay's tail.
+                let mut all: Vec<_> =
+                    folded.admitted[..o.split.min(folded.admitted.len())].to_vec();
+                all.extend(o.admitted.iter().cloned());
+                (all, o.fold.query("read", &json!({})))
+            }
+        };
         let mut view = NamespaceView {
             namespace: namespace.into(),
-            admitted: folded.admitted.clone(),
+            admitted,
             held: Vec::new(),
             refused: Vec::new(),
-            state: folded
-                .fold
-                .query("read", &json!({}))
-                .map_err(|e| crate::v05::malformed(e.to_string()))?,
+            state: state.map_err(|e| crate::v05::malformed(e.to_string()))?,
         };
         for j in &self.d.judgement.records {
             let ns_ok = j.namespace.as_deref() == Some(namespace);
@@ -809,7 +812,11 @@ impl Account {
         if let Some(d) = self.notreadable(namespace) {
             return Ok(Outcome::failure(d));
         }
-        match self.d.folded[namespace].fold.query(name, &args) {
+        let answered = match self.d.overlaid(namespace) {
+            Some(o) => o.fold.query(name, &args),
+            None => self.d.folded[namespace].fold.query(name, &args),
+        };
+        match answered {
             Ok(v) => Ok(Outcome::success(v)),
             Err(e) => Err(crate::v05::malformed(e.to_string())),
         }

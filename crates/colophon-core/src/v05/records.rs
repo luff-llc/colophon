@@ -1567,6 +1567,29 @@ struct WalkState {
     highest: BTreeMap<String, u64>,
     reserved: BTreeMap<String, BTreeSet<String>>,
     authentic: BTreeSet<(String, String)>,
+    /// The fold positions of the records that reserved a slot, by namespace: the highest clock
+    /// before a position is the clock of the last of these before it.
+    reserved_keys: BTreeMap<String, BTreeSet<FoldKey>>,
+    /// The fold positions of the records refused `clockJump`, by namespace: the only records a
+    /// record inserted before them can change the verdict of (the bound only loosens).
+    jump_keys: BTreeMap<String, BTreeSet<FoldKey>>,
+}
+impl WalkState {
+    /// Note what the judgement of the candidate at `key` added to the walk.
+    fn note(&mut self, key: &FoldKey, ns: &str, j: &Judged) {
+        if j.reserved {
+            self.reserved_keys
+                .entry(ns.to_string())
+                .or_default()
+                .insert(key.clone());
+        }
+        if j.outcome == Outcome::Refused(Reason::ClockJump.as_str()) {
+            self.jump_keys
+                .entry(ns.to_string())
+                .or_default()
+                .insert(key.clone());
+        }
+    }
 }
 type FoldKey = (u64, String, String, String);
 /// What a resumed walk starts from: its state, the new candidates, the last key walked and the
@@ -2190,8 +2213,10 @@ fn judge_impl(
         run.walked += 1;
         let memo = cache.as_mut().map(|(cc, _)| &mut cc.opened);
         let j = judge_candidate(&env, &mut state, memo, &mut run, c, *early);
-        last_key = Some(fold_key(c));
-        ns_last.insert(c.header.namespace.clone(), fold_key(c));
+        let key = fold_key(c);
+        state.note(&key, &c.header.namespace, &j);
+        last_key = Some(key.clone());
+        ns_last.insert(c.header.namespace.clone(), key);
         by_digest.insert(c.digest.clone(), j);
     }
     for (ci, (idx, c, _)) in cands.iter().enumerate() {
@@ -2409,7 +2434,21 @@ pub(crate) fn judge_extend(
             let key = fold_key(c);
             let after_all = last.last_key.as_ref().is_none_or(|k| key > *k);
             if !after_all {
-                if ns_last.get(&c.header.namespace).is_some_and(|k| key <= *k) {
+                // A record placed before the last one walked in its namespace changes the
+                // highest clock the records after it read, and no more: a record after it
+                // passed the clock bound with a lower highest clock and passes with a higher
+                // one, so only a record refused `clockJump` after it can change its verdict.
+                if ns_last.get(&c.header.namespace).is_some_and(|k| key <= *k)
+                    && last
+                        .state
+                        .jump_keys
+                        .get(&c.header.namespace)
+                        .is_some_and(|s| {
+                            s.range((std::ops::Bound::Excluded(&key), std::ops::Bound::Unbounded))
+                                .next()
+                                .is_some()
+                        })
+                {
                     return None;
                 }
                 let budgeted = auth
@@ -2446,19 +2485,48 @@ pub(crate) fn judge_extend(
     for &ci in &order {
         let (at, c, early) = &cands[ci];
         run.walked += 1;
-        let jd = judge_candidate(
-            &env,
-            &mut last.state,
-            Some(&mut cache.opened),
-            &mut run,
-            c,
-            *early,
-        );
         let key = fold_key(c);
+        let ns = &c.header.namespace;
+        let late = last.ns_last.get(ns).is_some_and(|k| key <= *k);
+        let jd = if late {
+            // Judged at its place: the highest clock before it is that of the last record
+            // that reserved a slot before it, and nothing else of the walk is read (its
+            // author holds no budget and its ID is new, checked above).
+            let before = last
+                .state
+                .reserved_keys
+                .get(ns)
+                .and_then(|s| s.range(..&key).next_back())
+                .map_or(0, |k| k.0);
+            let mut at = WalkState::default();
+            at.highest.insert(ns.clone(), before);
+            let jd = judge_candidate(&env, &mut at, Some(&mut cache.opened), &mut run, c, *early);
+            for (a, ids) in at.reserved {
+                last.state.reserved.entry(a).or_default().extend(ids);
+            }
+            last.state.authentic.extend(at.authentic);
+            if jd.reserved {
+                let h = last.state.highest.entry(ns.clone()).or_insert(0);
+                *h = (*h).max(c.header.clock);
+            }
+            jd
+        } else {
+            judge_candidate(
+                &env,
+                &mut last.state,
+                Some(&mut cache.opened),
+                &mut run,
+                c,
+                *early,
+            )
+        };
+        last.state.note(&key, ns, &jd);
         if last.last_key.as_ref().is_none_or(|k| key > *k) {
             last.last_key = Some(key.clone());
         }
-        last.ns_last.insert(c.header.namespace.clone(), key);
+        if !late {
+            last.ns_last.insert(ns.clone(), key);
+        }
         last.by_digest.insert(c.digest.clone(), jd.clone());
         judged_new.push((*at, jd));
     }
