@@ -77,81 +77,42 @@ made in one of two ways:
   same bytes. The row (`slot` to `{account, base, at, request}`) is written to
   `<dataDir>/provisioned.json` (staged, fsynced, renamed) before the answer, and read at
   start-up with the configured slots; a slot both configured and provisioned with different
-  accounts refuses start-up. Provisioned slots are scheduled like configured ones, and stay
-  served when provisioning is later turned off.
+  accounts refuses start-up. Provisioned slots are scheduled like configured ones.
+
+**The table.** `provisioned.json` is read only when provisioning is on or a regular file of that
+name is in the data directory. With provisioning off and no such file the relay reads, scans and
+removes nothing of that name (a 0.3 slot called `provisioned.json` works as before; turning
+provisioning on with it there refuses start-up until that slot is renamed). When provisioning was
+on and is turned off (`enabled: false`) the table file stays: its slots stay served and the door
+answers 404; keep `provision.prefix` set, since every row is checked against it. While
+provisioning is or has been on, `provisioned.json` (and its staging files, `.provisioned.json.*`,
+which the slot grammar already excludes) cannot be slot names. The table is never repaired: at
+start-up it is read up to a bound (32 KiB of request per row, `max(maxSlots, 200)` rows), it
+must be exactly as the relay writes it (no duplicate key, no other field), and every row must
+have a slot that matches `slotPattern`, `base === prefix + slot`, and a member request that the
+module finds well formed, signed by this home's key, and naming the row's account and endpoint.
+A bad table refuses start-up with a message naming the row.
+
+**Release, and a lapsed entitlement.** Only a slot that was never appointed and holds no genesis
+is ever released (`unclaimedHours`). The release takes the slot out of service first (new requests
+answer `refused:notProvisioned`, a waiting change feed is woken and ended, a provision of the name
+waits), drains every request and scheduler pass still running on it, and checks again that nothing
+is held; only then are its directory and its row removed, and only then can the name be
+provisioned again. If an upload landed meanwhile, the release is abandoned and the slot stays. An
+appointed home keeps witnessing and receipting the account's authority history until its
+revocation is final, whatever the grant's expiry or the state of a subscription: when an
+entitlement lapses, the gate may stop new slots and the home may stop serving records, but it keeps
+signing heads and receipting authority changes until the account revokes it, or it would block that
+account's key changes. (Entitlements are not built in 0.5; gate `"token"` is the smallest one.)
 
 | `provision` field | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | The door answers 404 when off, and every other answer is as without the setting |
-| `prefix` | none, required when on | The public URL prefix, ending in `/`: `base` must equal `prefix + slot` |
+| `prefix` | none, required when on (and while a table file exists) | The public `https://` URL prefix, ending in `/`: `base` must equal `prefix + slot`. Plain `http://` only to a loopback host, for tests; anything else refuses start-up |
 | `maxSlots` | `200` | Provisioned slots this home holds |
 | `perAddressPerHour` | `10` | New slots, and refused tokens, one client address may spend in an hour |
 | `unclaimedHours` | `24` | A provisioned slot holding no genesis this long after it was made is released (its directory, then its row, removed) at the next provision or start-up, on the relay's clock |
-| `slotPattern` | `^[a-z0-9][a-z0-9._-]{7,63}# Colophon reference relay, and a Colophon 0.5 home
-
-A small Bun server. It is the 0.3 HTTP exchange ([spec §8](../spec/colophon-0.3.md#8-http-exchange),
-incorporated by 0.5 §11.8): per library slot, signed and encrypted records on disk, moved between
-devices. And, for a slot you mark as a **home**, the server of Colophon 0.5
-([§13 homes and heads](../spec/colophon-0.5.md#13-homes-and-heads),
-[§14 exchange](../spec/colophon-0.5.md#14-exchange)): it keeps a copy of one account's history, orders
-and receipts authority changes, signs heads, and serves members.
-
-A relay is untrusted by clients. A home must itself be correct, so every decision a home makes is
-made by the same Rust code the verifier uses (see "How it is built"). Slots that are not homes
-behave exactly as the 0.3 relay always did: a token is storage access, never membership, and the
-relay holds no keys. `GET {base}` keeps the marker `colophon/relay/3` (0.5 §20 lists it, and §14
-says a home *adds* `home` to that response).
-
-## Run it
-
-```sh
-bun relay/server.js token       # a new bearer token and its SHA-256 (as before)
-bun relay/server.js home-key    # a new home key: a private P-256 JWK. Keep it secret.
-```
-
-A plain 0.3 slot:
-
-```sh
-COLOPHON_RELAY_TOKENS="home=<token>" COLOPHON_RELAY_DATA=./relay-data bun relay/server.js
-```
-
-A 0.5 home. The account names this home in a member request whose `service.endpoints` is the
-slot's public URL (it must be `https://`); that URL is the slot's `base`, and the call audience:
-
-```sh
-bun relay/server.js home-key > home-key.jwk        # once; chmod 600; never commit it
-cargo build --target wasm32-unknown-unknown --release -p colophon-home-wasm
-COLOPHON_RELAY_HOME_SLOTS="acct=<account ID>@https://home.example.org/v1/libraries/acct" \
-COLOPHON_HOME_KEY_FILE=home-key.jwk                         \
-COLOPHON_HOME_WASM=target/wasm32-unknown-unknown/release/colophon_home_wasm.wasm \
-COLOPHON_RELAY_DATA=./relay-data  bun relay/server.js
-# {"listening":{"host":"127.0.0.1","port":8787,"tls":false}}
-curl http://127.0.0.1:8787/v1/libraries/acct      # {"protocol":"colophon/relay/3", ..., "home":{"member":"<ID>"}}
-```
-
-The `member` in that answer is the home's ID (the key ID of its signing key). Give the signing point
-of the key (the JWK's `x`, `y`) and any agreement point to the host that appoints the home. The
-home holds no account secret: no controller or member key, no PRF output, no seed (§13.1).
-
-| Setting | Env | Default |
-| --- | --- | --- |
-| Listen host / port | `COLOPHON_RELAY_HOST`, `COLOPHON_RELAY_PORT` (0 picks a free port) | `127.0.0.1`, `8787` |
-| Data directory | `COLOPHON_RELAY_DATA` | `./relay-data` |
-| Config file | `COLOPHON_RELAY_CONFIG` or `--config` | none |
-| Plain tokens | `COLOPHON_RELAY_TOKENS="slot=token,…"` (or `tokenSha256` in a config file) | none |
-| Token-free slots (tests only) | `COLOPHON_RELAY_OPEN="slot"` | none |
-| Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`) | none |
-| Home key | `COLOPHON_HOME_KEY_FILE` (preferred) or `home.keyFile` in the config; `COLOPHON_HOME_KEY` (the JWK itself) is readable from the process environment, so prefer a file | required for a home |
-| Home module | `COLOPHON_HOME_WASM`, or `home.wasm` | required for a home |
-| Scheduler tick | `COLOPHON_RELAY_TICK_MS` or `tickMs` | `2000` |
-| Other homes | config `resolve`: `{"https://other.example/v1/libraries/acct": "http://10.0.0.7:8787/v1/libraries/acct"}` (the endpoint an account names, to the URL to reach it) | the endpoint itself |
-| Request rate | `limits.requestsPerMinute` (per address) | `1200` |
-| TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
-| CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
-| Provisioning | config `provision` (below) | off |
-| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1"]}` | the socket address |
-
- | Names an app may pick, besides the slot grammar |
+| `slotPattern` | `^[a-z0-9][a-z0-9._-]{7,63}$` | Names an app may pick, besides the slot grammar |
 | `gate` | `"open"` | Who may provision: `"open"` (anyone within the bounds) or `"token"` (`Authorization: Bearer <token>` whose SHA-256 is `tokenSha256`; `bun relay/server.js token` prints one). Anything else refuses start-up |
 | `tokenSha256` | none | 64 hex; required with gate `"token"`, compared in constant time |
 
@@ -172,6 +133,9 @@ The gate is one function, `admitProvision` in `relay/provision.js`: every check 
 and an entitlement presented in `Authorization` is added there. `refused:closed` is reserved and
 not produced. With provisioning on, a request to a slot this home does not hold answers 404
 `{"result":"refused:notProvisioned"}` instead of the 0.3 answer, 401 `WWW-Authenticate: Bearer`.
+So the answers tell the kinds of slot apart: an unknown name is 404, a configured token slot asked
+without its token is 401, and a home slot answers `GET {base}` with 200. That is intended: slot
+names are not secrets, and access is by call (or, at a 0.3 slot, by token), never by knowing a name.
 
 **The client address.** The per-address request limit and `perAddressPerHour` count against one
 address, from one function. By default it is the socket address. Behind a proxy (the staging home

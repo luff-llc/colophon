@@ -309,3 +309,146 @@ fn killed_between_the_durable_write_and_the_answer_the_same_request_completes_af
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// The same relay, traced, waiting at the trace point `pause_at` (the first time) until the file
+/// `dir/resume` exists; its trace markers arrive on the returned channel.
+fn start_paused(
+    keys: &HomeKeys,
+    dir: &std::path::Path,
+    clock_ms: i64,
+    pause_at: &str,
+) -> (Child, u16, std::sync::mpsc::Receiver<String>) {
+    let (relay, wasm) = prerequisites().expect("prerequisites");
+    std::fs::create_dir_all(dir).unwrap();
+    write_clock(&dir.join("clock"), clock_ms);
+    let config = dir.join("config.json");
+    std::fs::write(
+        &config,
+        json!({
+            "provision": {"enabled": true, "prefix": PREFIX, "slotPattern": "^[a-z]{4,64}$"},
+            "limits": {"requestsPerMinute": 0},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut child = Command::new("bun")
+        .arg(relay)
+        .arg("--test-clock")
+        .arg("--config")
+        .arg(&config)
+        .env("COLOPHON_RELAY_PORT", "0")
+        .env("COLOPHON_RELAY_DATA", dir.join("data"))
+        .env_remove("COLOPHON_RELAY_HOME_SLOTS")
+        .env("COLOPHON_HOME_KEY", keys.jwk())
+        .env("COLOPHON_HOME_WASM", wasm)
+        .env("COLOPHON_RELAY_CLOCK_FILE", dir.join("clock"))
+        .env("COLOPHON_RELAY_TICK_MS", "0")
+        .env("COLOPHON_RELAY_TRACE", "1")
+        .env("COLOPHON_RELAY_PAUSE_AT", pause_at)
+        .env("COLOPHON_RELAY_RESUME_FILE", dir.join("resume"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let err = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(err).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut line = String::new();
+    BufReader::new(child.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let v: Value = serde_json::from_str(&line).expect("the listening line");
+    (child, v["listening"]["port"].as_u64().unwrap() as u16, rx)
+}
+
+/// Wait for the trace marker `what` (a bound, not a timing assertion: the marker is the event).
+fn marker(rx: &std::sync::mpsc::Receiver<String>, what: &str) {
+    loop {
+        let line = rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap_or_else(|_| panic!("no trace marker {what}"));
+        if line == format!("trace {what}") {
+            return;
+        }
+    }
+}
+
+#[test]
+fn a_first_upload_paused_after_its_access_check_wins_over_a_release_and_a_provision_for_another_account(
+) {
+    if prerequisites().is_none() {
+        return;
+    }
+    let keys = HomeKeys::new(0x5c);
+    let scratch = Scratch::new("provision-race");
+    let mut f = create_public(&[NS]);
+    let account = f.account.id().as_str().to_string();
+    let t0 = f.account.now_ms();
+    let (mut child, port, rx) = start_paused(&keys, scratch.path(), t0, "access authority");
+    let relay = Relay::attached(port, &base(), &account, scratch.path());
+    let (status, request) = provision(port, SLOT, &base(), &account).expect("an answer");
+    assert_eq!(status, 200);
+    appoint_with(&mut f, &request);
+
+    // A's first upload (the genesis and its history) pauses right after its access check.
+    let entries: Vec<Value> = entries_json(&f).into_iter().map(|(_, e)| e).collect();
+    assert!(entries.len() <= 64, "one page");
+    let body = json!({"from": 1, "entries": entries, "receipts": []}).to_string();
+    let path = relay.url("/authority");
+    let upload = std::thread::spawn(move || {
+        http(
+            port,
+            "POST",
+            &path,
+            &[("Content-Type".into(), "application/json".into())],
+            body.as_bytes(),
+        )
+    });
+    marker(&rx, "access authority");
+
+    // Past unclaimedHours, another account asks for the name: the release starts, takes the
+    // slot out of dispatch, and waits for A.
+    relay.set_clock(t0 + 25 * HOUR);
+    let other = "ef".repeat(32);
+    let b = std::thread::spawn({
+        let (base, other) = (base(), other.clone());
+        move || provision(port, SLOT, &base, &other)
+    });
+    marker(&rx, &format!("release draining {SLOT}"));
+    let (status, body) = relay.get("");
+    assert_eq!(status, 404, "closing: out of dispatch");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["result"],
+        "refused:notProvisioned"
+    );
+
+    // A resumes and stores the genesis: the release is abandoned and B is refused.
+    std::fs::write(scratch.path().join("resume"), b"").unwrap();
+    let (a_status, _, a_body) = upload.join().unwrap();
+    assert_eq!(a_status, 200, "{}", String::from_utf8_lossy(&a_body));
+    let (b_status, _) = b.join().unwrap().expect("an answer");
+    assert_eq!(b_status, 409, "the slot is A's: never both");
+    assert_eq!(table(scratch.path())[SLOT]["account"], account.as_str());
+    assert_eq!(relay.get("").0, 200, "back in service");
+    assert_eq!(
+        kinds(&relay).len(),
+        entries_json(&f).len(),
+        "A's history, on A's slot"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // A restart finds no account mismatch.
+    let (mut child, port) = start(&keys, scratch.path(), t0 + 25 * HOUR, None);
+    let relay = Relay::attached(port, &base(), &account, scratch.path());
+    assert_eq!(relay.get("").0, 200);
+    assert_eq!(kinds(&relay).len(), entries_json(&f).len());
+    let _ = child.kill();
+    let _ = child.wait();
+}

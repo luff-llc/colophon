@@ -6,7 +6,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { HomeKey, HomeModule, HomeSlot } from './home.js';
 import {
-  ProvisionTable, TABLE_FILE, clientAddressConfig, clientAddressResolver, isJsonType, memberRequest, parseProvisionBody,
+  ProvisionTable, TABLE_FILE, clientAddressConfig, tableKind, clientAddressResolver, isJsonType, memberRequest, parseProvisionBody,
   provisionConfig, provisionGate,
 } from './provision.js';
 import path from 'node:path';
@@ -435,19 +435,20 @@ function readBody(req, max) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt, hook }) {
   if (!dataDir) throw new Error('dataDir is required');
   if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
   const origins = corsOrigins(cors?.origins);
   const provisioning = provisionConfig(provision);
   // The address requests count against, for every per-address limit (never for access).
   const clientAddress = clientAddressResolver(clientAddressConfig(addressConfig));
-  // Test builds only (tracing needs --test-clock): a marker on stderr, and a SIGKILL of this
-  // process at the named point, so a test can stop it exactly there.
-  const reach = (point) => {
+  // Test builds only (tracing needs --test-clock): a marker on stderr, a SIGKILL of this process
+  // at the named point, and `hook` (a test's pause), so a test can stop it exactly there.
+  const reach = async (point) => {
     if (!tracing) return;
     writeSync(2, `trace ${point}\n`);
     if (crashAt === point) process.kill(process.pid, 'SIGKILL');
+    if (hook) await hook(point);
   };
   const effective = { ...DEFAULT_LIMITS, ...limits };
   await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -455,16 +456,26 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   const auth = new Map();
   const homeSlots = new Map();
   // Slots apps provisioned through the door (`POST /v1/provision`), read before anything is served.
-  const table = await ProvisionTable.load(path.resolve(dataDir));
+  // The table is in use only when provisioning is on or a regular file of that name is there;
+  // otherwise nothing of that name is read, scanned or removed (a 0.3 slot may be called so).
+  const kind = await tableKind(path.resolve(dataDir));
+  if (provisioning.enabled && kind === 'other') {
+    throw new Error(`${path.join(path.resolve(dataDir), TABLE_FILE)} is not a regular file (a 0.3 slot of that name?): rename that slot before turning provisioning on`);
+  }
+  const tableInUse = provisioning.enabled || kind === 'file';
+  const table = tableInUse ? await ProvisionTable.load(path.resolve(dataDir), provisioning) : ProvisionTable.empty(path.resolve(dataDir));
   let homeModule = null; let homeKey = null;
   if (Object.values(libraries ?? {}).some((e) => e && e.home) || provisioning.enabled || table.size > 0) {
     if (!home?.wasm || !home?.key) throw new Error('A home slot, and provisioning, need home.wasm (the module path) and home.key (a private P-256 JWK)');
     homeModule = home.wasm instanceof HomeModule ? home.wasm : await HomeModule.load(home.wasm);
     homeKey = await HomeKey.fromJwk(home.key, homeModule);
   }
+  // Every row against this relay's settings and key, through the module. Nothing is repaired.
+  table.validate(provisioning, (slot, e) => homeModule.call({ op: 'member_request', account: e.account,
+    signing: homeKey.point.toString('base64'), endpoint: `${e.base}/`, request: e.request }));
   for (const [name, entry] of Object.entries(libraries ?? {})) {
     if (!SLOT.test(name)) throw new Error(`Invalid library slot name: ${name}`);
-    if (name === TABLE_FILE && (provisioning.enabled || table.size > 0)) throw new Error(`${TABLE_FILE} is the provisioning table, not a slot name`);
+    if (name === TABLE_FILE && tableInUse) throw new Error(`${TABLE_FILE} is the provisioning table, not a slot name, while provisioning is or has been on`);
     const provisioned = table.get(name);
     if (provisioned && (!entry?.home || entry.account !== provisioned.account)) {
       throw new Error(`Slot ${name} is configured, and provisioned for account ${provisioned.account} in ${TABLE_FILE}: they must agree, or the slot be removed from one`);
@@ -487,8 +498,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   const configured = new Set(Object.keys(libraries ?? {}));
   const slots = new Map();
   const opening = new Map();
+  const notProvisioned = () => new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
   async function slot(name) {
     if (slots.has(name)) return slots.get(name);
+    // Never opened for a name this relay does not hold (a released slot is not reopened).
+    if (!homeSlots.has(name) && !auth.has(name)) throw notProvisioned();
     if (!opening.has(name)) {
       opening.set(name, (async () => {
         const isHome = homeSlots.has(name);
@@ -500,7 +514,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt, clientAddress },
+            deps: { HttpError, send, readBody, clampInt, clientAddress, reach },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -523,29 +537,67 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Work in flight on a slot: every request from dispatch until both its response has ended and
+  // its handler has settled, and every scheduler pass. A slot being released waits for none.
+
+  function enter(s) { s.active = (s.active ?? 0) + 1; }
+  function leave(s) {
+    s.active -= 1;
+    if (s.active === 0 && s.drained) { const done = s.drained; s.drained = null; done(); }
+  }
+  const drained = (s) => (s.active ? new Promise((done) => { s.drained = done; }) : Promise.resolve());
+
+  // ---------------------------------------------------------------------------------------------
   // Provisioning: the door, under one lock, and the release of slots nobody claimed.
 
   const admitProvision = provisionGate(provisioning, clock);
   let provisionTail = Promise.resolve();
   const provisionLock = (fn) => { const run = provisionTail.then(fn, fn); provisionTail = run.catch(() => {}); return run; };
+  const claimed = (s) => { const st = s.home.status(); return Boolean(st.appointed || st.held > 0); };
+
+  /**
+   * Release one provisioned slot that holds no genesis (never appointed). Under the
+   * provisioning lock, so no provision of the name proceeds until this ends. The slot is marked
+   * closing and taken out of dispatch (new requests answer refused:notProvisioned, long polls
+   * are woken and end), the work in flight on it is drained, and "nothing held" is checked again
+   * under its lock: only then are its directory and its row removed. If something is held by
+   * then, the release is abandoned and the slot returns to service. A late use of the released
+   * Slot fails closed (its locks refuse), never on a later slot's directory. A crash between the
+   * directory and the row leaves the row: the slot is opened fresh and released at the next
+   * start-up.
+   */
+  async function release(name, e) {
+    const s = await slot(name);
+    if (await s.home.lock(async () => claimed(s))) return;
+    s.closing = true;
+    homeSlots.delete(name);
+    for (const wake of [...s.waiters]) wake();
+    await reach(`release draining ${name}`);
+    await drained(s);
+    await reach(`release drained ${name}`);
+    const removed = await s.home.lock(async () => {
+      if (claimed(s)) return false;
+      const refuse = () => Promise.reject(new Error(`slot ${name} was released`));
+      s.released = true;
+      s.home.lock = refuse; s.home.replayLock = refuse; s.exclusive = refuse;
+      slots.delete(name); opening.delete(name);
+      await fsp.rm(s.root, { recursive: true, force: true });
+      return true;
+    });
+    if (!removed) { s.closing = false; homeSlots.set(name, { base: e.base, account: e.account }); await reach(`release abandoned ${name}`); return; }
+    await table.write(name, null);
+    await reach(`released ${name}`);
+  }
 
   /** A provisioned slot holding no genesis `unclaimedHours` after it was provisioned is
-   * released: its directory removed, then its row. A crash between the two leaves the row, and
-   * the slot is opened fresh and released again at the next start-up. */
+   * released (on the relay's clock). Configured slots never are. An appointed home is never
+   * released: it witnesses and receipts until the account's revocation of it is final. */
   async function releaseUnclaimed() {
     const now = clock();
     for (const name of [...table.keys()]) {
       const e = table.get(name);
       if (configured.has(name) || now - e.at < provisioning.unclaimedHours * 3_600_000) continue;
-      const s = await slot(name);
-      const released = await s.home.lock(async () => {
-        const st = s.home.status();
-        if (st.appointed || st.held > 0) return false;
-        homeSlots.delete(name); slots.delete(name); opening.delete(name);
-        await fsp.rm(s.root, { recursive: true, force: true });
-        return true;
-      });
-      if (released) await table.write(name, null);
+      await release(name, e);
     }
   }
 
@@ -574,7 +626,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       const request = await memberRequest({ wasm: homeModule, key: homeKey, account: asked.account, base: asked.base, now: clock() });
       // Durable before answered: a crash after this write leaves a row the same request completes.
       await table.write(asked.slot, { account: asked.account, base: asked.base, at: clock(), request: request.toString('base64') });
-      reach('provision written');
+      await reach('provision written');
       homeSlots.set(asked.slot, { base: asked.base, account: asked.account });
       await slot(asked.slot);
       return request;
@@ -583,7 +635,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     res.end(answer);
   }
 
-  async function handle(req, res) {
+  async function handle(req, res, work) {
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
     if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
@@ -593,11 +645,14 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     // With provisioning on, a slot this home does not hold is named as such (an app asks for its
     // slot at the door); off, it is the 0.3 answer, unchanged.
     if (provisioning.enabled && !homeSlots.has(name) && !auth.has(name)) {
-      throw new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
+      throw notProvisioned();
     }
     if (!SLOT.test(name)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
     if (!homeSlots.has(name)) authorize(req, name);
     const s = await slot(name);
+    // Counted from here until the response has ended and this handler has settled.
+    if (s.closing || s.released) throw notProvisioned();
+    enter(s); work.slot = s;
     if (s.home && await s.home.handle(req, res, url, section, recordPath)) return undefined;
     if (!s.home && ['head', 'authority', 'pending', 'predecessor'].includes(section)) throw new HttpError(404, 'Not found');
     if (!section) {
@@ -616,6 +671,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       if (page.entries.length === 0 && wait > 0) {
         await Promise.race([s.waitForEntry(wait * 1000), closed(res)]);
         if (res.destroyed) return undefined;
+        if (s.closing) throw notProvisioned(); // woken by a release
         page = s.changes(after, limit, namespaces);
       }
       return send(res, 200, page);
@@ -660,18 +716,23 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   function listener(req, res) {
     const listed = enforceAnswerHeaders(req, res, origins);
     if (req.method === 'OPTIONS') { answerOptions(req, res, listed); return; }
-    handle(req, res).catch((error) => {
+    const work = { slot: null };
+    const settled = handle(req, res, work).catch((error) => {
       if (res.headersSent || res.destroyed) { res.destroy(); return; }
       if (error instanceof HttpError) send(res, error.status, error.body !== undefined ? error.body : { error: error.message }, error.headers);
       else { console.error(error); send(res, 500, { error: 'Internal relay error' }); }
     });
+    Promise.all([settled, ended(res)]).then(() => { if (work.slot) leave(work.slot); });
   }
 
   // The scheduler: recording entries, heads and forwarding for every home slot, on the relay's clock.
   const tickAll = async () => {
     for (const name of homeSlots.keys()) {
-      const s = await slot(name);
-      try { await s.home.tick(); } catch (error) { console.error(`home tick failed for slot ${name}: ${error.message}`); }
+      let s;
+      try { s = await slot(name); } catch { continue; }
+      if (s.closing || s.released) continue;
+      enter(s);
+      try { await s.home.tick(); } catch (error) { console.error(`home tick failed for slot ${name}: ${error.message}`); } finally { leave(s); }
     }
   };
   let timer = null;
@@ -686,6 +747,12 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
 
 // The response (not the request, which closes once its body is read) closes with the client.
 function closed(res) { return new Promise((resolve) => res.once('close', resolve)); }
+
+/** The response has ended: finished, or closed with its client. */
+function ended(res) {
+  if (res.writableFinished || res.destroyed) return Promise.resolve();
+  return new Promise((resolve) => { res.once('finish', resolve); res.once('close', resolve); });
+}
 
 function clampInt(value, fallback, min, max) {
   if (value === null || value === '') return fallback;

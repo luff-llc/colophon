@@ -465,6 +465,7 @@ export class HomeSlot {
       ? await readBody(req, rest?.startsWith('blobs/') ? this.limits.blobBytes : this.limits.recordBytes)
       : null;
     const allowed = await this.access(req, section ?? '', rest ?? null, effect, body);
+    await this.deps.reach?.(`access ${section ?? ''}`); // a test hook (traced builds only)
     const key = allowed.reserve?.key;
     if (!section || section === 'changes') return false;
     if (section === 'head') { await this.serveOwnHead(res); return true; }

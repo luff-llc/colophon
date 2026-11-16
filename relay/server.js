@@ -9,6 +9,17 @@ import path from 'node:path';
 import { TABLE_FILE, clientAddressConfig, provisionConfig } from './provision.js';
 import { corsOrigins, newToken, startRelay } from './relay.js';
 
+/** A test hook: wait at `point` the first time it is reached, until `file` exists. */
+function pauseOnce(point, file) {
+  let armed = true;
+  return async (at) => {
+    if (at !== point || !armed) return;
+    armed = false;
+    while (!existsSync(file)) await new Promise((resolve) => setTimeout(resolve, 5));
+    process.stderr.write(`trace resumed ${point}\n`);
+  };
+}
+
 function loadConfig(argv, env) {
   const index = argv.indexOf('--config');
   const file = index >= 0 ? argv[index + 1] : env.COLOPHON_RELAY_CONFIG;
@@ -66,8 +77,10 @@ function loadConfig(argv, env) {
     cors: { origins: origins ?? [] },
     provision: config.provision,
     clientAddress: config.clientAddress,
-    // A test hook with the trace: the relay kills itself at the named point.
+    // Test hooks with the trace: the relay kills itself at the named point, or waits there (the
+    // first time it is reached) until the file COLOPHON_RELAY_RESUME_FILE exists.
     crashAt: tracing ? env.COLOPHON_RELAY_CRASH_AT : undefined,
+    hook: tracing && env.COLOPHON_RELAY_PAUSE_AT && env.COLOPHON_RELAY_RESUME_FILE ? pauseOnce(env.COLOPHON_RELAY_PAUSE_AT, env.COLOPHON_RELAY_RESUME_FILE) : undefined,
     home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
     // The test clock: a reading taken while a test rewrites the file can be empty; read again
     // rather than take 0 (which would put every entry in the future).

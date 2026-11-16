@@ -7,7 +7,7 @@
 // `member_request`) and signed by the relay's home key, as heads and receipts are: this file
 // holds no protocol rule.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { promises as fsp } from 'node:fs';
+import { constants as fsc, promises as fsp } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
@@ -47,11 +47,15 @@ export function provisionConfig(raw) {
     throw new Error('provision.gate "token" needs provision.tokenSha256, the 64-hex SHA-256 of the token (bun relay/server.js token prints one)');
   }
   if (c.gate !== 'token' && c.tokenSha256 !== undefined) throw new Error('provision.tokenSha256 is used only with gate "token"');
-  if (c.enabled) {
+  if (c.enabled && c.prefix === undefined) throw new Error('provision.prefix is required when provisioning is on: the public https URL prefix of the slots, ending in "/" (base = prefix + slot)');
+  if (c.prefix !== undefined) {
     let url = null;
     try { url = new URL(c.prefix); } catch { url = null; }
-    if (typeof c.prefix !== 'string' || !url || !/^https?:$/.test(url.protocol) || !c.prefix.endsWith('/') || url.search || url.hash || url.username || url.password) {
-      throw new Error('provision.prefix is required when provisioning is on: the public URL prefix of the slots, ending in "/" (base = prefix + slot)');
+    // §9.1: a service endpoint is https. Plain http only to a loopback host, for tests.
+    const loopback = url && (url.hostname === 'localhost' || /^127\.\d+\.\d+\.\d+$/.test(url.hostname) || url.hostname === '[::1]');
+    if (typeof c.prefix !== 'string' || !url || !(url.protocol === 'https:' || (url.protocol === 'http:' && loopback))
+      || !c.prefix.endsWith('/') || url.search || url.hash || url.username || url.password) {
+      throw new Error('provision.prefix must be the public https URL prefix of the slots, ending in "/" (base = prefix + slot); plain http only to a loopback host, for tests');
     }
   }
   return c;
@@ -102,32 +106,96 @@ export function clientAddressResolver(cfg) {
   };
 }
 
+/** The most bytes a stored member request may hold (decoded); its body is bounded at 16 KiB. */
+export const MAX_REQUEST_BYTES = 32 * 1024;
+/** A row's bound in the file: the request in base64 and the other fields. */
+const MAX_ROW_BYTES = Math.ceil(MAX_REQUEST_BYTES / 3) * 4 + 1024;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const ROW_FIELDS = ['account', 'base', 'at', 'request'];
+
+/** What is at `<dataDir>/provisioned.json`: nothing, a regular file (a table), or something else
+ * (a 0.3 slot directory of that name, a link). Only an lstat: nothing is read. */
+export async function tableKind(dataDir) {
+  const st = await fsp.lstat(path.join(dataDir, TABLE_FILE)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+  if (!st) return 'none';
+  return st.isFile() ? 'file' : 'other';
+}
+
+/** The bytes the relay writes for `rows`: sorted slots, each row's fields in one order. A table
+ * on disk must be exactly this, so a duplicate key, an unknown field or a hand edit is seen. */
+function serialize(rows) {
+  const out = Object.create(null);
+  for (const [slot, e] of [...rows].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    out[slot] = { account: e.account, base: e.base, at: e.at, request: e.request };
+  }
+  return JSON.stringify(out) + '\n';
+}
+
 /** The durable table of provisioned slots: slot -> {account, base, at, request}. `request` is
  * the member request answered for it (base64), kept so a repeated request answers the same
- * bytes. Written staged, fsynced and renamed, then the directory fsynced. */
+ * bytes. Written staged, fsynced and renamed, then the directory fsynced. It is read only when
+ * provisioning is on or a regular file is there, and never repaired: a bad table refuses
+ * start-up, naming the row. */
 export class ProvisionTable {
   constructor(dataDir, rows) { this.dataDir = dataDir; this.rows = rows; }
 
-  static async load(dataDir) {
+  /** No table in use (provisioning off and no table file): nothing on disk is touched. */
+  static empty(dataDir) { return new ProvisionTable(dataDir, new Map()); }
+
+  /** Reads the table: at most `maxSlots` rows' worth of bytes, each row's shape checked, and the
+   * file exactly as the relay writes it. Stale staging files from an interrupted write go. */
+  static async load(dataDir, { maxSlots }) {
     for (const name of await fsp.readdir(dataDir)) {
       if (name.startsWith(`.${TABLE_FILE}.`)) await fsp.rm(path.join(dataDir, name), { force: true });
     }
-    let text = null;
-    try { text = await fsp.readFile(path.join(dataDir, TABLE_FILE), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const rows = new Map();
-    if (text !== null) {
-      let parsed;
-      try { parsed = JSON.parse(text); } catch { throw new Error(`${path.join(dataDir, TABLE_FILE)} is not JSON: repair or remove it`); }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`${TABLE_FILE} must map slots to entries`);
-      for (const [slot, e] of Object.entries(parsed)) {
-        if (!SLOT.test(slot) || slot === TABLE_FILE || !e || typeof e !== 'object' || !HEX64.test(e.account ?? '') || typeof e.base !== 'string'
-          || !Number.isSafeInteger(e.at) || typeof e.request !== 'string') {
-          throw new Error(`${TABLE_FILE}: the entry for ${JSON.stringify(slot)} is not {account, base, at, request}`);
-        }
-        rows.set(slot, { account: e.account, base: e.base, at: e.at, request: e.request });
-      }
+    const file = path.join(dataDir, TABLE_FILE);
+    const bound = MAX_ROW_BYTES * Math.max(maxSlots, PROVISION_DEFAULTS.maxSlots) + 64;
+    let handle;
+    try { handle = await fsp.open(file, fsc.O_RDONLY | fsc.O_NOFOLLOW); } catch (error) {
+      if (error.code === 'ENOENT') return ProvisionTable.empty(dataDir);
+      throw new Error(`${file} cannot be opened (${error.code}): it must be a regular file`);
     }
+    let text;
+    try {
+      const st = await handle.stat();
+      if (!st.isFile()) throw new Error(`${file} is not a regular file`);
+      if (st.size > bound) throw new Error(`${file} is ${st.size} bytes, over its bound of ${bound}: it is not a table this relay wrote`);
+      text = (await handle.readFile()).toString('utf8');
+    } finally { await handle.close(); }
+    let parsed;
+    try { parsed = JSON.parse(text); } catch { throw new Error(`${file} is not JSON: repair or remove it`); }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`${file} must map slots to rows`);
+    const rows = new Map();
+    for (const slot of Object.keys(parsed)) {
+      const e = parsed[slot];
+      const name = `${file}: the row for ${JSON.stringify(slot)}`;
+      if (!SLOT.test(slot) || slot === TABLE_FILE) throw new Error(`${name} is not a slot name`);
+      if (!e || typeof e !== 'object' || Array.isArray(e) || Object.keys(e).sort().join() !== [...ROW_FIELDS].sort().join()) {
+        throw new Error(`${name} is not exactly {account, base, at, request}`);
+      }
+      if (typeof e.account !== 'string' || !HEX64.test(e.account)) throw new Error(`${name}: account is not 64 lower-case hex`);
+      if (typeof e.base !== 'string') throw new Error(`${name}: base is not a string`);
+      if (!Number.isSafeInteger(e.at) || e.at < 0) throw new Error(`${name}: at is not a time`);
+      if (typeof e.request !== 'string' || !BASE64.test(e.request) || e.request.length > MAX_ROW_BYTES - 1024) {
+        throw new Error(`${name}: request is not base64 within ${MAX_REQUEST_BYTES} bytes`);
+      }
+      rows.set(slot, { account: e.account, base: e.base, at: e.at, request: e.request });
+    }
+    if (serialize(rows) !== text) throw new Error(`${file} is not as this relay writes it (a duplicate key, or an edit): repair or remove it`);
     return new ProvisionTable(dataDir, rows);
+  }
+
+  /** Every row against this relay's settings and key: the slot pattern, `base === prefix +
+   * slot`, and `verify(row)` (the module: a member request signed by this home's key naming the
+   * row's account and endpoint). Throws naming the first bad row. */
+  validate(cfg, verify) {
+    for (const [slot, e] of this.rows) {
+      const name = `${path.join(this.dataDir, TABLE_FILE)}: the row for ${JSON.stringify(slot)}`;
+      if (!cfg.slotRegex.test(slot)) throw new Error(`${name}: the slot does not match provision.slotPattern`);
+      if (typeof cfg.prefix !== 'string') throw new Error(`${name}: provisioned slots need provision.prefix (with enabled false they stay served without the door)`);
+      if (e.base !== cfg.prefix + slot) throw new Error(`${name}: base ${JSON.stringify(e.base)} is not provision.prefix + slot`);
+      try { verify(slot, e); } catch (error) { throw new Error(`${name}: request: ${error.message}`); }
+    }
   }
 
   get(slot) { return this.rows.get(slot); }
@@ -139,7 +207,7 @@ export class ProvisionTable {
   async write(slot, entry) {
     const next = new Map(this.rows);
     if (entry) next.set(slot, entry); else next.delete(slot);
-    const bytes = Buffer.from(JSON.stringify(Object.fromEntries([...next].sort(([a], [b]) => (a < b ? -1 : 1)))) + '\n');
+    const bytes = Buffer.from(serialize(next));
     const staged = path.join(this.dataDir, `.${TABLE_FILE}.${randomBytes(8).toString('hex')}`);
     const handle = await fsp.open(staged, 'wx', 0o600);
     try { await handle.write(bytes); await handle.sync(); } finally { await handle.close(); }

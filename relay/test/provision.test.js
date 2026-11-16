@@ -351,9 +351,13 @@ describe('the provisioning door', { skip: ready ? false : `build the module firs
     assert.equal((await raw(running.port, '/v1/libraries/tabcdef0123')).status, 200);
     const again = await ask(running.port, 'tabcdef0123');
     assert.equal(again.body.toString(), first.body.toString());
-    // Off after a restart: the door is gone, the slot is still served.
+    // Off after a restart (the table file is there, so the prefix is kept): the door is gone,
+    // the slot is still served.
     await running.close();
-    running = await startRelay({ port: 0, dataDir: dir, tickMs: 0, libraries: {}, clock, home: { wasm, key: key.jwk } });
+    running = await startRelay({ port: 0, dataDir: dir, tickMs: 0, libraries: {}, clock, home: { wasm, key: key.jwk }, provision: { enabled: false, prefix: PREFIX } });
+    await running.close();
+    await assert.rejects(startRelay({ port: 0, dataDir: dir, tickMs: 0, libraries: {}, clock, home: { wasm, key: key.jwk } }), /provision\.prefix/);
+    running = await startRelay({ port: 0, dataDir: dir, tickMs: 0, libraries: {}, clock, home: { wasm, key: key.jwk }, provision: { enabled: false, prefix: PREFIX } });
     assert.equal((await raw(running.port, '/v1/libraries/tabcdef0123')).status, 200);
     assert.equal((await ask(running.port, 'tabcdef0123')).status, 404);
   });
@@ -407,5 +411,176 @@ describe('the provisioning door', { skip: ready ? false : `build the module firs
     const head = (ip) => raw(running.port, '/v1/libraries/tslot000001/head', { headers: from(ip) });
     assert.deepEqual([(await head('203.0.113.1')).status, (await head('203.0.113.1')).status, (await head('203.0.113.1')).status], [404, 404, 429]);
     assert.equal((await head('203.0.113.9')).status, 404, 'another client is not limited by the first');
+  });
+});
+
+/** A table file as the relay writes it. */
+const tableText = (rows) => {
+  const out = {};
+  for (const [slot, e] of Object.entries(rows).sort(([a], [b]) => (a < b ? -1 : 1))) out[slot] = { account: e.account, base: e.base, at: e.at, request: e.request };
+  return JSON.stringify(out) + '\n';
+};
+
+describe('releasing an unclaimed slot', { skip: ready ? false : 'module not built' }, () => {
+  let dir; let key; let now;
+  const clock = () => now;
+  before(async () => { key = await homeKey(); });
+  const begin = async (hook) => {
+    dir = await mkdtemp(path.join(tmpdir(), 'colophon-prov-'));
+    now = T0;
+    return provisioned({ dir, key, clock, tracing: true, hook });
+  };
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  test('a request paused after its access check, a release and a provision of the name for another account', async () => {
+    // The pause point: right after the home's access check, in A's upload. The release's drain
+    // point tells the test the provision of B is waiting on A.
+    let resume; const gate = new Promise((r) => { resume = r; });
+    let paused; const pausedAt = new Promise((r) => { paused = r; });
+    let draining; const drainingAt = new Promise((r) => { draining = r; });
+    let armed = true;
+    const running = await begin((point) => {
+      if (point === 'access authority' && armed) { armed = false; paused(); return gate; }
+      if (point.startsWith('release draining')) draining();
+      return undefined;
+    });
+    const slot = 'tslot00000a';
+    try {
+      assert.equal((await ask(running.port, slot)).status, 200);
+      const a = raw(running.port, `/v1/libraries/${slot}/authority`, { method: 'POST', headers: JSON_TYPE,
+        body: JSON.stringify({ from: 1, entries: [{}], receipts: [] }) });
+      await pausedAt;
+      now = T0 + 25 * HOUR;
+      const b = ask(running.port, slot, { account: OTHER });
+      await drainingAt;
+      // Closing: out of dispatch at once, and its directory still there while A is in flight.
+      const during = await raw(running.port, `/v1/libraries/${slot}`);
+      assert.equal(during.status, 404);
+      assert.deepEqual(json(during), { result: 'refused:notProvisioned' });
+      assert.ok(existsSync(path.join(dir, slot, 'home-state.json')), 'not removed while A is in flight');
+      resume();
+      const [ra, rb] = [await a, await b];
+      assert.equal(ra.status, 422, 'A held nothing (not a genesis), so the release went on after it');
+      assert.equal(rb.status, 200, rb.body.toString());
+      const s = await running.relay.slot(slot);
+      assert.equal(s.home.status().account, OTHER, 'B\'s slot is B\'s');
+      assert.equal(s.home.status().held, 0, 'nothing of A in it');
+      assert.equal((await table(dir))[slot].account, OTHER);
+    } finally { await running.close(); }
+    // A restart finds no account mismatch.
+    const again = await provisioned({ dir, key, clock });
+    try { assert.equal((await raw(again.port, `/v1/libraries/${slot}`)).status, 200); } finally { await again.close(); await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test('a long poll waiting on the slot is woken and ended by the release', async () => {
+    const running = await begin(undefined);
+    const slot = 'tslot00000a';
+    try {
+      assert.equal((await ask(running.port, slot)).status, 200);
+      // A home serves its change feed only to a caller its module allows; this test stands in
+      // for that allowance, so the relay's own long poll runs on the slot.
+      const s = await running.relay.slot(slot);
+      s.home.handle = async () => false;
+      const first = json(await raw(running.port, `/v1/libraries/${slot}/changes`));
+      const poll = raw(running.port, `/v1/libraries/${slot}/changes?after=${encodeURIComponent(first.cursor)}&wait=30`);
+      while (s.waiters.size === 0) await settle();
+      now = T0 + 25 * HOUR;
+      assert.equal((await ask(running.port, 'tslot00000b')).status, 200, 'its provision released the first slot');
+      const ended = await poll;
+      assert.equal(ended.status, 404);
+      assert.deepEqual(json(ended), { result: 'refused:notProvisioned' });
+      assert.equal(existsSync(path.join(dir, slot)), false);
+      assert.equal(s.active, 0);
+      // A late use of the released Slot fails closed.
+      await assert.rejects(s.putImmutable('authority/00000001.json', Buffer.from('x')), /released/);
+      assert.equal(existsSync(path.join(dir, slot)), false);
+    } finally { await running.close(); await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test('a release racing two provisions of the name by the same account: both answer the same new bytes', async () => {
+    const running = await begin(undefined);
+    const slot = 'tslot00000a';
+    try {
+      const original = await ask(running.port, slot);
+      now = T0 + 25 * HOUR;
+      const [x, y] = await Promise.all([ask(running.port, slot), ask(running.port, slot)]);
+      assert.equal(x.status, 200);
+      assert.equal(y.status, 200);
+      assert.equal(x.body.toString(), y.body.toString());
+      assert.notEqual(x.body.toString(), original.body.toString(), 'released, then provisioned anew');
+      const t = await table(dir);
+      assert.deepEqual(Object.keys(t), [slot]);
+      assert.equal(t[slot].at, T0 + 25 * HOUR);
+      assert.equal((await raw(running.port, `/v1/libraries/${slot}`)).status, 200);
+    } finally { await running.close(); await rm(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('the provisioning table at start-up', { skip: ready ? false : 'module not built' }, () => {
+  let key; let other; const now = T0; const clock = () => now;
+  before(async () => { key = await homeKey(); other = await homeKey(); });
+
+  /** A table with two good rows, made by the door; `edit` changes it; start-up must refuse. */
+  async function refuses(edit, pattern, opts = {}) {
+    const dir = await mkdtemp(path.join(tmpdir(), 'colophon-prov-'));
+    try {
+      const r = await provisioned({ dir, key, clock });
+      assert.equal((await ask(r.port, 'tslot00000a')).status, 200);
+      assert.equal((await ask(r.port, 'tslot00000b', { account: OTHER })).status, 200);
+      await r.close();
+      const file = path.join(dir, 'provisioned.json');
+      const rows = JSON.parse(await readFile(file, 'utf8'));
+      const text = await edit(rows);
+      await writeFile(file, text ?? tableText(rows));
+      await assert.rejects(provisioned({ dir, key: opts.key ?? key, clock, ...(opts.provision ? { provision: opts.provision } : {}) }), pattern);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+
+  test('a row whose base is not prefix + slot', () => refuses((t) => { t.tslot00000a.base = 'https://evil.example/'; }, /"tslot00000a": base/));
+  test('a request that is not base64', () => refuses((t) => { t.tslot00000a.request = '!!!'; }, /"tslot00000a": request is not base64/));
+  test('a request that is not a member request', () => refuses((t) => { t.tslot00000a.request = Buffer.from('{"body":"e30=","signature":""}').toString('base64'); }, /"tslot00000a": request: home module/));
+  test('a request for another account', () => refuses((t) => { t.tslot00000a.account = OTHER; }, /"tslot00000a": request: .*another account/));
+  test('a request for another endpoint', () => refuses((t) => { t.tslot00000c = { ...t.tslot00000a, base: `${PREFIX}tslot00000c` }; delete t.tslot00000a; }, /"tslot00000c": request: .*another endpoint/));
+  test('a request signed by another home key', () => refuses(() => undefined, /"tslot00000a": request: .*not this home/, { key: other }));
+  test('a slot that breaks slotPattern', () => refuses(() => undefined, /"tslot00000a": the slot does not match/, { provision: { enabled: true, prefix: PREFIX, slotPattern: '^z' } }));
+  test('a row with another field', () => refuses((t) => { t.tslot00000a.extra = 1; return JSON.stringify(t) + '\n'; }, /"tslot00000a" is not exactly/));
+  test('a prototype key', () => refuses((t) => `{"__proto__":${JSON.stringify(t.tslot00000a)}}\n`, /"__proto__" is not a slot name/));
+  test('a duplicate key', () => refuses((t) => tableText(t).replace('{"tslot00000a":', `{"tslot00000a":${JSON.stringify(t.tslot00000b)},"tslot00000a":`), /not as this relay writes it/));
+  test('a hand edit', () => refuses((t) => JSON.stringify(t, null, 2), /not as this relay writes it/));
+  test('not JSON', () => refuses(() => '{', /not JSON/));
+  test('a table over its bound', () => refuses(() => ' '.repeat(10 * 1024 * 1024), /over its bound/));
+});
+
+describe('provisioning off leaves provisioned.json alone', () => {
+  test('a 0.3 slot named provisioned.json starts and serves; staging-like files are not touched', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'colophon-prov-'));
+    const libraries = { 'provisioned.json': { token: TOKEN } };
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    try {
+      let r = await startRelay({ port: 0, dataDir: dir, libraries });
+      const put = await raw(r.port, '/v1/libraries/provisioned.json/records/authority/00000001.json',
+        { method: 'PUT', headers: { ...auth, 'if-none-match': '*' }, body: 'genesis' });
+      assert.equal(put.status, 201);
+      await r.close();
+      await writeFile(path.join(dir, '.provisioned.json.0123'), 'not ours to remove');
+      for (const provision of [undefined, { enabled: false }, { enabled: false, prefix: PREFIX }]) {
+        r = await startRelay({ port: 0, dataDir: dir, libraries, provision });
+        const get = await raw(r.port, '/v1/libraries/provisioned.json/records/authority/00000001.json', { headers: auth });
+        assert.equal(get.status, 200);
+        assert.equal(get.body.toString(), 'genesis');
+        await r.close();
+      }
+      assert.ok(existsSync(path.join(dir, '.provisioned.json.0123')), 'nothing scanned or removed');
+      // Turning provisioning on with that slot there is refused, with a message.
+      await assert.rejects(startRelay({ port: 0, dataDir: dir, libraries: {}, provision: { enabled: true, prefix: PREFIX } }), /not a regular file/);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test('prefix: https, or plain http only to a loopback host', () => {
+    assert.throws(() => provisionConfig({ enabled: true, prefix: 'http://home.example/' }), /https/);
+    assert.throws(() => provisionConfig({ enabled: false, prefix: 'http://home.example/' }), /https/);
+    for (const prefix of ['http://127.0.0.1:8080/v1/libraries/', 'http://localhost/', 'http://[::1]:9/', 'https://home.example/']) {
+      assert.equal(provisionConfig({ enabled: true, prefix }).prefix, prefix);
+    }
   });
 });
