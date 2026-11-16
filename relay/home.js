@@ -670,7 +670,9 @@ export class HomeSlot {
 
   /** Persist the forwarding rows, one write at a time (passes to several peers run at once). */
   saveForward() {
-    this.saving = (this.saving ?? Promise.resolve()).then(() => this.writeJson('forward.json', this.forward)).catch((error) => {
+    // A snapshot taken under the lock when the save is asked for, not the live rows at write time.
+    const snapshot = this.lock(async () => JSON.parse(JSON.stringify(this.forward)));
+    this.saving = (this.saving ?? Promise.resolve()).then(async () => this.writeJson('forward.json', await snapshot)).catch((error) => {
       this.note('forward.json', `the forwarding state could not be saved: ${error.message}`);
     });
     return this.saving;
@@ -722,12 +724,15 @@ export class HomeSlot {
     const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: NEW_PER_PASS }));
     const urgent = (o) => (o.kind === 'transition' || o.kind === 'veto' ? 0 : 1);
     const fresh = [...page.objects].sort((x, y) => urgent(x) - urgent(y) || x.seq - y.seq);
-    if (page.objects.length) row.after = page.objects[page.objects.length - 1].seq;
+    // The cursor moves past the page only together with the page's misses, so no saved state
+    // has the one without the other.
+    const missed = [];
     for (const o of fresh) {
       const objects = Date.now() < deadline ? await this.listed(o.seq) : null;
-      if (Date.now() >= deadline) { row.retry.push(o.seq); continue; }
-      if (objects && !await this.tryOffer(base, objects, peerId)) row.retry.push(o.seq);
+      if (Date.now() >= deadline) { missed.push(o.seq); continue; }
+      if (objects && !await this.tryOffer(base, objects, peerId)) missed.push(o.seq);
     }
+    if (page.objects.length) { row.after = page.objects[page.objects.length - 1].seq; row.retry.push(...missed); }
     await save();
     // (2) Entries and the head.
     await this.forwardEntries(base, row, peerId);

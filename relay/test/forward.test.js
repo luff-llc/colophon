@@ -74,3 +74,39 @@ describe('offering entries to a peer', () => {
     assert.equal(posts, 2, 'not held back until the clock catches up');
   });
 });
+
+describe('the forwarding state saved while a pass is offering', () => {
+  let realFetch;
+  beforeEach(() => { realFetch = globalThis.fetch; });
+  afterEach(() => { globalThis.fetch = realFetch; });
+
+  test('a save made by another pass never has the cursor past an object without its retry', async () => {
+    const h = slot();
+    const listed = { seq: 7, digest: 'd'.repeat(64), kind: 'transition', envelope: ENTRY };
+    h.wasm.call = (req) => {
+      if (req.op === 'pending_page') return { objects: req.after < 7 ? [listed] : [], more: false };
+      if (req.op === 'forward_objects') return { objects: [ENTRY] };
+      if (req.op === 'forward_entries') return { from: 0, entries: [], exchange: false };
+      if (req.op === 'peer_answer') return { delivered: false, why: 'status 503' };
+      throw new Error(`unexpected op ${req.op}`);
+    };
+    let release; let offered;
+    const asked = new Promise((r) => { offered = r; });
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) { offered(); await new Promise((r) => { release = r; }); }
+      return { status: 503, text: async () => '', arrayBuffer: async () => new ArrayBuffer(0) };
+    };
+    const row = (h.forward.peers[PEER] = { after: 0, retry: [], head: '' });
+    const pass = h.forwardTo('http://peer.test', row, PEER);
+    await asked; // the pass is offering seq 7, and has not heard back
+    await h.saveForward(); // another peer's pass saves now; then the process dies
+    const saved = h.writes.filter((w) => w.name === 'forward.json').at(-1).value.peers[PEER];
+    assert.ok(saved.after < 7 || saved.retry.includes(7), `cursor ${saved.after} without retry ${JSON.stringify(saved.retry)}`);
+    release();
+    await pass;
+    const last = h.writes.filter((w) => w.name === 'forward.json').at(-1).value.peers[PEER];
+    assert.deepEqual([last.after, last.retry], [7, [7]], 'after the pass: past it, and to be offered again');
+  });
+});
