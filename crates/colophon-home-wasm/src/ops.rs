@@ -1831,14 +1831,32 @@ fn objects(req: &Value) -> R<Value> {
 // Provisioning: the home's own member request (§9.1) for a new account, which the account uses
 // to appoint this home. The relay calls this twice: first without `signature`, to get the body
 // it signs with the home key (`sign`), then with the signature, to get the verified envelope.
-// The same inputs give the same body both times; no state is involved.
+// The same inputs give the same body both times; no state is involved. With `request` instead,
+// it checks a stored request: a well-formed member request whose signature verifies under
+// `signing` (this home's key) and that names exactly `account` and `endpoint`.
 
 fn member_request(req: &Value) -> R<Value> {
     use colophon_core::v05::write::calls::{finish_request, prepare_request, RequestSpec};
     let account = AccountId::parse(str_of(req, "account")?).map_err(|e| e.to_string())?;
     let signing = bytes_of(req, "signing")?;
-    let agreement = bytes_of(req, "agreement")?;
     let endpoint = str_of(req, "endpoint")?.to_string();
+    if req.get("request").is_some() {
+        let raw = bytes_of(req, "request")?;
+        let parsed = colophon_core::v05::members::Request::parse(&raw, false)
+            .map_err(|e| e.to_string())?;
+        parsed.unknown.check().map_err(|e| e.to_string())?;
+        if parsed.account.as_str() != account.as_str() {
+            return Err("the request names another account".into());
+        }
+        if parsed.signing != signing {
+            return Err("the request is not this home's".into());
+        }
+        if parsed.endpoints.as_deref() != Some(std::slice::from_ref(&endpoint)) {
+            return Err("the request names another endpoint".into());
+        }
+        return Ok(json!({"verified": true}));
+    }
+    let agreement = bytes_of(req, "agreement")?;
     // A few seconds before the home's clock, so a device whose clock is a little behind does
     // not read the request as created in its future.
     let created = format_date(i64_of(req, "now")?.saturating_sub(5_000));
