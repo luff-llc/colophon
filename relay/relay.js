@@ -1,10 +1,14 @@
 // Colophon 0.3 reference relay (spec §8). Stores opaque records per library slot.
 // Dependency-free: node:http, node:https, node:fs, node:path and node:crypto only.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { constants as fsc, promises as fsp } from 'node:fs';
+import { constants as fsc, promises as fsp, writeSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { HomeKey, HomeModule, HomeSlot } from './home.js';
+import {
+  ProvisionTable, TABLE_FILE, clientAddressConfig, clientAddressResolver, isJsonType, memberRequest, parseProvisionBody,
+  provisionConfig, provisionGate,
+} from './provision.js';
 import path from 'node:path';
 
 export const PROTOCOL = 'colophon/relay/3';
@@ -431,23 +435,40 @@ function readBody(req, max) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors, provision, clientAddress: addressConfig, crashAt }) {
   if (!dataDir) throw new Error('dataDir is required');
   if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
   const origins = corsOrigins(cors?.origins);
+  const provisioning = provisionConfig(provision);
+  // The address requests count against, for every per-address limit (never for access).
+  const clientAddress = clientAddressResolver(clientAddressConfig(addressConfig));
+  // Test builds only (tracing needs --test-clock): a marker on stderr, and a SIGKILL of this
+  // process at the named point, so a test can stop it exactly there.
+  const reach = (point) => {
+    if (!tracing) return;
+    writeSync(2, `trace ${point}\n`);
+    if (crashAt === point) process.kill(process.pid, 'SIGKILL');
+  };
   const effective = { ...DEFAULT_LIMITS, ...limits };
   await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
   await ensureRealDir(path.resolve(dataDir));
   const auth = new Map();
   const homeSlots = new Map();
+  // Slots apps provisioned through the door (`POST /v1/provision`), read before anything is served.
+  const table = await ProvisionTable.load(path.resolve(dataDir));
   let homeModule = null; let homeKey = null;
-  if (Object.values(libraries ?? {}).some((e) => e && e.home)) {
-    if (!home?.wasm || !home?.key) throw new Error('A home slot needs home.wasm (the module path) and home.key (a private P-256 JWK)');
+  if (Object.values(libraries ?? {}).some((e) => e && e.home) || provisioning.enabled || table.size > 0) {
+    if (!home?.wasm || !home?.key) throw new Error('A home slot, and provisioning, need home.wasm (the module path) and home.key (a private P-256 JWK)');
     homeModule = home.wasm instanceof HomeModule ? home.wasm : await HomeModule.load(home.wasm);
     homeKey = await HomeKey.fromJwk(home.key, homeModule);
   }
   for (const [name, entry] of Object.entries(libraries ?? {})) {
     if (!SLOT.test(name)) throw new Error(`Invalid library slot name: ${name}`);
+    if (name === TABLE_FILE && (provisioning.enabled || table.size > 0)) throw new Error(`${TABLE_FILE} is the provisioning table, not a slot name`);
+    const provisioned = table.get(name);
+    if (provisioned && (!entry?.home || entry.account !== provisioned.account)) {
+      throw new Error(`Slot ${name} is configured, and provisioned for account ${provisioned.account} in ${TABLE_FILE}: they must agree, or the slot be removed from one`);
+    }
     if (entry && entry.home) {
       if (typeof entry.base !== 'string' || !/^https?:\/\//.test(entry.base)) throw new Error(`Home slot ${name} needs base, the URL its account names as its endpoint`);
       // Provisioning: a home slot serves the one account the operator created it for.
@@ -462,6 +483,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     else if (entry && typeof entry.token === 'string' && entry.token.length >= 16) auth.set(name, createHash('sha256').update(entry.token).digest());
     else throw new Error(`Library slot ${name} needs tokenSha256, a token of at least 16 characters, or open: true`);
   }
+  for (const [name, e] of table.rows) if (!homeSlots.has(name)) homeSlots.set(name, { base: e.base, account: e.account });
+  const configured = new Set(Object.keys(libraries ?? {}));
   const slots = new Map();
   const opening = new Map();
   async function slot(name) {
@@ -477,7 +500,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
             clock, resolve, tracing,
-            deps: { HttpError, send, readBody, clampInt },
+            deps: { HttpError, send, readBody, clampInt, clientAddress },
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
@@ -499,12 +522,79 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     if (!match || !timingSafeEqual(given, expected)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Provisioning: the door, under one lock, and the release of slots nobody claimed.
+
+  const admitProvision = provisionGate(provisioning, clock);
+  let provisionTail = Promise.resolve();
+  const provisionLock = (fn) => { const run = provisionTail.then(fn, fn); provisionTail = run.catch(() => {}); return run; };
+
+  /** A provisioned slot holding no genesis `unclaimedHours` after it was provisioned is
+   * released: its directory removed, then its row. A crash between the two leaves the row, and
+   * the slot is opened fresh and released again at the next start-up. */
+  async function releaseUnclaimed() {
+    const now = clock();
+    for (const name of [...table.keys()]) {
+      const e = table.get(name);
+      if (configured.has(name) || now - e.at < provisioning.unclaimedHours * 3_600_000) continue;
+      const s = await slot(name);
+      const released = await s.home.lock(async () => {
+        const st = s.home.status();
+        if (st.appointed || st.held > 0) return false;
+        homeSlots.delete(name); slots.delete(name); opening.delete(name);
+        await fsp.rm(s.root, { recursive: true, force: true });
+        return true;
+      });
+      if (released) await table.write(name, null);
+    }
+  }
+
+  async function door(req, res) {
+    if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed', { allow: 'POST' });
+    // Checked before the body is read. A page on an origin not listed is refused here; any page
+    // must send application/json, which a browser preflights, and only a listed origin's
+    // preflight succeeds.
+    if (req.headers.origin !== undefined && !origins.has(req.headers.origin)) { req.resume(); throw new HttpError(403, 'Requests from this origin are refused'); }
+    if (!isJsonType(req.headers['content-type'])) { req.resume(); throw new HttpError(415, 'Content-Type must be application/json'); }
+    const body = await readBody(req, 4096);
+    const asked = parseProvisionBody(body) ?? {};
+    const address = clientAddress(req);
+    const answer = await provisionLock(async () => {
+      await releaseUnclaimed();
+      const valid = typeof asked.slot === 'string' && SLOT.test(asked.slot);
+      const occupied = valid && (configured.has(asked.slot)
+        || (!table.get(asked.slot) && await fsp.lstat(path.join(path.resolve(dataDir), asked.slot)).then(() => true, () => false)));
+      const verdict = admitProvision({ ...asked, address, authorization: req.headers.authorization,
+        held: { entry: table.get(asked.slot), occupied, count: table.size } });
+      if (!verdict.admit) {
+        throw new HttpError(verdict.status, verdict.error ?? 'Refused', verdict.retryAfter ? { 'retry-after': String(verdict.retryAfter) } : {},
+          verdict.result ? { result: verdict.result } : undefined);
+      }
+      if (verdict.existing) return Buffer.from(verdict.existing.request, 'base64');
+      const request = await memberRequest({ wasm: homeModule, key: homeKey, account: asked.account, base: asked.base, now: clock() });
+      // Durable before answered: a crash after this write leaves a row the same request completes.
+      await table.write(asked.slot, { account: asked.account, base: asked.base, at: clock(), request: request.toString('base64') });
+      reach('provision written');
+      homeSlots.set(asked.slot, { base: asked.base, account: asked.account });
+      await slot(asked.slot);
+      return request;
+    });
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': answer.length });
+    res.end(answer);
+  }
+
   async function handle(req, res) {
     const url = new URL(req.url, 'http://relay.invalid');
     if (url.pathname === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true });
+    if (provisioning.enabled && url.pathname === '/v1/provision') return door(req, res);
     const route = /^\/v1\/libraries\/([^/]+)(?:\/(changes|records|head|authority|pending|predecessor)(?:\/(.*))?)?$/.exec(url.pathname);
     if (!route) throw new HttpError(404, 'Not found');
     const [, name, section, recordPath] = route;
+    // With provisioning on, a slot this home does not hold is named as such (an app asks for its
+    // slot at the door); off, it is the 0.3 answer, unchanged.
+    if (provisioning.enabled && !homeSlots.has(name) && !auth.has(name)) {
+      throw new HttpError(404, 'Not provisioned', {}, { result: 'refused:notProvisioned' });
+    }
     if (!SLOT.test(name)) throw new HttpError(401, 'Unauthorized', { 'www-authenticate': 'Bearer' });
     if (!homeSlots.has(name)) authorize(req, name);
     const s = await slot(name);
@@ -586,7 +676,10 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   };
   let timer = null;
   if (homeSlots.size > 0) for (const name of homeSlots.keys()) await slot(name);
-  if (homeSlots.size > 0 && tickMs > 0) { timer = setInterval(() => { tickAll(); }, tickMs); timer.unref?.(); }
+  if (table.size > 0) await provisionLock(releaseUnclaimed);
+  // The timer runs whenever a home slot may exist: provisioning adds slots at run time, and
+  // `tickAll` reads the slot table on every pass.
+  if ((homeSlots.size > 0 || provisioning.enabled) && tickMs > 0) { timer = setInterval(() => { tickAll(); }, tickMs); timer.unref?.(); }
 
   return { listener, limits: effective, slot, tickAll, close: () => { if (timer) clearInterval(timer); } };
 }

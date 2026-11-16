@@ -58,11 +58,139 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Other homes | config `resolve`: `{"https://other.example/v1/libraries/acct": "http://10.0.0.7:8787/v1/libraries/acct"}` (the endpoint an account names, to the URL to reach it) | the endpoint itself |
 | Request rate | `limits.requestsPerMinute` (per address) | `1200` |
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
+| CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
+| Provisioning | config `provision` (below) | off |
+| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1"]}` | the socket address |
 
-**Provisioning.** The operator creates a home slot for one account, by its account ID, before
-anything is uploaded. Its first upload is accepted only if it starts with the genesis whose digest
-is that ID; anything else is refused and nothing is held. The relay refuses to start a home slot
-with no account, or one whose stored state belongs to another account or another home key.
+**Provisioning.** A home slot serves one account, by its account ID, from before anything is
+uploaded. Its first upload is accepted only if it starts with the genesis whose digest is that ID;
+anything else is refused and nothing is held. The relay refuses to start a home slot with no
+account, or one whose stored state belongs to another account or another home key. A slot is
+made in one of two ways:
+
+- The operator configures it (`COLOPHON_RELAY_HOME_SLOTS` or `libraries`), and restarts.
+- An app creates it, with no restart, at the door `POST /v1/provision` when `provision.enabled`
+  is true. The body is `{"slot","base","account"}` with `Content-Type: application/json` and a
+  `Content-Length`, as the test apps send it. The answer is 200 with the home's signed member
+  request (§9.1), JSON bytes: the account appoints the home with it. The home module builds and
+  verifies the request and the home key signs it. The same `{slot, account}` again answers the
+  same bytes. The row (`slot` to `{account, base, at, request}`) is written to
+  `<dataDir>/provisioned.json` (staged, fsynced, renamed) before the answer, and read at
+  start-up with the configured slots; a slot both configured and provisioned with different
+  accounts refuses start-up. Provisioned slots are scheduled like configured ones, and stay
+  served when provisioning is later turned off.
+
+| `provision` field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | The door answers 404 when off, and every other answer is as without the setting |
+| `prefix` | none, required when on | The public URL prefix, ending in `/`: `base` must equal `prefix + slot` |
+| `maxSlots` | `200` | Provisioned slots this home holds |
+| `perAddressPerHour` | `10` | New slots, and refused tokens, one client address may spend in an hour |
+| `unclaimedHours` | `24` | A provisioned slot holding no genesis this long after it was made is released (its directory, then its row, removed) at the next provision or start-up, on the relay's clock |
+| `slotPattern` | `^[a-z0-9][a-z0-9._-]{7,63}# Colophon reference relay, and a Colophon 0.5 home
+
+A small Bun server. It is the 0.3 HTTP exchange ([spec §8](../spec/colophon-0.3.md#8-http-exchange),
+incorporated by 0.5 §11.8): per library slot, signed and encrypted records on disk, moved between
+devices. And, for a slot you mark as a **home**, the server of Colophon 0.5
+([§13 homes and heads](../spec/colophon-0.5.md#13-homes-and-heads),
+[§14 exchange](../spec/colophon-0.5.md#14-exchange)): it keeps a copy of one account's history, orders
+and receipts authority changes, signs heads, and serves members.
+
+A relay is untrusted by clients. A home must itself be correct, so every decision a home makes is
+made by the same Rust code the verifier uses (see "How it is built"). Slots that are not homes
+behave exactly as the 0.3 relay always did: a token is storage access, never membership, and the
+relay holds no keys. `GET {base}` keeps the marker `colophon/relay/3` (0.5 §20 lists it, and §14
+says a home *adds* `home` to that response).
+
+## Run it
+
+```sh
+bun relay/server.js token       # a new bearer token and its SHA-256 (as before)
+bun relay/server.js home-key    # a new home key: a private P-256 JWK. Keep it secret.
+```
+
+A plain 0.3 slot:
+
+```sh
+COLOPHON_RELAY_TOKENS="home=<token>" COLOPHON_RELAY_DATA=./relay-data bun relay/server.js
+```
+
+A 0.5 home. The account names this home in a member request whose `service.endpoints` is the
+slot's public URL (it must be `https://`); that URL is the slot's `base`, and the call audience:
+
+```sh
+bun relay/server.js home-key > home-key.jwk        # once; chmod 600; never commit it
+cargo build --target wasm32-unknown-unknown --release -p colophon-home-wasm
+COLOPHON_RELAY_HOME_SLOTS="acct=<account ID>@https://home.example.org/v1/libraries/acct" \
+COLOPHON_HOME_KEY_FILE=home-key.jwk                         \
+COLOPHON_HOME_WASM=target/wasm32-unknown-unknown/release/colophon_home_wasm.wasm \
+COLOPHON_RELAY_DATA=./relay-data  bun relay/server.js
+# {"listening":{"host":"127.0.0.1","port":8787,"tls":false}}
+curl http://127.0.0.1:8787/v1/libraries/acct      # {"protocol":"colophon/relay/3", ..., "home":{"member":"<ID>"}}
+```
+
+The `member` in that answer is the home's ID (the key ID of its signing key). Give the signing point
+of the key (the JWK's `x`, `y`) and any agreement point to the host that appoints the home. The
+home holds no account secret: no controller or member key, no PRF output, no seed (§13.1).
+
+| Setting | Env | Default |
+| --- | --- | --- |
+| Listen host / port | `COLOPHON_RELAY_HOST`, `COLOPHON_RELAY_PORT` (0 picks a free port) | `127.0.0.1`, `8787` |
+| Data directory | `COLOPHON_RELAY_DATA` | `./relay-data` |
+| Config file | `COLOPHON_RELAY_CONFIG` or `--config` | none |
+| Plain tokens | `COLOPHON_RELAY_TOKENS="slot=token,…"` (or `tokenSha256` in a config file) | none |
+| Token-free slots (tests only) | `COLOPHON_RELAY_OPEN="slot"` | none |
+| Home slots | `COLOPHON_RELAY_HOME_SLOTS="slot=<account ID>@<base URL>,…"` (config: `libraries.slot = {"home":true,"account":…,"base":…}`) | none |
+| Home key | `COLOPHON_HOME_KEY_FILE` (preferred) or `home.keyFile` in the config; `COLOPHON_HOME_KEY` (the JWK itself) is readable from the process environment, so prefer a file | required for a home |
+| Home module | `COLOPHON_HOME_WASM`, or `home.wasm` | required for a home |
+| Scheduler tick | `COLOPHON_RELAY_TICK_MS` or `tickMs` | `2000` |
+| Other homes | config `resolve`: `{"https://other.example/v1/libraries/acct": "http://10.0.0.7:8787/v1/libraries/acct"}` (the endpoint an account names, to the URL to reach it) | the endpoint itself |
+| Request rate | `limits.requestsPerMinute` (per address) | `1200` |
+| TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
+| CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
+| Provisioning | config `provision` (below) | off |
+| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1"]}` | the socket address |
+
+ | Names an app may pick, besides the slot grammar |
+| `gate` | `"open"` | Who may provision: `"open"` (anyone within the bounds) or `"token"` (`Authorization: Bearer <token>` whose SHA-256 is `tokenSha256`; `bun relay/server.js token` prints one). Anything else refuses start-up |
+| `tokenSha256` | none | 64 hex; required with gate `"token"`, compared in constant time |
+
+| The door answers | When |
+| --- | --- |
+| 200 the member request | Admitted, or the same `{slot, account}` again |
+| 400 `{"result":"malformed"}` | The body is not exactly `{"slot","base","account"}`, the slot breaks the grammar or `slotPattern`, `base` is not `prefix + slot`, or `account` is not 64 lower-case hex |
+| 403 `{"result":"refused:noEntitlement"}` | Gate `"token"` and the token is missing or wrong (counted against the address's hourly share) |
+| 403 | The request carries an `Origin` not on the CORS list (checked before the body is read) |
+| 405 | Not `POST` |
+| 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory |
+| 411, 413 | No `Content-Length`, or a body over 4 KiB |
+| 415 | The media type is not `application/json` (checked before the body is read; a browser must preflight such a request, and only a listed origin's preflight succeeds) |
+| 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token) |
+| 507 `{"result":"refused:overQuota"}` | `maxSlots` are held |
+
+The gate is one function, `admitProvision` in `relay/provision.js`: every check goes through it,
+and an entitlement presented in `Authorization` is added there. `refused:closed` is reserved and
+not produced. With provisioning on, a request to a slot this home does not hold answers 404
+`{"result":"refused:notProvisioned"}` instead of the 0.3 answer, 401 `WWW-Authenticate: Bearer`.
+
+**The client address.** The per-address request limit and `perAddressPerHour` count against one
+address, from one function. By default it is the socket address. Behind a proxy (the staging home
+sits behind a Cloudflare tunnel, so every request comes from 127.0.0.1) set `clientAddress`: the
+header is read only when the socket peer is in `trustedPeers`; from a trusted peer a missing or
+malformed header (a list, two headers, not an IP address) counts against one shared bucket, never
+an unlimited one; from any other peer the header is ignored. The address is used for limits only,
+never for access.
+
+**CORS and caching.** Every answer, whoever writes it, carries `Cache-Control: no-store,
+no-transform` and no `Content-Encoding`; with a CORS list, `Vary: Origin`, and for a listed
+origin `Access-Control-Allow-Origin` and `Access-Control-Expose-Headers: ETag, Retry-After,
+WWW-Authenticate` (never `Allow-Credentials`). `OPTIONS` is answered before any slot, call or
+rate work: 204, with the allowed methods (`GET, POST, PUT, OPTIONS`) and headers
+(`Authorization, Content-Type, If-Match, If-None-Match`) and `Access-Control-Max-Age: 600` for a
+listed origin's preflight.
+
+**Clients must send `Content-Length`.** A body without one is refused with 411. A proxy that passes
+chunked bodies through (the Cloudflare tunnel does) reaches the relay as 411.
 
 **Credentials.** At a home slot a bearer token authorizes nothing (it is ignored, with a warning
 at start-up): every request that needs authorization takes `Authorization: Colophon …`. The key

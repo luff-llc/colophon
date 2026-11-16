@@ -3,8 +3,10 @@
 //   node relay/server.js                     start with env/config settings
 //   node relay/server.js --config file.json  start with a JSON config file
 //   node relay/server.js token               print a new bearer token and its SHA-256
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
+import path from 'node:path';
+import { TABLE_FILE, clientAddressConfig, provisionConfig } from './provision.js';
 import { corsOrigins, newToken, startRelay } from './relay.js';
 
 function loadConfig(argv, env) {
@@ -54,8 +56,18 @@ function loadConfig(argv, env) {
     throw new Error('cors in the config file must be an object: {"origins": ["https://app.example"]}');
   }
   corsOrigins(origins);
+  // Provisioning (the door at POST /v1/provision) and the client address behind a proxy: config
+  // file only. Checked here so a bad setting refuses start-up with its message (and again by
+  // createRelay).
+  provisionConfig(config.provision);
+  clientAddressConfig(config.clientAddress);
+  const tracing = Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1';
   return {
     cors: { origins: origins ?? [] },
+    provision: config.provision,
+    clientAddress: config.clientAddress,
+    // A test hook with the trace: the relay kills itself at the named point.
+    crashAt: tracing ? env.COLOPHON_RELAY_CRASH_AT : undefined,
     home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
     // The test clock: a reading taken while a test rewrites the file can be empty; read again
     // rather than take 0 (which would put every entry in the future).
@@ -66,7 +78,7 @@ function loadConfig(argv, env) {
       }
       throw new Error('the test clock file holds no time');
     } : undefined,
-    tracing: Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1',
+    tracing,
     tickMs: Number(env.COLOPHON_RELAY_TICK_MS ?? config.tickMs ?? 2000),
     resolve: config.resolve,
     host: env.COLOPHON_RELAY_HOST ?? config.host ?? '127.0.0.1',
@@ -91,7 +103,7 @@ if (process.argv[2] === 'home-key') {
     console.error(error.message);
     process.exit(2);
   }
-  if (Object.keys(config.libraries).length === 0) {
+  if (Object.keys(config.libraries).length === 0 && config.provision?.enabled !== true && !existsSync(path.join(config.dataDir, TABLE_FILE))) {
     console.error('No library slots configured. Set COLOPHON_RELAY_TOKENS=slot=token or pass --config.');
     process.exit(2);
   }
