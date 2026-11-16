@@ -342,9 +342,9 @@ fails those tests; otherwise they are skipped with a printed `SKIPPED:` line nam
 
 ## Notices (not built: the contract is missing)
 
-§13.1 says a home MUST push a notice to every delivery route registered with it on receipting a
-transition, a veto or a `suspend`, and §17.5 that hosts MUST register at least two routes with
-every home at setup. 0.5 gives a notice no signed body and no wire format, and nothing defines how
+Notice delivery and route registration are deferred to 0.6 (spec §17.5, revision 18). 0.5 requires
+a home to keep and serve pending objects until they are settled, and a syncing host to show them
+with their due time; this home does both. The contract below remains the proposal for 0.6. 0.5 gives a notice no signed body and no wire format, and nothing defines how
 a host registers a route with a home. The Swift and Kotlin sessions expect one: a
 `DeliveryRoute {kind: push|email|sms|webhook|other, address, reaches}` and a host-supplied
 `registerRoutes(account, routes) -> Bool` closure (`swift/Sources/ColophonSession/HostDuties.swift`,

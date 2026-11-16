@@ -2538,8 +2538,8 @@ different devices or services (for example push to a second device, and e-mail),
 observable behaviour tested against a simulated home, were 0.5 rules until revision 18. They come
 back in a later version, starting from the contract proposed in `relay/README.md` ("Notices").
 
-With syncing in the background and missed changes shown afterwards, the default delay stays
-72 hours: it is the time in which one of the person's devices syncs and shows the change.
+The default delay stays 72 hours. The 72-hour delay provides a veto opportunity only if a device
+syncs and shows the change before the deadline; missed changes are shown afterwards.
 
 
 ## 18. Policy fields and defaults
@@ -2784,7 +2784,7 @@ The one list. The README, the changelog and §18 point here.
    (`issued` + 300 s + `recoveryDelay`, 72 hours 5 minutes by default). The engine reports a home's
    421 and does not follow it, and if the old home is gone nothing in 0.5 tells a device where the
    new one is.
-3. **One home per account.** Several homes are optional and experimental (§13.1, §18); the open
+3. **Only one-home operation is supported; several homes are experimental.** They are optional (§13.1, §18); the open
    issues are in [docs/multi-home-open-issues.md](../docs/multi-home-open-issues.md).
 4. **What one home can do undetected.** It can withhold the history indefinitely, and a device
    cannot tell that from an outage. It can receipt a transition and hide it until its veto
@@ -2813,7 +2813,23 @@ The one list. The README, the changelog and §18 point here.
 12. **Before an account opts in to a later version, a 0.5 device may refuse something newer**
     rather than ask to be updated (§20 "Limits of 0.5").
 13. **Nothing is published** to npm, Maven or a Swift registry.
-
+14. **Not every required vector exists.** The required items with no vector or test are listed in
+    §21 condition 1.
+15. **No Swift differential corpus** (§21 condition 3): the §16.3 verifier is not shown to match the
+    released Swift verifier on macOS, iOS and visionOS.
+16. **Galley alignment is not recorded** (§21 condition 6).
+17. **No guaranteed background sync.** Nothing makes a device sync in the background, so a pending
+    change may not be seen inside the delay (§17.5), and nothing is proven about background
+    execution on phones.
+18. **Competing successors.** Two successors of one predecessor can each verify, for different
+    verifiers (§15.1, the implementation notes' open item 2); the host rule keeps honest hosts from
+    making it.
+19. **A limited removal follow-up.** The removal follow-up (§17.5) lists only what the removed key
+    added since the transition's anchor; a wider list is a question for after 0.5.
+20. **The revision-16 features deferred to 0.6:** F1 (unknown content, one rule), F4 (raisable
+    limits and `witnessWindow`), F5 (namespaces after genesis, a live-rule registry), F6 (opaque
+    members), F7 (location statements) and F8 (invites); see changes §A.12 and the design's
+    "Deferred to 0.6".
 
 ## 22. Review log
 

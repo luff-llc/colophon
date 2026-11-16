@@ -76,8 +76,9 @@ session.state.collect { render(it.phase, it.notices) }                    // pen
 * **Blobs**: `putBlob(bytes | file, ...)`, `blobAvailability`, `blobData`, `prefetchBlob`, `downloadRequiredBlobs`,
   `setBlobReference`. A required blob arrives with the exchange, an optional one when asked.
 * **What a person must see**: `notices.pending` (with `vetoable`), `veto(digest)`, `proposeTransition(json)`,
-  `notices.unseenActivations` and `acknowledgeActivation(seq)`, `notices.noHome`, `duties` (sole device, delivery
-  routes, submissions, dead transitions, the removal follow-up with `removeFollowUp` / `keepFollowUp`).
+  `notices.unseenActivations` and `acknowledgeActivation(seq)`, `notices.noHome`, `duties` (sole device,
+  submissions, dead transitions, the removal follow-up with `removeFollowUp` / `keepFollowUp`). `duties` also exposes
+  optional route-registration state for host extensions; routes are not a 0.5 requirement.
 * **Lock** on `onStop` (`lock()`), `unlock()` on `onStart`. `shutdown()` locks the engine and stops the loops.
 * Background exchange polls every `duties.pollIntervalMs`; `requestSync()` wakes it, `stopSync()` stops it.
 

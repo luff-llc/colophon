@@ -226,8 +226,9 @@ shown. Unlocking a device member is silent.
 `perform(command, observed)` refreshes, requires `observed.revision` to be current, prepares, signs, finishes, **writes
 the stores all or none**, then publishes the new state. `query` and `view` read. The blob calls keep the other SDKs'
 names. `notices` and `duties` carry what spec §17.5 and §18 say a person must see: pending transitions with `vetoable`,
-unseen activations, `noHome`, the sole-device warning, dead transitions, delivery routes, the removal follow-up
-(`removeFollowUp`, `keepFollowUp`). `veto`, `proposeTransition`, `resign` and `suspendKey` submit to every home until
+unseen activations, `noHome`, the sole-device warning, dead transitions, the removal follow-up
+(`removeFollowUp`, `keepFollowUp`). `duties` also exposes optional route-registration state for host extensions; routes
+are not a 0.5 requirement. `veto`, `proposeTransition`, `resign` and `suspendKey` submit to every home until
 each receipted it or 300 s passed. A veto is submitted and waited for by **its own digest** (`vetoes/<digest>.json`),
 not the transition's; it is also done when the transition is no longer pending, because once a home has recorded the
 veto the other homes have nothing left to receipt. `acknowledgeActivation` marks one activation seen and never dismisses a pending
