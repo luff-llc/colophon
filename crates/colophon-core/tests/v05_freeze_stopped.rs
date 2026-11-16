@@ -120,7 +120,7 @@ fn fixture() -> Fixture {
     .unwrap();
     let seed = host.fresh();
     let action = account
-        .begin_approve(&req.raw, terms, &[d.clone()], seed, pairing)
+        .begin_approve(&req.raw, terms, std::slice::from_ref(&d), seed, pairing)
         .unwrap();
     run(&mut account, &host, action);
     let mut f = Fixture {
@@ -186,7 +186,7 @@ fn raise_transition(f: &mut Fixture, to: u64) -> Vec<u8> {
         .account
         .begin_transition(
             &Change::policy(json!({"callWindow": 120})),
-            &[f.d.clone()],
+            std::slice::from_ref(&f.d),
             TransitionRule::Control,
         )
         .unwrap();
