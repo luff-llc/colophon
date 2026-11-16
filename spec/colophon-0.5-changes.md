@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 15, 2026-11-15. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 17, 2026-11-15. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -277,6 +277,91 @@ Text only: no verifier, vector or code changed in this revision. Each row maps a
 | 158 | §17.5 removal follow-up: only what the removed key added since the anchor, not before it, as built | PR #23 Q8; owner decision (the wider list is a post-0.5 question) |
 
 Checked and already in the text, unchanged: notices have no signed body or wire format (§13.1, §17.5); link `created` carries no rule (§12.1); a late veto with another home's in-window receipt (§13.1); two heads for one seq (§13.3); several envelopes over one body (§2.2, §8.6); receipts and heads judged for validity only, a head's time against the entry's own `issued` (§8.7); `resolve` carries `kept: {seq, digest}` (§8.6, §8.7); the shares-only `renew` (§9.4); two successors as a stated limit (§15.1).
+
+### A.12 Revision 16: the freeze package
+
+Text only: no verifier, vector or code changed in this revision. Every row is marked **code follows
+in the freeze package**: the rule is stated ahead of the code, and the design, with the functions,
+vectors and order of work, is [docs/design-freeze-package.md](../docs/design-freeze-package.md)
+(item names F1 to F8, R and L are its sections). Sources: the consolidated freeze list of
+2026-11-15, the Opus and Daybreak freeze reviews of revision 15, the domains survey
+(`docs/roadmap-domains-as-plugins.md`), the E12 check's three Low findings, the home package's owed
+sentence and the test apps' report on joining by camera. Four existing vectors change verdict when
+the code lands, each named in its row.
+
+| # | Change | Why |
+| --- | --- | --- |
+| 159 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §1 "One rule for what a reader does not understand": unknown content in any authenticated object is `newerFormat` after steps 1–3; the closed objects are named (envelopes and signature items, unsigned recording entries, the QR payload and the invite, equivocation evidence, the legacy formats); exchange JSON: clients ignore unknown response members, a home answers 422 `newerFormat` to an unknown request member. §2.3 lists the places. **Code follows in the freeze package** (F1: eight places that ignore unknown content today and the closed parses of the audit) | F1; both reviews |
+| 160 | §1 "A stop": kept in revision 17 in the form the door needs (see row 191). **Code follows** | F3 |
+| 161 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §1: `colophon/operation/<N>` for N above 5 is the one marker exception; §11.2 "Stable fields" freezes the header fields every version keeps; an unknown header field, `level` or live-stamp field is `newerFormat` for that record. This narrows revision 15's `malformed` for an unknown marker and for an unknown `level`. **Code follows** | F1; Opus 6 |
+| 162 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §11.3: an unknown plaintext top-level field is `newerFormat`, not `invalidPayload`. **Code follows** | F1; Daybreak 3 |
+| 163 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §11.5 "Unknown content, and opaque authors": steps 1–8 frozen (an unknown level or access needs only a `records` entry; such a header reserves and counts); a header after a `newerFormat` one with the same ID is `newerFormat`; unknown `colophon.` kinds are `newerFormat`; hosts show the count. §11.6: a `newerFormat` record before a resolution makes the proposal `newerFormat`. **Code follows** | F1, F6 |
+| 164 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §13.2, §13.3, §8.7, §13.5: unknown content in a head, its `authority`, a head inside a `final`, a receipt and a transition's `anchor` is `newerFormat` after the signature. **Code follows** | F1; Daybreak 3 |
+| 165 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §7.2: an unknown slot kind, part kind or field in a slot, part, `sealed` or the keyring's `vault` is `newerFormat`; typed checks only on known slots. **Code follows** | F1; Daybreak 3, 11 |
+| 166 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §9.3: an unknown field in a grant component or `homes.appoint` item is `newerFormat` (`shares` stays `malformed`); revision 15 made it `malformed`. **Code follows**; `rules/t-grant-component-extra-field` changes from `malformed` to `newerFormat` | F1 |
+| 167 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §15.1, §15.4: unknown content in `predecessor`, its `head`, a Swift succession veto and `migration` (an unknown member `kind` or `outcome` too) is `newerFormat`. **Code follows** | F1; Daybreak 3 |
+| 168 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §12.2, §12.3: an unknown call `signer` variant stays `malformed` unless `key` is a current principal's signing point, then `newerFormat` after steps 1–5, reserving nothing; `account` and `organisation` reserved and refused. **Code follows** | F1, R; Daybreak 3, 10; check 16 |
+| 169 | §8.5 step 3 "Current principal": one check (controller, member, home: not revoked, expired, provisional or suspended, role allowed) wherever a principal's signature is accepted, before unknown content; an expired or provisional member's `endSessions` is `badSignature`. Unknown kinds keep the control rule (the first draft's wider signer rule is withdrawn). **Code follows** | check 1, 2, 3; Opus 1 (not adopted) |
+| 170 | §8.7 "Unknown components": the control rule, as revision 15; the recording entry is `newerFormat`. §20: a later kind or component signed another way comes after the upgrade door, one opt-in per format version. **Code follows** (vectors only) | check 1, 3 |
+| 171 | §8.2 "Layout", §8.7, §20 "The upgrade door": `layout` is a stored integer; not raising voids the transition; above 2 is `newerFormat` and nothing after applies; the one door; a host checks every home's `layouts`. **Code follows**; `upgrade/then-v5-layout` (layout 2 in an account at 2) changes from `ok` to `malformed` and gains `upgrade/then-v5-layout-3` | F3; Daybreak 2 |
+| 172 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §2.4 "Limits that can be raised": a count or range above its 0.5 maximum and at most its ceiling is `newerFormat`; byte bounds, grammars, lower bounds and rule limits stay `malformed`; the table of maxima and ceilings. **Code follows**; `records/revoke-17-heads` and `succession/authority5-chain-17` change from `malformed` to `newerFormat` | F4; both reviews |
+| 173 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §8.2: up to 256 namespaces over an account's life (was 64; the builder already allowed 256) | F4; Opus 2 |
+| 174 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §6.3, §18: `policy.witnessWindow`, optional, absent 300, 60–3,600 s, changed by a transition with consent (§8.4); "Which W applies"; every witness-window 300 s of §8.6, §8.7, §13.1, §13.5, §15.1 and §17.5 reads W; the 60 s tolerance stays. **Code follows** | F4; Daybreak 9 |
+| 175 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §8.2 "Declaring a namespace after genesis": a `rekey` epoch 1 for an undeclared valid name declares it, after seq 2, under the `rekey` rule, not while retiring; never removed; `colophon.` names reserved; read scopes. **Code follows** | F5; survey 1 |
+| 176 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §11.8: 0.3 §5.1's podcast specifics and §6's table are the reference implementation's built-in modules; a live candidate with no known rule or `v` is `newerFormat`; the head rule with `newerFormat` candidates; `colophon.` kinds and namespaces reserved; reverse-DNS names for app namespaces; §10.2 record kinds follow the kind grammar. **Code follows** | F5; survey 2, 3 |
+| 177 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §9.8 "Opaque members", narrow form: only a new top-level term field is member-local; every other unknown in a grant is account-wide; an opaque member's records and calls are `newerFormat`, at a home too; host guidance with no security weight; "What later versions keep". §9.1, §10.2 (no epoch sealed to a member whose access a 0.5 host does not understand), §10.4 and §11.5 (an unknown operator in a grant no longer stops the account). **Code follows** | F6; Opus 4; check 6, 7 |
+| 178 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §9.1, §14 "A home's location": appointed endpoints are identifiers and the audience; calls go only to an appointed endpoint or a base named by a home-signed, monotonic `colophon/location/5` statement, stored, forwarded and served by every home and a folder at `records/locations/<id>.json`; with no other home and no folder, recovery needs another device. **Code follows** | F7; Opus 9, Daybreak 7; check 8, 9 |
+| 179 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §14 "What a home stores without understanding it": headers by stable fields; `ext/` side objects; authority still verified. **Code follows** | F1, R; Opus 7 |
+| 180 | §14 "Refusals a paid home may give": the four reserved codes; an unknown `refused:` refuses only that request and is shown raw; `closed` is not deletion. Revision 17 withdrew the retry signal and the closing-home SHOULD (deferred to 0.6). **Code follows** | R; Opus 8, Daybreak 8 |
+| 181 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §12.3 "No home": a configured verifier MAY take S from its persisted history for its own audience when the account has no home (default off). **Code follows** | R; Opus 10 |
+| 182 | §20 "Reserved names" and `GET {base}` `layouts`, text only. Revision 17 withdrew "Suites", `location`, `colophon/location/5` and `ext/` (deferred to 0.6) | R; Daybreak 11 |
+| 183 | §20 "Limits of 0.5": no compaction and what leaves room for it, `kept`, 512 MiB blobs, live slots, constants, homes, namespaces, successions, no home | the freeze list's accepted limits |
+| 184 | §3.3 rule 2: two distinct points with one key ID in one entry or transition are refused. **Code follows** (`apply_delta` key IDs) | E12 check L1 |
+| 185 | §17.1: the core refuses at preparation a transition whose delta it can already see is void, judging components against each other; it writes no `layout` component and nothing after a stop; it prepares or finishes a `grant` only by consuming a confirmed pairing (row 196). **Code follows** (`begin_transition`) | E12 check L2 |
+| 186 | **Withdrawn in the revision 17 fix round.** Was: a readable seq-0 Swift envelope makes the predecessor `malformed`. Now §16.3: an envelope at seq 0, readable or not, names no place in the chain and is ignored; anyone can write one without a key, so making it fatal would let a hostile home or folder fail a valid predecessor (§2.2). Matches today's code; no code change | E12 check L3; the code check of L3 |
+| 187 | §14: a successor's home holds the provisioned genesis, takes predecessor entries only as the chain it claims from its head down, and serves none before its first upload is verified | the home package's owed sentence |
+| 188 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §7.3 "Invites", §13.4 "An invite link", "What a leaked invite exposes": a link from the approving device's member key (current, not a home) for `colophon.history.read` of the authority chain and its verification pages at one or two named homes, never `/pending`; at most an hour (default 10 minutes); exempt from narrowing and depth; the closed `colophon/invite/5` object; the bound invite; the no-home invite. Replaces revision 15's "the history reaches a new device ... over the pairing channel". **Code follows** | F8; the test apps; check 10, 11, 17 |
+| 189 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §12.3 step 5, §19: a member ID no grant names is `refused:notGranted` ("not yet a member"), not `refused:revoked`. **Code follows** | F8; the test apps |
+| 190 | §19, §20: reserved home refusals; `refused:notGranted` kept as a reserved name only (0.5 answers `refused:revoked` for a member no grant names). Revision 17 withdrew `colophon/invite/5`, `colophon/location/5`, `colophon/operation/<N>` and the unknown-content results (deferred to 0.6) | F8, R |
+| 191 | §1 "A stop": a stopped reader trusts nothing new: every call `unavailable` whatever S, no head, no new record, no currency answer, nothing built; §12.3 step 4. Revision 17's fix round: a layout raise stops a reader only once its activation is final; a provisional raise is judged as any transition and a `vetoed` displaces it. **Code follows** | check 4; the revision 17 check, High 1 |
+| 192 | §13.6 "A stopped home": before a raise is final a 0.5 home treats it as any transition (receipts, `activate`, heads, a veto and its `vetoed`); after it, the table: what it keeps, serves, forwards and receipts (a veto, or a removal-only transition, anchored at or before N, within 300 s) and what it must not do. **Code follows** | check 5; the revision 17 check, High 1 |
+| 193 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §2.4 "Invariants come first": every version-independent invariant with known inputs is checked before `newerFormat`; `headQuorum` 9 with eight homes is `malformed`. **Code follows** | check 13 |
+| 194 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §11.8: the 0.5 live-rule registry is normative with one entry (podcast `position`), applied by every conforming 0.5 reader; any other live `(namespace, kind)` is `newerFormat` for all alike. **Code follows** | check 14 |
+| 195 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §8.2, §8.4: a `rekey` that declares a namespace needs the control rule with UV, no recovery-set consent. **Code follows** | check 15 |
+| 196 | §9.1, §17.1: the core prepares or finishes a `grant` only by consuming a confirmed pairing token bound to the account and the request's exact `member.signing`; no approval from an ID or prefix code; home appointment outside the rule (a stated limit). **Code follows**, first in the order of work (the SDK session layers approve by a 32-bit ID-prefix code today) | check 12; the test apps |
+| 197 | **Withdrawn in revision 17, deferred to 0.6** (revision 15 behaviour stands; the design's "Deferred to 0.6"). Was: §7.3: the invite is a closed object (revision 17: stated in §7.3 itself, since §1's list of closed objects belonged to F1, deferred) | check 17 |
+
+
+### A.13 Revision 17: the freeze package cut to what shipping needs
+
+Text only. The owner: "modularity can wait till 0.6, I just don't want to get blocked on shipping
+0.5. also don't want to do another full on migration once we start to work on 0.6", and "I'm not that
+worried about the unknowns." Revision 17 keeps what guarantees a later in-place upgrade and what
+shipping needs, and withdraws the rest of revision 16 (rows above marked withdrawn), restoring
+revision 15's text and behaviour there. Rows **code follows in the freeze package**.
+
+| # | Change | Why |
+| --- | --- | --- |
+| 198 | Withdrawn and deferred to 0.6: F1 (one rule for unknown content), F4 (limits as `newerFormat`, the parse ceiling, `policy.witnessWindow`), F5 (namespaces after genesis, the live-rule registry), F6 (opaque members), F7 (location statements, `ext/`). Each is restored to revision 15's text; the designed rule is kept, one paragraph each, under the design's "Deferred to 0.6" | owner's scope decision |
+| 199 | Kept: P (approval consumes a confirmed pairing, §9.1, §17.1), F2 (current principal, §8.5), F3 (the layout door, §8.2, §20, one opt-in per later format version), S (a stopped reader and a stopped home, §1, §13.6), text-only reservations (§14, §20, `refused:notGranted` among them), L1–L3 (§3.3, §17.1, §16.3), the owed predecessor sentence (§14) and the limits (§20) | owner's scope decision |
+| 200 | §20 "Later versions and layout-2 accounts" (normative): a later version changes an account's rules only after its layout is raised; until then a later implementation writes only what a 0.5 reader accepts; after the raise it still reads what the account wrote under 0.5 and admits `/5` records citing authority before the raise | the plan rests on the door |
+| 201 | §20 "Limits of 0.5": before an account opts in, a 0.5 device that meets something newer may refuse it rather than ask to be updated; nothing in an account's own data requires a move to a new account; the deferred items stated as today's limits (namespaces fixed at genesis, podcast-only live state, fixed caps, the 300 s window, a home's address in its request) | honest limits |
+| 202 | Existing vectors that change verdict when the code lands: only `upgrade/then-v5-layout` (0.5: `ok` → `malformed`, row 171). `rules/t-grant-component-extra-field`, `records/revoke-17-heads` and `succession/authority5-chain-17` no longer change (their rows are withdrawn) | consequence |
+| 203 | Withdrawn and deferred to 0.6: F8, the invite link and the join-from-invite flow (rows 188, 189, 197). §13.4 restores revision 15's sentence, corrected: under `members` the approving device hands the new device the authority history out of band (the SDKs carry it in the join invite); about 10 KB for a new account, more than one QR code; stated as a limit in §20. It can come later without the door: only the home and the two devices involved need the newer rule, and no account data changes | owner: "even QR code can wait till 0.6" |
+| 204 | §14 predecessor staging and `PUT`: before the appointment a Swift successor's home keeps the provisioned genesis and takes predecessor entries with no call only as the chain the genesis claims, from its head down, bounded, serving none; after the appointment only a controller's `colophon.home.write` (`approve` or `control`, not suspended, or `sign` listing `{base}`), never a member's, and only up to F's seq. **Code in PR 28** | home package (H2); settles changes §G.21 "Open for the H2 check" (who may `PUT`) |
+| 205 | §13.1 "Ordering": at a non-primary home an entry a primary head covers is exempt from the 300 s clock rule. **Code in PR 28** | H2; settles §G.21 "Open for the H2 check" (PR #21 sentence 14) |
+| 206 | §13.3: a home that cannot sign a due head (its guard refuses, `issued` cannot increase, or its history stops at a fork) answers 503 with `Retry-After`, never the older head, and forwards no head while one is due. **Code in PR 28** (settles row 146) | H2 |
+| 207 | §13.1: serving intervals are never under-recorded (recorded ahead, durably, before serving; closed after a restart at the end of what was recorded; what is uncertain counts as serving). **Code in PR 28** | H2 |
+| 208 | §13.1 "Receipts without their object": bounded per signing home, dropped after `received` + 300 s + `recoveryDelay` + 7 days; receipts sent with their object are taken first. §14: settled and expired objects stop counting toward the 10,368 bound. **Code in PR 28** | H2 |
+| 209 | Settled by merged code: rows 139 and 148 (code follows in E12) are built (PR #27, merged); row 154 is built in PR 28 | the merged state |
+| 210 | §21 "Open at freeze": two successors can each verify; the removal follow-up's wider list; the items deferred to 0.6 | nothing left implicit |
+| 211 | §13.1 "Transitions", §13.3: a home forwards to every other current home the entries of its history after the latest head of that home it holds, by `POST {peer}/authority` with no call (as a host publishes, §13.4), so every home holds each recording entry another appended and its `final` never waits for a head covering only an entry it does not hold; before producing any head a home appends the recording entries that are due; a forwarded head's entries go ahead of it. **Code in PR 28** | the revision 17 check, High 2; the home builder's fix |
+| 212 | §1, §8.2, §8.5, §8.7, §13.6, §20: a layout raise stops a reader or home only once final; before then it is any transition, and a `vetoed` displaces it. §20: a later-format implementation writes nothing of the later format to an account until the raise is final | the revision 17 check, High 1 |
+| 213 | §2.3: the blanket "unknown is `newerFormat`" replaced by what the 0.5 verifier does, case by case (accepted and ignored, `malformed`, `invalidPayload`, admitted and not folded, `newerFormat`); §20 states the unfortunate cases as limits. No behaviour change | the revision 17 check, High 3 |
+| 214 | §21 by reference: `conformance/0.5/candidate/README.md` "Required for freeze" gains the revision 17 cases (the door, stops, the stopped home, the current principal, the confirmed pairing, quorum-2 convergence, Swift seq 0); its status names revision 17 | the revision 17 check, Medium 4 |
+| 215 | §8.2: at most 64 genesis namespaces for a writer as for a verifier (the writer's 256 is a code defect being fixed) | the revision 17 check, Medium 5 |
+| 216 | §9.1: the scan path of a confirmed pairing scans exactly the canonical request envelope, whose `member.signing` is the key | the revision 17 check, Low 6 |
+| 217 | §20: the preservation sentence reads "including, without limitation" and names every category a later verifier keeps | the revision 17 check, Low 8 |
 
 ## B. Galley's requirements
 
@@ -1005,6 +1090,38 @@ to 158 of §A.11 hold the changes; rows 138, 139, 146, 148 and 154 wait for code
 | Not written | PR #16 Q10: device-local checkpoint, not wire |
 
 No vector changed in revision 15, and none was replayed by the Swift source.
+
+### G.22 The freeze reviews (2026-11-15), answered in revision 16
+
+| Source | Settled in |
+| --- | --- |
+| Opus 1, Daybreak "already safe" (unknown kinds) | §8.5 step 3, §8.7 (rows 169, 170): Opus's direction, widened to members |
+| Opus 2, 3; Daybreak 6 (caps) | §2.4, §8.2 (rows 172, 173) |
+| Opus 4 (one member's term) | §9.8 (row 177) |
+| Opus 5; survey 1–3 (namespaces, live, names) | §8.2, §11.8, §10.2 (rows 175, 176) |
+| Opus 6; Daybreak 3 (unknown content) | §1, §2.3, §7.2, §9.3, §11.2, §11.3, §11.5, §12.2, §13, §15 (rows 159–168) |
+| Opus 7; Daybreak 2 (the upgrade door, homes) | §8.2, §20, §14 (rows 171, 179) |
+| Opus 8; Daybreak 8 (paid homes) | §14, §20 (row 180) |
+| Opus 9; Daybreak 7 (home endpoints) | §9.1, §14 (row 178): endpoints as identifiers, not `homes.update` |
+| Opus 10 (calls with no home) | §12.3 (row 181) |
+| Opus 11, 12; Daybreak 1, 4, 5 (compaction, `kept`, blobs) | §20 "Limits of 0.5" (row 183) |
+| Daybreak 9 (witness window) | §6.3 (row 174) |
+| Daybreak 10, 11 (principals, suites) | §12.2, §20 (rows 168, 182) |
+| E12 check L1–L3 | §3.3, §17.1, §16.3 (rows 184–186) |
+| Home package (owed sentence) | §14 (row 187) |
+| Test apps (joining by camera, "not yet a member") | §7.3, §13.4, §12.3 (rows 188, 189) |
+| Independent check of the freeze design (18 findings) | rows 168–170, 177, 178, 188, 191–197; the design's §15 |
+
+No vector changed in revision 16 or 17. When the code lands, only `upgrade/then-v5-layout` changes
+verdict (row 171); revision 17 withdrew the rows (166, 172) that would have changed the other three.
+
+### G.23 The owner's scope decision (2026-11-15), answered in revision 17
+
+| Source | Settled in |
+| --- | --- |
+| "modularity can wait till 0.6 ... don't want to do another full on migration" | rows 198–201; the design's "Deferred to 0.6" and "Can a later format take over a 0.5 account in place?" |
+| "let's freeze the spec ... even QR code can wait till 0.6" | row 203 (F8 withdrawn); rows 204–210 (the home rules of PR 28, settled rows, open at freeze) |
+| §G.21 "Open for the H2 check" | rows 204, 205 |
 
 ## H. Theft and loss, worked through
 

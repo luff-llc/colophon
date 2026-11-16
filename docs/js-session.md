@@ -134,12 +134,15 @@ password is refused. A response is read in pieces and refused when it passes its
 A runtime that shows a 3xx answer (Bun, Node) hands it to the engine, which reports it. A browser hides it (an opaque
 redirect): that is `HomeProblem.redirected`, and the pass is abandoned.
 
-**A browser needs CORS from the home.** The relay sends no CORS headers today, so a page on another origin cannot reach
-it; the browser tests reach the relay through a same-origin proxy. A deployed web client needs the home itself (devices reach it directly) to answer
+**A browser needs CORS from the home.** The reference relay answers CORS only for the origins its operator lists, in
+`cors.origins` in the config file or `COLOPHON_RELAY_CORS_ORIGINS` (comma separated), each exactly `scheme://host[:port]`
+and compared whole. The list is empty by default, and then no CORS header is sent; the browser tests reach the relay
+through a same-origin proxy. A deployed web client needs the home itself (devices reach it directly) to answer
 preflights without a call and to send, on every answer including refusals, CORS headers for its allowed origins: the
 methods GET, POST and PUT, the request headers `Authorization`, `Content-Type`, `If-Match` and `If-None-Match`, and the
 exposed headers `ETag`, `Retry-After` and `WWW-Authenticate`. A refusal without them reaches the page as a network
-failure, and the engine never sees its code.
+failure, and the engine never sees its code. Two answers the runtime writes before the relay sees the request, an
+automatic `100 Continue` and the HTTP parser's `431` for oversized headers, carry no CORS headers.
 
 ## The exchange
 
