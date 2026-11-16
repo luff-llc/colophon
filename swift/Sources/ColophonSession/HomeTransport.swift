@@ -119,6 +119,9 @@ public enum HomeProblem: Error, Equatable, Sendable {
     /// This device's own check of the call it would send refused it, by the home's rule over what the device holds
     /// (for example it holds its own revocation, or too few homes' fresh heads). No call was sent.
     case callRefused(code: String)
+    /// A home refused this device's signed call. This is an unverified remote claim, not proof of revocation;
+    /// the pass stops, but local access and keys remain governed by verified account records.
+    case remoteCallRefused(code: String)
 }
 
 public struct HomeIssue: Equatable, Sendable {

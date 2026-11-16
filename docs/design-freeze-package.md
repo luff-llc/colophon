@@ -1,85 +1,83 @@
 # Colophon 0.5: the freeze package (design)
 
-Status: design, revised once after the independent check of 2026-11-15 (11 High, 6 Medium, 1 Low;
-the spec owner's decisions on each are applied below and listed in §15). Nothing here is built. The
-spec text is revision 16 of [`spec/colophon-0.5.md`](../spec/colophon-0.5.md), mapped in
-[`spec/colophon-0.5-changes.md`](../spec/colophon-0.5-changes.md) §A.12, rows 159 to 197, each
-marked "code follows in the freeze package". Base: `spec-0.5` at `9027b98`.
+Status: design. Revision 16 of the spec stated the whole package; after the independent check it was
+revised once. **Revision 17 cuts it to what shipping 0.5 and a later in-place upgrade need**, on the
+owner's word: "modularity can wait till 0.6, I just don't want to get blocked on shipping 0.5. also
+don't want to do another full on migration once we start to work on 0.6", and "I'm not that worried
+about the unknowns." Nothing here is built. The spec text is revision 17 of
+[`spec/colophon-0.5.md`](../spec/colophon-0.5.md), mapped in
+[`spec/colophon-0.5-changes.md`](../spec/colophon-0.5-changes.md) §A.12 (rows 159–197, the
+withdrawn ones marked) and §A.13 (rows 198–202). Base: `spec-0.5` at `25027b0`.
 
-**The one idea.** When a 0.5 implementation meets something it does not understand, the result is
-"update me" (`newerFormat`), never "this is broken" (`malformed`, `badSignature`,
-`invalidPayload`), and never silent acceptance of something that could change a verdict. Two rules
-govern every judgement call: **never widen who can stop a device**, and **an older reader may say
-"update me" where a newer one decides, but never decides differently.**
+**In 0.5:** P (approval consumes a confirmed pairing), F2 (the current-principal check; unknown kinds
+stay under the control rule), F3 (the layout door; one opt-in covers a whole later format version),
+S (a stopped reader and a stopped home, in the form the door needs), text-only reservations
+(`refused:notGranted` among them), the three Low fixes, the home rules the home code follows (spec
+§13.1, §13.3, §14; code in PR 28), the stated limits and what is open at the freeze.
 
-**Sources.** The consolidated list of 2026-11-15, the Opus and Daybreak freeze reviews of
-revision 15, the domains survey (`docs/roadmap-domains-as-plugins.md` on `docs-0.6-domains`),
-the three Low findings of the E12 check, the owed sentence from the home package, the test apps'
-report on joining by camera, and the independent check of this design.
+**Deferred to 0.6:** F1, F4, F5, F6, F7 behind the door, and F8 (invites), which needs no door. Their sections below are kept so the work is
+not lost, each marked **"Deferred to 0.6: not a 0.5 rule"**; §16 summarizes them. In 0.5, revision
+15's behaviour stands in each place.
+
+**The two governing rules:** never widen who can stop a device; an older reader may say "update me"
+where a newer one decides, but never decides differently.
 
 ## 0. Summary
 
 | Item | Existing vectors that change verdict | Size | Risk |
 | --- | --- | --- | --- |
 | P Member approval consumes a confirmed pairing (a live defect) | none (interface) | M | High until fixed: today a relay can substitute a member key |
-| F1 Unknown content, one rule | `rules/t-grant-component-extra-field` (`malformed` → `newerFormat`) | M | Medium: 27 closed parses, eight places that ignore unknown content today |
 | F2 Current principal; unknown kinds stay under the control rule | none (inputs: an expired or provisional member's `endSessions`, `ok`/`newerFormat` → `badSignature`) | S | Low |
-| S Stops: a stopped reader trusts nothing new; the stopped home | none | S–M | Medium: the stopped-home table must be built exactly |
 | F3 The upgrade door (`layout`) | `upgrade/then-v5-layout` (0.5: `ok` → `malformed`, regenerated as two cases) | S | Low |
-| F4 Limits that can be raised, invariants first; `policy.witnessWindow` | `records/revoke-17-heads`, `succession/authority5-chain-17` (`malformed` → `newerFormat`) | M | Medium: the window threads through every timing rule |
-| F5 Namespaces after genesis (control rule); a normative one-entry live registry | none | S–M | Low |
-| F6 Opaque members, narrow form: only new term fields are member-local | none | M | Medium: rests on the promise of §6 |
-| F7 A home's address can change: signed location statements | none | M | Low |
-| F8 A device with nothing gets the authority chain (invites); `refused:notGranted` | none | S–M | Medium: a bearer credential in a QR code |
-| R Reservations | none | S | Low |
-| L Three Low findings, the owed home sentence, stated limits | none (a Swift predecessor with a readable seq-0 envelope goes `ok` → `malformed`; no vector has one) | S | Low |
+| S Stops at the door: a stopped reader, the stopped home | none | S | Medium: the stopped-home table must be built exactly |
+| R Text-only reservations | none | S | Low |
+| L Two Low findings (L1, L2), the owed home sentence, stated limits; L3 withdrawn (a seq-0 Swift envelope is ignored, as today) | none | S | Low |
+| F1, F4, F5, F6, F7, F8 | withdrawn in revision 17 (deferred to 0.6) | — | — |
 
-**Existing vectors that change verdict:** exactly four, unchanged by the revision:
-`rules/t-grant-component-extra-field` (F1), `upgrade/then-v5-layout` (F3),
-`records/revoke-17-heads` and `succession/authority5-chain-17` (F4). Every other change of verdict
-is on an input no vector holds today; each item lists them.
+**Existing vectors that change verdict:** one, `upgrade/then-v5-layout` (F3). The three that revision
+16 would have changed (`rules/t-grant-component-extra-field`, `records/revoke-17-heads`,
+`succession/authority5-chain-17`) no longer change.
 
 ### Order of work: dispatchable streams
 
-**W0 (one commit, before wave 1, by whoever dispatches).** Add the empty generator files
-`crates/colophon-core/tests/v5_candidate/cases_freeze_{authority,swift,records,calls,home}.rs` and
-their `mod` lines in `crates/colophon-core/tests/v5_candidate.rs`. After W0 no stream edits
-`v5_candidate.rs`; each writes only its own generator file and the conformance directories it
-generates. No file belongs to two streams of one wave. A stream starts when everything it depends on
+W0 is merged (`cases_freeze_{authority,swift,records,calls,home}.rs` exist and are registered; no
+stream edits `tests/v5_candidate.rs`). `cases_freeze_records.rs` stays empty in 0.5 (its items are
+deferred). No file belongs to two streams of one wave; a stream starts when everything it depends on
 is merged into `spec-0.5`.
 
-Common acceptance for every Rust stream (private `CARGO_TARGET_DIR`, Rust 1.99.1):
-`cargo test -p colophon-core --test v05_candidate`, `cargo test -p colophon-core --test
-v5_candidate -- --ignored v5_generator_check`, `cargo test -p colophon-core`, `cargo clippy -p
-colophon-core --all-targets -- -D warnings`. Listed below: the stream's own extra commands.
+Common acceptance for every Rust stream (private `CARGO_TARGET_DIR`, Rust 1.99.1, through
+`pressroom run`): `cargo test -p colophon-core --test v05_candidate`, `cargo test -p colophon-core
+--test v5_candidate -- --ignored v5_generator_check`, `cargo test -p colophon-core`, `cargo clippy -p
+colophon-core --all-targets -- -D warnings`.
 
-**Wave 1** (member approval and the current-principal fix first, as the owner asked).
-
-| Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
-| --- | --- | --- | --- | --- | --- |
-| **W1-P Approval** | `crates/colophon-core/src/v05/pairing.rs`, `crates/colophon-core/src/v05/account/action.rs`, `crates/colophon-core/src/v05/write/authority.rs`, `crates/colophon-ffi/src/v05/api/pairing.rs`, `crates/colophon-ffi/src/v05/api/engine.rs`, `crates/colophon-ffi/src/v05/api/action.rs`, `crates/colophon-ffi/src/v05/surface-names.txt`, generated bindings (`swift/Sources/ColophonKit/Generated/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/colophon_ffi.kt`), `swift/Sources/ColophonSession/*`, `swift/Sources/ColophonSessionUI/*`, `swift/Tests/ColophonSessionTests/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/*`, `js/src/session/*`, `js/src/index.ts`, `js/scripts/smoke.mjs`, `playground/src/*`, `examples/ColophonSample/*`, new `crates/colophon-core/tests/v05_freeze_approval.rs` | W0 | P (§P), L2 | none in `conformance/` (an interface rule); tests: approve without a token refused; a token for another key refused; a token spent twice refused; the code path and the scan path each issue one | `cargo test -p colophon-core --test v05_freeze_approval`, `cargo test -p colophon-ffi`, `swift test`, `cd sdk/kotlin && ./gradlew test`, `cd js && npm test`, `cd playground && npm test` |
-| **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/keyring.rs`, `history/succession.rs`, `history/mod.rs`, `slots.rs`, `members.rs`, `terms.rs`, `prescan.rs`, `descriptor.rs`, `heads.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/candidate/{rules,heads,succession,upgrade}/` directories it generates (and the four regenerated vectors) | W0 | first commit F2 (current principal); then F1 authority rows, F3, F4 (verifier, invariants, the window), F5 (declaring), F6 (grant side, `MemberRecord.opaque`), S (the stopped flag `Verdict::stopped`), L1 | §1.5 `rules/`, `heads/`, `succession/` rows; §2.3; §3.4; §4.4; §5.4 `rules/` rows; §6.7 `rules/` rows | — |
-| **W1-C Swift** | `crates/colophon-core/src/v05/history/swift.rs`, `tests/v5_candidate/cases_freeze_swift.rs` | W0 | L3 | `succession/swift-seq-zero` | — |
-
-**Wave 2** (after W1-A merges: it fixes `MemberRecord.opaque`, the stopped flag, the current-principal
-helper and the checkpoint).
+**Wave 1**
 
 | Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
 | --- | --- | --- | --- | --- | --- |
-| **W2-R Records and live** | `crates/colophon-core/src/v05/records.rs`, `live.rs`, `protocol.rs`, `tests/v5_candidate/cases_freeze_records.rs`, `conformance/0.5/candidate/records/` | W1-A | F1 rows 1–5, §1.3, F5 (registry, `colophon.` kinds), F6 (records), S (records held when stopped) | §1.5, §5.4, §6.7 `records/` rows | — |
-| **W2-C Calls, invites, locations** | `crates/colophon-core/src/v05/calls.rs`, `write/calls.rs`, `v05/mod.rs`, new `v05/invite.rs`, new `v05/location.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/candidate/{calls,pairing}/` | W1-A | F1 row 22 (signer bound by `key`), F6 (calls), F8 (invite links and object, `notGranted`), F7 (statement parse and verify), S (stopped → `unavailable`), R (no-home option) | §1.5, §6.7, §7.4, §7a `calls/` and `pairing/` rows | — |
+| **W1-P Approval** | `crates/colophon-core/src/v05/pairing.rs`, `v05/account/action.rs`, `v05/write/authority.rs`, `crates/colophon-ffi/src/v05/api/{pairing,engine,action}.rs`, `crates/colophon-ffi/src/v05/surface-names.txt`, generated bindings (`swift/Sources/ColophonKit/Generated/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/colophon_ffi.kt`), `swift/Sources/ColophonSession/*`, `swift/Sources/ColophonSessionUI/*`, `swift/Tests/ColophonSessionTests/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/*`, `js/src/session/*`, `js/src/index.ts`, `js/scripts/smoke.mjs`, `playground/src/*`, `examples/ColophonSample/*`, new `crates/colophon-core/tests/v05_freeze_approval.rs` | — | P, L2 | none in `conformance/`; tests: approve without a token refused; a token for another key refused; a token spent twice refused; the code path and the scan path each issue one | `cargo test -p colophon-core --test v05_freeze_approval`, `cargo test -p colophon-ffi`, `swift test`, `cd sdk/kotlin && ./gradlew test`, `cd js && npm test`, `cd playground && npm test` |
+| **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/mod.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/candidate/{rules,upgrade}/` cases it generates (and the regenerated `upgrade/then-v5-layout`) | — | F2 (current principal, first commit), F3 (stored layout, the door), S (the reader's stopped flag, `Verdict::stopped`), L1 | §2 vectors, §3.4 vectors | — |
 
-**Wave 3** (after wave 2).
+**Wave 2** (after W1-A: the stopped flag and the current-principal helper)
 
 | Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
 | --- | --- | --- | --- | --- | --- |
-| **W3-H Home and exchange** | `crates/colophon-home-wasm/src/*`, `crates/colophon-core/src/v05/history/home.rs`, `engine/paths.rs`, `engine/exchange.rs`, `relay/*`, `tests/v5_candidate/cases_freeze_home.rs`, new `crates/colophon-core/tests/v05_freeze_home.rs` | W2-R (`parse_stable`), W2-C (invite, location) | F1 home storage and the home's receipt site, the stopped home (§13.6), W at the home, F7 (statements stored, forwarded, served; calls only to verified bases), F8 (invite paths at the home; `join_from_invite`), R (refusals, retry signal, `layouts`, `ext/`) | home tests: each row of §13.6's table; location monotonic and rollback; invite refused on `/pending`; `ext/` 412 | `cargo test -p colophon-home-wasm`, `cargo test -p colophon-core --test v05_freeze_home --test v05_home --test v05_engine_home`, `cd relay && npm test` |
-| **W3-G Write side, exports, SDK surfacing** | `crates/colophon-core/src/v05/write/authority.rs`, `write/records.rs`, `account/read.rs`, `account/derived.rs`, `account/mod.rs`, `account/action.rs`, `crates/colophon-ffi/src/v05/api/*`, generated bindings, the three session layers, `playground/src/*` | W3-H's core functions (or run after it) | W in the builders, the declaring `rekey`, invites (`begin_invite`, `join_from_invite`), surfacing (`newer` counts, `opaque`, stopped status, "waiting for approval" for `notGranted`), add-a-namespace | none new | as W1-P |
+| **W2-C Calls** | `crates/colophon-core/src/v05/calls.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/candidate/calls/` cases it generates | W1-A | S (a stopped reader's calls `unavailable`) | `calls/s-stopped-reader-call` | — |
 
-W1-P and W3-G both touch `account/action.rs`, `write/authority.rs`, the FFI and the session layers,
-in different waves. At most three builders at once (wave 1).
+**Wave 3**
+
+| Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
+| --- | --- | --- | --- | --- | --- |
+| **W3-H Home** | `crates/colophon-home-wasm/src/*`, `crates/colophon-core/src/v05/history/home.rs`, `engine/paths.rs`, `engine/exchange.rs`, `relay/*`, `tests/v5_candidate/cases_freeze_home.rs`, new `crates/colophon-core/tests/v05_freeze_home.rs` | W2-C and PR 28 merged | S (the stopped home, §13.6), R (`layouts`, refusal names shown raw) | home tests: each row of §13.6; unknown `refused:` refuses one request | `cargo test -p colophon-home-wasm`, `cargo test -p colophon-core --test v05_freeze_home --test v05_home --test v05_engine_home`, `cd relay && npm test` |
+| **W3-G Write side, exports, SDK surfacing** | `crates/colophon-core/src/v05/account/{read,derived,mod}.rs`, `crates/colophon-ffi/src/v05/api/*` other than W1-P's (and those once W1-P is merged), the three session layers, `playground/src/*` | W1-P, W2-C, W3-H | the stopped status; "waiting for approval" wording for a member no grant names | none new | as W1-P |
+
+W1-P and W3-G both touch the FFI and the session layers, in different waves. At most two builders at once
+(wave 1).
 
 ## 1. F1: Unknown content, one rule
+
+> **Deferred to 0.6 (revision 17): not a 0.5 rule.** Revision 15's behaviour stands in 0.5; this
+> section is kept as the design to build after the door. Summary: §16.
+
 
 ### Rule
 
@@ -363,52 +361,51 @@ Existing vectors that change: none.
 ### Who can stop a 0.5 device
 
 Unchanged from today: the control rule (any entry or transition), any single-rule signer within that
-rule's kinds (an unknown field in a `grant`, `renew`, `revoke` or `rekey`), and a current member in
+rule's kinds (an unknown field in a `grant`, `renew` or `revoke`), and a current member in
 its own `endSessions`; and now only while each is a current principal, which narrows it.
 
-## S. Stops
+## S. Stops at the door
 
 ### Rule
 
-An authority stop makes the reader **stopped** for the account at once (§1 "A stop"): every call it
-verifies is `unavailable` whatever S is, it accepts no head, admits no record it had not admitted
-before, answers no question of currency, membership or access, and builds nothing. A home that stops
-follows the normative table of §13.6.
+A reader is stopped (spec §1 "A stop") at an entry it judges `newerFormat` under today's rules, or
+when an activation raising the layout becomes **final** (revision 17 fix round: a provisional raise
+is judged as any transition, and a `vetoed` that displaces it is applied, so a vetoed raise strands
+nobody; the companion rule in §20: a later-format implementation writes nothing of the later format
+until the raise is final). Once stopped: every call it verifies is `unavailable` whatever S is, it accepts no head, admits no
+record it had not admitted before, answers no question of currency, membership or access, and builds
+nothing. A home that stops follows the normative table of spec §13.6. Revision 17 removed only the
+parts that served deferred items (`ext/` files, location statements, the policy window W).
 
 ### Why
 
-Finding 4: an unknown entry at N and the attacker's revoke at N+1; a reader that made only the calls
-"needing" N unavailable would still accept the attacker under a fresh head at N−1. A stopped reader
-cannot see N+1, so it must trust nothing new.
+Finding 4 of the check: an entry 0.5 cannot judge at N and the attacker's revoke at N+1; a reader
+that made only the calls "needing" N unavailable would still accept the attacker under a fresh head
+at N−1. A stopped reader cannot see N+1, so it trusts nothing new. The door makes this case ordinary:
+every account that opts in stops its 0.5 readers and homes at the raise.
 
-### The stopped home (§13.6), and the veto question
+### The stopped home (spec §13.6), and the veto question
 
 Keeps and serves what it holds (what needs no call); forwards every pending object it holds; signs no
-head after the stop, not even a fresh one at N−1 (that is what would let other old readers trust
-stale state); stores and vouches for no authority at or after N; verifies no call (503
-`unavailable`), so it serves nothing under `members` and stores nothing new.
+head after the stop, not even a fresh one at N−1; stores and vouches for no authority at or after N;
+verifies no call (503 `unavailable`), so it serves nothing under `members` and stores nothing new.
+It receipts a veto, or a removal-only transition, anchored before the stop, judged at its last
+verified state, within 300 s: a receipt only witnesses arrival time and every reader re-judges the
+signers, so it cannot make an invalid object count, while refusing could let a hostile stop suppress
+a veto or a revocation. It receipts nothing else.
 
-**Decided: it receipts a veto whose transition is anchored before the stop, and a removal-only
-transition anchored before the stop**, judged at its last verified state, inside W. The test: a
-hostile stop must never suppress a veto or a revoke for readers that understand the newer format. A
-receipt only witnesses arrival time; every reader judges the veto's or transition's signers at the
-entry that records it, so a stale receipt cannot make an invalid object count, while refusing could
-leave a veto short of `headQuorum` receipts inside its window. It receipts nothing else.
-
-### What could not be made sound as asked
-
-The owner asked that a stopped home "keep serving what it holds". It can serve only what needs no
-call: under `members`, every read is a call, and verifying one is a trust decision a stopped reader
-must not make (the entry after the stop may revoke the caller). So under `members` a stopped home
-serves `GET {base}`, location statements and nothing else until it is updated or revoked; newer
-devices read through the account's other homes. This is stated in §13.6.
+**Limit:** under `members` a stopped home serves only what needs no call (`GET {base}`, and the
+history under `public`), because verifying a call is a trust decision; newer devices read through the
+account's other homes, and the host offers to update or revoke the stopped home.
 
 ### Functions and vectors
 
-`history/mod.rs` (`Verdict::stopped`), `calls.rs` (step 4), `records.rs` (held when stopped),
-`history/home.rs` and `colophon-home-wasm` (the table). Vectors: `calls/s-stopped-reader-call`
-(`unavailable`, with fresh heads at N−1), `records/s-stopped-new-record` (held); home tests, one per
-row of §13.6.
+`history/mod.rs` (`Verdict::stopped`, W1-A), `calls.rs` (step 4, W2-C), `history/home.rs` and
+`colophon-home-wasm` (the table, W3-H). Vectors: `rules/f3-layout-then-entry` (nothing after the
+raise applied), `calls/s-stopped-reader-call` (`unavailable`, with fresh heads at N−1); home tests,
+one per row of §13.6. A stopped reader's record holding is in W1-A's `Verdict` and needs no change in
+`records.rs` (records citing the stop or later are already held `authorityBehind`; records admitted
+before stay shown).
 
 ## 3. F3: The upgrade door
 
@@ -417,9 +414,11 @@ row of §13.6.
 The transition component `layout` is an integer. A `/5` account is at layout 2 from genesis and an
 upgraded account at layout 2 from its `upgrade`; the verifier stores it. A `layout` component that
 does not raise it (2 or less) voids the transition (`malformed` at its `activate`). One that raises
-it above 2 is `newerFormat` once its transition passes every other check (control rule and the
-recovery set's consent, §8.4), and the reader applies nothing at or after that entry. Later
-versions opt an account in through this component and no other.
+it above 2 is judged and recorded as any transition (control rule and the recovery set's consent,
+§8.4); while its activation is provisional the reader applies nothing of the later layout and goes
+on, and a `vetoed` may displace it; once the activation is final the reader is stopped and applies
+nothing after the entry at which it became final. Later versions opt an account in through this
+component and no other, and write nothing of the later format until the raise is final.
 
 ### 3.1 Why, and the alternative rejected
 
@@ -427,7 +426,7 @@ One door, not two. The alternative is a new entry kind under F2. `layout` is cho
 already exists in the transition grammar, already needs the strongest consent (control rule plus
 recovery set), already means "stop" to 0.3 and Swift readers (Swift's freezing entry is a `layout`
 above 2), and the verifier already recognizes it; the fix is to read its value. A new kind would
-also work after F2, but it could be signed by any current principal; an opt-in that retires rules
+also work, but a second door means a second rule to get right; an opt-in that retires rules
 for every device belongs under the strongest rule.
 
 ### 3.2 What a 0.5 home does
@@ -450,7 +449,9 @@ other checks); `genesis` and the upgrade path set 2; `engine/checkpoint.rs` pers
 
 | Vector | Expected |
 | --- | --- |
-| `rules/f3-layout-3` | `newerFormat` at the `activate` |
+| `rules/f3-layout-3` | the reader stopped once the raise is final (`final` entry, or at once with no home) |
+| `rules/f3-layout-3-vetoed` | a `vetoed` displaces the provisional raise; nothing stops; later entries apply |
+| `rules/f3-layout-3-provisional` | the reader goes on past the provisional `activate`, applying nothing of layout 3 |
 | `rules/f3-layout-2` | `malformed` at the `activate` (void) |
 | `rules/f3-layout-3-no-consent` | `badSignature` |
 | `rules/f3-layout-not-integer` | `malformed` |
@@ -475,6 +476,10 @@ That is true of any authenticated format upgrade (Daybreak), and the same set ca
 every other key.
 
 ## 4. F4: Limits that can be raised
+
+> **Deferred to 0.6 (revision 17): not a 0.5 rule.** Revision 15's behaviour stands in 0.5; this
+> section is kept as the design to build after the door. Summary: §16.
+
 
 ### Rule
 
@@ -609,6 +614,10 @@ version that allows more than fit one body must split it, which is its own desig
 
 ## 5. F5: Namespaces after genesis, and live state beyond one module
 
+> **Deferred to 0.6 (revision 17): not a 0.5 rule.** Revision 15's behaviour stands in 0.5; this
+> section is kept as the design to build after the door. Summary: §16.
+
+
 ### Rule
 
 A `rekey` epoch for a valid namespace that is not yet declared **declares it**, when that epoch is
@@ -691,6 +700,10 @@ The control rule can declare up to 256 permanent namespaces; the rate limit boun
 waits for a later kind (after the door).
 
 ## 6. F6: Opaque members, narrow form
+
+> **Deferred to 0.6 (revision 17): not a 0.5 rule.** Revision 15's behaviour stands in 0.5; this
+> section is kept as the design to build after the door. Summary: §16.
+
 
 ### Rule
 
@@ -777,6 +790,10 @@ show it. Residual: the promise binds code not yet written; domain folds skip `ne
 
 ## 7. F7: A home's address can change
 
+> **Deferred to 0.6 (revision 17): not a 0.5 rule.** Revision 15's behaviour stands in 0.5; this
+> section is kept as the design to build after the door. Summary: §16.
+
+
 ### Rule
 
 A home's appointed `service.endpoints` are its identifiers and the audience of every call to it. A
@@ -821,6 +838,10 @@ as it can already sign any head.
 
 ## 7a. F8: A device with nothing gets the authority chain
 
+> **Deferred to 0.6 (revision 17): not a 0.5 rule.** In 0.5 the approving device hands over the
+> authority history out of band (spec §13.4), and `refused:notGranted` is only a reserved name.
+> Summary: §16.
+
 Found by the test apps: a new device joining an account whose history is `members` can fetch only
 the head, so the apps put the whole authority history in the invite (about 10 KB for a new
 account, far over one QR code's 2,953 bytes), and joining by camera does not work. Revision 15's
@@ -830,7 +851,7 @@ without knowing this.
 ### Rule
 
 The approving device makes an **invite link** (§13.4): a link from its member key (a current
-principal, not a home, not opaque) to a session key, whose terms are exactly one or two `services` entries, each a current home's appointed
+principal, not a home) to a session key, whose terms are exactly one or two `services` entries, each a current home's appointed
 endpoint with `["colophon.history.read"]`, lasting at most an hour (host default ten minutes). A
 home serves the authority chain and its verification pages, and nothing else (not `/pending`), to calls through it, without checking narrowing or
 `depth` against the member's own terms. The **invite** (§7.3, `colophon/invite/5`) carries the
@@ -860,8 +881,7 @@ home, which holds the history, decides, as §12.3 already lets a member that doe
 ### Who signs, what it grants, how long, what a leak exposes
 
 - **Signs:** the approving device's **member key** (a controller approves; a link is a member's
-  instrument, and controllers make no links), which must be a current principal (§8.5), not a home
-  and not opaque. A link of the invite shape from a home's member key is not an invite link
+  instrument, and controllers make no links), which must be a current principal (§8.5) and not a home. A link of the invite shape from a home's member key is not an invite link
   (finding 11). The link's `session` is the member's session number.
 - **Grants:** `GET` of the authority chain and what verifying it needs, at the named homes:
   `{base}/authority`, `records/authority/*`, the predecessor chain and its receipts (a successor
@@ -956,24 +976,21 @@ A bearer credential travels in a QR code: anyone who photographs it within its l
 any member reads. The bound invite removes that at the cost of a third scan. An approving device
 with only a controller cannot invite.
 
-## 8. Reservations (names and unknown-handling only)
+## 8. Reservations (text only)
 
 | Reserved | Text | 0.5 behaviour |
 | --- | --- | --- |
-| `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned` | §14 "Answers", §19 | A home MAY send them (507, 402, 410, 403). An unknown `refused:` from a home refuses only that request and is shown raw. **Retry signal:** `Retry-After` means retry after it; `"permanent": true` in the answer means do not retry that request; neither means retry with backoff. Forwarding counts an answer with `"permanent": true` as delivered. `refused:closed` is not evidence of deletion. A closing home SHOULD keep signing heads until its revocation is final. |
-| purposes `colophon.home.export`, `colophon.home.close` | §12.2 | A 0.5 home refuses them (`refused:outOfScope`, as any other purpose). |
-| principals `account`, `organisation` | §12.2 (call `signer`), §3.1 (descriptor `form`), §9.1 (request `kind`) | Reserved names, refused in 0.5: a call signer `malformed`; a descriptor form `newerFormat`, reported last (§1); a request kind `newerFormat` for the entry. |
-| calls with no fresh head | §12.3 "No home" | A verifier configured for it (default off) MAY, for its own audience only and never at a home, take S from its persisted verified history fetched within `headMaxAge` from a source the account names or the person configured, when the latest held state has no current home. It never changes an authority verdict. Vectors test the default. |
-| the suite | §20 "Suites" | One suite in 0.5. A later suite adds a `suite` member to the objects it changes (seals, slots and parts, `previousVault`, the vault); absent means suite 1; descriptors keep `form`. An unknown `suite` is `newerFormat` by F1. |
-| `layouts`, `location` in `GET {base}`; `colophon/location/5` | §14 | A 0.5 home answers `"layouts":[2]`; location statements as F7. |
-| `ext/<principal ID>/…` store paths | §14 "Store layout" | A home stores immutable files there written by `colophon.home.write` of that principal with its own key (a current member, or a controller with `approve` or `control`), up to 16 MiB each, serves them under `colophon.home.read`; readers ignore them. Room for side objects (checkpoints, manifests) without a home upgrade. |
-| kinds and namespaces `colophon.*` | §11.8 | F5. |
+| `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned` | spec §14 "Refusals a paid home may give", §19 | A home MAY send them (507, 402, 410, 403). An unknown `refused:` from a home refuses only that request and is shown raw. `refused:closed` is not evidence of deletion. (The retry signal and the closing-home SHOULD of revision 16 are deferred.) |
+| purposes `colophon.home.export`, `colophon.home.close` | spec §20 | A 0.5 home refuses them (`refused:outOfScope`, as any other purpose). |
+| principals `account`, `organisation` | spec §20 | Refused in 0.5, as any unknown value is today: a call signer `malformed`; a descriptor form or request kind `newerFormat`. |
+| kinds and namespaces `colophon.*` | spec §20 | Reserved; 0.5 writers do not use names the spec does not define; met in 0.5, judged as today. |
+| `layouts` in `GET {base}` | spec §14 | A 0.5 home answers `"layouts":[2]` (the door's host rule needs it). |
+| `refused:notGranted` for a call | spec §20 | Reserved for "not yet a member"; 0.5 answers `refused:revoked` for a member no grant names, and hosts word it as waiting for approval. |
 
-Functions: `colophon-home-wasm/src/ops.rs` (`peer_answer`, `access`, `identity`/`limits`),
-`engine/paths.rs` (`Kind::Ext`), `engine/exchange.rs` (retry signal), `calls.rs` (`CallConfig`
-gains `no_home_leniency: bool`). Vectors: `calls/r-signer-organisation` (`newerFormat`),
-`calls/r-no-home-default` (`unavailable`). Home tests for the refusal codes, the retry signal and
-`ext/`.
+Withdrawn in revision 17 (deferred): the no-home call option, the suite discriminator, `location`,
+`colophon/location/5` and `ext/`. Functions: `colophon-home-wasm/src/ops.rs` (`identity`/`limits`
+for `layouts`; `peer_answer` treats an unknown `refused:` as refusing that object only). Home test:
+an unknown `refused:` is surfaced raw.
 
 ## 9. The Low findings, the owed sentence, and stated limits
 
@@ -985,45 +1002,45 @@ gains `no_home_leniency: bool`). Vectors: `calls/r-signer-organisation` (`newerF
 - **L2, prepare-time check of a composite change** (`Account::begin_transition`, `action.rs:1075`):
   members are checked against the old state plus the change's own added controllers, so a doomed
   composite asks for no signature. Text: §17.1. Unit test.
-- **L3, a readable Swift envelope at seq 0** (`history/swift.rs::read_envelope`, `:359`): a
-  readable `seq` of 0 makes the predecessor `malformed`. Text: §16.3. Vector
-  `succession/swift-seq-zero` (`malformed`).
+- **L3, withdrawn in the revision 17 fix round.** An independent check of the code showed anyone
+  can write a readable Swift envelope at seq 0 without a key, so making it fatal would let a hostile
+  home or folder fail a valid predecessor, against §2.2. §16.3 states today's behaviour: an envelope
+  at seq 0, readable or not, names no place in the chain and is ignored. No code change.
 - **The owed sentence** (home package): a successor's home holds the provisioned account's genesis
   and takes predecessor entries only as the hash chain that genesis claims, from its head down, and
   serves none of them before its first upload is verified. Text: §14.
-- **Stated limits** (§20 "Limits of 0.5", text only): no compaction, with what leaves room for it
-  (signed side objects under `ext/`, never read by 0.5 readers; device-local checkpoints, §17.2; and
-  the layout door, which any pruning must follow because 0.5 readers expect every record); `kept`
+- **Stated limits** (§20 "Limits of 0.5", text only): before an account opts in, a 0.5 device that
+  meets something newer may refuse it rather than ask to be updated, and nothing in an account's own
+  data requires a move to a new account (§17); the deferred items as today's limits (namespaces fixed
+  at genesis, podcast-only live state, fixed caps, the 300 s window, a home's address in its
+  request); no compaction (device-local checkpoints, §17.2, and the door, which any pruning must
+  follow); `kept`
   bounded by one body (about 15,400 digests) and no continuation; a blob at most 512 MiB (64 KiB
   chunks, 8,192 per manifest; a larger blob is a later manifest kind, which 0.5 folds skip); live
   slot retention is lossy and per replica; the clock jump, the 60 s skew and the 7-day bound are
   constants; a home's key changes only by re-appointment; a namespace is never removed; two
   successors of one predecessor can each verify; an account with no home has no witness of order.
 
-## 10. What a home does, in one place
+## 10. What a home does, in one place (0.5)
 
-- Records, live values, history files: stores any header whose stable fields parse, whose path
-  matches and whose envelope verifies under a current member's key, whatever else it holds (F1).
-- `ext/` files: stores them (R).
-- Authority entries, transitions, vetoes, receipts, heads: verifies, and refuses `newerFormat` with
-  422. A home vouches with heads, so it must understand authority; an account uses newer authority
-  content only after its homes read it, and a host checks `layouts` before raising the layout (F3).
-- Calls by opaque members: refused (`newerFormat`), no exception.
-- A stopped home: §13.6's table (item S).
-- Location statements: stored, forwarded and served for every current home (F7).
-- The witness window: from the state §4.2 names.
-- Unknown request members: 422 `newerFormat`; unknown response members: ignored by clients.
+- Authority entries, transitions, vetoes, receipts, heads: verifies, as revision 15; refuses what it
+  cannot judge. An account uses newer authority content only after its homes read it; a host checks
+  `layouts` before raising the layout (F3).
+- At and after a stop: §13.6's table (S).
+- The rules of PR 28: predecessor staging and `PUT` by a controller only; the non-primary exemption
+  from the 300 s rule; 503 with `Retry-After` when a head is due and cannot be signed; serving
+  intervals never under-recorded; bounded, expiring unmatched receipts; settled objects off the cap.
+- Reserved refusals: may send them (R).
 
-## 11. Exports and SDKs, in one place
+## 11. Exports and SDKs, in one place (0.5)
 
-No new export beyond: `begin_rekey` with names to declare (F5); policy JSON with `witnessWindow`
-(F4); member JSON with `opaque` (F6); view JSON with a per-namespace `newer` count (F1);
-`begin_approve` spending a confirmed pairing and `AccountPairing.scan_request` (P); `begin_invite`
-and `join_from_invite` (F8); a stopped status (S). Swift,
-Kotlin and JS: surface `newerFormat` (they already map it to `updateRequired`), the count, opaque
-members, and one "add a namespace" call. No SDK type changes shape.
+`begin_approve` spending a confirmed pairing and `AccountPairing.scan_request` (P); a stopped status
+(S); "waiting for approval" wording for a member no grant names.
+Swift, Kotlin and JS surface `newerFormat` as `updateRequired`, as today. No other SDK change.
 
 ## 12. Where this design differs from a review, and why
+
+(Rows for F1, F4, F5, F6 and F7 record the design of deferred items; see §16.)
 
 | Point | Review | Chosen | Why |
 | --- | --- | --- | --- |
@@ -1049,9 +1066,8 @@ members, and one "add a namespace" call. No SDK type changes shape.
 None of the items touches keys he holds, data he holds or money, beyond these, each with the
 default this design uses so no work waits:
 
-1. **His real library (freeze condition 4).** The only change on the Swift path is L3 (a readable
-   seq-0 envelope is refused); shipped Swift never writes one. Default: no action; the dry run
-   would show it.
+1. **His real library (freeze condition 4).** Nothing in the package changes the Swift path.
+   Default: no action.
 2. **Names LUFF uses for its own new namespaces.** Default: `works.luff.<app>.<area>`, bare names
    only for the standard library.
 3. **A paid home's refusals.** Default: reserve the four codes; no tier names, prices or
@@ -1099,3 +1115,83 @@ because every read there is a call and verifying it is a trust decision (item S)
 only a dead base, with no other home and no folder, needs another device (§7); appointing a home is
 outside the pairing token (§P); an approving device that holds only a controller cannot invite
 (§7a).
+
+## 16. Deferred to 0.6
+
+Each item below was designed for revision 16 and withdrawn in revision 17. In 0.5, revision 15's
+text and behaviour stand. Each comes in place after an account's layout is raised (F3), under the
+rule that a later version changes an account's rules only after the raise (spec §20).
+
+- **F1, one rule for unknown content** (§1). Every place below an authenticated body where unknown
+  content is `malformed`, `invalidPayload` or silently ignored becomes `newerFormat`, with the stable
+  header fields, frozen admission steps 1–8 and the record-level fold rules. In 0.5 today: unknown
+  header fields and a few signed-entry fields are ignored, an unknown `level`, receipt or anchor field,
+  slot kind or call signer is `malformed`, an unknown plaintext field is `invalidPayload`. Before the
+  door, a later implementation writes none of these into a layout-2 account.
+- **F4, limits that can be raised** (§4). Counts and ranges above a 0.5 maximum as `newerFormat`
+  under a parse ceiling, invariants first, 256 namespaces, and `policy.witnessWindow`. In 0.5 the
+  stated maxima are `malformed` when exceeded and the witness window is a constant 300 s.
+- **F5, namespaces after genesis and the live rule** (§5). Declaring a namespace by a control-rule
+  `rekey`; a normative live-rule registry with `newerFormat` for other live kinds; `colophon.` kinds
+  as `newerFormat`. In 0.5 namespaces are fixed at genesis, and 0.3 §5.1's podcast `position` rule
+  and 0.3 §6's kinds table are what 0.5 does (other live candidates `invalidPayload`).
+- **F6, opaque members** (§6). A new top-level term field makes only that member opaque, with the
+  promise later versions keep (no effect on sealing, serving, other principals or entry validity).
+  In 0.5 an unknown term stops the account's history (`newerFormat`).
+- **F7, a home's address can change** (§7). Home-signed, monotonic `colophon/location/5` statements,
+  replicated by homes and folders; calls only to appointed or signed bases. In 0.5 a home's address is
+  the endpoint in its immutable request; changing it means revoking and appointing a new home.
+- **F8, invites for a device that holds nothing** (§7a). A member-signed invite link for
+  `colophon.history.read` of the authority chain at one or two homes, at most an hour, the closed
+  `colophon/invite/5` object fitting one QR code, and `refused:notGranted` for a member no grant
+  names. In 0.5 the approving device hands the history over out of band (about 10 KB for a new
+  account, more than one QR code), and a member no grant names is `refused:revoked`. This one needs
+  no door (§17).
+- Also deferred: the no-home call option, the suite discriminator, `ext/` side objects, the refusal
+  retry signal (§8).
+
+## 17. Can a later format take over a 0.5 account in place?
+
+The trimmed plan rests on this: with only the door (F3) in 0.5, a later format can take over every
+0.5 account in place, by raising that account's layout, and **nothing a 0.5 account writes forces a
+succession to a new account.** Checked item by item:
+
+| What a 0.5 account wrote | Why a later format takes it over in place |
+| --- | --- |
+| The account ID (SHA-256 of genesis) and the 32-character `libraryID` in epoch and blob AADs | Identifiers only; the later version keeps deriving them from the same genesis, as 0.5 already does for upgraded 0.4 accounts. |
+| The authority chain (`/5` entries, a `/4` prefix after an upgrade) | Immutable history the later version verifies under 0.5's rules up to the raise and its own after; §8.1's "no other mixture" binds 0.5 readers, which are stopped at the raise. |
+| Namespaces fixed at genesis | Declaring more is a new rule after the raise (F5's design); existing namespaces and epochs are untouched. |
+| Record paths and `/5` header fields; `/3` headers | Immutable records the later version keeps reading at their paths under 0.5's rules (spec §20 says it must); new header versions or paths come after the raise. |
+| Live slot derivation (podcast `position`, slot = SHA-256 of the episode ID) | The later version keeps the rule for existing slots and adds rules after the raise; live values are replaceable, so nothing old is stranded. |
+| Blob manifests (64 KiB chunks, at most 512 MiB) | Existing blobs stay readable; larger blobs are a new manifest kind after the raise. |
+| A home's address inside its immutable request | The request stays the home's identity and audience; a location rule (F7's design) or a new component after the raise moves it. Until then a hostname change is a revoke and re-appointment, inside the same account. |
+| Caps and the 300 s window | Rules, not data: the later version raises them after the raise. |
+| Keys, vault, slots, epoch seals (one cryptographic suite) | A new suite adds new slots, seals and controllers by transitions on the same account; old seals stay readable to a reader that keeps the old suite. |
+| Revocation `kept` sets, grants, requests | Immutable entries the later version reads as written; a continuation kind comes after the raise. |
+| Long histories | Compaction or checkpoints after the raise (when 0.5 readers are already stopped), on the same account. |
+| Devices that stay on 0.5 | They stop at the raise and write nothing citing authority after it; the later version admits their `/5` records that cite authority before the raise (spec §20). |
+| Homes that stay on 0.5 | They refuse the raise and stop (§13.6); the owner updates or revokes them, inside the same account. |
+| Joining by an invite (F8, deferred) | Needs **no** opt-in: it changes only what a home serves to a bearer of a link a current member signed, and what the two devices exchange. Nothing is written into the account (a link is never an authority entry or record), so no 0.5 reader judges anything new. A 0.5 home refuses the link (it fails narrowing today), and the devices fall back to handing the history over out of band; a newer home serves it. The account's data is the same either way. |
+
+**The answer: none.** One dependency, which is why F3 stays: the door works only once the 0.5
+verifier reads `layout` and stops above 2. Today's code accepts a `layout` change without reading it,
+so without F3 a later format's raise would be silently continued by 0.5 readers, a split between
+versions (not a forced move to a new account, but a silent disagreement). With F3 built, no deferred
+item needs to come back for this reason. The one honest cost, stated in the limits: before an account
+opts in, a 0.5 device that meets something newer may refuse it rather than ask to be updated, which
+is why spec §20 also binds later implementations to write only what a 0.5 reader accepts into a
+layout-2 account.
+
+## 18. Revision 17 fix round (2026-11-16)
+
+The independent check of revision 17 (3 High, 2 Medium, 3 Low) confirmed the in-place-upgrade claim
+(§17). Changes: a layout raise stops a reader or home only once final, with the companion rule for
+later implementations (spec §1, §8.2, §8.7, §13.6, §20); §2.3 describes, case by case, what the 0.5
+verifier does with unknown content, and §20 states the unfortunate cases as limits; the quorum-2
+forwarding rule is written from PR 28's fix: a home forwards its entries after a peer's latest head
+by `POST {peer}/authority`, and appends due recording entries before any head (spec §13.1, §13.3,
+changes row 211); the
+candidate README's "Required for freeze" gains the revision 17 cases; genesis namespaces at most 64
+for writers too; the scan path names the canonical request envelope; §20's preservation sentence is
+"including, without limitation"; L3 is withdrawn (seq 0 ignored, as today) and W1-C with it. The
+vectors that change verdict when the code lands are still only `upgrade/then-v5-layout`.

@@ -64,4 +64,27 @@ import ColophonSession
         // A device that never got the seed cannot act as owner: the owner key has no slot to open.
         await #expect(throws: (any Error).self) { try await second.session.approve(AccessRequest(id: "0", label: "x", kind: .app, termsJSON: "{}", record: Data())) }
     }
+
+    @Test func rejectingCodesPersistsTheFiveFailuresPerHourLimit() throws {
+        let account = String(repeating: "ab", count: 32), now: Int64 = 1000
+        let limiter = try PairingFailureLimiter.fromState(state: "")
+        for _ in 0..<5 {
+            let key = try withEntropy(32) { try PairingTransferKey.create(entropy: $0) }
+            let joiner = try withEntropy(32) { try AccountPairing.join(account: account, e: key.public(), nb: $0) }
+            let existing = try AccountPairing.existingReceiveCommitment(account: account, commitment: joiner.commitment(), limiter: limiter, nowMs: now)
+            let nonce = try withEntropy(32) { try existing.sendNonce(na: $0) }
+            let reveal = try #require(try joiner.receiveNonce(na: nonce))
+            _ = try existing.receiveReveal(e: reveal.e, nb: reveal.nb, limiter: limiter, nowMs: now)
+            try existing.reject(limiter: limiter, nowMs: now)
+            #expect(try existing.stage() == .spent)
+        }
+        #expect(try !limiter.mayStart(nowMs: now))
+        let restored = try PairingFailureLimiter.fromState(state: limiter.toState())
+        #expect(try !restored.mayStart(nowMs: now))
+        do {
+            _ = try AccountPairing.existingReceiveCommitment(account: account, commitment: Data(repeating: 0, count: 32), limiter: restored, nowMs: now)
+            Issue.record("the sixth attempt must be refused")
+        } catch AccountError.Refused(let code, _, _) { #expect(code == "pairing:limit") }
+        #expect(try restored.mayStart(nowMs: now + 3_600_001))
+    }
 }
