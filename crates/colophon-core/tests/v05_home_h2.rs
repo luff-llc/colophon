@@ -54,7 +54,8 @@ fn approve(f: &mut Fixture, n: u8, at: i64) -> Vec<u8> {
     let id = f.host.identity(n);
     let req = request_for(f, &f.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), at);
     let seed = f.host.fresh();
-    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed).unwrap();
+    let pairing = paired(&f, &req);
+    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed, pairing).unwrap();
     run(&mut f.account, &f.host, action).entries[0].1.clone()
 }
 
@@ -308,7 +309,8 @@ fn a_late_activate_is_refused_when_it_arrives_as_a_candidate() {
     let id = f.host.identity(44);
     let req = request_for(&f, &f.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), due + 500);
     let seed = f.host.fresh();
-    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed).unwrap();
+    let pairing = paired(&f, &req);
+    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed, pairing).unwrap();
     let x = run(&mut f.account, &f.host, action).entries[0].1.clone();
     assert_eq!(entry_seq(&x), entry_seq(&act), "X and the activate are at the same seq");
     // Extending A's branch, the activate is refused late (the rule as it stood).
@@ -367,7 +369,8 @@ fn a_candidate_another_homes_head_covers_is_kept_as_evidence_one_per_home() {
     let id = f.host.identity(45);
     let req = request_for(&f, &f.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), t + 3_000);
     let seed = f.host.fresh();
-    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed).unwrap();
+    let pairing = paired(&f, &req);
+    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed, pairing).unwrap();
     let x = run(&mut f.account, &f.host, action).entries[0].1.clone();
     let (n, dx) = (entry_seq(&x), body_digest(&x));
     let a = admit(&a, &x, &format_date(t + 3_000));

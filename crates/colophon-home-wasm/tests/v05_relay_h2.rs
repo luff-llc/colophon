@@ -250,7 +250,7 @@ fn approve(f: &Fixture, host: &mut Host, ctl: &mut Engine<MemSource>, src: &MemS
     let seed = host.fresh();
     let action = ctl
         .account()
-        .begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed)
+        .begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed, paired_on(ctl.account(), &req))
         .unwrap();
     engine_finish(ctl, host, src, action);
     let (seq, e) = ctl
