@@ -672,21 +672,17 @@ pub fn choose_receipts(
     object_issued_ms: i64,
     not_after_ms: Option<i64>,
 ) -> Result<Vec<Vec<u8>>> {
-    // Homes current and unexpired at the object's `issued` (§8.7), as the verifier judges.
-    let homes = state.current_homes_at(object_issued_ms);
+    let homes = state.current_homes();
     if homes.is_empty() {
         return Ok(Vec::new());
     }
-    let ids: std::collections::BTreeSet<String> =
-        homes.iter().map(|m| m.request.member_id()).collect();
     let quorum = (state.keyring().policy.head_quorum() as usize).min(homes.len());
     let mut best: BTreeMap<String, Receipt> = BTreeMap::new();
     for bytes in held {
         let Some(r) = parse_receipt(state, bytes) else {
             continue;
         };
-        if !ids.contains(&r.by)
-            || r.object != object_digest
+        if r.object != object_digest
             || r.received_ms < object_issued_ms
             || r.received_ms > object_issued_ms.saturating_add(RECEIPT_WINDOW_MS)
             || not_after_ms.is_some_and(|d| r.received_ms > d)
@@ -1977,37 +1973,11 @@ fn judge_veto(
     let s = verified_state(&before, account, ctx.now_ms)?;
     check_pending_veto(&s, &t_bytes, &receipts, veto)?;
     let timing = transition_timing(&s, &t_bytes, &receipts)?;
-    // The home's receipt of the veto, before the deadline.
-    let r = RawEnvelope::parse_bounded(
-        receipt,
-        bounds::RECEIPT_BODY,
-        bounds::RECEIPT_ENVELOPE,
-        true,
-    )?;
-    let mut o = Obj::new(r.value.clone(), "receipt")?;
-    require(
-        o.string("protocol")? == "colophon/receipt/5" && o.string("account")? == account,
-        "not a receipt of this account",
-    )?;
-    require(
-        o.digest("object")? == v.digest,
-        "the receipt is not of this veto",
-    )?;
-    let (_, received) = o.date("received")?;
-    let home = o.key_id("by")?;
-    o.finish_closed()?;
-    let key = s
-        .current_homes()
-        .into_iter()
-        .find(|m| m.request.member_id() == home)
-        .map(|m| m.request.signing.clone())
-        .ok_or_else(|| bad_signature("the receipt is not by a home current at the activation"))?;
-    r.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
+    // The home's receipt of the veto, before the deadline, judged by the verifier's own receipt
+    // check (shape, a current home's key, the veto, the window).
     let v_issued = issued_of(&v)?;
-    require(
-        received >= v_issued && received <= v_issued.saturating_add(RECEIPT_WINDOW_MS),
-        "the receipt is outside its window",
-    )?;
+    let (home, received) =
+        crate::v05::history::check_receipt(&s, receipt, &v.digest, v_issued)?;
     require(
         received <= timing.deadline_ms,
         "the home receipted the veto after the deadline",
