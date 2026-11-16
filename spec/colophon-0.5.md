@@ -1671,6 +1671,13 @@ that activation is final (§8.7). Any server, device or service the owner choose
 home stores only entries, transitions and vetoes that verify `ok`, and holds no controller or
 member private key, PRF output or seed. An account appoints up to 8 homes.
 
+**One home is supported in 0.5.** An account may appoint more, and a verifier judges such an
+account by the same rules. But exchange between homes (forwarding entries, heads and candidates)
+is experimental in 0.5. The rules for it under "Exchange between homes" below are informative, an
+account with several homes may fail to make progress, and a later version of the home may change
+them with no change to any account's history. Everything else in this section, and in §13.2 to
+§13.5, holds for a home whether or not the account has others.
+
 **One home, one account.** A home is provisioned by its operator for one account (its ID)
 before anything is uploaded, and serves that account only. For the first sequential entry of its
 first upload, a well-formed genesis whose body digest is not the provisioned account is
@@ -1682,26 +1689,9 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   them once a primary head covers them, and such an entry is exempt from the 300 s clock rule below
   at a non-primary home, however far its `issued` is behind that home's clock: the primary applied
   the rule.
-- **Transitions.** Every home receipts and forwards transitions, vetoes, receipts and its heads
-  to every other current home. A home also forwards to every other current home the entries of its
-  history after the latest head of that home it holds, by `POST {peer}/authority` as a host publishes
-  them (no call: §13.4 lets anyone post there, and the peer admits them as it admits any upload), so
-  that every home holds each recording entry another home appended and can sign a head over it; a
-  home's `final` never waits for a head that covers only an entry it does not hold. When a home's
-  latest head of another home names an entry that its own branch lacks at that seq, the two homes
-  are on different branches: the home forwards that home its branch from the seq after the last
-  entry both share, at most 64 entries per pass, with its head first. A home stores a valid
-  candidate that does not stand when a head it holds of another home covers it, a head that counts
-  in a conflict (§8.6: its home current on the branch it covers and unexpired at its `issued`),
-  and still answers 409 (or `refused:fork`), so both homes come
-  to hold the same candidates and reach the same verdict (§8.6). It keeps at most 4 entries per
-  seq and at most one such candidate per covering home; a candidate that stands is stored beyond
-  that, and an `activate` refused under the rule below is never stored as a candidate. A home
-  forwards to each peer on its own, so a slow or silent peer delays no other; each pass to a peer
-  sends newly listed transitions and vetoes first, then the home's entries and head, then what that
-  peer has not yet taken. Before producing
-  any head, a home appends the recording entries that are due, so the head it forwards covers them
-  and the entries go ahead of it. Every home appends recording entries (§8.7), whatever the
+- **Transitions.** Every home receipts transitions and vetoes and keeps them, with their
+  receipts, until they are settled (§14). Before producing any head, a home appends the recording entries
+  that are due, so the head it serves covers them and the entries go ahead of it. Every home appends recording entries (§8.7), whatever the
   primary does:
   `activate` once due, `vetoed` once a veto is valid, and `final` as soon as it holds the witness
   heads, before storing anything signed or receipted by what the activation added. A home that
@@ -1785,6 +1775,25 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   document defines a notice object.
 - **First upload.** A genesis may be followed in one upload by the transition appointing a home
   and its `activate` (due when issued, since the state before it has no home).
+- **Exchange between homes (informative in 0.5; see "One home is supported in 0.5" above).**
+  A home receipts and forwards transitions, vetoes, receipts and its heads to every other current
+  home. It also forwards to every other current home the entries of its history after the latest
+  head of that home it holds, by `POST {peer}/authority` as a host publishes them (no call: §13.4
+  lets anyone post there, and the peer admits them as it admits any upload). That way every home
+  holds each recording entry another home appended and can sign a head over it, and a home's
+  `final` never waits for a head that covers only an entry it does not hold. When a home's latest
+  head of another home names an entry that its own branch lacks at that seq, the two homes are on
+  different branches. The home then forwards that home its branch from the seq after the last
+  entry both share, at most 64 entries per pass, with its head first. A home stores a valid
+  candidate that does not stand when a head it holds of another home covers it (a head that
+  counts in a conflict, §8.6), and still answers 409 (or `refused:fork`), so both homes come to
+  hold the same candidates and reach the same verdict. It keeps at most 4 entries per seq and at
+  most one such candidate per covering home; a candidate that stands is stored beyond that, and an
+  `activate` refused under the late-activation rule above is never stored as a candidate. A home
+  forwards to each peer on its own, so a slow or silent peer delays no other. Each pass to a peer
+  sends newly listed transitions and vetoes first, then the home's entries and head, then what
+  that peer has not yet taken. Deep forks and several hostile homes are not handled
+  (`docs/multi-home-open-issues.md` in the reference implementation).
 
 ### 13.2 Head
 
@@ -1857,10 +1866,10 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   (its guard refuses, `issued` cannot yet increase, or its history stops at a fork), it answers 503
   with `Retry-After` and MUST NOT serve the older head, at `records/heads/<its ID>.json` too, and it
   forwards no head to its peers while one is due. A home that cannot yet determine which recording
-  entries are due produces no head either, and answers 503 the same way. It sends a peer the
-  entries a forwarded head covers before the head (§13.1 "Transitions"; in a candidate exchange the
-  head goes first), so a peer can always verify it, and at `headQuorum` 2
-  two homes never wait on each other for `final`. It MUST give its heads strictly increasing `issued`, and MUST NOT
+  entries are due produces no head either, and answers 503 the same way. (Informative in 0.5, §13.1 "Exchange between
+  homes": it sends a peer the entries a forwarded head covers before the head, or in a candidate
+  exchange the head first, so a peer can always verify it, and at `headQuorum` 2 two homes never
+  wait on each other for `final`.) It MUST give its heads strictly increasing `issued`, and MUST NOT
   sign a head for a second digest at a seq unless its own verdict shows the first displaced under
   §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
   second head's side; the Equivocation rule above). The guard belongs to home admission, which holds the history: the host
@@ -2548,6 +2557,11 @@ hide a transition until its deadline has passed (§13.1), and with one stolen ke
 are the person reference for availability only. The setup that resists one hostile home is three
 homes at `headQuorum` 2, the company reference; hosts SHOULD offer it to people too.
 
+**Several homes are experimental in 0.5** (§13.1 "One home is supported in 0.5"). The two- and
+three-home references above are the intended setups, but they depend on exchange between homes,
+which is informative in 0.5, so an account set up that way may fail to make progress. One home is
+the supported configuration in 0.5.
+
 ## 19. Results and reasons
 
 | Where | Reasons |
@@ -2575,6 +2589,10 @@ check as an optional diagnostic.
 0.5 account under 0.4 rules, and MUST NOT accept a `/3` or `/4` object where §11.5 or §16.1 fences
 it out. A later version that adds markers will say which 0.5 markers it retires; until an account
 opts in, 0.5 markers stay valid for it.
+
+**Exchange between homes is not frozen.** Forwarding of entries, heads and candidates between an
+account's homes (§13.1 "Exchange between homes") is informative in 0.5. A later version of the
+home may change it with no change to any account's history, to any marker or to the layout.
 
 **The upgrade door.** An account opts in to a later version's rules only by a transition whose
 `layout` component raises its layout above 2 (§8.2), under the control rule with the recovery
