@@ -1621,6 +1621,11 @@ fn record_due(req: &Value) -> R<Value> {
     let mut sign = Vec::new();
     let mut result = "ok".to_string();
     let mut recorded = 0usize;
+    // Whether what is due at `now` could be determined: when it could not, the host signs no
+    // head at `now` (§13.1: a home appends the recording entries that are due before it produces
+    // a head; a head at `now` over a history missing one would leave the head over it unsignable
+    // until the clock passes `now`, §13.3).
+    let mut settled = true;
     match Account::open(
         objects.clone(),
         Vec::new(),
@@ -1628,9 +1633,15 @@ fn record_due(req: &Value) -> R<Value> {
         Identity::Member(l.slot.home.clone()),
         now_ms,
     ) {
-        Err(e) => note = json!(e.to_string()),
+        Err(e) => {
+            note = json!(e.to_string());
+            settled = false;
+        }
         Ok(mut account) => match account.record_due() {
-            Err(e) => note = json!(e.to_string()),
+            Err(e) => {
+                note = json!(e.to_string());
+                settled = false;
+            }
             Ok(done) => {
                 'all: for f in done {
                     for (_, bytes) in f.entries {
@@ -1684,6 +1695,7 @@ fn record_due(req: &Value) -> R<Value> {
         "sign": sign,
         "result": result,
         "note": note,
+        "settled": settled,
     }))
 }
 

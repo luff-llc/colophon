@@ -142,7 +142,8 @@ export class HomeSlot {
   note(topic, message) {
     if (this.said.get(topic) === message) return;
     this.said.set(topic, message);
-    if (message) console.error(message);
+    // Each line names the home that says it (several homes may share one log).
+    if (message) console.error(`[home ${this.key.memberId.slice(0, 8)} @${this.clock()}] ${message}`);
   }
 
   async open() {
@@ -276,6 +277,9 @@ export class HomeSlot {
       await this.materialize(r.store);
       await this.signReceipts(r.sign);
       this.trace('record_due end');
+      // When what is due now could not be determined, no head is produced now (it stays due:
+      // a GET is answered 503, a peer is sent none) and the next pass asks again.
+      if (r.settled === false) return 'due';
       this.lastDue = { state: this.state, now };
     }
     return this.ensureHead();
