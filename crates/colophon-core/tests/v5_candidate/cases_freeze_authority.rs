@@ -201,6 +201,7 @@ pub fn part(o: &mut Out) {
     f3_final(o);
     fix_round(o);
     head_expiry(o);
+    drop_home(o);
 }
 
 fn head_of(chain: &Chain, home: &Key, at: i64, seq: usize) -> Value {
@@ -1031,4 +1032,207 @@ fn head_expiry(o: &mut Out) {
 
 fn late_head(chain: &Chain, home: &Key, expiry: i64) -> Value {
     head_of(chain, home, expiry + 100, 3)
+}
+
+/// Append an `activate` of `t` at `issued` carrying `receipts` (no due-time arithmetic).
+fn activate_at(chain: &mut Chain, t: &Value, receipts: &[Value], issued: i64) {
+    append_unsigned(
+        chain,
+        "activate",
+        &fstr(t, "by"),
+        &ts(issued),
+        json!({"transition": emb(t), "receipts": receipts.iter().map(emb).collect::<Vec<_>>()}),
+    );
+}
+
+/// A policy transition by `by` activated at once with no receipt: valid only with no home.
+fn no_home_step(chain: &mut Chain, by: Key, at: i64) {
+    let t = transition(chain, json!({"policy": {"callWindow": 120}}), sg![by], &ts(at));
+    activate_at(chain, &t, &[], at);
+}
+
+/// §8.7 "Revoking a home": a full set leaves the homes it revokes out of its receipts, as out of
+/// its witnesses (the spec owner's decision of 2026-11-16, before the freeze). A home that is
+/// gone or refuses can be dropped by the stronger authority; nothing else changes.
+fn drop_home(o: &mut Out) {
+    let (a, b, k1, k2) = (A.clone(), B.clone(), K1.clone(), K2.clone());
+    let at = R0;
+
+    // Full set (b): A and B, every control key in two units, drop the only home, which never
+    // answers. No receipt; due at its `issued`; no witness, so final at once.
+    let (base, _) = account(&[(&a, AC), (&b, AC)], 0, 1, &[("Home one", None)], sg![a]);
+    let h1_id = derived("w1a/homeone/signing").id;
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![a, b], &ts(at));
+    let mut dropped = base.clone();
+    activate_at(&mut dropped, &t, &[], at);
+    let mut c = dropped.clone();
+    no_home_step(&mut c, a.clone(), at + 60);
+    wc(
+        o,
+        "f2-drop-home-full-set-b",
+        &c,
+        ok_at(4),
+        "Every control key (A and B, two units) signs a full set that revokes the only home, which never answers. The home it revokes is left out of its receipts as out of its witnesses: no receipt, due at its issued, final at once. The account then has no home: a transition at seq 4 activates at once with no receipt.",
+        &["8.7"],
+    );
+
+    // Then a new home is appointed under the no-home rules, and it receipts what follows.
+    let mut c = dropped.clone();
+    let (item, h2) = appointment(&account_id(&c), "Home two", None);
+    let t2 = transition(&c, json!({"homes": {"appoint": [item]}}), sg![a], &ts(at + 60));
+    activate_at(&mut c, &t2, &[], at + 60);
+    let t3 = transition(&c, json!({"policy": {"callWindow": 120}}), sg![a], &ts(at + 120));
+    let r3 = receipt_of(&account_id(&c), &t3, &h2, &ts(at + 121));
+    activate(&mut c, &t3, &[r3]);
+    wc(
+        o,
+        "f2-drop-home-then-appoint",
+        &c,
+        ok_at(5),
+        "After a full set drops the only home (seq 3), A appoints a new home with no receipt, as an account with no home does (seq 4); the new home then receipts a transition that waits the recovery delay (seq 5).",
+        &["8.7"],
+    );
+
+    // Full set (a): both recovery keys (two units, recoverThreshold 2) drop the only home.
+    let (base, _) = account(
+        &[(&a, AC), (&k1, &["recover"]), (&k2, &["recover"])],
+        2,
+        1,
+        &[("Home one", None)],
+        sg![a, k1, k2],
+    );
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![k1, k2], &ts(at));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[], at);
+    no_home_step(&mut c, a.clone(), at + 60);
+    wc(
+        o,
+        "f2-drop-home-full-set-a",
+        &c,
+        ok_at(4),
+        "Every recovery key (two units, the recovery rule) signs a full set that revokes the only home, which never answers: no receipt, due at its issued, final at once; the account then has no home.",
+        &["8.7"],
+    );
+
+    // headQuorum 2, two homes; a full set revokes Home one. Only the remaining home's receipt is
+    // required, and it alone witnesses: its head alone makes the activation final.
+    let (base, keys) = account(
+        &[(&a, AC), (&b, AC)],
+        0,
+        2,
+        &[("Home one", None), ("Home two", None)],
+        sg![a],
+    );
+    let acct = account_id(&base);
+    let (h1, h2) = (keys[0].clone(), keys[1].clone());
+    let t = transition(&base, json!({"homes": {"revoke": [h1.id]}}), sg![a, b], &ts(at));
+    let r2 = receipt_of(&acct, &t, &h2, &ts(at + 1));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, std::slice::from_ref(&r2), at + 1);
+    let head = head_of(&c, &h2, at + 60, 3);
+    final_of(&mut c, 3, &head);
+    wc(
+        o,
+        "f2-drop-one-of-two-homes",
+        &c,
+        ok_at(4),
+        "headQuorum 2 with two homes: a full set revokes Home one. Its receipts are required from min(headQuorum, remaining homes) = 1 remaining home, so Home two's receipt alone suffices, due at its received; Home two alone witnesses, and a final with its head alone makes the activation final.",
+        &["8.7"],
+    );
+    let mut c = base.clone();
+    let r1 = receipt_of(&acct, &t, &h1, &ts(at + 1));
+    activate_at(&mut c, &t, std::slice::from_ref(&r1), at + 1);
+    wc(
+        o,
+        "f2-drop-one-of-two-homes-revoked-receipt-only",
+        &c,
+        bad("malformed", 3),
+        "The same full set carrying only the receipt of the home it revokes: that is neither headQuorum receipts from the homes current before it (two) nor one from a remaining home, so the activate is malformed.",
+        &["8.7"],
+    );
+
+    // The same revocation of the only home under the control rule (A alone, not a full set),
+    // with no receipt: still refused. It can be vetoed, and the home witnesses its window.
+    let (base, _) = account(&[(&a, AC), (&b, AC)], 0, 1, &[("Home one", None)], sg![a]);
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![a], &ts(at));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[], at + W + D);
+    wc(
+        o,
+        "f2-drop-home-control-rule-no-receipt",
+        &c,
+        bad("malformed", 3),
+        "A alone (the control rule, not a full set: B did not sign) revokes the only home with no receipt. It can be vetoed, so it still needs the home's receipt: malformed.",
+        &["8.7"],
+    );
+
+    // Under the recovery rule, not a full set (K1 of K1 and K2, recoverThreshold 1): still refused.
+    let (base, _) = account(
+        &[(&a, AC), (&k1, &["recover"]), (&k2, &["recover"])],
+        1,
+        1,
+        &[("Home one", None)],
+        sg![a, k1],
+    );
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![k1], &ts(at));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[], at + W + D);
+    wc(
+        o,
+        "f2-drop-home-recovery-rule-no-receipt",
+        &c,
+        bad("malformed", 3),
+        "K1 alone (the recovery rule, not a full set: K2 did not sign) revokes the only home with no receipt. It can be vetoed, so it still needs the home's receipt: malformed.",
+        &["8.7"],
+    );
+
+    // A single control unit is never a full set: its revocation of the home needs the receipt.
+    let (base, _) = account(&[(&a, AC)], 0, 1, &[("Home one", None)], sg![a]);
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![a], &ts(at));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[], at);
+    wc(
+        o,
+        "f2-drop-home-one-unit",
+        &c,
+        bad("malformed", 3),
+        "The account's only controller, one unit, revokes the only home with no receipt. One unit is never a full set, so the receipt is required: malformed.",
+        &["8.7"],
+    );
+
+    // A backdated full set with no home remaining. Its `issued` is bounded below by its anchor's
+    // `issued` and by the 7-day bound: the activate's `issued` is max(due, previous) and at most
+    // 7 days after due, so a full set issued more than 7 days before the entry it follows is
+    // malformed.
+    let (base, _) = account(&[(&a, AC), (&b, AC)], 0, 1, &[("Home one", None)], sg![a]);
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![a, b], &ts(120));
+    let mut c = base.clone();
+    let later = 120 + 8 * 86_400;
+    grant_agent(&mut c, &a, &ts(later), &a);
+    activate_at(&mut c, &t, &[], later);
+    wc(
+        o,
+        "f2-drop-home-full-set-backdated",
+        &c,
+        bad("malformed", 4),
+        "A full set that drops the only home, anchored at seq 2 and issued 8 days before the entry at seq 3. With no home remaining it is due at its issued; the activate must be issued at max(due, previous) and no more than 7 days after due, so it is malformed. A full set's issued is bounded by its anchor's issued and by the 7-day bound, as in an account with no home.",
+        &["8.7"],
+    );
+
+    // The only home receipts the full set that drops it anyway: still ok (the homes current
+    // before it, counted as before), and the account then has no home.
+    let (base, keys) = account(&[(&a, AC), (&b, AC)], 0, 1, &[("Home one", None)], sg![a]);
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![a, b], &ts(at));
+    let r = receipt_of(&account_id(&base), &t, &keys[0], &ts(at + 5));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[r], at + 5);
+    no_home_step(&mut c, a.clone(), at + 60);
+    wc(
+        o,
+        "f2-drop-home-full-set-with-receipt",
+        &c,
+        ok_at(4),
+        "A full set that drops the only home carries that home's receipt anyway: still ok (headQuorum receipts from the homes current before it), due at the receipt's received, final at once; the account then has no home.",
+        &["8.7"],
+    );
 }
