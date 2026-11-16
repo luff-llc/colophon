@@ -57,10 +57,22 @@ function loadConfig(argv, env) {
   return {
     cors: { origins: origins ?? [] },
     home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
-    clock: clockFile ? () => Number(readFileSync(clockFile, 'utf8').trim()) : undefined,
+    // The test clock: a reading taken while a test rewrites the file can be empty; read again
+    // rather than take 0 (which would put every entry in the future).
+    clock: clockFile ? () => {
+      for (let i = 0; i < 1000; i += 1) {
+        const v = Number(readFileSync(clockFile, 'utf8').trim());
+        if (Number.isFinite(v) && v > 0) return v;
+      }
+      throw new Error('the test clock file holds no time');
+    } : undefined,
     tracing: Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1',
     tickMs: Number(env.COLOPHON_RELAY_TICK_MS ?? config.tickMs ?? 2000),
-    resolve: config.resolve,
+    // Test builds only: another home's address read from a file at each use, so tests can start
+    // every relay on port 0 and tell each the others' ports afterwards (and after a restart).
+    resolve: clockFile && env.COLOPHON_RELAY_RESOLVE_FILE ? () => {
+      try { return JSON.parse(readFileSync(env.COLOPHON_RELAY_RESOLVE_FILE, 'utf8')); } catch { return config.resolve ?? {}; }
+    } : config.resolve,
     host: env.COLOPHON_RELAY_HOST ?? config.host ?? '127.0.0.1',
     port: Number(env.COLOPHON_RELAY_PORT ?? config.port ?? 8787),
     dataDir: env.COLOPHON_RELAY_DATA ?? config.dataDir ?? './relay-data',

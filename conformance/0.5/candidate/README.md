@@ -165,10 +165,10 @@ Normative for spec §21 condition 1.
   - the confirmed pairing (§9.1, interface tests): an approval without a token, with a token spent
     once already, with a token for another account, and with a token for another key are refused;
     the code path and the scan path (the canonical request envelope) each issue one;
-  - homes at `headQuorum` 2 converge to `final` in the order that deadlocked before PR 28's fix
-    (a peer's head arriving before the home's own head is forwarded), reliably, with the two
-    intermittent relay tests (`crates/colophon-home-wasm/tests/v05_relay_home.rs`) passing every
-    run;
+  - the two-home tests pass (`crates/colophon-home-wasm/tests/v05_relay_h2.rs` and
+    `v05_relay_home.rs`, every run). Convergence between several homes in general is not a 0.5
+    requirement: 0.5 supports one home per account, and exchange between homes is experimental
+    (spec §13.1; open issues in `docs/multi-home-open-issues.md`);
   - Swift (§16.3): an envelope at seq 0, readable or not, is ignored and a valid predecessor stays
     valid.
 
