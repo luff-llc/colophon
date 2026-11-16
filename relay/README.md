@@ -62,11 +62,103 @@ home holds no account secret: no controller or member key, no PRF output, no see
 | Other homes | config `resolve`: `{"https://other.example/v1/libraries/acct": "http://10.0.0.7:8787/v1/libraries/acct"}` (the endpoint an account names, to the URL to reach it) | the endpoint itself |
 | Request rate | `limits.requestsPerMinute` (per address) | `1200` |
 | TLS | `COLOPHON_RELAY_TLS_CERT`, `COLOPHON_RELAY_TLS_KEY`, or `"tls":{…}` | off |
+| CORS origins | `COLOPHON_RELAY_CORS_ORIGINS="https://app.example,…"` or `cors.origins`: each exactly `scheme://host[:port]`, lower case, compared whole; `*`, `null`, a path or a default port refuse start-up | none: no CORS header |
+| Provisioning | config `provision` (below) | off |
+| Client address | config `clientAddress`: `{"header": "CF-Connecting-IP", "trustedPeers": ["127.0.0.1", "::1"]}` | the socket address |
 
-**Provisioning.** The operator creates a home slot for one account, by its account ID, before
-anything is uploaded. Its first upload is accepted only if it starts with the genesis whose digest
-is that ID; anything else is refused and nothing is held. The relay refuses to start a home slot
-with no account, or one whose stored state belongs to another account or another home key.
+**Provisioning.** A home slot serves one account, by its account ID, from before anything is
+uploaded. Its first upload is accepted only if it starts with the genesis whose digest is that ID;
+anything else is refused and nothing is held. The relay refuses to start a home slot with no
+account, or one whose stored state belongs to another account or another home key. A slot is
+made in one of two ways:
+
+- The operator configures it (`COLOPHON_RELAY_HOME_SLOTS` or `libraries`), and restarts.
+- An app creates it, with no restart, at the door `POST /v1/provision` when `provision.enabled`
+  is true. The body is `{"slot","base","account"}` with `Content-Type: application/json` and a
+  `Content-Length`, as the test apps send it. The answer is 200 with the home's signed member
+  request (§9.1), JSON bytes: the account appoints the home with it. The home module builds and
+  verifies the request and the home key signs it. The same `{slot, account}` again answers the
+  same bytes. The row (`slot` to `{account, base, at, request}`) is written to
+  `<dataDir>/provisioned.json` (staged, fsynced, renamed) before the answer, and read at
+  start-up with the configured slots; a slot both configured and provisioned with different
+  accounts refuses start-up. Provisioned slots are scheduled like configured ones.
+
+**The table.** `provisioned.json` is read only when provisioning is on or a regular file of that
+name is in the data directory. With provisioning off and no such file the relay reads, scans and
+removes nothing of that name (a 0.3 slot called `provisioned.json` works as before; turning
+provisioning on with it there refuses start-up until that slot is renamed). When provisioning was
+on and is turned off (`enabled: false`) the table file stays: its slots stay served and the door
+answers 404; keep `provision.prefix` set, since every row is checked against it. While
+provisioning is or has been on, `provisioned.json` (and its staging files, `.provisioned.json.*`,
+which the slot grammar already excludes) cannot be slot names. The table is never repaired: at
+start-up it is read up to a bound (32 KiB of request per row, `max(maxSlots, 200)` rows), it
+must be exactly as the relay writes it (no duplicate key, no other field), and every row must
+have a slot that matches `slotPattern`, `base === prefix + slot`, and a member request that the
+module finds well formed, signed by this home's key, and naming the row's account and endpoint.
+A bad table refuses start-up with a message naming the row.
+
+**Release, and a lapsed entitlement.** Only a slot that was never appointed and holds no genesis
+is ever released (`unclaimedHours`). The release takes the slot out of service first (new requests
+answer `refused:notProvisioned`, a waiting change feed is woken and ended, a provision of the name
+waits), drains every request and scheduler pass still running on it, and checks again that nothing
+is held; only then are its directory and its row removed, and only then can the name be
+provisioned again. If an upload landed meanwhile, the release is abandoned and the slot stays. An
+appointed home keeps witnessing and receipting the account's authority history until its
+revocation is final, whatever the grant's expiry or the state of a subscription: when an
+entitlement lapses, the gate may stop new slots and the home may stop serving records, but it keeps
+signing heads and receipting authority changes until the account revokes it, or it would block that
+account's key changes. (Entitlements are not built in 0.5; gate `"token"` is the smallest one.)
+
+| `provision` field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | The door answers 404 when off, and every other answer is as without the setting |
+| `prefix` | none, required when on (and while a table file exists) | The public `https://` URL prefix, ending in `/`: `base` must equal `prefix + slot`. Plain `http://` only to a loopback host, for tests; anything else refuses start-up |
+| `maxSlots` | `200` | Provisioned slots this home holds |
+| `perAddressPerHour` | `10` | New slots, and refused tokens, one client address may spend in an hour |
+| `unclaimedHours` | `24` | A provisioned slot holding no genesis this long after it was made is released (its directory, then its row, removed) at the next provision or start-up, on the relay's clock |
+| `slotPattern` | `^[a-z0-9][a-z0-9._-]{7,63}$` | Names an app may pick, besides the slot grammar |
+| `gate` | `"open"` | Who may provision: `"open"` (anyone within the bounds) or `"token"` (`Authorization: Bearer <token>` whose SHA-256 is `tokenSha256`; `bun relay/server.js token` prints one). Anything else refuses start-up |
+| `tokenSha256` | none | 64 hex; required with gate `"token"`, compared in constant time |
+
+| The door answers | When |
+| --- | --- |
+| 200 the member request | Admitted, or the same `{slot, account}` again |
+| 400 `{"result":"malformed"}` | The body is not exactly `{"slot","base","account"}`, the slot breaks the grammar or `slotPattern`, `base` is not `prefix + slot`, or `account` is not 64 lower-case hex |
+| 403 `{"result":"refused:noEntitlement"}` | Gate `"token"` and the token is missing or wrong (counted against the address's hourly share) |
+| 403 | The request carries an `Origin` not on the CORS list (checked before the body is read) |
+| 405 | Not `POST` |
+| 409 | The slot is held by another account, configured by the operator, or a directory of that name is in the data directory |
+| 411, 413 | No `Content-Length`, or a body over 4 KiB |
+| 415 | The media type is not `application/json` (checked before the body is read; a browser must preflight such a request, and only a listed origin's preflight succeeds) |
+| 429 `{"result":"refused:overQuota"}` | The address is over `perAddressPerHour`, with `Retry-After` (checked first: a guesser over its share learns nothing about its token) |
+| 507 `{"result":"refused:overQuota"}` | `maxSlots` are held |
+
+The gate is one function, `admitProvision` in `relay/provision.js`: every check goes through it,
+and an entitlement presented in `Authorization` is added there. `refused:closed` is reserved and
+not produced. With provisioning on, a request to a slot this home does not hold answers 404
+`{"result":"refused:notProvisioned"}` instead of the 0.3 answer, 401 `WWW-Authenticate: Bearer`.
+So the answers tell the kinds of slot apart: an unknown name is 404, a configured token slot asked
+without its token is 401, and a home slot answers `GET {base}` with 200. That is intended: slot
+names are not secrets, and access is by call (or, at a 0.3 slot, by token), never by knowing a name.
+
+**The client address.** The per-address request limit and `perAddressPerHour` count against one
+address, from one function. By default it is the socket address. Behind a proxy (the staging home
+sits behind a Cloudflare tunnel, so every request comes from 127.0.0.1) set `clientAddress`: the
+header is read only when the socket peer is in `trustedPeers`; from a trusted peer a missing or
+malformed header (a list, two headers, not an IP address) counts against one shared bucket, never
+an unlimited one; from any other peer the header is ignored. The address is used for limits only,
+never for access.
+
+**CORS and caching.** Every answer, whoever writes it, carries `Cache-Control: no-store,
+no-transform` and no `Content-Encoding`; with a CORS list, `Vary: Origin`, and for a listed
+origin `Access-Control-Allow-Origin` and `Access-Control-Expose-Headers: ETag, Retry-After,
+WWW-Authenticate` (never `Allow-Credentials`). `OPTIONS` is answered before any slot, call or
+rate work: 204, with the allowed methods (`GET, POST, PUT, OPTIONS`) and headers
+(`Authorization, Content-Type, If-Match, If-None-Match`) and `Access-Control-Max-Age: 600` for a
+listed origin's preflight.
+
+**Clients must send `Content-Length`.** A body without one is refused with 411. A proxy that passes
+chunked bodies through (the Cloudflare tunnel does) reaches the relay as 411.
 
 **Credentials.** At a home slot a bearer token authorizes nothing (it is ignored, with a warning
 at start-up): every request that needs authorization takes `Authorization: Colophon …`. The key
