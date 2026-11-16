@@ -353,6 +353,15 @@ impl State {
             })
             .collect()
     }
+    /// [`State::current_homes`] that are also unexpired at `at_ms` (§8.5: a home is current only
+    /// while it is a current member besides). Receipts are judged at the receipted object's
+    /// `issued` and witnesses at the activation's `issued` (§8.7).
+    pub fn current_homes_at(&self, at_ms: i64) -> Vec<&MemberRecord> {
+        self.current_homes()
+            .into_iter()
+            .filter(|m| m.expires_ms.is_none_or(|e| at_ms <= e))
+            .collect()
+    }
     pub(super) fn home_key(&self, id: &str) -> Option<Vec<u8>> {
         self.current_homes()
             .into_iter()
@@ -1380,8 +1389,9 @@ pub(crate) fn check_transition(
     if (all.len() as u64) < 1 + max_v {
         return Err(bad_signature("escalation: too few signer units"));
     }
-    // Receipts (§8.7 validity 2).
-    let homes = s.current_homes();
+    // Receipts (§8.7 validity 2), from the homes current and unexpired at the transition's
+    // `issued`.
+    let homes = s.current_homes_at(issued);
     let quorum = k.policy.head_quorum() as usize;
     let mut latest_receipt = issued;
     if with_receipts {
@@ -1477,7 +1487,7 @@ pub(super) fn check_receipt(
     o.finish_closed()?;
     // A receipt counts only from a current home (§8.5 "Current principal"); one from another
     // key is a wrong home, `malformed` (§8.5's table).
-    let key = match s.current_principal(&by, Claim::Home, received) {
+    let key = match s.current_principal(&by, Claim::Home, object_issued) {
         Ok(Principal::Home(m)) => m.request.signing.clone(),
         _ => return Err(malformed("receipt by a key that is not a current home")),
     };
@@ -2028,9 +2038,11 @@ fn finalize_empty_witnesses(n: &mut State) {
     }
 }
 
-fn witnesses_of(s: &State, t: &TCheck, after: Option<&State>) -> BTreeSet<String> {
+/// The witnesses of an activation recorded at `at_ms` (its `issued`): the homes current and
+/// unexpired then in the state before it (§8.5, §8.7), less those it revokes.
+fn witnesses_of(s: &State, t: &TCheck, after: Option<&State>, at_ms: i64) -> BTreeSet<String> {
     let mut w: BTreeSet<String> = s
-        .current_homes()
+        .current_homes_at(at_ms)
         .iter()
         .map(|m| m.request.member_id())
         .collect();
@@ -2263,7 +2275,7 @@ fn activate(s: &State, e: &Entry, now_ms: i64) -> Step<State> {
         n.v.insert(u.clone(), 0);
     }
     n.suspensions.retain(|sp| sp.transition != t.digest);
-    let witnesses = witnesses_of(s, &t, Some(&n));
+    let witnesses = witnesses_of(s, &t, Some(&n), e.issued);
     n.activations.push(Activation {
         seq: e.seq,
         digest: e.env.digest.clone(),
@@ -2370,8 +2382,9 @@ fn check_veto(
     if v_units.iter().any(|u| t.units.contains(u)) {
         return Err(malformed("a vetoing unit signed the transition").into());
     }
-    // The veto's receipts: chosen, within 300 s of its issued, before the deadline.
-    let homes = s.current_homes();
+    // The veto's receipts: chosen, within 300 s of its issued, before the deadline, from the
+    // homes current and unexpired at its `issued`.
+    let homes = s.current_homes_at(v_issued);
     let quorum = (k.policy.head_quorum() as usize).min(homes.len());
     crate::v05::require(
         !with_receipts || receipts.len() == quorum,
@@ -2611,8 +2624,13 @@ fn suspend(s: &State, e: &Entry) -> Step<State> {
     if !t_env.signer_ids().contains(&e.by) {
         return Err(bad_signature("the suspending key is not a signer of the transition").into());
     }
-    if s.current(&e.by).is_none() {
-        return Err(bad_signature("the suspending key is not current").into());
+    // A suspended key may sign transitions and vetoes, never a `suspend` (§8.7).
+    let claim = Claim::Controller {
+        roles: &[],
+        suspended_ok: false,
+    };
+    if let Err(n) = s.current_principal(&e.by, claim, e.issued) {
+        return Err(bad_signature(format!("the suspending key is not current: {n:?}")).into());
     }
     let t = check_transition(s, &t_bytes, &receipts, true, true)?;
     if s.recorded.contains(&t.digest) {
@@ -3575,12 +3593,22 @@ pub(super) fn covered_by_home_head(
     y: &Entry,
     home: &str,
 ) -> bool {
-    let Some(key) = s.home_key(home) else {
+    // A head counts only when its home is current and unexpired at the head's own `issued`
+    // (§8.6, §13.3): an expired home's later heads decide nothing.
+    let Some(m) = s
+        .current_homes()
+        .into_iter()
+        .find(|m| m.request.member_id() == home)
+    else {
         return false;
     };
     let branch = descendants(all, &y.env.digest);
     heads.heads.iter().any(|h| {
-        h.by == home && h.seq >= y.seq && branch.contains(&h.digest) && h.env.verify(&key).is_ok()
+        h.by == home
+            && h.seq >= y.seq
+            && m.expires_ms.is_none_or(|e| h.issued <= e)
+            && branch.contains(&h.digest)
+            && h.env.verify(&m.request.signing).is_ok()
     })
 }
 

@@ -406,6 +406,8 @@ pub struct GenesisParams {
 /// that meet the control rule over the new keyring, and a possession proof for every other
 /// controller.
 pub fn prepare_genesis(p: &GenesisParams, now_ms: i64) -> Result<PendingBatch> {
+    // The verifier caps genesis at 64 namespaces; the builder refuses what it would.
+    crate::v05::history::check_namespace_count(p.namespaces.len())?;
     let k = Keyring::parse(p.keyring.clone(), 1)?;
     validate_slots(&k.controllers, &k.slots, 1)?;
     require(!p.signers.is_empty(), "genesis needs a signer")?;
@@ -670,17 +672,21 @@ pub fn choose_receipts(
     object_issued_ms: i64,
     not_after_ms: Option<i64>,
 ) -> Result<Vec<Vec<u8>>> {
-    let homes = state.current_homes();
+    // Homes current and unexpired at the object's `issued` (§8.7), as the verifier judges.
+    let homes = state.current_homes_at(object_issued_ms);
     if homes.is_empty() {
         return Ok(Vec::new());
     }
+    let ids: std::collections::BTreeSet<String> =
+        homes.iter().map(|m| m.request.member_id()).collect();
     let quorum = (state.keyring().policy.head_quorum() as usize).min(homes.len());
     let mut best: BTreeMap<String, Receipt> = BTreeMap::new();
     for bytes in held {
         let Some(r) = parse_receipt(state, bytes) else {
             continue;
         };
-        if r.object != object_digest
+        if !ids.contains(&r.by)
+            || r.object != object_digest
             || r.received_ms < object_issued_ms
             || r.received_ms > object_issued_ms.saturating_add(RECEIPT_WINDOW_MS)
             || not_after_ms.is_some_and(|d| r.received_ms > d)
@@ -804,6 +810,13 @@ fn transition_batch(
     now_ms: i64,
     p: &TransitionParams,
 ) -> Result<PendingBatch> {
+    // The upgrade door (§20, design §3.5): a `layout` component that does not raise the layout
+    // voids its transition, and one that raises it is a later version's; 0.5 writes neither.
+    if p.change.get("layout").is_some() {
+        return Err(malformed(
+            "a 0.5 writer builds no `layout` component: one that does not raise the layout voids its transition, and 0.5 has no raise to write",
+        ));
+    }
     check_signers_current(state, &p.signers, i64::MAX)?;
     let k = state.keyring();
     let new_threshold = p

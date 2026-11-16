@@ -1,0 +1,1 @@
+{"description":"A layout raise together with a component that voids the transition (adding a present key with other roles): the whole transition is void, malformed, and nothing stops.","expected":{"result":"malformed","seq":2},"sections":["8.7","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

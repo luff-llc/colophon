@@ -1,0 +1,1 @@
+{"description":"A provisional layout raise whose only witness is then revoked by the recovery rule (removal-only, final at once): the home is excused, the raise has no remaining witness and is final, so the reader stops at the raise.","expected":{"result":"newerFormat","seq":3},"sections":["8.7","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
