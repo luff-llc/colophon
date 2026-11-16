@@ -72,6 +72,8 @@ struct SetupView: View {
         .navigationTitle("Colophon test")
         .disabled(model.busy != nil)
         .onAppear { prefix = model.settings.homePrefix; reach = model.settings.reachPrefix; provisioner = model.settings.provisioner; token = model.settings.provisionerToken }
+        // Settings can change under the form (a reset, a test hand-off): show what is stored.
+        .onChange(of: model.settings) { _, s in prefix = s.homePrefix; reach = s.reachPrefix; provisioner = s.provisioner; token = s.provisionerToken }
         .sheet(isPresented: $scanning) {
             ScannerView { text in scanning = false; invite = text; Task { await model.prepareJoin(text) } }
         }
