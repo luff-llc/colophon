@@ -21,6 +21,16 @@
 mod kit;
 #[path = "v5_candidate/cases_a.rs"]
 mod cases_a;
+#[path = "v5_candidate/cases_freeze_authority.rs"]
+mod cases_freeze_authority;
+#[path = "v5_candidate/cases_freeze_calls.rs"]
+mod cases_freeze_calls;
+#[path = "v5_candidate/cases_freeze_home.rs"]
+mod cases_freeze_home;
+#[path = "v5_candidate/cases_freeze_records.rs"]
+mod cases_freeze_records;
+#[path = "v5_candidate/cases_freeze_swift.rs"]
+mod cases_freeze_swift;
 #[path = "v5_candidate/cases_records.rs"]
 mod cases_records;
 #[path = "v5_candidate/cases_swift_slots.rs"]
@@ -40,6 +50,11 @@ fn build() -> (Out, usize) {
     cases_v8::part3(&mut out);
     cases_records::part(&mut out);
     cases_swift_slots::part(&mut out);
+    cases_freeze_authority::part(&mut out);
+    cases_freeze_swift::part(&mut out);
+    cases_freeze_records::part(&mut out);
+    cases_freeze_calls::part(&mut out);
+    cases_freeze_home::part(&mut out);
     let honest = self_check(&out);
     eprintln!(
         "{} files built; {} 0.4 bodies re-canonicalized; {honest} call/link signatures verified",
