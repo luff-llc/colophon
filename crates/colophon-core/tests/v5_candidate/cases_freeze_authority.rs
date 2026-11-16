@@ -1218,6 +1218,19 @@ fn drop_home(o: &mut Out) {
         "A full set that drops the only home, anchored at seq 2 and issued 8 days before the entry at seq 3. With no home remaining it is due at its issued; the activate must be issued at max(due, previous) and no more than 7 days after due, so it is malformed. A full set's issued is bounded by its anchor's issued and by the 7-day bound, as in an account with no home.",
         &["8.7"],
     );
+    // The same within the bound: issued a day before the entry it follows, it is recorded.
+    let mut c = base.clone();
+    let later = 120 + 86_400;
+    grant_agent(&mut c, &a, &ts(later), &a);
+    activate_at(&mut c, &t, &[], later);
+    wc(
+        o,
+        "f2-drop-home-full-set-within-bound",
+        &c,
+        ok_at(4),
+        "The same full set, issued a day before the entry at seq 3: within the 7-day bound, the activate at max(due, previous) is ok and the only home is dropped.",
+        &["8.7"],
+    );
 
     // The only home receipts the full set that drops it anyway: still ok (the homes current
     // before it, counted as before), and the account then has no home.
