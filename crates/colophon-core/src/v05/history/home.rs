@@ -15,6 +15,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const WINDOW: i64 = 300_000;
+/// Entries a home keeps at one seq (§13.1 candidate exchange): its own and the candidates other
+/// homes forwarded as evidence. A candidate that stands is stored beyond it.
+const CANDIDATES_PER_SEQ: usize = 4;
 /// The persisted format of [`HomeState`]: 2 stores bytes as base64 and keeps the checkpoint's
 /// pending objects and heads replaced, not merged.
 const STATE_VERSION: u32 = 2;
@@ -1130,7 +1133,9 @@ fn admit_full(
     })();
     // The checkpoint's pending objects and heads are replaced whenever they change (a refusal
     // can store a late transition too), so `persisted()` is never stale.
-    let changed = admitted_head.is_some() || next.pending.len() != home.pending.len();
+    let changed = admitted_head.is_some()
+        || next.pending.len() != home.pending.len()
+        || next.checkpoint != home.checkpoint;
     if changed || result.is_ok() {
         let refreshed = date(now, "home clock")
             .and_then(|now_ms| refresh_checkpoint(&mut next, admitted_head.as_deref(), now_ms));
@@ -1326,6 +1331,7 @@ fn admit_entry(
             fork,
             &held_entries,
             covered,
+            later,
         );
     }
     let mut objects = Objects {
@@ -1496,6 +1502,7 @@ fn admit_candidate(
     fork: Option<u64>,
     held: &[super::Entry],
     covered: bool,
+    later: &[Vec<u8>],
 ) -> AdmitResult<()> {
     let recording = matches!(
         entry.kind.as_str(),
@@ -1552,8 +1559,44 @@ fn admit_candidate(
         next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
         return Ok(());
     }
-    if fork.is_some() {
+    // Candidate exchange (§13.1): a valid candidate that does not stand is stored as evidence
+    // when a held head of another current home covers it (that home forwarded its branch), so
+    // homes on different branches come to hold the same candidates and reach the same §8.6
+    // verdict. The answer is unchanged (409, or `refused:fork`). At most CANDIDATES_PER_SEQ
+    // entries per seq, and at most one non-standing candidate per covering home at a seq (a home
+    // whose heads cover two of them equivocated itself), so one hostile home fills one slot; a
+    // candidate that stands is stored whatever the count (above).
+    let stored_as_evidence = (verdict.stop.is_none() || forks) && {
+        let extra: Vec<super::Entry> = std::iter::once(incoming)
+            .chain(later.iter().map(Vec::as_slice))
+            .filter_map(|b| parse_entry(b).ok())
+            .collect();
+        let refs: Vec<&super::Entry> = held.iter().chain(extra.iter()).collect();
+        let head_set = HeadSet::parse(&heads);
+        let others: Vec<String> = st
+            .current_homes()
+            .iter()
+            .map(|m| m.request.member_id().to_string())
+            .filter(|h| *h != next.home)
+            .collect();
+        let at_seq: Vec<&super::Entry> = held.iter().filter(|e| e.seq == entry.seq).collect();
+        let coverers: Vec<&String> = others
+            .iter()
+            .filter(|h| state::covered_by_home_head(st, &head_set, &refs, entry, h))
+            .collect();
+        let slot_free = coverers.iter().any(|h| {
+            !at_seq.iter().any(|e| state::covered_by_home_head(st, &head_set, &refs, e, h))
+        });
+        !coverers.is_empty() && slot_free && at_seq.len() < CANDIDATES_PER_SEQ
+    };
+    if stored_as_evidence {
+        next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;
+    }
+    if fork.is_some() || (stored_as_evidence && forks) {
         return Err(Failure::Refused(crate::v05::Reason::Fork).into());
+    }
+    if stored_as_evidence {
+        return Err(Refusal::Conflict);
     }
     if let Some(p) = st.primary_home().filter(|p| *p != next.home) {
         if !recording && !covered {

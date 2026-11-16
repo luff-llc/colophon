@@ -330,3 +330,87 @@ fn a_late_activate_is_refused_when_it_arrives_as_a_candidate() {
     assert!(!entries.iter().any(|e| body_digest(e) == body_digest(&act)), "the activate is not stored");
     assert!(entries.len() >= x_seq);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The check of the forwarding fix, finding 2: candidate exchange at the core.
+
+/// The primary A holds an immediate entry X at seq n, covered by its own head and issued before
+/// transition T's due time; T's `activate` R at seq n comes from another copy of the history.
+/// Under §8.6 rule 1, X stands. R alone is refused (409) and not stored; once A holds B's head
+/// over R, R is stored as evidence and still answered 409, and A's branch is unchanged. A second
+/// such candidate R2 covered only by B is not stored (B has its slot at that seq); covered by C
+/// too, it is.
+#[test]
+fn a_candidate_another_homes_head_covers_is_kept_as_evidence_one_per_home() {
+    use colophon_core::v05::account::{Account, Identity};
+    let (mut f, a, [ka, kb, kc]) = three_homes();
+    let account = f.account.id().as_str().to_string();
+    let t = f.account.now_ms() + 60_000;
+    let (_tr, d, a) = receipted(&mut f, a, &ka, t);
+    let open = |f: &Fixture| {
+        Account::open(f.account.objects().clone(), f.account.records().to_vec(), None,
+            Identity::Controller(f.d.clone()), t + 2_000).unwrap()
+    };
+    let mut other = open(&f);
+    // R2 comes from a copy that holds B's receipt of T instead of A's, so its body differs.
+    let mut objects = f.account.objects().clone();
+    objects.pending.retain(|p| {
+        let v: Value = serde_json::from_slice(p).unwrap();
+        let b: Value = serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+        !(b["protocol"] == "colophon/receipt/5" && b["by"] == ka.id.as_str())
+    });
+    objects.pending.push(receipt(&kb, &account, &d, t + 1_500));
+    let mut other2 = Account::open(objects, f.account.records().to_vec(), None,
+        Identity::Controller(f.d.clone()), t + 2_000).unwrap();
+    // X at A before T is due, and A's head over it.
+    f.account.advance(t + 3_000).unwrap();
+    let id = f.host.identity(45);
+    let req = request_for(&f, &f.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), t + 3_000);
+    let seed = f.host.fresh();
+    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed).unwrap();
+    let x = run(&mut f.account, &f.host, action).entries[0].1.clone();
+    let (n, dx) = (entry_seq(&x), body_digest(&x));
+    let a = admit(&a, &x, &format_date(t + 3_000));
+    assert_eq!(a.result, Ok(()));
+    let a = admit(&a.state, &head(&ka, &account, n, &dx, t + 4_000), &format_date(t + 4_000));
+    assert_eq!(a.result, Ok(()));
+    let a = a.state;
+    // R and R2: T's activate at n, from the two other copies.
+    let due = t + 3_900_000;
+    other.advance(due + 1_000).unwrap();
+    let r = other.record_due().unwrap()[0].entries[0].1.clone();
+    other2.advance(due + 1_500).unwrap();
+    let r2 = other2.record_due().unwrap()[0].entries[0].1.clone();
+    let (dr, dr2) = (body_digest(&r), body_digest(&r2));
+    assert_eq!((entry_seq(&r), entry_seq(&r2)), (n, n));
+    assert_ne!(dr, dr2);
+    let held = |s: &HomeState, d: &str| {
+        s.persisted().unwrap().objects().unwrap().entries.iter().any(|e| body_digest(e) == d)
+    };
+    let now = format_date(due + 2_000);
+    // Alone, R is refused and not stored.
+    let alone = admit(&a, &r, &now);
+    assert_eq!(alone.result, Err(Refusal::Conflict));
+    assert!(!held(&alone.state, &dr));
+    // With B's head over R, R is kept as evidence, still 409; A's branch keeps X.
+    let a = admit(&a, &head(&kb, &account, n, &dr, due + 1_500), &now).state;
+    let with = admit(&a, &r, &now);
+    assert_eq!(with.result, Err(Refusal::Conflict));
+    assert!(held(&with.state, &dr), "kept as evidence");
+    let a = with.state;
+    let branch_n = |s: &HomeState| {
+        let h = admit(s, &head(&ka, &account, n, &dx, due + 3_000), &format_date(due + 3_000));
+        h.result
+    };
+    assert_eq!(branch_n(&a), Ok(()), "A can still sign over X: its verdict is unchanged");
+    // R2 covered by B only: B already covers a candidate at n, so it is not stored.
+    let a = admit(&a, &head(&kb, &account, n, &dr2, due + 1_800), &now).state;
+    let b_only = admit(&a, &r2, &now);
+    assert_eq!(b_only.result, Err(Refusal::Conflict));
+    assert!(!held(&b_only.state, &dr2), "one slot per covering home");
+    // Covered by C too: C's own slot.
+    let a = admit(&a, &head(&kc, &account, n, &dr2, due + 1_900), &now).state;
+    let c_too = admit(&a, &r2, &now);
+    assert_eq!(c_too.result, Err(Refusal::Conflict));
+    assert!(held(&c_too.state, &dr2));
+}
