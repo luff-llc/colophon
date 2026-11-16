@@ -537,8 +537,9 @@ fn the_upgraded_account_accepts_a_05_entry() {
     let upgrade = build(&chain, &p).unwrap();
     let objects = objects_of(&chain, &[upgrade]);
     let by = p.signers[0].clone();
-    // A `/5` layout transition under the control rule, then its activation (the vector
-    // `then-v5-layout`, built here by the authority builders).
+    // A `/5` transition under the control rule, then its activation, built by the authority
+    // builders. (It was a `layout: 2` transition, which no longer raises the layout and so voids
+    // its transition, design §3.5; a policy change is a valid 0.5 entry of the same shape.)
     let t = prepare_transition(
         &objects,
         NOW,
@@ -547,7 +548,7 @@ fn the_upgraded_account_accepts_a_05_entry() {
             issued_ms: T_UPGRADE + 1_000,
             signers: vec![by.clone()],
             rule: TransitionRule::Control,
-            change: json!({"layout": 2}),
+            change: json!({"policy": {"recoveryDelay": 172_800}}),
         },
     )
     .unwrap();
@@ -567,6 +568,33 @@ fn the_upgraded_account_accepts_a_05_entry() {
     let v = verify_history(&all, &Persisted::default(), NOW);
     assert_eq!((v.code().as_str(), v.seq()), ("ok", 4));
     let _ = parse_date;
+}
+
+/// The upgrade door (design §3.5): the write side builds no `layout` component, neither one that
+/// does not raise the layout (it voids its transition) nor a raise (no 0.5 builder writes one).
+#[test]
+fn the_write_side_builds_no_layout_component() {
+    let chain = base_chain("seq-two-rekey");
+    let p = params(&chain);
+    let upgrade = build(&chain, &p).unwrap();
+    let objects = objects_of(&chain, &[upgrade]);
+    for layout in [1, 2, 3] {
+        let r = prepare_transition(
+            &objects,
+            NOW,
+            &TransitionParams {
+                anchor: None,
+                issued_ms: T_UPGRADE + 1_000,
+                signers: vec![p.signers[0].clone()],
+                rule: TransitionRule::Control,
+                change: json!({"layout": layout}),
+            },
+        );
+        match r {
+            Ok(_) => panic!("a layout {layout} transition was prepared"),
+            Err(e) => assert_eq!(e.code(), "malformed", "layout {layout}: {e}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -673,4 +701,25 @@ fn a_webauthn_controller_signs_an_upgrade_only_with_user_verification() {
     let env = pending.finish(vec![ok]).unwrap().entries[0].1.clone();
     let v = verify_history(&objects_of(&chain, &[env]), &Persisted::default(), NOW);
     assert_eq!((v.code().as_str(), v.seq()), ("ok", 4));
+}
+
+/// Genesis preparation refuses what the verifier would: more than 64 namespaces (§8.2). The cap
+/// is judged before anything else, so even an empty keyring is refused for the count.
+#[test]
+fn genesis_preparation_refuses_more_than_64_namespaces() {
+    let namespaces: Vec<String> = (0..65).map(|i| format!("n{i:03}")).collect();
+    let r = prepare_genesis(
+        &GenesisParams {
+            label: "Too many".into(),
+            namespaces,
+            keyring: Value::Null,
+            issued_ms: NOW,
+            signers: vec![],
+        },
+        NOW,
+    );
+    match r {
+        Ok(_) => panic!("a genesis with 65 namespaces was prepared"),
+        Err(e) => assert_eq!(e.detail(), colophon_core::v05::history::TOO_MANY_NAMESPACES),
+    }
 }
