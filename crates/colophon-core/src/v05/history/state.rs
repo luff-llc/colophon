@@ -353,15 +353,6 @@ impl State {
             })
             .collect()
     }
-    /// [`State::current_homes`] that are also unexpired at `at_ms` (§8.5: a home is current only
-    /// while it is a current member besides). Receipts are judged at the receipted object's
-    /// `issued` and witnesses at the activation's `issued` (§8.7).
-    pub fn current_homes_at(&self, at_ms: i64) -> Vec<&MemberRecord> {
-        self.current_homes()
-            .into_iter()
-            .filter(|m| m.expires_ms.is_none_or(|e| at_ms <= e))
-            .collect()
-    }
     pub(super) fn home_key(&self, id: &str) -> Option<Vec<u8>> {
         self.current_homes()
             .into_iter()
@@ -1389,9 +1380,9 @@ pub(crate) fn check_transition(
     if (all.len() as u64) < 1 + max_v {
         return Err(bad_signature("escalation: too few signer units"));
     }
-    // Receipts (§8.7 validity 2), from the homes current and unexpired at the transition's
-    // `issued`.
-    let homes = s.current_homes_at(issued);
+    // Receipts (§8.7 validity 2). A home witnesses from its appointment until its revocation is
+    // final, whatever its grant's expiry says (§8.5): a date never removes the veto window.
+    let homes = s.current_homes();
     let quorum = k.policy.head_quorum() as usize;
     let mut latest_receipt = issued;
     if with_receipts {
@@ -1485,12 +1476,12 @@ pub(super) fn check_receipt(
     let (_, received) = o.date("received")?;
     let by = o.key_id("by")?;
     o.finish_closed()?;
-    // A receipt counts only from a current home (§8.5 "Current principal"); one from another
-    // key is a wrong home, `malformed` (§8.5's table).
-    let key = match s.current_principal(&by, Claim::Home, object_issued) {
-        Ok(Principal::Home(m)) => m.request.signing.clone(),
-        _ => return Err(malformed("receipt by a key that is not a current home")),
-    };
+    // A receipt counts only from a current home: appointed by a final activation, its revocation
+    // not final, not excused (§8.7). Its grant's expiry does not end its witnessing (§8.5); one
+    // from another key is a wrong home, `malformed` (§8.5's table).
+    let key = s
+        .home_key(&by)
+        .ok_or_else(|| malformed("receipt by a key that is not a current home"))?;
     env.verify(&key)
         .map_err(|e| bad_signature(format!("receipt: {e}")))?;
     crate::v05::require(obj == object, "receipt names another object")?;
@@ -2038,11 +2029,9 @@ fn finalize_empty_witnesses(n: &mut State) {
     }
 }
 
-/// The witnesses of an activation recorded at `at_ms` (its `issued`): the homes current and
-/// unexpired then in the state before it (§8.5, §8.7), less those it revokes.
-fn witnesses_of(s: &State, t: &TCheck, after: Option<&State>, at_ms: i64) -> BTreeSet<String> {
+fn witnesses_of(s: &State, t: &TCheck, after: Option<&State>) -> BTreeSet<String> {
     let mut w: BTreeSet<String> = s
-        .current_homes_at(at_ms)
+        .current_homes()
         .iter()
         .map(|m| m.request.member_id())
         .collect();
@@ -2275,7 +2264,7 @@ fn activate(s: &State, e: &Entry, now_ms: i64) -> Step<State> {
         n.v.insert(u.clone(), 0);
     }
     n.suspensions.retain(|sp| sp.transition != t.digest);
-    let witnesses = witnesses_of(s, &t, Some(&n), e.issued);
+    let witnesses = witnesses_of(s, &t, Some(&n));
     n.activations.push(Activation {
         seq: e.seq,
         digest: e.env.digest.clone(),
@@ -2382,9 +2371,8 @@ fn check_veto(
     if v_units.iter().any(|u| t.units.contains(u)) {
         return Err(malformed("a vetoing unit signed the transition").into());
     }
-    // The veto's receipts: chosen, within 300 s of its issued, before the deadline, from the
-    // homes current and unexpired at its `issued`.
-    let homes = s.current_homes_at(v_issued);
+    // The veto's receipts: chosen, within 300 s of its issued, before the deadline.
+    let homes = s.current_homes();
     let quorum = (k.policy.head_quorum() as usize).min(homes.len());
     crate::v05::require(
         !with_receipts || receipts.len() == quorum,
@@ -3593,8 +3581,9 @@ pub(super) fn covered_by_home_head(
     y: &Entry,
     home: &str,
 ) -> bool {
-    // A head counts only when its home is current and unexpired at the head's own `issued`
-    // (§8.6, §13.3): an expired home's later heads decide nothing.
+    // A head counts only when its home is current on the branch it covers at the seq it covers
+    // (not finally revoked there) and unexpired at the head's own `issued` (§8.6, §13.3): a
+    // revoked or expired home's later heads decide nothing.
     let Some(m) = s
         .current_homes()
         .into_iter()
@@ -3609,7 +3598,40 @@ pub(super) fn covered_by_home_head(
             && m.expires_ms.is_none_or(|e| h.issued <= e)
             && branch.contains(&h.digest)
             && h.env.verify(&m.request.signing).is_ok()
+            && home_current_at(s, all, y, home, &h.digest)
     })
+}
+
+/// Whether `home` is still a current home (§8.7: appointed by a final activation, its
+/// revocation not final, not excused) in the state after the entry `head` on the branch from `y`:
+/// the entries from `y` to it, each applied to the state before it. The clock is not consulted
+/// (nothing is held for time), so the answer depends only on the entries. An entry on the way
+/// that does not apply leaves the head counting for nothing.
+fn home_current_at(s: &State, all: &[&Entry], y: &Entry, home: &str, head: &str) -> bool {
+    let by_digest: BTreeMap<&str, &Entry> = all.iter().map(|e| (e.env.digest.as_str(), *e)).collect();
+    let mut path: Vec<&Entry> = Vec::new();
+    let mut d = head;
+    loop {
+        let Some(e) = by_digest.get(d) else {
+            return false;
+        };
+        path.push(e);
+        if e.env.digest == y.env.digest {
+            break;
+        }
+        match (e.seq > y.seq, e.previous.as_deref()) {
+            (true, Some(p)) => d = p,
+            _ => return false,
+        }
+    }
+    let mut st = s.clone();
+    for e in path.into_iter().rev() {
+        match apply(&st, e, &Pending::default(), &HeadSet::default(), all.to_vec(), i64::MAX) {
+            Ok(n) => st = n,
+            Err(_) => return false,
+        }
+    }
+    st.current_homes().iter().any(|m| m.request.member_id() == home)
 }
 
 /// Decide a conflict among valid candidates at one seq (§8.6). `None` is a fork.

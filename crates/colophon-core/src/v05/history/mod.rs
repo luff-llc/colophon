@@ -72,6 +72,18 @@ pub fn check_admissible_transition(s: &State, transition: &[u8]) -> Result<(), F
     state::admission_transition(s, transition).map(|_| ())
 }
 
+/// Judge a receipt of `object` (issued at `object_issued_ms`) as the verifier does (§13.5): shape,
+/// a current home's key, the object, the window. Returns the home and `received`. The write side
+/// uses this one function, so a builder never treats a receipt differently from the verifier.
+pub fn check_receipt(
+    s: &State,
+    bytes: &[u8],
+    object: &str,
+    object_issued_ms: i64,
+) -> Result<(String, i64), Failure> {
+    state::check_receipt(s, bytes, object, object_issued_ms)
+}
+
 /// The members a transition's `change` would add, judged as at activation in `s` with
 /// `issued_ms` (§9.3 "A grant inside a transition"): the same function the verifier applies, so
 /// the write side refuses at prepare what a verifier would find void.
