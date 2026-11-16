@@ -268,7 +268,14 @@ fn a_non_primary_home_answers_421_until_the_primary_head_covers_the_entry() {
     // The primary stores it and signs a head; that head reaches the second home by forwarding.
     let (status, body) = w.a.post("/authority", &post);
     assert_eq!(status, 200, "{body}");
-    assert!(body["head"].is_object());
+    // Its answer carries the head over the entry; or, when the primary already signed a head at
+    // this very clock reading, none (§13.3: a head is due and `issued` must increase; the older
+    // head is not answered), and the head follows once the clock moves.
+    if body["head"].is_null() {
+        w.clocks(NOW + 6_000);
+    } else {
+        assert!(body["head"].is_object(), "{body}");
+    }
     eventually("the second home to hold the primary's head over it", 20, || {
         let r = b.post("/authority", &post);
         if r.0 != 421 {
