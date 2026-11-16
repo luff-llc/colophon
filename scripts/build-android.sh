@@ -24,6 +24,10 @@ fi
 if [[ -n "${JAVA_HOME:-}" && ! -f "$JAVA_HOME/release" && -f "$JAVA_HOME/libexec/openjdk.jdk/Contents/Home/release" ]]; then
   export JAVA_HOME="$JAVA_HOME/libexec/openjdk.jdk/Contents/Home"
 fi
+# scripts/package-release.sh records the NDK and JDK actually used.
+if [[ -n "${BUILD_INFO_FILE:-}" ]]; then
+  printf 'ndk=%s\njava_home=%s\n' "$ANDROID_NDK_HOME" "${JAVA_HOME:-}" >"$BUILD_INFO_FILE"
+fi
 command -v cargo-ndk >/dev/null || { echo 'Install cargo-ndk: cargo install cargo-ndk --locked' >&2; exit 1; }
 : "${GRADLE_USER_HOME:=$PWD/.gradle-home}"
 export GRADLE_USER_HOME
