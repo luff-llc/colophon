@@ -17,6 +17,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -228,6 +229,21 @@ class SessionTest {
         } finally { e.close() }
     }
 
+    /** A failed `create()` stays published: a background sync pass with no library does not refresh it away (the race seen as "phase NoLibrary error -" after an `http://` home). Deterministic: the pass is run explicitly after the failure. */
+    @Test fun aFailedCreationIsNotErasedByASyncPass() = runBlocking<Unit> {
+        val e = Device(homes = listOf(HomeConfiguration("http://home.example/v1/")), createWithoutHome = false)
+        try {
+            e.session.create()
+            val failed = e.session.phase
+            assertTrue(failed is SessionPhase.Failed, e.describe())
+            val error = e.session.lastError
+            assertNotNull(error, e.describe())
+            assertEquals(false, e.session.syncNow(), "with no library there is nothing to exchange")
+            assertEquals(failed, e.session.phase, e.describe())
+            assertEquals(error, e.session.lastError, e.describe())
+        } finally { e.close() }
+    }
+
     @Test fun aFolderStoreReopensWithTheSavedState() = runBlocking<Unit> {
         val root = Files.createTempDirectory("colophon-kotlin-reopen-").toFile()
         val dir = Files.createTempDirectory("colophon-kotlin-private-").toFile()
@@ -262,8 +278,7 @@ class SessionTest {
             first.session.refresh()
             val request = first.session.requests.single()
             assertEquals(second.session.memberId, request.id)
-            assertEquals((waiting as SessionPhase.WaitingForApproval).code, request.pairingCode, "both devices show the same code")
-            first.session.approve(request)
+            approveByCode(second.session, first.session)
             second.session.refresh()
             assertEquals(SessionPhase.Ready, second.session.phase, second.describe())
             assertEquals(1, admitted(second.session))
@@ -294,11 +309,11 @@ class SessionTest {
                 createWithoutHome = true, deviceSecrets = MemoryDeviceSecrets()))
             third.restore()
             assertEquals(SessionPhase.Ready, third.phase)
-            assertFailsWith<SessionKeyFailure> { third.approve(third.requests.single()) }
+            val scanned = third.scanRequest(second.session.exportRequest())
+            assertFailsWith<SessionKeyFailure> { third.approve(scanned.request, scanned.pairing) }
             assertEquals(SessionPhase.Failed(SessionFailure.KeysUnavailable("the key is not available")), third.phase)
             third.shutdown()
         } finally { first.close(); second.close() }
     }
 
-    @Test fun thePairingCodeIsTheKeyIdHead() = assertEquals("ABCD-1234", AccessRequest.code("abcd1234ffff"))
 }

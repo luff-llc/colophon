@@ -15,6 +15,7 @@
 //! The replay store (§12.4) is read at step 3 and reserved by compare-and-swap only after step
 //! 8, so no refusal reserves; the reservation is left `Pending` for the service.
 use super::descriptor::{Controller, KeyForm, Policy, Role};
+use super::history::{Claim, NotCurrent, State};
 use super::encoding::{
     bounds, canonical, canonical_body, decode_base64, decode_request_id, digest, is_digest, Obj,
 };
@@ -249,6 +250,13 @@ pub struct HistoryVerifierOutput {
 #[derive(Clone, Debug)]
 pub struct AccountView {
     v: HistoryVerifierOutput,
+    /// `Some(seq)` when the reader is stopped for the account at `seq` (§1 "A stop",
+    /// [`crate::v05::history::Verdict::stopped`]).
+    stopped: Option<u64>,
+    /// The verified state the view was built from, when it was built by the history verifier:
+    /// whether a controller, member or home is current is judged by its one helper
+    /// ([`State::current_principal`], §8.5).
+    state: Option<Box<State>>,
 }
 /// Most head envelopes a view holds (more homes than §13.1's 8 can't be current).
 pub const MAX_VIEW_HEADS: usize = 64;
@@ -359,7 +367,7 @@ impl AccountView {
                 status,
             )?);
         }
-        Self::from_parts_unverified(HistoryVerifierOutput {
+        let mut view = Self::from_parts_unverified(HistoryVerifierOutput {
             account: st.account().clone(),
             history: st.history().to_vec(),
             policies: st.policies.clone(),
@@ -373,7 +381,10 @@ impl AccountView {
                 .filter(|p| p.len() == 65)
                 .cloned()
                 .collect(),
-        })
+        })?;
+        view.stopped = verdict.stopped;
+        view.state = Some(Box::new(st.clone()));
+        Ok(view)
     }
     /// Assemble a view from parts the caller vouches for, checking every structural invariant.
     /// Production code builds views with [`AccountView::from_history_verifier`]; this is for
@@ -420,7 +431,79 @@ impl AccountView {
                 .all(|h| h.len() <= bounds::HEAD_BODY * 2 + 4_096),
             "head envelope exceeds its bound",
         )?;
-        Ok(Self { v })
+        Ok(Self {
+            v,
+            stopped: None,
+            state: None,
+        })
+    }
+    /// `Some(seq)` when the reader is **stopped** for the account (§1 "A stop"): its verdict on
+    /// the authority entry at `seq` is `newerFormat`. A stopped view verifies no call, accepts
+    /// no head and builds no link or call: each is `unavailable`, whatever S would be.
+    pub fn stopped(&self) -> Option<u64> {
+        self.stopped
+    }
+    /// Whether `id` is a current principal as `claim` at `now_ms` (§8.5): expiry, provisional
+    /// additions, suspension and revocation judged one way. A view built by the history verifier
+    /// asks its state's [`State::current_principal`]; a view assembled from parts the caller
+    /// vouches for ([`AccountView::from_parts_unverified`]) has no state and is judged from the
+    /// statuses it was given, the same questions in the same order.
+    fn principal(
+        &self,
+        id: &str,
+        claim: Claim<'_>,
+        now_ms: i64,
+    ) -> std::result::Result<(), NotCurrent> {
+        if let Some(st) = &self.state {
+            return st.current_principal(id, claim, now_ms).map(|_| ());
+        }
+        match claim {
+            Claim::Controller {
+                roles,
+                suspended_ok,
+            } => {
+                let c = self
+                    .v
+                    .controllers
+                    .iter()
+                    .find(|c| c.id == id)
+                    .ok_or(NotCurrent::Absent)?;
+                let latest = c.latest().ok_or(NotCurrent::Absent)?;
+                match c.status {
+                    ControllerStatus::PendingAddition => return Err(NotCurrent::Absent),
+                    ControllerStatus::AddedNotFinal => return Err(NotCurrent::Provisional),
+                    ControllerStatus::Suspended if !suspended_ok => {
+                        return Err(NotCurrent::Suspended)
+                    }
+                    _ => {}
+                }
+                if !roles.is_empty() && !roles.iter().any(|r| latest.has(r)) {
+                    return Err(NotCurrent::Role);
+                }
+                Ok(())
+            }
+            Claim::Member | Claim::Home => {
+                let m = self
+                    .v
+                    .members
+                    .iter()
+                    .find(|m| m.id == id)
+                    .ok_or(NotCurrent::Absent)?;
+                if m.revoked_seq.is_some() {
+                    return Err(NotCurrent::Revoked);
+                }
+                if m.status == MemberStatus::AddedNotFinal {
+                    return Err(NotCurrent::Provisional);
+                }
+                if m.expiry_at(u64::MAX).is_some_and(|e| now_ms > e) {
+                    return Err(NotCurrent::Expired);
+                }
+                if matches!(claim, Claim::Home) && !m.is_current_home(now_ms) {
+                    return Err(NotCurrent::Role);
+                }
+                Ok(())
+            }
+        }
     }
     /// The account.
     pub fn account(&self) -> &AccountId {
@@ -446,12 +529,16 @@ impl AccountView {
             .find(|(s, _)| *s <= seq)
             .map(|(_, p)| p)
     }
-    /// Current homes at `now_ms`: `(member ID, signing point)`.
+    /// Current homes at `now_ms`: `(member ID, signing point)`. None for a stopped view: a
+    /// stopped reader answers no question of currency (§1 "A stop").
     pub fn current_homes(&self, now_ms: i64) -> Vec<(String, Vec<u8>)> {
+        if self.stopped.is_some() {
+            return Vec::new();
+        }
         self.v
             .members
             .iter()
-            .filter(|m| m.is_current_home(now_ms))
+            .filter(|m| self.principal(&m.id, Claim::Home, now_ms).is_ok())
             .map(|m| (m.id.clone(), m.signing.clone()))
             .collect()
     }
@@ -732,6 +819,14 @@ fn secs(s: u64) -> i128 {
 fn revoked() -> Failure {
     Failure::Refused(Reason::Revoked)
 }
+/// A signer that is not a current principal, as a call reports it (§12.3 step 5): expired is
+/// `refused:expired`, anything else `refused:revoked`.
+fn not_current(n: NotCurrent) -> Failure {
+    match n {
+        NotCurrent::Expired => refused(Reason::Expired),
+        _ => revoked(),
+    }
+}
 fn refused(r: Reason) -> Failure {
     Failure::Refused(r)
 }
@@ -747,6 +842,17 @@ fn require_sig(ok: bool, why: &str) -> Result<()> {
         Ok(())
     } else {
         Err(bad_signature(why))
+    }
+}
+/// §1 "A stop", §12.3 step 4: a stopped reader verifies no call and builds no link or call,
+/// whatever S would be: `unavailable`. Every entry point that verifies or builds a call or link
+/// consults this before it reads any authority state.
+fn not_stopped(view: &AccountView) -> Result<()> {
+    match view.stopped {
+        Some(seq) => Err(Failure::Unavailable(format!(
+            "stopped for the account at seq {seq}: newer format, update to continue"
+        ))),
+        None => Ok(()),
     }
 }
 fn index(seq: u64) -> Result<usize> {
@@ -767,6 +873,8 @@ fn evaluate_at_s(view: &AccountView, now_ms: i64) -> Result<(u64, Policy)> {
 /// that the signer is behind a home (§13.3: such a head is not wrong, the history is fetched
 /// further). A verifier is never lenient: it fetches first (§12.3 step 4).
 fn evaluate(view: &AccountView, now_ms: i64, signer: bool) -> Result<(u64, Policy, bool)> {
+    // A stopped reader accepts no head (§1 "A stop").
+    not_stopped(view)?;
     let v = &view.v;
     let held = v.history.len() as u64;
     let latest_policy = view
@@ -831,9 +939,14 @@ fn member_at_s<'a>(view: &'a AccountView, id: &str, s: u64, now_ms: i64) -> Resu
         .iter()
         .find(|m| m.id == id)
         .ok_or_else(revoked)?;
-    if m.granted_seq > s || m.revoked_seq.is_some() || m.status == MemberStatus::AddedNotFinal {
+    // Grants after S don't count (§12.3 step 5).
+    if m.granted_seq > s {
         return Err(revoked());
     }
+    // Revocation and finality beyond S apply at once: current now, as §8.5 judges it.
+    view.principal(id, Claim::Member, now_ms)
+        .map_err(not_current)?;
+    // A renewal after S doesn't count: the expiry is the one in force at S.
     if m.expiry_at(s).is_some_and(|e| now_ms > e) {
         return Err(refused(Reason::Expired));
     }
@@ -913,6 +1026,7 @@ pub(crate) fn chain_parent(
     member: &str,
     prior: &[Vec<u8>],
 ) -> Result<ChainParent> {
+    not_stopped(view)?;
     let m = view
         .v
         .members
@@ -945,6 +1059,7 @@ pub(crate) fn check_link_chain(
     link: &[u8],
     now_ms: i64,
 ) -> Result<()> {
+    not_stopped(view)?;
     let (s, policy) = evaluate_at_s(view, now_ms)?;
     let m = member_at_s(view, member, s, now_ms)?;
     let mut unknown = Unknown::default();
@@ -1025,7 +1140,6 @@ pub fn verify_home_write(
     store: &mut dyn ReplayStore,
     writes: &[HomeWrite],
 ) -> Result<VerifiedCall> {
-    require(!writes.is_empty(), "a home write names what it writes")?;
     verify(
         envelope,
         view,
@@ -1033,6 +1147,7 @@ pub fn verify_home_write(
         store,
         Mode {
             writes,
+            names_writes: true,
             ..Mode::default()
         },
     )
@@ -1142,8 +1257,9 @@ pub struct HomeRequest<'a> {
 }
 
 /// Verify a call that came with a request at a home (§12.3, §13.4, §14): its purpose fits the
-/// method and path ([`home_purposes`], else `refused:outOfScope`, before anything else is checked beyond
-/// parsing); then [`verify_call`], or [`verify_home_write`] for a write that names what it writes;
+/// method and path ([`home_purposes`], else `refused:outOfScope`, judged in §12.3's order: after
+/// parsing, possession, audience, window and replay look-up and the stop, before any history is
+/// read, and reserving nothing); then [`verify_call`], or [`verify_home_write`] for a write that names what it writes;
 /// and the call's `args` are exactly [`home_call_args`] for this request (else
 /// `refused:outOfScope`, and nothing is reserved). The rule a home applies and a signer builds
 /// by ([`check_home_call_as_signer`]).
@@ -1182,11 +1298,6 @@ fn home_request(
     req: &HomeRequest<'_>,
     signer: bool,
 ) -> Result<VerifiedCall> {
-    let parsed = Call::parse(envelope)?;
-    require_refused(
-        home_purposes(req.method, req.path).contains(&parsed.purpose.as_str()),
-        Reason::OutOfScope,
-    )?;
     let bound = home_call_args(req.method, req.path, req.body_sha256);
     let writes = if is_read(req.method) { &[][..] } else { req.writes };
     verify(
@@ -1198,6 +1309,8 @@ fn home_request(
             writes,
             bound: Some(&bound),
             signer,
+            purposes: Some(home_purposes(req.method, req.path)),
+            names_writes: false,
         },
     )
 }
@@ -1232,6 +1345,11 @@ struct Mode<'a> {
     writes: &'a [HomeWrite],
     bound: Option<&'a Value>,
     signer: bool,
+    /// The purposes the request at a home allows ([`home_purposes`]); another is
+    /// `refused:outOfScope`, judged after possession and the stop, before any history is read.
+    purposes: Option<&'a [&'a str]>,
+    /// A home write must name what it writes (`malformed` otherwise), judged at the same point.
+    names_writes: bool,
 }
 
 fn verify(
@@ -1276,6 +1394,17 @@ fn verify(
         }));
     }
     // 4. History and heads.
+    // A stopped reader: `unavailable`, whatever S would be and whatever the call names.
+    not_stopped(view)?;
+    // The request's own rules at a home (§13.4, §14), in the pipeline's order: after possession
+    // and the stop, and before any history is read, so a call for another kind of request
+    // (a `colophon.history.read` call at a record path) is refused and reserves nothing.
+    if let Some(allowed) = mode.purposes {
+        require_refused(allowed.contains(&call.purpose.as_str()), Reason::OutOfScope)?;
+    }
+    if mode.names_writes {
+        require(!writes.is_empty(), "a home write names what it writes")?;
+    }
     if call.account != v.account.as_str() {
         return Err(Failure::Unavailable(
             "no verified history for this account".into(),
@@ -1319,15 +1448,17 @@ fn verify(
                 (Some(a), Some(l)) if !vc.removed_after(s) => (a, l),
                 _ => return Err(revoked()),
             };
-            match vc.status {
-                ControllerStatus::PendingAddition | ControllerStatus::AddedNotFinal => {
-                    return Err(revoked())
-                }
-                ControllerStatus::Suspended if call.purpose != HISTORY_READ => {
-                    return Err(revoked())
-                }
-                _ => {}
-            }
+            // Current now (§8.5): present, final, and not suspended unless the call is the one a
+            // suspended key may make. Roles are judged below, at S and latest together.
+            view.principal(
+                id,
+                Claim::Controller {
+                    roles: &[],
+                    suspended_ok: call.purpose == HISTORY_READ,
+                },
+                cfg.now_ms,
+            )
+            .map_err(|_| revoked())?;
             let both = |r: &Role| at_s.has(r) && latest.has(r);
             let sign_ok = both(&Role::Sign)
                 && [at_s, latest]

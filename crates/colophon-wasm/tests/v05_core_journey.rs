@@ -113,7 +113,7 @@ fn the_web_build_creates_verifies_requests_pairs_and_refuses_hostile_input() {
     let tk = PairingTransferKey::create(host.fresh(32)).unwrap();
     let joiner =
         AccountPairing::join(created.account.clone(), tk.public(), host.fresh(32)).unwrap();
-    let limiter = PairingFailureLimiter::from_state(String::new()).unwrap();
+    let limiter = PairingFailureLimiter::fresh();
     let existing = AccountPairing::existing_receive_commitment(
         created.account.clone(),
         joiner.commitment().unwrap(),
@@ -121,6 +121,8 @@ fn the_web_build_creates_verifies_requests_pairs_and_refuses_hostile_input() {
         NOW,
     )
     .unwrap();
+    // The ledger is sealed (persisted, in an app) before the nonce leaves (§7.3).
+    limiter.seal(DEVICE_KEY.to_vec(), created.account.clone(), host.fresh(32)).unwrap();
     let na = existing.send_nonce(host.fresh(32)).unwrap();
     let reveal = joiner.receive_nonce(na).unwrap().unwrap();
     let shown = existing

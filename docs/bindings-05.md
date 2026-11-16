@@ -43,7 +43,7 @@ field; `u64` and `i64` are `bigint`; `optional<T>` is `undefined`.
 | `AccountCreation` | Creation before any store exists: PRF, genesis, first `rekey`; the result is the account ID and the stores; `open_engine(source, listing, namespaces, batch, key, now_ms)` then opens the session over the stored result, unlocked as the creation left it (the owner is asked once at first run). |
 | `SwiftSuccessorCreation` | The genesis of the account that succeeds a Swift library: the carried controllers, the rebuilt slots (one passkey assertion each), the `handover`; the result is the account ID and the stores. Every other step of the Swift move needs an account made this way. |
 | `AccountRequest` | A device's membership request before it is a member (public values only). |
-| `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | The pairing ceremony (§7.3). |
+| `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | The pairing ceremony (§7.3). A confirmed `AccountPairing` is also what approving a member spends (§9.1): see "Approving a member" below. |
 | `AccountMove` | A prepared move step: the 0.4 upgrade, a Swift veto, F, a copier's shares, the migration. |
 | `SwiftSource`, `SwiftCopyPlan`, `SwiftCopyDestination`, `SwiftCopyResult`, `AccountCopyWrite` | The Swift record copy: the predecessor library with its vault and keys, the plan with the host's translator, the import writes, the finished copy. |
 | `AccountBlobWriter`, `AccountLiveWrite` | A streaming blob upload; a prepared live write. |
@@ -66,7 +66,7 @@ nothing and consumes the action; prepare again with fresh entropy. An action fin
 
 | `begin_*` | Arguments (besides `entropy`) | Entropy |
 | --- | --- | --- |
-| `begin_approve` | `request: bytes`, `terms_json`, `signers` | 32 |
+| `begin_approve` | `request: bytes`, `terms_json`, `signers`, `pairing: AccountPairing` (confirmed; spent) | 32 |
 | `begin_renew` / `begin_renew_shares` | `member`, `expires_ms` (renew only), `signers` | 32 |
 | `begin_revoke` | `member`, `keep: RevokeKeep`, `signers` | 32 |
 | `begin_end_sessions` / `begin_end_my_sessions` | `member`, `signers` / none | 0 |
@@ -76,11 +76,77 @@ nothing and consumes the action; prepare again with fresh entropy. An action fin
 | `begin_add_slot` | `signer`, `plan: SlotPlan` | 32 |
 | `begin_rotate_vault` | `signer`, `has_plans: bool`, `plans: list<SlotPlan>` | 64 (new seed, entropy) |
 | `begin_remove_controller` | `remove`, `keep`, `signers`, `rule`, `rotate: bool` | 64 if `rotate`, else 0 |
-| `begin_transition` | `change_json`, `signers`, `rule` | 0 |
+| `begin_transition` | `change_json`, `signers`, `rule` (a change with a `grant` is `refused:outOfScope`) | 0 |
+| `begin_grant_transition` | `change_json` with a `grant`, `signers`, `rule`, `pairing: AccountPairing` (confirmed; spent) | 0 |
 | `begin_veto` / `begin_suspend` / `begin_resolve` | as the core | 0 |
 | `begin_write` / `begin_propose` | `namespace`, `kind`, `payload_json` | 32 |
 | `begin_resolution` | `namespace`, `accept`, `proposals` | 32 |
 | `begin_import` | `namespace`, `batch_json` | 32 |
+
+### Approving a member
+
+The core prepares a `grant` (or a transition's `grant` component) only by spending a confirmed
+pairing for exactly the request's key (spec §9.1, §17.1). No call approves a member from its ID or a
+code made from it. Exactly two pairings approve:
+
+1. **The code (§7.3).** The joining device calls `AccountPairing.join(account, e, nb)` with `e` its
+   request's `member.signing` and sends `commitment()`; the approving device calls
+   `existing_receive_commitment(account, commitment, limiter, now_ms)` and `send_nonce(na)`; the joiner's
+   `receive_nonce(na)` returns the reveal; the approving device's `receive_reveal(e, nb, limiter, now_ms)`
+   returns the six digits, which both screens show (`digits()`). The person confirms they match:
+   `confirm()` on the approving device. A mismatch is `reject(limiter, now_ms)` on either device and,
+   on the approving one, counts as a failure; five failures in an hour close the limiter.
+2. **The request scanned**, the scan path's one payload (§9.1): the approving device scans the
+   canonical request envelope from the joining device's screen:
+   `AccountPairing.scan_request(account, request, limiter, now_ms)` is confirmed for that request's
+   `member.signing` (a request that does not verify is `pairing:invalidRequest`, another account
+   `pairing:wrongAccount`; each counts as a failure). It carries no nonces and cannot move the seed.
+
+`begin_approve(request, terms_json, signers, pairing, entropy)` and `begin_grant_transition(change_json,
+signers, rule, pairing, entropy)` then spend it. A pairing that is not `Confirmed` (or already `Spent`) is
+`Consumed` and left as it was. A confirmed one is spent whatever the answer: for another account or
+another key, confirmed on the joining device, or confirmed by the pairing QR (`existing_scan_qr`,
+which moves the seed only), `refused:outOfScope`; more than ten minutes after the
+approving device's session began, or before it (a clock moved back), `refused:expired`. The joining device's
+own confirmed pairing never approves. Appointing a home (`homes.appoint`) is outside this rule: its request
+comes from the home's own base (a stated limit of §9.1).
+
+**The approving device's ledger: one ceremony at a time, every start counted.** Every session the existing
+device starts (`existing_receive_commitment`, `existing_scan_qr`, `scan_request`) comes from its
+`PairingFailureLimiter`:
+
+- Starting one **reserves** one of the five an hour; only a confirmed pairing gives it back (`confirm`, the
+  pairing QR's `send_nonce`, a valid `scan_request`). Abandoning (`AccountPairing.abandon(now_ms)`), rejecting
+  (`reject`), a mismatch, a reveal after the ten-minute timeout (`pairing:timeout`), dropping the object or
+  restarting the device all leave it counted. Five counted in an hour: `pairing:limit`.
+- **One ceremony is live at a time**: while one is (not ended, younger than ten minutes) another start is
+  refused, `pairing:busy`, and never yields a nonce. A relay therefore cannot run sessions with its own keys
+  beside the honest one and pick the one whose code matches. Start a ceremony only when the person asks; a
+  commitment that arrives unasked is shown or dropped, never started.
+- **Persist before the nonce.** `send_nonce` is refused, `pairing:unsealed`, until the host took
+  `limiter.seal(device_key, account, entropy)` after the start; the host writes the sealed bytes and
+  `limiter.generation()` beside them, and only then asks for the nonce. A host that cannot write sends none.
+- **Open on start**: `PairingFailureLimiter.open(sealed, device_key, account, floor, now_ms)`, with the
+  generation recorded beside it as `floor` (0 when none). Missing bytes with a floor, an edited or foreign
+  ledger, another device key, or a generation below the floor open as a spent budget.
+  `PairingFailureLimiter.fresh()` is an in-memory ledger (tests; a device's own request). `is_live(now_ms)`
+  and `may_start(now_ms)` answer without changing anything.
+- **Every instance over one store.** One limiter object coordinates only itself. The session layers take a lock that
+  every instance sharing the private store takes (Swift: `flock` on `pairing-ledger.lock`; Kotlin: `FileChannel.lock` on
+  it, behind a JVM-wide monitor; JavaScript: a Web Lock, or a process-wide lock where the platform has none), reload the
+  ledger under it whenever the stored generation is not the one they hold, and write before releasing it. A host that
+  uses the bindings directly must do the same: two limiters opened from one store must never start ceremonies apart.
+- **Clock.** A start on a clock outside 1970 to 9999 is refused (`pairing:clock`); nothing the ledger keeps can then
+  overflow its timeout or its hour. A clock moved back is floored (the ledger keeps the latest time it saw) until it has
+  stayed more than five minutes behind that floor for an hour of its own time; the ledger then re-anchors at it, dropping
+  what was stamped in the future. A forward mistake therefore clears an hour after the clock is corrected, and moving the
+  clock back gains nothing the hour would not have given.
+- `fresh()` is for a device that keeps no ledger (a test, a device's own request at creation): a host must never call
+  it for an account whose ledger exists, or the budget is gone. `seal` takes 32 bytes of fresh entropy on every call:
+  the GCM nonce comes from it, so entropy must never be reused under one device key.
+- **Residual limit:** a host or backup that restores the private store wholesale (the sealed ledger and its
+  recorded generation together) restores the budget; the device key is not a counter, so the core cannot see
+  it. Within one process the ledger never goes back.
 
 ### `AccountEngine`
 
@@ -180,11 +246,11 @@ logs and never carries key material. `Refused` carries the §19 reason; `Denied`
 
 | Variant | `code` | Meaning |
 | --- | --- | --- |
-| `Malformed` | `malformed` | A rule is broken; also an argument that is not valid JSON. Pairing aborts: `pairing:commitmentMismatch`, `pairing:invalidPoint`, `pairing:wrongAccount`. |
+| `Malformed` | `malformed` | A rule is broken; also an argument that is not valid JSON. Pairing aborts: `pairing:commitmentMismatch`, `pairing:invalidPoint`, `pairing:wrongAccount`, `pairing:invalidRequest` (a scanned request that does not verify), `pairing:timeout` (a reveal after the ten-minute ceremony timeout). |
 | `BadSignature` | `badSignature`; from `account_webauthn_check` `badSignature:<check>`, with `check: SignatureCheck` | A signature, assertion, possession proof or key binding failed. Checks: `point rawLength scalar der verify clientData clientDataBound unknownForm type challenge origin crossOrigin relyingParty userPresence userVerification form callOrigin`. |
 | `NewerFormat` | `newerFormat` | Authenticated content of a newer format. |
 | `Unavailable` | `unavailable` | Something needed could not be obtained. |
-| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`). |
+| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`), `pairing:busy` (`pairingBusy`: another ceremony is live), `pairing:clock` (`pairingClock`: an implausible clock), `pairing:unsealed` (`pairingUnsealed`: the ledger was not sealed since the start). |
 | `Denied` | `denied:<reason>`, `reason` | `notGranted revoked expired budgetSpent notReadable unavailable`. |
 | `Host` | `host` | A host callback failed; `detail` is the host's own message (a foreign exception arrives here too). |
 | `Reentered` | `reentered` | A callback called back into the object that was calling it, on the same thread; or a call from another thread waited more than 30 s for an object whose holder was inside a host callback (see "Threads and callbacks"). |
@@ -596,7 +662,7 @@ The 0.4 exports stay (an in-place upgrade reads a 0.4 library with them first). 
 | `begin_layout` | none: a 0.5 account is at layout 2 from genesis |
 | `begin_add_controller`, `begin_recovery_add`, `begin_add_passkey` | `begin_add_controller`, `AccountPairing`, `transfer_seed`, `accept_seed_transfer` |
 | `begin_remove_controller`, `begin_keyring` | `begin_remove_controller`, `begin_rotate_vault`, `begin_keyring`, `begin_transition` |
-| `begin_import_grant`, `begin_import`, `import_output_id`, `import_occurrence_id`, `import_identity_category`, `reconcile_import_prefix` | `begin_approve` with `terms_json` carrying `import`; `begin_import` |
+| `begin_import_grant`, `begin_import`, `import_output_id`, `import_occurrence_id`, `import_identity_category`, `reconcile_import_prefix` | `begin_grant_transition` with a `grant` whose terms carry `import` (§9.3: an import grant is a transition); `begin_import` |
 | `live_generation`, `written_operation`, `written_operation_json`, `operation_at` | `record_verdict`, `operation_at_json`, `live_heads`, `begin_live_write` |
 | `tools` | `tools_json` |
 | `begin_request`, `request_info`, `AccessRequest`, `PublicKeys` | `AccountRequest`, `account_request_info` |

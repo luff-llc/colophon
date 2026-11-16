@@ -82,13 +82,13 @@ class AppRulesTest {
         }
     }
 
-    /** A request link needs an owner device; on a device without an account it is refused, never imported. */
-    @Test fun aRequestLinkIsNeverImportedByItself() = runBlocking {
+    /** A request link never approves: on a device without an account it is refused, and nothing is scanned or stored. */
+    @Test fun aRequestLinkNeverApproves() = runBlocking {
         val model = ApplicationProvider.getApplicationContext<TestApplication>().model
         withContext(Dispatchers.Main) {
             model.resetDevice()
             model.open(Uri.parse("colophontest://request?p=CTR1.abc"))
-            assertNull(model.pendingRequestText)
+            assertNull(model.scanned)
             assertNotNull(model.actionError)
         }
     }

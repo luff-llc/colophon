@@ -1491,7 +1491,11 @@ fn account(n: u8) -> AccountId {
 fn confirmed(acct: &AccountId, e: &[u8], nb: [u8; 32], na: [u8; 32]) -> ConfirmedPairing {
     QrJoiner::begin(acct, e, nb).unwrap().receive_nonce(na)
 }
+/// A permit for one protocol step. Since the ledger allows one live ceremony at a time, each step
+/// of these protocol-shape tests takes its permit from a ledger of its own; the ledger's rules
+/// have their own tests below and in `v05_freeze_approval`.
 fn permit(limiter: &mut FailureLimiter) -> Permit {
+    *limiter = FailureLimiter::new();
     limiter.permit(1_000).unwrap()
 }
 
@@ -1617,7 +1621,10 @@ fn the_failure_limiter_gates_sessions_and_records_every_failure() {
     let json = serde_json::to_string(&limiter).unwrap();
     let back: FailureLimiter = serde_json::from_str(&json).unwrap();
     assert_eq!(back, limiter);
-    assert!(!back.may_start(t0 - 3_600_000));
+    // The ledger keeps its floor and its watch for a corrected clock: an hour after the clock first fell behind (at
+    // t0 - 2h above), it re-anchors (a forward mistake must not stay spent); before that hour it stays floored.
+    assert!(!back.may_start(t0 - 7_200_000 + 1_800_000));
+    assert_eq!(back.may_start(t0 - 3_600_000), limiter.may_start(t0 - 3_600_000));
 }
 
 /// M1: the QR path and the code path are different session types. A code-flow `Joiner` has no

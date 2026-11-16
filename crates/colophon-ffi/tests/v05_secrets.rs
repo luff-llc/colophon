@@ -235,7 +235,7 @@ fn world(host: &mut Host) -> (MemSource, String, String, String) {
     let step = req.step().unwrap();
     let info = req.finish(host.sign_one(&step.body, &m, false)).unwrap();
     let a = ctl
-        .begin_approve(info.raw, terms.to_string(), vec![d.clone()], host.fresh(32))
+        .begin_approve(info.raw.clone(), terms.to_string(), vec![d.clone()], scanned(&ctl, &info.raw, T0 + 3 * HOUR), host.fresh(32))
         .unwrap();
     let w = ctl
         .finish(a.clone(), host.sign(&a.steps().unwrap()))

@@ -23,8 +23,9 @@ import ColophonSession
     func create() async { created += 1 }
     func leave() async throws { left += 1 }
     func rejoin(keys: any AsyncKeyProvider) async {}
-    func importRequest(from url: URL) async throws {}
-    func approve(_ request: AccessRequest, grant: GrantOptions?) async throws {}
+    func scanRequest(_ data: Data) async throws -> ScannedRequest { throw SessionError.notReady }
+    func rejectPairing(_ pairing: AccountPairing) async throws {}
+    func approve(_ request: AccessRequest, pairing: AccountPairing, grant: GrantOptions?) async throws {}
     func revoke(memberID: String) async throws {}
     func veto(_ transition: String) async throws { vetoed.append(transition) }
     func acknowledgeActivation(seq: UInt64) async { acknowledged += 1; notices = .empty }
@@ -56,7 +57,7 @@ private func activation() -> SeenActivation {
 
 @MainActor struct GateStateTests {
     private let presentation = LibraryPresentation(appName: "Later", promise: "Keep it.")
-    private static let allPhases: [SessionPhase] = [.opening, .noLibrary, .creating, .migrating, .waitingForDownload, .waitingForApproval(code: "ABCD-1234"),
+    private static let allPhases: [SessionPhase] = [.opening, .noLibrary, .creating, .migrating, .waitingForDownload, .waitingForApproval,
         .denied, .unavailable(reason: "offline"), .updateRequired, .ready, .refreshing, .retry, .locked,
         .failed(error: .keysUnavailable(detail: "locked")), .failed(error: .other(detail: "x"))]
 
@@ -92,7 +93,7 @@ private func activation() -> SeenActivation {
         // The host's capabilities add exactly their controls where they belong.
         #expect(try screen(.denied, rejoin: true, recovery: true).controls.map(\.action) == [.rejoin, .useRecoveryKit, .retry, .supportReport])
         #expect(try screen(.noLibrary, rejoin: true).controls.map(\.action) == [.create, .join, .rejoin, .supportReport])
-        #expect(try screen(.waitingForApproval(code: "X"), recovery: true).controls.map(\.action) == [.checkAgain, .useRecoveryKit, .cancelPairing, .supportReport])
+        #expect(try screen(.waitingForApproval, recovery: true).controls.map(\.action) == [.checkAgain, .useRecoveryKit, .cancelPairing, .supportReport])
     }
 
     @Test func eachScreenSaysWhatThePersonNeeds() throws {
@@ -102,8 +103,9 @@ private func activation() -> SeenActivation {
         let welcome = try screen(.noLibrary)
         #expect(welcome.title == "Welcome to Later" && welcome.message == "Keep it." && welcome.footnote == presentation.dataNote)
         #expect(welcome.controls.first?.title == "Get Started" && welcome.controls[1].title == "I Use Later on Another Device")
-        let waiting = try screen(.waitingForApproval(code: "ABCD-1234"))
-        #expect(waiting.pairingCode == "ABCD-1234" && waiting.message.contains("same code"))
+        let waiting = try screen(.waitingForApproval)
+        // The joining device shows no code of its own (spec §9.1): the six digits appear only while it pairs.
+        #expect(waiting.pairingCode == nil && waiting.message.contains("same code") && waiting.message.contains("scan"))
         #expect(try screen(.unavailable(reason: "The disk is gone")).message == "The disk is gone")
         #expect(try screen(.failed(error: .keysUnavailable(detail: "d"))).message.hasPrefix("Your identity keys are unavailable."))
         #expect(try screen(.updateRequired).message.contains("newer storage layout"))
@@ -224,7 +226,6 @@ private func activation() -> SeenActivation {
         let request = AccessRequest(id: "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a", label: "iPad", kind: .device,
             termsJSON: #"{"records":[{"namespace":"reading.saved","access":"write"},{"namespace":"notes","access":"read"}]}"#, record: Data())
         #expect(request.namespaces == ["reading.saved", "notes"] && request.access == [.read, .write])
-        #expect(request.pairingCode == "5A5A-5A5A")
         let report = try SupportReport(session: FakeSession(.locked)).text()
         #expect(report.contains("\"phase\" : \"locked\""))
         #expect(!report.contains("5a5a"), "the report carries no identifiers")

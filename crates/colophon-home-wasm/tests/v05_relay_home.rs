@@ -243,7 +243,7 @@ fn a_non_primary_home_answers_421_until_the_primary_head_covers_the_entry() {
     let d = w.f.d.clone();
     let action = ctl
         .account()
-        .begin_approve(&req.raw, granted, &[d], seed)
+        .begin_approve(&req.raw, granted, &[d], seed, paired_on(ctl.account(), &req))
         .unwrap();
     engine_finish(&mut ctl, &w.host, &w.src, action);
     let all: Vec<(u64, Value)> = ctl
@@ -449,7 +449,7 @@ fn a_head_the_guard_refuses_is_not_signed() {
     let d = w.f.d.clone();
     let action = ctl
         .account()
-        .begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[d], seed)
+        .begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[d], seed, paired_on(ctl.account(), &req))
         .unwrap();
     engine_finish(&mut ctl, &w.host, &w.src, action);
     let (seq, entry) = ctl
@@ -747,7 +747,7 @@ fn a8_an_entry_in_the_receipts_array_is_malformed_and_storage_follows_state() {
     let id = w.host.identity(33);
     let req = request_for(&w.f, &w.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), NOW);
     let seed = w.host.fresh();
-    let action = ctl.account().begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[w.f.d.clone()], seed).unwrap();
+    let action = ctl.account().begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[w.f.d.clone()], seed, paired_on(ctl.account(), &req)).unwrap();
     engine_finish(&mut ctl, &w.host, &w.src, action);
     let all: Vec<(u64, Value)> = ctl.account().objects().entries.iter().map(|e| (entry_seq(e), serde_json::from_slice(e).unwrap())).collect();
     let (_, entry) = all.iter().max_by_key(|(s, _)| *s).unwrap().clone();

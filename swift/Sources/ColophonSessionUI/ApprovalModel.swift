@@ -2,8 +2,14 @@ import ColophonSession
 import Foundation
 import Observation
 
+/// Reviewing one request before approving it. Approval spends a pairing for exactly this request's key (spec §9.1):
+/// either the request was scanned from the joining device's screen (`code == nil`: the pairing is confirmed already),
+/// or the two devices ran the six-digit code (`code` is the approving device's digits, and the person confirms that
+/// the joining device shows the same before anything is approved).
 @Observable @MainActor public final class ApprovalModel {
     public let request: AccessRequest
+    /// The six digits to compare, when the devices paired by the code; `nil` when the request was scanned.
+    public let code: String?
     public var namespaces: Set<String>
     public var readOnly: Bool
     public var codeMatches = false
@@ -12,16 +18,22 @@ import Observation
     public var limitsBudget = false
     public var budget = "100"
     public let action = LibraryActionModel()
+    private let pairing: AccountPairing
     private let context: UUID
     private let revision: UInt64
-    public init(request: AccessRequest, session: any LibrarySessionSource, now: Date = .now) {
-        self.request = request; namespaces = Set(request.namespaces)
+    public init(request: AccessRequest, pairing: AccountPairing, code: String?, session: any LibrarySessionSource, now: Date = .now) {
+        self.request = request; self.pairing = pairing; self.code = code
+        namespaces = Set(request.namespaces)
         readOnly = !request.access.contains(.write)
         expires = now.addingTimeInterval(7 * 86400)
         context = session.context; revision = session.revision
     }
+    /// A request scanned from the joining device's screen.
+    public convenience init(scanned: ScannedRequest, session: any LibrarySessionSource, now: Date = .now) {
+        self.init(request: scanned.request, pairing: scanned.pairing, code: nil, session: session, now: now)
+    }
     public func grant(now: Date = .now) throws -> GrantOptions {
-        guard codeMatches else { throw LibraryUIError.unavailable("Compare the code on both devices before approving.") }
+        guard code == nil || codeMatches else { throw LibraryUIError.unavailable("Compare the code on both devices before approving.") }
         guard !namespaces.isEmpty, namespaces.isSubset(of: Set(request.namespaces)) else {
             throw LibraryUIError.unavailable("Choose at least one of the requested areas.")
         }
@@ -42,9 +54,16 @@ import Observation
             await session.refresh()
             try Task.checkCancellation()
             guard session.context == context else { throw SessionError.destinationChanged }
-            guard session.revision == revision, session.requests.contains(request) else { throw SessionError.staleRevision }
+            guard session.revision == revision else { throw SessionError.staleRevision }
             guard session.phase == .ready else { throw SessionError.notReady }
-            try await session.approve(request, grant: options)
+            // The person said both screens show the same digits: only now is the pairing confirmed.
+            if code != nil, try pairing.stage() != .confirmed { try pairing.confirm() }
+            try await session.approve(request, pairing: pairing, grant: options)
         }
+    }
+    /// The codes differ: the pairing ends here (a failure the limiter counts) and nothing is approved. The joining
+    /// device must abort too; a new attempt starts with fresh nonces.
+    public func codesDiffer(session: any LibrarySessionSource) async -> Bool {
+        await action.run { try await session.rejectPairing(pairing) }
     }
 }

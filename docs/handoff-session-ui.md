@@ -12,10 +12,12 @@ integration are narrow exceptions to the otherwise additive Package.swift/new UI
   (SwiftUI, Foundation, Observation and UniformTypeIdentifiers); no legacy ColophonUI dependency.
 - `LibraryGate` restores and refreshes on foreground entry, renders all nine session phases,
   and invokes its content builder only when ready. Welcome copy and artwork belong to the app.
-  Failure reasons are visible; Retry uses the existing lifecycle retry API. Pairing codes are
-  selectable and spoken character by character. Migration shows real host-supplied progress
+  Failure reasons are visible; Retry uses the existing lifecycle retry API. The waiting screen shows no code
+  (spec §9.1); a six-digit code appears only while two devices pair, in `PairingCodeView`, selectable and spoken digit by
+  digit. Migration shows real host-supplied progress
   when present, otherwise indeterminate progress; it never fabricates progress.
-- Shared settings: request-file import, explicit code comparison, narrowing of namespaces,
+- Shared settings: a request scanned from the joining device (`LibraryHostActions.scanRequest`, the host's camera), or
+  approval after the six-digit code (`ApproveRequestView(request:pairing:code:session:)`), narrowing of namespaces,
   read-only access, expiry and write budget; member kinds and grant summaries; confirmed
   revocation with the “past contributions stay attributed” explanation; the attributed ledger;
   connection location selection; recovery kit export/import screens; confirmed local leave and
@@ -60,10 +62,10 @@ System-owned file-picker, navigation-back and share-sheet controls keep their sy
 | --- | --- |
 | Gate welcome | `library.createLocal`, `library.join` |
 | Gate state/progress | `library.opening`, `library.creating`, `library.migrating`, `library.migrationProgress`, `library.denied`, `library.unavailable`, `library.failed` |
-| Pairing and lifecycle | `library.pairingCode`, `library.retryPairing`, `library.cancelPairing`, `library.retry`, `library.rejoin`, `library.recoverFromPairing` |
+| Pairing and lifecycle | `library.pairingCode` (only while pairing), `library.retryPairing`, `library.cancelPairing`, `library.retry`, `library.rejoin`, `library.recoverFromPairing` |
 | Shared feedback/sheets | `library.actionError`, `library.sheet.close`, `library.bugReport` |
-| Settings | `library.settings`, `library.request.import`, `library.request.<requestID>`, `library.member.<memberID>`, `library.ledger.open`, `library.addDevice`, `library.recovery.open`, `library.leaveFromSettings` |
-| Approval | `library.approve.codeMatches`, `library.approve.namespace.<namespace>`, `library.approve.readOnly`, `library.approve.limitExpiry`, `library.approve.expiry`, `library.approve.limitBudget`, `library.approve.budget`, `library.approve` |
+| Settings | `library.settings`, `library.request.scan`, `library.request.<requestID>`, `library.member.<memberID>`, `library.ledger.open`, `library.addDevice`, `library.recovery.open`, `library.leaveFromSettings` |
+| Approval | `library.approve.scanned`, `library.approve.codeMatches`, `library.approve.codesDiffer`, `library.approve.namespace.<namespace>`, `library.approve.readOnly`, `library.approve.limitExpiry`, `library.approve.expiry`, `library.approve.limitBudget`, `library.approve.budget`, `library.approve` |
 | Member and revocation | `library.member.grant`, `library.access.end`, `library.access.end.confirm`, `library.access.end.cancel` |
 | Colophon | `library.ledger`, `library.ledger.entry.<sequence>` |
 | Connection | `addDevice.folder`, `addDevice.iCloud.<choiceID>`, `addDevice.appGroup.<choiceID>`, `addDevice.unavailable`, `addDevice.next` |
@@ -83,7 +85,7 @@ an assertion that every legacy 0.1 keyring/passkey identifier or UI-test route i
   exactly **13 known sandbox issues**, covering file coordination/read-write availability and
   backup exclusion. No failure in SessionUI or the other 0.2 suites.
 - `bash scripts/test-swift.sh --filter ColophonSessionUITests`: **28 tests in 7 suites pass**.
-  Snapshot-free checks cover grant narrowing, explicit code comparison, expiry/budget validation,
+  Snapshot-free checks cover grant narrowing, the code comparison of a paired request, expiry/budget validation,
   stale context/revision/request/phase, authority refusal, duplicate action exclusion,
   cancellation, rejoin provider failures, connection callback success/failure and device-local App Group instructions, recovery secrecy,
   dismiss-during-export, all-phase support-report privacy and member grant presentation.

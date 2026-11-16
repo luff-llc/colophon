@@ -12,13 +12,20 @@ if [[ -z "${JAVA_HOME:-}" && -d /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk
   export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
 fi
 jobs="${PRESSROOM_THREADS:-4}"
-# A private target per invocation. The caller can supply its private run target to reuse builds.
+# The build target: the caller's CARGO_TARGET_DIR when it gives one (a pressroom lane, kept for reuse and never deleted
+# here; cargo locks it, so a lane another worktree also uses only costs rebuilds), else a private one made and removed
+# here. The run's logs and device data always go to a private directory under this worktree, removed at the end.
 mkdir -p "$root/target"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(mktemp -d "$root/target/cross-XXXXXX")}"
-case "$CARGO_TARGET_DIR" in "$root"/target/*) ;; *) echo 'test-cross: CARGO_TARGET_DIR must be private to this worktree under target/' >&2; exit 1 ;; esac
+owned_target=""
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+  CARGO_TARGET_DIR="$(mktemp -d "$root/target/cross-XXXXXX")"
+  owned_target="$CARGO_TARGET_DIR"
+fi
+export CARGO_TARGET_DIR
 mkdir -p "$CARGO_TARGET_DIR"
+run_dir="$(mktemp -d "$root/target/cross-run-XXXXXX")"
 export COLOPHON_CROSS_RUN_DIR
-COLOPHON_CROSS_RUN_DIR="$(mktemp -d "$CARGO_TARGET_DIR/devices-XXXXXX")"
+COLOPHON_CROSS_RUN_DIR="$(mktemp -d "$run_dir/devices-XXXXXX")"
 runner=""
 swift_count=0 kotlin_count=0 bun_count=0
 finish() {
@@ -26,7 +33,8 @@ finish() {
   trap - EXIT INT TERM
   # runner is our unreaped direct child. Relay handles belong to Bun's World, which handles TERM.
   if [[ -n "$runner" ]]; then kill -TERM "$runner" 2>/dev/null || true; wait "$runner" 2>/dev/null || true; fi
-  rm -rf "$CARGO_TARGET_DIR"
+  rm -rf "$run_dir"
+  if [[ -n "$owned_target" ]]; then rm -rf "$owned_target"; fi
   if [[ "$status" == 0 ]]; then
     echo "test-cross: PASS — $bun_count Bun tests, $swift_count Swift tests, $kotlin_count Kotlin tests; owned children closed"
   else
@@ -63,14 +71,14 @@ export SWIFTPM_MODULECACHE_OVERRIDE="$root/.build/module-cache"
 export COLOPHON_SOFTWARE_KEYS=1
 mkdir -p "$CLANG_MODULE_CACHE_PATH"
 swift build --disable-sandbox -j "$jobs" --product ColophonCrossDevice
-run_logged "$CARGO_TARGET_DIR/swift.log" swift test --disable-sandbox -j "$jobs" --filter 'RevokedReopenTests|PairingTests'
-swift_count="$(bun scripts/cross-results.ts swift "$CARGO_TARGET_DIR/swift.log")"
+run_logged "$run_dir/swift.log" swift test --disable-sandbox -j "$jobs" --filter 'RevokedReopenTests|PairingTests'
+swift_count="$(bun scripts/cross-results.ts swift "$run_dir/swift.log")"
 bin="$(swift build --disable-sandbox --show-bin-path)"
 export COLOPHON_CROSS_SWIFT="$bin/ColophonCrossDevice"
 [[ -x "$COLOPHON_CROSS_SWIFT" ]] || { echo "test-cross: driver missing at $COLOPHON_CROSS_SWIFT" >&2; exit 1; }
 sdk/kotlin/gradlew -p sdk/kotlin --no-daemon --max-workers="$jobs" crossDeviceClasspath test --rerun \
   --tests com.luff.colophon.session.PairingTest --tests com.luff.colophon.session.RevokedReopenTest
 kotlin_count="$(bun scripts/cross-results.ts kotlin sdk/kotlin/build/test-results/test)"
-run_logged "$CARGO_TARGET_DIR/bun.log" bun test tests/cross
-bun_count="$(bun scripts/cross-results.ts bun "$CARGO_TARGET_DIR/bun.log")"
+run_logged "$run_dir/bun.log" bun test tests/cross
+bun_count="$(bun scripts/cross-results.ts bun "$run_dir/bun.log")"
 [[ "$source_hash" == "$(bash scripts/apple-provenance.sh "$root" hash)" ]] && bash scripts/apple-provenance.sh "$root" check

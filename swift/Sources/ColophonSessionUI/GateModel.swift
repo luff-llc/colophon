@@ -136,10 +136,10 @@ public enum GateModel {
                 ?? .indeterminate("Upgrading library")
             return screen("Your Library Is Being Upgraded", "Your existing library is kept while the upgrade completes.", "library.migrating",
                           progress: progress, [retry])
-        case .waitingForApproval(let code):
+        case .waitingForApproval:
             return screen("Waiting for Approval",
-                          "On a device with access, open Library settings. Approve \(presentation.appName) only when both devices show the same code.",
-                          "library.waitingForApproval", code: code,
+                          "On a device with access, open Library settings and scan this device's request, or pair with the six-digit code. Approve \(presentation.appName) only when both devices show the same code.",
+                          "library.waitingForApproval",
                           [GateControl(.checkAgain, "Check Again", "library.retryPairing")] + recovery
                             + [GateControl(.cancelPairing, "Cancel Pairing", "library.cancelPairing", .cancel)])
         case .denied:

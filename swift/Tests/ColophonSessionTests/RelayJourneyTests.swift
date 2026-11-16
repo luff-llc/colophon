@@ -74,8 +74,8 @@ import ColophonSession
         await second.session.restore()
         second.session.stopSync()
         guard case .waitingForApproval = second.session.phase else { Issue.record("expected waiting, got \(describe(second))"); return }
-        try await first.session.importRequest(try await second.session.exportRequest())
-        try await first.session.approve(try #require(first.session.requests.first))
+        // The two devices pair by the six-digit code (§7.3) and the owner approves what that pairing confirmed.
+        try await approveByCode(joining: second.session, approving: first.session)
         #expect(await settle(first), "\(describe(first))")
         _ = await second.session.syncNow()
         await second.session.refresh()
@@ -100,8 +100,8 @@ import ColophonSession
                            homes: joining(relays, refusals: thirdRefusals), createWithoutHome: false)
         await third.session.restore()
         third.session.stopSync()
-        try await first.session.importRequest(try await third.session.exportRequest())
-        try await first.session.approve(try #require(first.session.requests.first))
+        // The owner scans the third device's request from its screen (the scan path, §9.1).
+        try await approveByScan(joining: third.session, approving: first.session)
         #expect(await settle(first), "\(describe(first))")
         _ = await third.session.syncNow()
         await third.session.refresh()

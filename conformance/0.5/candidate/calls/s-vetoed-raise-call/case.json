@@ -1,0 +1,1 @@
+{"description":"Seq 4 records B's veto of the layout raise: the reader is not stopped, and the call is judged as usual (ok at S = 3).","expected":"ok","sections":["1","8.7","12.3","13.6"],"verifier":{"audiences":["https://projects.example/scopes/7"],"now":"2026-11-14T08:09:00Z","replay":"empty"}}

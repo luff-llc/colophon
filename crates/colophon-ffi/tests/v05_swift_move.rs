@@ -486,7 +486,7 @@ fn build() -> (World, Arc<AccountEngine>) {
     e.advance(at).unwrap();
     let change = json!({"grant": {"request": encode_base64(&cinfo.raw), "terms": gterms}});
     let a = e
-        .begin_transition(change.to_string(), signers, RuleKind::Control, vec![])
+        .begin_grant_transition(change.to_string(), signers, RuleKind::Control, scanned(&e, &cinfo.raw, at), vec![])
         .unwrap();
     let wr = e.finish(a.clone(), w.sign(&a.steps().unwrap())).unwrap();
     store_all(&w, &wr.stores);

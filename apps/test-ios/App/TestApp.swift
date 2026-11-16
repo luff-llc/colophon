@@ -33,7 +33,7 @@ struct RootView: View {
                 NavigationStack { SetupView() }
             } else if let session = model.session {
                 switch session.phase {
-                case .waitingForApproval(let code): NavigationStack { WaitingView(code: code) }
+                case .waitingForApproval: NavigationStack { WaitingView() }
                 default: MainTabs()
                 }
             } else {

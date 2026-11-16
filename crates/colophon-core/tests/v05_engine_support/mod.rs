@@ -322,11 +322,27 @@ pub fn admit(f: &mut Fixture, member: &str, label: &str, kind: &str, asked: Valu
     let host = &f.host;
     let req = request_for(f, host, member, label, kind, asked, f.account.now_ms());
     let seed = f.host.fresh();
+    let pairing = paired(f, &req);
     let action = f
         .account
-        .begin_approve(&req.raw, granted, &[f.d.clone()], seed)
+        .begin_approve(&req.raw, granted, &[f.d.clone()], seed, pairing)
         .unwrap();
     run(&mut f.account, &f.host, action);
+}
+
+/// A confirmed pairing for `req`: the approving device scanned the request from the joining
+/// device's screen (§7.3, §9.1).
+pub fn paired(f: &Fixture, req: &AccessRequest) -> colophon_core::v05::pairing::ConfirmedPairing {
+    paired_on(&f.account, req)
+}
+/// The same, on `a`'s account at `a`'s time.
+pub fn paired_on(a: &Account, req: &AccessRequest) -> colophon_core::v05::pairing::ConfirmedPairing {
+    colophon_core::v05::pairing::scanned_request(
+        a.id(),
+        &req.raw,
+        FailureLimiter::new().permit(a.now_ms()).unwrap(),
+    )
+    .unwrap()
 }
 
 pub fn agent_terms(access: &str) -> Value {

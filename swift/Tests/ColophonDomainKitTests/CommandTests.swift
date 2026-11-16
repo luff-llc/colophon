@@ -50,8 +50,9 @@ import ColophonNotesKit
     func agent() async throws -> ColophonSession {
         let agent = ColophonSession(configuration: .init(memberLabel: "Worker", memberKind: .agent, namespaces: ["listening.podcasts"], location: .memory(memory), privateContainer: home.appendingPathComponent("agent"), keys: SoftwareKeys(), ownerController: SoftwareKeys(), deviceSecrets: MemoryDeviceSecrets()))
         await agent.restore(); await session.refresh()
-        let request = try #require(session.requests.first)
-        try await session.approve(request)
+        // The owner scans the agent's request (its canonical envelope) and approves what that scan paired (spec §9.1).
+        let scanned = try await session.scanRequest(try await agent.exportRequest())
+        try await session.approve(scanned.request, pairing: scanned.pairing)
         await agent.refresh()
         try #require(agent.phase == .ready)
         return agent
