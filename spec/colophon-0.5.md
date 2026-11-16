@@ -1018,7 +1018,8 @@ before E:
    receipts of the homes that witness its window;
 3. its anchor is on E's branch (`malformed`).
 
-A transition whose only receipting homes are revoked before activation is dead.
+A transition whose only receipting homes are revoked before activation is dead, unless it is a
+full set and they are homes it revokes itself: it needs no receipt from those (rule 2).
 
 A home admits a transition (receipts it) by judging it at the home's **current head**, not at a
 later state (§13.1); validity at an entry is judged at that entry, as above.
@@ -1033,7 +1034,10 @@ another unit.
 **Full set.** T is a full set, can't be vetoed and is due as above when it has at least two signer
 units and either (a) meets the recovery rule and every current `recover` controller signed it, or
 (b) meets the control rule, every current `control` controller signed it, and, if it needs
-consent, every current `recover` controller too. "Current" includes every key T removes. Whoever
+consent, every current `recover` controller too. "Current" includes every key T removes. Either
+definition makes T a full set, whichever rule T is otherwise judged under, but (a) only where the
+recovery rule may make T's components and (b) only where the control rule may (consent included):
+being a full set lets through no component that rule refuses. Whoever
 holds every recovery key is treated as the owner.
 
 **Removal-only transitions.** A transition is **removal-only** when every component only
@@ -1072,8 +1076,9 @@ from heads it has seen or the order it saw things in.
   whose revocation isn't final yet; a home is excused only once its revocation is final), less the
   homes it revokes itself under the stronger authority. For a
   full set they are those of them that remain after it. A home witnesses, and its receipts are
-  required and accepted, from the final activation that appoints it until its revocation is final,
-  whatever its grant's expiry says (§8.5); a home that stops answering blocks finality until it is
+  accepted, from the final activation that appoints it until its revocation is final, whatever its
+  grant's expiry says (§8.5); its receipts are required for the same span, except by a full set
+  that revokes it (validity 2); a home that stops answering blocks finality until it is
   revoked.
 - **Final.** An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering

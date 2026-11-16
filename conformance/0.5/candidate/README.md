@@ -173,7 +173,10 @@ Normative for spec §21 condition 1.
     valid;
   - dropping a home that is gone (§8.7 validity 2, "Revoking a home"; changes rows 224–226): full
     set (b), and full set (a) by two recovery units, drop a silent sole home with no receipt, final
-    at once, leaving no home (`rules/f2-drop-home-full-set-b`, `-full-set-a`), then appoint a new
+    at once, leaving no home (`rules/f2-drop-home-full-set-b`, `-full-set-a`), also when a signer of
+    full set (a) holds `control` too (`-full-set-a-dual-role`; not without every recovery key,
+    `-dual-role-not-full`, nor for a component the recovery rule may not make,
+    `rules/f2-dual-role-full-a-component-not-recovery`), then appoint a new
     one (`-then-appoint`); one control and one recovery unit do the same (`-one-control-one-recovery`);
     with two homes only the remaining home's receipt is needed and it alone witnesses
     (`rules/f2-drop-one-of-two-homes`), and the revoked home's receipt alone is `malformed`
