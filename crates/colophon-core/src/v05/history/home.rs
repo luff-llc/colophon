@@ -1576,6 +1576,11 @@ fn admit_candidate(
     // entries per seq, and at most one non-standing candidate per covering home at a seq (a home
     // whose heads cover two of them equivocated itself), so one hostile home fills one slot; a
     // candidate that stands is stored whatever the count (above).
+    // §13.1 Clock: a full set more than 300 s behind the clock is `refused:late`, a candidate
+    // kept as evidence too.
+    if full && entry.issued < now_ms.saturating_sub(WINDOW) {
+        return Err(Refusal::Late);
+    }
     let stored_as_evidence = (verdict.stop.is_none() || forks) && {
         let extra: Vec<super::Entry> = std::iter::once(incoming)
             .chain(later.iter().map(Vec::as_slice))

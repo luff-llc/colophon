@@ -417,3 +417,61 @@ fn a_candidate_another_homes_head_covers_is_kept_as_evidence_one_per_home() {
     assert_eq!(c_too.result, Err(Refusal::Conflict));
     assert!(held(&c_too.state, &dr2));
 }
+
+// ---------------------------------------------------------------------------------------------
+// The third check, finding 3: the 300 s rule for a full set holds for a candidate kept as
+// evidence too.
+
+/// A full-set transition T (every control unit and the recovery key) is receipted by A after
+/// the immediate entry X at seq n was issued, so X, covered by A's head, stands against T's
+/// `activate` R at n. R reaches A more than 300 s after its `issued`, covered by B's head: it is
+/// `refused:late` (§13.1 Clock: a full set more than 300 s behind the clock) and not stored, not
+/// even as evidence.
+#[test]
+fn an_old_full_set_candidate_is_refused_late_not_kept_as_evidence() {
+    use colophon_core::v05::account::{Account, Identity};
+    let (mut f, a, [ka, kb, _kc]) = three_homes();
+    let account = f.account.id().as_str().to_string();
+    let t = f.account.now_ms() + 60_000;
+    f.account.advance(t + 100).unwrap();
+    let (p, k) = (f.p.clone(), f.k.clone());
+    let action = f
+        .account
+        .begin_transition(&Change::policy(json!({"callWindow": 640})), &[f.d.clone(), p, k], TransitionRule::Control)
+        .unwrap();
+    let tr = run(&mut f.account, &f.host, action).pending[0].clone();
+    let d = body_digest(&tr);
+    // The copy that records R: T, and later A's receipt, but not X.
+    let mut other = Account::open(f.account.objects().clone(), f.account.records().to_vec(), None,
+        Identity::Controller(f.d.clone()), t + 150).unwrap();
+    // X, issued before A receipts T.
+    f.account.advance(t + 200).unwrap();
+    let id = f.host.identity(46);
+    let req = request_for(&f, &f.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), t + 200);
+    let seed = f.host.fresh();
+    let pairing = paired(&f, &req);
+    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed, pairing).unwrap();
+    let x = run(&mut f.account, &f.host, action).entries[0].1.clone();
+    let (n, dx) = (entry_seq(&x), body_digest(&x));
+    let a = admit(&a, &x, &format_date(t + 200)).state;
+    let a = admit(&a, &head(&ka, &account, n, &dx, t + 250), &format_date(t + 250)).state;
+    // A receipts T.
+    let adm = admit(&a, &tr, &format_date(t + 300));
+    assert_eq!(adm.result, Ok(()));
+    let draft = &adm.receipts[0];
+    let env = canonical(&json!({"body": STANDARD.encode(&draft.body),
+        "signature": STANDARD.encode(ka.sign(&draft.body).signature)})).unwrap();
+    let a = finish_receipt(&adm.state, &d, &env, &format_date(t + 300)).unwrap();
+    other.merge(Incoming { objects: Objects { pending: vec![env], ..Objects::default() }, records: vec![] }, t + 400).unwrap();
+    other.advance(t + 1_000).unwrap();
+    let r = other.record_due().unwrap()[0].entries[0].1.clone();
+    let dr = body_digest(&r);
+    assert_eq!(entry_seq(&r), n);
+    // B's head over R; R reaches A 400 s after its `issued`.
+    let late = t + 1_000 + 400_000;
+    let a = admit(&a, &head(&kb, &account, n, &dr, t + 1_500), &format_date(late)).state;
+    let got = admit(&a, &r, &format_date(late));
+    assert_eq!(got.result, Err(Refusal::Late));
+    let held = got.state.persisted().unwrap().objects().unwrap().entries.iter().any(|e| body_digest(e) == dr);
+    assert!(!held, "an old full set is not kept, even as evidence");
+}
