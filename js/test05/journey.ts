@@ -14,7 +14,7 @@ import {
   blobAvailability, blobData, glue, MemoryMedium, prefetchBlob, putBlob, SessionError, WebCryptoKeyProvider,
   type HistoryAccess, type HomeConfiguration,
 } from '../src/session/index.js';
-import { admitted, assert, Device, equal, note, RelayHome, sameBytes, sleep, type RelayHost } from './support.js';
+import { admitted, approveByCode, approveByScan, assert, Device, equal, note, RelayHome, sameBytes, sleep, type RelayHost } from './support.js';
 
 const authorityOnly = (medium: MemoryMedium): MemoryMedium => medium.copy(path => path.startsWith('authority/'));
 const callRefused = (device: Device): string[] => device.session.homeIssues.flatMap(i => i.problem.kind === 'callRefused' ? [i.problem.code] : []);
@@ -78,8 +78,8 @@ export async function journey(host: RelayHost, history: HistoryAccess, homeCount
     await second.session.restore();
     second.session.stopSync();
     equal(second.session.phase.kind, 'waitingForApproval', `the second device waits: ${second.describe()}`);
-    await first.session.importRequest(await second.session.exportRequest());
-    await first.session.approve(first.session.requests[0]!);
+    // The two devices pair by the six-digit code (§7.3) and the owner approves what that pairing confirmed.
+    await approveByCode(second.session, first.session);
     assert(await settle(first), () => first.describe());
     const secondPasses = await untilApproved(second);
     equal(second.session.phase.kind, 'ready', `the phone learnt its approval through the home: ${second.describe()}`);
@@ -102,8 +102,8 @@ export async function journey(host: RelayHost, history: HistoryAccess, homeCount
     devices.push(third);
     await third.session.restore();
     third.session.stopSync();
-    await first.session.importRequest(await third.session.exportRequest());
-    await first.session.approve(first.session.requests[0]!);
+    // The owner scans the third device's request from its screen (the scan path, §9.1).
+    await approveByScan(third.session, first.session);
     assert(await settle(first), () => first.describe());
     const thirdPasses = await untilApproved(third);
     equal(third.session.phase.kind, 'ready', third.describe());

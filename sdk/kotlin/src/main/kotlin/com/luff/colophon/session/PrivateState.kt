@@ -40,6 +40,16 @@ internal object AtomicFile {
         } catch (_: AtomicMoveNotSupportedException) {
             Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
+        syncDirectory(file.parentFile)
+    }
+    /** Makes the rename durable: the directory entry is flushed, as the Swift store does (a crash cannot bring the old file back). */
+    private fun syncDirectory(dir: File?) {
+        if (dir == null) return
+        try {
+            java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+        } catch (_: java.io.IOException) {
+            // A platform that cannot open a directory (not Linux, Android or macOS) has no directory flush to give.
+        }
     }
     fun read(file: File, maximumBytes: Int): ByteArray? {
         if (!file.isFile) return null

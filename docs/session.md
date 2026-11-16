@@ -50,7 +50,7 @@ let session = ColophonSession(configuration: .init(
 
 ## Phases
 
-`opening`, `noLibrary`, `creating`, `waitingForApproval(code:)`, `ready`, `refreshing`, `waitingForDownload`, `retry`,
+`opening`, `noLibrary`, `creating`, `waitingForApproval`, `ready`, `refreshing`, `waitingForDownload`, `retry`,
 `denied`, `unavailable(reason:)`, `updateRequired`, `failed`, `migrating` (kept for apps), and **`locked`** (new).
 `updateRequired` is the engine's `newerFormat`: nothing is lost and nothing is changed. A revoked member is `denied`. A storage
 error is `retry` or `waitingForDownload`, never an empty library.
@@ -64,11 +64,28 @@ error is `retry` or `waitingForDownload`, never an empty library.
   `policy.headQuorum` of a new account.
 * `restore()` lists the medium, discovers the account ID from its verified history (cached in the private journal), opens the
   member's engine from the sealed saved state when it can, and opens the member's epoch shares. A member that is not approved
-  yet is `waitingForApproval(code:)`; its engine is loaded without keys so the exchange can bring the approval in.
-* **A device that asks for access** publishes its signed request (`requests/<id>.json` in the library folder, or
-  `exportRequest()` bytes for a file, AirDrop or a code) and shows a code derived from its key ID. An owner device lists
-  `requests`, compares the code, and calls `approve(_:grant:)` (the owner key signs). `importRequest(_:)` takes a request that came
-  out of band.
+  yet is `waitingForApproval` (it carries no code); its engine is loaded without keys so the exchange can bring the approval in.
+* **A device that asks for access** publishes its signed request (`requests/<id>.json` in the library folder) and shows it
+  as a QR code (`exportRequest()`, the canonical request envelope). Approving it spends a **confirmed pairing** for exactly its
+  key (spec §7.3, §9.1); no code is derived from a key ID and a listed request cannot be approved by itself. Two ways:
+  * **Scan:** the owner device's camera reads the request from the joining device's screen; `scanRequest(_:)` returns the
+    request and its confirmed pairing (nothing is stored), and `approve(_:pairing:grant:)` spends it.
+  * **Six-digit code:** the joining device calls `beginJoinPairing()` and sends `commitment()` (with its request); the owner
+    device's person starts the ceremony with `beginApproval(commitment:)` and sends back its `nonce`; the joining device's
+    `receiveNonce(na:)` gives the reveal; `approvalCode(pairing:e:nb:)` gives the owner's digits; both screens show the same
+    six digits, the person confirms (`pairing.confirm()`) and the owner calls `approve(_:pairing:grant:)`. Different digits:
+    `rejectPairing(_:)` on both devices. `abandonApproval(_:)` ends a ceremony the person cancelled.
+  * **One ceremony at a time, five failures an hour.** The core keeps the owner device's ledger: while one ceremony is live
+    (not confirmed, rejected or abandoned, and younger than ten minutes) another start is refused (`pairing:busy`), and every
+    start counts toward five an hour until it confirms (`pairing:limit`). A ceremony starts only when the person starts it;
+    traffic alone burns nothing. The session keeps the ledger sealed under the device key (`pairing-ledger.bin`, its
+    generation in `pairing-ledger.generation`) and persists it before the nonce exists: if it cannot, no nonce is produced. A
+    missing, edited or older ledger opens as a spent budget. Every session and process over the same private container takes one lock
+    (`flock` on `pairing-ledger.lock`) and reloads the ledger under it, so two instances never hold two live ceremonies.
+    A clock outside 1970 to 9999 starts nothing (`pairing:clock`); a forward clock mistake clears an hour after the
+    clock is corrected. **Residual limit:** a host or backup that restores the whole
+    private container (the ledger and its recorded generation together) restores the budget; the device key in the Keychain
+    is not a counter, so this cannot be detected.
 * **Adding a device by pairing and seed transfer** (a second controller): `addController(_:label:roles:immediate:)` names the new
   key; both screens run the ceremony (`AccountPairing`, six digits); the existing device calls `transferSeed(pairing:)`; the new
   device calls `acceptSeedTransfer(key:pairing:sealed:label:)`, which opens a controller engine from the seed and builds its own
@@ -113,7 +130,7 @@ time, on a background executor (once to address it, once to encrypt and store ea
 publish take the gate. `blobFile` is `@concurrent`: it pulls verified chunks one at a time (`blobStream` reads the next chunk
 only when asked, so a slow consumer never makes it buffer) and writes them to a private file that is moved into place after
 the digest checks. Both take an optional `progress` callback (`BlobProgress`: stage, bytes done, total), called off the main
-actor. `importRequest(from:)` reads the file off the main actor too, at most 40 MiB. The session's worker runs on its own
+actor. Request scans arrive as bytes from the host's camera; nothing reads a request file. The session's worker runs on its own
 serial queue, so the medium's synchronous record I/O never occupies the main actor or a cooperative-pool thread. The test
 `MainActorTests` moves a 200 MiB blob in and out with a 5 ms main-actor timer running (worst lateness about 6 ms, footprint
 growth about 35 MiB), and the blob executor stops on `dispatchPrecondition` if it is ever called on the main thread.
@@ -185,11 +202,12 @@ An app written against 0.4's session reads the same where the meaning is unchang
   `RelayClient`, `RelaySync`, `RecordPath` are gone: `RecordMedium`, `FolderMedium`, `MemoryMedium`, `RecordPaths`.
   `CheckpointCache` takes a 64-hex account ID.
 * `ColophonSession`: `members` is `[AccountMember]`; `ledger` (a property) is `ledger()` returning JSON; `requests` holds the new
-  `AccessRequest` (`id`, `label`, `kind: AccountMemberKind`, `termsJSON`, `pairingCode` `XXXX-XXXX`, `record`, and `namespaces` /
-  `access` read from its terms). `syncConflicts` is `homeFaults`. `syncState` is `HomeSyncState` (`RelaySyncState` is an alias).
+  `AccessRequest` (`id`, `label`, `kind: AccountMemberKind`, `termsJSON`, `record`, and `namespaces` /
+  `access` read from its terms; no code). `syncConflicts` is `homeFaults`. `syncState` is `HomeSyncState` (`RelaySyncState` is an alias).
   Removed: `performMigration`, `migrationBlob`, `restoreDevice(using:)`, `recoveryKeys()`. New: `notices`, `homes`, `lock()`,
   `unlock()`, `veto(_:)`, `acknowledgeActivation(seq:)`, `addController`, `transferSeed`, `acceptSeedTransfer`, `exportRequest()`,
-  `importRequest(_ data:)`, `receipts(for:)`.
+  `scanRequest(_:)`, `beginJoinPairing()`, `beginApproval(commitment:)`, `approvalCode(pairing:e:nb:)`, `rejectPairing(_:)`,
+  `abandonApproval(_:)`, `approve(_:pairing:grant:)`, `receipts(for:)`. Removed in the freeze package: `importRequest`.
 * `SessionPhase.locked`; `SessionError.noHome`, `.ownerRequired`; `SessionKeyFailure` is public.
 * `IngressEnvelope.libraryID` is the 64-hex account ID.
 * `AsyncKeyProvider.keyDescriptor()` is a requirement with a default (raw keys). `KeyDescriptor.view` is the 0.5 form.

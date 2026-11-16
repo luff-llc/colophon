@@ -3,9 +3,9 @@
 An internal test tool for the Colophon 0.5 Swift SDK: create or join an account, write notes on several devices, and
 
 **Use it only with invites exchanged in person or over a channel you trust.** An invite is not signed yet: it does not
-prove who made it, or that the home and the account are theirs. A signed short invite and the spec's §7.3 pairing
-ceremony are being designed in the 0.5 freeze package; until they land in the SDKs, the code the two screens show only
-proves that the owner device received this device's request unchanged.
+prove who made it, or that the home and the account are theirs (a signed invite is planned for 0.6). Approving a device
+is safe against a relay: the owner device scans the new device's request from its screen, and the SDK approves only the
+key that scan paired (spec §7.3, §9.1); no request that arrives any other way can be approved.
 see exactly what the session says. Not a product. Bundle ID `works.luff.colophon.testapp` (the Android app uses the same).
 
 ## Build and run
@@ -57,9 +57,10 @@ takes the same `{"slot","base","account"}` request as `apps/test-home` and gives
   `authority/` history). On the new device, scan it, paste it or open its link: that only fills a confirmation screen
   with the home's host and the account ID in short form. Nothing is stored and nothing is sent until you tap "Ask to
   join"; even then the history is verified in memory first and must name the account the invite claims. The new device
-  then shows its request (QR and text) and a code. On the owner device, scan, paste or open the request (a link only
-  shows it: you import it), compare the code, tap "The codes match", then Approve; or Reject, which discards it.
-  Five failed or rejected attempts in an hour block further ones for the hour (spec §7.3's bound). The new device
+  then shows its request as a QR code. On the owner device, Devices, "Scan its request": the camera reads it from the
+  new device's screen, the session pairs that request's key (nothing is stored), and you Approve or Reject it. A pasted
+  or linked request is not approved (debug builds take a request link only from the test harness, standing in for the
+  camera). Five failed scans in an hour block further ones for the hour (the session's §7.3 limiter). The new device
   learns its approval through the home ("Check for approval", or the automatic sync).
 * **Notes**: `note.put` records in `notes`, shared by every device, with an optional photo (a required blob). Each row
   shows the member that wrote it. Pull to sync; the app also asks for a sync every 15 s on this screen.
@@ -98,12 +99,12 @@ build. In the Simulator without them, "Create with a passkey" fails with the pla
 
 * Passkey creation has not run: the association file is live, but the entitlement and a signing team are not in this
   repository and no signed device build was made. The software owner key path is what the UI test runs.
-* The camera scanner (VisionKit) is not available in the Simulator; only paste and links were exercised.
+* The camera scanner (VisionKit) is not available in the Simulator; the scripted run feeds the scanned request through a
+  debug-only link, so the camera path itself has not run.
 * A joined device is a member only: it cannot approve, revoke or veto (adding it as a second controller with the seed
   transfer is not built).
-* The invite is unauthenticated and the pairing is the SDK's request and code (`AccessRequest.pairingCode`, the first
-  eight hex of the member key ID), not the §7.3 commitment ceremony: no nonces, commitment or six-digit code. Both wait
-  for the freeze package.
+* The invite is unauthenticated (a signed invite is 0.6). Approval uses the SDK's scan path (§9.1); the six-digit code
+  ceremony is in the SDK but these apps have no channel between two phones to carry it, so they do not offer it.
 * The invite carries the account's history because a device with nothing cannot fetch it from a home that keeps it for
   members. Even a new account's invite (about 10 KB) is too large for one QR code: the app says "too large for one
   QR code" and offers Copy. In 0.5 an invite goes by link or paste; a short QR invite is planned for 0.6. The request

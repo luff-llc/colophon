@@ -56,9 +56,14 @@ session.state.collect { render(it.phase, it.notices) }                    // pen
   `android:apk-key-hash:...` from `appPasskeyOrigins`) into the descriptor's `origins` too: the core admits a platform
   authority origin only when `origins` names it (spec §3.1). `AndroidSessionTest.anAndroidAppOriginCreatesAndApproves`
   runs this call with assertions made under such an origin.
-* **A second device** restores over a copy of the history (a shared folder) or with nothing, shows
-  `SessionPhase.WaitingForApproval(code)`, and hands `exportRequest()` to an owner device, which calls
-  `importRequest(bytes)` and `approve(request)`. The new device learns its approval through the home (`syncNow()`).
+* **A second device** restores over a copy of the history (a shared folder) or with nothing and shows
+  `SessionPhase.WaitingForApproval` (no code). Approval spends a confirmed pairing for exactly its key (spec §7.3, §9.1):
+  the owner device scans the request the new device shows (`exportRequest()` as a QR code, then `scanRequest(bytes)` and
+  `approve(scanned.request, scanned.pairing)`), or the two run the six-digit code (`beginJoinPairing()` on the new device;
+  `beginApproval(commitment)`, `approvalCode(pairing, e, nb)` and `pairing.confirm()` on the owner device; `rejectPairing`
+  on both when the digits differ; `abandonApproval` to cancel). One ceremony at a time and five failures an hour, kept in a
+  sealed ledger in the private directory, as `docs/session.md` describes. The new device learns its approval through the
+  home (`syncNow()`).
 * **Reads**: `query(namespace, name, argumentsJson)` and `view(namespace)`; there is no typed domain kit in Kotlin yet
   (the Swift `ColophonSavedKit` has no Kotlin twin): an app passes the payload JSON its domain defines.
 * **Blobs**: `putBlob(bytes | file, ...)`, `blobAvailability`, `blobData`, `prefetchBlob`, `downloadRequiredBlobs`,

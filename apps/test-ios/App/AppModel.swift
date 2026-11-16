@@ -248,10 +248,9 @@ struct SyncOutcome: Sendable {
         var accountShort: String { String(invite.account.prefix(8)) + "…" + String(invite.account.suffix(4)) }
     }
     private(set) var pendingInvite: PendingInvite?
-    /// A request a link brought, shown in Devices for the person to import or ignore; never imported by the link.
-    var pendingRequestText: String?
-    /// Requests whose code the person said matches on both screens, this run only.
-    private(set) var confirmedCodes: Set<String> = []
+    /// A request scanned from the joining device's screen, with the confirmed pairing the scan made (spec §7.3, §9.1),
+    /// shown in Devices until the person approves or rejects it. Nothing is stored for it.
+    private(set) var scanned: ScannedRequest?
 
     /// Decodes an invite (bounded) and shows it for confirmation. Stores nothing.
     func prepareJoin(_ text: String) async {
@@ -348,38 +347,32 @@ struct SyncOutcome: Sendable {
         #endif
     }
 
-    func importRequest(_ text: String) async {
-        await perform("Import request") {
+    /// The camera read the joining device's request (its canonical envelope, the scan path's one payload, spec §9.1): the
+    /// session confirms a pairing for exactly that request's key and stores nothing. Invalid or foreign requests count as
+    /// failed sessions in the session's limiter (five an hour).
+    func scanRequest(_ text: String) async {
+        await perform("Scan request") {
             guard let session else { throw SessionError.notReady }
-            try checkAttempts()
-            pendingRequestText = nil
-            let request: Data
-            do { request = try PairingPayload.decodeRequest(text) } catch { countFailure(); throw error }
-            try await session.importRequest(request)
-            record("imported a request; waiting: \(session.requests.map { "\($0.label) \($0.pairingCode)" }.joined(separator: ", "))")
+            let request = try PairingPayload.decodeRequest(text)
+            scanned = try await session.scanRequest(request)
+            record("scanned a request from \(scanned?.request.label ?? "-") \(scanned?.request.id ?? "-")")
         }
     }
 
-    /// The person says the code on this screen and on the joining device are the same.
-    func confirmCodes(_ request: AccessRequest) { confirmedCodes.insert(request.id); record("codes confirmed for \(request.label) \(request.pairingCode)") }
-
-    /// Discards a request: it is hidden from now on and counts as a failed attempt.
-    func reject(_ request: AccessRequest) {
-        confirmedCodes.remove(request.id)
-        settings.rejected.insert(request.id)
-        countFailure()
-        record("rejected the request \(request.label) \(request.pairingCode)")
+    /// The person does not want this device: the scanned request and its pairing are dropped. Nothing was stored.
+    func rejectScanned() {
+        if let s = scanned { record("rejected the request \(s.request.label) \(s.request.id)") }
+        scanned = nil
     }
 
-    /// The requests waiting, without the ones the person rejected.
-    var visibleRequests: [AccessRequest] { (session?.requests ?? []).filter { !settings.rejected.contains($0.id) } }
-
-    func approve(_ request: AccessRequest) async {
-        await perform("Approve \(request.pairingCode)") {
+    /// Approves the scanned request, spending its pairing (the core refuses any other).
+    func approveScanned() async {
+        guard let s = scanned else { return }
+        await perform("Approve \(s.request.label)") {
             guard let session else { throw SessionError.notReady }
-            guard confirmedCodes.contains(request.id) else { throw Provisioner.Failure(text: "confirm that the codes match first") }
-            try await session.approve(request)
-            record("approved \(request.label) \(request.id)")
+            scanned = nil
+            try await session.approve(s.request, pairing: s.pairing)
+            record("approved \(s.request.label) \(s.request.id)")
             await sync()
         }
     }
@@ -530,9 +523,13 @@ struct SyncOutcome: Sendable {
         guard url.scheme == "colophontest", let p = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "p" })?.value else { return }
         record("opened link \(url.host ?? "-")")
         switch url.host {
-        // A link only fills a screen the person must confirm: it never joins, imports or approves by itself.
+        // A link only fills a screen the person must confirm: it never joins or approves by itself.
         case "join" where settings.slot == nil: await prepareJoin(p)
-        case "request" where isOwner: pendingRequestText = p; record("a request arrived by link: shown in Devices, not imported")
+        #if DEBUG
+        // Scripted runs only: the test harness stands in for the camera that reads the joining device's screen. A release
+        // build takes no request by link: a request is approved only from a scan (spec §9.1).
+        case "request" where isOwner: await scanRequest(p)
+        #endif
         default: actionError = "This link does not fit this device's state (\(url.host ?? "-"))."
         }
     }

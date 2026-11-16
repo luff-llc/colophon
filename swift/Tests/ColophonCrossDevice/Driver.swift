@@ -82,8 +82,13 @@ private struct Transport: HomeTransport {
     var session: ColophonSession?
     var owner: SoftwareKeys?
     var pairing: AccountPairing?
+    var pairingAccount = ""
     var transferKey: PairingTransferKey?
-    let limiter = try! PairingFailureLimiter.fromState(state: "")
+    /// The approval ceremony's session on this device (§7.3, §9.1), and on the approving device the request that came
+    /// with the commitment.
+    var approval: AccountPairing?
+    var approvalRequest: Data?
+    let limiter = PairingFailureLimiter.fresh()
     let audit = Audit()
     func keys(_ directory: URL, _ name: String) throws -> SoftwareKeys {
         func scalar(_ suffix: String, make: () -> Data) throws -> Data {
@@ -153,10 +158,14 @@ private struct Transport: HomeTransport {
             pairing = try AccountPairing.join(account: text("account"), e: e, nb: data("nb"))
             return ["commitment": try pairing!.commitment().base64EncodedString(), "e": e.base64EncodedString()]
         case "scan":
+            pairingAccount = text("account")
             if text("mode") == "qr" { pairing = try AccountPairing.existingScanQr(account: text("account"), payload: data("qr"), limiter: limiter, nowMs: 1000) }
             else { pairing = try AccountPairing.existingReceiveCommitment(account: text("account"), commitment: data("commitment"), limiter: limiter, nowMs: 1000) }
             return true
-        case "nonce": return try pairing!.sendNonce(na: data("na")).base64EncodedString()
+        case "nonce":
+            // The ledger is sealed (an app persists it) before the nonce leaves (§7.3).
+            _ = try withEntropy(32) { try limiter.seal(deviceKey: Data(repeating: 0x44, count: 32), account: pairingAccount, entropy: $0) }
+            return try pairing!.sendNonce(na: data("na")).base64EncodedString()
         case "receiveNonce":
             if let r = try pairing!.receiveNonce(na: data("na")) {
                 return ["e": r.e.base64EncodedString(), "nb": r.nb.base64EncodedString(), "digits": try pairing!.digits()]
@@ -178,10 +187,31 @@ private struct Transport: HomeTransport {
         case "refuseCalls": await audit.setRefusesCalls(c["enabled"] as! Bool)
         case "sync": await audit.clear(); _ = await s.syncNow(); await s.refresh()
         case "request": return try await s.exportRequest().base64EncodedString()
+        // Approval pairs the two devices by the six-digit code through their sessions (§7.3, §9.1). The orchestrator
+        // only carries the messages; each half runs in its own process.
+        case "approvalJoin":
+            let request = try await s.exportRequest()
+            approval = try await s.beginJoinPairing()
+            return ["request": request.base64EncodedString(), "commitment": try approval!.commitment().base64EncodedString()]
+        case "approvalBegin":
+            approvalRequest = data("request")
+            let start = try await s.beginApproval(commitment: data("commitment"))
+            approval = start.pairing
+            return start.nonce.base64EncodedString()
+        case "approvalReveal":
+            guard let r = try approval!.receiveNonce(na: data("nonce")) else { throw DriverError.invalid("not a code-path joiner") }
+            return ["e": r.e.base64EncodedString(), "nb": r.nb.base64EncodedString(), "digits": try approval!.digits()]
+        case "approvalCode": return try await s.approvalCode(pairing: approval!, e: data("e"), nb: data("nb"))
+        case "approvalConfirm":
+            let matches = try approval!.digits() == text("digits")
+            if matches { try approval!.confirm() } else { try await s.rejectPairing(approval!) }
+            return ["accepted": matches, "stage": String(describing: try approval!.stage())]
         case "approve":
-            try await s.importRequest(data("request"))
-            guard let request = s.requests.first else { throw DriverError.invalid("no request") }
-            try await s.approve(request)
+            guard let raw = approvalRequest, let pairing = approval else { throw DriverError.invalid("no paired request to approve") }
+            let info = try accountRequestInfo(raw: raw)
+            try await s.approve(AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson, record: info.raw),
+                                pairing: pairing)
+            approval = nil; approvalRequest = nil
         case "revoke": try await s.revoke(memberID: text("member"))
         case "write":
             try await s.perform(DomainCommand(namespace: "reading.saved", kind: "capture", payloadJSON: data("payload")), observed: s.observedRevision)

@@ -2,7 +2,7 @@
 import {
   ColophonSession, FetchHomeTransport, glue, MemoryDeviceSecrets, MemoryMedium, MemoryPrivateStore, plain, WebCryptoKeyProvider,
   type AdditionalController, type AsyncKeyProvider, type DeviceSecretStore, type HistoryAccess, type HomeConfiguration, type HomeTransport,
-  type PrivateStore, type RecordMedium, type RequestInfo, type SigningStep, type WriteReceipt,
+  type AccessRequest, type PrivateStore, type RecordMedium, type RequestInfo, type SigningStep, type WriteReceipt,
 } from '../src/session/index.js';
 
 export function assert(condition: unknown, message: string | (() => string)): asserts condition {
@@ -121,3 +121,37 @@ export class RelayHome {
   }
 }
 export { b64url };
+
+// Pairing before approval (§7.3, §9.1)
+
+/**
+ * The six-digit code between a joining device and an approving one, each through its own session, with the messages passed
+ * between them as an app would carry them: the request with the commitment, the nonce, the reveal. Both screens' digits
+ * are compared and both devices confirm. Returns the request the approving device approves and its confirmed pairing.
+ */
+export async function pairByCode(joining: ColophonSession, approving: ColophonSession): Promise<{ request: AccessRequest; pairing: glue.AccountPairing }> {
+  const raw = await joining.exportRequest();
+  const j = await joining.beginJoinPairing();
+  const start = await approving.beginApproval(j.commitment());
+  const reveal = j.receive_nonce(start.nonce);
+  assert(reveal !== undefined, 'a code-path joiner reveals');
+  const code = await approving.approvalCode(start.pairing, reveal.e, reveal.nb);
+  equal(code, j.digits(), 'both screens show the same six digits');
+  assert(/^\d{6}$/.test(code), 'six digits');
+  j.confirm(); start.pairing.confirm();
+  const info = plain<RequestInfo>(glue.account_request_info(raw));
+  const request: AccessRequest = { id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, record: info.raw, namespaces: [], access: [] };
+  return { request, pairing: start.pairing };
+}
+
+/** Pairs by the code and approves. */
+export async function approveByCode(joining: ColophonSession, approving: ColophonSession, termsJson?: string): Promise<void> {
+  const { request, pairing } = await pairByCode(joining, approving);
+  await approving.approve(request, pairing, termsJson);
+}
+
+/** The scan path: the approving device scans the joining device's request (its canonical envelope) and approves it. */
+export async function approveByScan(joining: ColophonSession, approving: ColophonSession, termsJson?: string): Promise<void> {
+  const scanned = await approving.scanRequest(await joining.exportRequest());
+  await approving.approve(scanned.request, scanned.pairing, termsJson);
+}

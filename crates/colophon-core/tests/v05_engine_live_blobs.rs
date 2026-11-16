@@ -814,10 +814,11 @@ fn an_import_grant_is_made_through_the_account_and_its_batch_folds() {
     let change = Change::grant(&req.raw, granted);
     let action = f
         .account
-        .begin_transition(
+        .begin_grant_transition(
             &change,
             &[f.d.clone(), f.k.clone()],
             TransitionRule::Control,
+            paired(&f, &req),
         )
         .unwrap();
     let done = run(&mut f.account, &f.host, action);

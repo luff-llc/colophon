@@ -300,10 +300,11 @@ fn a_failed_pending_page_does_not_lose_the_page_before_it() {
     );
     let action =
         s.f.account
-            .begin_transition(
+            .begin_grant_transition(
                 &Change::grant(&req.raw, terms("write")),
                 &[s.f.d.clone(), s.f.k.clone()],
                 TransitionRule::Control,
+                paired(&s.f, &req),
             )
             .unwrap();
     let done = run(&mut s.f.account, &s.f.host, action);
@@ -462,10 +463,11 @@ fn a_forged_pending_transition_is_not_held_and_the_real_one_is() {
     );
     let action =
         s.f.account
-            .begin_transition(
+            .begin_grant_transition(
                 &Change::grant(&req.raw, terms("write")),
                 &[s.f.d.clone(), s.f.k.clone()],
                 TransitionRule::Control,
+                paired(&s.f, &req),
             )
             .unwrap();
     let done = run(&mut s.f.account, &s.f.host, action);

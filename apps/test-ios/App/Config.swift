@@ -56,16 +56,15 @@ struct Settings: Codable, Sendable, Equatable {
     var slot: String?
     var owner: OwnerChoice?
     var passkey: PasskeyRecord?
-    /// Failed or rejected pairing attempts (the last hour counts; see `AppModel.attemptLimit`).
+    /// Invites that failed to read or verify (the last hour counts; see `AppModel.attemptLimit`). Approving a device is
+    /// bounded by the session's own pairing limiter (§7.3).
     var failures: [Date] = []
-    /// Requests the person rejected (member key IDs, public).
-    var rejected: Set<String> = []
 
     init(defaults: BuildDefaults = .current) {
         homePrefix = defaults.homePrefix; reachPrefix = defaults.reachPrefix; provisioner = defaults.provisioner
     }
 
-    private enum CodingKeys: String, CodingKey { case homePrefix, reachPrefix, provisioner, provisionerToken, slot, owner, passkey, failures, rejected }
+    private enum CodingKeys: String, CodingKey { case homePrefix, reachPrefix, provisioner, provisionerToken, slot, owner, passkey, failures }
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = BuildDefaults.current
@@ -77,7 +76,6 @@ struct Settings: Codable, Sendable, Equatable {
         owner = try c.decodeIfPresent(OwnerChoice.self, forKey: .owner)
         passkey = try c.decodeIfPresent(PasskeyRecord.self, forKey: .passkey)
         failures = try c.decodeIfPresent([Date].self, forKey: .failures) ?? []
-        rejected = try c.decodeIfPresent(Set<String>.self, forKey: .rejected) ?? []
     }
 
     /// The home's base URL as the account names it (no trailing slash).

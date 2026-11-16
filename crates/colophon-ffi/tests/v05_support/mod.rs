@@ -448,3 +448,15 @@ pub fn sync_pass(
     }
     panic!("a pass did not end");
 }
+
+/// A confirmed pairing for the request `raw` on `engine`'s account: the approving device scanned
+/// the request from the joining device's screen at `now_ms` (§7.3, §9.1). Approval spends it.
+pub fn scanned(engine: &AccountEngine, raw: &[u8], now_ms: i64) -> Arc<AccountPairing> {
+    AccountPairing::scan_request(
+        engine.id().unwrap(),
+        raw.to_vec(),
+        PairingFailureLimiter::fresh(),
+        now_ms,
+    )
+    .unwrap()
+}

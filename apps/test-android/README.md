@@ -6,9 +6,9 @@ account, write notes on several devices, and see exactly what the session says. 
 dependency allowlist.
 
 **Use it only with invites exchanged in person or over a channel you trust.** An invite is not signed yet: it does not
-prove who made it, or that the home and the account are theirs. A signed short invite and the spec's §7.3 pairing
-ceremony are being designed in the 0.5 freeze package; until they land in the SDKs, the code the two screens show only
-proves that the owner device received this device's request unchanged.
+prove who made it, or that the home and the account are theirs (a signed invite is planned for 0.6). Approving a device
+is safe against a relay: the owner device scans the new device's request from its screen, and the SDK approves only the
+key that scan paired (spec §7.3, §9.1); no request that arrives any other way can be approved.
 
 ## Build and run
 
@@ -54,8 +54,10 @@ that cannot do PRF (it lives in `src/debug`; a release build has no such key);
 add a device with an invite and a request (QR via ZXing, Copy, paste, or the links `colophontest://join?p=…` and
 `colophontest://request?p=…`). A link, scan or paste only fills a confirmation screen (the home's host, the account ID
 in short form); nothing is stored or sent until "Ask to join", and the history must verify in memory as the claimed
-account first. A request is shown, imported only when you choose, and approved only after "The codes match"; Reject
-discards it, and five failed or rejected attempts in an hour block further ones for the hour; `note.put` notes with a photo (system photo picker, a required blob); the status screen
+account first. A request is approved only from a camera scan of the new device's screen ("Scan its request": the session pairs
+that key, nothing is stored), then Approve or Reject; a pasted or linked request is not approved (debug builds take a
+request link only from the test harness, standing in for the camera), and five failed scans in an hour block further
+ones for the hour (the session's §7.3 limiter); `note.put` notes with a photo (system photo picker, a required blob); the status screen
 with the phase, account and key IDs, the home URL, the last head, the last answer and refusal (HTTP status and the home's
 `result`, only one the spec's §1 grammar allows; no other byte of a response body is shown, logged or written), the last sync outcome (`complete` only with no fault or issue left), faults, issues, pending changes with Veto,
 members with Revoke, Lock, Unlock, Sign out and Reset. The app locks in `onStop` and unlocks in `onStart`, and asks for a
@@ -90,5 +92,5 @@ signing key for test builds, kept outside the repository). The controller's `aut
   automatic.
 * The sign-out confirmation is a dialog; the UI test makes the confirmed call directly.
 * A joined device is a member only (no seed transfer to make it a controller).
-* The invite is unauthenticated and the pairing code is the SDK's `AccessRequest.pairingCode`, not the §7.3 commitment
-  ceremony. Both wait for the freeze package.
+* The invite is unauthenticated (a signed invite is 0.6). Approval uses the SDK's scan path (§9.1); the six-digit code
+  ceremony is in the SDK but these apps have no channel between two phones to carry it, so they do not offer it.

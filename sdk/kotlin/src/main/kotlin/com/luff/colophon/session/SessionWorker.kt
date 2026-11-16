@@ -28,7 +28,10 @@ import com.luff.colophon.KeepMode
 import com.luff.colophon.ListedPath
 import com.luff.colophon.Notices
 import com.luff.colophon.PairingTransferKey
+import com.luff.colophon.PairingFailureLimiter
+import com.luff.colophon.PairingStage
 import com.luff.colophon.Report
+import com.luff.colophon.RequestInfo
 import com.luff.colophon.RequestSpec
 import com.luff.colophon.RevokeKeep
 import com.luff.colophon.RuleKind
@@ -280,7 +283,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         when (standing.kind) {
             StandingKind.UNKNOWN -> {
                 ensureOwnRequest()
-                return snapshot(SessionPhase.WaitingForApproval(AccessRequest.code(memberId ?: "")), members, pending, homes = homes)
+                return snapshot(SessionPhase.WaitingForApproval, members, pending, homes = homes)
             }
             StandingKind.CONTROLLER -> phase = SessionPhase.Failed(SessionFailure.Other("this identity is a controller, not a member"))
             StandingKind.MEMBER -> {
@@ -473,11 +476,6 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         ensureOwnRequest()
         storage().read(requestPath(id))
     }
-    suspend fun importRequest(data: ByteArray): SessionSnapshot = gated {
-        val info = accountRequestInfo(data)
-        storage().write(listOf(MediumWrite(requestPath(info.member), info.raw)))
-        reconcile()
-    }
     private fun pendingRequests(members: List<AccountMember>): List<AccessRequest> {
         val known = members.map { it.id }.toSet()
         val out = ArrayList<AccessRequest>()
@@ -485,9 +483,125 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             if (!entry.path.startsWith("requests/")) continue
             val info = try { accountRequestInfo(storage().read(entry.path)) } catch (_: Exception) { continue }
             if (info.member in known || info.member == memberId) continue
-            out.add(AccessRequest(info.member, info.label, info.kind, info.termsJson, AccessRequest.code(info.member), info.raw))
+            out.add(accessRequest(info))
         }
         return out
+    }
+    private fun accessRequest(info: RequestInfo) = AccessRequest(info.member, info.label, info.kind, info.termsJson, info.raw)
+
+    // Pairing before approval (§7.3, §9.1)
+
+    /**
+     * The pairing ledger of this device (§7.3): five failed sessions an hour and one ceremony at a time, enforced by the
+     * core. Kept sealed under the device key in the private directory (`pairing-ledger.bin`), its generation recorded beside
+     * it (`pairing-ledger.generation`): a missing, edited or older ledger opens as a spent budget. It records sessions only,
+     * never a request.
+     *
+     * Every change happens under [withLedger]: a lock on `pairing-ledger.lock` in the private directory, taken by every
+     * process ([java.nio.channels.FileChannel.lock]) and every session in this process (a JVM-wide monitor per file, since
+     * one JVM cannot hold two file locks on one file), so two instances never change the ledger at once. Under the lock the
+     * ledger is reloaded whenever the stored generation is not the one this worker loaded or persisted, so a ceremony
+     * another instance started is seen live (`pairing:busy`), and a change is sealed and written before the lock goes.
+     */
+    private var ledger: Triple<String, PairingFailureLimiter, ULong>? = null
+    private val ledgerFile = File(configuration.privateDirectory, "pairing-ledger.bin")
+    private val ledgerFloorFile = File(configuration.privateDirectory, "pairing-ledger.generation")
+    private val ledgerLockFile = File(configuration.privateDirectory, "pairing-ledger.lock")
+    private fun storedGeneration(): ULong = AtomicFile.read(ledgerFloorFile, 64)?.toString(Charsets.UTF_8)?.trim()?.toULongOrNull() ?: 0uL
+    private fun loadLedger(account: String): PairingFailureLimiter {
+        val sealed = AtomicFile.read(ledgerFile, 1 shl 20) ?: ByteArray(0)
+        val opened = configuration.deviceSecrets.key(account).use { key -> key.lend { PairingFailureLimiter.open(sealed, it, account, storedGeneration(), nowMs) } }
+        ledger = Triple(account, opened, opened.generation())
+        return opened
+    }
+    /** Persists the sealed ledger, then its generation (the lock is held). Throws when either cannot be written: a start is then never answered with a nonce (fail closed). */
+    private fun keepLedger(account: String, limiter: PairingFailureLimiter) {
+        val sealed = configuration.deviceSecrets.key(account).use { key -> key.lend { k -> withEntropy(32) { limiter.seal(k, account, it) } } }
+        AtomicFile.write(ledgerFile, sealed)
+        val generation = limiter.generation()
+        AtomicFile.write(ledgerFloorFile, generation.toString().toByteArray(Charsets.UTF_8))
+        ledger = Triple(account, limiter, generation)
+    }
+    /** Runs [body] on the ledger under the cross-instance lock; a change it made is persisted before the lock is released, also when it throws. */
+    private fun <T> withLedger(account: String, body: (PairingFailureLimiter) -> T): T {
+        configuration.privateDirectory.mkdirs()
+        val monitor = ledgerMonitors.computeIfAbsent(ledgerLockFile.canonicalPath) { Any() }
+        synchronized(monitor) {
+            java.nio.channels.FileChannel.open(ledgerLockFile.toPath(), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE).use { channel ->
+                channel.lock().use {
+                    // The held ledger is current when the store still has the generation it was loaded or persisted at;
+                    // its own later changes (a confirmed pairing's release) are then kept. Otherwise another instance wrote.
+                    val held = ledger
+                    val limiter = if (held != null && held.first == account && held.third == storedGeneration()) held.second else loadLedger(account)
+                    val base = ledger?.third ?: 0uL
+                    try {
+                        val out = body(limiter)
+                        if (limiter.generation() != base) keepLedger(account, limiter)
+                        return out
+                    } catch (e: Exception) {
+                        if (runCatching { limiter.generation() }.getOrNull() != base) runCatching { keepLedger(account, limiter) }
+                        throw e
+                    }
+                }
+            }
+        }
+    }
+    /** Keeps a change the app made to the ledger directly (a confirmed pairing gives its reservation back); a lost write only leaves it counted. */
+    private fun keepLedgerChange(account: String) {
+        if (ledger?.first != account) return
+        runCatching { withLedger(account) { } }
+    }
+    /** The joining device: a code-path pairing for its own member key. Send `commitment()` with the request. */
+    suspend fun beginJoinPairing(): AccountPairing = gated {
+        loadJournal()
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        val e = memberKeys.publicKeys().signing
+        withEntropy(32) { AccountPairing.join(account, e, it) }
+    }
+    /**
+     * The approving device's person started a ceremony for one incoming commitment: a session that reserves one of the five
+     * an hour, and the nonce to send back. While another is live (in this session or any other instance over the same
+     * private directory) this is refused (`pairing:busy`); the reservation is persisted before the nonce exists, and if it
+     * cannot be, no nonce is produced.
+     */
+    suspend fun beginApproval(commitment: ByteArray): ApprovalStart = gated {
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        val at = nowMs
+        val pairing = withLedger(account) { AccountPairing.existingReceiveCommitment(account, commitment, it, at) }
+        ApprovalStart(pairing, withEntropy(32) { pairing.sendNonce(it) })
+    }
+    /** The approving device received the reveal: the six digits both screens show. A mismatch or a reveal after the ten-minute timeout aborts (it stays counted). */
+    suspend fun approvalCode(pairing: AccountPairing, e: ByteArray, nb: ByteArray): String = gated {
+        val account = accountId ?: throw SessionError.NotReady()
+        val at = nowMs
+        withLedger(account) { pairing.receiveReveal(e, nb, it, at) }
+    }
+    /** The codes did not match (or the person stopped): the session ends on this device, counted. */
+    suspend fun rejectPairing(pairing: AccountPairing) = gated {
+        val account = accountId ?: throw SessionError.NotReady()
+        val at = nowMs
+        withLedger(account) { limiter ->
+            when (pairing.stage()) {
+                PairingStage.CODE, PairingStage.REVEALED -> pairing.reject(limiter, at)
+                else -> pairing.abandon(at)
+            }
+        }
+    }
+    /** Ends a ceremony this device started, in any stage before it is confirmed. It stays counted. */
+    suspend fun abandonApproval(pairing: AccountPairing) = gated {
+        val at = nowMs
+        val account = accountId
+        if (account == null) pairing.abandon(at) else withLedger(account) { pairing.abandon(at) }
+    }
+    /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored about the request. */
+    suspend fun scanRequest(data: ByteArray): ScannedRequest = gated {
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        val at = nowMs
+        val pairing = withLedger(account) { AccountPairing.scanRequest(account, data, it, at) }
+        ScannedRequest(accessRequest(accountRequestInfo(data)), pairing)
     }
 
     // Owner operations
@@ -527,13 +641,16 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         return chosen.ifEmpty { listOf(ownerId) }
     }
 
-    suspend fun approve(request: AccessRequest, terms: String?): SessionSnapshot = gated {
+    /** Approves `request`, spending `pairing`: confirmed on this device for exactly the request's key (§9.1). Any other pairing is refused; it is spent whatever the answer. */
+    suspend fun approve(request: AccessRequest, pairing: AccountPairing, terms: String?): SessionSnapshot = gated {
         if (engine == null) reconcile()
         withOwner { owner, custody, ownerId ->
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
             val t = terms ?: request.termsJson
-            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, it) } }
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, pairing, it) } }
         }
+        // The confirmed pairing gave its reservation back; keep the ledger (a lost write only leaves it counted).
+        accountId?.let { keepLedgerChange(it) }
         reconcile()
     }
     suspend fun revoke(member: String): SessionSnapshot = gated {
@@ -680,9 +797,15 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             memberId = KeyCustody.keyId(memberKeys)
             accountId = account
             val memberRaw = ownRequestBytes()
+            // This device made the request itself, with its own member key: there is no second device to pair with, so it
+            // reads its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
+            // The creation's engine keeps the time it opened at; bring it to the scan's time, which the pairing may not precede (§9.1).
+            val at = nowMs
+            owner.run { it.advance(at) }
+            val own = AccountPairing.scanRequest(account, memberRaw, PairingFailureLimiter.fresh(), at)
             val terms = terms(configuration.namespaces, configuration.access, null, null)
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
-            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, it) } }
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, own, it) } }
         } finally {
             release(owner)
         }
@@ -971,3 +1094,6 @@ internal object AccountCreator {
         }
     }
 }
+
+/** One monitor per ledger lock file in this JVM: a JVM cannot hold two file locks on one file, so sessions in one process wait here first. */
+private val ledgerMonitors = java.util.concurrent.ConcurrentHashMap<String, Any>()

@@ -88,6 +88,14 @@ error), so `RecordMedium.listing`, `read` and `readBlob` are synchronous and `wr
   a rename that is checked, and a holder asks again that it still holds the lock just before the commit point. There
   is no kernel lock here (Node and Bun have no portable one), so two processes can still overlap in the instant
   between one's check and its rename; batches are then still whole, each in its own journal folder.
+* **The private store and the pairing ledger.** `IndexedDBPrivateStore` writes each value in one `readwrite`
+  transaction with **strict durability**, the strongest commit IndexedDB offers: when the promise resolves the browser
+  has committed it to disk. The session writes the sealed pairing ledger and its generation, and awaits both, before it
+  releases a ceremony's nonce. `FilePrivateStore` (Node) syncs the file, renames it into place and syncs the directory.
+  `MemoryPrivateStore` keeps nothing across a reload; a host's own `PrivateStore` gives only the durability it implements,
+  and the five-an-hour bound across crashes is as durable as that. Starts are serialized by
+  a Web Lock shared by every tab and worker of the origin; where the platform has no `navigator.locks` (Node, Bun) the
+  lock covers one process only, so two processes over one `FilePrivateStore` are not coordinated.
 * A batch is checked whole before anything is stored (`planBatch`): a bad path, a size over 40 MiB or different bytes at
   an immutable path refuses all of it. Exact duplicates are idempotent; `state/` and `heads/` are replaceable.
 

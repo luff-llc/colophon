@@ -6,7 +6,9 @@ import Foundation
 public enum SessionPhase: Equatable, Sendable {
     case opening, noLibrary, creating, migrating
     case waitingForDownload
-    case waitingForApproval(code: String)
+    /// This device asked to join and is not approved yet. It shows no code of its own: the six-digit code
+    /// appears only while it pairs with the approving device (`ColophonSession.beginJoinPairing()`).
+    case waitingForApproval
     case denied
     case unavailable(reason: String)
     /// Authenticated content of a newer format than this client evaluates. Nothing is changed or lost.
@@ -185,20 +187,20 @@ public struct AdditionalController: Sendable {
     }
 }
 
-/// A member's request for access, as an approver sees it.
+/// A member's request for access, as an approver sees it. It carries no code: approving it spends a
+/// confirmed pairing for exactly its key (spec §9.1), from the six-digit code (`beginApproval`,
+/// `approvalCode`) or from scanning the request on the joining device's screen (`scanRequest`).
 public struct AccessRequest: Equatable, Sendable, Identifiable {
     /// The member's key ID.
     public let id: String
     public let label: String
     public let kind: AccountMemberKind
     public let termsJSON: String
-    /// A short code both devices derive from the key ID: compare it before approving.
-    public let pairingCode: String
-    /// The request exactly as signed; share it (`ColophonSession.exportRequest()`) or write it to the library folder.
+    /// The request exactly as signed (the canonical envelope); the joining device shows it as a QR
+    /// code (`ColophonSession.exportRequest()`) for the approving device to scan.
     public let record: Data
-    public init(id: String, label: String, kind: AccountMemberKind, termsJSON: String, pairingCode: String? = nil, record: Data) {
-        self.id = id; self.label = label; self.kind = kind; self.termsJSON = termsJSON
-        self.pairingCode = pairingCode ?? Self.code(for: id); self.record = record
+    public init(id: String, label: String, kind: AccountMemberKind, termsJSON: String, record: Data) {
+        self.id = id; self.label = label; self.kind = kind; self.termsJSON = termsJSON; self.record = record
     }
     /// The namespaces the request asks for, read from its terms.
     public var namespaces: [String] { records.map(\.0) }
@@ -209,10 +211,21 @@ public struct AccessRequest: Equatable, Sendable, Identifiable {
               let list = object["records"] as? [[String: Any]] else { return [] }
         return list.compactMap { entry in (entry["namespace"] as? String).map { ($0, (entry["access"] as? String) ?? "read") } }
     }
-    static func code(for id: String) -> String {
-        let head = id.prefix(8).uppercased()
-        return head.prefix(4) + "-" + head.suffix(4)
-    }
+}
+
+/// The approving device's half of the six-digit code (§7.3): the session it opened when the joining
+/// device's commitment arrived, and the nonce to send back. Send `nonce`; when the joining device's
+/// reveal arrives, `ColophonSession.approvalCode(pairing:e:nb:)` gives the code both screens show.
+public struct ApprovalStart: @unchecked Sendable {
+    public let pairing: AccountPairing
+    public let nonce: Data
+}
+
+/// A request scanned from the joining device's screen, with the confirmed pairing that scan made
+/// (§7.3, §9.1): `ColophonSession.approve(_:pairing:grant:)` spends it. Nothing is stored for it.
+public struct ScannedRequest: @unchecked Sendable {
+    public let request: AccessRequest
+    public let pairing: AccountPairing
 }
 
 /// What a person may be shown about this account that is not content (§17.5, §18).

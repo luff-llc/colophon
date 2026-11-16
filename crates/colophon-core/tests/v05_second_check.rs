@@ -770,10 +770,11 @@ fn an_import_grant_by_transition_follows_the_import_rules() {
     let change = Change::grant(&req.raw, granted);
     // The builder applies the rules an immediate grant follows (§9.3): an import grant goes to
     // a device or app, with write in every records entry and an expiry later than `issued`.
-    let r = f.account.begin_transition(
+    let r = f.account.begin_grant_transition(
         &change,
         &[f.d.clone(), f.k.clone()],
         TransitionRule::Control,
+        paired(&f, &req),
     );
     assert!(
         r.is_err(),
@@ -793,10 +794,11 @@ fn an_import_grant_by_transition_follows_the_import_rules() {
     let t = json!({"records": [{"namespace": NOTES, "access": "write"}], "import": true});
     assert!(
         f.account
-            .begin_transition(
+            .begin_grant_transition(
                 &Change::grant(&req.raw, t),
                 &[f.d.clone(), f.k.clone()],
-                TransitionRule::Control
+                TransitionRule::Control,
+                paired(&f, &req),
             )
             .is_err(),
         "an import grant without an expiry is refused"

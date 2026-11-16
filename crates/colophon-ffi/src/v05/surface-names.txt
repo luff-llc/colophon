@@ -31,6 +31,7 @@ AccountEngine.begin_blob
 AccountEngine.begin_call
 AccountEngine.begin_end_my_sessions
 AccountEngine.begin_end_sessions
+AccountEngine.begin_grant_transition
 AccountEngine.begin_import
 AccountEngine.begin_keyring
 AccountEngine.begin_link
@@ -139,6 +140,7 @@ AccountMove.begin_upgrade
 AccountMove.finish
 AccountMove.kind
 AccountMove.steps
+AccountPairing.abandon
 AccountPairing.commitment
 AccountPairing.confirm
 AccountPairing.digits
@@ -150,14 +152,18 @@ AccountPairing.qr_payload
 AccountPairing.receive_nonce
 AccountPairing.receive_reveal
 AccountPairing.reject
+AccountPairing.scan_request
 AccountPairing.send_nonce
 AccountPairing.stage
 AccountRequest.finish
 AccountRequest.prepare
 AccountRequest.step
-PairingFailureLimiter.from_state
+PairingFailureLimiter.fresh
+PairingFailureLimiter.generation
+PairingFailureLimiter.is_live
 PairingFailureLimiter.may_start
-PairingFailureLimiter.to_state
+PairingFailureLimiter.open
+PairingFailureLimiter.seal
 PairingTransferKey.create
 PairingTransferKey.public
 SwiftCopyDestination.empty

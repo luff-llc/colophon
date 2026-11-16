@@ -187,8 +187,32 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         }
     }
 
-    /** Approves a member's request with the owner controller. `terms` overrides the requested terms. */
-    suspend fun approve(request: AccessRequest, termsJson: String? = null) = owner { worker.approve(request, termsJson) }
+    /**
+     * Approves a member's request with the owner controller, spending `pairing`: confirmed on this device for exactly this
+     * request's key (spec §9.1), by the six-digit code (`beginApproval`, `approvalCode`, then `pairing.confirm()` once the
+     * person saw the same digits on both devices) or by `scanRequest`. Any other pairing is refused; a pairing is spent
+     * whatever the answer. `termsJson` overrides the requested terms.
+     */
+    suspend fun approve(request: AccessRequest, pairing: AccountPairing, termsJson: String? = null) = owner { worker.approve(request, pairing, termsJson) }
+
+    // Pairing before approval (§7.3)
+
+    /**
+     * The joining device, code path: a pairing for this device's member key. Send `pairing.commitment()` to the approving
+     * device; when its nonce arrives, `pairing.receiveNonce(na)` gives the reveal to send back and `pairing.digits()` the
+     * six digits to show. On a match `pairing.confirm()`, otherwise `rejectPairing(pairing)`.
+     */
+    suspend fun beginJoinPairing(): AccountPairing = facade { restore(); worker.beginJoinPairing() }
+    /** The approving device's person starts a ceremony for one incoming commitment: send `nonce` back. Call it only when the person asked (an incoming commitment is never started by itself). One ceremony at a time; every start counts toward five an hour until it confirms (§7.3). */
+    suspend fun beginApproval(commitment: ByteArray): ApprovalStart = facade { restore(); worker.beginApproval(commitment) }
+    /** The approving device received the reveal: the six digits to show. A reveal that does not open the commitment aborts and counts as a failure. */
+    suspend fun approvalCode(pairing: AccountPairing, e: ByteArray, nb: ByteArray): String = facade { worker.approvalCode(pairing, e, nb) }
+    /** The codes differed or the person stopped: the session ends on this device and counts as a failure. */
+    suspend fun rejectPairing(pairing: AccountPairing) = facade { worker.rejectPairing(pairing) }
+    /** Ends a ceremony this device started (the person cancelled, the other device went away). It stays counted. */
+    suspend fun abandonApproval(pairing: AccountPairing) = facade { worker.abandonApproval(pairing) }
+    /** The approving device scanned a request from the joining device's screen (its canonical envelope, §9.1). Nothing is stored. */
+    suspend fun scanRequest(data: ByteArray): ScannedRequest = facade { restore(); worker.scanRequest(data) }
     suspend fun revoke(memberId: String) = owner { worker.revoke(memberId) }
     /** Leaves locally; does not revoke the member or delete the person's records. */
     suspend fun leave() = facade {
@@ -201,9 +225,7 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         try { val s = worker.rejoin(keys); if (lease == context) { apply(s); startWatching(); startSyncLoop() } }
         catch (e: CancellationException) { throw e } catch (e: Exception) { if (lease == context) fail(e) }
     }
-    /** Takes a request that arrived out of band (a file, a code) and shows it for approval. */
-    suspend fun importRequest(data: ByteArray) = owner { worker.importRequest(data) }
-    /** This device's own signed membership request, to hand to an approver. */
+    /** This device's own signed membership request (its canonical envelope), to show as a QR code for the approving device to scan (`scanRequest`). */
     suspend fun exportRequest(): ByteArray = facade { restore(); worker.exportRequest() }
 
     /** A bounded core query (`query_json`), fenced against namespace and identity changes. Returns the value's JSON. */
@@ -344,6 +366,9 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     }
     private suspend fun runSync(): Boolean {
         restore()
+        // With no library there is nothing to exchange. A pass here would refresh to `NoLibrary` and erase what a failed
+        // `create()` just published (its `Failed` phase and error), which an app would see as a missing error.
+        if (_state.value.libraryId == null) return false
         set { copy(syncState = HomeSyncState.Syncing) }
         return try {
             val result = worker.exchange()

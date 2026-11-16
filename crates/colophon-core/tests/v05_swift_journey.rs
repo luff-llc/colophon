@@ -526,7 +526,18 @@ fn start_with(o: Opts) -> (Journey, Vec<SwiftEpochKey>) {
         f.passkey_id.clone()
     };
     let action = acct
-        .begin_transition(&change, &[ctl.clone(), recover], TransitionRule::Control)
+        .begin_grant_transition(
+            &change,
+            &[ctl.clone(), recover],
+            TransitionRule::Control,
+            // The approving device scanned the copier's request (§7.3, §9.1).
+            colophon_core::v05::pairing::scanned_request(
+                acct.id(),
+                &creq.raw,
+                colophon_core::v05::pairing::FailureLimiter::new().permit(acct.now_ms()).unwrap(),
+            )
+            .unwrap(),
+        )
         .unwrap();
     let t_env = run(&mut acct, &host, action).pending[0].clone();
     let t_digest = body_digest(&t_env);

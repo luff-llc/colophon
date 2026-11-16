@@ -10,9 +10,9 @@ import type {
 import { closeAll, withEntropy } from './secrets.js';
 import { HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest } from './transport.js';
 import {
-  ConfiguredHome, emptyNotices, noDuties, noticesFrom, pairingCode, phaseUsable, samePhase, SessionRefusal,
-  type AccessRequest, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
-  type SessionConfiguration, type SessionNotices, type SessionPhase, type SessionSnapshot, type WriteReceipt,
+  ConfiguredHome, emptyNotices, noDuties, noticesFrom, phaseUsable, samePhase, SessionRefusal,
+  type AccessRequest, type ApprovalStart, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
+  type SessionConfiguration, type SessionNotices, type ScannedRequest, type SessionPhase, type SessionSnapshot, type WriteReceipt,
 } from './types.js';
 import { glue, isAccountFault, makeFault, plain } from './wasm.js';
 
@@ -271,7 +271,7 @@ export class SessionWorker {
     }
     if (standing.kind === glue.StandingKind.Unknown) {
       await this.ensureOwnRequest();
-      return this.snapshot({ kind: 'waitingForApproval', code: pairingCode(this.memberId ?? '') }, { members, requests, homes });
+      return this.snapshot({ kind: 'waitingForApproval' }, { members, requests, homes });
     } else if (standing.kind === glue.StandingKind.Controller) {
       phase = { kind: 'failed', failure: { kind: 'other', detail: 'this identity is a controller, not a member' } };
     } else if (standing.member?.revokedAt !== undefined) {
@@ -479,13 +479,6 @@ export class SessionWorker {
       return this.storage.read(this.requestPath(id));
     });
   }
-  importRequest(data: Uint8Array): Promise<SessionSnapshot> {
-    return this.gated(async () => {
-      const info = plain<RequestInfo>(glue.account_request_info(data));
-      await this.storage.write([{ path: this.requestPath(info.member), bytes: info.raw }]);
-      return this.reconcile();
-    });
-  }
   private pendingRequests(members: readonly AccountMember[]): AccessRequest[] {
     const known = new Set(members.map(m => m.id));
     const out: AccessRequest[] = [];
@@ -494,12 +487,141 @@ export class SessionWorker {
       let info: RequestInfo;
       try { info = plain<RequestInfo>(glue.account_request_info(this.storage.read(entry.path))); } catch { continue; }
       if (known.has(info.member) || info.member === this.memberId) continue;
-      const records = requestedRecords(info.termsJson);
-      out.push({ id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, pairingCode: pairingCode(info.member), record: info.raw,
-        namespaces: records.map(r => r.namespace), access: records.some(r => r.access === 'write') ? ['read', 'write'] : ['read'] });
+      out.push(accessRequest(info));
     }
     return out;
   }
+
+  // Pairing before approval (§7.3, §9.1)
+
+  /**
+   * The pairing ledger of this device (§7.3): five failed sessions an hour and one ceremony at a time, enforced by the
+   * core. Kept sealed under the device key in the private store (`pairing-ledger.bin`), its generation recorded beside it
+   * (`pairing-ledger.generation`): a missing, edited or older ledger opens as a spent budget. It records sessions only,
+   * never a request.
+   *
+   * Every change happens under `withLedger`: an exclusive Web Lock (`navigator.locks`, shared by every tab and worker of
+   * the origin) named for the account, or, where the platform has none (Node, Bun), a lock shared by every session in this
+   * process. Under the lock the ledger is reloaded whenever the stored generation is not the one this worker loaded or
+   * persisted, so a ceremony another instance started is seen live (`pairing:busy`), and a change is written before the
+   * lock goes. Separate processes over one file store without Web Locks are not coordinated (docs/js-session.md).
+   */
+  private pairingLedgerHeld: { account: string; limiter: glue.PairingFailureLimiter; base: bigint } | undefined;
+  private async storedGeneration(): Promise<bigint> {
+    const bytes = await this.configuration.privateStore.read('pairing-ledger.generation');
+    return bytes ? BigInt(new TextDecoder().decode(bytes).trim() || '0') : 0n;
+  }
+  private async loadLedger(account: string): Promise<glue.PairingFailureLimiter> {
+    const sealed = (await this.configuration.privateStore.read('pairing-ledger.bin')) ?? new Uint8Array(0);
+    const floor = await this.storedGeneration();
+    const key = await this.configuration.deviceSecrets.key(account);
+    let opened: glue.PairingFailureLimiter;
+    try { opened = key.lend(k => glue.PairingFailureLimiter.open(sealed, k, account, floor, BigInt(this.nowMs))); } finally { key.close(); }
+    this.pairingLedgerHeld = { account, limiter: opened, base: opened.generation() };
+    return opened;
+  }
+  /** Persists the sealed ledger, then its generation (the lock is held). Throws when either cannot be written: a start is then never answered with a nonce (fail closed). */
+  private async keepLedger(account: string, limiter: glue.PairingFailureLimiter): Promise<void> {
+    const key = await this.configuration.deviceSecrets.key(account);
+    let sealed: Uint8Array;
+    try { sealed = key.lend(k => withEntropy(32, entropy => limiter.seal(k, account, entropy))); } finally { key.close(); }
+    await this.configuration.privateStore.write('pairing-ledger.bin', sealed);
+    const generation = limiter.generation();
+    await this.configuration.privateStore.write('pairing-ledger.generation', new TextEncoder().encode(generation.toString()));
+    this.pairingLedgerHeld = { account, limiter, base: generation };
+  }
+  /** Runs `body` on the ledger under the cross-instance lock; a change it made is persisted before the lock is released, also when it throws. */
+  private withLedger<T>(account: string, body: (limiter: glue.PairingFailureLimiter) => T): Promise<T> {
+    return withExclusiveLock(`colophon:pairing-ledger:${account}`, async () => {
+      // The held ledger is current when the store still has the generation it was loaded or persisted at; its own later
+      // changes (a confirmed pairing's release) are then kept. Otherwise another instance wrote: reload.
+      const held = this.pairingLedgerHeld;
+      const limiter = held?.account === account && held.base === await this.storedGeneration() ? held.limiter : await this.loadLedger(account);
+      const base = this.pairingLedgerHeld?.base ?? 0n;
+      let out: T;
+      try { out = body(limiter); } catch (error) {
+        try { if (limiter.generation() !== base) await this.keepLedger(account, limiter); } catch { /* counted already */ }
+        throw error;
+      }
+      if (limiter.generation() !== base) await this.keepLedger(account, limiter);
+      return out;
+    });
+  }
+  /** Keeps a change the app made to the ledger directly (a confirmed pairing gives its reservation back); a lost write only leaves it counted. */
+  private async keepLedgerChange(account: string): Promise<void> {
+    if (this.pairingLedgerHeld?.account !== account) return;
+    try { await this.withLedger(account, () => undefined); } catch { /* stays counted */ }
+  }
+  /** The joining device: a code-path pairing for its own member key. Send `commitment()` with the request. */
+  beginJoinPairing(): Promise<glue.AccountPairing> {
+    return this.gated(async () => {
+      await this.loadJournal();
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const e = (await this.memberKeys.publicKeys()).signing;
+      return withEntropy(32, nb => glue.AccountPairing.join(account, e, nb));
+    });
+  }
+  /**
+   * The approving device's person started a ceremony for one incoming commitment: a session that reserves one of the five an
+   * hour, and the nonce to send back. While another is live (in this session or any other instance sharing the lock and
+   * the store) this is refused (`pairing:busy`); the reservation is persisted before the nonce exists, and if it cannot
+   * be, no nonce is produced.
+   */
+  beginApproval(commitment: Uint8Array): Promise<ApprovalStart> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const at = BigInt(this.nowMs);
+      const pairing = await this.withLedger(account, limiter => glue.AccountPairing.existing_receive_commitment(account, commitment, limiter, at));
+      return { pairing, nonce: withEntropy(32, na => pairing.send_nonce(na)) };
+    });
+  }
+  /** The approving device received the reveal: the six digits both screens show. A mismatch or a reveal after the ten-minute timeout aborts (it stays counted). */
+  approvalCode(pairing: glue.AccountPairing, e: Uint8Array, nb: Uint8Array): Promise<string> {
+    return this.gated(async () => {
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const at = BigInt(this.nowMs);
+      return this.withLedger(account, limiter => pairing.receive_reveal(e, nb, limiter, at));
+    });
+  }
+  /** The codes did not match (or the person stopped): the session ends on this device, counted. */
+  rejectPairing(pairing: glue.AccountPairing): Promise<void> {
+    return this.gated(async () => {
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const at = BigInt(this.nowMs);
+      await this.withLedger(account, limiter => {
+        const stage = pairing.stage();
+        if (stage === glue.PairingStage.Code || stage === glue.PairingStage.Revealed) pairing.reject(limiter, at);
+        else pairing.abandon(at);
+      });
+    });
+  }
+  /** Ends a ceremony this device started, in any stage before it is confirmed. It stays counted. */
+  abandonApproval(pairing: glue.AccountPairing): Promise<void> {
+    return this.gated(async () => {
+      const at = BigInt(this.nowMs);
+      const account = this.accountId;
+      if (account === undefined) { pairing.abandon(at); return; }
+      await this.withLedger(account, () => pairing.abandon(at));
+    });
+  }
+  /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored about the request. */
+  scanRequest(data: Uint8Array): Promise<ScannedRequest> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const at = BigInt(this.nowMs);
+      const pairing = await this.withLedger(account, limiter => glue.AccountPairing.scan_request(account, data, limiter, at));
+      return { request: accessRequest(plain<RequestInfo>(glue.account_request_info(data))), pairing };
+    });
+  }
+
 
   // Owner operations
 
@@ -550,10 +672,13 @@ export class SessionWorker {
     });
   }
 
-  approve(request: AccessRequest, termsJson?: string, signal?: AbortSignal): Promise<SessionSnapshot> {
+  /** Approves `request`, spending `pairing`: confirmed on this device for exactly the request's key (§9.1). Any other pairing is refused; it is spent whatever the answer. */
+  approve(request: AccessRequest, pairing: glue.AccountPairing, termsJson?: string, signal?: AbortSignal): Promise<SessionSnapshot> {
     return this.ownerOperation(signal, async (owner, custody, ownerId, waiting) => {
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
-      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(request.record, termsJson ?? request.termsJson, signers, entropy)), this.persistOn(owner), waiting);
+      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(request.record, termsJson ?? request.termsJson, signers, pairing, entropy)), this.persistOn(owner), waiting);
+      // The confirmed pairing gave its reservation back; keep the ledger (a lost write only leaves it counted).
+      if (this.accountId !== undefined) await this.keepLedgerChange(this.accountId);
     });
   }
   revoke(member: string, signal?: AbortSignal): Promise<SessionSnapshot> {
@@ -737,9 +862,17 @@ export class SessionWorker {
     this.accountId = account;
     if (!plain<AccountMember[]>(owner.run(e => e.members())).some(m => m.id === this.memberId)) {
       const memberRaw = await this.ownRequestBytes(waiting);
+      // This device made the request itself, with its own member key: there is no second device to pair with, so it reads
+      // its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
+      // The creation's engine keeps the time it opened at; bring it to the scan's time, which the pairing may not precede (§9.1).
+      const at = BigInt(this.nowMs);
+      plain(owner.run(e => e.advance(at)));
+      const fresh = glue.PairingFailureLimiter.fresh();
+      const own = glue.AccountPairing.scan_request(account, memberRaw, fresh, at);
+      fresh.free();
       const memberTerms = terms(this.configuration.namespaces, this.access);
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
-      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(memberRaw, memberTerms, signers, entropy)), this.persistOn(owner), waiting);
+      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(memberRaw, memberTerms, signers, own, entropy)), this.persistOn(owner), waiting);
     }
     this.journal.setupPending = false;
     await this.saveJournal();
@@ -1065,4 +1198,27 @@ export function queryResult(text: string): string {
   if (o.ok === true && 'value' in o) return JSON.stringify(o.value);
   const reason = typeof o.reason === 'string' && knownReasons.has(o.reason) ? o.reason : 'unavailable';
   return JSON.stringify({ ok: false, reason });
+}
+
+/** A request as an approver sees it: no code (approving spends a confirmed pairing, §9.1). */
+function accessRequest(info: RequestInfo): AccessRequest {
+  const records = requestedRecords(info.termsJson);
+  return { id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, record: info.raw,
+    namespaces: records.map(r => r.namespace), access: records.some(r => r.access === 'write') ? ['read', 'write'] : ['read'] };
+}
+
+/**
+ * Runs `body` holding an exclusive lock named `name`: a Web Lock where the platform has `navigator.locks` (every tab and
+ * worker of the origin shares it), otherwise a lock shared by everything in this process.
+ */
+const processLocks = new Map<string, Promise<unknown>>();
+function withExclusiveLock<T>(name: string, body: () => Promise<T>): Promise<T> {
+  const locks = (globalThis as { navigator?: { locks?: { request: (n: string, o: { mode: 'exclusive' }, cb: () => Promise<T>) => Promise<T> } } }).navigator?.locks;
+  if (locks) return locks.request(name, { mode: 'exclusive' }, body);
+  const previous = processLocks.get(name) ?? Promise.resolve();
+  const run = previous.then(body, body);
+  const settled = run.then(() => undefined, () => undefined);
+  processLocks.set(name, settled);
+  void settled.then(() => { if (processLocks.get(name) === settled) processLocks.delete(name); });
+  return run;
 }
