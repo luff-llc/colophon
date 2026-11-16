@@ -140,6 +140,7 @@ AccountMove.begin_upgrade
 AccountMove.finish
 AccountMove.kind
 AccountMove.steps
+AccountPairing.abandon
 AccountPairing.commitment
 AccountPairing.confirm
 AccountPairing.digits
@@ -157,9 +158,12 @@ AccountPairing.stage
 AccountRequest.finish
 AccountRequest.prepare
 AccountRequest.step
-PairingFailureLimiter.from_state
+PairingFailureLimiter.fresh
+PairingFailureLimiter.generation
+PairingFailureLimiter.is_live
 PairingFailureLimiter.may_start
-PairingFailureLimiter.to_state
+PairingFailureLimiter.open
+PairingFailureLimiter.seal
 PairingTransferKey.create
 PairingTransferKey.public
 SwiftCopyDestination.empty

@@ -14,6 +14,10 @@ import ColophonSession
         await second.session.restore()
         return (first, second)
     }
+    private func requestView(_ raw: Data) throws -> AccessRequest {
+        let info = try accountRequestInfo(raw: raw)
+        return AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson, record: info.raw)
+    }
     private func isMember(_ device: Device, of owner: Device) async -> Bool {
         await owner.session.refresh()
         return owner.session.members.contains { $0.id == device.session.memberID }
@@ -35,7 +39,8 @@ import ColophonSession
         let start = try await first.session.beginApproval(commitment: try j.commitment())
         let reveal = try #require(try j.receiveNonce(na: start.nonce))
         _ = try await first.session.approvalCode(pairing: start.pairing, e: reveal.e, nb: reveal.nb)
-        let request = try await first.session.scanRequest(raw).request
+        // The request travels with the commitment; a scan now would be refused (one ceremony at a time).
+        let request = try requestView(raw)
         await #expect(throws: (any Error).self) { try await first.session.approve(request, pairing: start.pairing) }
         #expect(await isMember(second, of: first) == false)
     }
@@ -71,7 +76,7 @@ import ColophonSession
         let start = try await first.session.beginApproval(commitment: try j.commitment())
         _ = try #require(try j.receiveNonce(na: start.nonce))
         try j.confirm()
-        let request = try await first.session.scanRequest(try await second.session.exportRequest()).request
+        let request = try requestView(try await second.session.exportRequest())
         await #expect(throws: (any Error).self) { try await first.session.approve(request, pairing: j) }
         #expect(await isMember(second, of: first) == false)
     }
@@ -80,8 +85,9 @@ import ColophonSession
         let (first, second) = await world()
         let other = Device()
         await other.session.create()
+        let raw = try await second.session.exportRequest()
         let before = first.medium.snapshot()
-        let scanned = try await first.session.scanRequest(try await second.session.exportRequest())
+        let scanned = try await first.session.scanRequest(raw)
         #expect(scanned.request.id == second.session.memberID)
         #expect(first.medium.snapshot() == before, "a scan writes nothing")
         // A request for another account is refused, and nothing is stored either.
@@ -112,5 +118,78 @@ import ColophonSession
         }
         let j = try await second.session.beginJoinPairing()
         await #expect(throws: (any Error).self) { _ = try await first.session.beginApproval(commitment: try j.commitment()) }
+    }
+
+    // MARK: The approving device's ledger: one ceremony at a time, every start counted (§7.3)
+
+    private func commitment(_ joining: ColophonSession) async throws -> Data { try await joining.beginJoinPairing().commitment() }
+
+    /// A second commitment while one ceremony is live is refused and yields no nonce.
+    @Test func aSecondCommitmentWhileOneIsLiveIsRefused() async throws {
+        let (first, second) = await world()
+        let live = try await first.session.beginApproval(commitment: try await commitment(second.session))
+        do {
+            _ = try await first.session.beginApproval(commitment: try await commitment(second.session))
+            Issue.record("a second ceremony started while one is live")
+        } catch AccountError.Refused(let code, _, _) { #expect(code == "pairing:busy") }
+        try await first.session.abandonApproval(live.pairing)
+        _ = try await first.session.beginApproval(commitment: try await commitment(second.session))
+    }
+
+    /// The attack of the check: many starts on the approving device beside the honest ceremony get no second nonce.
+    @Test func manyParallelStartsYieldAtMostOneNonce() async throws {
+        let (first, second) = await world()
+        var commitments: [Data] = []
+        for _ in 0..<40 { commitments.append(try await commitment(second.session)) }
+        let session = first.session
+        // All started at once; the worker serializes them, the core lets one live.
+        let tasks = commitments.map { c in Task { @MainActor in (try? await session.beginApproval(commitment: c)) != nil } }
+        var nonces = 0
+        for task in tasks {
+            if await task.value { nonces += 1 }
+        }
+        #expect(nonces == 1, "one live ceremony, one nonce")
+    }
+
+    /// Abandoned ceremonies stay counted: five close the hour.
+    @Test func abandonedCeremoniesCount() async throws {
+        let (first, second) = await world()
+        for _ in 0..<5 {
+            let start = try await first.session.beginApproval(commitment: try await commitment(second.session))
+            try await first.session.abandonApproval(start.pairing)
+        }
+        do {
+            _ = try await first.session.beginApproval(commitment: try await commitment(second.session))
+            Issue.record("a sixth ceremony started")
+        } catch AccountError.Refused(let code, _, _) { #expect(code == "pairing:limit") }
+    }
+
+    /// When the ledger cannot be persisted, no nonce is produced.
+    @Test func withoutAPersistedLedgerThereIsNoNonce() async throws {
+        let (first, second) = await world()
+        // A directory where the ledger file goes: every write of it fails.
+        try FileManager.default.createDirectory(at: first.home.appendingPathComponent("pairing-ledger.bin/blocked"), withIntermediateDirectories: true)
+        await #expect(throws: (any Error).self) { _ = try await first.session.beginApproval(commitment: try await commitment(second.session)) }
+    }
+
+    /// A ledger rolled back to an earlier copy, or deleted, does not restore the budget after a relaunch.
+    @Test func aRolledBackLedgerDoesNotRestoreTheBudget() async throws {
+        let (first, second) = await world()
+        let ledger = first.home.appendingPathComponent("pairing-ledger.bin")
+        let start = try await first.session.beginApproval(commitment: try await commitment(second.session))
+        try await first.session.abandonApproval(start.pairing)
+        let early = try Data(contentsOf: ledger)
+        for _ in 0..<4 {
+            let s = try await first.session.beginApproval(commitment: try await commitment(second.session))
+            try await first.session.abandonApproval(s.pairing)
+        }
+        try early.write(to: ledger)
+        let relaunched = first.relaunch()
+        await relaunched.restore()
+        await #expect(throws: (any Error).self) { _ = try await relaunched.beginApproval(commitment: try await commitment(second.session)) }
+        try FileManager.default.removeItem(at: ledger)
+        let again = first.relaunch()
+        await again.restore()
+        await #expect(throws: (any Error).self) { _ = try await again.beginApproval(commitment: try await commitment(second.session)) }
     }
 }

@@ -16,7 +16,7 @@ use colophon_core::v05::account::{AccessRequest, Change};
 use colophon_core::v05::ids::AccountId;
 use colophon_core::v05::pairing::{
     scanned_request, ConfirmedPairing, ExistingWaiting, FailureLimiter, Joiner, PairingAbort,
-    QrJoiner, QrPayload, ScannedQr, CONFIRMED_PAIRING_LIFETIME_MS,
+    PermitRefused, QrJoiner, QrPayload, ScannedQr, CONFIRMED_PAIRING_LIFETIME_MS,
 };
 use colophon_core::v05::write::authority::TransitionRule;
 use colophon_core::v05::write::calls::RequestSpec;
@@ -238,21 +238,20 @@ fn a_grant_transition_spends_a_pairing_for_exactly_its_request() {
 fn a_scanned_request_must_verify_and_name_the_account() {
     let (f, _m, req) = with_request();
     let other = create_v(&["notes"], 4);
-    let mut lim = FailureLimiter::new();
     let now = f.account.now_ms();
     assert_eq!(
-        scanned_request(other.account.id(), &req.raw, lim.permit(now).unwrap()).unwrap_err(),
+        scanned_request(other.account.id(), &req.raw, FailureLimiter::new().permit(now).unwrap()).unwrap_err(),
         PairingAbort::WrongAccount
     );
     let mut tampered = req.raw.clone();
     let at = tampered.len() / 2;
     tampered[at] ^= 1;
     assert_eq!(
-        scanned_request(f.account.id(), &tampered, lim.permit(now).unwrap()).unwrap_err(),
+        scanned_request(f.account.id(), &tampered, FailureLimiter::new().permit(now).unwrap()).unwrap_err(),
         PairingAbort::InvalidRequest
     );
     assert_eq!(
-        scanned_request(f.account.id(), b"not a request", lim.permit(now).unwrap()).unwrap_err(),
+        scanned_request(f.account.id(), b"not a request", FailureLimiter::new().permit(now).unwrap()).unwrap_err(),
         PairingAbort::InvalidRequest
     );
     // The one payload is the canonical envelope (§9.1): the same envelope with a space added
@@ -260,7 +259,7 @@ fn a_scanned_request_must_verify_and_name_the_account() {
     let mut spaced = b" ".to_vec();
     spaced.extend_from_slice(&req.raw);
     assert_eq!(
-        scanned_request(f.account.id(), &spaced, lim.permit(now).unwrap()).unwrap_err(),
+        scanned_request(f.account.id(), &spaced, FailureLimiter::new().permit(now).unwrap()).unwrap_err(),
         PairingAbort::InvalidRequest
     );
 }
@@ -309,4 +308,135 @@ fn l2_a_member_with_a_key_the_same_change_adds_is_refused_at_preparation() {
     // Each component alone prepares.
     let alone = Change::homes(json!({"appoint": [{"request": b64(&req.raw), "terms": {"serves": ["home"]}}]}));
     assert!(f.account.begin_transition(&alone, &[f.d.clone(), f.k.clone()], TransitionRule::Control).is_ok());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The approving device's ledger (§7.3): one ceremony at a time, every start counted.
+
+const KEY: [u8; 32] = [0x44; 32];
+
+/// The attack of the check: a relay starts many sessions on the approving device with keys it
+/// chose, beside the honest one, to pick the one whose code equals the joiner's. With one live
+/// ceremony per device, only the first start gets a permit (and so a nonce); every other is
+/// refused, so the relay matches one code per counted attempt, at one in a million.
+#[test]
+fn many_attacker_sessions_beside_an_honest_one_get_no_second_nonce() {
+    let (f, m, _req) = with_request();
+    let now = f.account.now_ms();
+    let acct = f.account.id().clone();
+    let mut lim = FailureLimiter::new();
+    let (honest, c) = Joiner::begin(&acct, &signing(&f, &m), [7; 32]).unwrap();
+    let h = ExistingWaiting::receive_commitment(&acct, c, lim.permit(now).unwrap());
+    let mut started = 0;
+    for i in 0..10_000i64 {
+        if lim.permit(now + i).is_ok() {
+            started += 1;
+        }
+    }
+    assert_eq!(started, 0, "no second ceremony while one is live");
+    assert_eq!(lim.permit(now).unwrap_err(), PermitRefused::CeremonyLive);
+    // The honest ceremony goes on and confirms; the budget is given back.
+    let (h, na) = h.send_nonce([9; 32]);
+    let (reveal, j) = honest.reveal(na).unwrap();
+    let code = h.finish_limited(&reveal.e, &reveal.nb, &mut lim, now + 1).unwrap();
+    assert_eq!(code.digits(), j.digits());
+    let token = code.confirm();
+    lim.release(&token);
+    assert!(lim.may_start(now + 2));
+}
+
+/// Abandoning, rejecting, a mismatch and a timeout each leave the start counted; five of them
+/// close the hour. A confirmed pairing given back does not count.
+#[test]
+fn every_start_counts_until_it_confirms() {
+    let (f, m, req) = with_request();
+    let now = f.account.now_ms();
+    let acct = f.account.id().clone();
+    let e = signing(&f, &m);
+    let mut lim = FailureLimiter::new();
+    // Abandoned.
+    lim.permit(now).unwrap().abandon(&mut lim, now);
+    // Rejected code.
+    let (j, c) = Joiner::begin(&acct, &e, [1; 32]).unwrap();
+    let (h, na) = ExistingWaiting::receive_commitment(&acct, c, lim.permit(now).unwrap()).send_nonce([2; 32]);
+    let (r, _) = j.reveal(na).unwrap();
+    h.finish_limited(&r.e, &r.nb, &mut lim, now).unwrap().reject(&mut lim, now);
+    // Mismatch.
+    let (_, c) = Joiner::begin(&acct, &e, [3; 32]).unwrap();
+    let (h, _) = ExistingWaiting::receive_commitment(&acct, c, lim.permit(now).unwrap()).send_nonce([4; 32]);
+    assert_eq!(h.finish_limited(&e, &[0; 32], &mut lim, now).unwrap_err(), PairingAbort::CommitmentMismatch);
+    // Timed out: the reveal after ten minutes aborts, and the slot is free again.
+    let (j, c) = Joiner::begin(&acct, &e, [5; 32]).unwrap();
+    let (h, na) = ExistingWaiting::receive_commitment(&acct, c, lim.permit(now).unwrap()).send_nonce([6; 32]);
+    let (r, _) = j.reveal(na).unwrap();
+    let late = now + colophon_core::v05::pairing::CEREMONY_TIMEOUT_MS + 1;
+    assert_eq!(h.finish_limited(&r.e, &r.nb, &mut lim, late).unwrap_err(), PairingAbort::Timeout);
+    // A confirmed scan gives its reservation back.
+    let mut other = FailureLimiter::new();
+    let token = scanned_request(f.account.id(), &req.raw, other.permit(late).unwrap());
+    other.release(&token.unwrap());
+    assert!(other.may_start(late) && !other.is_live(late));
+    // Four counted here; the fifth start closes the hour.
+    assert!(lim.may_start(late));
+    lim.permit(late).unwrap().abandon(&mut lim, late);
+    assert_eq!(lim.permit(late + 1).unwrap_err(), PermitRefused::LimitReached);
+}
+
+/// A ceremony left live (the host never ended it) blocks a second one only until its timeout.
+#[test]
+fn a_forgotten_ceremony_ends_by_its_timeout_counted() {
+    let mut lim = FailureLimiter::new();
+    let _held = lim.permit(1_000).unwrap();
+    assert_eq!(lim.permit(2_000).unwrap_err(), PermitRefused::CeremonyLive);
+    let after = 1_000 + colophon_core::v05::pairing::CEREMONY_TIMEOUT_MS + 1;
+    assert!(!lim.is_live(after));
+    let p = lim.permit(after).unwrap();
+    p.abandon(&mut lim, after);
+    // Two starts counted.
+    for t in 0..3 {
+        lim.permit(after + t).unwrap().abandon(&mut lim, after + t);
+    }
+    assert_eq!(lim.permit(after + 5).unwrap_err(), PermitRefused::LimitReached);
+}
+
+/// The ledger is sealed under the device key for the account. An edited, foreign, older or
+/// missing ledger (where the host recorded a generation) opens as a spent budget.
+#[test]
+fn a_rolled_back_or_edited_ledger_opens_spent() {
+    let acct = AccountId::parse(&"ab".repeat(32)).unwrap();
+    let other = AccountId::parse(&"cd".repeat(32)).unwrap();
+    let mut lim = FailureLimiter::new();
+    let early = lim.seal(&acct, &KEY, [1; 32]).unwrap();
+    for t in 0..5 {
+        lim.permit(t).unwrap().abandon(&mut lim, t);
+    }
+    let late = lim.seal(&acct, &KEY, [2; 32]).unwrap();
+    let floor = lim.generation();
+    assert!(lim.sealed_since(floor));
+    let open = |b: &[u8], a: &AccountId, k: &[u8; 32], f: u64| FailureLimiter::open(b, a, k, f, 10);
+    assert!(!open(&late, &acct, &KEY, floor).may_start(10), "the real ledger is spent");
+    assert_eq!(open(&late, &acct, &KEY, floor).generation(), floor);
+    assert!(!open(&early, &acct, &KEY, floor).may_start(10), "an older ledger opens spent");
+    assert!(!open(&[], &acct, &KEY, floor).may_start(10), "a missing ledger with a floor opens spent");
+    let mut edited = late.clone();
+    let n = edited.len() - 1;
+    edited[n] ^= 1;
+    assert!(!open(&edited, &acct, &KEY, 0).may_start(10));
+    assert!(!open(&late, &other, &KEY, 0).may_start(10), "another account's ledger");
+    assert!(!open(&late, &acct, &[0x45; 32], 0).may_start(10), "another device key");
+    assert!(open(&[], &acct, &KEY, 0).may_start(10), "no ledger, no floor: a new device");
+    // The early ledger opens as it was when no floor says otherwise (the residual limit: a host
+    // that restores both the ledger and its recorded generation restores the budget).
+    assert!(open(&early, &acct, &KEY, 0).may_start(10));
+}
+
+/// A clock moved back before the approving session began does not keep a pairing alive.
+#[test]
+fn a_pairing_is_refused_before_its_session_began() {
+    let (mut f, m, req) = with_request();
+    let now = f.account.now_ms();
+    let (h, _) = code_pairing(&f.account.id().clone(), &signing(&f, &m), now + 60_000);
+    let seed = f.host.fresh();
+    let r = f.account.begin_approve(&req.raw, terms("write"), &[f.d.clone()], seed, h);
+    assert_eq!(refused(r), "refused:expired");
 }

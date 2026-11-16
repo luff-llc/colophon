@@ -455,7 +455,7 @@ pub fn scanned(engine: &AccountEngine, raw: &[u8], now_ms: i64) -> Arc<AccountPa
     AccountPairing::scan_request(
         engine.id().unwrap(),
         raw.to_vec(),
-        PairingFailureLimiter::from_state(String::new()).unwrap(),
+        PairingFailureLimiter::fresh(),
         now_ms,
     )
     .unwrap()

@@ -203,12 +203,14 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
      * six digits to show. On a match `pairing.confirm()`, otherwise `rejectPairing(pairing)`.
      */
     suspend fun beginJoinPairing(): AccountPairing = facade { restore(); worker.beginJoinPairing() }
-    /** The approving device received the joining device's commitment: send `nonce` back. Five failed sessions an hour stop new ones (§7.3). */
+    /** The approving device's person starts a ceremony for one incoming commitment: send `nonce` back. Call it only when the person asked (an incoming commitment is never started by itself). One ceremony at a time; every start counts toward five an hour until it confirms (§7.3). */
     suspend fun beginApproval(commitment: ByteArray): ApprovalStart = facade { restore(); worker.beginApproval(commitment) }
     /** The approving device received the reveal: the six digits to show. A reveal that does not open the commitment aborts and counts as a failure. */
     suspend fun approvalCode(pairing: AccountPairing, e: ByteArray, nb: ByteArray): String = facade { worker.approvalCode(pairing, e, nb) }
     /** The codes differed or the person stopped: the session ends on this device and counts as a failure. */
     suspend fun rejectPairing(pairing: AccountPairing) = facade { worker.rejectPairing(pairing) }
+    /** Ends a ceremony this device started (the person cancelled, the other device went away). It stays counted. */
+    suspend fun abandonApproval(pairing: AccountPairing) = facade { worker.abandonApproval(pairing) }
     /** The approving device scanned a request from the joining device's screen (its canonical envelope, §9.1). Nothing is stored. */
     suspend fun scanRequest(data: ByteArray): ScannedRequest = facade { restore(); worker.scanRequest(data) }
     suspend fun revoke(memberId: String) = owner { worker.revoke(memberId) }

@@ -1135,7 +1135,8 @@ fn run_pairing() -> Outcome {
         let r = ExistingWaiting::receive_commitment(
             &account,
             n32(want_c.clone()),
-            limiter.permit(0).unwrap(),
+            // One live ceremony per ledger: each refuse row is its own session.
+            colophon_core::v05::pairing::FailureLimiter::new().permit(0).unwrap(),
         )
         .send_nonce(na)
         .0

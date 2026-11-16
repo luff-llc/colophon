@@ -200,12 +200,14 @@ export class ColophonSession {
    * digits to show. On a match `pairing.confirm()`, otherwise `rejectPairing(pairing)`.
    */
   async beginJoinPairing(): Promise<glue.AccountPairing> { await this.restore(); return this.worker.beginJoinPairing(); }
-  /** The approving device received the joining device's commitment: send `nonce` back. Five failed sessions an hour stop new ones (§7.3). */
+  /** The approving device's person starts a ceremony for one incoming commitment: send `nonce` back. Call it only when the person asked (an incoming commitment is never started by itself). One ceremony at a time; every start counts toward five an hour until it confirms (§7.3). */
   async beginApproval(commitment: Uint8Array): Promise<ApprovalStart> { await this.restore(); return this.worker.beginApproval(commitment); }
   /** The approving device received the reveal: the six digits to show. A reveal that does not open the commitment aborts and counts as a failure. */
   approvalCode(pairing: glue.AccountPairing, e: Uint8Array, nb: Uint8Array): Promise<string> { return this.worker.approvalCode(pairing, e, nb); }
   /** The codes differed or the person stopped: the session ends on this device and counts as a failure. */
   rejectPairing(pairing: glue.AccountPairing): Promise<void> { return this.worker.rejectPairing(pairing); }
+  /** Ends a ceremony this device started (the person cancelled, the other device went away). It stays counted. */
+  abandonApproval(pairing: glue.AccountPairing): Promise<void> { return this.worker.abandonApproval(pairing); }
   /** The approving device scanned a request from the joining device's screen (its canonical envelope, §9.1). Nothing is stored. */
   async scanRequest(data: Uint8Array): Promise<ScannedRequest> { await this.restore(); return this.worker.scanRequest(data); }
   revoke(memberId: string): Promise<void> { return this.owner(signal => this.worker.revoke(memberId, signal)); }

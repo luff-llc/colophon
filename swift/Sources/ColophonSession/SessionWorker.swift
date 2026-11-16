@@ -508,15 +508,31 @@ actor SessionWorker {
 
     // MARK: Pairing before approval (§7.3, §9.1)
 
-    /// The five-failures-an-hour ledger (§7.3), kept in the private container so the limit holds across launches.
-    /// It records failed sessions only, never a request.
-    private var limiterURL: URL { configuration.privateContainer.appendingPathComponent("pairing-limiter.json") }
-    private func limiter() throws -> PairingFailureLimiter {
-        let state = (try? AtomicFile.read(limiterURL, maximumBytes: 1 << 16)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-        return try PairingFailureLimiter.fromState(state: state)
+    /// The pairing ledger of this device (§7.3): five failed sessions an hour and one ceremony at a time, enforced by
+    /// the core. Kept sealed under the device key in the private container (`pairing-ledger.bin`), with its generation
+    /// recorded beside it (`pairing-ledger.generation`): a missing, edited or older ledger opens as a spent budget. It
+    /// records sessions only, never a request. One instance per account lives in this worker, so a ceremony's handle
+    /// and the ledger it counts against are the same.
+    private var ledger: (account: String, limiter: PairingFailureLimiter)?
+    private var ledgerURL: URL { configuration.privateContainer.appendingPathComponent("pairing-ledger.bin") }
+    private var ledgerFloorURL: URL { configuration.privateContainer.appendingPathComponent("pairing-ledger.generation") }
+    private func pairingLedger(_ account: String) throws -> PairingFailureLimiter {
+        if let ledger, ledger.account == account { return ledger.limiter }
+        let sealed = (try? AtomicFile.read(ledgerURL, maximumBytes: 1 << 20)) ?? Data()
+        let floor = (try? AtomicFile.read(ledgerFloorURL, maximumBytes: 64)).flatMap { UInt64(String(decoding: $0, as: UTF8.self)) } ?? 0
+        let key = try configuration.deviceSecrets.key(for: account)
+        let opened = try key.withUnsafeData { try PairingFailureLimiter.open(sealed: sealed, deviceKey: $0, account: account, floor: floor, nowMs: nowMs) }
+        ledger = (account, opened)
+        return opened
     }
-    private func keep(_ limiter: PairingFailureLimiter) throws {
-        try AtomicFile.write(Data(try limiter.toState().utf8), to: limiterURL)
+    /// Persists the sealed ledger, then its generation. Throws when either cannot be written: a start is then never
+    /// answered with a nonce (fail closed), and the ledger in memory keeps counting it.
+    private func keepLedger(_ account: String) throws {
+        guard let ledger, ledger.account == account else { return }
+        let key = try configuration.deviceSecrets.key(for: account)
+        let sealed = try key.withUnsafeData { k in try withEntropy(32) { try ledger.limiter.seal(deviceKey: k, account: account, entropy: $0) } }
+        try AtomicFile.write(sealed, to: ledgerURL)
+        try AtomicFile.write(Data(String(try ledger.limiter.generation()).utf8), to: ledgerFloorURL)
     }
     /// The joining device: a code-path pairing for its own member key. Send `commitment()` with the request.
     func beginJoinPairing() async throws -> AccountPairing {
@@ -528,45 +544,61 @@ actor SessionWorker {
             return try withEntropy(32) { try AccountPairing.join(account: account, e: e, nb: $0) }
         }
     }
-    /// The approving device received the joining device's commitment: a session (counted by the limiter) and
-    /// the nonce to send back.
+    /// The approving device's person started a ceremony for one incoming commitment: a session that reserves one of
+    /// the five an hour, and the nonce to send back. While another is live this is refused (`pairing:busy`); the
+    /// reservation is persisted before the nonce exists, and if it cannot be, no nonce is produced.
     func beginApproval(commitment: Data) async throws -> ApprovalStart {
         try await gated {
             if engine == nil { _ = try await reconcile() }
             guard let account = accountID else { throw SessionError.notReady }
-            let limiter = try limiter()
-            defer { try? keep(limiter) }
+            let limiter = try pairingLedger(account)
             let pairing = try AccountPairing.existingReceiveCommitment(account: account, commitment: commitment, limiter: limiter, nowMs: nowMs)
+            do { try keepLedger(account) } catch { try? pairing.abandon(nowMs: nowMs); throw error }
             let nonce = try withEntropy(32) { try pairing.sendNonce(na: $0) }
             return ApprovalStart(pairing: pairing, nonce: nonce)
         }
     }
-    /// The approving device received the joining device's reveal: the six digits both screens show. A reveal
-    /// that does not open the commitment aborts the session and counts as a failure.
+    /// The approving device received the joining device's reveal: the six digits both screens show. A reveal that does
+    /// not open the commitment, or comes after the ten-minute timeout, aborts the session (it stays counted).
     func approvalCode(pairing: AccountPairing, e: Data, nb: Data) async throws -> String {
         try await gated {
-            let limiter = try limiter()
-            defer { try? keep(limiter) }
-            return try pairing.receiveReveal(e: e, nb: nb, limiter: limiter, nowMs: nowMs)
+            guard let account = accountID else { throw SessionError.notReady }
+            let limiter = try pairingLedger(account)
+            // The start was persisted counted, so a failure here needs no write to stay counted; the ledger is kept anyway.
+            do { return try pairing.receiveReveal(e: e, nb: nb, limiter: limiter, nowMs: nowMs) }
+            catch { try? keepLedger(account); throw error }
         }
     }
-    /// The codes did not match (or the person stopped): the session ends on this device and counts as a failure.
+    /// The codes did not match (or the person stopped): the session ends on this device, counted.
     func rejectPairing(_ pairing: AccountPairing) async throws {
         try await gated {
-            let limiter = try limiter()
-            defer { try? keep(limiter) }
-            try pairing.reject(limiter: limiter, nowMs: nowMs)
+            guard let account = accountID else { throw SessionError.notReady }
+            let limiter = try pairingLedger(account)
+            switch try pairing.stage() {
+            case .code, .revealed: try pairing.reject(limiter: limiter, nowMs: nowMs)
+            default: try pairing.abandon(nowMs: nowMs)
+            }
+            try keepLedger(account)
         }
     }
-    /// The approving device scanned a request from the joining device's screen: its canonical envelope, the scan
-    /// path's one payload (§9.1). Nothing is stored; the result's pairing approves that request once.
+    /// Ends a ceremony this device started, in any stage before it is confirmed (the person cancelled, the other device
+    /// went away). It stays counted.
+    func abandonApproval(_ pairing: AccountPairing) async throws {
+        try await gated {
+            try pairing.abandon(nowMs: nowMs)
+            if let account = accountID { try keepLedger(account) }
+        }
+    }
+    /// The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's
+    /// one payload (§9.1). Nothing is stored about the request; the result's pairing approves it once.
     func scanRequest(_ data: Data) async throws -> ScannedRequest {
         try await gated {
             if engine == nil { _ = try await reconcile() }
             guard let account = accountID else { throw SessionError.notReady }
-            let limiter = try limiter()
-            defer { try? keep(limiter) }
-            let pairing = try AccountPairing.scanRequest(account: account, request: data, limiter: limiter, nowMs: nowMs)
+            let limiter = try pairingLedger(account)
+            let scanned = Result { try AccountPairing.scanRequest(account: account, request: data, limiter: limiter, nowMs: nowMs) }
+            try keepLedger(account)
+            let pairing = try scanned.get()
             return ScannedRequest(request: Self.accessRequest(try accountRequestInfo(raw: data)), pairing: pairing)
         }
     }
@@ -631,6 +663,8 @@ actor SessionWorker {
                 let written = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: request.record, termsJson: terms, signers: signers, pairing: pairing, entropy: $0) } }
                 try await persist(written, on: owner)
             }
+            // The confirmed pairing gave its reservation back; keep the ledger (a lost write only leaves it counted).
+            if let account = accountID { try? keepLedger(account) }
             return try await reconcile()
         }
     }
@@ -821,8 +855,12 @@ actor SessionWorker {
             let memberRaw = try await ownRequestBytesFor(account: account)
             // This device made the request itself, with its own member key: there is no second device to pair with,
             // so it reads its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
+            // The creation's engine keeps the time it opened at; bring it to the scan's time, which the pairing may not
+            // precede (§9.1).
+            let at = nowMs
+            _ = try await owner.run { try $0.advance(nowMs: at) }
             let own = try AccountPairing.scanRequest(account: account, request: memberRaw,
-                                                     limiter: try PairingFailureLimiter.fromState(state: ""), nowMs: nowMs)
+                                                     limiter: PairingFailureLimiter.fresh(), nowMs: at)
             let terms = termsJSON(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil)
             let signers = try await signers(owner, ownerID: ownerID, need: .member)
             let approve = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: memberRaw, termsJson: terms, signers: signers, pairing: own, entropy: $0) } }

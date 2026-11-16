@@ -4091,12 +4091,19 @@ public func FfiConverterTypeAccountMove_lower(_ value: AccountMove) -> UInt64 {
 public protocol AccountPairingProtocol: AnyObject, Sendable {
     
     /**
+     * End the session now, in any stage before it is confirmed: abandoned, it stays counted in
+     * the existing device's ledger (§7.3). A confirmed or spent session is left as it is.
+     */
+    func abandon(nowMs: Int64) throws 
+    
+    /**
      * The joiner's commitment `C` (32 bytes), to send first.
      */
     func commitment() throws  -> Data
     
     /**
-     * The person saw the same code on both screens.
+     * The person saw the same code on both screens. On the existing device the ceremony's
+     * reservation goes back: a confirmed pairing is not a failure.
      */
     func confirm() throws 
     
@@ -4275,6 +4282,19 @@ public static func scanRequest(account: String, request: Data, limiter: PairingF
 
     
     /**
+     * End the session now, in any stage before it is confirmed: abandoned, it stays counted in
+     * the existing device's ledger (§7.3). A confirmed or spent session is left as it is.
+     */
+open func abandon(nowMs: Int64)throws   {try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountpairing_abandon(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * The joiner's commitment `C` (32 bytes), to send first.
      */
 open func commitment()throws  -> Data  {
@@ -4287,7 +4307,8 @@ open func commitment()throws  -> Data  {
 }
     
     /**
-     * The person saw the same code on both screens.
+     * The person saw the same code on both screens. On the existing device the ceremony's
+     * reservation goes back: a confirmed pairing is not a failure.
      */
 open func confirm()throws   {try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
@@ -6895,25 +6916,40 @@ public func FfiConverterTypeNativeLibrary_lower(_ value: NativeLibrary) -> UInt6
 
 
 /**
- * The five-failures-per-hour ledger of an existing device (§7.3). Plain data the host keeps:
- * persist `to_state` and restore it with `from_state`, or the limit holds only for this process.
+ * The pairing ledger of an existing device (§7.3): five failed sessions an hour, one ceremony at
+ * a time. The host persists it sealed: `seal` after every change, `open` on start. An edited,
+ * foreign or unreadable ledger, or one older than the generation the host recorded beside it,
+ * opens as a spent budget.
  */
 public protocol PairingFailureLimiterProtocol: AnyObject, Sendable {
     
     /**
-     * Whether a session may start now.
+     * The ledger's generation, raised by every change: record it beside the sealed ledger.
+     */
+    func generation() throws  -> UInt64
+    
+    /**
+     * Whether a ceremony is live now.
+     */
+    func isLive(nowMs: Int64) throws  -> Bool
+    
+    /**
+     * Whether a session may start now (none live, budget left).
      */
     func mayStart(nowMs: Int64) throws  -> Bool
     
     /**
-     * The state to persist (an opaque text the host stores and gives back).
+     * The ledger sealed for `account` under the device-held key, to persist (with `generation`
+     * recorded beside it) before acting on the change. 32 bytes of entropy.
      */
-    func toState() throws  -> String
+    func seal(deviceKey: Data, account: String, entropy: Data) throws  -> Data
     
 }
 /**
- * The five-failures-per-hour ledger of an existing device (§7.3). Plain data the host keeps:
- * persist `to_state` and restore it with `from_state`, or the limit holds only for this process.
+ * The pairing ledger of an existing device (§7.3): five failed sessions an hour, one ceremony at
+ * a time. The host persists it sealed: `seal` after every change, `open` on start. An edited,
+ * foreign or unreadable ledger, or one older than the generation the host recorded beside it,
+ * opens as a spent budget.
  */
 open class PairingFailureLimiter: PairingFailureLimiterProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -6967,13 +7003,29 @@ open class PairingFailureLimiter: PairingFailureLimiterProtocol, @unchecked Send
 
     
     /**
-     * A limiter from saved state, or a fresh one from an empty string.
+     * A new, empty ledger held in memory (a device that keeps none, or a test).
      */
-public static func fromState(state: String)throws  -> PairingFailureLimiter  {
+public static func fresh() -> PairingFailureLimiter  {
+    return try!  FfiConverterTypePairingFailureLimiter_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_fresh(uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The ledger the host stored for `account` (empty when none), opened under the device-held
+     * key; `floor` is the generation the host recorded beside it (0 when none).
+     */
+public static func `open`(sealed: Data, deviceKey: Data, account: String, floor: UInt64, nowMs: Int64)throws  -> PairingFailureLimiter  {
     return try  FfiConverterTypePairingFailureLimiter_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
-    uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_from_state(
-        FfiConverterString.lower(state),uniffiCallStatus
+    uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_open(
+        FfiConverterData.lower(sealed),
+        FfiConverterData.lower(deviceKey),
+        FfiConverterString.lower(account),
+        FfiConverterUInt64.lower(floor),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -6981,7 +7033,32 @@ public static func fromState(state: String)throws  -> PairingFailureLimiter  {
 
     
     /**
-     * Whether a session may start now.
+     * The ledger's generation, raised by every change: record it beside the sealed ledger.
+     */
+open func generation()throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_pairingfailurelimiter_generation(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether a ceremony is live now.
+     */
+open func isLive(nowMs: Int64)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_pairingfailurelimiter_is_live(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether a session may start now (none live, budget left).
      */
 open func mayStart(nowMs: Int64)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
@@ -6994,13 +7071,17 @@ open func mayStart(nowMs: Int64)throws  -> Bool  {
 }
     
     /**
-     * The state to persist (an opaque text the host stores and gives back).
+     * The ledger sealed for `account` under the device-held key, to persist (with `generation`
+     * recorded beside it) before acting on the change. 32 bytes of entropy.
      */
-open func toState()throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+open func seal(deviceKey: Data, account: String, entropy: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
-    uniffi_colophon_ffi_fn_method_pairingfailurelimiter_to_state(
-            self.uniffiCloneHandle(),uniffiCallStatus
+    uniffi_colophon_ffi_fn_method_pairingfailurelimiter_seal(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(deviceKey),
+        FfiConverterString.lower(account),
+        FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
 }
@@ -26751,10 +26832,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountmove_steps() != 32622) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_accountpairing_abandon() != 34220) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_accountpairing_commitment() != 18527) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accountpairing_confirm() != 787) {
+    if (uniffi_colophon_ffi_checksum_method_accountpairing_confirm() != 36711) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountpairing_digits() != 52369) {
@@ -26778,10 +26862,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountpairing_stage() != 51135) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_may_start() != 10122) {
+    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_generation() != 25863) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_to_state() != 28839) {
+    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_is_live() != 43796) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_may_start() != 3427) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_seal() != 33154) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_pairingtransferkey_public() != 26060) {
@@ -26907,7 +26997,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_constructor_accountpairing_scan_request() != 60272) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_from_state() != 60989) {
+    if (uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_fresh() != 61851) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_open() != 48477) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_pairingtransferkey_create() != 49812) {

@@ -16,15 +16,21 @@ class PairingTest {
     private fun key() = PairingTransferKey.create(ByteArray(32) { 17 })
     private fun hash(vararg parts: ByteArray) = MessageDigest.getInstance("SHA-256").run { parts.forEach { update(it) }; digest() }
     private fun b64(b: ByteArray) = Base64.getEncoder().encodeToString(b)
+    private val deviceKey = ByteArray(32) { 0x44 }
+    /** The existing side's nonce, after the ledger is sealed (an app persists it first, §7.3). */
+    private fun send(existing: AccountPairing, limiter: PairingFailureLimiter): ByteArray {
+        limiter.seal(deviceKey, account, ByteArray(32) { 1 })
+        return existing.sendNonce(na)
+    }
 
     @Test fun commitmentAndSixDigitsUseExactlyTheSpecBytes() {
         key().use { key ->
             val e = key.public()
             AccountPairing.join(account, e, nb).use { joiner ->
                 assertContentEquals(hash("colophon/pair/5".toByteArray(), account.toByteArray(), e, nb), joiner.commitment())
-                PairingFailureLimiter.fromState("").use { limiter ->
+                PairingFailureLimiter.fresh().use { limiter ->
                     AccountPairing.existingReceiveCommitment(account, joiner.commitment(), limiter, now).use { existing ->
-                        val reveal = assertNotNull(joiner.receiveNonce(existing.sendNonce(na)))
+                        val reveal = assertNotNull(joiner.receiveNonce(send(existing, limiter)))
                         assertContentEquals(e, reveal.e); assertContentEquals(nb, reveal.nb)
                         val shown = existing.receiveReveal(reveal.e, reveal.nb, limiter, now)
                         val digest = hash("colophon/pair-code/5".toByteArray(), account.toByteArray(), e, na, nb)
@@ -46,9 +52,9 @@ class PairingTest {
                 val expected = "{\"account\":\"$account\",\"e\":\"${b64(key.public())}\",\"nB\":\"${b64(nb)}\",\"protocol\":\"colophon/pair-qr/5\"}"
                 val payload = joiner.qrPayload()
                 assertContentEquals(expected.toByteArray(), payload)
-                PairingFailureLimiter.fromState("").use { limiter ->
+                PairingFailureLimiter.fresh().use { limiter ->
                     AccountPairing.existingScanQr(account, joiner.qrPayload(), limiter, now).use { existing ->
-                        assertNull(joiner.receiveNonce(existing.sendNonce(na)))
+                        assertNull(joiner.receiveNonce(send(existing, limiter)))
                         assertEquals(PairingStage.CONFIRMED, existing.stage()); assertEquals(PairingStage.CONFIRMED, joiner.stage())
                     }
                     val wrong = assertFailsWith<AccountException.Malformed> { AccountPairing.existingScanQr("cd".repeat(32), payload, limiter, now) }
@@ -63,9 +69,9 @@ class PairingTest {
     @Test fun mismatchedCommitmentConsumesTheOnlyReveal() {
         key().use { key ->
             AccountPairing.join(account, key.public(), nb).use { joiner ->
-                PairingFailureLimiter.fromState("").use { limiter ->
+                PairingFailureLimiter.fresh().use { limiter ->
                     AccountPairing.existingReceiveCommitment(account, joiner.commitment(), limiter, now).use { existing ->
-                        joiner.receiveNonce(existing.sendNonce(na))
+                        joiner.receiveNonce(send(existing, limiter))
                         val e = assertFailsWith<AccountException.Malformed> { existing.receiveReveal(key.public(), ByteArray(32), limiter, now) }
                         assertEquals("pairing:commitmentMismatch", e.code)
                         assertEquals(PairingStage.SPENT, existing.stage())
@@ -78,11 +84,11 @@ class PairingTest {
 
     @Test fun rejectingCodesPersistsTheFiveFailuresPerHourLimit() {
         key().use { key ->
-            PairingFailureLimiter.fromState("").use { limiter ->
+            PairingFailureLimiter.fresh().use { limiter ->
                 repeat(5) {
                     AccountPairing.join(account, key.public(), nb).use { joiner ->
                         AccountPairing.existingReceiveCommitment(account, joiner.commitment(), limiter, now).use { existing ->
-                            val reveal = assertNotNull(joiner.receiveNonce(existing.sendNonce(na)))
+                            val reveal = assertNotNull(joiner.receiveNonce(send(existing, limiter)))
                             existing.receiveReveal(reveal.e, reveal.nb, limiter, now)
                             existing.reject(limiter, now)
                             assertEquals(PairingStage.SPENT, existing.stage())
@@ -91,7 +97,8 @@ class PairingTest {
                     }
                 }
                 assertFalse(limiter.mayStart(now))
-                PairingFailureLimiter.fromState(limiter.toState()).use { restored ->
+                val sealed = limiter.seal(deviceKey, account, ByteArray(32) { 2 })
+                PairingFailureLimiter.open(sealed, deviceKey, account, limiter.generation(), now).use { restored ->
                     assertFalse(restored.mayStart(now))
                     val e = assertFailsWith<AccountException.Refused> { AccountPairing.existingReceiveCommitment(account, ByteArray(32), restored, now) }
                     assertEquals("pairing:limit", e.code)
@@ -112,17 +119,17 @@ class PairingTest {
             second = Device(medium = first.medium.copy(), owner = owner)
             second.session.restore()
             key().use { key ->
-                PairingFailureLimiter.fromState("").use { limiter ->
+                PairingFailureLimiter.fresh().use { limiter ->
                     AccountPairing.join(account, key.public(), nb).use { joiner ->
                         AccountPairing.existingReceiveCommitment(account, joiner.commitment(), limiter, now).use { existing ->
-                            val reveal = assertNotNull(joiner.receiveNonce(existing.sendNonce(na)))
+                            val reveal = assertNotNull(joiner.receiveNonce(send(existing, limiter)))
                             existing.receiveReveal(reveal.e, reveal.nb, limiter, now)
                             assertFailsWith<AccountException> { first.session.transferSeed(existing) }
                             existing.confirm(); joiner.confirm()
                             val sealed = first.session.transferSeed(existing)
                             AccountPairing.joinQr(account, key.public(), ByteArray(32) { 9 }).use { other ->
                                 AccountPairing.existingScanQr(account, other.qrPayload(), limiter, now).use { scanner ->
-                                    other.receiveNonce(scanner.sendNonce(na))
+                                    other.receiveNonce(send(scanner, limiter))
                                     val before = second.medium.snapshot()
                                     assertFailsWith<AccountException> { second.session.acceptSeedTransfer(key, other, sealed, "Wrong") }
                                     val after = second.medium.snapshot()

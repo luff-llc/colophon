@@ -269,7 +269,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let tk = PairingTransferKey::create(host.fresh(32)).unwrap();
     let joiner = AccountPairing::join(account.clone(), tk.public(), host.fresh(32)).unwrap();
     assert_eq!(joiner.stage().unwrap(), PairingStage::Joiner);
-    let limiter = PairingFailureLimiter::from_state(String::new()).unwrap();
+    let limiter = PairingFailureLimiter::fresh();
     let existing = AccountPairing::existing_receive_commitment(
         account.clone(),
         joiner.commitment().unwrap(),
@@ -277,6 +277,8 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
         NOW,
     )
     .unwrap();
+    // The ledger is sealed (persisted, in an app) before the nonce leaves (§7.3).
+    limiter.seal(DEVICE_KEY.to_vec(), account.clone(), host.fresh(32)).unwrap();
     let na = existing.send_nonce(host.fresh(32)).unwrap();
     let reveal = joiner.receive_nonce(na).unwrap().unwrap();
     let shown = existing
@@ -295,7 +297,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
         PairingStage::Confirmed,
         "a wrong-stage call consumes nothing"
     );
-    assert!(limiter.to_state().unwrap().len() < 200);
+    assert!(limiter.may_start(NOW).unwrap(), "the confirmed ceremony gave its reservation back");
     let sealed = ctl.transfer_seed(existing.clone(), host.fresh(32)).unwrap();
     // A seed sealed to another pairing's key is refused.
     let other = PairingTransferKey::create(host.fresh(32)).unwrap();

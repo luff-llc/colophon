@@ -1491,7 +1491,11 @@ fn account(n: u8) -> AccountId {
 fn confirmed(acct: &AccountId, e: &[u8], nb: [u8; 32], na: [u8; 32]) -> ConfirmedPairing {
     QrJoiner::begin(acct, e, nb).unwrap().receive_nonce(na)
 }
+/// A permit for one protocol step. Since the ledger allows one live ceremony at a time, each step
+/// of these protocol-shape tests takes its permit from a ledger of its own; the ledger's rules
+/// have their own tests below and in `v05_freeze_approval`.
 fn permit(limiter: &mut FailureLimiter) -> Permit {
+    *limiter = FailureLimiter::new();
     limiter.permit(1_000).unwrap()
 }
 

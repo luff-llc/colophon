@@ -168,8 +168,10 @@ import Observation
     /// `pairing.digits()` the six digits to show. The person compares them with the approving device's: on a
     /// match `pairing.confirm()`, otherwise `rejectPairing(_:)` (and the approving device aborts too).
     public func beginJoinPairing() async throws -> AccountPairing { await restore(); return try await worker.beginJoinPairing() }
-    /// The approving device received the joining device's commitment: send `nonce` back. Five failed sessions in
-    /// an hour stop new ones (§7.3).
+    /// The approving device's person starts a ceremony for one incoming commitment: send `nonce` back. Call it only
+    /// when the person asked (an incoming commitment is never started by itself). One ceremony at a time: while one is
+    /// live (not confirmed, rejected or abandoned, and younger than ten minutes) another is refused; every start counts
+    /// toward five an hour until it confirms (§7.3).
     public func beginApproval(commitment: Data) async throws -> ApprovalStart {
         await restore(); return try await worker.beginApproval(commitment: commitment)
     }
@@ -180,6 +182,8 @@ import Observation
     }
     /// The codes differed or the person stopped: the session ends on this device and counts as a failure.
     public func rejectPairing(_ pairing: AccountPairing) async throws { try await worker.rejectPairing(pairing) }
+    /// Ends a ceremony this device started (the person cancelled, the other device went away). It stays counted.
+    public func abandonApproval(_ pairing: AccountPairing) async throws { try await worker.abandonApproval(pairing) }
     /// The approving device scanned a request from the joining device's screen (its canonical envelope, §9.1).
     /// Nothing is stored; approve the result's request with its pairing.
     public func scanRequest(_ data: Data) async throws -> ScannedRequest {

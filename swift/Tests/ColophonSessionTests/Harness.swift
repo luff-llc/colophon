@@ -6,19 +6,28 @@ import ColophonSession
 
 /// One device of a test account: a session over a shared medium, with software keys.
 @MainActor final class Device {
-    let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let home: URL
     let medium: MemoryMedium
     let member: SoftwareKeys
     let owner: SoftwareKeys
     let session: ColophonSession
+    let secrets: MemoryDeviceSecrets
+    private let makeSession: @MainActor () -> ColophonSession
     init(medium: MemoryMedium = MemoryMedium(), member: SoftwareKeys = SoftwareKeys(), owner: SoftwareKeys = SoftwareKeys(),
          homes: [HomeConfiguration] = [], createWithoutHome: Bool = true, recovery: SoftwareKeys? = nil, additional: [AdditionalController] = [], namespaces: [String] = ["reading.saved"],
          history: HistoryAccess? = nil, headQuorum: Int? = nil, clock: @escaping @Sendable () -> Date = { Date() }) {
         self.medium = medium; self.member = member; self.owner = owner
-        session = ColophonSession(configuration: .init(memberLabel: "Test device", namespaces: namespaces, location: .memory(medium),
-            privateContainer: home, keys: member, ownerController: owner, recoveryKeys: recovery, homes: homes, createWithoutHome: createWithoutHome, additionalControllers: additional,
-            deviceSecrets: MemoryDeviceSecrets(), history: history, headQuorum: headQuorum, now: clock))
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), secrets = MemoryDeviceSecrets()
+        self.home = home; self.secrets = secrets
+        makeSession = {
+            ColophonSession(configuration: .init(memberLabel: "Test device", namespaces: namespaces, location: .memory(medium),
+                privateContainer: home, keys: member, ownerController: owner, recoveryKeys: recovery, homes: homes, createWithoutHome: createWithoutHome, additionalControllers: additional,
+                deviceSecrets: secrets, history: history, headQuorum: headQuorum, now: clock))
+        }
+        session = makeSession()
     }
+    /// Another session over this device's medium, private container and device secrets: a relaunch.
+    func relaunch() -> ColophonSession { makeSession() }
     isolated deinit { try? FileManager.default.removeItem(at: home) }
 }
 

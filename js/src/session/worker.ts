@@ -494,15 +494,35 @@ export class SessionWorker {
 
   // Pairing before approval (§7.3, §9.1)
 
-  /** The five-failures-an-hour ledger (§7.3), kept in the private store so the limit holds across launches. It records failed sessions only, never a request. */
-  private async withLimiter<T>(body: (limiter: glue.PairingFailureLimiter) => T): Promise<T> {
-    const saved = await this.configuration.privateStore.read('pairing-limiter.json');
-    const limiter = glue.PairingFailureLimiter.from_state(saved ? new TextDecoder().decode(saved) : '');
-    try { return body(limiter); }
-    finally {
-      try { await this.configuration.privateStore.write('pairing-limiter.json', new TextEncoder().encode(limiter.to_state())); } catch { /* the ledger is kept on the next call */ }
-      limiter.free();
-    }
+  /**
+   * The pairing ledger of this device (§7.3): five failed sessions an hour and one ceremony at a time, enforced by the
+   * core. Kept sealed under the device key in the private store (`pairing-ledger.bin`), its generation recorded beside it
+   * (`pairing-ledger.generation`): a missing, edited or older ledger opens as a spent budget. It records sessions only,
+   * never a request. One instance per account lives in this worker, so a ceremony's handle and its ledger are the same.
+   */
+  private pairingLedgerHeld: { account: string; limiter: glue.PairingFailureLimiter } | undefined;
+  private async pairingLedger(account: string): Promise<glue.PairingFailureLimiter> {
+    if (this.pairingLedgerHeld?.account === account) return this.pairingLedgerHeld.limiter;
+    const store = this.configuration.privateStore;
+    const sealed = (await store.read('pairing-ledger.bin')) ?? new Uint8Array(0);
+    const floorBytes = await store.read('pairing-ledger.generation');
+    const floor = floorBytes ? BigInt(new TextDecoder().decode(floorBytes).trim() || '0') : 0n;
+    const key = await this.configuration.deviceSecrets.key(account);
+    let opened: glue.PairingFailureLimiter;
+    try { opened = key.lend(k => glue.PairingFailureLimiter.open(sealed, k, account, floor, BigInt(this.nowMs))); } finally { key.close(); }
+    this.pairingLedgerHeld?.limiter.free();
+    this.pairingLedgerHeld = { account, limiter: opened };
+    return opened;
+  }
+  /** Persists the sealed ledger, then its generation. Throws when either cannot be written: a start is then never answered with a nonce (fail closed). */
+  private async keepLedger(account: string): Promise<void> {
+    const ledger = this.pairingLedgerHeld;
+    if (ledger?.account !== account) return;
+    const key = await this.configuration.deviceSecrets.key(account);
+    let sealed: Uint8Array;
+    try { sealed = key.lend(k => withEntropy(32, entropy => ledger.limiter.seal(k, account, entropy))); } finally { key.close(); }
+    await this.configuration.privateStore.write('pairing-ledger.bin', sealed);
+    await this.configuration.privateStore.write('pairing-ledger.generation', new TextEncoder().encode(ledger.limiter.generation().toString()));
   }
   /** The joining device: a code-path pairing for its own member key. Send `commitment()` with the request. */
   beginJoinPairing(): Promise<glue.AccountPairing> {
@@ -515,36 +535,64 @@ export class SessionWorker {
       return withEntropy(32, nb => glue.AccountPairing.join(account, e, nb));
     });
   }
-  /** The approving device received the joining device's commitment: a session (counted by the limiter) and the nonce to send back. */
+  /**
+   * The approving device's person started a ceremony for one incoming commitment: a session that reserves one of the five an
+   * hour, and the nonce to send back. While another is live this is refused (`pairing:busy`); the reservation is persisted
+   * before the nonce exists, and if it cannot be, no nonce is produced.
+   */
   beginApproval(commitment: Uint8Array): Promise<ApprovalStart> {
     return this.gated(async () => {
       if (!this.engine) await this.reconcile();
       const account = this.accountId;
       if (account === undefined) throw new SessionError('notReady');
-      return this.withLimiter(limiter => {
-        const pairing = glue.AccountPairing.existing_receive_commitment(account, commitment, limiter, BigInt(this.nowMs));
-        return { pairing, nonce: withEntropy(32, na => pairing.send_nonce(na)) };
-      });
+      const limiter = await this.pairingLedger(account);
+      const pairing = glue.AccountPairing.existing_receive_commitment(account, commitment, limiter, BigInt(this.nowMs));
+      try { await this.keepLedger(account); } catch (error) { try { pairing.abandon(BigInt(this.nowMs)); } catch { /* ended */ } pairing.free(); throw error; }
+      return { pairing, nonce: withEntropy(32, na => pairing.send_nonce(na)) };
     });
   }
-  /** The approving device received the reveal: the six digits both screens show. A reveal that does not open the commitment aborts and counts as a failure. */
+  /** The approving device received the reveal: the six digits both screens show. A mismatch or a reveal after the ten-minute timeout aborts (it stays counted). */
   approvalCode(pairing: glue.AccountPairing, e: Uint8Array, nb: Uint8Array): Promise<string> {
-    return this.gated(() => this.withLimiter(limiter => pairing.receive_reveal(e, nb, limiter, BigInt(this.nowMs))));
+    return this.gated(async () => {
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const limiter = await this.pairingLedger(account);
+      // The start was persisted counted, so a failure needs no write to stay counted; the ledger is kept anyway.
+      try { return pairing.receive_reveal(e, nb, limiter, BigInt(this.nowMs)); }
+      catch (error) { try { await this.keepLedger(account); } catch { /* counted already */ } throw error; }
+    });
   }
-  /** The codes did not match (or the person stopped): the session ends on this device and counts as a failure. */
+  /** The codes did not match (or the person stopped): the session ends on this device, counted. */
   rejectPairing(pairing: glue.AccountPairing): Promise<void> {
-    return this.gated(() => this.withLimiter(limiter => pairing.reject(limiter, BigInt(this.nowMs))));
+    return this.gated(async () => {
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const stage = pairing.stage();
+      if (stage === glue.PairingStage.Code || stage === glue.PairingStage.Revealed) pairing.reject(await this.pairingLedger(account), BigInt(this.nowMs));
+      else pairing.abandon(BigInt(this.nowMs));
+      await this.keepLedger(account);
+    });
   }
-  /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored. */
+  /** Ends a ceremony this device started, in any stage before it is confirmed. It stays counted. */
+  abandonApproval(pairing: glue.AccountPairing): Promise<void> {
+    return this.gated(async () => {
+      pairing.abandon(BigInt(this.nowMs));
+      if (this.accountId !== undefined) await this.keepLedger(this.accountId);
+    });
+  }
+  /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored about the request. */
   scanRequest(data: Uint8Array): Promise<ScannedRequest> {
     return this.gated(async () => {
       if (!this.engine) await this.reconcile();
       const account = this.accountId;
       if (account === undefined) throw new SessionError('notReady');
-      return this.withLimiter(limiter => {
-        const pairing = glue.AccountPairing.scan_request(account, data, limiter, BigInt(this.nowMs));
-        return { request: accessRequest(plain<RequestInfo>(glue.account_request_info(data))), pairing };
-      });
+      const limiter = await this.pairingLedger(account);
+      let pairing: glue.AccountPairing | undefined;
+      let failure: unknown;
+      try { pairing = glue.AccountPairing.scan_request(account, data, limiter, BigInt(this.nowMs)); } catch (error) { failure = error; }
+      await this.keepLedger(account);
+      if (pairing === undefined) throw failure;
+      return { request: accessRequest(plain<RequestInfo>(glue.account_request_info(data))), pairing };
     });
   }
 
@@ -602,6 +650,8 @@ export class SessionWorker {
     return this.ownerOperation(signal, async (owner, custody, ownerId, waiting) => {
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
       await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(request.record, termsJson ?? request.termsJson, signers, pairing, entropy)), this.persistOn(owner), waiting);
+      // The confirmed pairing gave its reservation back; keep the ledger (a lost write only leaves it counted).
+      if (this.accountId !== undefined) { try { await this.keepLedger(this.accountId); } catch { /* stays counted */ } }
     });
   }
   revoke(member: string, signal?: AbortSignal): Promise<SessionSnapshot> {
@@ -787,8 +837,11 @@ export class SessionWorker {
       const memberRaw = await this.ownRequestBytes(waiting);
       // This device made the request itself, with its own member key: there is no second device to pair with, so it reads
       // its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
-      const fresh = glue.PairingFailureLimiter.from_state('');
-      const own = glue.AccountPairing.scan_request(account, memberRaw, fresh, BigInt(this.nowMs));
+      // The creation's engine keeps the time it opened at; bring it to the scan's time, which the pairing may not precede (§9.1).
+      const at = BigInt(this.nowMs);
+      plain(owner.run(e => e.advance(at)));
+      const fresh = glue.PairingFailureLimiter.fresh();
+      const own = glue.AccountPairing.scan_request(account, memberRaw, fresh, at);
       fresh.free();
       const memberTerms = terms(this.configuration.namespaces, this.access);
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);

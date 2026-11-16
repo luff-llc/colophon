@@ -8,14 +8,23 @@
 //! confirmed on the approving device (`confirm`), and the canonical request envelope scanned from
 //! the joining device (`scan_request`), the scan path's one payload (§9.1). The pairing QR
 //! (`existing_scan_qr`) moves the seed and does not approve.
+//!
+//! **One ceremony at a time, every start counted.** An existing device's sessions start from its
+//! `PairingFailureLimiter`, the sealed ledger of §7.3. Starting one reserves one of the five an
+//! hour; only a confirmed pairing gives it back. While one is live (not ended, younger than ten
+//! minutes) another start is refused (`pairing:busy`) and never yields a nonce. The session's
+//! nonce (`send_nonce`) is refused (`pairing:unsealed`) until the host took the sealed ledger
+//! (`seal`) after the start, so a host that cannot persist it never sends one. `abandon` ends a
+//! session, counted; dropping the object does the same.
 use super::fault::AccountError;
 use super::types::*;
 use super::{guard, Cell};
 use colophon_core::v05::ids::AccountId;
 use colophon_core::v05::pairing::{
     scanned_request, ConfirmedPairing, ExistingAwaitingReveal, ExistingWaiting, FailureLimiter,
-    Joiner, PairingAbort, PairingCode, QrJoiner, QrPayload, ScannedQr, TransferKey,
+    Joiner, PairingAbort, PairingCode, PermitRefused, QrJoiner, QrPayload, ScannedQr, TransferKey,
 };
+use std::sync::Arc;
 
 type R<T> = Result<T, AccountError>;
 
@@ -25,77 +34,143 @@ fn abort(a: PairingAbort) -> AccountError {
         PairingAbort::InvalidPoint => "invalidPoint",
         PairingAbort::WrongAccount => "wrongAccount",
         PairingAbort::InvalidRequest => "invalidRequest",
+        PairingAbort::Timeout => "timeout",
     };
     AccountError::Malformed {
         code: format!("pairing:{code}"),
         detail: a.to_string(),
     }
 }
-fn limit_error(e: impl std::fmt::Display) -> AccountError {
+fn permit_error(e: PermitRefused) -> AccountError {
+    let (code, reason) = match e {
+        PermitRefused::LimitReached => ("pairing:limit", "pairingLimit"),
+        PermitRefused::CeremonyLive => ("pairing:busy", "pairingBusy"),
+    };
     AccountError::Refused {
-        code: "pairing:limit".into(),
-        reason: "pairingLimit".into(),
+        code: code.into(),
+        reason: reason.into(),
         detail: e.to_string(),
     }
 }
 fn account_id(s: &str) -> R<AccountId> {
     Ok(AccountId::parse(s)?)
 }
+fn device_key(key: &[u8]) -> R<[u8; 32]> {
+    fixed::<32>(key, "device key")
+}
 
-/// The five-failures-per-hour ledger of an existing device (§7.3). Plain data the host keeps:
-/// persist `to_state` and restore it with `from_state`, or the limit holds only for this process.
+/// The pairing ledger of an existing device (§7.3): five failed sessions an hour, one ceremony at
+/// a time. The host persists it sealed: `seal` after every change, `open` on start. An edited,
+/// foreign or unreadable ledger, or one older than the generation the host recorded beside it,
+/// opens as a spent budget.
 #[cfg_attr(feature = "native05", derive(uniffi::Object))]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 pub struct PairingFailureLimiter {
-    l: Cell<FailureLimiter>,
+    pub(crate) l: Arc<Cell<FailureLimiter>>,
 }
 impl PairingFailureLimiter {
-    fn from_state_inner(state: String) -> R<Self> {
-        guard(|| {
-            let l: FailureLimiter = if state.is_empty() {
-                FailureLimiter::new()
-            } else {
-                if state.len() > 1 << 16 {
-                    return Err(AccountError::bound("limiter state is over 64 KiB"));
-                }
-                serde_json::from_str(&state)
-                    .map_err(|_| AccountError::bad("not a limiter state"))?
-            };
-            Ok(Self { l: Cell::new(l) })
-        })
+    fn wrap(l: FailureLimiter) -> Self {
+        Self {
+            l: Arc::new(Cell::new(l)),
+        }
+    }
+    fn open_inner(
+        sealed: Vec<u8>,
+        key: Vec<u8>,
+        account: String,
+        floor: u64,
+        now_ms: i64,
+    ) -> R<Self> {
+        let mut key = key;
+        let r = guard(|| {
+            bytes_ok(&sealed, 1 << 20, "a sealed ledger")?;
+            let k = device_key(&key)?;
+            Ok(Self::wrap(FailureLimiter::open(
+                &sealed,
+                &account_id(&account)?,
+                &k,
+                floor,
+                now_ms,
+            )))
+        });
+        wipe(&mut key);
+        r
     }
 }
 #[cfg_attr(feature = "native05", uniffi::export)]
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 impl PairingFailureLimiter {
-    /// The state to persist (an opaque text the host stores and gives back).
-    pub fn to_state(&self) -> Result<String, AccountError> {
-        guard(|| {
-            serde_json::to_string(&*self.l.lock()?)
-                .map_err(|_| AccountError::internal("a result could not be written"))
-        })
+    /// The ledger sealed for `account` under the device-held key, to persist (with `generation`
+    /// recorded beside it) before acting on the change. 32 bytes of entropy.
+    pub fn seal(&self, device_key: Vec<u8>, account: String, entropy: Vec<u8>) -> Result<Vec<u8>, AccountError> {
+        let (mut key, mut entropy) = (device_key, entropy);
+        let r = guard(|| {
+            let k = self::device_key(&key)?;
+            let seed = fixed::<32>(&entropy, "entropy")?;
+            Ok(self.l.lock()?.seal(&account_id(&account)?, &k, seed)?)
+        });
+        wipe(&mut key);
+        wipe(&mut entropy);
+        r
     }
-    /// Whether a session may start now.
+    /// The ledger's generation, raised by every change: record it beside the sealed ledger.
+    pub fn generation(&self) -> Result<u64, AccountError> {
+        guard(|| Ok(self.l.lock()?.generation()))
+    }
+    /// Whether a session may start now (none live, budget left).
     pub fn may_start(&self, now_ms: i64) -> Result<bool, AccountError> {
         guard(|| Ok(self.l.lock()?.may_start(now_ms)))
+    }
+    /// Whether a ceremony is live now.
+    pub fn is_live(&self, now_ms: i64) -> Result<bool, AccountError> {
+        guard(|| Ok(self.l.lock()?.is_live(now_ms)))
     }
 }
 #[cfg(feature = "native05")]
 #[uniffi::export]
 impl PairingFailureLimiter {
-    /// A limiter from saved state, or a fresh one from an empty string.
+    /// A new, empty ledger held in memory (a device that keeps none, or a test).
     #[uniffi::constructor]
-    pub fn from_state(state: String) -> Result<std::sync::Arc<Self>, AccountError> {
-        Self::from_state_inner(state).map(std::sync::Arc::new)
+    pub fn fresh() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::wrap(FailureLimiter::new()))
+    }
+    /// The ledger the host stored for `account` (empty when none), opened under the device-held
+    /// key; `floor` is the generation the host recorded beside it (0 when none).
+    #[uniffi::constructor]
+    pub fn open(
+        sealed: Vec<u8>,
+        device_key: Vec<u8>,
+        account: String,
+        floor: u64,
+        now_ms: i64,
+    ) -> Result<std::sync::Arc<Self>, AccountError> {
+        Self::open_inner(sealed, device_key, account, floor, now_ms).map(std::sync::Arc::new)
     }
 }
 #[cfg(feature = "web05")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 impl PairingFailureLimiter {
-    /// A limiter from saved state, or a fresh one from an empty string.
-    pub fn from_state(state: String) -> Result<PairingFailureLimiter, AccountError> {
-        Self::from_state_inner(state)
+    /// A new, empty ledger held in memory.
+    pub fn fresh() -> PairingFailureLimiter {
+        Self::wrap(FailureLimiter::new())
     }
+    /// The ledger the host stored for `account`, opened under the device-held key.
+    pub fn open(
+        sealed: Vec<u8>,
+        device_key: Vec<u8>,
+        account: String,
+        floor: u64,
+        now_ms: i64,
+    ) -> Result<PairingFailureLimiter, AccountError> {
+        Self::open_inner(sealed, device_key, account, floor, now_ms)
+    }
+}
+
+/// The ledger and reservation of an existing-side session.
+struct Gate {
+    l: Arc<Cell<FailureLimiter>>,
+    id: u64,
+    generation: u64,
 }
 
 enum Stage {
@@ -131,10 +206,93 @@ impl Stage {
 #[cfg_attr(feature = "web05", wasm_bindgen::prelude::wasm_bindgen)]
 pub struct AccountPairing {
     st: Cell<Stage>,
+    /// On the existing side: the ledger and the reservation this session holds.
+    gate: std::sync::Mutex<Option<Gate>>,
+}
+impl Drop for AccountPairing {
+    /// A session dropped before it ended is abandoned: its reservation stays counted (§7.3).
+    fn drop(&mut self) {
+        let live = self
+            .st
+            .lock()
+            .map(|s| {
+                matches!(
+                    s.kind(),
+                    PairingStage::Waiting
+                        | PairingStage::AwaitingReveal
+                        | PairingStage::Code
+                        | PairingStage::Scanned
+                )
+            })
+            .unwrap_or(true);
+        if live {
+            self.end_gate(i64::MIN);
+        }
+    }
 }
 impl AccountPairing {
     fn new(s: Stage) -> Self {
-        Self { st: Cell::new(s) }
+        Self {
+            st: Cell::new(s),
+            gate: std::sync::Mutex::new(None),
+        }
+    }
+    fn gated(s: Stage, l: &Arc<Cell<FailureLimiter>>, id: u64, generation: u64) -> Self {
+        Self {
+            st: Cell::new(s),
+            gate: std::sync::Mutex::new(Some(Gate {
+                l: l.clone(),
+                id,
+                generation,
+            })),
+        }
+    }
+    /// End this session's reservation, counted, and forget the gate.
+    fn end_gate(&self, now_ms: i64) {
+        let gate = self.gate.lock().ok().and_then(|mut g| g.take());
+        if let Some(g) = gate {
+            if let Ok(mut l) = g.l.lock() {
+                l.end_reservation(g.id, now_ms);
+            }
+        }
+    }
+    /// Give this session's reservation back for the confirmed pairing `c`.
+    fn release_gate(&self, c: &ConfirmedPairing) {
+        let gate = self.gate.lock().ok().and_then(|mut g| g.take());
+        if let Some(g) = gate {
+            if let Ok(mut l) = g.l.lock() {
+                l.release(c);
+            }
+        }
+    }
+    /// The ledger this session started from; refused when `limiter` is another one.
+    fn gate_ledger(&self, limiter: &PairingFailureLimiter) -> R<Arc<Cell<FailureLimiter>>> {
+        let g = self
+            .gate
+            .lock()
+            .map_err(|_| AccountError::internal("the pairing gate"))?;
+        match &*g {
+            Some(g) if Arc::ptr_eq(&g.l, &limiter.l) => Ok(g.l.clone()),
+            Some(_) => Err(AccountError::bad("this session started from another ledger")),
+            None => Ok(limiter.l.clone()),
+        }
+    }
+    /// The nonce goes only after the host took the sealed ledger since this session began.
+    fn require_sealed(&self) -> R<()> {
+        let g = self
+            .gate
+            .lock()
+            .map_err(|_| AccountError::internal("the pairing gate"))?;
+        if let Some(g) = &*g {
+            if !g.l.lock()?.sealed_since(g.generation) {
+                return Err(AccountError::Refused {
+                    code: "pairing:unsealed".into(),
+                    reason: "pairingUnsealed".into(),
+                    detail: "persist the sealed ledger (seal) before sending the nonce".into(),
+                });
+            }
+        }
+        Ok(())
     }
     /// Run a step only in the stages `allowed`; otherwise nothing is consumed.
     fn step<T>(&self, allowed: &[PairingStage], f: impl FnOnce(Stage) -> R<(Stage, T)>) -> R<T> {
@@ -176,10 +334,12 @@ impl AccountPairing {
     ) -> R<Self> {
         guard(|| {
             let c = fixed::<32>(&commitment, "commitment")?;
-            let permit = limiter.l.lock()?.permit(now_ms).map_err(limit_error)?;
-            Ok(Self::new(Stage::Waiting(
-                ExistingWaiting::receive_commitment(&account_id(&account)?, c, permit),
-            )))
+            let acct = account_id(&account)?;
+            let permit = limiter.l.lock()?.permit(now_ms).map_err(permit_error)?;
+            let generation = permit.generation();
+            let w = ExistingWaiting::receive_commitment(&acct, c, permit);
+            let id = w.reservation();
+            Ok(Self::gated(Stage::Waiting(w), &limiter.l, id, generation))
         })
     }
     fn scan_qr_inner(
@@ -191,9 +351,14 @@ impl AccountPairing {
         guard(|| {
             bytes_ok(&payload, 4096, "a QR payload")?;
             let p = QrPayload::from_bytes(&payload)?;
-            let permit = limiter.l.lock()?.permit(now_ms).map_err(limit_error)?;
-            match ScannedQr::scan(&account_id(&account)?, &p, permit) {
-                Ok(s) => Ok(Self::new(Stage::Scanned(s))),
+            let acct = account_id(&account)?;
+            let permit = limiter.l.lock()?.permit(now_ms).map_err(permit_error)?;
+            let generation = permit.generation();
+            match ScannedQr::scan(&acct, &p, permit) {
+                Ok(s) => {
+                    let id = s.reservation();
+                    Ok(Self::gated(Stage::Scanned(s), &limiter.l, id, generation))
+                }
                 Err(e) => {
                     limiter.l.lock()?.record_failure(now_ms);
                     Err(abort(e))
@@ -211,9 +376,14 @@ impl AccountPairing {
             // A request envelope: a body of at most 16 KiB and a signature, in JSON.
             bytes_ok(&request, 1 << 16, "a request")?;
             let acct = account_id(&account)?;
-            let permit = limiter.l.lock()?.permit(now_ms).map_err(limit_error)?;
+            let permit = limiter.l.lock()?.permit(now_ms).map_err(permit_error)?;
             match scanned_request(&acct, &request, permit) {
-                Ok(c) => Ok(Self::new(Stage::Confirmed(c))),
+                // A request read from the joining device's screen confirms at once: its
+                // reservation goes back and nothing is left live.
+                Ok(c) => {
+                    limiter.l.lock()?.release(&c);
+                    Ok(Self::new(Stage::Confirmed(c)))
+                }
                 Err(e) => {
                     limiter.l.lock()?.record_failure(now_ms);
                     Err(abort(e))
@@ -251,9 +421,10 @@ impl AccountPairing {
         guard(|| {
             bytes_ok(&e, 65, "a point")?;
             let nb = fixed::<32>(&nb, "nonce")?;
+            let ledger = self.gate_ledger(limiter)?;
             self.step(&[PairingStage::AwaitingReveal], |s| match s {
                 Stage::AwaitingReveal(a) => {
-                    let mut l = limiter.l.lock()?;
+                    let mut l = ledger.lock()?;
                     let code = a.finish_limited(&e, &nb, &mut l, now_ms).map_err(abort)?;
                     let digits = code.digits().to_string();
                     Ok((Stage::Code(code), digits))
@@ -263,9 +434,10 @@ impl AccountPairing {
         })
     }
     fn reject_inner(&self, limiter: &PairingFailureLimiter, now_ms: i64) -> R<()> {
+        let ledger = self.gate_ledger(limiter)?;
         self.step(&[PairingStage::Code, PairingStage::Revealed], |s| match s {
             Stage::Code(c) | Stage::Revealed(c) => {
-                c.reject(&mut *limiter.l.lock()?, now_ms);
+                c.reject(&mut *ledger.lock()?, now_ms);
                 Ok((Stage::Spent, ()))
             }
             _ => Err(AccountError::internal("stage")),
@@ -300,6 +472,7 @@ impl AccountPairing {
     /// the QR path this confirms the pairing at once.
     pub fn send_nonce(&self, na: Vec<u8>) -> Result<Vec<u8>, AccountError> {
         let na = guard(|| fixed::<32>(&na, "nonce"))?;
+        guard(|| self.require_sealed())?;
         self.step(
             &[PairingStage::Waiting, PairingStage::Scanned],
             |s| match s {
@@ -309,6 +482,7 @@ impl AccountPairing {
                 }
                 Stage::Scanned(q) => {
                     let (c, n) = q.send_nonce(na);
+                    self.release_gate(&c);
                     Ok((Stage::Confirmed(c), n.to_vec()))
                 }
                 _ => Err(AccountError::internal("stage")),
@@ -344,11 +518,35 @@ impl AccountPairing {
             _ => Err(AccountError::consumed("there is no code in this stage")),
         })
     }
-    /// The person saw the same code on both screens.
+    /// The person saw the same code on both screens. On the existing device the ceremony's
+    /// reservation goes back: a confirmed pairing is not a failure.
     pub fn confirm(&self) -> Result<(), AccountError> {
         self.step(&[PairingStage::Code, PairingStage::Revealed], |s| match s {
-            Stage::Revealed(c) | Stage::Code(c) => Ok((Stage::Confirmed(c.confirm()), ())),
+            Stage::Revealed(c) | Stage::Code(c) => {
+                let c = c.confirm();
+                self.release_gate(&c);
+                Ok((Stage::Confirmed(c), ()))
+            }
             _ => Err(AccountError::internal("stage")),
+        })
+    }
+    /// End the session now, in any stage before it is confirmed: abandoned, it stays counted in
+    /// the existing device's ledger (§7.3). A confirmed or spent session is left as it is.
+    pub fn abandon(&self, now_ms: i64) -> Result<(), AccountError> {
+        guard(|| {
+            let ended = {
+                let mut g = self.st.lock()?;
+                if matches!(g.kind(), PairingStage::Confirmed | PairingStage::Spent) {
+                    false
+                } else {
+                    *g = Stage::Spent;
+                    true
+                }
+            };
+            if ended {
+                self.end_gate(now_ms);
+            }
+            Ok(())
         })
     }
 }
@@ -538,13 +736,29 @@ impl PairingTransferKey {
 mod tests {
     use super::*;
 
+    const KEY: [u8; 32] = [0x44; 32];
+
+    fn account() -> String {
+        "ab".repeat(32)
+    }
+    fn point(n: u8) -> Vec<u8> {
+        TransferKey::new([n; 32]).unwrap().public()
+    }
+    fn seal(limiter: &PairingFailureLimiter) -> Vec<u8> {
+        limiter.seal(KEY.to_vec(), account(), vec![9; 32]).unwrap()
+    }
+    fn commitment_of(e: &[u8], nb: [u8; 32]) -> Vec<u8> {
+        colophon_core::v05::pairing::commitment(&AccountId::parse(&account()).unwrap(), e, &nb)
+            .unwrap()
+            .to_vec()
+    }
+
     fn confirmed_qr() -> AccountPairing {
-        let account = "ab".repeat(32);
-        let e = TransferKey::new([1; 32]).unwrap().public();
-        let limiter = PairingFailureLimiter::from_state_inner(String::new()).unwrap();
-        let j = AccountPairing::join_qr_inner(account.clone(), e, vec![2; 32]).unwrap();
+        let limiter = PairingFailureLimiter::wrap(FailureLimiter::new());
+        let j = AccountPairing::join_qr_inner(account(), point(1), vec![2; 32]).unwrap();
         let payload = j.qr_payload().unwrap();
-        let h = AccountPairing::scan_qr_inner(account, payload, &limiter, 0).unwrap();
+        let h = AccountPairing::scan_qr_inner(account(), payload, &limiter, 0).unwrap();
+        seal(&limiter);
         h.send_nonce(vec![3; 32]).unwrap();
         h
     }
@@ -566,9 +780,7 @@ mod tests {
     /// A pairing that is not confirmed is refused and left as it was.
     #[test]
     fn an_unconfirmed_pairing_is_refused_and_kept() {
-        let account = "ab".repeat(32);
-        let e = TransferKey::new([1; 32]).unwrap().public();
-        let j = AccountPairing::join_inner(account, e, vec![2; 32]).unwrap();
+        let j = AccountPairing::join_inner(account(), point(1), vec![2; 32]).unwrap();
         assert!(j.require_confirmed().is_err());
         assert!(j.take_confirmed().is_err());
         assert_eq!(j.stage().unwrap(), PairingStage::Joiner);
@@ -578,11 +790,112 @@ mod tests {
     /// A scanned request that does not verify is refused and counts as a failure.
     #[test]
     fn a_bad_scanned_request_is_a_failure() {
-        let limiter = PairingFailureLimiter::from_state_inner(String::new()).unwrap();
+        let limiter = PairingFailureLimiter::wrap(FailureLimiter::new());
         for _ in 0..5 {
-            let r = AccountPairing::scan_request_inner("ab".repeat(32), b"{}".to_vec(), &limiter, 0);
+            let r = AccountPairing::scan_request_inner(account(), b"{}".to_vec(), &limiter, 0);
             assert!(matches!(r, Err(AccountError::Malformed { ref code, .. }) if code == "pairing:invalidRequest"));
         }
         assert!(!limiter.may_start(0).unwrap(), "five failures close the hour");
+    }
+
+    /// A second commitment while one ceremony is live is refused and yields no nonce.
+    #[test]
+    fn a_second_commitment_while_one_is_live_is_refused() {
+        let limiter = PairingFailureLimiter::wrap(FailureLimiter::new());
+        let first = AccountPairing::receive_commitment_inner(account(), commitment_of(&point(1), [1; 32]), &limiter, 0).unwrap();
+        let second = AccountPairing::receive_commitment_inner(account(), commitment_of(&point(2), [2; 32]), &limiter, 1);
+        assert!(matches!(second, Err(AccountError::Refused { ref code, .. }) if code == "pairing:busy"));
+        seal(&limiter);
+        assert!(first.send_nonce(vec![7; 32]).is_ok());
+    }
+
+    /// The attack of the check: a relay starts many sessions with its own keys beside the honest
+    /// one, to pick the one whose code matches. Only the first start yields a nonce; every other
+    /// is refused, so the relay has one code to match, not hundreds of thousands.
+    #[test]
+    fn many_parallel_starts_yield_at_most_one_nonce() {
+        let limiter = PairingFailureLimiter::wrap(FailureLimiter::new());
+        let mut nonces = 0;
+        let mut held = Vec::new();
+        for i in 0..1_000u32 {
+            let e = point((i % 200) as u8 + 1);
+            let nb = [(i % 251) as u8; 32];
+            if let Ok(p) = AccountPairing::receive_commitment_inner(account(), commitment_of(&e, nb), &limiter, i64::from(i)) {
+                seal(&limiter);
+                if p.send_nonce(vec![5; 32]).is_ok() {
+                    nonces += 1;
+                }
+                held.push(p);
+            }
+        }
+        assert_eq!(nonces, 1, "one live ceremony, one nonce");
+    }
+
+    /// The nonce is refused until the host took the sealed ledger after the start: a host that
+    /// cannot persist it never sends one.
+    #[test]
+    fn without_a_sealed_ledger_there_is_no_nonce() {
+        let limiter = PairingFailureLimiter::wrap(FailureLimiter::new());
+        let p = AccountPairing::receive_commitment_inner(account(), commitment_of(&point(1), [1; 32]), &limiter, 0).unwrap();
+        assert!(matches!(p.send_nonce(vec![7; 32]), Err(AccountError::Refused { ref code, .. }) if code == "pairing:unsealed"));
+        assert_eq!(p.stage().unwrap(), PairingStage::Waiting, "nothing consumed");
+        seal(&limiter);
+        assert!(p.send_nonce(vec![7; 32]).is_ok());
+    }
+
+    /// An abandoned ceremony, or a dropped one, stays counted; a confirmed one gives its
+    /// reservation back.
+    #[test]
+    fn abandoned_and_dropped_ceremonies_count_and_a_confirmed_one_does_not() {
+        let limiter = PairingFailureLimiter::wrap(FailureLimiter::new());
+        for i in 0..4 {
+            let p = AccountPairing::receive_commitment_inner(account(), commitment_of(&point(1), [i; 32]), &limiter, i64::from(i)).unwrap();
+            if i % 2 == 0 {
+                p.abandon(i64::from(i)).unwrap();
+            } else {
+                drop(p);
+            }
+            assert!(!limiter.is_live(i64::from(i)).unwrap());
+        }
+        // A confirmed code ceremony: J and H agree, H confirms, the budget is back to four used.
+        let e = point(3);
+        let j = AccountPairing::join_inner(account(), e.clone(), vec![4; 32]).unwrap();
+        let h = AccountPairing::receive_commitment_inner(account(), j.commitment().unwrap(), &limiter, 10).unwrap();
+        seal(&limiter);
+        let na = h.send_nonce(vec![6; 32]).unwrap();
+        let r = j.receive_nonce(na).unwrap().unwrap();
+        let digits = h.reveal_inner(r.e, r.nb, &limiter, 11).unwrap();
+        assert_eq!(digits, j.digits().unwrap());
+        h.confirm().unwrap();
+        assert!(limiter.may_start(12).unwrap(), "four counted, the confirmed one given back");
+        let p = AccountPairing::receive_commitment_inner(account(), commitment_of(&point(1), [9; 32]), &limiter, 13).unwrap();
+        p.abandon(13).unwrap();
+        assert!(!limiter.may_start(14).unwrap(), "five counted");
+    }
+
+    /// A rolled-back, edited, foreign or missing ledger does not restore the budget.
+    #[test]
+    fn a_rolled_back_ledger_does_not_restore_the_budget() {
+        let limiter = PairingFailureLimiter::wrap(FailureLimiter::new());
+        let early = seal(&limiter);
+        let early_generation = limiter.generation().unwrap();
+        for i in 0..5 {
+            let p = AccountPairing::receive_commitment_inner(account(), commitment_of(&point(1), [i; 32]), &limiter, i64::from(i)).unwrap();
+            p.abandon(i64::from(i)).unwrap();
+        }
+        let late = seal(&limiter);
+        let floor = limiter.generation().unwrap();
+        assert!(floor > early_generation);
+        let open = |b: &[u8], f: u64| PairingFailureLimiter::open_inner(b.to_vec(), KEY.to_vec(), account(), f, 10).unwrap();
+        assert!(!open(&late, floor).may_start(10).unwrap(), "the real ledger: spent");
+        assert!(!open(&early, floor).may_start(10).unwrap(), "an older ledger opens as spent");
+        assert!(!open(&[], floor).may_start(10).unwrap(), "a missing ledger with a floor opens as spent");
+        let mut edited = late.clone();
+        let n = edited.len() - 1;
+        edited[n] ^= 1;
+        assert!(!open(&edited, 0).may_start(10).unwrap(), "an edited ledger opens as spent");
+        let other = PairingFailureLimiter::open_inner(late.clone(), [0x45; 32].to_vec(), account(), 0, 10).unwrap();
+        assert!(!other.may_start(10).unwrap(), "another device key: spent");
+        assert!(open(&[], 0).may_start(10).unwrap(), "no ledger and no floor: a new device");
     }
 }

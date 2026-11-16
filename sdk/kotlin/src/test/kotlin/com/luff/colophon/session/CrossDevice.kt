@@ -69,7 +69,8 @@ private class CrossDriver {
     /** The approval ceremony's session on this device (§7.3, §9.1); on the approving device, the request that came with the commitment. */
     private var approval: AccountPairing? = null
     private var approvalRequest: ByteArray? = null
-    private val limiter = PairingFailureLimiter.fromState("")
+    private val limiter = PairingFailureLimiter.fresh()
+    private var pairingAccount = ""
     private val refused = Collections.synchronizedList(ArrayList<String>())
     private fun state(): Map<String, Any?> {
         val s = session ?: return mapOf()
@@ -136,11 +137,16 @@ private class CrossDriver {
             }
             "scan" -> {
                 pairing?.close()
+                pairingAccount = text("account")
                 pairing = if (text("mode") == "qr") AccountPairing.existingScanQr(text("account"), data("qr"), limiter, 1000)
                     else AccountPairing.existingReceiveCommitment(text("account"), data("commitment"), limiter, 1000)
                 return true
             }
-            "nonce" -> return encode(pairing!!.sendNonce(data("na")))
+            "nonce" -> {
+                // The ledger is sealed (an app persists it) before the nonce leaves (§7.3).
+                limiter.seal(ByteArray(32) { 0x44 }, pairingAccount, ByteArray(32) { 1 })
+                return encode(pairing!!.sendNonce(data("na")))
+            }
             "receiveNonce" -> {
                 val r = pairing!!.receiveNonce(data("na"))
                 return if (r == null) mapOf("stage" to pairing!!.stage().name.lowercase()) else mapOf("e" to encode(r.e), "nb" to encode(r.nb), "digits" to pairing!!.digits())

@@ -29,6 +29,7 @@ import com.luff.colophon.ListedPath
 import com.luff.colophon.Notices
 import com.luff.colophon.PairingTransferKey
 import com.luff.colophon.PairingFailureLimiter
+import com.luff.colophon.PairingStage
 import com.luff.colophon.Report
 import com.luff.colophon.RequestInfo
 import com.luff.colophon.RequestSpec
@@ -490,12 +491,30 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
 
     // Pairing before approval (§7.3, §9.1)
 
-    /** The five-failures-an-hour ledger (§7.3), kept in the private directory so the limit holds across launches. It records failed sessions only, never a request. */
-    private val limiterFile = File(configuration.privateDirectory, "pairing-limiter.json")
-    private fun <T> withLimiter(body: (PairingFailureLimiter) -> T): T {
-        val state = AtomicFile.read(limiterFile, 1 shl 16)?.toString(Charsets.UTF_8) ?: ""
-        val limiter = PairingFailureLimiter.fromState(state)
-        try { return body(limiter) } finally { runCatching { AtomicFile.write(limiterFile, limiter.toState().toByteArray(Charsets.UTF_8)) } }
+    /**
+     * The pairing ledger of this device (§7.3): five failed sessions an hour and one ceremony at a time, enforced by the
+     * core. Kept sealed under the device key in the private directory (`pairing-ledger.bin`), its generation recorded beside
+     * it (`pairing-ledger.generation`): a missing, edited or older ledger opens as a spent budget. It records sessions only,
+     * never a request. One instance per account lives in this worker, so a ceremony's handle and its ledger are the same.
+     */
+    private var ledger: Pair<String, PairingFailureLimiter>? = null
+    private val ledgerFile = File(configuration.privateDirectory, "pairing-ledger.bin")
+    private val ledgerFloorFile = File(configuration.privateDirectory, "pairing-ledger.generation")
+    private fun pairingLedger(account: String): PairingFailureLimiter {
+        ledger?.let { (a, l) -> if (a == account) return l }
+        val sealed = AtomicFile.read(ledgerFile, 1 shl 20) ?: ByteArray(0)
+        val floor = AtomicFile.read(ledgerFloorFile, 64)?.toString(Charsets.UTF_8)?.trim()?.toULongOrNull() ?: 0uL
+        val opened = configuration.deviceSecrets.key(account).use { key -> key.lend { PairingFailureLimiter.open(sealed, it, account, floor, nowMs) } }
+        ledger = account to opened
+        return opened
+    }
+    /** Persists the sealed ledger, then its generation. Throws when either cannot be written: a start is then never answered with a nonce (fail closed). */
+    private fun keepLedger(account: String) {
+        val (a, limiter) = ledger ?: return
+        if (a != account) return
+        val sealed = configuration.deviceSecrets.key(account).use { key -> key.lend { k -> withEntropy(32) { limiter.seal(k, account, it) } } }
+        AtomicFile.write(ledgerFile, sealed)
+        AtomicFile.write(ledgerFloorFile, limiter.generation().toString().toByteArray(Charsets.UTF_8))
     }
     /** The joining device: a code-path pairing for its own member key. Send `commitment()` with the request. */
     suspend fun beginJoinPairing(): AccountPairing = gated {
@@ -505,29 +524,46 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val e = memberKeys.publicKeys().signing
         withEntropy(32) { AccountPairing.join(account, e, it) }
     }
-    /** The approving device received the joining device's commitment: a session (counted by the limiter) and the nonce to send back. */
+    /**
+     * The approving device's person started a ceremony for one incoming commitment: a session that reserves one of the five
+     * an hour, and the nonce to send back. While another is live this is refused (`pairing:busy`); the reservation is
+     * persisted before the nonce exists, and if it cannot be, no nonce is produced.
+     */
     suspend fun beginApproval(commitment: ByteArray): ApprovalStart = gated {
         if (engine == null) reconcile()
         val account = accountId ?: throw SessionError.NotReady()
-        withLimiter { limiter ->
-            val pairing = AccountPairing.existingReceiveCommitment(account, commitment, limiter, nowMs)
-            ApprovalStart(pairing, withEntropy(32) { pairing.sendNonce(it) })
-        }
+        val pairing = AccountPairing.existingReceiveCommitment(account, commitment, pairingLedger(account), nowMs)
+        try { keepLedger(account) } catch (e: Exception) { runCatching { pairing.abandon(nowMs) }; throw e }
+        ApprovalStart(pairing, withEntropy(32) { pairing.sendNonce(it) })
     }
-    /** The approving device received the reveal: the six digits both screens show. A reveal that does not open the commitment aborts and counts as a failure. */
+    /** The approving device received the reveal: the six digits both screens show. A mismatch or a reveal after the ten-minute timeout aborts (it stays counted). */
     suspend fun approvalCode(pairing: AccountPairing, e: ByteArray, nb: ByteArray): String = gated {
-        withLimiter { pairing.receiveReveal(e, nb, it, nowMs) }
+        val account = accountId ?: throw SessionError.NotReady()
+        // The start was persisted counted, so a failure needs no write to stay counted; the ledger is kept anyway.
+        try { pairing.receiveReveal(e, nb, pairingLedger(account), nowMs) }
+        catch (x: Exception) { runCatching { keepLedger(account) }; throw x }
     }
-    /** The codes did not match (or the person stopped): the session ends on this device and counts as a failure. */
-    suspend fun rejectPairing(pairing: AccountPairing) = gated { withLimiter { pairing.reject(it, nowMs) } }
-    /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored. */
+    /** The codes did not match (or the person stopped): the session ends on this device, counted. */
+    suspend fun rejectPairing(pairing: AccountPairing) = gated {
+        val account = accountId ?: throw SessionError.NotReady()
+        when (pairing.stage()) {
+            PairingStage.CODE, PairingStage.REVEALED -> pairing.reject(pairingLedger(account), nowMs)
+            else -> pairing.abandon(nowMs)
+        }
+        keepLedger(account)
+    }
+    /** Ends a ceremony this device started, in any stage before it is confirmed. It stays counted. */
+    suspend fun abandonApproval(pairing: AccountPairing) = gated {
+        pairing.abandon(nowMs)
+        accountId?.let { keepLedger(it) }
+    }
+    /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored about the request. */
     suspend fun scanRequest(data: ByteArray): ScannedRequest = gated {
         if (engine == null) reconcile()
         val account = accountId ?: throw SessionError.NotReady()
-        withLimiter { limiter ->
-            val pairing = AccountPairing.scanRequest(account, data, limiter, nowMs)
-            ScannedRequest(accessRequest(accountRequestInfo(data)), pairing)
-        }
+        val scanned = runCatching { AccountPairing.scanRequest(account, data, pairingLedger(account), nowMs) }
+        keepLedger(account)
+        ScannedRequest(accessRequest(accountRequestInfo(data)), scanned.getOrThrow())
     }
 
     // Owner operations
@@ -575,6 +611,8 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             val t = terms ?: request.termsJson
             owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, pairing, it) } }
         }
+        // The confirmed pairing gave its reservation back; keep the ledger (a lost write only leaves it counted).
+        accountId?.let { runCatching { keepLedger(it) } }
         reconcile()
     }
     suspend fun revoke(member: String): SessionSnapshot = gated {
@@ -723,7 +761,10 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             val memberRaw = ownRequestBytes()
             // This device made the request itself, with its own member key: there is no second device to pair with, so it
             // reads its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
-            val own = AccountPairing.scanRequest(account, memberRaw, PairingFailureLimiter.fromState(""), nowMs)
+            // The creation's engine keeps the time it opened at; bring it to the scan's time, which the pairing may not precede (§9.1).
+            val at = nowMs
+            owner.run { it.advance(at) }
+            val own = AccountPairing.scanRequest(account, memberRaw, PairingFailureLimiter.fresh(), at)
             val terms = terms(configuration.namespaces, configuration.access, null, null)
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
             owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, own, it) } }

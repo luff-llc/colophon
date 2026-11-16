@@ -78,6 +78,8 @@ pub enum PairingAbort {
     WrongAccount,
     /// A scanned membership request does not parse or its signature does not verify (§9.1).
     InvalidRequest,
+    /// The ceremony ran past its timeout ([`CEREMONY_TIMEOUT_MS`], §7.3).
+    Timeout,
 }
 impl std::fmt::Display for PairingAbort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,6 +88,7 @@ impl std::fmt::Display for PairingAbort {
             Self::InvalidPoint => "abort: E is not a valid point",
             Self::WrongAccount => "abort: QR names another account",
             Self::InvalidRequest => "abort: the scanned request is not a valid request",
+            Self::Timeout => "abort: the ceremony timed out",
         })
     }
 }
@@ -152,6 +155,8 @@ pub struct PairingCode {
     digits: String,
     /// When H's session began (its permit); `None` on the joining side.
     started_ms: Option<i64>,
+    /// H's reservation in its ledger; `None` on the joining side.
+    reservation: Option<u64>,
 }
 impl PairingCode {
     /// The six digits to display.
@@ -168,12 +173,16 @@ impl PairingCode {
             e: self.e,
             nonces: Some((self.na, self.nb)),
             approving_since_ms: self.started_ms,
+            reservation: self.reservation,
         }
     }
     /// The person rejected the code (or abandoned the comparison): a failed session, recorded
     /// in `limiter` at `now_ms` (§7.3). Consumes the code.
     pub fn reject(self, limiter: &mut FailureLimiter, now_ms: i64) {
-        limiter.record_failure(now_ms);
+        match self.reservation {
+            Some(id) => limiter.end(id, now_ms),
+            None => limiter.record_failure(now_ms),
+        }
     }
 }
 
@@ -207,6 +216,8 @@ pub struct ConfirmedPairing {
     /// side and for the pairing QR, which moves the seed but does not approve (§9.1: the scan
     /// path's one payload is the canonical request envelope).
     approving_since_ms: Option<i64>,
+    /// The reservation of the ceremony that confirmed it, given back by [`FailureLimiter::release`].
+    reservation: Option<u64>,
 }
 /// Two confirmed pairings are equal when they are the same pairing (account, `E` and nonces),
 /// whichever side holds each and whenever its session began: both devices hold equal pairings.
@@ -278,7 +289,9 @@ impl ConfirmedPairing {
         if &self.account != account || self.e != signing {
             return Err(Failure::Refused(Reason::OutOfScope));
         }
-        if now_ms > started.saturating_add(CONFIRMED_PAIRING_LIFETIME_MS) {
+        // Outside [started, started + lifetime]: a clock moved back before the session began does
+        // not keep a pairing alive (the session began at the ledger's latest time, its floor).
+        if now_ms < started || now_ms > started.saturating_add(CONFIRMED_PAIRING_LIFETIME_MS) {
             return Err(Failure::Refused(Reason::Expired));
         }
         Ok(())
@@ -386,6 +399,7 @@ impl Joiner {
                 nb: self.nb,
                 digits,
                 started_ms: None,
+                reservation: None,
             },
         ))
     }
@@ -425,6 +439,7 @@ impl QrJoiner {
             e: self.e,
             nonces: Some((na, self.nb)),
             approving_since_ms: None,
+            reservation: None,
         }
     }
 }
@@ -432,26 +447,30 @@ impl QrJoiner {
 // --- The existing side H -----------------------------------------------------------------
 
 /// H after receiving `C` and before choosing `nA` (§7.3 step 2: "only after receiving `C`").
-/// There is no way to obtain a nonce-bearing state without this one.
+/// There is no way to obtain a nonce-bearing state without this one, and no way to hold two:
+/// the [`Permit`] it consumes is the device's one live ceremony ([`FailureLimiter`]).
 #[derive(Debug)]
 pub struct ExistingWaiting {
     account: AccountId,
     commitment: [u8; 32],
     started_ms: i64,
+    reservation: u64,
 }
 impl ExistingWaiting {
     /// H received `C` for `account`. A session needs a [`Permit`] from the failure limiter
-    /// (§7.3: no more than 5 failed sessions per hour); there is no way to start one without it.
-    /// The session begins at the permit's time.
+    /// (§7.3: no more than 5 failed sessions per hour, one ceremony at a time); there is no way
+    /// to start one without it. The session begins at the permit's time.
     pub fn receive_commitment(account: &AccountId, commitment: [u8; 32], permit: Permit) -> Self {
         Self {
             account: account.clone(),
             commitment,
             started_ms: permit.at_ms,
+            reservation: permit.id,
         }
     }
     /// Step 2: H chose `nA` (host-random, only now) and sends it. Returns the nonce and the
-    /// state that accepts exactly one reveal.
+    /// state that accepts exactly one reveal. A host persists its sealed ledger first
+    /// ([`FailureLimiter::sealed_since`]); the exported API refuses the nonce otherwise.
     pub fn send_nonce(self, na: [u8; 32]) -> (ExistingAwaitingReveal, [u8; 32]) {
         (
             ExistingAwaitingReveal {
@@ -459,9 +478,14 @@ impl ExistingWaiting {
                 commitment: self.commitment,
                 na,
                 started_ms: self.started_ms,
+                reservation: self.reservation,
             },
             na,
         )
+    }
+    /// The reservation this session holds in the ledger.
+    pub fn reservation(&self) -> u64 {
+        self.reservation
     }
 }
 
@@ -472,6 +496,7 @@ pub struct ExistingAwaitingReveal {
     commitment: [u8; 32],
     na: [u8; 32],
     started_ms: i64,
+    reservation: u64,
 }
 impl ExistingAwaitingReveal {
     /// Step 3 and 4: J sent `E` and `nB`. H checks `C`; a mismatch aborts
@@ -490,9 +515,12 @@ impl ExistingAwaitingReveal {
             nb: *nb,
             digits,
             started_ms: Some(self.started_ms),
+            reservation: Some(self.reservation),
         })
     }
-    /// [`ExistingAwaitingReveal::finish`], recording an abort in `limiter` at `now_ms`.
+    /// [`ExistingAwaitingReveal::finish`] at `now_ms`, against `limiter`: a reveal after the
+    /// ceremony's timeout aborts ([`PairingAbort::Timeout`]), and any abort ends the ceremony,
+    /// counted.
     pub fn finish_limited(
         self,
         e: &[u8],
@@ -500,9 +528,15 @@ impl ExistingAwaitingReveal {
         limiter: &mut FailureLimiter,
         now_ms: i64,
     ) -> Result<PairingCode, PairingAbort> {
-        let result = self.finish(e, nb);
+        let id = self.reservation;
+        let result = if limiter.effective(now_ms) > self.started_ms.saturating_add(CEREMONY_TIMEOUT_MS)
+        {
+            Err(PairingAbort::Timeout)
+        } else {
+            self.finish(e, nb)
+        };
         if result.is_err() {
-            limiter.record_failure(now_ms);
+            limiter.end(id, now_ms);
         }
         result
     }
@@ -516,6 +550,7 @@ impl ExistingAwaitingReveal {
 #[derive(Debug)]
 pub struct ScannedQr {
     payload: QrPayload,
+    reservation: u64,
 }
 impl ScannedQr {
     /// H scanned `payload` while pairing for `expected`. A payload for another account or with
@@ -523,7 +558,7 @@ impl ScannedQr {
     pub fn scan(
         expected: &AccountId,
         payload: &QrPayload,
-        _permit: Permit,
+        permit: Permit,
     ) -> Result<Self, PairingAbort> {
         if payload.account != *expected {
             return Err(PairingAbort::WrongAccount);
@@ -531,7 +566,12 @@ impl ScannedQr {
         check_point(&payload.e)?;
         Ok(Self {
             payload: payload.clone(),
+            reservation: permit.id,
         })
+    }
+    /// The reservation this session holds in the ledger.
+    pub fn reservation(&self) -> u64 {
+        self.reservation
     }
     /// H chose `nA` and sends it to J. Consumes the scan.
     pub fn send_nonce(self, na: [u8; 32]) -> (ConfirmedPairing, [u8; 32]) {
@@ -542,6 +582,7 @@ impl ScannedQr {
                 nonces: Some((na, self.payload.nb)),
                 // The pairing QR moves the seed; it does not approve a member (§9.1).
                 approving_since_ms: None,
+                reservation: Some(self.reservation),
             },
             na,
         )
@@ -571,44 +612,107 @@ pub fn scanned_request(
         e: req.signing,
         nonces: None,
         approving_since_ms: Some(permit.at_ms),
+        reservation: Some(permit.id),
     })
 }
 
-/// The failed-session limit of H (§7.3): no more than 5 failed sessions per hour. A mismatch,
-/// abort or timeout is a failure; the host records it with the time it observed. The ledger is
-/// plain data the host persists.
+/// How long one ceremony on the existing side may run (§7.3 "a timeout"): ten minutes from its
+/// permit. A ceremony past it is over: its next step aborts and a new one may start.
+pub const CEREMONY_TIMEOUT_MS: i64 = 10 * 60 * 1000;
+const HOUR_MS: i64 = 3_600_000;
+
+/// The live ceremony of an existing device: the reservation it holds and when it began.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Live {
+    id: u64,
+    started_ms: i64,
+}
+
+/// The pairing ledger of H (§7.3): no more than 5 failed sessions per hour, and **one ceremony
+/// at a time**.
+///
+/// - Every session H starts takes a [`Permit`], which is a **reservation**: it counts against the
+///   five an hour from the moment it is granted, and only a confirmed pairing given back with
+///   [`FailureLimiter::release`] returns it. Abandoning, timing out, rejecting, a mismatch, dropping
+///   the session or restarting the device all leave it counted.
+/// - While a ceremony is live (granted, not yet ended, younger than [`CEREMONY_TIMEOUT_MS`]),
+///   [`FailureLimiter::permit`] refuses another ([`PermitRefused::CeremonyLive`]): a second
+///   commitment never yields a nonce. This is what stops a relay from running many sessions with
+///   its own keys beside the honest one and picking the one whose code matches (§7.3 bounds a
+///   relay to one in a million per attempt only if attempts are counted one at a time).
+/// - [`FailureLimiter::record_failure`] ends the live ceremony as failed (it is counted already)
+///   or, with none live, counts a failure on its own.
+///
+/// The ledger is data the host persists, sealed under the device-held key
+/// ([`FailureLimiter::seal`], [`FailureLimiter::open`]): an edited or unreadable ledger, or one
+/// older than the generation the host recorded, opens as a spent budget. Every change raises its
+/// generation; a host must persist the sealed ledger after a change and before it acts on it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureLimiter {
     failures_ms: Vec<i64>,
     /// The latest time this ledger has seen: a clock moved backwards never reopens the budget.
     #[serde(default)]
     latest_ms: i64,
+    /// Reservations not given back: `(id, granted at)`.
+    #[serde(default)]
+    reserved: Vec<(u64, i64)>,
+    #[serde(default)]
+    live: Option<Live>,
+    #[serde(default)]
+    next_id: u64,
+    /// Raised by every change; sealed into the ledger so a host can detect an older one.
+    #[serde(default)]
+    generation: u64,
+    /// The generation last sealed (this process only).
+    #[serde(skip)]
+    sealed_generation: u64,
 }
 
-/// Permission to start one pairing session, taken from the limiter. It cannot be made any
-/// other way, and every session start ([`ExistingWaiting::receive_commitment`],
-/// [`ScannedQr::scan`], [`scanned_request`]) consumes one. It carries the time the session
-/// began (the latest the ledger has seen), from which a confirmed pairing's lifetime runs.
+/// Permission to start one pairing session, taken from the limiter: a reservation (see
+/// [`FailureLimiter`]). It cannot be made any other way, and every session start
+/// ([`ExistingWaiting::receive_commitment`], [`ScannedQr::scan`], [`scanned_request`]) consumes
+/// one. It carries the time the session began (the latest the ledger has seen), from which the
+/// ceremony's timeout and a confirmed pairing's lifetime run.
 #[derive(Debug)]
 pub struct Permit {
     at_ms: i64,
+    id: u64,
+    generation: u64,
 }
 impl Permit {
-    /// The session was abandoned or timed out: a failure, recorded at `now_ms` (§7.3).
+    /// The session was abandoned or timed out: it ends, counted (§7.3).
     pub fn abandon(self, limiter: &mut FailureLimiter, now_ms: i64) {
-        limiter.record_failure(now_ms);
+        limiter.end(self.id, now_ms);
+    }
+    /// The ledger generation this reservation made: a host persists the sealed ledger at or
+    /// after it before it sends the session's nonce ([`FailureLimiter::sealed_since`]).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
-/// The limit is reached: 5 failed sessions in the last hour (§7.3).
+/// Why no session may start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LimitReached;
-impl std::fmt::Display for LimitReached {
+pub enum PermitRefused {
+    /// 5 failed sessions in the last hour (§7.3).
+    LimitReached,
+    /// Another ceremony is live on this device: one at a time.
+    CeremonyLive,
+}
+pub use PermitRefused::LimitReached;
+impl std::fmt::Display for PermitRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("pairing: 5 failed sessions in the last hour")
+        f.write_str(match self {
+            Self::LimitReached => "pairing: 5 failed sessions in the last hour",
+            Self::CeremonyLive => "pairing: another ceremony is live on this device",
+        })
     }
 }
-impl std::error::Error for LimitReached {}
+impl std::error::Error for PermitRefused {}
+
+/// The purpose label of a sealed ledger.
+const LEDGER_PURPOSE: &str = "colophon/pairing-ledger/5";
+const LEDGER_MAGIC: &[u8; 8] = b"COLOPL05";
 
 impl FailureLimiter {
     /// An empty ledger.
@@ -618,34 +722,187 @@ impl FailureLimiter {
     fn effective(&self, now_ms: i64) -> i64 {
         now_ms.max(self.latest_ms)
     }
-    /// Record a failed session (mismatch, abort, rejected code or timeout) at `now_ms`.
-    pub fn record_failure(&mut self, now_ms: i64) {
+    fn touch(&mut self, now_ms: i64) -> i64 {
         let now = self.effective(now_ms);
         self.latest_ms = now;
-        self.failures_ms.retain(|t| *t > now - 3_600_000);
-        self.failures_ms.push(now);
+        self.failures_ms.retain(|t| *t > now - HOUR_MS);
+        self.reserved.retain(|(_, t)| *t > now - HOUR_MS);
+        if self
+            .live
+            .is_some_and(|l| now > l.started_ms.saturating_add(CEREMONY_TIMEOUT_MS))
+        {
+            self.live = None;
+        }
+        now
     }
-    /// True when a new session may start: fewer than 5 failures in the last hour, measured at
-    /// the latest time the ledger has seen (a clock moved backwards does not help).
+    fn changed(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+    }
+    fn counted(&self, now: i64) -> usize {
+        self.failures_ms.iter().filter(|t| **t > now - HOUR_MS).count()
+            + self.reserved.iter().filter(|(_, t)| *t > now - HOUR_MS).count()
+    }
+    /// End the session holding reservation `id` without a confirmed pairing (abandoned, dropped,
+    /// timed out): it stays counted. A host that drops a session calls this.
+    pub fn end_reservation(&mut self, id: u64, now_ms: i64) {
+        self.end(id, now_ms);
+    }
+    fn end(&mut self, id: u64, now_ms: i64) {
+        self.touch(now_ms);
+        if self.live.is_some_and(|l| l.id == id) {
+            self.live = None;
+        }
+        self.changed();
+    }
+    /// Record a failed session (mismatch, abort, rejected code or timeout) at `now_ms`. With a
+    /// ceremony live, it is that ceremony that failed: it ends, counted once (its reservation).
+    /// With none live, the failure is counted on its own.
+    pub fn record_failure(&mut self, now_ms: i64) {
+        let now = self.touch(now_ms);
+        if self.live.take().is_none() {
+            self.failures_ms.push(now);
+        }
+        self.changed();
+    }
+    /// True when a new session may start now: no ceremony live and fewer than 5 counted sessions
+    /// in the last hour, measured at the latest time the ledger has seen (a clock moved backwards
+    /// does not help).
     pub fn may_start(&self, now_ms: i64) -> bool {
-        let now = self.effective(now_ms);
-        self.failures_ms
-            .iter()
-            .filter(|t| **t > now - 3_600_000)
-            .count()
-            < MAX_FAILED_PER_HOUR
+        let mut probe = self.clone();
+        let now = probe.touch(now_ms);
+        probe.live.is_none() && probe.counted(now) < MAX_FAILED_PER_HOUR
     }
-    /// Start a session: a [`Permit`], or [`LimitReached`]. Sessions cannot start without one.
-    pub fn permit(&mut self, now_ms: i64) -> Result<Permit, LimitReached> {
-        self.latest_ms = self.effective(now_ms);
-        if self.may_start(now_ms) {
-            Ok(Permit {
-                at_ms: self.latest_ms,
-            })
-        } else {
-            Err(LimitReached)
+    /// Whether a ceremony is live now.
+    pub fn is_live(&self, now_ms: i64) -> bool {
+        let mut probe = self.clone();
+        probe.touch(now_ms);
+        probe.live.is_some()
+    }
+    /// Start a session: a [`Permit`] that reserves one of the five, or why not. Sessions cannot
+    /// start without one, and only one is live at a time.
+    pub fn permit(&mut self, now_ms: i64) -> Result<Permit, PermitRefused> {
+        let now = self.touch(now_ms);
+        if self.live.is_some() {
+            return Err(PermitRefused::CeremonyLive);
+        }
+        if self.counted(now) >= MAX_FAILED_PER_HOUR {
+            return Err(PermitRefused::LimitReached);
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.reserved.push((id, now));
+        self.live = Some(Live { id, started_ms: now });
+        self.changed();
+        Ok(Permit {
+            at_ms: now,
+            id,
+            generation: self.generation,
+        })
+    }
+    /// A pairing this device confirmed gives its reservation back: a confirmed ceremony is not a
+    /// failure (§7.3). A pairing with no reservation (the joining side's) changes nothing.
+    pub fn release(&mut self, pairing: &ConfirmedPairing) {
+        let Some(id) = pairing.reservation else {
+            return;
+        };
+        self.reserved.retain(|(r, _)| *r != id);
+        if self.live.is_some_and(|l| l.id == id) {
+            self.live = None;
+        }
+        self.changed();
+    }
+    /// The ledger's generation (raised by every change).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    /// Whether a sealed copy at or after `generation` was handed out by [`FailureLimiter::seal`]
+    /// in this process: a host sends a session's nonce only after it persisted that copy.
+    pub fn sealed_since(&self, generation: u64) -> bool {
+        self.sealed_generation >= generation
+    }
+
+    /// The ledger sealed for `account` under the host's device-held key (AES-256-GCM under an
+    /// HKDF-SHA256 key with its own purpose label, the account in the authenticated header; the
+    /// same construction as the engine's saved state). `nonce_seed` is 32 fresh bytes.
+    pub fn seal(
+        &mut self,
+        account: &AccountId,
+        key: &[u8; 32],
+        nonce_seed: [u8; 32],
+    ) -> VResult<Vec<u8>> {
+        let head = ledger_header(account)?;
+        let plain = serde_json::to_vec(self).map_err(|_| malformed("pairing ledger"))?;
+        let nonce = Entropy::new(nonce_seed)
+            .take::<12>()
+            .map_err(|e| malformed(e.to_string()))?;
+        let ct = crate::crypto::seal(&ledger_key(key)?, &nonce, &plain, &head)
+            .map_err(|e| malformed(e.to_string()))?;
+        let mut out = Vec::with_capacity(24 + head.len() + ct.len());
+        out.extend_from_slice(LEDGER_MAGIC);
+        out.extend_from_slice(&(head.len() as u32).to_le_bytes());
+        out.extend_from_slice(&head);
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ct);
+        self.sealed_generation = self.generation;
+        Ok(out)
+    }
+
+    /// Open the ledger a host stored for `account`. `floor` is the generation the host recorded
+    /// apart from the ledger (0 when it recorded none). The budget is **spent** (five failures
+    /// at `now_ms`, nothing live) when the bytes are empty while `floor` is above 0, when they do
+    /// not open under `key` for exactly this account, or when they hold a generation below
+    /// `floor`: a missing, edited, foreign or older ledger never restores the budget. Empty bytes
+    /// with no floor are a new ledger.
+    pub fn open(bytes: &[u8], account: &AccountId, key: &[u8; 32], floor: u64, now_ms: i64) -> Self {
+        if bytes.is_empty() && floor == 0 {
+            return Self::new();
+        }
+        let opened = open_ledger(bytes, account, key)
+            .and_then(|p| serde_json::from_slice::<Self>(&p).ok())
+            .filter(|l| l.generation >= floor);
+        match opened {
+            Some(mut l) => {
+                l.sealed_generation = l.generation;
+                l
+            }
+            None => {
+                let mut spent = Self::new();
+                let now = spent.touch(now_ms);
+                spent.failures_ms = vec![now; MAX_FAILED_PER_HOUR];
+                spent.generation = floor.saturating_add(1);
+                spent
+            }
         }
     }
+}
+
+fn ledger_key(key: &[u8; 32]) -> VResult<[u8; 32]> {
+    let mut out = [0u8; 32];
+    hkdf::Hkdf::<Sha256>::new(None, key)
+        .expand(LEDGER_PURPOSE.as_bytes(), &mut out)
+        .map_err(|_| malformed("pairing ledger key derivation"))?;
+    Ok(out)
+}
+fn ledger_header(account: &AccountId) -> VResult<Vec<u8>> {
+    super::encoding::canonical(&serde_json::json!({
+        "account": account.as_str(),
+        "purpose": LEDGER_PURPOSE,
+    }))
+}
+fn open_ledger(bytes: &[u8], account: &AccountId, key: &[u8; 32]) -> Option<Vec<u8>> {
+    if bytes.len() < 24 + 16 || bytes.len() > 1 << 20 || &bytes[..8] != LEDGER_MAGIC {
+        return None;
+    }
+    let len = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+    if len > 1_024 || bytes.len() < 12 + len + 12 + 16 {
+        return None;
+    }
+    let head = &bytes[12..12 + len];
+    if ledger_header(account).ok()?.as_slice() != head {
+        return None;
+    }
+    let nonce = &bytes[12 + len..24 + len];
+    crate::crypto::open(&ledger_key(key).ok()?, nonce, &bytes[24 + len..], head).ok()
 }
 
 // --- Moving the seed (§7.4) --------------------------------------------------------------

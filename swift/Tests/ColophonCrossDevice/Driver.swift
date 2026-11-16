@@ -82,12 +82,13 @@ private struct Transport: HomeTransport {
     var session: ColophonSession?
     var owner: SoftwareKeys?
     var pairing: AccountPairing?
+    var pairingAccount = ""
     var transferKey: PairingTransferKey?
     /// The approval ceremony's session on this device (§7.3, §9.1), and on the approving device the request that came
     /// with the commitment.
     var approval: AccountPairing?
     var approvalRequest: Data?
-    let limiter = try! PairingFailureLimiter.fromState(state: "")
+    let limiter = PairingFailureLimiter.fresh()
     let audit = Audit()
     func keys(_ directory: URL, _ name: String) throws -> SoftwareKeys {
         func scalar(_ suffix: String, make: () -> Data) throws -> Data {
@@ -157,10 +158,14 @@ private struct Transport: HomeTransport {
             pairing = try AccountPairing.join(account: text("account"), e: e, nb: data("nb"))
             return ["commitment": try pairing!.commitment().base64EncodedString(), "e": e.base64EncodedString()]
         case "scan":
+            pairingAccount = text("account")
             if text("mode") == "qr" { pairing = try AccountPairing.existingScanQr(account: text("account"), payload: data("qr"), limiter: limiter, nowMs: 1000) }
             else { pairing = try AccountPairing.existingReceiveCommitment(account: text("account"), commitment: data("commitment"), limiter: limiter, nowMs: 1000) }
             return true
-        case "nonce": return try pairing!.sendNonce(na: data("na")).base64EncodedString()
+        case "nonce":
+            // The ledger is sealed (an app persists it) before the nonce leaves (§7.3).
+            _ = try withEntropy(32) { try limiter.seal(deviceKey: Data(repeating: 0x44, count: 32), account: pairingAccount, entropy: $0) }
+            return try pairing!.sendNonce(na: data("na")).base64EncodedString()
         case "receiveNonce":
             if let r = try pairing!.receiveNonce(na: data("na")) {
                 return ["e": r.e.base64EncodedString(), "nb": r.nb.base64EncodedString(), "digits": try pairing!.digits()]
