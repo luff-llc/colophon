@@ -119,6 +119,9 @@ public enum HomeProblem: Error, Equatable, Sendable {
     /// This device's own check of the call it would send refused it, by the home's rule over what the device holds
     /// (for example it holds its own revocation, or too few homes' fresh heads). No call was sent.
     case callRefused(code: String)
+    /// The engine still had a request outstanding after the pass was abandoned and run again once: the pass could not
+    /// finish, and the exchange failed.
+    case stillWaiting
 }
 
 public struct HomeIssue: Equatable, Sendable {

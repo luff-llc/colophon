@@ -142,6 +142,8 @@ sealed class HomeProblem {
     data class CallNotBound(val why: String) : HomeProblem()
     /** This device's own check of the call refused it, by the home's rule over what the device holds. No call was sent. */
     data class CallRefused(val code: String) : HomeProblem()
+    /** The engine still had a request outstanding after the pass was abandoned and run again once: the pass could not finish, and the exchange failed. */
+    object StillWaiting : HomeProblem() { override fun toString() = "StillWaiting" }
 }
 
 internal class HomeProblemException(val problem: HomeProblem) : Exception(problem.toString())

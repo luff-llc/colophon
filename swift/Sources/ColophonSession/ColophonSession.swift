@@ -207,11 +207,24 @@ import Observation
     }
     /// The namespace's fold as the engine reports it (`view_json`: `{"ok":…,"value":{"admitted":[…],…}}`), unchanged, for
     /// screens and tests that read a kind no domain kit folds. The Kotlin session's `view(namespace)`.
+    /// Fenced as `query` is: a fold that returns after the session locked, lost access or changed account is `staleRevision`.
     public func view(namespace: String) async throws -> Data {
         await restore()
         guard hasUsableContent else { throw SessionError.notReady }
-        return try await worker.view(namespace: namespace)
+        let lease = context
+        let observed = namespaceRevisions[namespace, default: 0]
+        do {
+            let bytes = try await worker.view(namespace: namespace)
+            if let afterViewForTests { await afterViewForTests() }
+            guard context == lease, hasUsableContent, namespaceRevisions[namespace, default: 0] == observed else { throw SessionError.staleRevision }
+            return bytes
+        } catch {
+            if context == lease { handleCommandError(error) }
+            throw error
+        }
     }
+    /// Tests only: runs between the worker's answer to `view` and the fence.
+    @ObservationIgnored var afterViewForTests: (@MainActor () async -> Void)?
     /// The verified history as the engine reports it (JSON). Explicit: normal screens use named queries.
     public func ledger() async throws -> Data { await restore(); return try await worker.ledger() }
 
@@ -343,10 +356,10 @@ import Observation
             let result = try await worker.exchange()
             homeFaults = result.faults; homeIssues = result.issues
             lastSynced = .now
-            syncState = result.unauthorized ? .unauthorized : .idle
+            syncState = result.unauthorized ? .unauthorized : result.failed ? .error(reason: "a pass could not finish: the engine was still waiting") : .idle
             if result.changed || phase != .ready { await refresh(preservingCommandFailure: true) }
             else if let snapshot = try? await worker.currentSnapshot() { apply(snapshot) }
-            return !result.unauthorized
+            return !result.unauthorized && !result.failed
         } catch is CancellationError {
             return false
         } catch let error as HomeTransportError {
