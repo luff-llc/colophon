@@ -145,10 +145,13 @@ fn merge(f: &mut Fixture, pending: Vec<Vec<u8>>, at: i64) {
 
 /// A transition by one unit, receipted by home A. Returns (transition, its digest, A's state).
 fn receipted(f: &mut Fixture, a: HomeState, ka: &HomeKeys, t: i64) -> (Vec<u8>, String, HomeState) {
+    receipted_with(f, a, ka, t, 600)
+}
+fn receipted_with(f: &mut Fixture, a: HomeState, ka: &HomeKeys, t: i64, window: u64) -> (Vec<u8>, String, HomeState) {
     f.account.advance(t).unwrap();
     let action = f
         .account
-        .begin_transition(&Change::policy(json!({"callWindow": 600})), &[f.d.clone()], TransitionRule::Control)
+        .begin_transition(&Change::policy(json!({"callWindow": window})), &[f.d.clone()], TransitionRule::Control)
         .unwrap();
     let tr = run(&mut f.account, &f.host, action).pending[0].clone();
     let d = body_digest(&tr);
@@ -220,4 +223,54 @@ fn a_late_veto_with_its_receipt_is_stored_however_full_the_unmatched_buffer() {
     let r_new = receipt(&kb, &account, &digest(b"new object"), later);
     let after = admit(&a2, &r_new, &format_date(later));
     assert_ne!(after.result, Err(Refusal::Verification(colophon_core::v05::Failure::Unavailable("unmatched receipt capacity of this home".into()))));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The H2 check, finding 3: the 10,368 cap counts what is listed, and settled objects are dropped
+// 7 days after their transition's due time.
+
+/// A long-lived home holds more than 10,368 settled objects (receipts of a transition whose
+/// `activate` is on the branch). A new transition, its veto and another home's receipts of both
+/// are still stored. Seven days after the settled transition's due time, the home drops them.
+#[test]
+fn settled_objects_do_not_count_toward_the_cap_and_are_dropped_after_seven_days() {
+    let (mut f, a, [ka, kb, _kc]) = three_homes();
+    let account = f.account.id().as_str().to_string();
+    let t = f.account.now_ms() + 60_000;
+    let (_tr, d1, a) = receipted(&mut f, a, &ka, t);
+    // Due (issued + 300 s + 3,600 s): the activate, recorded and admitted at A.
+    let due = t + 3_900_000;
+    f.account.advance(due + 1_000).unwrap();
+    let rec = f.account.record_due().unwrap();
+    let act = rec[0].entries[0].1.clone();
+    let adm = admit(&a, &act, &format_date(due + 1_000));
+    assert_eq!(adm.result, Ok(()));
+    let mut a = adm.state;
+    // A long life of settled objects: more than the cap, all naming the recorded transition.
+    a.pad_for_tests(&d1, 10_400, due + 7 * 86_400_000);
+    assert!(a.stored_objects() > 10_368);
+    // A new transition, receipted by A and by B, then vetoed, the veto receipted by B.
+    let t2 = due + 60_000;
+    let (tr2, d2, a2) = receipted_with(&mut f, a, &ka, t2, 700);
+    let rb = receipt(&kb, &account, &d2, t2 + 2_000);
+    let r = admit(&a2, &rb, &format_date(t2 + 2_500));
+    assert_eq!(r.result, Ok(()), "B's receipt of the new transition is stored");
+    let a2 = r.state;
+    f.account.advance(t2 + 3_000).unwrap();
+    let action = f.account.begin_veto(&d2, &[f.p.clone()]).unwrap();
+    let veto = run(&mut f.account, &f.host, action).pending.iter().find(|p| {
+        let v: Value = serde_json::from_slice(p).unwrap();
+        let b: Value = serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+        b["protocol"] == "colophon/veto/5"
+    }).unwrap().clone();
+    let dv = body_digest(&veto);
+    let rv = receipt(&kb, &account, &dv, t2 + 4_000);
+    let (a3, results, own) = admit_pending_batch(&a2, &[veto, rv], &format_date(t2 + 4_000)).unwrap();
+    assert_eq!(results, vec![Ok(()), Ok(())], "the veto and B's receipt of it are stored");
+    assert_eq!(own.len(), 1, "A receipts the veto");
+    let _ = tr2;
+    // Seven days after the first transition's due time, its objects are dropped.
+    let later = due + 7 * 86_400_000 + 1_000;
+    let r = admit(&a3, &receipt(&kb, &account, &digest(b"x"), later), &format_date(later));
+    assert!(r.state.stored_objects() < 100, "{}", r.state.stored_objects());
 }

@@ -165,6 +165,15 @@ struct ObservedReceipt {
     #[serde(default)]
     received_ms: i64,
 }
+/// Until when a transition (and its vetoes and receipts) is listed: 7 days after its due time
+/// (§14). A full set is due at its latest chosen receipt, at most 300 s after its `issued`.
+fn listed_until(t: &state::TCheck, issued_ms: i64) -> i64 {
+    if t.full_set {
+        issued_ms.saturating_add(WINDOW).saturating_add(WEEK)
+    } else {
+        t.due_ms.saturating_add(WEEK)
+    }
+}
 /// Receipts of objects the home does not hold yet, kept per signing home (§13.1: forwarded
 /// receipts may arrive before their object). 8 homes at most share 4,096.
 const UNMATCHED_PER_HOME: usize = 512;
@@ -233,6 +242,28 @@ impl HomeState {
         let mut next = self.clone();
         next.serving = serving;
         Ok(next)
+    }
+    /// Test support only: add `n` placeholder receipt objects naming `target`, listed until
+    /// `expires_ms`, as a long-lived home accumulates them. Never call it outside a test.
+    #[doc(hidden)]
+    pub fn pad_for_tests(&mut self, target: &str, n: usize, expires_ms: i64) {
+        for i in 0..n {
+            let seq = self.next_cursor;
+            self.next_cursor += 1;
+            self.pending.push(PendingObject {
+                seq,
+                digest: crate::v05::encoding::digest(format!("pad {target} {i}").as_bytes()),
+                kind: "receipt".into(),
+                envelope: Vec::new(),
+                target: target.to_string(),
+                units: BTreeSet::new(),
+                expires_ms: Some(expires_ms),
+            });
+        }
+    }
+    /// How many objects (transitions, vetoes, receipts) the home stores.
+    pub fn stored_objects(&self) -> usize {
+        self.pending.len()
     }
     /// The home's serving intervals (§13.1: a home persists its own serving intervals).
     pub fn serving(&self) -> &[ServingInterval] {
@@ -683,6 +714,18 @@ fn admit_full(
     let result = (|| -> AdmitResult<()> {
         let now_ms = date(now, "home clock")?;
         let (persisted, prefix, fork) = home.context_any(now_ms)?;
+        // §14: a transition or veto, and its receipts, are listed until 7 days after the
+        // transition's due time; then the home drops them (it MAY). Nothing can be recorded of
+        // the transition after that (§8.7: 7 days after due); a recording entry already made
+        // embeds them; the stored files stay where they are served.
+        let before = next.pending.len();
+        next.pending
+            .retain(|p| p.kind == "succession" || p.expires_ms.is_none_or(|e| now_ms <= e));
+        if next.pending.len() != before {
+            let kept: BTreeSet<String> = next.pending.iter().map(|p| p.digest.clone()).collect();
+            next.facts.retain(|d, _| kept.contains(d));
+            next.drafts.retain(|d, _| kept.contains(d));
+        }
         // Receipts of objects that never came expire (`unmatched_expiry`).
         next.unmatched_receipts
             .retain(|r| r.received_ms == 0 || now_ms <= unmatched_expiry(r.received_ms, &prefix));
@@ -795,23 +838,9 @@ fn admit_full(
                     "transition",
                     t.digest.clone(),
                     BTreeSet::from([t.proposer.clone()]),
-                    if t.full_set {
-                        None
-                    } else {
-                        Some(t.due_ms.saturating_add(WEEK))
-                    },
+                    Some(listed_until(&t, at)),
                 )?;
-                promote_receipts(
-                    &mut next,
-                    &st,
-                    &env,
-                    at,
-                    if t.full_set {
-                        None
-                    } else {
-                        Some(t.due_ms.saturating_add(WEEK))
-                    },
-                )?;
+                promote_receipts(&mut next, &st, &env, at, Some(listed_until(&t, at)))?;
                 if now_ms > at.saturating_add(WINDOW) {
                     return Err(Refusal::Late);
                 }
@@ -1069,7 +1098,14 @@ fn admit_full(
                         return Ok(());
                     }
                 }
-                if next.pending.len() >= 10_368 {
+                // §14: the admission caps bound a listing at 10,368 objects. Only what is still
+                // listed counts: settled (recorded) and expired objects do not.
+                let live = next
+                    .pending
+                    .iter()
+                    .filter(|p| p.kind != "succession" && next.visible(p, &st, now_ms))
+                    .count();
+                if live >= 10_368 {
                     return Err(Failure::Unavailable("home pending storage full".into()).into());
                 }
                 next.facts.entry(target.clone()).or_insert(Fact {
