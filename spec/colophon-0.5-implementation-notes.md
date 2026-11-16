@@ -5,7 +5,7 @@
 revision 14 text). The foundation (encoding, keys, signatures, terms, records, calls) was merged as colophon#4. Step 1
 brought it to revision 11 (`63bbeff`); step 2 added the authority history verifier of §8;
 revisions 12 to 14 are the last sections. No vector of revision 12, 13 or 14 was replayed by the
-Swift source. 0.5 was frozen on 2026-11-16 (spec §21); this list stays as the record of the
+Swift source. 0.5 was frozen on 2026-11-16 at revision 18, provisionally (spec §21); this list stays as the record of the
 build, dated as written.
 
 Revisions 7–11 settled every open item of the revision-6 list:

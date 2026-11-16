@@ -1,7 +1,8 @@
 # Colophon 0.5: guide
 
 **Non-normative.** Rationale, host wording and history for [colophon-0.5.md](colophon-0.5.md),
-frozen as 0.5 on 2026-11-16.
+frozen 0.5, revision 18, on 2026-11-16 (provisional: the formats and reader rules are frozen for now,
+and the gaps spec §21 lists are closed in 0.5.x without changing any format).
 Where this guide and the specification differ, the specification wins. Nothing here is a rule a
 verifier applies.
 
@@ -136,8 +137,8 @@ whether it is final and which homes it still needs; and per unit, v(u).
   removed cannot get its own transition recorded ahead of the removal (§17.5).
 - **Reading.** A controller that holds the seed may read record content and never writes records
   as a controller; a namespace is shown only when the key of its latest epoch is held (§10.2, §17.1).
-- **First-seen seq** in a notice is the verified seq at which this host first held the object:
-  local memory, to be persisted so a notice does not repeat after a restart (§17.5).
+- **First-seen seq** of a pending change is the verified seq at which this host first held the
+  object: local memory, to be persisted so a change is not shown twice after a restart (§17.5).
 - **A controller added by a transition** builds its slot by a self-slot entry once its activation
   is final (§17.3).
 - **Handles and stored state.** Epoch key handles are as trusted as the keys. Stored verifier
@@ -176,7 +177,7 @@ builder refuses a member whose grant has no role.
 
 - When an account is set up with one device: "If this device is stolen, nothing can veto what the
   thief does with it. Add a second key."
-- In every notice: "Waiting protects who controls your account. It doesn't protect anything a
+- With every pending change shown: "Waiting protects who controls your account. It doesn't protect anything a
   stolen key could already read."
 
 **What a host can tell the person (§18)** (for the reference person; adapt the numbers):
@@ -187,10 +188,11 @@ builder refuses a member whose grant has no role.
 > more of your keys than you still hold (for example your phone and one security key, or
 > everything kept in one place) can take the account after three days even if you object; someone
 > who gets both security keys can take it at once. So keep one security key away from home, and
-> open the app at least every few days. A stolen key can still read whatever it could already
+> let the app sync at least every few days: nothing else tells you about a waiting change. A stolen key can still read whatever it could already
 > read, and can keep signing in until you suspend or remove it. Your account's history is kept by
-> two services: if one is down, removals still work and new keys wait; if one turns dishonest
-> while someone also has one of your keys, you can lose the account.
+> one service, its home: while it is down, changes wait; if it turns dishonest while someone also
+> has one of your keys, you can lose the account, and if it is lost or refuses, the way out is a new
+> account (spec §21.1).
 
 **An account with no home.** Tell the person: "Nothing keeps a record of when things happened on
 this account. Someone who once held one of your keys can later show a new device a different
@@ -214,8 +216,8 @@ What the reference setup protects, plainly:
 
 At `headQuorum` 1, one hostile home together with one stolen control or recovery key can still
 win, because it can receipt a backdated transition and hide vetoes. Three homes at `headQuorum` 2
-close that and keep working with one home down. Two homes at quorum 1 keep working with one down,
-but don't close it.
+would close that and keep working with one home down, and two homes at quorum 1 would keep working
+with one down without closing it; both are experimental in 0.5 (spec §13.1, §18).
 
 ## 6. Not in this version (§20)
 

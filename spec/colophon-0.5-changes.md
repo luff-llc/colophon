@@ -1,7 +1,8 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), frozen 0.5 (the text of revision 17),
-2026-11-16. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), frozen 0.5, revision 18,
+2026-11-16 (provisional: the formats and reader rules are frozen for now; the gaps spec §21 lists are
+closed in 0.5.x without changing any format). Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -374,6 +375,29 @@ revision 15's text and behaviour there. Rows **code follows in the freeze packag
 | 226 | §20 "Limits of 0.5": an account whose `control` and `recover` controllers form one unit can't form a full set, so it can't drop a lost home; its way out is a new, unrelated account and an import of its records (a succession needs the old home too). One control and one recovery unit can (`rules/f2-drop-home-one-control-one-recovery`). §H row 14 updated | consequence of row 224 |
 | 227 | §8.7 "Full set": either definition makes a transition a full set, whichever rule it is otherwise judged under, (a) only where the recovery rule may make its components and (b) only where the control rule may. The verifier had judged a full set only by the rule it selected first (control), so every recovery controller in two units, one of them also holding `control`, was no full set and needed the receipt of the home it revoked. Which rule a non-full transition is judged under is unchanged. Vectors `rules/f2-drop-home-full-set-a-dual-role`, `-dual-role-not-full`, `rules/f2-dual-role-full-a-component-not-recovery` | the independent check of PR 47, High 1 |
 | 228 | §8.7: "a transition whose only receipting homes are revoked before activation is dead" excepts a full set that revokes those homes itself; a home's receipts are accepted until its revocation is final, and required for that span except by a full set that revokes it | the independent check of PR 47, High 2 |
+
+### A.14 Revision 18: the freeze, made true of 0.5.0
+
+Text only: no format, vector or reader rule changes. The owner (16 November 2026): "let's
+temporarily freeze them, and start working on closing those gaps with stuff that we would need
+anyways / but for independent implementation, we should wait till v1.0 for that. / wanring also can
+wait". Sources: an independent whole-branch security review of 16 November 2026 (no format or
+signed-body hazard; three findings about this text, answered here) and the checker's verdict on
+moving an account to another home.
+
+| # | Change | Why |
+| --- | --- | --- |
+| 224 | Status: frozen 0.5, revision 18. The formats and the rules by which a reader judges an account are frozen for now; the freeze is provisional, and the gaps listed in §21 are closed in 0.5.x without changing any format | the owner's decision |
+| 225 | §21: "0.5 freezes only when all of these are done" replaced by what the freeze means; each condition recorded as met or open with its evidence: vectors open (the required items with no vector or test listed), two implementations open and deferred to v1.0 by the owner, the Swift corpus open, the dry run open, the security review met, Galley open, nothing proven on physical devices. The owner's decisions recorded: the §6.4 warnings in the reference sessions deferred (normative for hosts; no date), no journey proving a move to another home | the review's first finding: the text stated conditions as if met |
+| 226 | §13.1, §17.5: delivering notices is not part of 0.5 conformance; a home MAY deliver them, and 0.5 defines no format or route. Normative instead, because built and tested: a home keeps and serves every pending transition and veto until it is settled; a host that syncs MUST read the pending objects on every sync and show each pending change to the account's keys with its due time. "Polling" (MUST, at launch and every `recoveryDelay` / 6) becomes a SHOULD to sync in the background often enough, and to tell the person when it cannot. The two-route requirement and delivery as observable behaviour move to 0.6, starting from `relay/README.md` "Notices". Notices leave §21's conditions | the review's second finding: the reference home delivers no notices |
+| 227 | §17.5 and guide §5: the default delay's argument now leans on syncing, not notices. The 72-hour default stays: it is the time in which one of the person's devices syncs and shows the change. The guide's paragraph for the person says to let the app sync every few days, and that the history is kept by one home | row 226 |
+| 228 | §18: the "Homes" default is one home (it was two, run by different operators, before any recovery key); two or three homes are optional and experimental in 0.5 and a host SHOULD NOT offer them as the default. The paragraph that called two homes the person reference and three the company reference, with "hosts SHOULD offer it to people too", now says what one home cannot resist and that the larger setups are experimental. Revision 17's freeze edit had already set the reference table to one home | §13.1 "One home is supported in 0.5" |
+| 229 | §21.1: one list of what 0.5.0 does not do, which the README, the changelog and §18 point to. It starts with the lock-in limit: an account on one home needs that home's cooperation to change its keys or to move to another home, and if the home is lost or refuses, the way out is a new, unrelated account and an import of the records its devices hold. It then states moving between homes (works with a cooperative home, each step waiting out the delay; no journey; the engine does not follow a 421), one home per account, what one home can do undetected, no notices, invites by link or paste, the §6.4 warnings missing from the reference sessions, one verifier implementation, no dry run, nothing proven on physical devices, performance, refusal before opt-in, nothing published | the review's "Limits to state"; the moving-out verdict |
+| 230 | §6.4 unchanged and still normative for hosts. The changelog, `docs/session.md`, `docs/android.md` and `docs/js-session.md` record that the reference sessions do not yet give the warnings before the genesis is written (they expose `soleDevice` afterwards), and what an app does until they do | the review's third finding |
+| 231 | `conformance/0.5/README.md`: the file count (2,168 outside `legacy-draft-1/`), the freeze run (422 in scope, 422 pass), and the lines that were no longer current made current or removed | the review's first finding |
+
+No vector's expected verdict depends on notices or on §21.
+
 
 ## B. Galley's requirements
 
