@@ -378,11 +378,17 @@ import Observation
         // With no library there is nothing to exchange. A pass here would refresh to `noLibrary` and erase what a failed
         // `create()` just published (its `failed` phase and error), which an app would see as a missing error.
         guard libraryID != nil else { return false }
+        // A stopped account runs no exchange (spec §1 "A stop"): not a failure, and nothing to retry.
+        if phase.isStopped { syncState = .disabled; return true }
         if syncState != .syncing { syncState = .syncing }
         do {
             let result = try await worker.exchange()
             homeFaults = result.faults; homeIssues = result.issues
             lastSynced = .now
+            if result.stopped { syncState = .disabled; await refresh(preservingCommandFailure: true); return true }
+            // A home that answered `503 {"result":"unavailable"}` is not available: shown so, retried with backoff (never as
+            // this device being stopped, which only its own verified history decides).
+            if result.homeUnavailable, !result.changed { syncState = .offline(reason: HomeWords.unavailable); return false }
             syncState = result.unauthorized ? .unauthorized : result.failed ? .error(reason: "a pass could not finish: the engine was still waiting") : .idle
             if result.changed || phase != .ready { await refresh(preservingCommandFailure: true) }
             else if let snapshot = try? await worker.currentSnapshot() { apply(snapshot) }
@@ -414,6 +420,9 @@ import Observation
             while !Task.isCancelled {
                 guard let self else { return }
                 let ok = await self.syncNow()
+                // Stopped: no timer and no backoff. Only an event (a refresh, lock, unlock, an explicit `requestSync`) wakes the
+                // loop, and each pass returns at once without contacting a home.
+                if self.phase.isStopped { await self.syncSignal.wait(); continue }
                 failures = ok ? 0 : failures + 1
                 let signal = self.syncSignal
                 // Success: poll again after `duties.pollInterval` (recoveryDelay / 6, as §17.5 asks at least; 15 s while a
@@ -486,7 +495,7 @@ import Observation
         batchTask?.cancel(); batchTask = nil
         await refresh(preservingCommandFailure: true)
     }
-    public var hasUsableContent: Bool { usable && [.ready, .refreshing, .waitingForDownload, .retry].contains(phase) }
+    public var hasUsableContent: Bool { usable && ([.ready, .refreshing, .waitingForDownload, .retry].contains(phase) || phase.isStopped) }
 
     private func apply(_ snapshot: SessionSnapshot) {
         guard snapshot.revision >= revision else { return }
@@ -521,6 +530,9 @@ import Observation
     }
     private func fail(_ error: any Error) {
         if error is CancellationError { return }
+        // A stopped account refuses every write (`newerFormat`) and every call (`unavailable`): that is the stopped phase
+        // the person already sees, not a new fault, so the phase and the readable content stay.
+        if phase.isStopped, let colophon = error as? ColophonError, colophon.isNewerFormat || colophon.code.hasPrefix("unavailable") { return }
         lastError = error.localizedDescription
         switch error {
         case let colophon as ColophonError:

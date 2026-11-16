@@ -393,8 +393,23 @@ impl Account {
     // -----------------------------------------------------------------------------------------
     // Shared helpers.
 
+    /// §1 "A stop": an action prepared before the stop is refused at its next step with the result
+    /// its begin would give now: `unavailable` for a link or call, `newerFormat` for the rest.
+    fn refuse_stale(&self, action: &PendingAction) -> Result<()> {
+        let call = matches!(
+            &action.stage,
+            Stage::Sign(s) if matches!(s.work, Work::Link(_) | Work::Call(..) | Work::HomeCall(..))
+        );
+        if call {
+            self.refuse_call_if_stopped()
+        } else {
+            self.refuse_if_stopped()
+        }
+    }
+
     /// Writes need a clean history and no rollback (§13.3).
     fn require_writable(&self) -> Result<()> {
+        self.refuse_if_stopped()?;
         self.d.auth.require_clean()?;
         if self.d.verdict.rollback {
             return Err(Failure::Refused(Reason::Rollback));
@@ -754,6 +769,7 @@ impl Account {
     /// after it is in the keyring ([`Account::begin_add_slot`]), on a device that holds the
     /// seed ([`Account::transfer_seed`], [`Account::accept_seed_transfer`]).
     pub fn begin_add_controller(&self, add: &AddController) -> Result<PendingAction> {
+        self.refuse_if_stopped()?;
         match &add.mode {
             AddMode::Immediate { signers } => self.begin_keyring(
                 &KeyringEdit {
@@ -969,6 +985,7 @@ impl Account {
             &action.account == self.d.auth.account(),
             "the action is for another account",
         )?;
+        self.refuse_stale(&action)?;
         let Stage::Prf(stage) = action.stage else {
             return Err(malformed("this action needs no PRF assertions"));
         };
@@ -1388,6 +1405,7 @@ impl Account {
         signers: &[String],
         rule: TransitionRule,
     ) -> Result<PendingAction> {
+        self.refuse_if_stopped()?;
         if self.d.verdict.rollback {
             return Err(Failure::Refused(Reason::Rollback));
         }
@@ -1677,6 +1695,7 @@ impl Account {
         not_before_ms: i64,
         expires_ms: i64,
     ) -> Result<PendingAction> {
+        self.refuse_call_if_stopped()?;
         let me = self.me_member()?;
         crate::v05::write::check_issued(not_before_ms)?;
         crate::v05::write::check_issued(expires_ms)?;
@@ -1723,6 +1742,9 @@ impl Account {
         request_id: [u8; 32],
         target: CallTarget,
     ) -> Result<PendingAction> {
+        // A stopped reader builds no call (§1 "A stop", §12.3 step 4): refused before a
+        // signature is asked for.
+        self.refuse_call_if_stopped()?;
         let view = self.call_view()?;
         let st = self.d.auth.state();
         let seq = st.history().len() as u64;
@@ -1783,6 +1805,7 @@ impl Account {
         call: &HomeCall,
         request_id: [u8; 32],
     ) -> Result<PendingAction> {
+        self.refuse_call_if_stopped()?;
         require(
             call.method.bytes().all(|b| b.is_ascii_uppercase()) && !call.method.is_empty(),
             "the method is an upper-case HTTP method",
@@ -1855,6 +1878,12 @@ impl Account {
             &action.account == self.d.auth.account(),
             "the action is for another account",
         )?;
+        // An action prepared before the account stopped is refused here with the result its begin
+        // would now give, and dropped (§1 "A stop"): nothing is signed into an envelope, returned or
+        // stored after the stop. Every finish of a prepared action passes here (`record_due` too:
+        // it records nothing once stopped; the entry that makes a raise final is recorded while the
+        // account is not yet stopped).
+        self.refuse_stale(&action)?;
         let info = action.info;
         let Stage::Sign(stage) = action.stage else {
             return Err(malformed("the PRF assertions have not been provided"));
@@ -2062,6 +2091,13 @@ impl Account {
         match &d.verdict.stop {
             None | Some(Stop::Held { .. }) => {}
             same if *same == self.d.verdict.stop => {}
+            // Recording the entry that makes a layout raise final (§1 "A stop", §13.6: before
+            // the raise is final a 0.5 reader records it as any activation): the account is
+            // then stopped, a verified state, and builds nothing more.
+            Some(Stop::Failed { seq, .. })
+                if self.d.verdict.stopped.is_none()
+                    && d.verdict.stopped == Some(*seq)
+                    && d.auth.state().stopped_at() == Some(*seq) => {}
             Some(Stop::Fork { .. }) => return Err(Failure::Refused(Reason::Fork)),
             Some(Stop::Failed { failure, .. }) => return Err(failure.clone()),
         }

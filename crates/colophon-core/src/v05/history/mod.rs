@@ -128,6 +128,9 @@ pub struct Persisted {
     /// This verifier saw the succession verified (§15.1: "a verifier that has persisted a
     /// verified succession keeps it"): never re-derived, never lost when heads age.
     succession_verified: bool,
+    /// The stop this verifier once verified for the account (§1 "A stop"): `(seq, layout)`. A floor,
+    /// as the head marks are: local memory that evidence going missing never undoes.
+    stop_floor: Option<(u64, Option<u64>)>,
 }
 
 /// Checkpoint format. 2 added `held_until`; 3 added the successor fields; 4 added the per-home
@@ -154,6 +157,9 @@ struct Checkpoint {
     succession_verified: bool,
     /// The seq at which the verdict stopped the reader (format 7, [`Verdict::stopped`]).
     stopped: Option<u64>,
+    /// The stop this verifier once verified, kept as a floor (additive: absent means none).
+    #[serde(default)]
+    stop_floor: Option<(u64, Option<u64>)>,
 }
 
 impl Persisted {
@@ -164,6 +170,7 @@ impl Persisted {
             checkpoint: None,
             head_marks: BTreeMap::new(),
             succession_verified: false,
+            stop_floor: None,
         }
     }
 
@@ -177,6 +184,18 @@ impl Persisted {
     /// Whether this verifier saw its account's succession verified (§15.1).
     pub fn succession_verified(&self) -> bool {
         self.succession_verified
+    }
+    /// The stop this verifier once verified for the account, `(seq, layout)` (§1 "A stop"): a floor
+    /// that holds even when the evidence of the raise is no longer held. Never cleared.
+    pub fn stop_floor(&self) -> Option<(u64, Option<u64>)> {
+        self.stop_floor
+    }
+    /// Record a verified stop as the floor. Monotone: the first stop recorded stays.
+    pub fn with_stop_floor(mut self, seq: u64, layout: Option<u64>) -> Self {
+        if self.stop_floor.is_none() {
+            self.stop_floor = Some((seq, layout));
+        }
+        self
     }
     /// Record that the succession was seen verified. Monotone: never cleared.
     pub fn with_succession_verified(mut self) -> Self {
@@ -247,6 +266,7 @@ impl Persisted {
             high_water: high_water.clone(),
             head_marks: previous.head_marks.clone(),
             succession_verified: previous.succession_verified,
+            stop_floor: previous.stop_floor,
             checkpoint: Some(Checkpoint {
                 version: CHECKPOINT_VERSION,
                 now_ms,
@@ -259,6 +279,7 @@ impl Persisted {
                 head_marks: previous.head_marks.clone(),
                 succession_verified: previous.succession_verified,
                 stopped: verdict.stopped,
+                stop_floor: previous.stop_floor,
             }),
         }
     }
@@ -273,6 +294,7 @@ impl Persisted {
         cp.high_water = self.high_water.clone();
         cp.head_marks = self.head_marks.clone();
         cp.succession_verified = self.succession_verified;
+        cp.stop_floor = self.stop_floor;
         serde_json::to_vec(&cp).map_err(|e| crate::v05::malformed(e.to_string()))
     }
 
@@ -292,6 +314,7 @@ impl Persisted {
             high_water: cp.high_water.clone(),
             head_marks: cp.head_marks.clone(),
             succession_verified: cp.succession_verified,
+            stop_floor: cp.stop_floor,
             checkpoint: Some(cp),
         })
     }
@@ -314,9 +337,15 @@ impl Persisted {
                     .and_then(serde_json::Value::as_bool)
             })
             .unwrap_or(false);
+        let floor = serde_json::from_slice::<serde_json::Value>(old)
+            .ok()
+            .and_then(|v| v.get("stop_floor").cloned())
+            .and_then(|f| serde_json::from_value::<Option<(u64, Option<u64>)>>(f).ok())
+            .flatten();
         let previous = Self {
             head_marks: marks,
             succession_verified: kept,
+            stop_floor: floor,
             ..Self::default()
         };
         Self::checkpoint(objects, &previous, now_ms)

@@ -4,11 +4,11 @@ import { descriptorView, KeyCustody, keyDescriptorOf, keyIdOf, toPrfAnswers, toS
 import type { MediumEntry, RecordMedium } from './medium.js';
 import { SavedStateCache, SessionJournal, type SavedStateData } from './private.js';
 import type {
-  AccountDenial, AccountMember, CallNeed, Controller, Created, EpochAgreement, ExchangeStep, HistoryReport, Home, KeyDescriptor, Notices, Policy,
+  AccountDenial, AccountMember, AccountStop, CallNeed, Controller, Created, EpochAgreement, ExchangeStep, HistoryReport, Home, KeyDescriptor, Notices, Policy,
   PrfRequest, RemovalFollowUp, Report, RequestInfo, SealedSeed, SigningStep, SlotInfo, Standing, Status, Store, UnlockInput, Written, NamespaceRevision,
 } from './records.js';
 import { closeAll, withEntropy } from './secrets.js';
-import { HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest } from './transport.js';
+import { homeRefusal, HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest } from './transport.js';
 import {
   ConfiguredHome, emptyNotices, noDuties, noticesFrom, phaseUsable, samePhase, SessionRefusal,
   type AccessRequest, type ApprovalStart, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
@@ -40,6 +40,11 @@ export interface ExchangeResult {
   passes: number; faults: HomeFault[]; issues: HomeIssue[]; changed: boolean; unauthorized: boolean;
   /** A pass that did not finish (the engine still waited after its one recovery): the exchange failed. */
   failed: boolean;
+  /** The account is stopped (a final layout raise this device verified, spec §1 "A stop"): no pass runs, and a pass that
+   *  brought the stop in ended there. Not a failure. */
+  stopped?: boolean;
+  /** A home answered `503 {"result":"unavailable"}`: the home is not available. Retried with backoff; not about this device. */
+  homeUnavailable?: boolean;
 }
 
 /**
@@ -187,7 +192,8 @@ export class SessionWorker {
     const objects = (prefix: string): glue.ByteString[] => entries.filter(e => e.path.startsWith(prefix)).map(e => new glue.ByteString(medium.read(e.path)));
     const pending = [...objects('transitions/'), ...objects('vetoes/'), ...objects('receipts/')];
     const report = plain<HistoryReport>(glue.account_verify_history(new glue.AuthorityObjects(objects('authority/'), pending, objects('heads/'), objects('predecessor/')), BigInt(this.nowMs)));
-    if (report.kind === glue.StatusKind.NewerFormat) throw makeFault('NewerFormat', report.code, report.detail ?? '');
+    // A history that stops at a final layout raise still names its account: the engine opens it, stopped (spec §1).
+    if (report.kind === glue.StatusKind.NewerFormat && report.account === undefined) throw makeFault('NewerFormat', report.code, report.detail ?? '');
     if (report.account === undefined) throw makeFault('Malformed', report.code, report.detail ?? "the library's history does not verify");
     return report.account;
   }
@@ -216,6 +222,8 @@ export class SessionWorker {
   private async refreshEngine(entries: readonly MediumEntry[], signal?: AbortSignal): Promise<void> {
     const engine = this.engine;
     if (!engine) return;
+    // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
+    if (this.isStopped(engine)) return;
     plain(engine.run(e => e.advance(BigInt(this.nowMs))));
     plain(engine.run(e => e.refresh(listed(entries))));
     for (const written of plain<Written[]>(engine.run(e => e.record_due()))) await this.persist(written.stores);
@@ -232,13 +240,17 @@ export class SessionWorker {
     engine.finishUnlockEpochs(await custody.answerEpochs(agreements, this.waiting(signal)));
   }
 
+  /** Seals and stores the engine's saved state (inside the gate). A stopped account's saved state carries the stop as a floor. */
+  private async persistSaved(engine: ColophonEngine, account: string): Promise<void> {
+    plain(engine.run(e => e.verify_batch(128n)));
+    const state = plain<SavedStateData>(engine.run(e => withEntropy(32, seed => e.save(seed))));
+    await this.cache.save(account, state);
+  }
   saveCheckpoint(): Promise<void> {
     return this.gated(async () => {
       const engine = this.engine; const account = this.accountId;
-      if (!engine || account === undefined || this.lastPhase.kind !== 'ready') return;
-      plain(engine.run(e => e.verify_batch(128n)));
-      const state = plain<SavedStateData>(engine.run(e => withEntropy(32, seed => e.save(seed))));
-      await this.cache.save(account, state);
+      if (!engine || account === undefined || (this.lastPhase.kind !== 'ready' && this.lastPhase.kind !== 'stopped')) return;
+      await this.persistSaved(engine, account);
     });
   }
 
@@ -255,11 +267,33 @@ export class SessionWorker {
       setupPending: this.journal.setupPending };
   }
 
+  /**
+   * The stopped phase (spec §1 "A stop"): only from the verified status. What the device holds stays readable as of the
+   * stop (revisions are published for the namespaces this member may read); no notices or duties are computed: a
+   * stopped reader answers no question of currency, and the host builds nothing.
+   */
+  private async stoppedSnapshot(engine: ColophonEngine, stop: AccountStop, standing: Standing): Promise<SessionSnapshot> {
+    // The moment the stop is verified it is persisted (the sealed saved state carries it as a floor).
+    if (this.lastPhase.kind !== 'stopped' && this.accountId !== undefined) await this.persistSaved(engine, this.accountId);
+    const members = plain<AccountMember[]>(engine.run(e => e.members()));
+    const homes = plain<Home[]>(engine.run(e => e.homes()));
+    const revisions: Record<string, bigint> = {};
+    if (standing.kind === glue.StandingKind.Member && standing.member?.revokedAt === undefined) {
+      for (const r of plain<NamespaceRevision[]>(engine.run(e => e.revisions()))) {
+        if (this.libraryNamespaces.includes(r.namespace) && plain<AccountDenial | undefined>(engine.run(e => e.access(r.namespace))) === undefined) revisions[r.namespace] = r.revision;
+      }
+      if (Object.keys(revisions).length > 0) revisions['colophon.authority'] = engine.run(e => e.head_seq());
+    }
+    const phase: SessionPhase = stop.layout === undefined ? { kind: 'stopped', seq: Number(stop.seq) } : { kind: 'stopped', seq: Number(stop.seq), layout: Number(stop.layout) };
+    return this.snapshot(phase, { members, namespaceRevisions: revisions, homes });
+  }
+
   private async build(): Promise<SessionSnapshot> {
     const engine = this.engine;
     if (!engine) return this.snapshot(this.lockedFlag ? { kind: 'locked' } : { kind: 'noLibrary' });
     const standing = plain<Standing>(engine.run(e => e.me()));
     const status = plain<Status>(engine.run(e => e.status()));
+    if (status.stopped) return await this.stoppedSnapshot(engine, status.stopped, standing);
     if (status.kind === glue.StatusKind.NewerFormat) return this.snapshot({ kind: 'updateRequired' });
     const members = plain<AccountMember[]>(engine.run(e => e.members()));
     const requests = this.pendingRequests(members);
@@ -940,6 +974,13 @@ export class SessionWorker {
    */
   /** Tests only: answers `exchange_next` for a home instead of the engine when it returns a step. */
   nextStepOverride?: (home: string) => ExchangeStep | undefined;
+  /** Per home, the clock time (ms) before which it is not contacted again (a `Retry-After` it sent with a result). */
+  private readonly notBefore = new Map<string, number>();
+  /** Per home, the refusal that came with its `Retry-After`, shown again while the home is not contacted. */
+  private readonly waitingIssue = new Map<string, HomeIssue>();
+  private isStopped(engine: ColophonEngine): boolean {
+    try { return plain<Status>(engine.run(e => e.status())).stopped !== undefined; } catch { return false; }
+  }
 
   async exchange(caller?: AbortSignal): Promise<ExchangeResult> {
     // Locking the session ends the pass in flight, as a cancelled caller does.
@@ -949,10 +990,22 @@ export class SessionWorker {
     const engine = this.engine;
     if (!engine) return result;
     const homes = plain<Home[]>(engine.run(e => e.exchange_homes()));
+    // This device asked to join and holds no grant for itself: a `refused:revoked` for its own call means "not approved yet".
+    let awaitingApproval = false;
+    try { awaitingApproval = plain<Standing>(engine.run(e => e.me())).kind === glue.StandingKind.Unknown; } catch { /* not known */ }
     for (const home of homes) {
       throwIfAborted(signal);
       const configured = this.transportFor(home);
       if (!configured) continue;
+      // The home asked for time (`Retry-After`): it is not contacted again before then.
+      // What it said stays shown until then.
+      const until = this.notBefore.get(home.id);
+      if (until !== undefined && this.nowMs < until) {
+        const said = this.waitingIssue.get(home.id);
+        if (said) { result.issues.push(said); if (said.problem.kind === 'homeUnavailable') result.homeUnavailable = true; }
+        continue;
+      }
+      this.waitingIssue.delete(home.id);
       if (!configured.isAllowed) { result.issues.push({ home: home.id, problem: { kind: 'insecureEndpoint', url: configured.endpoint } }); continue; }
       const token = configured.configuration.bearerToken;
       if (token !== undefined) engine.run(e => e.exchange_set_bearer(home.id, token));
@@ -962,11 +1015,15 @@ export class SessionWorker {
         plain(engine.run(e => e.refresh(listed(this.storage.listing()))));
         await this.unlockIfPossible(signal);
       });
+      // A stopped account runs no exchange pass (spec §1 "A stop": it accepts no head and asks no call).
+      if (this.isStopped(engine)) { result.stopped = true; break; }
       const started = performance.now();
       const elapsed = (): number => performance.now() - started;
       const tooSlow = (): HomeProblem => ({ kind: 'tooSlow', seconds: Math.round(this.exchangeTimeMs / 1000) });
       let stopped: HomeProblem | undefined;
       let finished = false;
+      // The pass was left for a `Retry-After`: the answer was not given to the engine, so its request is abandoned.
+      let abandon = false;
       try {
         let progress = true; let passIndex = 0; let recovered = false;
         // A pass can end before everything moved (the engine plans the next stage from what the home just said): run
@@ -991,7 +1048,7 @@ export class SessionWorker {
             if (step.kind === glue.ExchangeStepKind.NeedCall) {
               if (!step.need) break;
               try { await this.provideCall(step.need, home, configured, signal); } catch (error) {
-                if (error instanceof HomeProblemError) { stopped = error.problem; break homeLoop; }
+                if (error instanceof HomeProblemError) { stopped = error.problem.kind === 'callRefused' && error.problem.code === 'refused:revoked' && awaitingApproval ? { kind: 'waitingForApproval' } : error.problem; break homeLoop; }
                 throw error;
               }
               continue;
@@ -1028,6 +1085,43 @@ export class SessionWorker {
             } finally { clearTimeout(timer); }
             const limit = HomeLimits.responseBytes(request.url);
             if (answer.body.length > limit) { stopped = { kind: 'responseTooLarge', limit }; break homeLoop; }
+            // A home's answer that carries a §1 result (spec §14, §19): read only the `result`, validated against the result
+            // grammar and bounded (`homeRefusal`), never any other byte of the body. It is the home's word about one
+            // request, not a verified state of the account.
+            let refusedCall: HomeProblem | undefined;
+            const refusal = request.home === home.id ? homeRefusal(answer) : undefined;
+            if (refusal) {
+              if (refusal.retryAfterSeconds !== undefined) this.notBefore.set(home.id, this.nowMs + refusal.retryAfterSeconds * 1000);
+              const retry = refusal.retryAfterSeconds !== undefined ? { retryAfterSeconds: refusal.retryAfterSeconds } : {};
+              if (refusal.status === 503 && refusal.code === 'unavailable') {
+                // `503 {"result":"unavailable"}` (a stopped or overloaded home, §13.6): the home is not available. The pass
+                // stops and the session retries with backoff; it says nothing about this device.
+                stopped = { kind: 'homeUnavailable', ...retry };
+                if (refusal.retryAfterSeconds !== undefined) this.waitingIssue.set(home.id, { home: home.id, problem: stopped });
+                result.homeUnavailable = true;
+                break homeLoop;
+              }
+              const code = refusal.code;
+              if (code !== undefined && code.startsWith('refused:')) {
+                // A device that asked to join and holds no grant for itself sees `refused:revoked` for its own call (0.5
+                // keeps that result; `refused:notGranted` is reserved): it is waiting for approval.
+                const problem: HomeProblem = code === 'refused:revoked' && awaitingApproval
+                  ? { kind: 'waitingForApproval' } : { kind: 'remoteCallRefused', code, ...retry };
+                const signed = request.headers.some(h => h.name.toLowerCase() === 'authorization' && h.value.startsWith('Colophon '));
+                if (answer.status === 401) {
+                  // The challenge for a call: the engine asks for one.
+                } else if (answer.status === 403 && signed) {
+                  // This device's signed call was refused: the engine is told, then the pass ends with the home's word.
+                  refusedCall = problem;
+                } else {
+                  // Any other refusal refuses only that request (an unknown or reserved name included) and the pass goes
+                  // on, unless the home asked for time (`Retry-After`).
+                  const issue = { home: home.id, problem };
+                  if (!result.issues.some(i => i.home === home.id && JSON.stringify(i.problem) === JSON.stringify(problem))) result.issues.push(issue);
+                  if (refusal.retryAfterSeconds !== undefined) { this.waitingIssue.set(home.id, issue); abandon = true; break homeLoop; }
+                }
+              } else if (refusal.retryAfterSeconds !== undefined) { abandon = true; break homeLoop; }
+            }
             throwIfAborted(signal);
             // The answer and the persistence of its stores are one step: never abandoned half way.
             const report = await this.gated(async () => {
@@ -1043,14 +1137,21 @@ export class SessionWorker {
             if (report.store.length > 0 || report.changes.authorityToSeq !== report.changes.authorityFromSeq || report.changes.namespaces.length > 0) {
               result.changed = true; progress = true;
             }
+            if (refusedCall) { stopped = refusedCall; result.unauthorized = true; break homeLoop; }
           }
           result.passes++;
         }
-        finished = stopped === undefined;
+        finished = stopped === undefined && !abandon;
+      } catch (error) {
+        // The pass brought in the final raise that stops this account: the engine then refuses the next step
+        // (`unavailable`). That is the stop, not a fault of the exchange.
+        if (signal.aborted || !this.isStopped(engine)) throw error;
+        result.stopped = true; result.changed = true;
       } finally {
         // Every exit that is not a completed pass abandons the request in flight, a cancelled caller included.
         if (!finished) await this.abortPass(engine, home.id);
       }
+      if (result.stopped) break;
       if (stopped) {
         result.issues.push({ home: home.id, problem: stopped });
         if (stopped.kind === 'stillWaiting') result.failed = true;

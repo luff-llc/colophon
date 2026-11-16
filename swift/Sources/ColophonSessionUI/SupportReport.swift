@@ -20,6 +20,7 @@ public struct SupportReport: Encodable, Equatable, Sendable {
         case .denied: phase = "denied"
         case .unavailable: phase = "unavailable"
         case .updateRequired: phase = "updateRequired"
+        case .stopped: phase = "stopped"
         case .ready: phase = "ready"
         case .refreshing: phase = "refreshing"
         case .retry: phase = "retry"

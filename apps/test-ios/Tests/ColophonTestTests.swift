@@ -36,6 +36,20 @@ import ColophonSession
         #expect(observer.snapshot().lastRefusal?.detail == "refused:revoked")
     }
 
+    /// The status screen's words: a home's refusal with the name it gave (an unknown or reserved one too), the home being
+    /// unavailable, waiting for approval, and a stopped account, none of them worded as a fault of the account.
+    @Test func theStatusWordsForRefusalsWaitingAndAStop() {
+        for code in ["refused:overQuota", "refused:noEntitlement", "refused:closed", "refused:notProvisioned", "refused:somethingNew"] {
+            let words = AppModel.describe(.remoteCallRefused(code: code))
+            #expect(words.contains(code) && words.contains("not a verified state"), "\(words)")
+        }
+        #expect(AppModel.describe(.remoteCallRefused(code: "refused:window", retryAfterSeconds: 120)).contains("120 s"))
+        #expect(AppModel.describe(.homeUnavailable(retryAfterSeconds: nil)) == HomeWords.unavailable)
+        #expect(AppModel.describe(.waitingForApproval).hasPrefix("Waiting for approval"))
+        #expect(!AppModel.describe(.waitingForApproval).contains("revoked:"), "not worded as a revocation")
+        #expect(AppModel.Words.stopped.contains("moved to a newer format") && AppModel.Words.stopped.contains("update the app"))
+    }
+
     @Test func theResultGrammar() {
         for good in ["ok", "malformed", "badSignature", "newerFormat", "unavailable", "refused:revoked", "refused:outOfScope"] {
             #expect(ResultCode.isValid(good), "\(good)")

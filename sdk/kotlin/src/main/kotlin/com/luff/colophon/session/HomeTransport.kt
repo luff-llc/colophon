@@ -144,8 +144,73 @@ sealed class HomeProblem {
     data class CallRefused(val code: String) : HomeProblem()
     /** The engine still had a request outstanding after the pass was abandoned and run again once: the pass could not finish, and the exchange failed. */
     object StillWaiting : HomeProblem() { override fun toString() = "StillWaiting" }
-    /** Unverified refusal of this device's signed call by a home. Stops its pass; never denies local data or wipes keys. */
-    data class RemoteCallRefused(val code: String) : HomeProblem()
+    /**
+     * A home refused a request of this device with a `refused:<reason>` result (spec §14, §19). [code] is the result as
+     * the home gave it, validated against the result grammar and bounded ([HomeRefusal]); a name this session does not
+     * know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed` and `refused:notProvisioned`
+     * included, is shown as received. It refuses only that request: an unverified remote claim, never a verified state of
+     * the account (`refused:closed` is not evidence that anything was deleted; `refused:revoked` is not proof of
+     * revocation). A refused call (401/403) ends the pass; any other refusal lets it go on. [retryAfterSeconds] is the
+     * home's `Retry-After`, honoured: the home is not contacted again before then.
+     */
+    data class RemoteCallRefused(val code: String, val retryAfterSeconds: Int? = null) : HomeProblem()
+    /**
+     * The home answered `503 {"result":"unavailable"}`: the home is not available (a stopped home answers so, §13.6). It
+     * says nothing about this device or the account; the exchange is retried with backoff.
+     */
+    data class HomeUnavailable(val retryAfterSeconds: Int?) : HomeProblem()
+    /**
+     * This device asked to join and holds no grant for itself, and a home (or its own check) answered `refused:revoked`:
+     * in 0.5 that is the result for a member no grant names (`refused:notGranted` is reserved), so the device is waiting
+     * for approval, not revoked. A device that holds its own verified revocation is [SessionPhase.Denied].
+     */
+    object WaitingForApproval : HomeProblem() { override fun toString() = "WaitingForApproval" }
+}
+
+/**
+ * The one thing a session reads from a home's error answer: its `result`, only when it is a result the spec's §1 grammar
+ * allows (`ok`, `malformed`, `badSignature`, `newerFormat`, `unavailable`, or `refused:<reason>` with a reason of a
+ * lower-case letter then letters and digits, at most 48 characters), from a JSON body of at most 64 KiB. Every other byte
+ * of the body is dropped, never echoed. With it, `Retry-After` in whole seconds (1 to 86,400).
+ */
+data class HomeRefusal(val status: Int, val code: String?, val retryAfterSeconds: Int?) {
+    /** `503` with `{"result":"unavailable"}`: the home is not available. */
+    val isHomeUnavailable: Boolean get() = status == 503 && code == "unavailable"
+
+    companion object {
+        val NAMED = setOf("ok", "malformed", "badSignature", "newerFormat", "unavailable")
+        /** Null for a success, or an answer that carries neither a valid result nor a `Retry-After`. */
+        fun of(status: Int, headers: List<Header>, body: ByteArray): HomeRefusal? {
+            if (status < 400) return null
+            val code = result(body)
+            val retry = headers.firstOrNull { it.name.equals("retry-after", ignoreCase = true) }?.let { seconds(it.value) }
+            if (code == null && retry == null) return null
+            return HomeRefusal(status, code, retry)
+        }
+        fun isValid(text: String): Boolean {
+            if (text in NAMED) return true
+            if (!text.startsWith("refused:") || text.length > 8 + 48) return false
+            val reason = text.substring(8)
+            if (reason.isEmpty() || reason[0] !in 'a'..'z') return false
+            return reason.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' }
+        }
+        internal fun result(body: ByteArray): String? {
+            if (body.size > 64 * 1024) return null
+            val text = Json.obj(body.toString(Charsets.UTF_8))?.string("result") ?: return null
+            return if (isValid(text)) text else null
+        }
+        internal fun seconds(text: String): Int? {
+            val t = text.trim()
+            if (t.isEmpty() || t.length > 6 || !t.all { it in '0'..'9' }) return null
+            return t.toInt().takeIf { it in 1..86_400 }
+        }
+    }
+}
+
+/** Words a host may show for a home's state. */
+object HomeWords {
+    /** [HomeProblem.HomeUnavailable]: the home answered `503 {"result":"unavailable"}`. */
+    const val UNAVAILABLE = "The home is not available right now. This app will try again."
 }
 
 internal class HomeProblemException(val problem: HomeProblem) : Exception(problem.toString())

@@ -445,6 +445,9 @@ record:AccountMember.revoked_at
 record:AccountMember.session
 record:AccountMember.since
 record:AccountMember.writes
+record:AccountStop
+record:AccountStop.layout
+record:AccountStop.seq
 record:AccountSigningStep
 record:AccountSigningStep.body
 record:AccountSigningStep.challenge
@@ -776,6 +779,7 @@ record:Status.reason
 record:Status.rollback
 record:Status.seq
 record:Status.stop_seq
+record:Status.stopped
 record:Store
 record:SuccessionTiming
 record:SuccessionTiming.due_ms

@@ -1,7 +1,7 @@
 import { KeyCustodyError, HomeTransportError, SessionError, StorageError } from './errors.js';
 import { keyDescriptorOf, type AsyncKeyProvider } from './keys.js';
 import type { AccountMember, Home, SealedSeed } from './records.js';
-import type { HomeIssue } from './transport.js';
+import { HomeWords, type HomeIssue } from './transport.js';
 import {
   emptyNotices, failureMessage, noDuties, phaseUsable, samePhase, SessionRefusal,
   type AccessRequest, type ApprovalStart, type DomainCommand, type HomeFault, type HostDuties, type ObservedRevision, type ScannedRequest, type SessionConfiguration, type SessionNotices,
@@ -353,9 +353,18 @@ export class ColophonSession {
     // With no library there is nothing to exchange. A pass here would refresh to `noLibrary` and erase what a failed
     // `create()` just published (its `failed` phase and error), which an app would see as a missing error.
     if (this.current.libraryId === undefined) return false;
+    // A stopped account runs no exchange (spec §1 "A stop"): not a failure, and nothing to retry.
+    if (this.phase.kind === 'stopped') { this.set({ syncState: { kind: 'disabled' } }); return true; }
     this.set({ syncState: { kind: 'syncing' } });
     try {
       const result = await this.worker.exchange(signal);
+      if (result.stopped) { this.set({ syncState: { kind: 'disabled' } }); await this.refreshKeeping(true); return true; }
+      // A home that answered `503 {"result":"unavailable"}` is not available: shown so, retried with backoff (never as this
+      // device being stopped, which only its own verified history decides).
+      if (result.homeUnavailable && !result.changed) {
+        this.set({ homeFaults: result.faults, homeIssues: result.issues, syncState: { kind: 'offline', reason: HomeWords.unavailable } });
+        return false;
+      }
       this.set({ homeFaults: result.faults, homeIssues: result.issues, lastSyncedMs: Date.now(),
         syncState: result.unauthorized ? { kind: 'unauthorized' } : result.failed ? { kind: 'error', reason: 'a pass could not finish: the engine was still waiting' } : { kind: 'idle' } });
       if (result.changed || this.phase.kind !== 'ready') await this.refreshKeeping(true);
@@ -388,7 +397,9 @@ export class ColophonSession {
         const ok = this.phase.kind === 'locked' ? true : await this.syncNow(signal);
         failures = ok ? 0 : failures + 1;
         // Success: poll after duties.pollIntervalMs or when a local change arrives. Failure: capped, jittered backoff.
-        const wait = ok ? this.duties.pollIntervalMs : Math.min(60, 2 ** Math.max(0, failures - 1)) * (0.5 + Math.random() / 2) * 1000;
+        // Stopped: no timer and no backoff. Only an event wakes the loop (the longest timer a runtime keeps), and each pass
+        // returns at once without contacting a home.
+        const wait = this.phase.kind === 'stopped' ? 2_147_483_647 : ok ? this.duties.pollIntervalMs : Math.min(60, 2 ** Math.max(0, failures - 1)) * (0.5 + Math.random() / 2) * 1000;
         const woken = new AbortController();
         this.wakeSync = () => woken.abort();
         await sleep(wait, AbortSignal.any([signal, woken.signal]));
@@ -444,6 +455,9 @@ export class ColophonSession {
     } else this.set({ lastError: describe(error) });
   }
   private fail(error: unknown): void {
+    // A stopped account refuses every write (`newerFormat`) and every call (`unavailable`): that is the stopped phase the
+    // person already sees, not a new fault, so the phase and the readable content stay.
+    if (this.phase.kind === 'stopped' && isAccountFault(error) && (error.kind === 'NewerFormat' || error.kind === 'Unavailable')) return;
     this.set({ lastError: describe(error) });
     let phase: SessionPhase;
     if (isAccountFault(error)) {

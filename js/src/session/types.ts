@@ -15,7 +15,15 @@ export type SessionPhase =
   | { kind: 'denied' }
   | { kind: 'unavailable'; reason: string }
   /** Authenticated content of a newer format than this client evaluates. Nothing is changed or lost. */
-  | { kind: 'updateRequired' }
+    /**
+   * New in 0.5 (freeze package): this account was moved to a newer format. A layout raise (spec §20) became final in the
+   * history this device verified, so this app must be updated to continue with the account. A verified state, never a
+   * home's word or a refusal. What the device holds stays readable (`hasUsableContent`), as of the stop; nothing is
+   * written and no exchange runs; it persists across relaunch; lock and sign-out still work. `seq` is the raising
+   * activation's, `layout` the one it names (absent: an entry of a newer format, not a raise).
+   */
+  | { kind: 'stopped'; seq: number; layout?: number }
+| { kind: 'updateRequired' }
   | { kind: 'ready' }
   /** A refresh is in flight; previously verified content is still usable. */
   | { kind: 'refreshing' }
@@ -28,7 +36,7 @@ export type SessionFailure = { kind: 'keysUnavailable'; detail: string } | { kin
 export function failureMessage(f: SessionFailure): string {
   return f.kind === 'keysUnavailable' ? `Your identity keys are unavailable. Unlock this device or restore key access, then retry. ${f.detail}` : f.detail;
 }
-export const phaseUsable = (p: SessionPhase): boolean => p.kind === 'ready' || p.kind === 'refreshing' || p.kind === 'waitingForDownload' || p.kind === 'retry';
+export const phaseUsable = (p: SessionPhase): boolean => p.kind === 'ready' || p.kind === 'refreshing' || p.kind === 'waitingForDownload' || p.kind === 'retry' || p.kind === 'stopped';
 export const samePhase = (a: SessionPhase, b: SessionPhase): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 /** A command is bound to the context and revision observed before the person's action began. */

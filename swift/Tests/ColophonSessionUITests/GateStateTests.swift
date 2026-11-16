@@ -58,7 +58,7 @@ private func activation() -> SeenActivation {
 @MainActor struct GateStateTests {
     private let presentation = LibraryPresentation(appName: "Later", promise: "Keep it.")
     private static let allPhases: [SessionPhase] = [.opening, .noLibrary, .creating, .migrating, .waitingForDownload, .waitingForApproval,
-        .denied, .unavailable(reason: "offline"), .updateRequired, .ready, .refreshing, .retry, .locked,
+        .denied, .unavailable(reason: "offline"), .updateRequired, .stopped(seq: 4, layout: 3), .ready, .refreshing, .retry, .locked,
         .failed(error: .keysUnavailable(detail: "locked")), .failed(error: .other(detail: "x"))]
 
     private func screen(_ phase: SessionPhase, rejoin: Bool = false, recovery: Bool = false) throws -> GateScreen {
@@ -76,7 +76,7 @@ private func activation() -> SeenActivation {
         let expected: [String: [GateAction]] = [
             "library.opening": [], "library.creating": [], "library.waitingForDownload": [], "library.refreshing": [],
             "library.noLibrary": [.create, .join], "library.locked": [.unlock], "library.retryPhase": [.retry],
-            "library.updateRequired": [.retry], "library.migrating": [.retry], "library.waitingForApproval": [.checkAgain, .cancelPairing],
+            "library.updateRequired": [.retry], "library.stopped": [], "library.migrating": [.retry], "library.waitingForApproval": [.checkAgain, .cancelPairing],
             "library.denied": [.retry], "library.unavailable": [.retry], "library.failed": [.retry],
         ]
         var seen: Set<String> = []
@@ -109,6 +109,11 @@ private func activation() -> SeenActivation {
         #expect(try screen(.unavailable(reason: "The disk is gone")).message == "The disk is gone")
         #expect(try screen(.failed(error: .keysUnavailable(detail: "d"))).message.hasPrefix("Your identity keys are unavailable."))
         #expect(try screen(.updateRequired).message.contains("newer storage layout"))
+        // A stopped account: a verified state with no retry and no fault, and the words say to update the app.
+        let stopped = try screen(.stopped(seq: 4, layout: 3))
+        #expect(stopped.title == "Update to Continue" && stopped.message.contains("moved to a newer format") && stopped.message.contains("Update the app"))
+        #expect(GateModel.content(phase: .stopped(seq: 4, layout: 3), usable: true, presentation: presentation, capabilities: .init(rejoin: false, recovery: false))
+                == .content(status: StoppedWords.status, controls: []), "a stopped account keeps showing what it holds")
         guard case .screen(let migrating) = GateModel.content(phase: .migrating, usable: false, presentation: presentation,
                                                               capabilities: .init(rejoin: false, recovery: false), migrationProgress: 1.7) else { Issue.record("migrating"); return }
         #expect(migrating.progress == .fraction("Upgrading library", 1), "progress is clamped")

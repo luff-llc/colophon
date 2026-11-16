@@ -179,7 +179,60 @@ export type HomeProblem =
   | { kind: 'callRefused'; code: string }
   /** The engine still had a request outstanding after the pass was abandoned and run again once: the pass could not
    *  finish, and the exchange failed. */
-  | { kind: 'stillWaiting' };
+  | { kind: 'stillWaiting' }
+  /**
+   * A home refused a request of this device with a `refused:<reason>` result (spec §14, §19). `code` is the result as
+   * the home gave it, validated against the result grammar and bounded (`homeRefusal`); a name this session does not
+   * know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed` and `refused:notProvisioned`
+   * included, is shown as received. It refuses only that request: an unverified remote claim, never a verified state of
+   * the account (`refused:closed` is not evidence that anything was deleted; `refused:revoked` is not proof of
+   * revocation). A refused call (401/403) ends the pass; any other refusal lets it go on. `retryAfterSeconds` is the
+   * home's `Retry-After`, honoured: the home is not contacted again before then.
+   */
+  | { kind: 'remoteCallRefused'; code: string; retryAfterSeconds?: number }
+  /** The home answered `503 {"result":"unavailable"}`: the home is not available (a stopped home answers so, §13.6). It
+   *  says nothing about this device or the account; the exchange is retried with backoff. */
+  | { kind: 'homeUnavailable'; retryAfterSeconds?: number }
+  /** This device asked to join and holds no grant for itself, and a home (or its own check) answered `refused:revoked`:
+   *  in 0.5 that is the result for a member no grant names (`refused:notGranted` is reserved), so the device is waiting
+   *  for approval, not revoked. A device that holds its own verified revocation is `denied`. */
+  | { kind: 'waitingForApproval' };
+
+/** Words a host may show for a home's state. */
+export const HomeWords = {
+  /** `homeUnavailable`: the home answered `503 {"result":"unavailable"}`. */
+  unavailable: 'The home is not available right now. This app will try again.',
+} as const;
+
+/** What a session reads from a home's error answer (`homeRefusal`). */
+export interface HomeRefusal { status: number; code?: string; retryAfterSeconds?: number }
+const NAMED_RESULTS = new Set(['ok', 'malformed', 'badSignature', 'newerFormat', 'unavailable']);
+/** A result the spec's §1 grammar allows: a named one, or `refused:<reason>` with a reason of a lower-case letter then
+ *  letters and digits, at most 48 characters. */
+export function isResultCode(text: string): boolean {
+  if (NAMED_RESULTS.has(text)) return true;
+  return /^refused:[a-z][A-Za-z0-9]{0,47}$/.test(text);
+}
+/**
+ * The one thing a session reads from a home's error answer: its `result`, only when valid (`isResultCode`), from a JSON
+ * body of at most 64 KiB; every other byte of the body is dropped, never echoed. With it, `Retry-After` in whole seconds
+ * (1 to 86,400). Undefined for a success, or an answer that carries neither.
+ */
+export function homeRefusal(answer: HomeAnswer): HomeRefusal | undefined {
+  if (answer.status < 400) return undefined;
+  let code: string | undefined;
+  if (answer.body.length <= 64 * 1024) {
+    try {
+      const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(answer.body));
+      const result = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>).result : undefined;
+      if (typeof result === 'string' && isResultCode(result)) code = result;
+    } catch { /* not JSON: no result */ }
+  }
+  const header = answer.headers.find(h => h.name.toLowerCase() === 'retry-after')?.value.trim();
+  const retry = header !== undefined && /^[0-9]{1,6}$/.test(header) && Number(header) >= 1 && Number(header) <= 86_400 ? Number(header) : undefined;
+  if (code === undefined && retry === undefined) return undefined;
+  return { status: answer.status, ...(code !== undefined ? { code } : {}), ...(retry !== undefined ? { retryAfterSeconds: retry } : {}) };
+}
 
 export interface HomeIssue { home: string; problem: HomeProblem }
 

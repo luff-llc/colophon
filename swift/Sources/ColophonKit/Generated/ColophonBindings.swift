@@ -8954,6 +8954,66 @@ public func FfiConverterTypeAccountSigningStep_lower(_ value: AccountSigningStep
 
 
 /**
+ * Where a reader stopped (§1 "A stop", §20): the seq of the activation whose final raise
+ * stopped it (or of the entry it judged `newerFormat`), and the layout the raise names
+ * (none for an entry of a newer format that is not a raise). Only from the verified
+ * history, never from a home's answer.
+ */
+public struct AccountStop: Equatable, Hashable {
+    public let seq: UInt64
+    public let layout: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(seq: UInt64, layout: UInt64?) {
+        self.seq = seq
+        self.layout = layout
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AccountStop: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccountStop: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccountStop {
+        return
+            try AccountStop(
+                seq: FfiConverterUInt64.read(from: &buf), 
+                layout: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AccountStop, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterOptionUInt64.write(value.layout, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountStop_lift(_ buf: RustBuffer) throws -> AccountStop {
+    return try FfiConverterTypeAccountStop.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountStop_lower(_ value: AccountStop) -> RustBuffer {
+    return FfiConverterTypeAccountStop.lower(value)
+}
+
+
+/**
  * Facts about a prepared action.
  */
 public struct ActionInfo: Equatable, Hashable {
@@ -15395,10 +15455,23 @@ public struct Status: Equatable, Hashable {
     public let stopSeq: UInt64?
     public let detail: String?
     public let rollback: Bool
+    /**
+     * Set when this reader is stopped for the account (§1 "A stop"): a verified state, not a
+     * fault. The account was moved to a newer format; what this device holds stays
+     * readable and nothing new is built (writes `NewerFormat`, calls and exchange passes
+     * `Unavailable`).
+     */
+    public let stopped: AccountStop?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(seq: UInt64, code: String, kind: StatusKind, reason: String?, stopSeq: UInt64?, detail: String?, rollback: Bool) {
+    public init(seq: UInt64, code: String, kind: StatusKind, reason: String?, stopSeq: UInt64?, detail: String?, rollback: Bool, 
+        /**
+         * Set when this reader is stopped for the account (§1 "A stop"): a verified state, not a
+         * fault. The account was moved to a newer format; what this device holds stays
+         * readable and nothing new is built (writes `NewerFormat`, calls and exchange passes
+         * `Unavailable`).
+         */stopped: AccountStop?) {
         self.seq = seq
         self.code = code
         self.kind = kind
@@ -15406,6 +15479,7 @@ public struct Status: Equatable, Hashable {
         self.stopSeq = stopSeq
         self.detail = detail
         self.rollback = rollback
+        self.stopped = stopped
     }
 
     
@@ -15430,7 +15504,8 @@ public struct FfiConverterTypeStatus: FfiConverterRustBuffer {
                 reason: FfiConverterOptionString.read(from: &buf), 
                 stopSeq: FfiConverterOptionUInt64.read(from: &buf), 
                 detail: FfiConverterOptionString.read(from: &buf), 
-                rollback: FfiConverterBool.read(from: &buf)
+                rollback: FfiConverterBool.read(from: &buf), 
+                stopped: FfiConverterOptionTypeAccountStop.read(from: &buf)
         )
     }
 
@@ -15442,6 +15517,7 @@ public struct FfiConverterTypeStatus: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.stopSeq, into: &buf)
         FfiConverterOptionString.write(value.detail, into: &buf)
         FfiConverterBool.write(value.rollback, into: &buf)
+        FfiConverterOptionTypeAccountStop.write(value.stopped, into: &buf)
     }
 }
 
@@ -23304,6 +23380,30 @@ fileprivate struct FfiConverterOptionTypeAccountMember: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeAccountMember.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeAccountStop: FfiConverterRustBuffer {
+    typealias SwiftType = AccountStop?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAccountStop.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAccountStop.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

@@ -22,7 +22,7 @@ struct SessionSnapshot: Sendable {
     var notices: SessionNotices = .empty
     var homes: [Home] = []
     var duties: HostDuties = .none
-    var usable: Bool { [.ready, .refreshing, .waitingForDownload, .retry].contains(phase) }
+    var usable: Bool { [.ready, .refreshing, .waitingForDownload, .retry].contains(phase) || phase.isStopped }
 }
 
 /// A refusal that carries the fresh snapshot so the facade shows what the person must now see.
@@ -78,6 +78,10 @@ actor SessionWorker {
     private let cache: CheckpointCache
     private var faults: [HomeFault] = []
     private var issues: [HomeIssue] = []
+    /// Per home, the time before which it is not contacted again (a `Retry-After` it sent with a result).
+    private var notBefore: [String: Date] = [:]
+    /// Per home, the refusal that came with its `Retry-After`, shown again while the home is not contacted.
+    private var waitingIssue: [String: HomeIssue] = [:]
 
     init(configuration: SessionConfiguration) {
         self.configuration = configuration; memberKeys = SessionKeys(base: configuration.keys)
@@ -180,7 +184,8 @@ actor SessionWorker {
         let pending = try objects("transitions/") + objects("vetoes/") + objects("receipts/")
         let report = try accountVerifyHistory(objects: AuthorityObjects(entries: try objects("authority/"), pending: pending,
             heads: try objects("heads/"), predecessor: try objects("predecessor/")), nowMs: nowMs)
-        if report.kind == .newerFormat { throw ColophonError.newerFormat(code: report.code, detail: report.detail ?? "") }
+        // A history that stops at a final layout raise still names its account: the engine opens it, stopped (spec §1).
+        if report.kind == .newerFormat, report.account == nil { throw ColophonError.newerFormat(code: report.code, detail: report.detail ?? "") }
         guard let account = report.account else {
             throw ColophonError.malformed(code: report.code, detail: report.detail ?? "the library's history does not verify")
         }
@@ -208,6 +213,8 @@ actor SessionWorker {
 
     private func refreshEngine(_ entries: [MediumEntry]) async throws {
         guard let engine else { return }
+        // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
+        if try await Self.isStopped(engine) { return }
         let list = listed(entries)
         let at = nowMs
         _ = try await engine.run { try $0.advance(nowMs: at) }
@@ -240,11 +247,16 @@ actor SessionWorker {
     }
     func saveCheckpoint() async throws {
         try await gated {
-            guard let engine, let account = accountID, phaseIsReady else { return }
-            _ = try await engine.run { try $0.verifyBatch(limit: 128) }
-            let state = try await engine.run { engine in try withEntropy(32) { try engine.save(nonceSeed: $0) } }
-            try await cache.save(JSONEncoder().encode(SavedFile(state)), libraryID: account)
+            guard let engine, let account = accountID, phaseIsReady || lastPhase.isStopped else { return }
+            try await persistSaved(engine, account: account)
         }
+    }
+    /// Seals and stores the engine's saved state (inside the gate). A stopped account's saved state carries the stop as a
+    /// floor, so a relaunch whose store no longer holds the raise stays stopped (spec §1 "A stop").
+    private func persistSaved(_ engine: ColophonEngine, account: String) async throws {
+        _ = try await engine.run { try $0.verifyBatch(limit: 128) }
+        let state = try await engine.run { engine in try withEntropy(32) { try engine.save(nonceSeed: $0) } }
+        try await cache.save(JSONEncoder().encode(SavedFile(state)), libraryID: account)
     }
 
     // MARK: Snapshot
@@ -261,6 +273,7 @@ actor SessionWorker {
         guard let engine else { return snapshot(phase: .noLibrary) }
         let standing = try await engine.run { try $0.me() }
         let status = try await engine.run { try $0.status() }
+        if let stop = status.stopped { return try await stoppedSnapshot(engine, stop: stop, standing: standing) }
         if status.kind == .newerFormat { return snapshot(phase: .updateRequired) }
         let members = try await engine.run { try $0.members() }
         let pending = try await pendingRequests(members: members)
@@ -293,6 +306,26 @@ actor SessionWorker {
         let visible = phase == .ready
         let duties = try await hostDuties(notices: notices, homes: homes)
         return snapshot(phase: phase, members: members, requests: pending, notices: notices, revisions: visible ? revisions : [:], homes: homes, duties: duties)
+    }
+
+    static func isStopped(_ engine: ColophonEngine) async throws -> Bool { try await engine.run { try $0.status() }.stopped != nil }
+
+    /// The stopped phase (spec §1 "A stop"): only from the verified status. What the device holds stays readable as of the
+    /// stop (revisions are published for the namespaces this member may read), and no notices or duties are computed:
+    /// a stopped reader answers no question of currency, and the host builds nothing.
+    private func stoppedSnapshot(_ engine: ColophonEngine, stop: AccountStop, standing: Standing) async throws -> SessionSnapshot {
+        // The moment the stop is verified it is persisted (the sealed saved state carries it as a floor).
+        if !lastPhase.isStopped, let account = accountID { try await persistSaved(engine, account: account) }
+        let members = try await engine.run { try $0.members() }
+        let homes = try await engine.run { try $0.homes() }
+        var revisions: [String: UInt64] = [:]
+        if standing.kind == .member, standing.member?.revokedAt == nil {
+            for r in try await engine.run({ try $0.revisions() }) where configuration.libraryNamespaces.contains(r.namespace) {
+                if try await engine.run({ try $0.access(namespace: r.namespace) }) == nil { revisions[r.namespace] = r.revision }
+            }
+            if !revisions.isEmpty { revisions["colophon.authority"] = try await engine.run { try $0.headSeq() } }
+        }
+        return snapshot(phase: .stopped(seq: stop.seq, layout: stop.layout), members: members, revisions: revisions, homes: homes)
     }
 
     private func localKeyIDs() async -> [String] {
@@ -1009,6 +1042,11 @@ actor SessionWorker {
         var passes = 0; var faults: [HomeFault] = []; var issues: [HomeIssue] = []; var changed = false; var unauthorized = false
         /// A pass that did not finish (the engine still waited after its one recovery): the exchange failed.
         var failed = false
+        /// The account is stopped (a final layout raise this device verified, spec §1 "A stop"): no pass runs, and a pass that
+        /// brought the stop in ended there. Not a failure: the session shows the stopped phase and runs no sync loop.
+        var stopped = false
+        /// A home answered `503 {"result":"unavailable"}`: the home is not available. Retried with backoff; not about this device.
+        var homeUnavailable = false
     }
     /// One pass with every home. The network calls run outside the gate; each engine step and the
     /// persistence of its stores run inside it, so an unpersisted answer is never visible to a refresh.
@@ -1022,8 +1060,20 @@ actor SessionWorker {
         var result = ExchangeResult()
         guard let engine else { return result }
         let homes = try await engine.run { try $0.exchangeHomes() }
+        // This device asked to join and holds no grant for itself: a `refused:revoked` for its own call means "not approved yet".
+        let awaitingApproval = (try? await engine.run { try $0.me() }.kind) == .unknown
         for home in homes {
             guard let configured = transport(for: home) else { continue }
+            // The home asked for time (`Retry-After`): it is not contacted again before then.
+            // What it said stays shown until then.
+            if let until = notBefore[home.id], now < until {
+                if let said = waitingIssue[home.id] {
+                    result.issues.append(said)
+                    if case .homeUnavailable = said.problem { result.homeUnavailable = true }
+                }
+                continue
+            }
+            waitingIssue[home.id] = nil
             guard configured.isAllowed else {
                 result.issues.append(HomeIssue(home: home.id, problem: .insecureEndpoint(configured.endpoint.absoluteString)))
                 continue
@@ -1036,11 +1086,15 @@ actor SessionWorker {
                 _ = try await engine.run { try $0.refresh(listing: list) }
                 try await unlockIfPossible()
             }
+            // A stopped account runs no exchange pass (spec §1 "A stop": it accepts no head and asks no call).
+            if try await Self.isStopped(engine) { result.stopped = true; break }
             let started = ContinuousClock.now
             var progress = true
             var passIndex = 0
             var stopped: HomeProblem?
             var recovered = false
+            // The pass was left for a `Retry-After`: the answer was not given to the engine, so its request is abandoned.
+            var abandon = false
             do {
             // A pass can end before everything moved (the engine plans the next stage from what the home just
             // said): run passes until one moves nothing, at most `HomeLimits.passes`.
@@ -1071,7 +1125,7 @@ actor SessionWorker {
                 case .needCall:
                     guard let need = step.need else { break loop }
                     do { try await provideCall(for: need, home: home, configured: configured) }
-                    catch let problem as HomeProblem { stopped = problem; break homeLoop }
+                    catch let problem as HomeProblem { stopped = problem == .callRefused(code: "refused:revoked") && awaitingApproval ? .waitingForApproval : problem; break homeLoop }
                 case .request:
                     guard let request = step.request else { break loop }
                     // A request is for this home, except another home's public head (`headQuorum` above 1), which goes
@@ -1092,6 +1146,44 @@ actor SessionWorker {
                     // A transport the host supplied is held to the same bound.
                     let limit = HomeLimits.responseBytes(for: request.url)
                     guard answer.body.count <= limit else { stopped = .responseTooLarge(limit: limit); break homeLoop }
+                    // A home's answer that carries a §1 result (spec §14, §19): read only the `result`, validated against
+                    // the result grammar and bounded (`HomeRefusal`), never any other byte of the body. It is the home's
+                    // word about one request, not a verified state of the account.
+                    var refusedCall: HomeProblem?
+                    if request.home == home.id, let refusal = HomeRefusal(status: answer.status, headers: answer.headers, body: answer.body) {
+                        if let wait = refusal.retryAfterSeconds { notBefore[home.id] = now.addingTimeInterval(Double(wait)) }
+                        if refusal.isHomeUnavailable {
+                            // `503 {"result":"unavailable"}` (a stopped or overloaded home, §13.6): the home is not available.
+                            // The pass stops and the session retries with backoff; it says nothing about this device.
+                            stopped = .homeUnavailable(retryAfterSeconds: refusal.retryAfterSeconds)
+                            if refusal.retryAfterSeconds != nil { waitingIssue[home.id] = HomeIssue(home: home.id, problem: .homeUnavailable(retryAfterSeconds: refusal.retryAfterSeconds)) }
+                            result.homeUnavailable = true
+                            break homeLoop
+                        }
+                        if let code = refusal.code, code.hasPrefix("refused:") {
+                            // A device that asked to join and holds no grant for itself sees `refused:revoked` for its own
+                            // call (0.5 keeps that result; `refused:notGranted` is reserved): it is waiting for approval.
+                            let problem: HomeProblem = code == "refused:revoked" && awaitingApproval
+                                ? .waitingForApproval : .remoteCallRefused(code: code, retryAfterSeconds: refusal.retryAfterSeconds)
+                            let signed = request.headers.contains { $0.name.lowercased() == "authorization" && $0.value.hasPrefix("Colophon ") }
+                            if answer.status == 401 {
+                                // The challenge for a call: the engine asks for one.
+                            } else if answer.status == 403, signed {
+                                // This device's signed call was refused: the engine is told, then the pass ends with the home's
+                                // word, as for any refused call.
+                                refusedCall = problem
+                            } else {
+                                // Any other refusal refuses only that request (an unknown or reserved name included) and the
+                                // pass goes on, unless the home asked for time (`Retry-After`).
+                                if !result.issues.contains(HomeIssue(home: home.id, problem: problem)) {
+                                    result.issues.append(HomeIssue(home: home.id, problem: problem))
+                                }
+                                if refusal.retryAfterSeconds != nil { waitingIssue[home.id] = HomeIssue(home: home.id, problem: problem); abandon = true; break homeLoop }
+                            }
+                        } else if refusal.retryAfterSeconds != nil {
+                            abandon = true; break homeLoop
+                        }
+                    }
                     let report = try await gated { () -> Report in
                         let report = try await engine.run { try $0.exchangeAnswer(home: home.id, ticket: request.ticket, answer: answer) }
                         try await persist(report.store)
@@ -1102,17 +1194,7 @@ actor SessionWorker {
                         if fault.kind == .unauthorized { result.unauthorized = true }
                     }
                     if !report.store.isEmpty || report.changes.authorityToSeq != report.changes.authorityFromSeq || !report.changes.namespaces.isEmpty { result.changed = true; progress = true }
-                    // Rust reports 401/403 as Unauthorized without retaining the response's result code.
-                    // Surface this home's claim only for our own signed call. It cannot establish revocation:
-                    // only verified authority records may deny local reads or change custody.
-                    if answer.status == 403, request.home == home.id,
-                       request.headers.contains(where: { $0.name.lowercased() == "authorization" && $0.value.hasPrefix("Colophon ") }),
-                       let body = try? JSONSerialization.jsonObject(with: answer.body) as? [String: Any],
-                       body["result"] as? String == "refused:revoked" {
-                        stopped = .remoteCallRefused(code: "refused:revoked")
-                        result.unauthorized = true
-                        break homeLoop
-                    }
+                    if let refusedCall { stopped = refusedCall; result.unauthorized = true; break homeLoop }
                 }
             }
             result.passes += 1
@@ -1121,11 +1203,16 @@ actor SessionWorker {
                 // A transport failure, an engine error or a cancelled caller: the request in flight is forgotten, what was
                 // pulled and verified is kept, and the next pass starts clean. The abort runs even for a cancelled caller.
                 await abortPass(engine, home: home.id)
+                // The pass brought in the final raise that stops this account: the engine then refuses the next step
+                // (`unavailable`). That is the stop, not a fault of the exchange.
+                if !(error is CancellationError), (try? await Self.isStopped(engine)) == true { result.stopped = true; result.changed = true; break }
                 throw error
             }
             if let stopped {
                 result.issues.append(HomeIssue(home: home.id, problem: stopped))
                 if stopped == .stillWaiting { result.failed = true }
+                await abortPass(engine, home: home.id)
+            } else if abandon {
                 await abortPass(engine, home: home.id)
             }
         }
