@@ -76,7 +76,7 @@ tar_tree() {
 # The last matching prefix wins.
 set_rustflags() {
   local t var flags
-  flags="--remap-path-prefix=$REAL_CARGO_HOME=/cargo --remap-path-prefix=$CARGO_HOME=/cargo"
+  flags="--remap-path-prefix=$CARGO_HOME=/cargo"
   flags+=" --remap-path-prefix=$RUSTUP_HOME=/rustup --remap-path-prefix=$PWD=/colophon"
   flags+=" --remap-path-prefix=$CARGO_TARGET_DIR=/target"
   for t in aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-visionos \
@@ -225,6 +225,8 @@ if [[ "${1:-}" == --pass ]]; then
   pass_arts="$2" pass_dir="$3"
   cd "$pass_dir/src"
   set_rustflags
+  # Pass a fetches every crate Cargo.lock names (all targets); pass b is offline on a copy.
+  if [[ "$RELEASE_PASS" == a ]]; then cargo fetch --locked; fi
   IFS=, read -r -a pass_list <<<"$pass_arts"
   for art in "${pass_list[@]}"; do
     say "pass $RELEASE_PASS: building $art"
@@ -366,19 +368,22 @@ marker="$root/dist/release/$version.FAILED"
 rm -f "$marker"
 
 # One pass in a sanitized environment with its own HOME, Cargo home, Gradle home, npm cache,
-# target directory and TMPDIR. Only Cargo's registry is shared (Cargo.lock pins every crate by
-# checksum), with Cargo's own lock files so other builds on the machine see the same locks.
+# target directory and TMPDIR. Nothing is shared with the machine's Cargo home, so its
+# config.toml never applies. Pass a fills its own registry with `cargo fetch --locked` (Cargo.lock
+# pins every crate by checksum); pass b starts from a copy of pass a's registry and runs offline.
+# The registry must be a real directory: a symlink in a crate's source path breaks proc macros
+# that resolve files relative to it (askama in uniffi_bindgen).
 run_pass() {
-  local p="$1" dir="$run/$1" v l envs
+  local p="$1" dir="$run/$1" v envs
   mkdir -p "$dir/out/.parts" "$dir/home" "$dir/tmp" "$dir/bin" "$dir/cargo-home" "$dir/gradle-home" \
-           "$dir/npm-cache" "$dir/target" "$real_cargo_home/registry" "$real_cargo_home/git"
+           "$dir/npm-cache" "$dir/target"
   : >"$dir/npmrc-user"
   : >"$dir/npmrc-global"
-  for l in registry git; do ln -s "$real_cargo_home/$l" "$dir/cargo-home/$l"; done
-  for l in .package-cache .package-cache-mutate; do
-    [[ -e "$real_cargo_home/$l" ]] || : >"$real_cargo_home/$l"
-    ln -s "$real_cargo_home/$l" "$dir/cargo-home/$l"
-  done
+  if [[ "$p" == b ]]; then
+    # A clone where the filesystem can (APFS, reflink), a plain copy otherwise.
+    if [[ "$(uname -s)" == Darwin ]]; then cp -Rc "$run/a/cargo-home/registry" "$dir/cargo-home/registry"
+    else cp -a --reflink=auto "$run/a/cargo-home/registry" "$dir/cargo-home/registry"; fi
+  fi
   ln -s "$rustup_bin" "$dir/bin/rustup"
   if want js; then ln -s "$wasm_bindgen" "$dir/bin/wasm-bindgen"; ln -s "$node_bin" "$dir/bin/node"; ln -s "$npm_bin" "$dir/bin/npm"; fi
   if want android; then ln -s "$cargo_ndk" "$dir/bin/cargo-ndk"; fi
@@ -386,7 +391,7 @@ run_pass() {
   envs=(
     HOME="$dir/home" PATH="$dir/bin:$tc_bin:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$dir/tmp"
     LANG=C LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" ZERO_AR_DATE=1 COPYFILE_DISABLE=1
-    CARGO_INCREMENTAL=0 CARGO_HOME="$dir/cargo-home" REAL_CARGO_HOME="$real_cargo_home"
+    CARGO_INCREMENTAL=0 CARGO_HOME="$dir/cargo-home"
     RUSTUP_HOME="$real_rustup_home" RUSTUP_TOOLCHAIN="$toolchain" APPLE_TOOLCHAIN="$toolchain"
     VISIONOS_TOOLCHAIN="$visionos_tc" SKIP_VISIONOS="${SKIP_VISIONOS:-0}" RELEASE_NO_INSTALL=1
     CARGO_TARGET_DIR="$dir/target" GRADLE_USER_HOME="$dir/gradle-home"
