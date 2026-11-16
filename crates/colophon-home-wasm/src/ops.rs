@@ -233,6 +233,7 @@ fn identity(req: &Value) -> R<Value> {
 
 fn limits() -> Value {
     json!({
+        "layouts": [2],
         "retentionMs": RETENTION_MS,
         "firstUploadEntries": MAX_FIRST_UPLOAD,
         "replayRows": DEFAULT_REPLAY_ROWS,

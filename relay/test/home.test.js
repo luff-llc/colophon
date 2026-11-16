@@ -53,10 +53,12 @@ describe('a 0.5 home slot', { skip: ready ? false : `build the module first: car
     const body = await r.json();
     assert.equal(body.protocol, 'colophon/relay/3');
     assert.match(body.home.member, /^[0-9a-f]{32}$/);
+    assert.deepEqual(body.layouts, [2]);
     assert.equal(body.limits.authorityBodyBytes, undefined, 'home-only limits are not published');
     // A slot that is not a home says nothing of one.
     const plain = await (await fetch(`${home.replace('/home', '/plain')}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
     assert.equal(plain.home, undefined);
+    assert.equal(plain.layouts, undefined);
   });
 
   test('the member ID is the key ID of the configured key and the private key is never served', async () => {

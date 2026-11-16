@@ -156,17 +156,35 @@ export class HomeSlot {
   }
 
   async open() {
-    this.state = await this.readJson('home-state.json', null);
-    if (!this.state) {
-      this.state = this.wasm.call({ op: 'init', home: this.key.memberId, account: this.account }).state;
-      await this.writeJson('home-state.json', this.state);
+    // Validate before Slot.open: even its log repair and tmp cleanup must not touch a slot
+    // whose checkpoint is lost or damaged. Retained files are never a fresh home.
+    let fresh = false;
+    let files;
+    try {
+      let stat;
+      try { stat = await fsp.lstat(this.file('home-state.json')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (stat) {
+        if (!stat.isFile()) throw new Error('not a regular file');
+        this.state = JSON.parse(await fsp.readFile(this.file('home-state.json'), 'utf8'));
+      } else {
+        if (await this.hasPriorStorage()) throw new Error('missing while the slot retains storage');
+        this.state = this.wasm.call({ op: 'init', home: this.key.memberId, account: this.account }).state;
+        fresh = true;
+      }
+      const st = this.status();
+      if (st.error) throw new Error(st.error);
+      if (st.home !== this.key.memberId) throw new Error('state belongs to another home key');
+      if (st.account !== this.account) throw new Error(`state belongs to account ${st.account}, not ${this.account}`);
+      files = this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files;
+    } catch (error) {
+      throw new Error(`Home slot ${this.slot.name}: cannot open ${this.file('home-state.json')}: ${error.message}; restore the state file from a backup`);
     }
-    const st = this.status();
-    if (st.home !== this.key.memberId) throw new Error(`Home slot ${this.slot.name} holds the state of another home key`);
-    if (st.account !== this.account) throw new Error(`Home slot ${this.slot.name} was provisioned for account ${st.account}, not ${this.account}`);
+    await this.slot.open();
+    if (fresh) await this.writeJson('home-state.json', this.state);
     // Reconcile storage with the state before serving: a crash between a commit and its files
     // (a missing entry, a head file older than the committed head) heals here, not later.
-    await this.materialize(this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files);
+    await this.materialize(files);
     await this.openReplay();
     this.forward = await this.readJson('forward.json', { peers: {} });
     // Serving intervals (§13.1). The module decides from the last lease recorded (the home may
@@ -179,6 +197,28 @@ export class HomeSlot {
     const r = this.wasm.call({ op: 'resume', state: this.state, now, alive: until });
     await this.renewLease(now);
     if (r.changed) await this.commit(r.state);
+  }
+
+  /** A missing checkpoint is safe only when nothing that could outlive it remains. Check the
+   * raw directory and log, not Slot's reconstructed index (which omits deleted records). */
+  async hasPriorStorage() {
+    const stat = async (name) => {
+      try { return await fsp.lstat(this.file(name)); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; return null; }
+    };
+    for (const name of ['replay.log', 'alive.json', 'forward.json']) if (await stat(name)) return true;
+    const log = await stat('log.jsonl');
+    if (log && (!log.isFile() || log.size > 0)) return true;
+    const records = await stat('records');
+    if (!records) return false;
+    if (!records.isDirectory()) return true;
+    const holdsFile = async (dir) => {
+      for (const entry of await fsp.readdir(dir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || await holdsFile(path.join(dir, entry.name))) return true;
+      }
+      return false;
+    };
+    return holdsFile(this.file('records'));
   }
 
   /** Record that this home may serve until the module's lease end, durably, before serving

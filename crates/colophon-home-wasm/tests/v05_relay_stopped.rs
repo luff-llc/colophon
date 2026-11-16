@@ -166,6 +166,120 @@ fn assert_unavailable(
 }
 
 #[test]
+fn normal_and_stopped_base_advertise_layout_2() {
+    let Some(w) = world("h4-base-layouts", "public") else {
+        return;
+    };
+    let (status, base) = json_get(&w.relay, "");
+    assert_eq!(status, 200);
+    assert_eq!(base["layouts"], json!([2]));
+    stop(&w, None);
+    let (status, base) = json_get(&w.relay, "");
+    assert_eq!(status, 200);
+    assert_eq!(base["layouts"], json!([2]));
+}
+
+// Snapshot every byte, including the log and tmp files Slot.open would otherwise repair.
+fn storage_snapshot(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                walk(root, &entry.path(), files);
+            } else {
+                files.insert(
+                    entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(entry.path()).unwrap(),
+                );
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    walk(root, root, &mut files);
+    files
+}
+
+#[test]
+fn missing_or_corrupt_checkpoint_cannot_unstop() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    let Some((server, wasm)) = prerequisites() else {
+        return;
+    };
+    for stopped in [false, true] {
+        let mut w = world(
+            if stopped { "h4-lost-stopped" } else { "h4-lost-appointed" },
+            "public",
+        ).unwrap();
+        if stopped {
+            stop(&w, None);
+        }
+        w.relay.stop();
+        let data = w.scratch.path().join("data");
+        let checkpoint = data.join("home/home-state.json");
+        let backup = std::fs::read(&checkpoint).unwrap();
+        std::fs::write(data.join("home/tmp/keep-me"), b"untouched").unwrap();
+        for damaged in [
+            None, Some(""), Some("{"), Some("{}"), Some("null"), Some("\"not a state\""),
+        ] {
+            match damaged {
+                None => std::fs::remove_file(&checkpoint).unwrap(),
+                Some(bytes) => std::fs::write(&checkpoint, bytes).unwrap(),
+            }
+            let before = storage_snapshot(&data);
+            let mut child = Command::new("bun")
+                .arg(&server)
+                .arg("--test-clock")
+                .env("COLOPHON_RELAY_PORT", "0")
+                .env("COLOPHON_RELAY_DATA", &data)
+                .env(
+                    "COLOPHON_RELAY_HOME_SLOTS",
+                    format!("home={}@{BASE_A}", w.f.account.id().as_str()),
+                )
+                .env("COLOPHON_HOME_KEY", w.keys.jwk())
+                .env("COLOPHON_HOME_WASM", &wasm)
+                .env("COLOPHON_RELAY_CLOCK_FILE", w.scratch.path().join("clock"))
+                .env("COLOPHON_RELAY_TICK_MS", "0")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            // A regression must fail promptly, even if it starts listening. No upload can reach
+            // a correctly refused slot because the relay exits before opening its listener.
+            if !line.is_empty() {
+                child.kill().unwrap();
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(line.is_empty(), "stopped={stopped}, damaged={damaged:?}: served {line}");
+            assert!(!output.status.success(), "a bad checkpoint must fail startup");
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains("Home slot home") && error.contains("home-state.json"),
+                "{error}"
+            );
+            assert_eq!(storage_snapshot(&data), before, "failed open must write nothing");
+            std::fs::write(&checkpoint, &backup).unwrap();
+        }
+        // Restoring the intact checkpoint reopens the original home, including its stop.
+        w.relay = w.relay.restart(&w.keys, NOW, &[]);
+        assert_eq!(json_get(&w.relay, "").0, 200);
+        if stopped {
+            assert_head_unavailable(&w.relay, &w.keys.id);
+        } else {
+            assert_eq!(w.relay.get("/head").0, 200);
+        }
+    }
+}
+
+#[test]
 fn stopped_public_home_keeps_every_store_kind_and_serves_only_call_free_reads_after_restart() {
     let Some(mut w) = world("h4-public", "public") else {
         return;
