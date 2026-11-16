@@ -3,9 +3,22 @@
 //   node relay/server.js                     start with env/config settings
 //   node relay/server.js --config file.json  start with a JSON config file
 //   node relay/server.js token               print a new bearer token and its SHA-256
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
+import path from 'node:path';
+import { TABLE_FILE, clientAddressConfig, provisionConfig } from './provision.js';
 import { corsOrigins, newToken, startRelay } from './relay.js';
+
+/** A test hook: wait at `point` the first time it is reached, until `file` exists. */
+function pauseOnce(point, file) {
+  let armed = true;
+  return async (at) => {
+    if (at !== point || !armed) return;
+    armed = false;
+    while (!existsSync(file)) await new Promise((resolve) => setTimeout(resolve, 5));
+    process.stderr.write(`trace resumed ${point}\n`);
+  };
+}
 
 function loadConfig(argv, env) {
   const index = argv.indexOf('--config');
@@ -54,8 +67,20 @@ function loadConfig(argv, env) {
     throw new Error('cors in the config file must be an object: {"origins": ["https://app.example"]}');
   }
   corsOrigins(origins);
+  // Provisioning (the door at POST /v1/provision) and the client address behind a proxy: config
+  // file only. Checked here so a bad setting refuses start-up with its message (and again by
+  // createRelay).
+  provisionConfig(config.provision);
+  clientAddressConfig(config.clientAddress);
+  const tracing = Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1';
   return {
     cors: { origins: origins ?? [] },
+    provision: config.provision,
+    clientAddress: config.clientAddress,
+    // Test hooks with the trace: the relay kills itself at the named point, or waits there (the
+    // first time it is reached) until the file COLOPHON_RELAY_RESUME_FILE exists.
+    crashAt: tracing ? env.COLOPHON_RELAY_CRASH_AT : undefined,
+    hook: tracing && env.COLOPHON_RELAY_PAUSE_AT && env.COLOPHON_RELAY_RESUME_FILE ? pauseOnce(env.COLOPHON_RELAY_PAUSE_AT, env.COLOPHON_RELAY_RESUME_FILE) : undefined,
     home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
     // The test clock: a reading taken while a test rewrites the file can be empty; read again
     // rather than take 0 (which would put every entry in the future).
@@ -66,7 +91,7 @@ function loadConfig(argv, env) {
       }
       throw new Error('the test clock file holds no time');
     } : undefined,
-    tracing: Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1',
+    tracing,
     tickMs: Number(env.COLOPHON_RELAY_TICK_MS ?? config.tickMs ?? 2000),
     // Test builds only: another home's address read from a file at each use, so tests can start
     // every relay on port 0 and tell each the others' ports afterwards (and after a restart).
@@ -95,7 +120,7 @@ if (process.argv[2] === 'home-key') {
     console.error(error.message);
     process.exit(2);
   }
-  if (Object.keys(config.libraries).length === 0) {
+  if (Object.keys(config.libraries).length === 0 && config.provision?.enabled !== true && !existsSync(path.join(config.dataDir, TABLE_FILE))) {
     console.error('No library slots configured. Set COLOPHON_RELAY_TOKENS=slot=token or pass --config.');
     process.exit(2);
   }
