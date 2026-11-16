@@ -1140,7 +1140,6 @@ pub fn verify_home_write(
     store: &mut dyn ReplayStore,
     writes: &[HomeWrite],
 ) -> Result<VerifiedCall> {
-    require(!writes.is_empty(), "a home write names what it writes")?;
     verify(
         envelope,
         view,
@@ -1148,6 +1147,7 @@ pub fn verify_home_write(
         store,
         Mode {
             writes,
+            names_writes: true,
             ..Mode::default()
         },
     )
@@ -1257,8 +1257,9 @@ pub struct HomeRequest<'a> {
 }
 
 /// Verify a call that came with a request at a home (§12.3, §13.4, §14): its purpose fits the
-/// method and path ([`home_purposes`], else `refused:outOfScope`, before anything else is checked beyond
-/// parsing); then [`verify_call`], or [`verify_home_write`] for a write that names what it writes;
+/// method and path ([`home_purposes`], else `refused:outOfScope`, judged in §12.3's order: after
+/// parsing, possession, audience, window and replay look-up and the stop, before any history is
+/// read, and reserving nothing); then [`verify_call`], or [`verify_home_write`] for a write that names what it writes;
 /// and the call's `args` are exactly [`home_call_args`] for this request (else
 /// `refused:outOfScope`, and nothing is reserved). The rule a home applies and a signer builds
 /// by ([`check_home_call_as_signer`]).
@@ -1297,11 +1298,6 @@ fn home_request(
     req: &HomeRequest<'_>,
     signer: bool,
 ) -> Result<VerifiedCall> {
-    let parsed = Call::parse(envelope)?;
-    require_refused(
-        home_purposes(req.method, req.path).contains(&parsed.purpose.as_str()),
-        Reason::OutOfScope,
-    )?;
     let bound = home_call_args(req.method, req.path, req.body_sha256);
     let writes = if is_read(req.method) { &[][..] } else { req.writes };
     verify(
@@ -1313,6 +1309,8 @@ fn home_request(
             writes,
             bound: Some(&bound),
             signer,
+            purposes: Some(home_purposes(req.method, req.path)),
+            names_writes: false,
         },
     )
 }
@@ -1347,6 +1345,11 @@ struct Mode<'a> {
     writes: &'a [HomeWrite],
     bound: Option<&'a Value>,
     signer: bool,
+    /// The purposes the request at a home allows ([`home_purposes`]); another is
+    /// `refused:outOfScope`, judged after possession and the stop, before any history is read.
+    purposes: Option<&'a [&'a str]>,
+    /// A home write must name what it writes (`malformed` otherwise), judged at the same point.
+    names_writes: bool,
 }
 
 fn verify(
@@ -1393,6 +1396,15 @@ fn verify(
     // 4. History and heads.
     // A stopped reader: `unavailable`, whatever S would be and whatever the call names.
     not_stopped(view)?;
+    // The request's own rules at a home (§13.4, §14), in the pipeline's order: after possession
+    // and the stop, and before any history is read, so a call for another kind of request
+    // (a `colophon.history.read` call at a record path) is refused and reserves nothing.
+    if let Some(allowed) = mode.purposes {
+        require_refused(allowed.contains(&call.purpose.as_str()), Reason::OutOfScope)?;
+    }
+    if mode.names_writes {
+        require(!writes.is_empty(), "a home write names what it writes")?;
+    }
     if call.account != v.account.as_str() {
         return Err(Failure::Unavailable(
             "no verified history for this account".into(),

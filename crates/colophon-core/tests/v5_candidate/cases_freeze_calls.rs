@@ -294,6 +294,36 @@ pub fn part(o: &mut Out) {
         "ok",
         "Seq 4 activates the layout raise but no final makes it final: the reader is not stopped, and the call is judged as usual (ok at S = 3).",
     );
+    // A fork at seq 4 between a grant the home's fresh head covers and the provisional raise: the
+    // grant stands (§8.6), the raise is on the losing branch and stops nothing. Both seq-4
+    // candidates are in the case's records (the raise as `00000004-raise.json`).
+    let mut granted = b.chain.clone();
+    grant_agent_with(
+        &mut granted,
+        &b.a,
+        &ts(RAISE + 100),
+        &b.a,
+        &derived("w2c/other/signing"),
+        &derived("w2c/other/agreement"),
+        EXPIRES,
+    );
+    let h4 = head(&granted, &b.home, 4, NOW - 60);
+    let raise4 = activated(&b).envs[3].clone();
+    write_call_case(
+        o,
+        "s-losing-fork-raise-call",
+        &granted,
+        &h4,
+        &read,
+        plain.clone(),
+        "ok",
+        "A fork at seq 4: a grant covered by the home's fresh head, and the provisional layout raise (records/authority/00000004-raise.json). The grant stands, the raise is on the losing branch, the reader is not stopped, and the call is judged as usual (ok at S = 4).",
+    );
+    write_raw(
+        o,
+        "calls/s-losing-fork-raise-call/records/authority/00000004-raise.json",
+        env_bytes(&raise4),
+    );
     write_call_case(
         o,
         "s-vetoed-raise-call",

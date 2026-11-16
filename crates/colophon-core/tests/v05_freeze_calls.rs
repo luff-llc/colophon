@@ -369,3 +369,136 @@ fn a_provisional_or_vetoed_raise_does_not_stop_the_reader() {
         assert!(got.is_ok(), "{name}: {got:?}");
     }
 }
+
+/// A raise on the losing branch of a fork stops nothing: the call is judged as usual.
+#[test]
+fn a_raise_on_a_losing_fork_does_not_stop_the_reader() {
+    let c = load("s-losing-fork-raise-call");
+    assert_eq!(c.entries, 5, "both seq-4 candidates are held");
+    assert!(!c.verdict.is_stopped(), "{:?}", c.verdict.stop);
+    assert_eq!(c.view.history().len(), 4, "the grant stands at seq 4");
+    let aud = [AUD.to_string()];
+    let call = fs::read(case_dir("s-losing-fork-raise-call").join("call.json")).unwrap();
+    let mut store = MemoryReplayStore::new();
+    let vc = verify_call(&call, &c.view, &cfg(c.now_ms, &aud, false), &mut store).unwrap();
+    assert_eq!(vc.evaluated_at, 4);
+}
+
+/// The same call body signed by a key that is not `key`.
+fn forged(body: &[u8]) -> Vec<u8> {
+    let sig = Key::derived("w2c/attacker").sign(body).signature;
+    canonical(&json!({"body": STANDARD.encode(body), "signature": STANDARD.encode(sig)})).unwrap()
+}
+fn code<T>(r: Result<T, Failure>) -> String {
+    match r {
+        Ok(_) => "ok".into(),
+        Err(e) => e.code(),
+    }
+}
+
+/// The home wrappers keep §12.3's order: possession, then the stop, then the request's own
+/// rules (purpose fits the request, a write names what it writes), and a refusal there reserves
+/// nothing.
+#[test]
+fn the_home_wrappers_judge_in_the_pipeline_order() {
+    let (c, b) = (stopped(), before());
+    let home = [endpoint(&c.view)];
+    let get = HomeRequest {
+        method: "GET",
+        path: "/authority",
+        body_sha256: EMPTY_SHA,
+        writes: &[],
+    };
+    // A write purpose on a read of the history: the wrong purpose for the request.
+    let args = home_call_args("GET", "/authority", EMPTY_SHA);
+    let (good, body, sig) = signed_call(&c, &home[0], "colophon.home.write", args.clone(), 21);
+    let bad = forged(&body);
+    for (name, view, now) in [("stopped", &c.view, c.now_ms), ("not stopped", &b.view, b.now_ms)] {
+        let cf = cfg(now, &home, true);
+        let mut store = MemoryReplayStore::new();
+        assert_eq!(
+            code(verify_home_request(&bad, view, &cf, &mut store, &get)),
+            "badSignature",
+            "forged, wrong purpose, {name}"
+        );
+        assert_eq!(code(check_home_call_as_signer(&bad, view, &cf, &get)), "badSignature");
+    }
+    let cs = cfg(c.now_ms, &home, true);
+    let mut store = MemoryReplayStore::new();
+    assert_eq!(code(verify_home_request(&good, &c.view, &cs, &mut store, &get)), "unavailable");
+    assert_eq!(code(check_home_call_as_signer(&good, &c.view, &cs, &get)), "unavailable");
+    let a = agent();
+    let spec = CallSpec {
+        account: c.view.account(),
+        as_of: (3, &c.view.history()[2]),
+        signer: CallSignerSpec::Member(a.id()),
+        key: &a.point,
+        links: &[],
+        audience: &home[0],
+        purpose: "colophon.home.write",
+        args,
+        request_id: [21; 32],
+        created: &c.now,
+        webauthn: false,
+    };
+    let prepared = prepare_call(&spec).unwrap();
+    assert_eq!(prepared.step().body(), body.as_slice());
+    assert_eq!(code(finish_home_call(&prepared, &sig, &c.view, &cs, &get)), "unavailable");
+    let cb = cfg(b.now_ms, &home, true);
+    let mut store = MemoryReplayStore::new();
+    for _ in 0..2 {
+        // Refused, and nothing reserved: the second try is not refused:replay.
+        assert_eq!(
+            code(verify_home_request(&good, &b.view, &cb, &mut store, &get)),
+            "refused:outOfScope"
+        );
+    }
+    assert_eq!(code(finish_home_call(&prepared, &sig, &b.view, &cb, &get)), "refused:outOfScope");
+
+    // A history read cannot reach a record path.
+    let path = format!("/records/blobs/{EMPTY_SHA}");
+    let rec = HomeRequest {
+        method: "GET",
+        path: &path,
+        body_sha256: EMPTY_SHA,
+        writes: &[],
+    };
+    let (hr, _, _) = signed_call(
+        &b,
+        &home[0],
+        "colophon.history.read",
+        home_call_args("GET", &path, EMPTY_SHA),
+        22,
+    );
+    let mut store = MemoryReplayStore::new();
+    for _ in 0..2 {
+        assert_eq!(
+            code(verify_home_request(&hr, &b.view, &cb, &mut store, &rec)),
+            "refused:outOfScope"
+        );
+    }
+
+    // A home write that names nothing.
+    let put = format!("/records/blobs/{EMPTY_SHA}");
+    let (good, body, _) = signed_call(
+        &c,
+        &home[0],
+        "colophon.home.write",
+        home_call_args("PUT", &put, EMPTY_SHA),
+        23,
+    );
+    let bad = forged(&body);
+    for (name, view, now) in [("stopped", &c.view, c.now_ms), ("not stopped", &b.view, b.now_ms)] {
+        let mut store = MemoryReplayStore::new();
+        assert_eq!(
+            code(verify_home_write(&bad, view, &cfg(now, &home, true), &mut store, &[])),
+            "badSignature",
+            "forged, no writes, {name}"
+        );
+    }
+    let mut store = MemoryReplayStore::new();
+    assert_eq!(code(verify_home_write(&good, &c.view, &cs, &mut store, &[])), "unavailable");
+    for _ in 0..2 {
+        assert_eq!(code(verify_home_write(&good, &b.view, &cb, &mut store, &[])), "malformed");
+    }
+}
