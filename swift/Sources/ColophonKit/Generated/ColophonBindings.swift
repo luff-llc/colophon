@@ -1411,9 +1411,13 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
     func beginAddSlot(signer: String, plan: SlotPlan, entropy: Data) throws  -> AccountAction
     
     /**
-     * Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
+     * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+     * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+     * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+     * `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+     * it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
      */
-    func beginApprove(request: Data, termsJson: String, signers: [String], entropy: Data) throws  -> AccountAction
+    func beginApprove(request: Data, termsJson: String, signers: [String], pairing: AccountPairing, entropy: Data) throws  -> AccountAction
     
     /**
      * Start a streaming blob upload (32 fresh bytes).
@@ -1429,6 +1433,13 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
      * End a member's sessions. No entropy.
      */
     func beginEndSessions(member: String, signers: [String], entropy: Data) throws  -> AccountAction
+    
+    /**
+     * A pending transition whose `change_json` carries a `grant` component (an import grant,
+     * §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+     * with a `grant`. No entropy.
+     */
+    func beginGrantTransition(changeJson: String, signers: [String], rule: RuleKind, pairing: AccountPairing, entropy: Data) throws  -> AccountAction
     
     /**
      * An import batch (the 0.4 batch JSON) under a grant that carries `import`. 32 bytes.
@@ -1498,7 +1509,9 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
     func beginSuspend(key: String, transition: String, signer: String, entropy: Data) throws  -> AccountAction
     
     /**
-     * A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+     * A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+     * component is `refused:outOfScope` here: it spends a confirmed pairing through
+     * `begin_grant_transition` (§9.1). No entropy.
      */
     func beginTransition(changeJson: String, signers: [String], rule: RuleKind, entropy: Data) throws  -> AccountAction
     
@@ -2146,9 +2159,13 @@ open func beginAddSlot(signer: String, plan: SlotPlan, entropy: Data)throws  -> 
 }
     
     /**
-     * Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
+     * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+     * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+     * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+     * `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+     * it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
      */
-open func beginApprove(request: Data, termsJson: String, signers: [String], entropy: Data)throws  -> AccountAction  {
+open func beginApprove(request: Data, termsJson: String, signers: [String], pairing: AccountPairing, entropy: Data)throws  -> AccountAction  {
     return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
     uniffi_colophon_ffi_fn_method_accountengine_begin_approve(
@@ -2156,6 +2173,7 @@ open func beginApprove(request: Data, termsJson: String, signers: [String], entr
         FfiConverterData.lower(request),
         FfiConverterString.lower(termsJson),
         FfiConverterSequenceString.lower(signers),
+        FfiConverterTypeAccountPairing_lower(pairing),
         FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
@@ -2199,6 +2217,25 @@ open func beginEndSessions(member: String, signers: [String], entropy: Data)thro
             self.uniffiCloneHandle(),
         FfiConverterString.lower(member),
         FfiConverterSequenceString.lower(signers),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A pending transition whose `change_json` carries a `grant` component (an import grant,
+     * §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+     * with a `grant`. No entropy.
+     */
+open func beginGrantTransition(changeJson: String, signers: [String], rule: RuleKind, pairing: AccountPairing, entropy: Data)throws  -> AccountAction  {
+    return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_begin_grant_transition(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(changeJson),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterTypeRuleKind_lower(rule),
+        FfiConverterTypeAccountPairing_lower(pairing),
         FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
@@ -2418,7 +2455,9 @@ open func beginSuspend(key: String, transition: String, signer: String, entropy:
 }
     
     /**
-     * A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+     * A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+     * component is `refused:outOfScope` here: it spends a confirmed pairing through
+     * `begin_grant_transition` (§9.1). No entropy.
      */
 open func beginTransition(changeJson: String, signers: [String], rule: RuleKind, entropy: Data)throws  -> AccountAction  {
     return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
@@ -4210,6 +4249,25 @@ public static func joinQr(account: String, e: Data, nb: Data)throws  -> AccountP
         FfiConverterString.lower(account),
         FfiConverterData.lower(e),
         FfiConverterData.lower(nb),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The existing device scanned a membership request from the joining device's screen
+     * (§7.3, §7a): the request must verify and name `account`; the pairing is then confirmed
+     * for its `member.signing` and may approve that one request. The host attests the scan.
+     * A bad request is `pairing:invalidRequest` or `pairing:wrongAccount` and counts as a
+     * failure.
+     */
+public static func scanRequest(account: String, request: Data, limiter: PairingFailureLimiter, nowMs: Int64)throws  -> AccountPairing  {
+    return try  FfiConverterTypeAccountPairing_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_accountpairing_scan_request(
+        FfiConverterString.lower(account),
+        FfiConverterData.lower(request),
+        FfiConverterTypePairingFailureLimiter_lower(limiter),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -26351,7 +26409,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot() != 16458) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() != 48078) {
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() != 12821) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_blob() != 26001) {
@@ -26361,6 +26419,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_end_sessions() != 46090) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_grant_transition() != 63919) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_import() != 64191) {
@@ -26402,7 +26463,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_suspend() != 12346) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_transition() != 15310) {
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_transition() != 1156) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_unlock_epochs() != 60825) {
@@ -26841,6 +26902,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_accountpairing_join_qr() != 17885) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_accountpairing_scan_request() != 60272) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_from_state() != 60989) {

@@ -276,7 +276,7 @@ fn journey(history: &str, homes: u8) {
     assert_eq!(owner.homes().unwrap().len(), usize::from(homes));
     let terms = json!({"records": [{"namespace": NS, "access": "write"}]});
     let r1 = request(&host, &account, &m1, "Mac", AccountMemberKind::Device, terms.clone(), vec![]);
-    let a = owner.begin_approve(r1.raw, terms.to_string(), vec![d.clone()], host.fresh(32)).unwrap();
+    let a = owner.begin_approve(r1.raw.clone(), terms.to_string(), vec![d.clone()], scanned(&owner, &r1.raw, NOW), host.fresh(32)).unwrap();
     mac.store(&finish(&owner, &host, a).stores);
     let mut w = World { host, relays, account: account.clone(), homes: home_ids, now: NOW, unbuilt: Vec::new(), refused: Vec::new() };
 
@@ -323,7 +323,7 @@ fn journey(history: &str, homes: u8) {
     assert!(!is_member(&dev2));
     let r2 = request(&w.host, &account, &m2, "Phone", AccountMemberKind::Device, terms.clone(), vec![]);
     owner.refresh(mac.listing()).unwrap();
-    let a = owner.begin_approve(r2.raw, terms.to_string(), vec![d.clone()], w.host.fresh(32)).unwrap();
+    let a = owner.begin_approve(r2.raw.clone(), terms.to_string(), vec![d.clone()], scanned(&owner, &r2.raw, w.now), w.host.fresh(32)).unwrap();
     mac.store(&finish(&owner, &w.host, a).stores);
     clean(sync(&mut w, &dev1, &mac, &m1), "the approval reaches the home");
     let f = sync(&mut w, &dev2, &phone, &m2);
@@ -350,7 +350,7 @@ fn journey(history: &str, homes: u8) {
     dev3.load().unwrap();
     let r3 = request(&w.host, &account, &m3, "Tablet", AccountMemberKind::Device, terms.clone(), vec![]);
     owner.refresh(mac.listing()).unwrap();
-    let a = owner.begin_approve(r3.raw, terms.to_string(), vec![d.clone()], w.host.fresh(32)).unwrap();
+    let a = owner.begin_approve(r3.raw.clone(), terms.to_string(), vec![d.clone()], scanned(&owner, &r3.raw, w.now), w.host.fresh(32)).unwrap();
     mac.store(&finish(&owner, &w.host, a).stores);
     clean(sync(&mut w, &dev1, &mac, &m1), "");
     clean(sync(&mut w, &dev3, &tablet, &m3), "");

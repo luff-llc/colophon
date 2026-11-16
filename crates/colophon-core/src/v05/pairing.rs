@@ -31,10 +31,24 @@
 //! The core has no clock and no RNG: nonces, the ephemeral key's seed and the time of every
 //! failure come in as arguments. The state machine consumes itself at each step, so a
 //! commitment permits exactly one reveal (§7.3).
+//!
+//! **Approving a member spends a confirmed pairing (§9.1, §17.1).** A [`ConfirmedPairing`] is
+//! also the token without which the account refuses to prepare a `grant` or a transition's
+//! `grant` component ([`crate::v05::account::Account::begin_approve`],
+//! [`crate::v05::account::Account::begin_grant_transition`]). It is not `Clone`: the approval
+//! takes it by value, so one pairing approves at most one request. It approves only when it
+//! names this account, its `E` is exactly the request's `member.signing`, no more than
+//! [`CONFIRMED_PAIRING_LIFETIME_MS`] passed since the approving session began, and it came from
+//! one of exactly two places, each a session H started with a [`Permit`] (so failures are
+//! bounded by the limiter): the six-digit code confirmed on H ([`PairingCode::confirm`]), or the
+//! canonical request envelope scanned from J's screen ([`scanned_request`]), the scan path's one
+//! payload (§9.1). The joining side's pairing and the pairing QR ([`ScannedQr`], which moves the
+//! seed) do not approve. Nothing approves a member from its ID or a prefix of it.
 use super::descriptor::valid_point;
 use super::encoding::hex;
 use super::ids::{key_id, AccountId};
 use super::vault::{malformed, AgreementKey, SealedBox, VResult, VaultPublic, VaultSeed};
+use super::{Failure, Reason};
 use crate::crypto::Entropy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -47,6 +61,10 @@ pub const CODE_LABEL: &[u8] = b"colophon/pair-code/5";
 pub const TRANSFER_LABEL: &str = "colophon/vault-transfer/5";
 /// Failed pairing sessions an existing device allows per hour (§7.3).
 pub const MAX_FAILED_PER_HOUR: usize = 5;
+/// How long a confirmed pairing may approve a member, from the moment the existing side's
+/// session began (its [`Permit`]): ten minutes. The spec bounds a session by "a timeout" without
+/// a number; this is the core's, the same as an invite link's default (§18).
+pub const CONFIRMED_PAIRING_LIFETIME_MS: i64 = 10 * 60 * 1000;
 
 /// Why a pairing aborted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,8 +74,10 @@ pub enum PairingAbort {
     CommitmentMismatch,
     /// `E` is not a valid uncompressed P-256 point.
     InvalidPoint,
-    /// A QR payload names another account.
+    /// A QR payload (or a scanned request) names another account.
     WrongAccount,
+    /// A scanned membership request does not parse or its signature does not verify (§9.1).
+    InvalidRequest,
 }
 impl std::fmt::Display for PairingAbort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,6 +85,7 @@ impl std::fmt::Display for PairingAbort {
             Self::CommitmentMismatch => "abort: commitment mismatch",
             Self::InvalidPoint => "abort: E is not a valid point",
             Self::WrongAccount => "abort: QR names another account",
+            Self::InvalidRequest => "abort: the scanned request is not a valid request",
         })
     }
 }
@@ -120,29 +141,33 @@ pub struct Reveal {
 }
 
 /// A pairing both sides computed but the person has not yet confirmed. The code is compared
-/// by eye; [`PairingCode::confirm`] is the person's "they match".
-#[derive(Clone, Debug)]
+/// by eye; [`PairingCode::confirm`] is the person's "they match". Not `Clone`: one compared code
+/// confirms one pairing.
+#[derive(Debug)]
 pub struct PairingCode {
     account: AccountId,
     e: Vec<u8>,
     na: [u8; 32],
     nb: [u8; 32],
     digits: String,
+    /// When H's session began (its permit); `None` on the joining side.
+    started_ms: Option<i64>,
 }
 impl PairingCode {
     /// The six digits to display.
     pub fn digits(&self) -> &str {
         &self.digits
     }
-    /// The person confirmed that the codes match: a pairing that §7.4 may use. This and
-    /// [`ScannedQr::send_nonce`] / [`QrJoiner::receive_nonce`] are the only ways to obtain a
-    /// [`ConfirmedPairing`].
+    /// The person confirmed that the codes match: a pairing that §7.4 may use and, on the
+    /// existing side, that may approve the member whose `member.signing` is `E` (§9.1). This,
+    /// [`ScannedQr::send_nonce`], [`QrJoiner::receive_nonce`] and [`scanned_request`] are the
+    /// only ways to obtain a [`ConfirmedPairing`].
     pub fn confirm(self) -> ConfirmedPairing {
         ConfirmedPairing {
             account: self.account,
             e: self.e,
-            na: self.na,
-            nb: self.nb,
+            nonces: Some((self.na, self.nb)),
+            approving_since_ms: self.started_ms,
         }
     }
     /// The person rejected the code (or abandoned the comparison): a failed session, recorded
@@ -153,22 +178,44 @@ impl PairingCode {
 }
 
 /// A pairing the person confirmed: the only thing from which a seed transfer can be sealed or
-/// opened (§7.4). It carries both nonces for the transfer label. It has no public constructor:
-/// it exists only after (a) a compared six-digit code ([`PairingCode::confirm`]), or (b) the
-/// QR path of §7.3 ([`ScannedQr`], [`QrJoiner`]).
+/// opened (§7.4), and the token a member approval spends (§9.1). It has no public constructor:
+/// it exists only after (a) a compared six-digit code ([`PairingCode::confirm`]), (b) the QR
+/// path of §7.3 ([`ScannedQr`], [`QrJoiner`]), or (c) a membership request scanned from the
+/// requester's screen ([`scanned_request`], approval only: it carries no nonces and moves no
+/// seed). It is not `Clone`: an approval takes it by value and so spends it.
 ///
 /// ```compile_fail
 /// use colophon_core::v05::pairing::{ConfirmedPairing, QrPayload};
 /// // There is no way to build a confirmed pairing from a payload the caller made.
 /// let _ = ConfirmedPairing::from_qr;
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// ```compile_fail
+/// fn twice(p: colophon_core::v05::pairing::ConfirmedPairing) {
+///     // A confirmed pairing cannot be copied, so one cannot approve twice.
+///     let _q = p.clone();
+/// }
+/// ```
+#[derive(Debug)]
 pub struct ConfirmedPairing {
     account: AccountId,
     e: Vec<u8>,
-    na: [u8; 32],
-    nb: [u8; 32],
+    /// `(nA, nB)`; `None` for a scanned request, which has no nonces.
+    nonces: Option<([u8; 32], [u8; 32])>,
+    /// When the approving session began (its permit), for a pairing that may approve a member:
+    /// the existing side's code session or a scanned request envelope. `None` on the joining
+    /// side and for the pairing QR, which moves the seed but does not approve (§9.1: the scan
+    /// path's one payload is the canonical request envelope).
+    approving_since_ms: Option<i64>,
 }
+/// Two confirmed pairings are equal when they are the same pairing (account, `E` and nonces),
+/// whichever side holds each and whenever its session began: both devices hold equal pairings.
+impl PartialEq for ConfirmedPairing {
+    fn eq(&self, other: &Self) -> bool {
+        self.account == other.account && self.e == other.e && self.nonces == other.nonces
+    }
+}
+impl Eq for ConfirmedPairing {}
 impl ConfirmedPairing {
     /// The joining key `E`.
     pub fn e(&self) -> &[u8] {
@@ -178,17 +225,63 @@ impl ConfirmedPairing {
     pub fn account(&self) -> &AccountId {
         &self.account
     }
+    /// Whether this pairing may approve a member (§9.1): confirmed on the existing side by the
+    /// six-digit code, or a request envelope scanned from the requester's screen.
+    pub fn may_approve(&self) -> bool {
+        self.approving_since_ms.is_some()
+    }
+    /// Whether this pairing carries both nonces and so may move the seed (§7.4).
+    pub fn can_move_seed(&self) -> bool {
+        self.nonces.is_some()
+    }
     /// The seed-transfer `info` and AAD (§7.4):
     /// `"colophon/vault-transfer/5\n" ‖ accountID ‖ "\n" ‖ keyID(E) ‖ "\n" ‖ hex(nA) ‖ hex(nB)`.
+    /// Empty for a scanned request, which has no nonces: sealing or opening a seed with one is
+    /// refused.
     pub fn transfer_info(&self) -> Vec<u8> {
+        let Some((na, nb)) = &self.nonces else {
+            return Vec::new();
+        };
         format!(
             "{TRANSFER_LABEL}\n{}\n{}\n{}{}",
             self.account,
             key_id(&self.e),
-            hex(&self.na),
-            hex(&self.nb)
+            hex(na),
+            hex(nb)
         )
         .into_bytes()
+    }
+    fn require_nonces(&self) -> VResult<()> {
+        if self.nonces.is_some() {
+            Ok(())
+        } else {
+            Err(malformed(
+                "a scanned request approves a member; it cannot move the seed",
+            ))
+        }
+    }
+    /// Spend this pairing on approving the member whose `member.signing` is `signing`, in
+    /// `account`, at `now_ms` (§9.1, §17.1). Refused `refused:outOfScope` unless it was confirmed
+    /// on the existing side, names `account` and paired exactly `signing`; `refused:expired`
+    /// when more than [`CONFIRMED_PAIRING_LIFETIME_MS`] passed since H's session began. The
+    /// pairing is consumed whatever the answer.
+    pub(crate) fn spend_for_grant(
+        self,
+        account: &AccountId,
+        signing: &[u8],
+        now_ms: i64,
+    ) -> Result<(), Failure> {
+        // Joining side, pairing QR, another account or another key: out of scope.
+        let Some(started) = self.approving_since_ms else {
+            return Err(Failure::Refused(Reason::OutOfScope));
+        };
+        if &self.account != account || self.e != signing {
+            return Err(Failure::Refused(Reason::OutOfScope));
+        }
+        if now_ms > started.saturating_add(CONFIRMED_PAIRING_LIFETIME_MS) {
+            return Err(Failure::Refused(Reason::Expired));
+        }
+        Ok(())
     }
 }
 
@@ -292,6 +385,7 @@ impl Joiner {
                 na,
                 nb: self.nb,
                 digits,
+                started_ms: None,
             },
         ))
     }
@@ -329,8 +423,8 @@ impl QrJoiner {
         ConfirmedPairing {
             account: self.account,
             e: self.e,
-            na,
-            nb: self.nb,
+            nonces: Some((na, self.nb)),
+            approving_since_ms: None,
         }
     }
 }
@@ -343,14 +437,17 @@ impl QrJoiner {
 pub struct ExistingWaiting {
     account: AccountId,
     commitment: [u8; 32],
+    started_ms: i64,
 }
 impl ExistingWaiting {
     /// H received `C` for `account`. A session needs a [`Permit`] from the failure limiter
     /// (§7.3: no more than 5 failed sessions per hour); there is no way to start one without it.
-    pub fn receive_commitment(account: &AccountId, commitment: [u8; 32], _permit: Permit) -> Self {
+    /// The session begins at the permit's time.
+    pub fn receive_commitment(account: &AccountId, commitment: [u8; 32], permit: Permit) -> Self {
         Self {
             account: account.clone(),
             commitment,
+            started_ms: permit.at_ms,
         }
     }
     /// Step 2: H chose `nA` (host-random, only now) and sends it. Returns the nonce and the
@@ -361,6 +458,7 @@ impl ExistingWaiting {
                 account: self.account,
                 commitment: self.commitment,
                 na,
+                started_ms: self.started_ms,
             },
             na,
         )
@@ -373,6 +471,7 @@ pub struct ExistingAwaitingReveal {
     account: AccountId,
     commitment: [u8; 32],
     na: [u8; 32],
+    started_ms: i64,
 }
 impl ExistingAwaitingReveal {
     /// Step 3 and 4: J sent `E` and `nB`. H checks `C`; a mismatch aborts
@@ -390,6 +489,7 @@ impl ExistingAwaitingReveal {
             na: self.na,
             nb: *nb,
             digits,
+            started_ms: Some(self.started_ms),
         })
     }
     /// [`ExistingAwaitingReveal::finish`], recording an abort in `limiter` at `now_ms`.
@@ -439,12 +539,39 @@ impl ScannedQr {
             ConfirmedPairing {
                 account: self.payload.account,
                 e: self.payload.e,
-                na,
-                nb: self.payload.nb,
+                nonces: Some((na, self.payload.nb)),
+                // The pairing QR moves the seed; it does not approve a member (§9.1).
+                approving_since_ms: None,
             },
             na,
         )
     }
+}
+
+/// H scanned a membership request from the requester's screen (§7.3 QR alternative, §7a): the
+/// scan authenticates the request's `member.signing` as `E` directly, so nothing is compared.
+/// The request must parse and verify under its own key (§9.1) and name `expected`; otherwise the
+/// session aborts. A [`Permit`] from the limiter is required, as for any session H starts. The
+/// result approves that one request and carries no nonces, so it cannot move the seed. As with
+/// [`ScannedQr::scan`], the core cannot see a camera: the host calls this only with bytes it
+/// read from the requester's screen.
+pub fn scanned_request(
+    expected: &AccountId,
+    request: &[u8],
+    permit: Permit,
+) -> Result<ConfirmedPairing, PairingAbort> {
+    let req = super::members::Request::parse(request, true)
+        .map_err(|_| PairingAbort::InvalidRequest)?;
+    if req.account != *expected {
+        return Err(PairingAbort::WrongAccount);
+    }
+    check_point(&req.signing)?;
+    Ok(ConfirmedPairing {
+        account: req.account,
+        e: req.signing,
+        nonces: None,
+        approving_since_ms: Some(permit.at_ms),
+    })
 }
 
 /// The failed-session limit of H (§7.3): no more than 5 failed sessions per hour. A mismatch,
@@ -460,9 +587,12 @@ pub struct FailureLimiter {
 
 /// Permission to start one pairing session, taken from the limiter. It cannot be made any
 /// other way, and every session start ([`ExistingWaiting::receive_commitment`],
-/// [`ScannedQr::scan`]) consumes one.
+/// [`ScannedQr::scan`], [`scanned_request`]) consumes one. It carries the time the session
+/// began (the latest the ledger has seen), from which a confirmed pairing's lifetime runs.
 #[derive(Debug)]
-pub struct Permit(());
+pub struct Permit {
+    at_ms: i64,
+}
 impl Permit {
     /// The session was abandoned or timed out: a failure, recorded at `now_ms` (§7.3).
     pub fn abandon(self, limiter: &mut FailureLimiter, now_ms: i64) {
@@ -509,7 +639,9 @@ impl FailureLimiter {
     pub fn permit(&mut self, now_ms: i64) -> Result<Permit, LimitReached> {
         self.latest_ms = self.effective(now_ms);
         if self.may_start(now_ms) {
-            Ok(Permit(()))
+            Ok(Permit {
+                at_ms: self.latest_ms,
+            })
         } else {
             Err(LimitReached)
         }
@@ -527,6 +659,7 @@ pub fn seal_seed_for_transfer(
     pairing: &ConfirmedPairing,
     entropy: &mut Entropy,
 ) -> VResult<SealedBox> {
+    pairing.require_nonces()?;
     seed.seal_to(pairing.e(), &pairing.transfer_info(), entropy)
 }
 
@@ -553,6 +686,7 @@ impl TransferKey {
         vault: &VaultPublic,
     ) -> VResult<VaultSeed> {
         vault.validate()?;
+        pairing.require_nonces()?;
         if pairing.e() != self.public().as_slice() {
             return Err(malformed("the pairing is not for this transfer key"));
         }

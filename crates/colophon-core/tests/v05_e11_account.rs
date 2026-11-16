@@ -45,9 +45,9 @@ fn an_engine_over_a_created_account_is_unlocked_at_once() {
     let fake = Fixture { host: Host::new(), d: d.clone(), p: String::new(), k: String::new(), account: colophon_core::v05::account::Account::open(account.objects().clone(), account.records().to_vec(), None, Identity::Controller(d.clone()), T0).unwrap() };
     let req = request_for(&fake, &host, &m, "Phone", "device", terms_for(&[("notes", "write")]), T0);
     let cold = Engine::open(src.clone(), src.listing(), Identity::Controller(d.clone()), EngineOptions::new(&id, DEVICE_KEY), None, T0).unwrap();
-    assert!(cold.account().begin_approve(&req.raw, terms_for(&[("notes", "write")]), &[d.clone()], host.fresh()).is_err(), "a cold engine needs an unlock first");
+    assert!(cold.account().begin_approve(&req.raw, terms_for(&[("notes", "write")]), &[d.clone()], host.fresh(), paired(&fake, &req)).is_err(), "a cold engine needs an unlock first");
     let mut e = Engine::open_created(src.clone(), src.listing(), account, EngineOptions::new(&id, DEVICE_KEY), T0).unwrap();
-    let action = e.account().begin_approve(&req.raw, terms_for(&[("notes", "write")]), &[d.clone()], host.fresh()).unwrap();
+    let action = e.account().begin_approve(&req.raw, terms_for(&[("notes", "write")]), &[d.clone()], host.fresh(), paired(&fake, &req)).unwrap();
     let w = engine_finish(&mut e, &host, &src, action);
     assert!(!w.stores.is_empty(), "the owner approved a member without unlocking again");
     let _ = (&mut host, Level::Write, json!({}));

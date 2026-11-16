@@ -1,13 +1,20 @@
 //! Pairing (§7.3). Public values only cross: the account ID, points, nonces, a commitment and
 //! a code. Moving the seed to the paired device is `AccountEngine.transfer_seed` and
 //! `accept_seed_transfer`.
+//!
+//! Approving a member spends a confirmed pairing (§9.1): `AccountEngine.begin_approve` and
+//! `begin_grant_transition` take the pairing object, which must be in the `Confirmed` stage on
+//! the approving device, and leave it `Spent`. Exactly two pairings approve: the six-digit code
+//! confirmed on the approving device (`confirm`), and the canonical request envelope scanned from
+//! the joining device (`scan_request`), the scan path's one payload (§9.1). The pairing QR
+//! (`existing_scan_qr`) moves the seed and does not approve.
 use super::fault::AccountError;
 use super::types::*;
 use super::{guard, Cell};
 use colophon_core::v05::ids::AccountId;
 use colophon_core::v05::pairing::{
-    ConfirmedPairing, ExistingAwaitingReveal, ExistingWaiting, FailureLimiter, Joiner,
-    PairingAbort, PairingCode, QrJoiner, QrPayload, ScannedQr, TransferKey,
+    scanned_request, ConfirmedPairing, ExistingAwaitingReveal, ExistingWaiting, FailureLimiter,
+    Joiner, PairingAbort, PairingCode, QrJoiner, QrPayload, ScannedQr, TransferKey,
 };
 
 type R<T> = Result<T, AccountError>;
@@ -17,6 +24,7 @@ fn abort(a: PairingAbort) -> AccountError {
         PairingAbort::CommitmentMismatch => "commitmentMismatch",
         PairingAbort::InvalidPoint => "invalidPoint",
         PairingAbort::WrongAccount => "wrongAccount",
+        PairingAbort::InvalidRequest => "invalidRequest",
     };
     AccountError::Malformed {
         code: format!("pairing:{code}"),
@@ -193,12 +201,45 @@ impl AccountPairing {
             }
         })
     }
+    fn scan_request_inner(
+        account: String,
+        request: Vec<u8>,
+        limiter: &PairingFailureLimiter,
+        now_ms: i64,
+    ) -> R<Self> {
+        guard(|| {
+            // A request envelope: a body of at most 16 KiB and a signature, in JSON.
+            bytes_ok(&request, 1 << 16, "a request")?;
+            let acct = account_id(&account)?;
+            let permit = limiter.l.lock()?.permit(now_ms).map_err(limit_error)?;
+            match scanned_request(&acct, &request, permit) {
+                Ok(c) => Ok(Self::new(Stage::Confirmed(c))),
+                Err(e) => {
+                    limiter.l.lock()?.record_failure(now_ms);
+                    Err(abort(e))
+                }
+            }
+        })
+    }
     /// Run `f` on the confirmed pairing, or refuse.
     pub(crate) fn with_confirmed<T>(&self, f: impl FnOnce(&ConfirmedPairing) -> R<T>) -> R<T> {
         match &*self.st.lock()? {
             Stage::Confirmed(c) => f(c),
             _ => Err(AccountError::consumed("this pairing is not confirmed")),
         }
+    }
+    /// Refuse unless the pairing is confirmed, without spending it.
+    pub(crate) fn require_confirmed(&self) -> R<()> {
+        self.with_confirmed(|_| Ok(()))
+    }
+    /// Take the confirmed pairing out to spend it on an approval (§9.1): the session is then
+    /// `Spent`, so one pairing approves at most one request. Any other stage is refused and
+    /// left as it was.
+    pub(crate) fn take_confirmed(&self) -> R<ConfirmedPairing> {
+        self.step(&[PairingStage::Confirmed], |s| match s {
+            Stage::Confirmed(c) => Ok((Stage::Spent, c)),
+            _ => Err(AccountError::internal("stage")),
+        })
     }
     fn reveal_inner(
         &self,
@@ -355,6 +396,20 @@ impl AccountPairing {
     ) -> Result<std::sync::Arc<Self>, AccountError> {
         Self::scan_qr_inner(account, payload, &limiter, now_ms).map(std::sync::Arc::new)
     }
+    /// The existing device scanned a membership request from the joining device's screen
+    /// (§7.3, §7a): the request must verify and name `account`; the pairing is then confirmed
+    /// for its `member.signing` and may approve that one request. The host attests the scan.
+    /// A bad request is `pairing:invalidRequest` or `pairing:wrongAccount` and counts as a
+    /// failure.
+    #[uniffi::constructor]
+    pub fn scan_request(
+        account: String,
+        request: Vec<u8>,
+        limiter: std::sync::Arc<PairingFailureLimiter>,
+        now_ms: i64,
+    ) -> Result<std::sync::Arc<Self>, AccountError> {
+        Self::scan_request_inner(account, request, &limiter, now_ms).map(std::sync::Arc::new)
+    }
     /// The existing device received the joiner's reveal: returns the six-digit code. A mismatch
     /// is `pairing:commitmentMismatch` and counts as a failure.
     pub fn receive_reveal(
@@ -407,6 +462,15 @@ impl AccountPairing {
         now_ms: i64,
     ) -> Result<AccountPairing, AccountError> {
         Self::scan_qr_inner(account, payload, limiter, now_ms)
+    }
+    /// The existing device scanned a membership request from the joining device's screen.
+    pub fn scan_request(
+        account: String,
+        request: Vec<u8>,
+        limiter: &PairingFailureLimiter,
+        now_ms: i64,
+    ) -> Result<AccountPairing, AccountError> {
+        Self::scan_request_inner(account, request, limiter, now_ms)
     }
     /// The existing device received the joiner's reveal: returns the six-digit code.
     pub fn receive_reveal(
@@ -466,5 +530,59 @@ impl PairingTransferKey {
     /// A transfer key from 32 fresh bytes (wiped).
     pub fn create(entropy: Vec<u8>) -> Result<PairingTransferKey, AccountError> {
         Self::new_inner(entropy)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn confirmed_qr() -> AccountPairing {
+        let account = "ab".repeat(32);
+        let e = TransferKey::new([1; 32]).unwrap().public();
+        let limiter = PairingFailureLimiter::from_state_inner(String::new()).unwrap();
+        let j = AccountPairing::join_qr_inner(account.clone(), e, vec![2; 32]).unwrap();
+        let payload = j.qr_payload().unwrap();
+        let h = AccountPairing::scan_qr_inner(account, payload, &limiter, 0).unwrap();
+        h.send_nonce(vec![3; 32]).unwrap();
+        h
+    }
+
+    /// One confirmed pairing approves once: taking it leaves the session spent, and a second
+    /// take is refused (§9.1).
+    #[test]
+    fn a_confirmed_pairing_is_taken_once() {
+        let h = confirmed_qr();
+        assert!(h.take_confirmed().is_ok());
+        assert_eq!(h.stage().unwrap(), PairingStage::Spent);
+        assert!(matches!(
+            h.take_confirmed(),
+            Err(AccountError::Consumed { .. })
+        ));
+        assert!(h.require_confirmed().is_err());
+    }
+
+    /// A pairing that is not confirmed is refused and left as it was.
+    #[test]
+    fn an_unconfirmed_pairing_is_refused_and_kept() {
+        let account = "ab".repeat(32);
+        let e = TransferKey::new([1; 32]).unwrap().public();
+        let j = AccountPairing::join_inner(account, e, vec![2; 32]).unwrap();
+        assert!(j.require_confirmed().is_err());
+        assert!(j.take_confirmed().is_err());
+        assert_eq!(j.stage().unwrap(), PairingStage::Joiner);
+        assert!(j.commitment().is_ok(), "the session goes on");
+    }
+
+    /// A scanned request that does not verify is refused and counts as a failure.
+    #[test]
+    fn a_bad_scanned_request_is_a_failure() {
+        let limiter = PairingFailureLimiter::from_state_inner(String::new()).unwrap();
+        for _ in 0..5 {
+            let r = AccountPairing::scan_request_inner("ab".repeat(32), b"{}".to_vec(), &limiter, 0);
+            assert!(matches!(r, Err(AccountError::Malformed { ref code, .. }) if code == "pairing:invalidRequest"));
+        }
+        assert!(!limiter.may_start(0).unwrap(), "five failures close the hour");
     }
 }

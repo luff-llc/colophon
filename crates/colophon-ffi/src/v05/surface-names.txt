@@ -31,6 +31,7 @@ AccountEngine.begin_blob
 AccountEngine.begin_call
 AccountEngine.begin_end_my_sessions
 AccountEngine.begin_end_sessions
+AccountEngine.begin_grant_transition
 AccountEngine.begin_import
 AccountEngine.begin_keyring
 AccountEngine.begin_link
@@ -150,6 +151,7 @@ AccountPairing.qr_payload
 AccountPairing.receive_nonce
 AccountPairing.receive_reveal
 AccountPairing.reject
+AccountPairing.scan_request
 AccountPairing.send_nonce
 AccountPairing.stage
 AccountRequest.finish

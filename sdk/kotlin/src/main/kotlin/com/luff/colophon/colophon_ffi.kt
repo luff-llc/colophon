@@ -1133,6 +1133,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_end_sessions(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_grant_transition(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_import(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_keyring(
@@ -1452,6 +1454,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_colophon_ffi_checksum_constructor_accountpairing_join(
     ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_accountpairing_join_qr(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_constructor_accountpairing_scan_request(
     ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_from_state(
     ): Int
@@ -1811,13 +1815,15 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_add_slot(`ptr`: Long,`signer`: RustBuffer.ByValue,`plan`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_approve(`ptr`: Long,`request`: RustBuffer.ByValue,`termsJson`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_approve(`ptr`: Long,`request`: RustBuffer.ByValue,`termsJson`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`pairing`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_blob(`ptr`: Long,`namespace`: RustBuffer.ByValue,`mediaType`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_end_my_sessions(`ptr`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_end_sessions(`ptr`: Long,`member`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_grant_transition(`ptr`: Long,`changeJson`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`rule`: RustBuffer.ByValue,`pairing`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_import(`ptr`: Long,`namespace`: RustBuffer.ByValue,`batchJson`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -2058,6 +2064,8 @@ internal object UniffiLib {
     external fun uniffi_colophon_ffi_fn_constructor_accountpairing_join(`account`: RustBuffer.ByValue,`e`: RustBuffer.ByValue,`nb`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_constructor_accountpairing_join_qr(`account`: RustBuffer.ByValue,`e`: RustBuffer.ByValue,`nb`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_constructor_accountpairing_scan_request(`account`: RustBuffer.ByValue,`request`: RustBuffer.ByValue,`limiter`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountpairing_commitment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2769,7 +2777,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot() and 0xFFFF) != 16458) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() and 0xFFFF) != 48078) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() and 0xFFFF) != 12821) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_blob() and 0xFFFF) != 26001) {
@@ -2779,6 +2787,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_end_sessions() and 0xFFFF) != 46090) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_grant_transition() and 0xFFFF) != 63919) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_import() and 0xFFFF) != 64191) {
@@ -2820,7 +2831,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_suspend() and 0xFFFF) != 12346) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_transition() and 0xFFFF) != 15310) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_transition() and 0xFFFF) != 1156) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_unlock_epochs() and 0xFFFF) != 60825) {
@@ -3259,6 +3270,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_constructor_accountpairing_join_qr() and 0xFFFF) != 17885) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_constructor_accountpairing_scan_request() and 0xFFFF) != 60272) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_from_state() and 0xFFFF) != 60989) {
@@ -5198,9 +5212,13 @@ public interface AccountEngineInterface {
     fun `beginAddSlot`(`signer`: kotlin.String, `plan`: SlotPlan, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
-     * Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
+     * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+     * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+     * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+     * `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+     * it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
      */
-    fun `beginApprove`(`request`: kotlin.ByteArray, `termsJson`: kotlin.String, `signers`: List<kotlin.String>, `entropy`: kotlin.ByteArray): AccountAction
+    fun `beginApprove`(`request`: kotlin.ByteArray, `termsJson`: kotlin.String, `signers`: List<kotlin.String>, `pairing`: AccountPairing, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
      * Start a streaming blob upload (32 fresh bytes).
@@ -5216,6 +5234,13 @@ public interface AccountEngineInterface {
      * End a member's sessions. No entropy.
      */
     fun `beginEndSessions`(`member`: kotlin.String, `signers`: List<kotlin.String>, `entropy`: kotlin.ByteArray): AccountAction
+    
+    /**
+     * A pending transition whose `change_json` carries a `grant` component (an import grant,
+     * §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+     * with a `grant`. No entropy.
+     */
+    fun `beginGrantTransition`(`changeJson`: kotlin.String, `signers`: List<kotlin.String>, `rule`: RuleKind, `pairing`: AccountPairing, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
      * An import batch (the 0.4 batch JSON) under a grant that carries `import`. 32 bytes.
@@ -5285,7 +5310,9 @@ public interface AccountEngineInterface {
     fun `beginSuspend`(`key`: kotlin.String, `transition`: kotlin.String, `signer`: kotlin.String, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
-     * A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+     * A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+     * component is `refused:outOfScope` here: it spends a confirmed pairing through
+     * `begin_grant_transition` (§9.1). No entropy.
      */
     fun `beginTransition`(`changeJson`: kotlin.String, `signers`: List<kotlin.String>, `rule`: RuleKind, `entropy`: kotlin.ByteArray): AccountAction
     
@@ -5989,9 +6016,13 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
 
     
     /**
-     * Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
+     * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+     * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+     * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+     * `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+     * it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
      */
-    @Throws(AccountException::class)override fun `beginApprove`(`request`: kotlin.ByteArray, `termsJson`: kotlin.String, `signers`: List<kotlin.String>, `entropy`: kotlin.ByteArray): AccountAction {
+    @Throws(AccountException::class)override fun `beginApprove`(`request`: kotlin.ByteArray, `termsJson`: kotlin.String, `signers`: List<kotlin.String>, `pairing`: AccountPairing, `entropy`: kotlin.ByteArray): AccountAction {
             return FfiConverterTypeAccountAction.lift(
     callWithHandle {
     uniffiRustCallWithError(AccountException) { _status ->
@@ -6001,6 +6032,7 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
         FfiConverterByteArray.lower(`request`),
         FfiConverterString.lower(`termsJson`),
         FfiConverterSequenceString.lower(`signers`),
+        FfiConverterTypeAccountPairing.lower(`pairing`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }
     }
@@ -6059,6 +6091,30 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
         
         FfiConverterString.lower(`member`),
         FfiConverterSequenceString.lower(`signers`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * A pending transition whose `change_json` carries a `grant` component (an import grant,
+     * §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+     * with a `grant`. No entropy.
+     */
+    @Throws(AccountException::class)override fun `beginGrantTransition`(`changeJson`: kotlin.String, `signers`: List<kotlin.String>, `rule`: RuleKind, `pairing`: AccountPairing, `entropy`: kotlin.ByteArray): AccountAction {
+            return FfiConverterTypeAccountAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accountengine_begin_grant_transition(
+        it,
+        
+        FfiConverterString.lower(`changeJson`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterTypeRuleKind.lower(`rule`),
+        FfiConverterTypeAccountPairing.lower(`pairing`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }
     }
@@ -6346,7 +6402,9 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
 
     
     /**
-     * A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+     * A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+     * component is `refused:outOfScope` here: it spends a confirmed pairing through
+     * `begin_grant_transition` (§9.1). No entropy.
      */
     @Throws(AccountException::class)override fun `beginTransition`(`changeJson`: kotlin.String, `signers`: List<kotlin.String>, `rule`: RuleKind, `entropy`: kotlin.ByteArray): AccountAction {
             return FfiConverterTypeAccountAction.lift(
@@ -9234,6 +9292,29 @@ open class AccountPairing: Disposable, AutoCloseable, AccountPairingInterface
         FfiConverterString.lower(`account`),
         FfiConverterByteArray.lower(`e`),
         FfiConverterByteArray.lower(`nb`),_status)
+}
+    )
+    }
+    
+
+        
+    /**
+     * The existing device scanned a membership request from the joining device's screen
+     * (§7.3, §7a): the request must verify and name `account`; the pairing is then confirmed
+     * for its `member.signing` and may approve that one request. The host attests the scan.
+     * A bad request is `pairing:invalidRequest` or `pairing:wrongAccount` and counts as a
+     * failure.
+     */
+    @Throws(AccountException::class) fun `scanRequest`(`account`: kotlin.String, `request`: kotlin.ByteArray, `limiter`: PairingFailureLimiter, `nowMs`: kotlin.Long): AccountPairing {
+            return FfiConverterTypeAccountPairing.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_constructor_accountpairing_scan_request(
+    
+        
+        FfiConverterString.lower(`account`),
+        FfiConverterByteArray.lower(`request`),
+        FfiConverterTypePairingFailureLimiter.lower(`limiter`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     )
     }
