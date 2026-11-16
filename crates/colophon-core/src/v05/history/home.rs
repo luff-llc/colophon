@@ -1298,7 +1298,20 @@ fn admit_entry(
     // §13.1 Ordering: a non-primary home stores an immediate entry once a primary head covers
     // it. The head may name a later entry of the same upload (`later`), so those count as the
     // entry's descendants here; nothing else is taken from them.
-    let primary = st.primary_home().filter(|p| *p != next.home);
+    let extends = fork.is_none()
+        && entry.seq == st.seq() + 1
+        && entry.previous.as_ref() == st.history().last();
+    // Coverage is judged in the state before the entry's seq, on its own branch (a head counts only
+    // when its home is current there, §8.6): for a candidate, the state at its parent.
+    let parent_state;
+    let cover_st: &State = match entry.previous.as_ref().filter(|p| !extends && held_entries.iter().any(|e| &e.env.digest == *p)) {
+        Some(p) => {
+            parent_state = branch_state(persisted, p, now_ms)?;
+            &parent_state
+        }
+        None => st,
+    };
+    let primary = cover_st.primary_home().filter(|p| *p != next.home);
     let covered = !recording
         && primary.as_ref().is_some_and(|p| {
             let extra: Vec<super::Entry> = std::iter::once(incoming)
@@ -1312,11 +1325,8 @@ fn admit_entry(
                     .map(|o| o.heads.clone())
                     .unwrap_or_default(),
             );
-            state::covered_by_home_head(st, &heads, &refs, &entry, p)
+            state::covered_by_home_head(cover_st, &heads, &refs, &entry, p)
         });
-    let extends = fork.is_none()
-        && entry.seq == st.seq() + 1
-        && entry.previous.as_ref() == st.history().last();
     if !extends {
         if fork.is_none() && entry.seq > st.seq() + 1 {
             return Err(Refusal::Conflict); // a gap
@@ -1535,9 +1545,9 @@ fn admit_candidate(
     // An `activate` passes the same checks as on the branch (§13.1), judged on its own branch:
     // its transition valid and due there, no valid veto held, and the permanent late-activation
     // rule, which a candidate against another entry at that seq must not bypass.
+    let before = branch_state(persisted, parent, now_ms)?;
     let mut full = false;
     if entry.kind == "activate" {
-        let before = branch_state(persisted, parent, now_ms)?;
         full = check_activation(next, &before, &entry.env, now_ms)?;
     }
     let objects = Objects {
@@ -1573,7 +1583,7 @@ fn admit_candidate(
             .collect();
         let refs: Vec<&super::Entry> = held.iter().chain(extra.iter()).collect();
         let head_set = HeadSet::parse(&heads);
-        let others: Vec<String> = st
+        let others: Vec<String> = before
             .current_homes()
             .iter()
             .map(|m| m.request.member_id().to_string())
@@ -1582,10 +1592,10 @@ fn admit_candidate(
         let at_seq: Vec<&super::Entry> = held.iter().filter(|e| e.seq == entry.seq).collect();
         let coverers: Vec<&String> = others
             .iter()
-            .filter(|h| state::covered_by_home_head(st, &head_set, &refs, entry, h))
+            .filter(|h| state::covered_by_home_head(&before, &head_set, &refs, entry, h))
             .collect();
         let slot_free = coverers.iter().any(|h| {
-            !at_seq.iter().any(|e| state::covered_by_home_head(st, &head_set, &refs, e, h))
+            !at_seq.iter().any(|e| state::covered_by_home_head(&before, &head_set, &refs, e, h))
         });
         !coverers.is_empty() && slot_free && at_seq.len() < CANDIDATES_PER_SEQ
     };
