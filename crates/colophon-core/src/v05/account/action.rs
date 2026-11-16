@@ -1100,7 +1100,6 @@ impl Account {
     /// prepare, not found void later.
     fn check_grant_component(&self, change: &Change) -> Result<()> {
         crate::v05::history::check_transition_members(self.d.auth.state(), &change.0, self.now_ms)
-            .map_err(Into::into)
     }
 
     /// §6.2: some controller holds `control`. Refused at prepare when a change removes or

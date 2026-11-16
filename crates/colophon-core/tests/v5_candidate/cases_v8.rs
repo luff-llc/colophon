@@ -3989,14 +3989,16 @@ pub fn part3(o: &mut Out) {
             &recs,
             &mut g,
             after,
-            expected,
+            expected.clone(),
             why,
             &a,
             false,
             60,
             vec![],
         );
+        let mut held = "00000002.json";
         if let Some((file, bytes)) = extra {
+            held = file;
             write_raw(
                 o,
                 &format!("succession/{name}/predecessor/authority/{file}"),
@@ -4010,6 +4012,14 @@ pub fn part3(o: &mut Out) {
                 unreadable_issued(&recs[1]),
             );
         }
+        // The case names the predecessor envelope it holds that no builder writes, so a test
+        // that rebuilds the predecessor from its inputs knows to leave the case out.
+        write(
+            o,
+            &format!("succession/{name}/case.json"),
+            &json!({"description": why, "sections": ["2.2", "15.1", "16.3"], "expected": expected,
+                    "unreadable": [held]}),
+        );
     }
     // §15.4: the `migration` entry of a Swift succession, as a transition the owner's control
     // keys sign and the successor home receipts; recorded once, after its due time. The counts
