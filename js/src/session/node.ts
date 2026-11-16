@@ -1,4 +1,3 @@
-/// <reference path="./node-shim.d.ts" />
 /**
  * File-backed storage for Node and Bun: tests, command-line tools and agents. Not for browsers (`indexeddb.ts`).
  */

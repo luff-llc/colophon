@@ -752,7 +752,9 @@ export class SessionWorker {
    * `signal` aborted, the session locked), the request in flight is abandoned with `exchange_abort` before this
    * returns or throws, so the next pass never finds the engine waiting for an answer nobody will give.
    */
-  async exchange(signal?: AbortSignal): Promise<ExchangeResult> {
+  async exchange(caller?: AbortSignal): Promise<ExchangeResult> {
+    // Locking the session ends the pass in flight, as a cancelled caller does.
+    const signal = this.waiting(caller);
     await this.gated(async () => { if (!this.engine) await this.reconcile(signal); });
     const result: ExchangeResult = { passes: 0, faults: [], issues: [], changed: false, unauthorized: false };
     const engine = this.engine;
@@ -818,13 +820,13 @@ export class SessionWorker {
             // The exchange deadline covers the transport, whatever the transport does with its signal.
             const deadline = new AbortController();
             const timer = setTimeout(() => deadline.abort(), Math.max(1, this.exchangeTimeMs - elapsed()));
-            const sending = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+            const sending = AbortSignal.any([signal, deadline.signal]);
             const outgoing: HomeRequest = { method: methodName(request.method), url: request.url, headers: request.headers, body: request.body };
             let answer: HomeAnswer;
             try {
               answer = await raceAbort(target.transport.send(outgoing, sending), sending);
             } catch (error) {
-              if (deadline.signal.aborted && !signal?.aborted) { stopped = tooSlow(); break homeLoop; }
+              if (deadline.signal.aborted && !signal.aborted) { stopped = tooSlow(); break homeLoop; }
               if (error instanceof HomeTransportError) {
                 if (error.reason === 'responseTooLarge') { stopped = { kind: 'responseTooLarge', limit: error.limit ?? 0 }; break homeLoop; }
                 if (error.reason === 'insecureEndpoint') { stopped = { kind: 'insecureEndpoint', url: request.url }; break homeLoop; }
