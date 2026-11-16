@@ -119,6 +119,8 @@ stay as the record of what shipped.
 | Android Gradle Plugin | 8.7.3 | Library AAR at compileSdk 35 / minSdk 33, matching Gradle 8.14.3. |
 | Kotlin | 2.2.21 | Same pin as the JVM bindings. |
 | JUnit 4.13.2 / AndroidX Test 1.6.x | — | JVM unit tests and the instrumented emulator journey. |
+| `com.google.zxing:core` | 3.5.3 | Apache-2.0. The Android test app only (`apps/test-android`): encodes and decodes the pairing QR codes (Android has no platform QR API). Not in the SDK or the AAR. |
+| `androidx.test:core` | 1.6.1 | Apache-2.0, part of AndroidX Test 1.6.x. The Android test app's instrumented UI test (`ActivityScenario`). |
 
 ## Implemented dependency pins (0.3)
 
