@@ -19,6 +19,15 @@ const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (text) => Buffer.from(text, 'base64');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+// Forwarding (§13.1), per peer: each request's own time limit, a pass's wall-time budget, how many
+// newly listed objects and how many backlog objects one pass offers, and how soon the same
+// entries are offered again while the peer's head lags.
+const PEER_TIMEOUT_MS = 5000;
+const PASS_MS = 15000;
+const NEW_PER_PASS = 64;
+const RETRY_PER_PASS = 16;
+const ENTRIES_RESEND_MS = 2000;
+
 /** A loaded home module. The module is pure: an instance that traps is dropped and replaced. */
 export class HomeModule {
   constructor(module) { this.module = module; this.instance = null; }
@@ -625,30 +634,49 @@ export class HomeSlot {
       await this.keepLease();
       await this.settle();
     });
-    // Calls to other homes happen outside the lock: two homes forwarding to each other would
-    // otherwise wait on one another.
-    await this.forwardAll();
+    // Calls to other homes happen outside the lock (two homes forwarding to each other would
+    // otherwise wait on one another), and each peer has its own pass: the tick starts them and
+    // does not wait, so one slow or silent peer delays neither this home's settling nor its
+    // forwarding to any other peer.
+    this.forwardAll();
   }
 
+  /** Start a forwarding pass to every peer that has none running (§13.1). */
   async forwardAll() {
-    const st = await this.lock(async () => this.status());
+    let st;
+    try { st = await this.lock(async () => this.status()); } catch (error) {
+      this.note('forward', `forwarding could not start: ${error.message}`);
+      return;
+    }
+    const resolve = typeof this.resolve === 'function' ? this.resolve() : this.resolve;
+    this.passes ??= new Map();
     for (const peer of st.peers ?? []) {
       const endpoint = (peer.endpoints ?? [])[0];
-      if (!endpoint) continue;
-      const base = (this.resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
+      if (!endpoint || this.passes.has(peer.id)) continue; // its last pass is still running
+      const base = (resolve?.[endpoint.replace(/\/$/, '')] ?? endpoint).replace(/\/$/, '');
       const row = (this.forward.peers[peer.id] ??= { after: 0, retry: [], head: '' });
       row.retry ??= [];
-      try { await this.forwardTo(base, row, peer.id); this.note(`forward ${peer.id}`, ''); } catch (error) {
-        this.note(`forward ${peer.id}`, `forwarding to home ${peer.id} failed (it will be retried): ${error.message}`);
-      }
+      const pass = this.forwardTo(base, row, peer.id)
+        .then(() => this.note(`forward ${peer.id}`, ''))
+        .catch((error) => this.note(`forward ${peer.id}`, `forwarding to home ${peer.id} failed (it will be retried): ${error.message}`))
+        .finally(() => this.passes.delete(peer.id));
+      this.passes.set(peer.id, pass);
     }
+  }
+
+  /** Persist the forwarding rows, one write at a time (passes to several peers run at once). */
+  saveForward() {
+    this.saving = (this.saving ?? Promise.resolve()).then(() => this.writeJson('forward.json', this.forward)).catch((error) => {
+      this.note('forward.json', `the forwarding state could not be saved: ${error.message}`);
+    });
+    return this.saving;
   }
 
   /** Offer one listed object to a peer, with what the module sends with it (its receipts).
    * Returns whether it was delivered (the module reads the peer's answer); receipts the peer
    * returns are admitted like any forwarded receipt. */
   async offer(base, objects, peerId) {
-    const r = await fetch(`${base}/pending`, { signal: AbortSignal.timeout(5000), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
+    const r = await fetch(`${base}/pending`, { signal: AbortSignal.timeout(PEER_TIMEOUT_MS), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
     const body = Buffer.from(await r.arrayBuffer());
     const a = this.wasm.call({ op: 'peer_answer', status: r.status, body: b64(body) });
     if (a.receipts?.length) {
@@ -662,6 +690,14 @@ export class HomeSlot {
     return a.delivered;
   }
 
+  /** An offer that counts a failed request as not delivered. */
+  async tryOffer(base, objects, peerId) {
+    try { return await this.offer(base, objects, peerId); } catch (error) {
+      this.note(`offer ${peerId}`, `home ${peerId} could not be reached (${error.message}); the object will be offered again`);
+      return false;
+    }
+  }
+
   /** What to forward for the object this home still lists at exactly `seq` (the module says:
    * the object and its receipts), or null when it lists nothing there. */
   async listed(seq) {
@@ -669,57 +705,83 @@ export class HomeSlot {
     return r.objects.length ? r.objects.map((o) => JSON.parse(unb64(o))) : null;
   }
 
-  /** Forward to one peer (§13.1: a home MUST forward). The cursor moves past an object once it
-   * was offered; an object the peer did not take (not delivered, by the module's reading of the
-   * answer) is kept in `retry` and offered again every pass while this home still lists it. */
+  /** One forwarding pass to one peer (§13.1: a home MUST forward), bounded in requests and wall
+   * time, in this order: (1) objects newly listed since the last pass, transitions and vetoes
+   * before receipts, so an in-window transition or veto never waits behind a backlog; (2) this
+   * home's entries the peer lacks and its head; (3) the backlog of objects the peer has not taken
+   * (`retry`), the oldest first, a bounded number per pass, those still not taken going to the
+   * back. Requests time out on their own, so a peer that never answers holds only its own pass. */
   async forwardTo(base, row, peerId) {
-    const save = () => this.writeJson('forward.json', this.forward);
-    const retry = [];
-    for (const seq of row.retry) {
+    const save = () => this.saveForward();
+    const deadline = Date.now() + PASS_MS;
+    // (1) New objects, at most a page per pass.
+    const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: NEW_PER_PASS }));
+    const urgent = (o) => (o.kind === 'transition' || o.kind === 'veto' ? 0 : 1);
+    const fresh = [...page.objects].sort((x, y) => urgent(x) - urgent(y) || x.seq - y.seq);
+    if (page.objects.length) row.after = page.objects[page.objects.length - 1].seq;
+    for (const o of fresh) {
+      const objects = Date.now() < deadline ? await this.listed(o.seq) : null;
+      if (Date.now() >= deadline) { row.retry.push(o.seq); continue; }
+      if (objects && !await this.tryOffer(base, objects, peerId)) row.retry.push(o.seq);
+    }
+    await save();
+    // (2) Entries and the head.
+    await this.forwardEntries(base, row, peerId);
+    // (3) The backlog.
+    const todo = [...new Set(row.retry)];
+    const now = todo.slice(0, RETRY_PER_PASS);
+    const rest = todo.slice(RETRY_PER_PASS);
+    const again = [];
+    for (const seq of now) {
+      if (Date.now() >= deadline) { again.push(seq); continue; }
       const object = await this.listed(seq);
       if (!object) continue; // recorded or expired: no longer listed, nothing left to forward
-      if (!await this.offer(base, object, peerId)) retry.push(seq);
+      if (!await this.tryOffer(base, object, peerId)) again.push(seq);
     }
-    row.retry = retry;
+    row.retry = [...rest, ...again];
     await save();
-    for (;;) {
-      const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: 16 }));
-      if (page.objects.length === 0) break;
-      for (const o of page.objects) {
-        const objects = await this.listed(o.seq);
-        if (objects && !await this.offer(base, objects, peerId)) row.retry.push(o.seq);
-        row.after = o.seq;
-        await save();
-      }
-      if (!page.more) break;
-    }
-    // §13.1: the entries of this home's history after the peer's latest head (a recording entry
-    // the peer has not appended, above all), ahead of the head, so the peer can sign a head over
-    // them. The same suffix is offered again at most every 2 s (wall time) while the peer's head
-    // lags; an immediate entry a non-primary peer refused (421) for want of this home's head is
-    // offered again right after the head.
-    const sendEntries = async () => {
-      const fwd = await this.lock(async () => this.wasm.call({ op: 'forward_entries', state: this.state, now: this.clock(), peer: peerId }));
+  }
+
+  /** §13.1: the entries of this home's history after the peer's latest head (a recording entry
+   * the peer has not appended, above all), ahead of the head, so the peer can sign a head over
+   * them; when the homes are on different branches (the module says `exchange`), this home's
+   * branch from the last shared entry, after its head, so the peer holds the head that covers
+   * them and keeps them as evidence. The same suffix is offered again at most every 2 s while the
+   * peer's head lags (the time is kept with the forwarding state; a clock that moved back offers
+   * it again at once); an immediate entry a non-primary peer refused (421) for want of this
+   * home's head is offered again right after the head. */
+  async forwardEntries(base, row, peerId) {
+    const fwd = await this.lock(async () => this.wasm.call({ op: 'forward_entries', state: this.state, now: this.clock(), peer: peerId }));
+    const sendEntries = async (force) => {
       if (!fwd.entries.length) return 0;
       const mark = `${fwd.from}:${fwd.entries.length}:${sha(fwd.entries[fwd.entries.length - 1])}`;
-      if (mark === row.entries && Date.now() - (row.entriesAt ?? 0) < 2000) return 0;
-      row.entries = mark; row.entriesAt = Date.now();
+      const now = Date.now();
+      const at = row.entriesAt ?? 0;
+      if (!force && mark === row.entries && now >= at && now - at < ENTRIES_RESEND_MS) return 0;
+      row.entries = mark; row.entriesAt = now;
+      await this.saveForward();
       const body = JSON.stringify({ from: fwd.from, entries: fwd.entries.map((e) => JSON.parse(unb64(e))), receipts: [] });
-      const r = await fetch(`${base}/authority`, { signal: AbortSignal.timeout(5000), method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      const r = await fetch(`${base}/authority`, { signal: AbortSignal.timeout(PEER_TIMEOUT_MS), method: 'POST', headers: { 'content-type': 'application/json' }, body });
       this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${(await r.text()).slice(0, 200)}`);
       return r.status;
     };
-    const entriesStatus = await sendEntries();
-    // §13.3: a head the home is due to replace never leaves it, to a peer either.
-    const head = await this.lock(async () => this.headIfFresh());
-    if (head) {
+    const putHead = async () => {
+      // §13.3: a head the home is due to replace never leaves it, to a peer either.
+      const head = await this.lock(async () => this.headIfFresh());
+      if (!head) return;
       const text = JSON.stringify(head);
-      if (sha(text) !== row.head) {
-        const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: AbortSignal.timeout(5000), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
-        if (r.status === 200) { row.head = sha(text); await save(); this.note(`head ${peerId}`, ''); }
-        else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
-      }
+      if (sha(text) === row.head) return;
+      const r = await fetch(`${base}/records/heads/${this.key.memberId}.json`, { signal: AbortSignal.timeout(PEER_TIMEOUT_MS), method: 'PUT', headers: { 'content-type': 'application/json' }, body: text });
+      if (r.status === 200) { row.head = sha(text); await this.saveForward(); this.note(`head ${peerId}`, ''); }
+      else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
+    };
+    if (fwd.exchange) {
+      await putHead();
+      await sendEntries(false);
+      return;
     }
-    if (entriesStatus === 421) { row.entries = ''; await sendEntries(); }
+    const status = await sendEntries(false);
+    await putHead();
+    if (status === 421) await sendEntries(true);
   }
 }
