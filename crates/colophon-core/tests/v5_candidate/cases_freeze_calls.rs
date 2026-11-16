@@ -8,8 +8,7 @@
 //!   agent): the reader is stopped and cannot see seq 6, so every call is `unavailable`, even
 //!   under the home's fresh head at seq 3 (N−1);
 //! - **provisional** (seq 4 activates it, no `final`): the reader is not stopped, the call is
-//!   judged as usual (`s-provisional-raise-call`, generated once the authority stream stops a
-//!   reader only at a final raise);
+//!   judged as usual;
 //! - **vetoed** (seq 4 records B's veto): the reader is not stopped, the call is judged as usual.
 //! The same call over seqs 1–3 alone is `ok`.
 //!
@@ -283,6 +282,16 @@ pub fn part(o: &mut Out) {
         plain.clone(),
         "ok",
         "The same call over seqs 1 to 3 alone, the history before the raise: ok. Only the stop makes s-stopped-reader-call unavailable.",
+    );
+    write_call_case(
+        o,
+        "s-provisional-raise-call",
+        &activated(&b),
+        &h3,
+        &read,
+        plain.clone(),
+        "ok",
+        "Seq 4 activates the layout raise but no final makes it final: the reader is not stopped, and the call is judged as usual (ok at S = 3).",
     );
     write_call_case(
         o,
