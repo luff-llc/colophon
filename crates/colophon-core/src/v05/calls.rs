@@ -15,6 +15,7 @@
 //! The replay store (§12.4) is read at step 3 and reserved by compare-and-swap only after step
 //! 8, so no refusal reserves; the reservation is left `Pending` for the service.
 use super::descriptor::{Controller, KeyForm, Policy, Role};
+use super::history::{Claim, NotCurrent, State};
 use super::encoding::{
     bounds, canonical, canonical_body, decode_base64, decode_request_id, digest, is_digest, Obj,
 };
@@ -252,6 +253,10 @@ pub struct AccountView {
     /// `Some(seq)` when the reader is stopped for the account at `seq` (§1 "A stop",
     /// [`crate::v05::history::Verdict::stopped`]).
     stopped: Option<u64>,
+    /// The verified state the view was built from, when it was built by the history verifier:
+    /// whether a controller, member or home is current is judged by its one helper
+    /// ([`State::current_principal`], §8.5).
+    state: Option<Box<State>>,
 }
 /// Most head envelopes a view holds (more homes than §13.1's 8 can't be current).
 pub const MAX_VIEW_HEADS: usize = 64;
@@ -378,6 +383,7 @@ impl AccountView {
                 .collect(),
         })?;
         view.stopped = verdict.stopped;
+        view.state = Some(Box::new(st.clone()));
         Ok(view)
     }
     /// Assemble a view from parts the caller vouches for, checking every structural invariant.
@@ -425,13 +431,79 @@ impl AccountView {
                 .all(|h| h.len() <= bounds::HEAD_BODY * 2 + 4_096),
             "head envelope exceeds its bound",
         )?;
-        Ok(Self { v, stopped: None })
+        Ok(Self {
+            v,
+            stopped: None,
+            state: None,
+        })
     }
     /// `Some(seq)` when the reader is **stopped** for the account (§1 "A stop"): its verdict on
     /// the authority entry at `seq` is `newerFormat`. A stopped view verifies no call, accepts
     /// no head and builds no link or call: each is `unavailable`, whatever S would be.
     pub fn stopped(&self) -> Option<u64> {
         self.stopped
+    }
+    /// Whether `id` is a current principal as `claim` at `now_ms` (§8.5): expiry, provisional
+    /// additions, suspension and revocation judged one way. A view built by the history verifier
+    /// asks its state's [`State::current_principal`]; a view assembled from parts the caller
+    /// vouches for ([`AccountView::from_parts_unverified`]) has no state and is judged from the
+    /// statuses it was given, the same questions in the same order.
+    fn principal(
+        &self,
+        id: &str,
+        claim: Claim<'_>,
+        now_ms: i64,
+    ) -> std::result::Result<(), NotCurrent> {
+        if let Some(st) = &self.state {
+            return st.current_principal(id, claim, now_ms).map(|_| ());
+        }
+        match claim {
+            Claim::Controller {
+                roles,
+                suspended_ok,
+            } => {
+                let c = self
+                    .v
+                    .controllers
+                    .iter()
+                    .find(|c| c.id == id)
+                    .ok_or(NotCurrent::Absent)?;
+                let latest = c.latest().ok_or(NotCurrent::Absent)?;
+                match c.status {
+                    ControllerStatus::PendingAddition => return Err(NotCurrent::Absent),
+                    ControllerStatus::AddedNotFinal => return Err(NotCurrent::Provisional),
+                    ControllerStatus::Suspended if !suspended_ok => {
+                        return Err(NotCurrent::Suspended)
+                    }
+                    _ => {}
+                }
+                if !roles.is_empty() && !roles.iter().any(|r| latest.has(r)) {
+                    return Err(NotCurrent::Role);
+                }
+                Ok(())
+            }
+            Claim::Member | Claim::Home => {
+                let m = self
+                    .v
+                    .members
+                    .iter()
+                    .find(|m| m.id == id)
+                    .ok_or(NotCurrent::Absent)?;
+                if m.revoked_seq.is_some() {
+                    return Err(NotCurrent::Revoked);
+                }
+                if m.status == MemberStatus::AddedNotFinal {
+                    return Err(NotCurrent::Provisional);
+                }
+                if m.expiry_at(u64::MAX).is_some_and(|e| now_ms > e) {
+                    return Err(NotCurrent::Expired);
+                }
+                if matches!(claim, Claim::Home) && !m.is_current_home(now_ms) {
+                    return Err(NotCurrent::Role);
+                }
+                Ok(())
+            }
+        }
     }
     /// The account.
     pub fn account(&self) -> &AccountId {
@@ -466,7 +538,7 @@ impl AccountView {
         self.v
             .members
             .iter()
-            .filter(|m| m.is_current_home(now_ms))
+            .filter(|m| self.principal(&m.id, Claim::Home, now_ms).is_ok())
             .map(|m| (m.id.clone(), m.signing.clone()))
             .collect()
     }
@@ -747,6 +819,14 @@ fn secs(s: u64) -> i128 {
 fn revoked() -> Failure {
     Failure::Refused(Reason::Revoked)
 }
+/// A signer that is not a current principal, as a call reports it (§12.3 step 5): expired is
+/// `refused:expired`, anything else `refused:revoked`.
+fn not_current(n: NotCurrent) -> Failure {
+    match n {
+        NotCurrent::Expired => refused(Reason::Expired),
+        _ => revoked(),
+    }
+}
 fn refused(r: Reason) -> Failure {
     Failure::Refused(r)
 }
@@ -859,9 +939,14 @@ fn member_at_s<'a>(view: &'a AccountView, id: &str, s: u64, now_ms: i64) -> Resu
         .iter()
         .find(|m| m.id == id)
         .ok_or_else(revoked)?;
-    if m.granted_seq > s || m.revoked_seq.is_some() || m.status == MemberStatus::AddedNotFinal {
+    // Grants after S don't count (§12.3 step 5).
+    if m.granted_seq > s {
         return Err(revoked());
     }
+    // Revocation and finality beyond S apply at once: current now, as §8.5 judges it.
+    view.principal(id, Claim::Member, now_ms)
+        .map_err(not_current)?;
+    // A renewal after S doesn't count: the expiry is the one in force at S.
     if m.expiry_at(s).is_some_and(|e| now_ms > e) {
         return Err(refused(Reason::Expired));
     }
@@ -1351,15 +1436,17 @@ fn verify(
                 (Some(a), Some(l)) if !vc.removed_after(s) => (a, l),
                 _ => return Err(revoked()),
             };
-            match vc.status {
-                ControllerStatus::PendingAddition | ControllerStatus::AddedNotFinal => {
-                    return Err(revoked())
-                }
-                ControllerStatus::Suspended if call.purpose != HISTORY_READ => {
-                    return Err(revoked())
-                }
-                _ => {}
-            }
+            // Current now (§8.5): present, final, and not suspended unless the call is the one a
+            // suspended key may make. Roles are judged below, at S and latest together.
+            view.principal(
+                id,
+                Claim::Controller {
+                    roles: &[],
+                    suspended_ok: call.purpose == HISTORY_READ,
+                },
+                cfg.now_ms,
+            )
+            .map_err(|_| revoked())?;
             let both = |r: &Role| at_s.has(r) && latest.has(r);
             let sign_ok = both(&Role::Sign)
                 && [at_s, latest]
