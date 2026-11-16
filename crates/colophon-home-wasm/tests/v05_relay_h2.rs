@@ -763,3 +763,89 @@ fn a_head_due_to_be_replaced_is_not_forwarded() {
     });
     w.b = Some(b);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Two-home flake (2026-11-16): a head signed at T over the history before an entry due at T.
+
+/// A transition comes due at T. Before any scheduler tick at T (ticks are disabled here), the
+/// head is asked for: the home appends the determined `activate` first and signs its head over
+/// it, at T. Before the fix it signed a head at T over the history without the `activate`; the
+/// tick then appended the `activate`, but a head over it needed an `issued` later than T, so while
+/// the clock read T no head covered the activation, and `final` (which needs the witnesses' heads
+/// over it) never came: the two-home tests hung exactly this way when a peer's forwarding or a
+/// client's GET reached a home between the clock step and its tick.
+#[test]
+fn a_head_asked_for_at_a_due_time_covers_what_is_due_then() {
+    let Some(mut w) = world("settle", "public", 1, false, false) else {
+        return;
+    };
+    let ka = HomeKeys::new(0x77);
+    let account = w.f.account.id().as_str().to_string();
+    let t = NOW;
+    w.a.set_clock(t);
+    let mut ctl = w.controller(t);
+    propose_by(&w, &mut ctl, 600, &[w.f.d.clone()]);
+    w.pass_all(&mut ctl, t + 1_000);
+    let n = kinds_at(&w.a).len() as u64;
+    // Due at T + 300 s + 3,600 s. The home is started again with no tick, at that instant.
+    let due = t + 1_000 + 300_000 + HOUR;
+    let a = std::mem::replace(&mut w.a, Relay::attached(0, BASE_A, "", w.scratch[0].path()));
+    let (port, dir) = (a.port, a.dir.clone());
+    let mut a = a;
+    a.stop();
+    let mut quiet = Relay::start_with(&ka, &account, BASE_A, &dir, due, &[], port, json!({"tickMs": 600_000}));
+    let (s, h, _) = head_at(&quiet).map(|(s, d, i)| (s, d, i)).expect("a head");
+    let _ = h;
+    assert_eq!(s, n + 1, "the head asked for at the due time covers the activate due then");
+    quiet.stop();
+    // With ticks, at the same clock reading, the activation is made final.
+    w.a = Relay::start_on(&ka, &account, BASE_A, &dir, due, &[], port);
+    eventually("final at the same clock reading", 20, || kinds_at(&w.a).len() as u64 >= n + 2);
+    assert_eq!(kinds_at(&w.a)[n as usize..n as usize + 2], ["activate", "final"]);
+}
+
+/// Two homes at `headQuorum` 2, the order that left the second one waiting for ever. Both receipt
+/// a transition. At its due time A cannot reach B: B appends the `activate` and forwards its head
+/// over it to A; A appends the `activate`, then, holding both homes' heads over it, the `final`,
+/// and signs its head over the `final`. So the only head A has to give B covers an entry B does
+/// not hold, and B's own `final` needs A's head over the activation. Before the fix B waited for
+/// ever (homes forwarded heads, transitions, vetoes and receipts, never entries); now A forwards
+/// B its history after B's latest head, B appends the same `final`, and both agree.
+#[test]
+fn a_home_that_recorded_final_first_gives_its_peer_the_entry() {
+    let Some(mut w) = world("finalorder", "public", 2, true, true) else {
+        return;
+    };
+    let ka = HomeKeys::new(0x77);
+    let t = NOW;
+    w.clocks(t);
+    let mut ctl = w.controller(t);
+    propose_by(&w, &mut ctl, 600, &[w.f.d.clone()]);
+    w.pass_all(&mut ctl, t + 1_000);
+    for r in [&w.a, w.b.as_ref().unwrap()] {
+        eventually("both receipts at each home", 20, || listed(r, "receipt").len() == 2);
+    }
+    let n = kinds_at(&w.a).len();
+    // A restarted unable to reach B (B's endpoint resolves to a closed port); B reaches A.
+    let dead = free_port();
+    let a = std::mem::replace(&mut w.a, Relay::attached(0, BASE_A, "", w.scratch[0].path()));
+    w.a = a.restart(&ka, t + 2_000, &[(BASE_B, dead)]);
+    let due = t + 1_000 + 300_000 + HOUR;
+    w.clocks(due);
+    eventually("activate and final at A", 30, || {
+        w.clocks(due + 2_000);
+        kinds_at(&w.a).len() > n + 1
+    });
+    assert_eq!(kinds_at(&w.a)[n..n + 2], ["activate", "final"]);
+    let b = w.b.as_ref().unwrap();
+    assert_eq!(kinds_at(b).len(), n + 1, "B holds the activate and no final: it lacks A's head over the activation");
+    // A can reach B again; its clock moves on, so nothing here rests on a frozen clock.
+    let a = std::mem::replace(&mut w.a, Relay::attached(0, BASE_A, "", w.scratch[0].path()));
+    w.a = a.restart(&ka, due + 5_000, &[(BASE_B, w.pb)]);
+    let b = w.b.as_ref().unwrap();
+    eventually("B's final", 30, || {
+        b.set_clock(due + 6_000);
+        kinds_at(b).len() > n + 1
+    });
+    assert_eq!(entries(b)[..n + 2], entries(&w.a)[..n + 2], "the same history at both homes");
+}

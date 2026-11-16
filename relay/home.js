@@ -248,6 +248,7 @@ export class HomeSlot {
     const now = this.clock();
     const r = this.wasm.call({ op: 'head_request', state: this.state, now });
     await this.commit(r.state);
+    this.note('head', r.sign || !r.due ? '' : `home ${this.key.memberId}: a head is due and cannot be signed now: ${r.why}`);
     if (!r.sign) return r.due ? 'due' : 'fresh';
     const signature = b64(await this.key.sign(unb64(r.sign.body)));
     const f = this.wasm.call({ op: 'finish_head', state: this.state, now, seq: r.sign.seq, digest: r.sign.digest, issued: r.sign.issued, signature });
@@ -256,13 +257,37 @@ export class HomeSlot {
     return 'signed';
   }
 
+  /** Bring the home's history up to its clock, then its head (under the lock): the determined
+   * recording entries due now are appended first (`record_due`), and only then is a due head
+   * signed. A head signed at clock T is therefore over everything due at T: never a head at T
+   * over the history before an entry that is due at T, which would leave the head over that entry
+   * unsignable until the clock passes T (heads have strictly increasing `issued`, §13.3). */
+  async settle() {
+    if (!this.status().appointed) return 'fresh';
+    const now = this.clock();
+    // record_due is a pure function of (state, now): an unchanged pair would give the same
+    // answer, so it is not asked again (it verifies the whole history each time).
+    if (!(this.lastDue && this.lastDue.state === this.state && this.lastDue.now === now)) {
+      this.trace('record_due start');
+      const r = this.wasm.call({ op: 'record_due', state: this.state, now });
+      const said = r.result === 'ok' && !r.note ? '' : `recording entries for slot ${this.slot.name}: ${r.result} ${r.note ?? ''}`;
+      this.note('record', said);
+      await this.commit(r.state);
+      await this.materialize(r.store);
+      await this.signReceipts(r.sign);
+      this.trace('record_due end');
+      this.lastDue = { state: this.state, now };
+    }
+    return this.ensureHead();
+  }
+
   /** Serve this home's own head (`GET {base}/head`, `records/heads/<this home>.json`). §13.3:
    * the due head is produced and stored first; a due head that cannot be produced fails the
    * request (503, retryable) and the older head is never served. */
   async serveOwnHead(res) {
     const { HttpError, send } = this.deps;
     let outcome;
-    try { outcome = await this.lock(async () => (this.status().appointed ? this.ensureHead() : 'fresh')); }
+    try { outcome = await this.lock(async () => this.settle()); }
     catch (error) {
       if (!(error instanceof ModuleError)) throw error;
       outcome = 'due';
@@ -276,7 +301,7 @@ export class HomeSlot {
   /** The stored head, only when no other head is due (§13.3); null otherwise. Under the lock. */
   async headIfFresh() {
     let outcome;
-    try { outcome = this.status().appointed ? await this.ensureHead() : 'fresh'; }
+    try { outcome = await this.settle(); }
     catch (error) { if (!(error instanceof ModuleError)) throw error; outcome = 'due'; }
     return outcome === 'due' ? null : this.headEnvelope();
   }
@@ -561,7 +586,7 @@ export class HomeSlot {
     await this.commit(r.state); // even a refusal changes state (§13.1)
     await this.materialize(r.store);
     const receipts = await this.signReceipts(r.sign);
-    const head = r.appointed ? await this.ensureHead() : 'fresh';
+    const head = r.appointed ? await this.settle() : 'fresh';
     if (r.outcome !== 'ok') return this.answerOutcome(res, r);
     // A due head that could not be produced yet is not answered with the older one (§13.3).
     return send(res, 200, { head: head === 'due' ? null : await this.headEnvelope(), receipts });
@@ -594,21 +619,7 @@ export class HomeSlot {
   async tickOnce() {
     await this.lock(async () => {
       await this.keepLease();
-      const now = this.clock();
-      // record_due is a pure function of (state, now): an unchanged pair would give the same
-      // answer, so it is not asked again (it verifies the whole history each time).
-      if (this.lastDue && this.lastDue.state === this.state && this.lastDue.now === now) { await this.ensureHead(); return; }
-      if (!this.status().appointed) return;
-      this.trace('record_due start');
-      const r = this.wasm.call({ op: 'record_due', state: this.state, now });
-      const said = r.result === 'ok' && !r.note ? '' : `recording entries for slot ${this.slot.name}: ${r.result} ${r.note ?? ''}`;
-      this.note('record', said);
-      await this.commit(r.state);
-      await this.materialize(r.store);
-      await this.signReceipts(r.sign);
-      this.trace('record_due end');
-      this.lastDue = { state: this.state, now };
-      await this.ensureHead();
+      await this.settle();
     });
     // Calls to other homes happen outside the lock: two homes forwarding to each other would
     // otherwise wait on one another.
@@ -687,6 +698,18 @@ export class HomeSlot {
         if (r.status === 200) { row.head = sha(text); await save(); this.note(`head ${peerId}`, ''); }
         else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
       }
+    }
+    // §13.1: the entries of this home's history after the peer's latest head (a recording entry
+    // the peer has not appended, above all), so the peer can sign a head over them.
+    const fwd = await this.lock(async () => this.wasm.call({ op: 'forward_entries', state: this.state, now: this.clock(), peer: peerId }));
+    // The same suffix is offered again at most every 2 s (wall time), while the peer's head lags.
+    const mark = fwd.entries.length ? `${fwd.from}:${fwd.entries.length}:${sha(fwd.entries[fwd.entries.length - 1])}` : '';
+    const again = mark !== row.entries || Date.now() - (row.entriesAt ?? 0) >= 2000;
+    if (fwd.entries.length && again) {
+      row.entries = mark; row.entriesAt = Date.now();
+      const body = JSON.stringify({ from: fwd.from, entries: fwd.entries.map((e) => JSON.parse(unb64(e))), receipts: [] });
+      const r = await fetch(`${base}/authority`, { signal: AbortSignal.timeout(5000), method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${(await r.text()).slice(0, 200)}`);
     }
   }
 }

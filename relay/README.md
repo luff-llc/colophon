@@ -125,7 +125,11 @@ serving interval at the last lease's end, never earlier, §13.1); and forwards w
 current homes: each listed transition, veto and receipt to `{peer}/pending`, a transition or veto
 together with the receipts it holds of it (so a peer judging a late veto holds the in-window
 receipt), their receipts of what it sent come back and are admitted; its heads to
-`PUT {peer}/records/heads/<its ID>.json`. An object a
+`PUT {peer}/records/heads/<its ID>.json` (never one it is due to replace), and the entries of
+its history after that peer's latest head to `POST {peer}/authority`, so a peer holds every
+recording entry this home appended and can sign a head over it (otherwise, at `headQuorum` 2, a
+home whose only head covers its own `final` would leave the other home waiting for ever). Before
+any head is produced the home appends what is due at its clock. An object a
 peer did not take (a transient refusal such as `unavailable`, or any status or result the module
 does not read as delivered or permanently refused) is offered again every pass while this home
 still lists it.
