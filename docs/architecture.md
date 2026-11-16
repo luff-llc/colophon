@@ -139,23 +139,23 @@ the machine, never bundled or redistributed:
 `sdk/android` and the Android test app depend on Credentials and its Play Services adapter for passkeys (Credential
 Manager with PRF). Gradle resolves this graph for the app (`:app:dependencies`, 2026-11-16). **The Play Services
 artefacts and GoogleID are under the Android Software Development Kit License, not an open-source licence**: they are
-proprietary Google binaries the passkey path needs on devices with Google Play services. Whether to keep them is the
-owner's decision; nothing here removes passkey support.
+proprietary Google binaries the passkey path needs on devices with Google Play services. The owner accepted them on
+16 November 2026.
 
 | Dependency | Version | Licence | Why |
 | --- | --- | --- | --- |
 | `androidx.credentials:credentials` | 1.5.0 | Apache-2.0 | Credential Manager: passkey registration and assertions with PRF. Direct (SDK and app). |
 | `androidx.credentials:credentials-play-services-auth` | 1.5.0 | Apache-2.0 | The Credential Manager provider adapter for Google Play services. Direct (SDK and app). |
-| `com.google.android.gms:play-services-auth` | 21.1.1 | Android SDK License (not open source) | Pulled by the adapter. |
-| `com.google.android.gms:play-services-fido` | 21.0.0 | Android SDK License (not open source) | Pulled by the adapter (FIDO2, passkeys). |
-| `com.google.android.gms:play-services-identity-credentials` | 16.0.0-alpha02 | Android SDK License (not open source) | Pulled by the adapter. |
-| `com.google.android.gms:play-services-auth-blockstore` | 16.4.0 | Android SDK License (not open source) | Pulled by the adapter. |
-| `com.google.android.gms:play-services-auth-api-phone` | 18.0.2 | Android SDK License (not open source) | Pulled by `play-services-auth`. |
-| `com.google.android.gms:play-services-auth-base` | 18.0.10 | Android SDK License (not open source) | Pulled by `play-services-auth`. |
-| `com.google.android.gms:play-services-base` | 18.5.0 | Android SDK License (not open source) | Pulled by the Play Services artefacts above. |
-| `com.google.android.gms:play-services-basement` | 18.4.0 | Android SDK License (not open source) | Pulled by the Play Services artefacts above. |
-| `com.google.android.gms:play-services-tasks` | 18.2.0 | Android SDK License (not open source) | Pulled by the Play Services artefacts above. |
-| `com.google.android.libraries.identity.googleid:googleid` | 1.1.0 | Android SDK License (not open source) | Pulled by the adapter (Sign in with Google; unused here). |
+| `com.google.android.gms:play-services-auth` | 21.1.1 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter. |
+| `com.google.android.gms:play-services-fido` | 21.0.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter (FIDO2, passkeys). |
+| `com.google.android.gms:play-services-identity-credentials` | 16.0.0-alpha02 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter. |
+| `com.google.android.gms:play-services-auth-blockstore` | 16.4.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter. |
+| `com.google.android.gms:play-services-auth-api-phone` | 18.0.2 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by `play-services-auth`. |
+| `com.google.android.gms:play-services-auth-base` | 18.0.10 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by `play-services-auth`. |
+| `com.google.android.gms:play-services-base` | 18.5.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the Play Services artefacts above. |
+| `com.google.android.gms:play-services-basement` | 18.4.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the Play Services artefacts above. |
+| `com.google.android.gms:play-services-tasks` | 18.2.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the Play Services artefacts above. |
+| `com.google.android.libraries.identity.googleid:googleid` | 1.1.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter (Sign in with Google; unused here). |
 | `androidx.biometric:biometric` | 1.1.0 | Apache-2.0 | Pulled by Credentials. |
 | `androidx.core:core`, `core-ktx` | 1.15.0 | Apache-2.0 | Pulled by Credentials. |
 | `androidx.annotation:annotation` 1.8.1, `annotation-experimental` 1.4.1; `androidx.activity:activity` 1.5.1; `androidx.appcompat:appcompat` and `appcompat-resources` 1.2.0; `androidx.arch.core:core-common`, `core-runtime` 2.2.0; `androidx.collection:collection` 1.4.2; `androidx.concurrent:concurrent-futures` 1.1.0; `androidx.cursoradapter` 1.0.0; `androidx.customview` 1.0.0; `androidx.drawerlayout` 1.0.0; `androidx.fragment:fragment` 1.5.7; `androidx.interpolator` 1.0.0; `androidx.lifecycle:*` 2.6.2; `androidx.loader` 1.0.0; `androidx.profileinstaller` 1.3.0; `androidx.savedstate` 1.2.1; `androidx.startup:startup-runtime` 1.1.1; `androidx.tracing:tracing` 1.2.0; `androidx.vectordrawable:*` 1.1.0; `androidx.versionedparcelable` 1.1.1; `androidx.viewpager` 1.0.0 | as listed | Apache-2.0 | AndroidX libraries pulled by Credentials, Biometric and the Play Services artefacts. |
