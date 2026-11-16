@@ -983,8 +983,8 @@ serve the losing entry.
   it; a key the transition would remove may sign.
 - **Receipt** (§13.5): by a current home, `received` within 300 s after the object's `issued`.
   **Choosing receipts (a rule for a recorder):** an entry carries exactly `headQuorum` receipts for
-  an object (for a full set, at most the homes that remain after the homes it revokes, and from
-  those homes only), from the homes with the lowest member IDs whose valid receipts the recorder holds,
+  an object (for a full set of which the recorder holds fewer, at most the homes that remain after
+  the homes it revokes, and from those homes only, none if none remains), from the homes with the lowest member IDs whose valid receipts the recorder holds,
   for each home its receipt with the lowest body digest, sorted by home ID, so honest recorders
   holding the same receipts build the same entry. For a veto the receipts that may be chosen are
   those valid under §13.5 and **received at or before the transition's veto deadline**; a later
