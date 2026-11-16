@@ -6,7 +6,7 @@
 # `--tests 'com.luff.colophon.session.*'`).
 #
 # It leaves no relay process behind: each test stops its relays (and a shutdown hook kills them if the JVM dies),
-# and this script then looks for any relay started during the run, kills it and fails.
+# and this script fails if a new relay remains. It never kills a process it did not start.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root="$PWD"
@@ -48,8 +48,7 @@ status=0
 sdk/kotlin/gradlew -p sdk/kotlin --no-daemon test --rerun "$@" || status=$?
 left="$(leftover)"
 if [[ -n "$left" ]]; then
-  echo "test-kotlin: relay processes were left behind: $(echo $left); killing them" >&2
-  echo "$left" | xargs kill -9 2>/dev/null || true
+  echo "test-kotlin: relay processes were left behind: $(echo $left); their owning test must stop them" >&2
   status=1
 else
   echo "test-kotlin: no relay process left behind"

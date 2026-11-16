@@ -2,6 +2,8 @@ package com.luff.colophon.session
 
 import com.luff.colophon.AccountMemberKind
 import com.luff.colophon.AccountRequest
+import com.luff.colophon.ExchangeStep
+import com.luff.colophon.ExchangeStepKind
 import com.luff.colophon.HttpAnswer
 import com.luff.colophon.HttpMethod
 import com.luff.colophon.RequestSpec
@@ -52,6 +54,35 @@ class ExchangeCancelTest {
             assertTrue(seen.size >= 2, "the next pass reached the home: $seen")
             assertTrue(seen[1] == "${HttpMethod.GET} ${endpoint}head", "the next pass starts again from the head: $seen")
         } finally {
+            d.close()
+        }
+    }
+
+    /**
+     * An engine that answers `Waiting` again after the one recovery: the pass cannot finish. Before the fix the loop ended
+     * on the second `Waiting` with no fault, `syncNow()` returned true and an app called it a complete sync.
+     */
+    @Test(timeout = 60_000) fun aPassThatStillWaitsAfterItsRecoveryFails() = runBlocking<Unit> {
+        val endpoint = "https://waiting-home.test/v1/accounts/w/"
+        val homeKeys = SoftwareKeys()
+        val home = HomeConfiguration(endpoint, request = { account ->
+            val p = homeKeys.publicKeys()
+            val spec = RequestSpec(account, p.signing, p.agreement, "Fake home", AccountMemberKind.SERVER, "{\"serves\":[\"home\"]}",
+                accountFormatDate(System.currentTimeMillis() - 5_000), null, null, listOf(endpoint))
+            AccountRequest.prepare(spec).use { r -> r.finish(Signature(homeKeys.sign(r.step().body), null, null)).raw }
+        }, transport = HomeTransport { HttpAnswer(503u, listOf(), ByteArray(0)) })
+        val d = Device(homes = listOf(home), createWithoutHome = false)
+        try {
+            d.session.create()
+            d.session.stopSync()
+            assertEquals(SessionPhase.Ready, d.session.phase, d.describe())
+            d.session.worker.nextStepOverride = { ExchangeStep(ExchangeStepKind.WAITING, null, null) }
+            val ok = d.session.syncNow()
+            assertFalse(ok, "a pass that still waits is a failed sync")
+            assertTrue(d.session.homeIssues.any { it.problem == HomeProblem.StillWaiting }, "named: ${d.session.homeIssues}")
+            assertTrue(d.session.state.value.syncState is HomeSyncState.Error, "sync state ${d.session.state.value.syncState}")
+        } finally {
+            d.session.worker.nextStepOverride = null
             d.close()
         }
     }
