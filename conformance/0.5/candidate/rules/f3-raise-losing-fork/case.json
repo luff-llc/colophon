@@ -1,0 +1,1 @@
+{"description":"A provisional layout raise loses a conflict at its seq to a grant the primary home's head covers: the reader follows the grant and is not stopped.","expected":{"result":"ok","seq":3},"sections":["8.6","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

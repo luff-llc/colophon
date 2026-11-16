@@ -1,0 +1,1 @@
+{"description":"An expired member's endSessions with an unknown field: currency is checked before unknown content, so badSignature, never newerFormat.","expected":{"result":"badSignature","seq":3},"sections":["1","8.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

@@ -1054,7 +1054,11 @@ from heads it has seen or the order it saw things in.
 - An activation's **witnesses** are the homes current in the state before it (which include homes
   whose revocation isn't final yet; a home is excused only once its revocation is final), less the
   homes it revokes itself under the stronger authority. For a
-  full set they are those of them that remain after it.
+  full set they are those of them that remain after it. A home's expiry is judged at fixed
+  instants: for a transition's or veto's receipts at that object's `issued` (a home expired then is
+  not current, §8.5, so its receipt is neither required nor accepted), and for an activation's
+  witnesses at the activation's `issued`; heads in a `final` are judged by the home's key alone
+  (below).
 - **Final.** An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering
   it, or a later full set's anchor is it or follows it.

@@ -1,0 +1,1 @@
+{"description":"The only home receipts a layout raise and expires before its due time: the receipt counts (judged at the transition's issued), the home is no witness of the activation (judged at its issued), so the raise is final at once and the reader stops.","expected":{"result":"newerFormat","seq":3},"sections":["8.5","8.7","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
