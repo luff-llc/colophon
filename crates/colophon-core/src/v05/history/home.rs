@@ -1391,7 +1391,8 @@ fn endpoints_of(st: &State, home: &str) -> Vec<String> {
 /// valid veto of it is held (§13.1); and the permanent late-activation rule (§13.1): a home that
 /// neither receipted the transition nor first saw it (or a forwarded receipt of it) within 300 s
 /// of its `issued`, while serving during that window, refuses that `activate` for ever, and still
-/// stores and serves the transition and its receipts. Returns whether it is a full set.
+/// stores and serves the transition and its receipts. A full set that revokes this home is
+/// exempt from the late-activation rule there. Returns whether it is a full set.
 fn check_activation(
     next: &mut HomeState,
     st: &State,
@@ -1418,6 +1419,10 @@ fn check_activation(
         .map(|r| embedded_bytes(r, "receipt", bounds::RECEIPT_ENVELOPE))
         .collect::<Result<_>>()?;
     let t = state::check_transition(st, &t_bytes, &rs, true, true)?;
+    // A full set that revokes this home needs no receipt from it and has it as no witness
+    // (§8.7 validity 2, "Revoking a home"): the rules below protect the veto window this home
+    // witnesses, and it witnesses nothing of its own removal by a full set, so it stores it.
+    let leaves_me = state::receipt_exempt(t.full_set, &t.revokes).contains(&next.home);
     let full = t.full_set;
     if t.due_ms > now_ms {
         return Err(Refusal::Early);
@@ -1456,7 +1461,7 @@ fn check_activation(
     let served = next.serving.iter().any(|i| {
         i.from_ms <= at.saturating_add(WINDOW) && i.through_ms.is_none_or(|end| end >= at)
     });
-    if fact.refuse_activation || (!own_receipt && !timely && served) {
+    if !leaves_me && (fact.refuse_activation || (!own_receipt && !timely && served)) {
         fact.refuse_activation = true;
         fact.serving = next.serving.clone();
         // Even a permanently refused activation must leave the transition available to veto.
