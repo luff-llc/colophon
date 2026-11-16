@@ -509,7 +509,6 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
         // A home slot's path grammar is the module's (the engine's paths).
         const homeClassify = (p) => homeModule.call({ op: 'classify', path: p }).kind;
         const s = new Slot(path.join(path.resolve(dataDir), name), name, effective, isHome ? homeClassify : classifyPath);
-        await s.open();
         if (isHome) {
           s.home = new HomeSlot({
             slot: s, wasm: homeModule, key: homeKey, base: homeSlots.get(name).base, account: homeSlots.get(name).account,
@@ -518,10 +517,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
             limits: { ...effective, requestsPerMinute: effective.requestsPerMinute ?? 0 },
           });
           await s.home.open();
-        }
+        } else await s.open();
         slots.set(name, s);
         return s;
-      })());
+      })().catch((error) => {
+        opening.delete(name); // a repaired runtime slot is retried on the next request
+        if (!homeSlots.has(name) || configured.has(name)) throw error;
+        console.error(`Home slot ${name} unavailable: ${error.message}`);
+        throw new HttpError(503, 'Home slot unavailable', {}, { result: 'unavailable' });
+      }));
     }
     return opening.get(name);
   }
@@ -597,7 +601,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     for (const name of [...table.keys()]) {
       const e = table.get(name);
       if (configured.has(name) || now - e.at < provisioning.unclaimedHours * 3_600_000) continue;
-      await release(name, e);
+      try { await release(name, e); }
+      catch (error) { if (!(error instanceof HttpError && error.status === 503)) throw error; }
     }
   }
 
@@ -659,7 +664,7 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
       if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
       const { slotBytes, authorityBodyBytes, pendingBodyBytes, replayRows, requestsPerMinute, ...published } = effective;
       return send(res, 200, { protocol: PROTOCOL, slot: name, limits: published, ...(slotBytes ? { quotaBytes: slotBytes } : {}),
-        ...(s.home ? { home: { member: s.home.key.memberId } } : {}) });
+        ...(s.home ? { home: { member: s.home.key.memberId }, layouts: homeModule.call({ op: 'limits' }).layouts } : {}) });
     }
     if (section === 'changes') {
       if (req.method !== 'GET' || recordPath !== undefined) throw new HttpError(405, 'Method not allowed', { allow: 'GET' });
@@ -737,7 +742,11 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
     }));
   };
   let timer = null;
-  if (homeSlots.size > 0) for (const name of homeSlots.keys()) await slot(name);
+  for (const name of configured) if (homeSlots.has(name)) await slot(name);
+  for (const name of table.keys()) if (!configured.has(name)) {
+    try { await slot(name); }
+    catch (error) { if (!(error instanceof HttpError && error.status === 503)) throw error; }
+  }
   if (table.size > 0) await provisionLock(releaseUnclaimed);
   // The timer runs whenever a home slot may exist: provisioning adds slots at run time, and
   // `tickAll` reads the slot table on every pass.

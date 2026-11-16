@@ -156,17 +156,35 @@ export class HomeSlot {
   }
 
   async open() {
-    this.state = await this.readJson('home-state.json', null);
-    if (!this.state) {
-      this.state = this.wasm.call({ op: 'init', home: this.key.memberId, account: this.account }).state;
-      await this.writeJson('home-state.json', this.state);
+    // Validate before Slot.open: even its log repair and tmp cleanup must not touch a slot
+    // whose checkpoint is lost or damaged. Retained files are never a fresh home.
+    let fresh = false;
+    let files;
+    try {
+      let stat;
+      try { stat = await fsp.lstat(this.file('home-state.json')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (stat) {
+        if (!stat.isFile()) throw new Error('not a regular file');
+        this.state = JSON.parse(await fsp.readFile(this.file('home-state.json'), 'utf8'));
+      } else {
+        if (await this.hasPriorStorage()) throw new Error('missing while the slot retains storage');
+        this.state = this.wasm.call({ op: 'init', home: this.key.memberId, account: this.account }).state;
+        fresh = true;
+      }
+      const st = this.status();
+      if (st.error) throw new Error(st.error);
+      if (st.home !== this.key.memberId) throw new Error('state belongs to another home key');
+      if (st.account !== this.account) throw new Error(`state belongs to account ${st.account}, not ${this.account}`);
+      files = this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files;
+    } catch (error) {
+      throw new Error(`Home slot ${this.slot.name}: cannot open ${this.file('home-state.json')}: ${error.message}; restore the state file from a backup`);
     }
-    const st = this.status();
-    if (st.home !== this.key.memberId) throw new Error(`Home slot ${this.slot.name} holds the state of another home key`);
-    if (st.account !== this.account) throw new Error(`Home slot ${this.slot.name} was provisioned for account ${st.account}, not ${this.account}`);
+    await this.slot.open();
+    if (fresh) await this.writeJson('home-state.json', this.state);
     // Reconcile storage with the state before serving: a crash between a commit and its files
     // (a missing entry, a head file older than the committed head) heals here, not later.
-    await this.materialize(this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files);
+    await this.materialize(files);
     await this.openReplay();
     this.forward = await this.readJson('forward.json', { peers: {} });
     // Serving intervals (§13.1). The module decides from the last lease recorded (the home may
@@ -179,6 +197,28 @@ export class HomeSlot {
     const r = this.wasm.call({ op: 'resume', state: this.state, now, alive: until });
     await this.renewLease(now);
     if (r.changed) await this.commit(r.state);
+  }
+
+  /** A missing checkpoint is safe only when nothing that could outlive it remains. Check the
+   * raw directory and log, not Slot's reconstructed index (which omits deleted records). */
+  async hasPriorStorage() {
+    const stat = async (name) => {
+      try { return await fsp.lstat(this.file(name)); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; return null; }
+    };
+    for (const name of ['replay.log', 'alive.json', 'forward.json']) if (await stat(name)) return true;
+    const log = await stat('log.jsonl');
+    if (log && (!log.isFile() || log.size > 0)) return true;
+    const records = await stat('records');
+    if (!records) return false;
+    if (!records.isDirectory()) return true;
+    const holdsFile = async (dir) => {
+      for (const entry of await fsp.readdir(dir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || await holdsFile(path.join(dir, entry.name))) return true;
+      }
+      return false;
+    };
+    return holdsFile(this.file('records'));
   }
 
   /** Record that this home may serve until the module's lease end, durably, before serving
@@ -206,6 +246,10 @@ export class HomeSlot {
     const handle = await fsp.open(staged, 'w', 0o600);
     try { await handle.write(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, this.file(name));
+    // The rename must be durable too: in particular, a refused unknown-format entry's
+    // stop has no stored entry to replay if a crash were to lose the checkpoint update.
+    const directory = await fsp.open(this.slot.root, 'r');
+    try { await directory.sync(); } finally { await directory.close(); }
   }
 
   async commit(state) {
@@ -305,7 +349,7 @@ export class HomeSlot {
       if (!(error instanceof ModuleError)) throw error;
       outcome = 'due';
     }
-    if (outcome === 'due') throw new HttpError(503, 'The head is due and cannot be signed yet', { 'retry-after': '1' });
+    if (outcome === 'due') throw new HttpError(503, 'The head is due and cannot be signed yet', { 'retry-after': '1' }, { result: 'unavailable' });
     const head = await this.headEnvelope();
     if (!head) throw new HttpError(404, 'No head');
     send(res, 200, head);
@@ -437,6 +481,7 @@ export class HomeSlot {
       switch (r.status) {
         case 401: throw new HttpError(401, 'A Colophon call is required', { 'www-authenticate': 'Colophon' });
         case 403: throw new HttpError(403, 'Forbidden', {}, { result: r.result });
+        case 503: throw new HttpError(503, 'The home is unavailable', {}, { result: r.result });
         case 429: throw new HttpError(429, 'Too many requests', { 'retry-after': String(r.retryAfter ?? 60) }, { result: r.result });
         case 405: throw new HttpError(405, 'Method not allowed', { allow: r.allow });
         case 400: throw new HttpError(400, r.error ?? 'Bad request');
