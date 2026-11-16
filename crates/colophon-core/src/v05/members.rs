@@ -343,6 +343,83 @@ pub(crate) fn check_granted_terms(
     Ok(())
 }
 
+/// Read the `request` and `terms` members of a grant, whichever way it is granted: the embedded
+/// request verified under its own key and naming `account`, and the granted terms. Returns the
+/// unknown content of both (§2.3), for the caller to report after its checks.
+pub(crate) fn read_granted(
+    fields: &mut Obj,
+    account: &AccountId,
+) -> Result<(Request, Terms, Unknown)> {
+    let mut unknown = Unknown::default();
+    let request_bytes = fields.bytes("request", bounds::REQUEST_BODY * 2 + 4_096)?;
+    let request = Request::parse(&request_bytes, true)?;
+    unknown.0.extend(request.unknown.0.iter().cloned());
+    require(&request.account == account, "request names another account")?;
+    let terms = Terms::parse(fields.value("terms")?, TermsKind::Member)?;
+    unknown.0.extend(terms.unknown().0.iter().cloned());
+    Ok((request, terms, unknown))
+}
+
+/// Every rule a granted member meets whichever way it is granted, by an immediate `grant` entry
+/// (§9.2) or by the `grant` component or a `homes.appoint` item of a transition (§9.3 "A grant
+/// inside a transition"): the terms are covered by the request; both member points, and their
+/// key IDs, are new to the account (§3.3: `known_keys` holds every point and key ID any
+/// principal has used); the [`check_granted_terms`] rules; and `serves` never goes to an
+/// `agent`. One function, so the paths cannot disagree.
+pub(crate) fn check_granted(
+    request: &Request,
+    terms: &Terms,
+    namespaces: &[String],
+    known_keys: &BTreeSet<Vec<u8>>,
+    issued_ms: i64,
+) -> Result<()> {
+    require(
+        terms.covered_by(&request.terms),
+        "granted terms are not covered by the request",
+    )?;
+    for k in [&request.signing, &request.agreement] {
+        require(
+            !known_keys.contains(k),
+            "member key already used by a principal (§3.3)",
+        )?;
+        require(
+            !known_keys.contains(key_id(k).as_bytes()),
+            "member key ID already used by a principal (§3.3)",
+        )?;
+    }
+    check_granted_terms(request, terms, namespaces, issued_ms)?;
+    if terms.serves_home() {
+        require(
+            request.kind != MemberKind::Agent,
+            "serves is never granted to an agent",
+        )?;
+    }
+    Ok(())
+}
+
+/// A member granted inside a transition: the `grant` component or one `homes.appoint` item
+/// (§9.3). The component is exactly `{"request","terms"}`: `shares`, or any other member, is
+/// `malformed`. It meets every rule an immediate grant meets ([`check_granted`]); an appointed
+/// home (`home`) also serves `home`. Returns the request, the terms and their unknown content.
+pub(crate) fn parse_transition_grant(
+    component: Value,
+    path: &str,
+    account: &AccountId,
+    namespaces: &[String],
+    known_keys: &BTreeSet<Vec<u8>>,
+    issued_ms: i64,
+    home: bool,
+) -> Result<(Request, Terms, Unknown)> {
+    let mut fields = Obj::new(component, path)?;
+    let (request, terms, unknown) = read_granted(&mut fields, account)?;
+    fields.finish_closed()?;
+    check_granted(&request, &terms, namespaces, known_keys, issued_ms)?;
+    if home {
+        require(terms.serves_home(), "an appointed home must serve home")?;
+    }
+    Ok((request, terms, unknown))
+}
+
 impl Grant {
     /// The member ID.
     pub fn member_id(&self) -> String {
@@ -350,35 +427,18 @@ impl Grant {
     }
     /// Validate the fields of a `grant` entry (`request`, `terms`, `shares`) under §9.2–§9.3.
     pub fn parse(mut fields: Obj, ctx: GrantContext<'_>) -> Result<Self> {
-        let mut sink = Unknown::default();
+        let (request, terms, mut sink) = read_granted(&mut fields, ctx.account)?;
         let unknown = &mut sink;
-        let request_bytes = fields.bytes("request", bounds::REQUEST_BODY * 2 + 4_096)?;
-        let request = Request::parse(&request_bytes, true)?;
-        unknown.0.extend(request.unknown.0.iter().cloned());
-        require(
-            &request.account == ctx.account,
-            "request names another account",
-        )?;
-        let terms = Terms::parse(fields.value("terms")?, TermsKind::Member)?;
-        unknown.0.extend(terms.unknown().0.iter().cloned());
         let shares = parse_epochs(fields.array("shares")?, "shares", unknown)?;
         fields.finish(unknown);
-        require(
-            terms.covered_by(&request.terms),
-            "granted terms are not covered by the request",
+        check_granted(
+            &request,
+            &terms,
+            ctx.namespaces,
+            ctx.known_keys,
+            ctx.issued_ms,
         )?;
         let member = request.member_id();
-        for k in [&request.signing, &request.agreement] {
-            require(
-                !ctx.known_keys.contains(k),
-                "member key already used by a principal (§3.3)",
-            )?;
-            require(
-                !ctx.known_keys.contains(key_id(k).as_bytes()),
-                "member key ID already used by a principal (§3.3)",
-            )?;
-        }
-        check_granted_terms(&request, &terms, ctx.namespaces, ctx.issued_ms)?;
         if terms.records().is_none() {
             require(shares.is_empty(), "shares must be empty without records")?;
         }
@@ -406,12 +466,6 @@ impl Grant {
                     )?;
                 }
             }
-        }
-        if terms.serves_home() {
-            require(
-                request.kind != MemberKind::Agent,
-                "serves is never granted to an agent",
-            )?;
         }
         Ok(Self {
             request,

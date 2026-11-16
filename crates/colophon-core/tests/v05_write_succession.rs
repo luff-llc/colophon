@@ -74,8 +74,14 @@ fn vectors() -> Vec<Vector> {
     names.sort();
     for n in names {
         let dir = root.join(&n);
+        let case = read_json(&dir.join("case.json"));
+        // A vector that holds predecessor envelopes no builder writes (§16.3 "Envelopes":
+        // unreadable ones) is a verifier case only; the builders cannot reproduce it.
+        if case.get("unreadable").is_some() {
+            continue;
+        }
         out.push(Vector {
-            case: read_json(&dir.join("case.json")),
+            case,
             predecessor: files_in(&dir.join("predecessor/authority")),
             genesis: strip(std::fs::read(dir.join("genesis.json")).unwrap()),
             name: n,

@@ -1,0 +1,1 @@
+{"description":"The valid import grant of `t-grant-import-device`, with a `shares` member in the `grant` component: a grant inside a transition carries no `shares`, so the `activate` is malformed and the history stops before it.","expected":{"result":"malformed","seq":4},"sections":["8.7","9.3"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

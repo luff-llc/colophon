@@ -110,6 +110,18 @@ stay as the record of what shipped.
 7. Delegation research for agent swarms (attenuating grants, approval laundering, tamper-evident
    forensics).
 
+## JavaScript session tools (0.5)
+
+The 0.5 session (`js/src/session`, [js-session.md](js-session.md)) adds **no npm dependency and no crate**: the package
+still has one build dependency, TypeScript 5.9.3, and nothing at run time. Its tests use tools that are installed on
+the machine, never bundled or redistributed:
+
+| Tool | Version | Licence | Why |
+| --- | --- | --- | --- |
+| Bun (runtime, test runner, bundler) | 1.4.4 | MIT | Already the relay's runtime. Runs `js/test05` (`bun test`), spawns the relays, and bundles the browser test page (`Bun.build`). |
+| Google Chrome, headless (Chromium's engine) | 157.0.8103.52 on the build Mac; any current Chrome or Chromium | Chrome: Google's terms, used as installed. Chromium: BSD-3-Clause | The real browser engine of `js/test05/run-browser.ts`: IndexedDB, WebCrypto key handles and WebAuthn with PRF (its virtual authenticator), driven over the DevTools protocol by Bun. No driver package. |
+| OpenSSL command line | 4.1.0 on the build Mac; any current version | Apache-2.0 | Makes the throwaway TLS certificate of one browser run (the core takes only `https://<host>` as a web origin). Deleted with the run; never committed. |
+
 ## Android host pins (0.3)
 
 | Dependency | Version | Why |

@@ -1,6 +1,6 @@
 # Colophon 0.5: changes from 0.4, upgrade paths, review answers and deferred items
 
-**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 15, 2026-11-15. Section
+**Status:** companion to [colophon-0.5.md](colophon-0.5.md), revision 16, 2026-11-15. Section
 numbers without a prefix are 0.5's. "0.4" means [colophon-0.4-keys.md](colophon-0.4-keys.md).
 "Galley draft" is Galley's `docs/spec/colophon-0.5-draft.md` (draft 2). "The contract" is
 Galley's `contracts/identity/one-identity.md` on branch `one-identity-contract` (head 172fe8f).
@@ -254,7 +254,7 @@ Text only: no verifier, vector or code changed in this revision. Each row maps a
 | 135 | §14 "Store layout": `transitions/<digest>.json`, `vetoes/<digest>.json`, `receipts/<object digest>/<home id>.receipt.json`, `heads/<home id>.json`, `predecessor/authority/<n>.json`; §13.5 names the receipt path (`engine/paths.rs`) | PR #16 Q1; E6 §7 |
 | 136 | §11.8: the caveated live writer is judged per namespace (`kinds` of the entry for N, any `conditions`, `writes` or `expires`); `refused:caveatedLive` for a stamped header under `state/` or `ops/`; a stamp that disagrees with its header is `invalidPayload`; §19 lists the code (`records::live_caveated`) | PR #16 Q2, M5, M7; E6 M7; PR #18 |
 | 137 | §11.8: the blob chunk AAD's library is the first 32 characters of the account ID (`engine/blobs.rs`) | PR #16 Q6; E6 §5, M9 |
-| 138 | §9.5, §11.2: a live-stamped header is outside the author chain; the host never selects one as a maximal head and lists unreached live copies in `kept` (`chain_heads`, `prepare_revoke`); a `heads` item naming a live-stamped header makes the `revoke` `malformed` (**code follows in E12**: `kept_set` walks it today) | PR #16 Q5, M4, L6; E6 M4; Rf H2 |
+| 138 | §9.5, §11.2: a live-stamped header is outside the author chain; the host never selects one as a maximal head and lists unreached live copies in `kept` (`chain_heads`, `prepare_revoke`); a `heads` item naming a live-stamped header starts no walk and is not an error, as one naming another author's header, so a live copy is kept only through `kept` (`records::kept_set`; test `a_live_copy_named_as_a_revoke_head_is_kept_only_by_kept`) | PR #16 Q5, M4, L6; E6 M4; Rf H2 |
 | 139 | §9.3 "A grant inside a transition": the component is exactly `{request, terms}` and meets every §9.2 and §3.3 rule at activation, else the `activate` is `malformed`; `shares` or any other field there is `malformed`; a point or key ID of any principal is refused; a home refuses it at admission; shares come by a shares-only `renew` (`members::check_granted_terms`, `admission_transition`; vectors `rules/t-grant-import-*`; **code follows in E12** for extra fields and key-ID reuse, which `member_from` does not check today) | E9 H-B; PR #18; PR #16 Q7; Rf H1 |
 | 140 | §12.3, §13.4, §14 "Calls at a home": audience `{base}`; purpose by method, `colophon.history.read` on the history paths only; `args` exactly `{"method","path","body"}`; who may read and write records; a bearer token authorizes nothing (`calls::verify_home_request`, `home_purposes`, `home_path_serves_history`, `home_record_writes`) | PR #21; PR #23 Q5; E11 High; H1 M5, M6 |
 | 141 | §12.3 "The signer's own check": an ahead head counts as covering through the signer's highest held seq, and S is computed from the quorum heads as usual (Rf H3 corrected the first wording); a member that does not find itself may sign a read; one that holds its own revocation builds nothing; a verifier is never lenient (`check_home_call_as_signer`, `evaluate`) | PR #23 Q1 and gap 3; E11 |
@@ -277,6 +277,66 @@ Text only: no verifier, vector or code changed in this revision. Each row maps a
 | 158 | §17.5 removal follow-up: only what the removed key added since the anchor, not before it, as built | PR #23 Q8; owner decision (the wider list is a post-0.5 question) |
 
 Checked and already in the text, unchanged: notices have no signed body or wire format (§13.1, §17.5); link `created` carries no rule (§12.1); a late veto with another home's in-window receipt (§13.1); two heads for one seq (§13.3); several envelopes over one body (§2.2, §8.6); receipts and heads judged for validity only, a head's time against the entry's own `issued` (§8.7); `resolve` carries `kept: {seq, digest}` (§8.6, §8.7); the shares-only `renew` (§9.4); two successors as a stated limit (§15.1).
+
+### A.12 Revision 16: the freeze package
+
+Text only: no verifier, vector or code changed in this revision. Every row is marked **code follows
+in the freeze package**: the rule is stated ahead of the code, and the design, with the functions,
+vectors and order of work, is [docs/design-freeze-package.md](../docs/design-freeze-package.md)
+(item names F1 to F8, R and L are its sections). Sources: the consolidated freeze list of
+2026-11-15, the Opus and Daybreak freeze reviews of revision 15, the domains survey
+(`docs/roadmap-domains-as-plugins.md`), the E12 check's three Low findings, the home package's owed
+sentence and the test apps' report on joining by camera. Four existing vectors change verdict when
+the code lands, each named in its row.
+
+| # | Change | Why |
+| --- | --- | --- |
+| 159 | §1 "One rule for what a reader does not understand": unknown content in any authenticated object is `newerFormat` after steps 1–3; the closed objects are named (envelopes and signature items, unsigned recording entries, the QR payload and the invite, equivocation evidence, the legacy formats); exchange JSON: clients ignore unknown response members, a home answers 422 `newerFormat` to an unknown request member. §2.3 lists the places. **Code follows in the freeze package** (F1: eight places that ignore unknown content today and the closed parses of the audit) | F1; both reviews |
+| 160 | §1 "A stop": what a reader does after a `newerFormat` authority entry (applies nothing at or after it; records held, calls `unavailable`, its host builds nothing). **Code follows** | F2, F3 |
+| 161 | §1: `colophon/operation/<N>` for N above 5 is the one marker exception; §11.2 "Stable fields" freezes the header fields every version keeps; an unknown header field, `level` or live-stamp field is `newerFormat` for that record. This narrows revision 15's `malformed` for an unknown marker and for an unknown `level`. **Code follows** | F1; Opus 6 |
+| 162 | §11.3: an unknown plaintext top-level field is `newerFormat`, not `invalidPayload`. **Code follows** | F1; Daybreak 3 |
+| 163 | §11.5 "Unknown content, and opaque authors": steps 1–8 frozen (an unknown level or access needs only a `records` entry; such a header reserves and counts); a header after a `newerFormat` one with the same ID is `newerFormat`; unknown `colophon.` kinds are `newerFormat`; hosts show the count. §11.6: a `newerFormat` record before a resolution makes the proposal `newerFormat`. **Code follows** | F1, F6 |
+| 164 | §13.2, §13.3, §8.7, §13.5: unknown content in a head, its `authority`, a head inside a `final`, a receipt and a transition's `anchor` is `newerFormat` after the signature. **Code follows** | F1; Daybreak 3 |
+| 165 | §7.2: an unknown slot kind, part kind or field in a slot, part, `sealed` or the keyring's `vault` is `newerFormat`; typed checks only on known slots. **Code follows** | F1; Daybreak 3, 11 |
+| 166 | §9.3: an unknown field in a grant component or `homes.appoint` item is `newerFormat` (`shares` stays `malformed`); revision 15 made it `malformed`. **Code follows**; `rules/t-grant-component-extra-field` changes from `malformed` to `newerFormat` | F1 |
+| 167 | §15.1, §15.4: unknown content in `predecessor`, its `head`, a Swift succession veto and `migration` (an unknown member `kind` or `outcome` too) is `newerFormat`. **Code follows** | F1; Daybreak 3 |
+| 168 | §12.2, §12.3: an unknown call `signer` variant stays `malformed` unless `key` is a current principal's signing point, then `newerFormat` after steps 1–5, reserving nothing; `account` and `organisation` reserved and refused. **Code follows** | F1, R; Daybreak 3, 10; check 16 |
+| 169 | §8.5 step 3 "Current principal": one check (controller, member, home: not revoked, expired, provisional or suspended, role allowed) wherever a principal's signature is accepted, before unknown content; an expired or provisional member's `endSessions` is `badSignature`. Unknown kinds keep the control rule (the first draft's wider signer rule is withdrawn). **Code follows** | check 1, 2, 3; Opus 1 (not adopted) |
+| 170 | §8.7 "Unknown components": the control rule, as revision 15; the recording entry is `newerFormat`. §20: a later kind or component signed another way comes after the upgrade door, one opt-in per format version. **Code follows** (vectors only) | check 1, 3 |
+| 171 | §8.2 "Layout", §8.7, §20 "The upgrade door": `layout` is a stored integer; not raising voids the transition; above 2 is `newerFormat` and nothing after applies; the one door; a host checks every home's `layouts`. **Code follows**; `upgrade/then-v5-layout` (layout 2 in an account at 2) changes from `ok` to `malformed` and gains `upgrade/then-v5-layout-3` | F3; Daybreak 2 |
+| 172 | §2.4 "Limits that can be raised": a count or range above its 0.5 maximum and at most its ceiling is `newerFormat`; byte bounds, grammars, lower bounds and rule limits stay `malformed`; the table of maxima and ceilings. **Code follows**; `records/revoke-17-heads` and `succession/authority5-chain-17` change from `malformed` to `newerFormat` | F4; both reviews |
+| 173 | §8.2: up to 256 namespaces over an account's life (was 64; the builder already allowed 256) | F4; Opus 2 |
+| 174 | §6.3, §18: `policy.witnessWindow`, optional, absent 300, 60–3,600 s, changed by a transition with consent (§8.4); "Which W applies"; every witness-window 300 s of §8.6, §8.7, §13.1, §13.5, §15.1 and §17.5 reads W; the 60 s tolerance stays. **Code follows** | F4; Daybreak 9 |
+| 175 | §8.2 "Declaring a namespace after genesis": a `rekey` epoch 1 for an undeclared valid name declares it, after seq 2, under the `rekey` rule, not while retiring; never removed; `colophon.` names reserved; read scopes. **Code follows** | F5; survey 1 |
+| 176 | §11.8: 0.3 §5.1's podcast specifics and §6's table are the reference implementation's built-in modules; a live candidate with no known rule or `v` is `newerFormat`; the head rule with `newerFormat` candidates; `colophon.` kinds and namespaces reserved; reverse-DNS names for app namespaces; §10.2 record kinds follow the kind grammar. **Code follows** | F5; survey 2, 3 |
+| 177 | §9.8 "Opaque members", narrow form: only a new top-level term field is member-local; every other unknown in a grant is account-wide; an opaque member's records and calls are `newerFormat`, at a home too; host guidance with no security weight; "What later versions keep". §9.1, §10.2 (no epoch sealed to a member whose access a 0.5 host does not understand), §10.4 and §11.5 (an unknown operator in a grant no longer stops the account). **Code follows** | F6; Opus 4; check 6, 7 |
+| 178 | §9.1, §14 "A home's location": appointed endpoints are identifiers and the audience; calls go only to an appointed endpoint or a base named by a home-signed, monotonic `colophon/location/5` statement, stored, forwarded and served by every home and a folder at `records/locations/<id>.json`; with no other home and no folder, recovery needs another device. **Code follows** | F7; Opus 9, Daybreak 7; check 8, 9 |
+| 179 | §14 "What a home stores without understanding it": headers by stable fields; `ext/` side objects; authority still verified. **Code follows** | F1, R; Opus 7 |
+| 180 | §14 "Refusals a paid home may give": four reserved codes, the retry signal, unknown `refused:` refuses that request only, `closed` is not deletion, a closing home keeps signing heads. **Code follows** | R; Opus 8, Daybreak 8 |
+| 181 | §12.3 "No home": a configured verifier MAY take S from its persisted history for its own audience when the account has no home (default off). **Code follows** | R; Opus 10 |
+| 182 | §20 "Suites", "Reserved names", `GET {base}` `layouts` and `location` | R; Daybreak 11 |
+| 183 | §20 "Limits of 0.5": no compaction and what leaves room for it, `kept`, 512 MiB blobs, live slots, constants, homes, namespaces, successions, no home | the freeze list's accepted limits |
+| 184 | §3.3 rule 2: two distinct points with one key ID in one entry or transition are refused. **Code follows** (`apply_delta` key IDs) | E12 check L1 |
+| 185 | §17.1: the core refuses at preparation a transition whose delta it can already see is void, judging components against each other; writes no unknown content, `layout` or entry after a stop; the opaque-member fence; hosts show counts. **Code follows** (`begin_transition`) | E12 check L2; F1, F6 |
+| 186 | §16.3 "Sequence zero": a readable seq-0 envelope makes the predecessor `malformed`. **Code follows** (`history/swift.rs::read_envelope`) | E12 check L3 |
+| 187 | §14: a successor's home holds the provisioned genesis, takes predecessor entries only as the chain it claims from its head down, and serves none before its first upload is verified | the home package's owed sentence |
+| 188 | §7.3 "Invites", §13.4 "An invite link", "What a leaked invite exposes": a link from the approving device's member key (current, not a home, not opaque) for `colophon.history.read` of the authority chain and its verification pages at one or two named homes, never `/pending`; at most an hour (default 10 minutes); exempt from narrowing and depth; the closed `colophon/invite/5` object; the bound invite; the no-home invite. Replaces revision 15's "the history reaches a new device ... over the pairing channel". **Code follows** | F8; the test apps; check 10, 11, 17 |
+| 189 | §12.3 step 5, §19: a member ID no grant names is `refused:notGranted` ("not yet a member"), not `refused:revoked`. **Code follows** | F8; the test apps |
+| 190 | §19, §20 markers: results for unknown content, reserved home refusals, `colophon/invite/5`, `colophon/location/5` and `colophon/operation/<N>` | F1, F7, F8, R |
+| 191 | §1 "A stop": a stopped reader trusts nothing new: every call `unavailable` whatever S, no head, no new record, no currency answer, nothing built; §12.3 step 4. **Code follows** | check 4 |
+| 192 | §13.6 "A stopped home": what it keeps, serves, forwards and receipts (a veto, or a removal-only transition, anchored before the stop) and what it must not do (no head after the stop, no call verified, no new authority, nothing else receipted). **Code follows** | check 5 |
+| 193 | §2.4 "Invariants come first": every version-independent invariant with known inputs is checked before `newerFormat`; `headQuorum` 9 with eight homes is `malformed`. **Code follows** | check 13 |
+| 194 | §11.8: the 0.5 live-rule registry is normative with one entry (podcast `position`), applied by every conforming 0.5 reader; any other live `(namespace, kind)` is `newerFormat` for all alike. **Code follows** | check 14 |
+| 195 | §8.2, §8.4: a `rekey` that declares a namespace needs the control rule with UV, no recovery-set consent. **Code follows** | check 15 |
+| 196 | §9.1, §17.1: the core prepares or finishes a `grant` only by consuming a confirmed pairing token bound to the account and the request's exact `member.signing`; no approval from an ID or prefix code; home appointment outside the rule (a stated limit). **Code follows**, first in the order of work (the SDK session layers approve by a 32-bit ID-prefix code today) | check 12; the test apps |
+| 197 | §1: the invite is a closed object | check 17 |
+
+Weakened rules, each on purpose (the design gives the reasons): an unknown `/operation/N` marker
+and an unknown `level` were `malformed` (row 161); an extra grant-component field was `malformed`
+(row 166); counts above a 0.5 maximum were `malformed` once the invariants hold (rows 172, 193); a
+link needed a parent `services` entry and `depth` (row 188, for invite links at homes only). Each now
+gives `newerFormat` or, for row 188, one narrow purpose. Strengthened: the current-principal check
+(row 169), the stop (rows 191, 192), approval (row 196), declaring a namespace (row 195).
 
 ## B. Galley's requirements
 
@@ -1005,6 +1065,31 @@ to 158 of §A.11 hold the changes; rows 138, 139, 146, 148 and 154 wait for code
 | Not written | PR #16 Q10: device-local checkpoint, not wire |
 
 No vector changed in revision 15, and none was replayed by the Swift source.
+
+### G.22 The freeze reviews (2026-11-15), answered in revision 16
+
+| Source | Settled in |
+| --- | --- |
+| Opus 1, Daybreak "already safe" (unknown kinds) | §8.5 step 3, §8.7 (rows 169, 170): Opus's direction, widened to members |
+| Opus 2, 3; Daybreak 6 (caps) | §2.4, §8.2 (rows 172, 173) |
+| Opus 4 (one member's term) | §9.8 (row 177) |
+| Opus 5; survey 1–3 (namespaces, live, names) | §8.2, §11.8, §10.2 (rows 175, 176) |
+| Opus 6; Daybreak 3 (unknown content) | §1, §2.3, §7.2, §9.3, §11.2, §11.3, §11.5, §12.2, §13, §15 (rows 159–168) |
+| Opus 7; Daybreak 2 (the upgrade door, homes) | §8.2, §20, §14 (rows 171, 179) |
+| Opus 8; Daybreak 8 (paid homes) | §14, §20 (row 180) |
+| Opus 9; Daybreak 7 (home endpoints) | §9.1, §14 (row 178): endpoints as identifiers, not `homes.update` |
+| Opus 10 (calls with no home) | §12.3 (row 181) |
+| Opus 11, 12; Daybreak 1, 4, 5 (compaction, `kept`, blobs) | §20 "Limits of 0.5" (row 183) |
+| Daybreak 9 (witness window) | §6.3 (row 174) |
+| Daybreak 10, 11 (principals, suites) | §12.2, §20 (rows 168, 182) |
+| E12 check L1–L3 | §3.3, §17.1, §16.3 (rows 184–186) |
+| Home package (owed sentence) | §14 (row 187) |
+| Test apps (joining by camera, "not yet a member") | §7.3, §13.4, §12.3 (rows 188, 189) |
+| Independent check of the freeze design (18 findings) | rows 168–170, 177, 178, 188, 191–197; the design's §15 |
+
+No vector changed in revision 16. When the code lands, `rules/t-grant-component-extra-field`,
+`upgrade/then-v5-layout`, `records/revoke-17-heads` and `succession/authority5-chain-17` change
+verdict as rows 166, 171 and 172 say.
 
 ## H. Theft and loss, worked through
 

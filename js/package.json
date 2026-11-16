@@ -1,12 +1,35 @@
 {
   "name": "@colophon/core",
   "version": "0.4.0",
-  "description": "Colophon 0.3 pure Rust core with host-owned WebCrypto keys",
+  "description": "Colophon for JavaScript: the Rust core in WebAssembly with host-owned WebCrypto keys, and the 0.5 session",
   "type": "module",
   "license": "Apache-2.0",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist"],
-  "scripts": { "build": "bash scripts/build.sh", "test": "node scripts/key-security.mjs && node scripts/smoke.mjs" },
-  "engines": { "node": ">=24" },
-  "devDependencies": { "typescript": "5.9.3" }
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./session": {
+      "types": "./dist/session/index.d.ts",
+      "import": "./dist/session/index.js"
+    },
+    "./session/node": {
+      "types": "./dist/session/node.d.ts",
+      "import": "./dist/session/node.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "test": "node scripts/key-security.mjs && node scripts/smoke.mjs",
+    "test:session": "bash ../scripts/test-js.sh"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
 }
