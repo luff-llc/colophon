@@ -1199,6 +1199,27 @@ fn drop_home(o: &mut Out) {
         "The account's only controller, one unit, revokes the only home with no receipt. One unit is never a full set, so the receipt is required: malformed.",
         &["8.7"],
     );
+    // One control key and one recovery key are two units: together they are a full set (b) (every
+    // control key, with the recovery key's consent), so they can drop the home.
+    let (base, _) = account(
+        &[(&a, AC), (&k1, &["recover"])],
+        1,
+        1,
+        &[("Home one", None)],
+        sg![a, k1],
+    );
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![a, k1], &ts(at));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[], at);
+    no_home_step(&mut c, a.clone(), at + 60);
+    wc(
+        o,
+        "f2-drop-home-one-control-one-recovery",
+        &c,
+        ok_at(4),
+        "One control key and one recovery key, two units: together they are a full set (b), every control key with the recovery key's consent, so they drop the only home with no receipt; the account then has no home.",
+        &["8.7"],
+    );
 
     // A backdated full set with no home remaining. Its `issued` is bounded below by its anchor's
     // `issued` and by the 7-day bound: the activate's `issued` is max(due, previous) and at most
