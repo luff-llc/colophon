@@ -17,8 +17,8 @@ pub mod swift;
 pub(crate) mod upgrade;
 
 pub use state::{
-    check_pending_transition, check_pending_veto, Activation, HomeStatus, MemberRecord, State,
-    Suspension,
+    check_pending_transition, check_pending_veto, Activation, Claim, HomeStatus, MemberRecord,
+    NotCurrent, Principal, State, Suspension,
 };
 pub use succession::{succession_status, SuccessionStatus, SuccessionTiming};
 
