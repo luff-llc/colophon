@@ -1,5 +1,122 @@
 # Changelog
 
+## 0.5.0 — 2026-11-16
+
+**One portable identity: an account.** An account is a keyring of controllers whose identifier is
+the digest of its first authority record. Members (apps, devices, agents, servers) act under
+grants, sessions act for members through links and calls, and a home keeps and vouches for the
+history. Changes that weaken an account wait as pending transitions that can be vetoed. 0.4
+libraries upgrade in place; libraries of the shipped Swift apps move by a verified succession.
+Spec: [colophon-0.5.md](spec/colophon-0.5.md), frozen at revision 17 with one edit (§18's reference
+setup names one home); [changes from 0.4](spec/colophon-0.5-changes.md);
+[guide](spec/colophon-0.5-guide.md).
+
+### Protocol
+
+- Authority history `/5` (§8): immediate entries for changes that add or tighten, and pending
+  transitions with a recovery delay, a veto window, escalation and suspension for everything else.
+  Finality is recorded in the history (`activate`, `vetoed`, `final`), so every verifier reaches
+  the same verdict from the same objects, in any order.
+- Conflicts: evidence, forks with and without homes, and `resolve`, which keeps one branch.
+- Vault and slots (§7): removing a slotted controller retires the vault, and a `vault` entry and a
+  `rekey` follow. Pairing by code or by scanning the request; the seed moves to a new device under
+  its own label.
+- Member approval consumes a confirmed pairing (§9.1). The SDKs no longer approve by a 32-bit
+  ID-prefix code.
+- One current-principal check (§8.5): an expired or provisional member's `endSessions` is
+  refused.
+- Members, terms and records (§9 to §11): renew, revoke with `kept` and up to 16 heads,
+  `endSessions`, `/5` operation headers, author chains and proposals.
+- Links and calls (§12) with a replay store; heads, rollback marks per home and equivocation
+  evidence (§13).
+- The upgrade door (§8.2, §20): a later format version reaches an existing account in place, by one
+  transition that raises its layout. A 0.5 reader stops at a final raise, trusts nothing new and
+  keeps reading what it holds (§1); a stopped home follows the table in §13.6.
+- Upgrade from 0.4 in place (§16.1) and succession from the Swift keyring format (§15, §16.3),
+  with a `migration` entry.
+- Text-only reservations: paid-home refusals, `colophon.` names, `account` and `organisation`,
+  the export and close purposes, `layouts`, `refused:notGranted`.
+
+### Homes
+
+- The account engine syncs with a home: head, then authority, records, live state and blobs.
+- The home module (`colophon-home-wasm`) admits only what verifies, receipts transitions and
+  vetoes, records due transitions and signs heads. One home is supported per account.
+- Several homes per account are experimental: exchange between homes is informative in 0.5. The
+  two-home tests pass; the open issues are in
+  [docs/multi-home-open-issues.md](docs/multi-home-open-issues.md).
+
+### SDKs
+
+- **Rust core:** `colophon_core::v05`: the verifier, the write side (prepare, then finish), and
+  the account engine with checkpoints and resumption. The 0.4 engine stays beside it.
+- **FFI and WASM:** the UniFFI and WASM `AccountEngine` exports, including moving a Swift library;
+  secrets are wiped and lists are bounded.
+- **Swift:** the Swift SDK session.
+- **Kotlin and Android:** the same session model.
+- **JavaScript:** the session layer over the web exports.
+- One iPhone and one Android device on one account, and test apps for both. The SDKs show a
+  stopped account and a home's refusals.
+
+### The reference relay
+
+- The relay serves as a home (`relay/home.js`), one account per slot.
+- CORS for a configured list of origins (off by default), and uncompressed answers.
+- Provisioning: `POST /v1/provision` creates a slot at run time, bounded, with an open or token
+  gate (off by default). A slot not claimed within 24 hours is released.
+
+### Packaging
+
+- `scripts/package-release.sh` builds the Apple XCFramework, the Android AAR, the JS package and
+  the home bundle from one commit into `dist/release/<version>/` with `SHA256SUMS`
+  ([docs/release-packaging.md](docs/release-packaging.md)).
+
+### Performance
+
+From [docs/performance.md](docs/performance.md): the native engine, software keys, an M3 Max on a
+loaded machine; median / worst of five runs.
+
+| Operation records | Cold open | Resumed open | One stored write | Peak RSS (cold) |
+| --- | ---: | ---: | ---: | ---: |
+| 2,000 | 0.857 / 1.011 s | 0.221 / 0.227 s | 17.11 / 41.85 ms | 87.2 MB |
+| 10,000 | 4.962 / 7.102 s | 1.047 / 1.210 s | 30.86 / 88.76 ms | 408.2 MB |
+| 100,000 | 47.377 / 54.048 s | 19.622 / 25.794 s | 179.83 / 184.28 ms | 4,422.2 MB |
+
+The 2,000-record case meets the Mac limits it was measured against.
+
+### Conformance
+
+- `conformance/0.5/`: the 0.5 vectors, replayed by the Rust verifier. The README indexes what
+  covers each required item and names the items that nothing covers yet.
+- Spec §21 records each freeze condition as met or not met.
+
+### Limits
+
+- One home per account. Several homes are experimental; see
+  [docs/multi-home-open-issues.md](docs/multi-home-open-issues.md).
+- Moving an account from one home to another is not proven by a test in 0.5.
+- No push notices. Notices have no wire format; apps poll.
+- No invite link and no multi-part QR code. The invite carries the history by link or paste; the
+  approval is by camera scan.
+- Sync is serial, one request per record, so a new device joining a large library is slow
+  ([docs/performance.md](docs/performance.md)).
+- Libraries of 100,000 records are not usable: opens take tens of seconds, catch-up takes 13 to 15
+  minutes and memory reaches 7.19 GB.
+- Before an account opts in to a later version, a 0.5 device may refuse something newer rather
+  than ask to be updated.
+- Nothing is published to npm, Maven or a Swift registry.
+- Phones, the wasm build and the FFI boundary are not measured.
+
+### Withdrawn to 0.6
+
+Designed in the freeze package and deferred by revision 17
+([design](docs/design-freeze-package.md), "Deferred to 0.6"; changes §A.12):
+
+- Behind the upgrade door: F1 (unknown content, one rule), F4 (raisable limits and
+  `witnessWindow`), F5 (namespaces after genesis, a live-rule registry), F6 (opaque members), F7
+  (location statements).
+- Needing no door: F8 (invites).
+
 ## 0.4.0 — 2026-11-08
 
 **Keys and the keyring.** A clean break from 0.3's authority: no 0.1 or 0.3 authority record is
