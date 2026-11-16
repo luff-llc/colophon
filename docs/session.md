@@ -65,6 +65,9 @@ refusal. What the device holds stays readable (`hasUsableContent` is true, as of
 core (`newerFormat`) and the phase stays, with no fault shown; no exchange runs (`syncState` is disabled, the loop waits
 for an event with no timer or backoff, and no home is contacted); it persists across relaunch; lock, unlock and sign-out
 work. The gate shows the content with a status line, or the screen `library.stopped` ("Update to continue"), with no retry.
+While stopped the session does not refresh content: what it held when the stop was verified stays readable, and records
+that arrive later are not admitted (the engine ignores them as well). The session persists the stop in its sealed saved
+state the moment it sees it, so a relaunch whose store has lost the raise is still stopped (see `docs/bindings-05.md`).
 The existing `updateRequired` remains for an account the engine cannot open at all.
 
 **A home's refusals.** A home's error answer is read for its `result` only, validated against the §1 grammar (a named
@@ -73,7 +76,9 @@ of at most 64 KiB; no other byte of the body is kept (`HomeRefusal`, JS `homeRef
 not know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed` and `refused:notProvisioned`
 included, is the existing home issue `remoteCallRefused`, now with the name as given and the home's `Retry-After`: it
 refuses only that request (the pass goes on), except a refusal of this device's signed call (403), which ends the pass as
-before. It is never a state of the account. A `Retry-After` (whole seconds, 1 to 86,400) is honoured: the home is not
+before; a 403 that names a refusal for a request that carried no call is not retried with a call. It is never a state of
+the account. A `Retry-After` (whole seconds, 1 to 86,400) is honoured, as session policy (0.5 specifies it only for 429 and a home that
+cannot sign a due head): the home is not
 contacted again before then, and its refusal stays shown meanwhile. `503 {"result":"unavailable"}`, which a stopped home
 answers (§13.6), is the issue `homeUnavailable`: the sync state is offline with "The home is not available right now"
 (`HomeWords`), the loop backs off, and the device is not stopped. The retry signal of a refusal body is deferred (§16 of

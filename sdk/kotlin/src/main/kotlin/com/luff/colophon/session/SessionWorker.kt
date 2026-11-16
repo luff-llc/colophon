@@ -236,6 +236,8 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
 
     private suspend fun refreshEngine(entries: List<MediumEntry>) {
         val engine = engine ?: return
+        // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
+        if (isStopped(engine)) return
         val list = listed(entries)
         val at = nowMs
         engine.run { it.advance(at) }
@@ -263,7 +265,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     suspend fun saveCheckpoint() = gated {
         val engine = engine ?: return@gated
         val account = accountId ?: return@gated
-        if (lastPhase != SessionPhase.Ready) return@gated
+        if (lastPhase != SessionPhase.Ready && !lastPhase.isStopped) return@gated
+        persistSaved(engine, account)
+    }
+    /** Seals and stores the engine's saved state (inside the gate). A stopped account's saved state carries the stop as a floor. */
+    private suspend fun persistSaved(engine: ColophonEngine, account: String) {
         engine.run { it.verifyBatch(128u) }
         val state = engine.run { e -> withEntropy(32) { e.save(it) } }
         cache.save(account, state)
@@ -285,6 +291,8 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
      * stopped reader answers no question of currency, and the host builds nothing.
      */
     private suspend fun stoppedSnapshot(engine: ColophonEngine, stop: AccountStop, standing: Standing): SessionSnapshot {
+        // The moment the stop is verified it is persisted (the sealed saved state carries it as a floor).
+        if (!lastPhase.isStopped) accountId?.let { persistSaved(engine, it) }
         val members = engine.run { it.members() }
         val homes = engine.run { it.homes() }
         val revisions = LinkedHashMap<String, ULong>()

@@ -97,6 +97,60 @@ class StoppedAccountTest {
         } finally { relaunched?.shutdown(); device.close() }
     }
 
+    private fun relaunch(device: Device, medium: MemoryMedium) = ColophonSession(SessionConfiguration(memberLabel = "Test device",
+        namespaces = listOf("notes"), medium = medium, privateDirectory = device.dir, keys = device.member, ownerController = device.owner,
+        deviceSecrets = device.secrets))
+
+    /** A stop once verified survives its evidence going missing: a store without the raise relaunches stopped and writes nothing. */
+    @Test fun aStopSurvivesItsEvidenceGoingMissing() = runBlocking<Unit> {
+        val device = Device()
+        var relaunched: ColophonSession? = null
+        try {
+            device.session.create()
+            note(device.session, "kept")
+            val before = device.medium.listing().map { it.path }.toSet()
+            raiseLayout(device)
+            device.session.flushExternalChanges()
+            assertTrue(device.session.phase.isStopped, device.describe())
+            device.session.shutdown()
+            // A hostile store: every authority and pending file the raise added is gone.
+            val kept = device.medium.listing().map { it.path }
+                .filter { it in before || !(it.startsWith("authority/") || it.startsWith("transitions/")) }
+                .associateWith { device.medium.read(it) }
+            relaunched = relaunch(device, MemoryMedium(kept))
+            relaunched.restore()
+            relaunched.stopSync()
+            assertTrue(relaunched.phase.isStopped, "${relaunched.phase} ${relaunched.lastError}")
+            assertFails { note(relaunched, "after") }
+            assertEquals(1, admitted(relaunched))
+        } finally { relaunched?.shutdown(); device.close() }
+    }
+
+    /** A record written elsewhere under the old authority and put into the store after the stop is not admitted. */
+    @Test fun aRecordThatArrivesAfterTheStopIsNotAdmitted() = runBlocking<Unit> {
+        val device = Device()
+        val files = HashMap<String, ByteArray>()
+        var copy: Device? = null
+        try {
+            device.session.create()
+            note(device.session, "one")
+            for (e in device.medium.listing()) files[e.path] = device.medium.read(e.path)
+            copy = Device(medium = MemoryMedium(files), member = device.member, owner = device.owner)
+            copy.session.restore()
+            assertEquals(SessionPhase.Ready, copy.session.phase, copy.describe())
+            note(copy.session, "late")
+            val late = copy.medium.listing().map { it.path }.filter { it.startsWith("ops/") && it !in files }
+            assertEquals(1, late.size)
+            raiseLayout(device)
+            device.session.flushExternalChanges()
+            assertTrue(device.session.phase.isStopped, device.describe())
+            val shown = admitted(device.session)
+            device.medium.write(late.map { MediumWrite(it, copy.medium.read(it)) })
+            device.session.flushExternalChanges()
+            assertEquals(shown, admitted(device.session), "a record that arrived after the stop is not admitted")
+        } finally { copy?.close(); device.close() }
+    }
+
     /** A raise that is only held (not yet due) changes nothing. */
     @Test fun aRaiseThatIsNotYetRecordedStopsNothing() = runBlocking<Unit> {
         val device = Device()
@@ -160,6 +214,8 @@ class HomeRefusalTest {
             w.answer = { r -> if (r.url.endsWith("/head")) null else HttpAnswer(403u, listOf(), refusalBody("refused:notProvisioned")) }
             device.session.syncNow()
             assertTrue(device.session.homeIssues.any { it.problem == HomeProblem.RemoteCallRefused("refused:notProvisioned") }, device.describe())
+            // A refusal by name to a request that carried no call is not retried with a call.
+            assertFalse(device.session.homeIssues.any { it.problem is HomeProblem.CallRefused }, device.describe())
             assertEquals(SessionPhase.Ready, device.session.phase)
             // `503 {"result":"unavailable"}`: the home is not available, retried with backoff; never the device being stopped.
             w.answer = { HttpAnswer(503u, listOf(), refusalBody("unavailable")) }

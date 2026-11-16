@@ -89,6 +89,54 @@ describe('a stopped account', () => {
     again.close();
   });
 
+  test('a stop survives its evidence going missing: a store without the raise relaunches stopped and writes nothing', async () => {
+    const medium = new MemoryMedium(); const privateStore = new MemoryPrivateStore(); const secrets = new MemoryDeviceSecrets();
+    const member = await WebCryptoKeyProvider.generate(); const owner = await WebCryptoKeyProvider.generate();
+    const device = await Device.make({ medium, privateStore, secrets, member, owner });
+    await device.session.create();
+    await note(device.session, 'kept');
+    const before = new Set(medium.listing().map(e => e.path));
+    await raiseLayout(device);
+    await device.session.flushExternalChanges();
+    expect(device.session.phase.kind).toBe('stopped');
+    device.close();
+    // A hostile store: every authority and pending file the raise added is gone.
+    const reduced = new MemoryMedium();
+    await reduced.write(medium.listing().map(e => e.path)
+      .filter(p => before.has(p) || !(p.startsWith('authority/') || p.startsWith('transitions/')))
+      .map(p => ({ path: p, bytes: medium.read(p) })));
+    const again = await Device.make({ medium: reduced, privateStore, secrets, member, owner });
+    await again.session.restore();
+    expect(again.session.phase.kind).toBe('stopped');
+    await expect(note(again.session, 'after')).rejects.toBeInstanceOf(Error);
+    expect(await admitted(again.session)).toBe(1);
+    again.close();
+  });
+
+  test('a record that arrives after the stop is not admitted', async () => {
+    const member = await WebCryptoKeyProvider.generate(); const owner = await WebCryptoKeyProvider.generate();
+    const device = await Device.make({ member, owner });
+    await device.session.create();
+    await note(device.session, 'one');
+    const copyMedium = new MemoryMedium();
+    await copyMedium.write(device.medium.listing().map(e => ({ path: e.path, bytes: device.medium.read(e.path) })));
+    const held = new Set(device.medium.listing().map(e => e.path));
+    const copy = await Device.make({ medium: copyMedium, member, owner });
+    await copy.session.restore();
+    expect(copy.session.phase.kind).toBe('ready');
+    await note(copy.session, 'late');
+    const late = copyMedium.listing().map(e => e.path).filter(p => p.startsWith('ops/') && !held.has(p));
+    expect(late.length).toBe(1);
+    await raiseLayout(device);
+    await device.session.flushExternalChanges();
+    expect(device.session.phase.kind).toBe('stopped');
+    const shown = await admitted(device.session);
+    await device.medium.write(late.map(p => ({ path: p, bytes: copyMedium.read(p) })));
+    await device.session.flushExternalChanges();
+    expect(await admitted(device.session)).toBe(shown);
+    copy.close(); device.close();
+  });
+
   test('a raise that is not yet recorded stops nothing', async () => {
     const device = await Device.make();
     await device.session.create();
@@ -137,6 +185,8 @@ describe("a home's refusals", () => {
     answer.fn = r => (r.url.endsWith('/head') ? undefined : { status: 403, headers: [], body: refusalBody('refused:notProvisioned') });
     await device.session.syncNow();
     expect(device.session.homeIssues.some(i => i.problem.kind === 'remoteCallRefused' && i.problem.code === 'refused:notProvisioned')).toBe(true);
+    // A refusal by name to a request that carried no call is not retried with a call.
+    expect(device.session.homeIssues.some(i => i.problem.kind === 'callRefused')).toBe(false);
     expect(device.session.phase.kind).toBe('ready');
     // `503 {"result":"unavailable"}`: the home is not available, retried with backoff; never the device being stopped.
     answer.fn = () => ({ status: 503, headers: [], body: refusalBody('unavailable') });

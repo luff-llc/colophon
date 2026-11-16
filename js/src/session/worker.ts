@@ -222,6 +222,8 @@ export class SessionWorker {
   private async refreshEngine(entries: readonly MediumEntry[], signal?: AbortSignal): Promise<void> {
     const engine = this.engine;
     if (!engine) return;
+    // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
+    if (this.isStopped(engine)) return;
     plain(engine.run(e => e.advance(BigInt(this.nowMs))));
     plain(engine.run(e => e.refresh(listed(entries))));
     for (const written of plain<Written[]>(engine.run(e => e.record_due()))) await this.persist(written.stores);
@@ -238,13 +240,17 @@ export class SessionWorker {
     engine.finishUnlockEpochs(await custody.answerEpochs(agreements, this.waiting(signal)));
   }
 
+  /** Seals and stores the engine's saved state (inside the gate). A stopped account's saved state carries the stop as a floor. */
+  private async persistSaved(engine: ColophonEngine, account: string): Promise<void> {
+    plain(engine.run(e => e.verify_batch(128n)));
+    const state = plain<SavedStateData>(engine.run(e => withEntropy(32, seed => e.save(seed))));
+    await this.cache.save(account, state);
+  }
   saveCheckpoint(): Promise<void> {
     return this.gated(async () => {
       const engine = this.engine; const account = this.accountId;
-      if (!engine || account === undefined || this.lastPhase.kind !== 'ready') return;
-      plain(engine.run(e => e.verify_batch(128n)));
-      const state = plain<SavedStateData>(engine.run(e => withEntropy(32, seed => e.save(seed))));
-      await this.cache.save(account, state);
+      if (!engine || account === undefined || (this.lastPhase.kind !== 'ready' && this.lastPhase.kind !== 'stopped')) return;
+      await this.persistSaved(engine, account);
     });
   }
 
@@ -266,7 +272,9 @@ export class SessionWorker {
    * stop (revisions are published for the namespaces this member may read); no notices or duties are computed: a
    * stopped reader answers no question of currency, and the host builds nothing.
    */
-  private stoppedSnapshot(engine: ColophonEngine, stop: AccountStop, standing: Standing): SessionSnapshot {
+  private async stoppedSnapshot(engine: ColophonEngine, stop: AccountStop, standing: Standing): Promise<SessionSnapshot> {
+    // The moment the stop is verified it is persisted (the sealed saved state carries it as a floor).
+    if (this.lastPhase.kind !== 'stopped' && this.accountId !== undefined) await this.persistSaved(engine, this.accountId);
     const members = plain<AccountMember[]>(engine.run(e => e.members()));
     const homes = plain<Home[]>(engine.run(e => e.homes()));
     const revisions: Record<string, bigint> = {};
@@ -285,7 +293,7 @@ export class SessionWorker {
     if (!engine) return this.snapshot(this.lockedFlag ? { kind: 'locked' } : { kind: 'noLibrary' });
     const standing = plain<Standing>(engine.run(e => e.me()));
     const status = plain<Status>(engine.run(e => e.status()));
-    if (status.stopped) return this.stoppedSnapshot(engine, status.stopped, standing);
+    if (status.stopped) return await this.stoppedSnapshot(engine, status.stopped, standing);
     if (status.kind === glue.StatusKind.NewerFormat) return this.snapshot({ kind: 'updateRequired' });
     const members = plain<AccountMember[]>(engine.run(e => e.members()));
     const requests = this.pendingRequests(members);

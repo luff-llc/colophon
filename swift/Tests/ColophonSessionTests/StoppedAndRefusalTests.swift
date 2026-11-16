@@ -86,6 +86,63 @@ func hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: 
         #expect(relaunched.phase == .noLibrary)
     }
 
+    /// A stop once verified survives its evidence going missing: the store loses the raising transition and its
+    /// activate (a hostile shared folder), and a relaunch is still stopped and still writes nothing.
+    @Test func aStopSurvivesItsEvidenceGoingMissing() async throws {
+        let device = Device()
+        await device.session.create()
+        device.session.stopSync()
+        try await device.session.perform(try .saveLink(url: URL(string: "https://example.org/kept")!, title: "Kept"),
+                                         observed: device.session.observedRevision)
+        let before = Set(try device.medium.listing().map(\.path))
+        try await raiseLayout(device)
+        await device.session.flushExternalChanges()
+        try #require(device.session.phase.isStopped, "\(device.session.phase)")
+        // Remove every authority and pending file the raise added.
+        for path in try device.medium.listing().map(\.path) where !before.contains(path)
+            && (path.hasPrefix("authority/") || path.hasPrefix("transitions/")) { device.medium.remove(path) }
+        let relaunched = device.relaunch()
+        await relaunched.restore()
+        relaunched.stopSync()
+        #expect(relaunched.phase.isStopped, "\(relaunched.phase) \(relaunched.lastError ?? "")")
+        await #expect(throws: (any Error).self) {
+            try await relaunched.perform(try .saveLink(url: URL(string: "https://example.org/after")!, title: "After"),
+                                         observed: relaunched.observedRevision)
+        }
+        #expect(try await relaunched.query(namespace: "reading.saved", name: "items", arguments: Data("{}".utf8)).count > 0)
+        await relaunched.lock()
+    }
+
+    /// Nothing that arrives after the stop is admitted: a record written elsewhere under the old authority and put into
+    /// the store afterwards does not change what the device shows, and the session does not refresh content while stopped.
+    @Test func aRecordThatArrivesAfterTheStopIsNotAdmitted() async throws {
+        let device = Device()
+        await device.session.create()
+        device.session.stopSync()
+        try await device.session.perform(try .saveLink(url: URL(string: "https://example.org/one")!, title: "One"),
+                                         observed: device.session.observedRevision)
+        // The same member on another copy of the store writes a second link that this device has not seen.
+        var files: [String: Data] = [:]
+        for path in try device.medium.listing().map(\.path) { files[path] = try device.medium.read(path) }
+        let copy = Device(medium: MemoryMedium(files: files), member: device.member, owner: device.owner)
+        await copy.session.restore()
+        copy.session.stopSync()
+        try #require(copy.session.phase == .ready, "\(copy.session.phase)")
+        try await copy.session.perform(try .saveLink(url: URL(string: "https://example.org/late")!, title: "Late arrival"),
+                                       observed: copy.session.observedRevision)
+        let late = try copy.medium.listing().map(\.path).filter { $0.hasPrefix("ops/") && files[$0] == nil }
+        try #require(late.count == 1)
+        try await raiseLayout(device)
+        await device.session.flushExternalChanges()
+        try #require(device.session.phase.isStopped, "\(device.session.phase)")
+        let shown = String(decoding: try await device.session.query(namespace: "reading.saved", name: "items", arguments: Data("{}".utf8)), as: UTF8.self)
+        try device.medium.write(late.map { MediumWrite(path: $0, bytes: try copy.medium.read($0)) })
+        await device.session.flushExternalChanges()
+        let after = String(decoding: try await device.session.query(namespace: "reading.saved", name: "items", arguments: Data("{}".utf8)), as: UTF8.self)
+        #expect(after == shown && !after.contains("Late arrival"), "\(after)")
+        await copy.session.lock()
+    }
+
     /// A raise that is only held (not activated) changes nothing.
     @Test func aRaiseThatIsNotYetRecordedStopsNothing() async throws {
         let device = Device()
@@ -160,6 +217,8 @@ func hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: 
         home.answer = { request in request.url.hasSuffix("/head") ? nil : HttpAnswer(status: 403, headers: [], body: refusalBody("refused:notProvisioned")) }
         _ = await device.session.syncNow()
         #expect(device.session.homeIssues.contains { $0.problem == .remoteCallRefused(code: "refused:notProvisioned") }, "\(device.session.homeIssues) log \(home.requestLog) sync \(device.session.syncState)")
+        // A refusal by name to a request that carried no call is not retried with a call.
+        #expect(!device.session.homeIssues.contains { if case .callRefused = $0.problem { true } else { false } }, "\(device.session.homeIssues)")
         #expect(device.session.phase == .ready && device.session.hasUsableContent)
     }
 

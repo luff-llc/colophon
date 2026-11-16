@@ -213,6 +213,8 @@ actor SessionWorker {
 
     private func refreshEngine(_ entries: [MediumEntry]) async throws {
         guard let engine else { return }
+        // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
+        if try await Self.isStopped(engine) { return }
         let list = listed(entries)
         let at = nowMs
         _ = try await engine.run { try $0.advance(nowMs: at) }
@@ -245,11 +247,16 @@ actor SessionWorker {
     }
     func saveCheckpoint() async throws {
         try await gated {
-            guard let engine, let account = accountID, phaseIsReady else { return }
-            _ = try await engine.run { try $0.verifyBatch(limit: 128) }
-            let state = try await engine.run { engine in try withEntropy(32) { try engine.save(nonceSeed: $0) } }
-            try await cache.save(JSONEncoder().encode(SavedFile(state)), libraryID: account)
+            guard let engine, let account = accountID, phaseIsReady || lastPhase.isStopped else { return }
+            try await persistSaved(engine, account: account)
         }
+    }
+    /// Seals and stores the engine's saved state (inside the gate). A stopped account's saved state carries the stop as a
+    /// floor, so a relaunch whose store no longer holds the raise stays stopped (spec §1 "A stop").
+    private func persistSaved(_ engine: ColophonEngine, account: String) async throws {
+        _ = try await engine.run { try $0.verifyBatch(limit: 128) }
+        let state = try await engine.run { engine in try withEntropy(32) { try engine.save(nonceSeed: $0) } }
+        try await cache.save(JSONEncoder().encode(SavedFile(state)), libraryID: account)
     }
 
     // MARK: Snapshot
@@ -307,6 +314,8 @@ actor SessionWorker {
     /// stop (revisions are published for the namespaces this member may read), and no notices or duties are computed:
     /// a stopped reader answers no question of currency, and the host builds nothing.
     private func stoppedSnapshot(_ engine: ColophonEngine, stop: AccountStop, standing: Standing) async throws -> SessionSnapshot {
+        // The moment the stop is verified it is persisted (the sealed saved state carries it as a floor).
+        if !lastPhase.isStopped, let account = accountID { try await persistSaved(engine, account: account) }
         let members = try await engine.run { try $0.members() }
         let homes = try await engine.run { try $0.homes() }
         var revisions: [String: UInt64] = [:]
