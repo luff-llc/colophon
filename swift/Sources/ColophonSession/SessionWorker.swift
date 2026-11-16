@@ -843,6 +843,11 @@ actor SessionWorker {
         let known = ["notFound", "deleted", "notGranted", "unavailable", "invalidArgument", "staleCursor", "contentTooLarge"]
         return Data("{\"ok\":false,\"reason\":\"\(known.contains(reason) ? reason : "unavailable")\"}".utf8)
     }
+    /// The namespace's whole fold as the engine reports it (`view_json`), unchanged.
+    func view(namespace: String) async throws -> Data {
+        guard let engine else { throw SessionError.notReady }
+        return Data(try await engine.run { try $0.viewJson(namespace: namespace) }.utf8)
+    }
     func ledger() async throws -> Data {
         guard let engine else { throw SessionError.notReady }
         return Data(try await engine.run { try $0.ledgerJson() }.utf8)
@@ -858,10 +863,16 @@ actor SessionWorker {
 
     struct ExchangeResult: Sendable {
         var passes = 0; var faults: [HomeFault] = []; var issues: [HomeIssue] = []; var changed = false; var unauthorized = false
+        /// A pass that did not finish (the engine still waited after its one recovery): the exchange failed.
+        var failed = false
     }
     /// One pass with every home. The network calls run outside the gate; each engine step and the
     /// persistence of its stores run inside it, so an unpersisted answer is never visible to a refresh.
     /// A home is held to `HomeLimits`: steps per pass, the time of an exchange, the size of each response.
+    /// Tests only: answers `exchange_next` for a home instead of the engine when it returns a step.
+    private var nextStepOverride: (@Sendable (String) -> ExchangeStep?)?
+    func setNextStepOverride(_ override: (@Sendable (String) -> ExchangeStep?)?) { nextStepOverride = override }
+
     func exchange(nowMsOverride: Int64? = nil) async throws -> ExchangeResult {
         try await gated { if engine == nil { _ = try await reconcile() } }
         var result = ExchangeResult()
@@ -899,14 +910,19 @@ actor SessionWorker {
                 if ContinuousClock.now - started > HomeLimits.exchangeTime {
                     stopped = .tooSlow(seconds: Int(HomeLimits.exchangeTime.components.seconds)); break homeLoop
                 }
-                let step = try await gated { try await engine.run { try $0.exchangeNext(home: home.id) } }
+                let step = try await gated { () -> ExchangeStep in
+                    if let override = nextStepOverride, let step = override(home.id) { return step }
+                    return try await engine.run { try $0.exchangeNext(home: home.id) }
+                }
                 switch step.kind {
                 case .done: break loop
                 // This loop answers every request it is given, so an outstanding one belongs to a pass that was interrupted
                 // (a cancelled caller): abandon it and run the pass again, once.
+                // A second `Waiting` after that recovery means the pass cannot finish: a failed exchange, never "done".
                 case .waiting:
                     await abortPass(engine, home: home.id)
-                    if !recovered { recovered = true; progress = true }
+                    if recovered { stopped = .stillWaiting; break homeLoop }
+                    recovered = true; progress = true
                     break loop
                 case .needCall:
                     guard let need = step.need else { break loop }
@@ -965,6 +981,7 @@ actor SessionWorker {
             }
             if let stopped {
                 result.issues.append(HomeIssue(home: home.id, problem: stopped))
+                if stopped == .stillWaiting { result.failed = true }
                 await abortPass(engine, home: home.id)
             }
         }
