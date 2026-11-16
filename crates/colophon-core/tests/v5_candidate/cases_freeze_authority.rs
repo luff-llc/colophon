@@ -902,11 +902,17 @@ fn head_expiry(o: &mut Out) {
     let mut granted = base.clone();
     grant_agent(&mut granted, &a, &ts(R0 + 100), &a);
     let late = head_of(&granted, &h1, e + 100, 3);
+    // Each winner gets an entry at seq 4, so the verdict's seq shows which branch stood.
+    let (z_k, z_a) = (derived("w1a/agent-z/signing"), derived("w1a/agent-z/agreement"));
+    let mut act4 = act.clone();
+    grant_agent_with(&mut act4, &a, &ts(DUE0 + 60), &a, &z_k, &z_a, EXPIRES);
+    let mut granted4 = granted.clone();
+    grant_agent_with(&mut granted4, &a, &ts(R0 + 300), &a, &z_k, &z_a, EXPIRES);
     write_case(
         o,
         "f2-head-expired-primary-no-displace",
-        &act,
-        ok_at(3),
+        &act4,
+        ok_at(4),
         "A grant conflicts with an activate at seq 3; the primary home's head covering the grant was issued after that home expired, so it counts for nothing and the activate stands.",
         &["8.6", "13.3"],
         vec![("objects/head.json".into(), late)],
@@ -917,8 +923,8 @@ fn head_expiry(o: &mut Out) {
     write_case(
         o,
         "f2-head-before-expiry-counts",
-        &granted,
-        ok_at(3),
+        &granted4,
+        ok_at(4),
         "The same conflict with the primary home's head issued before the home expired: it counts, and the grant it covers stands against the activate.",
         &["8.6", "13.3"],
         vec![("objects/head.json".into(), early)],
