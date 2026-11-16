@@ -439,12 +439,19 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     let act = body_of(&e[n as usize]);
     let embedded: Value = serde_json::from_slice(&STANDARD.decode(act["transition"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(digest_of(&embedded), dr);
-    w.clocks(at + 5_000);
-    eventually("B's head over the resolution", 30, || head_at(b).is_some_and(|(s, _, _)| s > n));
+    // The homes' clocks move on, as real clocks do (a head over each new entry needs a later
+    // `issued` than the one before, §13.3; both homes now append the activate and the final and
+    // give each other their entries).
+    let tick = std::cell::Cell::new(at + 5_000);
+    eventually("B's head over the resolution", 30, || {
+        tick.set(tick.get() + 50);
+        w.clocks(tick.get());
+        head_at(b).is_some_and(|(s, _, _)| s > n)
+    });
     let (s, file) = b.get(&format!("/records/authority/{n:08}.json"));
     assert_eq!((s, digest_of(&serde_json::from_slice(&file).unwrap())), (200, dx.clone()));
     // Both devices sync to the resolved history from B.
-    let now = at + 10_000;
+    let now = tick.get() + 10_000;
     w.clocks(now);
     let mut wire = w.wire();
     // The forked device opened again (an engine that met a 401 at a home asks for a call before
@@ -467,10 +474,14 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     // The device whose entry after X lost to the resolution sees the conflict at that seq: B's
     // head names the `activate` there (the engine reports it; its host signs again, §8.6).
     let faults = relay_pass(&mut ctl_x, &w.src, &w.hb, &mut wire, &w.host, now + 2);
-    // (Through the head, `refused:fork`, or, when the head is due at that instant and B answers
-    // 503, through the push of its entry: 409.)
+    // (Through the head, `refused:fork`; or, when B answers 503 for a head due at that instant or
+    // its head names a later entry the device cannot link to, through the push of its entry,
+    // which B, not the primary, does not take: 409, or 421 naming the primary.)
     use colophon_core::v05::engine::exchange::Fault;
-    assert!(faults.iter().any(|f| matches!(f, Fault::Fork { .. } | Fault::Conflict { .. })), "{faults:?}");
+    assert!(
+        faults.iter().any(|f| matches!(f, Fault::Fork { .. } | Fault::Conflict { .. } | Fault::Redirect { .. })),
+        "{faults:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
