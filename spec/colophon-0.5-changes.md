@@ -316,7 +316,7 @@ the code lands, each named in its row.
 | 181 | §12.3 "No home": a configured verifier MAY take S from its persisted history for its own audience when the account has no home (default off). **Code follows** | R; Opus 10 |
 | 182 | §20 "Suites", "Reserved names", `GET {base}` `layouts` and `location` | R; Daybreak 11 |
 | 183 | §20 "Limits of 0.5": no compaction and what leaves room for it, `kept`, 512 MiB blobs, live slots, constants, homes, namespaces, successions, no home | the freeze list's accepted limits |
-| 184 | §3.3 rule 2: two distinct points with one key ID in one entry or transition are refused. **Code follows** (`apply_delta` key IDs) | E12 check L1 |
+| 184 | §3.3 rule 2: two distinct points with one key ID in one entry or transition are refused. Code: freeze package W1-A (`apply_delta` key IDs). | E12 check L1 |
 | 185 | §17.1: the core refuses at preparation a transition whose delta it can already see is void, judging components against each other; writes no unknown content, `layout` or entry after a stop; the opaque-member fence; hosts show counts. **Code follows** (`begin_transition`) | E12 check L2; F1, F6 |
 | 186 | §16.3 "Sequence zero": a readable seq-0 envelope makes the predecessor `malformed`. **Code follows** (`history/swift.rs::read_envelope`) | E12 check L3 |
 | 187 | §14: a successor's home holds the provisioned genesis, takes predecessor entries only as the chain it claims from its head down, and serves none before its first upload is verified | the home package's owed sentence |

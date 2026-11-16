@@ -1729,19 +1729,23 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     let new_k = Keyring::parse(raw_keyring, 0)
         .map_err(|e| malformed(format!("void: the result breaks §6: {}", e.detail())))?;
     check_keyring_keys(s, &new_k).map_err(|e| malformed(format!("void: {}", e.detail())))?;
-    // A member this delta adds uses no key of the keyring it puts in place (§3.3).
-    let mut keyring_points: BTreeSet<Vec<u8>> = BTreeSet::new();
+    // A member this delta adds uses no key, and no key ID, of the keyring it puts in place
+    // (§3.3 rule 2, "including within one entry or transition").
+    let mut keyring_points: Vec<Vec<u8>> = Vec::new();
     for c in new_k.controllers.values() {
-        keyring_points.insert(c.key().signing().to_vec());
+        keyring_points.push(c.key().signing().to_vec());
         keyring_points.extend(c.key().agreement().map(<[u8]>::to_vec));
     }
-    keyring_points.insert(new_k.vault.0.clone());
-    keyring_points.insert(new_k.vault.1.clone());
+    keyring_points.push(new_k.vault.0.clone());
+    keyring_points.push(new_k.vault.1.clone());
     for m in &new_members {
         crate::v05::require(
-            !keyring_points.contains(&m.request.signing)
-                && !keyring_points.contains(&m.request.agreement),
-            "void: a member key is a key of the keyring (§3.3)",
+            !member_collides(
+                &keyring_points,
+                &[&m.request.signing, &m.request.agreement],
+                key_id,
+            ),
+            "void: a member key or key ID is one of the keyring (§3.3)",
         )?;
     }
     // Unknown content the delta brought into the keyring (a policy field, a slot or vault
@@ -1783,6 +1787,16 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     }
     record_points(&mut n);
     Ok(n)
+}
+
+/// §3.3 rule 2 within one transition: a member point equals a keyring point, or the two have
+/// the same key ID under `kid` (a parameter so a test can substitute a colliding function; a
+/// real collision needs 128 bits of work).
+fn member_collides(keyring: &[Vec<u8>], member: &[&Vec<u8>], kid: impl Fn(&[u8]) -> String) -> bool {
+    let ids: BTreeSet<String> = keyring.iter().map(|p| kid(p)).collect();
+    member
+        .iter()
+        .any(|p| keyring.iter().any(|k| k == *p) || ids.contains(&kid(p)))
 }
 
 /// `previousVault` (§8.3): the current vault seed (32 bytes) sealed to the new vault, an HPKE
@@ -3884,4 +3898,36 @@ pub(super) fn from_upgrade(
         resolved: Vec::new(),
         layout: LAYOUT_5,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L1 (§3.3 rule 2): a member and a keyring key with one key ID in one transition are
+    /// refused. A real collision needs 128 bits of work, so the key-ID function is substituted:
+    /// one that maps every point to the same ID makes any two distinct points collide.
+    #[test]
+    fn a_member_with_a_keyring_key_id_in_one_transition_collides() {
+        let keyring = vec![vec![4u8; 65], vec![5u8; 65]];
+        let member = vec![6u8; 65];
+        let other = vec![7u8; 65];
+        // Distinct points, distinct real key IDs: no collision.
+        assert!(!member_collides(&keyring, &[&member, &other], key_id));
+        // The same point: a collision whatever the key-ID function.
+        assert!(member_collides(&keyring, &[&keyring[1]], key_id));
+        // Distinct points with one key ID: a collision (the rule before L1 compared points only).
+        let same = |_: &[u8]| "00000000000000000000000000000000".to_string();
+        assert!(member_collides(&keyring, &[&member], same));
+        // A function that collides only for one chosen pair.
+        let pair = |p: &[u8]| {
+            if p == [6u8; 65].as_slice() || p == [5u8; 65].as_slice() {
+                "c0111de0c0111de0c0111de0c0111de0".to_string()
+            } else {
+                key_id(p)
+            }
+        };
+        assert!(member_collides(&keyring, &[&member], pair));
+        assert!(!member_collides(&keyring, &[&other], pair));
+    }
 }
