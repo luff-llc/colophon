@@ -79,20 +79,21 @@ the same 1,078 files.
 
 ## What was run
 
-- `v5_generator_check` (the Rust generator), revision 13: 1,454 generated files match, byte for
-  byte, including the revision 13 vector directories. The directory holds 1,457 files: those plus three sources (`README.md` and the probe's
-  `Package.swift` and `main.swift`). The Python generator it replaced matched 1,078 of them (before the fix round added two forged-`final` cases of eight files each , a seven-file chained succession, a nine-file Swift layout case and a thirteen-file cutoff case).
+- `v5_generator_check` (the Rust generator), at the freeze (2026-11-16): 2,165 generated files
+  match, byte for byte. The directory holds 2,168 files outside `legacy-draft-1/` (64 files, not
+  0.5 vectors): those plus three sources (`README.md` and the probe's `Package.swift` and
+  `main.swift`). The Python generator it replaced matched 1,078 of an earlier set.
 - The fifth reviewer's signature checker (`sigcheck5.py`): 2,203 signatures, including heads in
   `final` entries and objects embedded in recording entries and `suspend`; 7 failures, all
   intended (two invalid call signatures, two origin cases, two veto cases, one `signers` mismatch).
-- **`v05_candidate` (the 0.5 history verifier), revision 13:** 319 in scope, 319 pass, 0 fail,
-  0 not implemented (before: 301 / 301 / 0 / 1). No vector of revision 13 was replayed by the Swift
-  source.
+- **`v05_candidate` (the 0.5 history verifier), at the freeze:** 422 in scope, 422 pass, 0 fail, 0 not
+  implemented. No other implementation has replayed the vectors (spec §21 condition 2).
 - **0.4 engine** on `upgrade/*`: `newerFormat` everywhere except `foreign-signer` (`badSignature`).
 - **Swift verifier** (Marginalia `c8280332`, unmodified): every full predecessor stops at its first
   freeze with `unsupportedStorageLayout(3)`.
 - **CryptoKit DER probe** (macOS 27.0.1, 200 random keys): minimal DER and high-S accepted, every
-  other form tested refused, including `r` or `s` of zero. iOS and visionOS were not probed.
+  other form tested refused, including `r` or `s` of zero. iOS and visionOS have not been run as of 0.5.0 (spec §21 condition
+  3).
 - New-vault slots and `previousVault` seals are structurally valid synthetic bytes, not openable.
 - No valid transition approaches the 622,592-byte envelope bound, so the quorum-8 size
   composition (§2.4) is checked by arithmetic, not by a vector.
@@ -261,16 +262,3 @@ for which no vector or test was found at the freeze; it is not covered.
 | Revision 17: the two-home tests pass | `crates/colophon-home-wasm/tests/v05_relay_h2.rs` and `crates/colophon-home-wasm/tests/v05_relay_home.rs`, every test in both files |
 | Revision 17: Swift seq 0 | **None found.** The generator file for it, `crates/colophon-core/tests/v5_candidate/cases_freeze_swift.rs`, builds nothing |
 
-## Missing before the engine (kept as history)
-
-This list was written before the 0.5 engine existed. The index above says what covers each
-required item at the freeze.
-
-- Every 0.4 key case as `/5`; slots and rotation with real HPKE; slot rebasing with a slot added
-  after the anchor; a vault change in an account with namespaces and its `rekey`.
-- Namespaces: rekey (including two epochs for one namespace), shares, `/5` headers, author chains,
-  revocation walks, proposals.
-- `headQuorum` 2 with three homes, receipt forwarding, finality in order and rollback of a suffix,
-  mutual removal, external-object limits, the replay states, the rate limit's byte budgets.
-- `/5` succession, the migration entry with real digests, seed transfer.
-- The Swift corpus on iOS and visionOS, and the dry run on a real library.

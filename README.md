@@ -17,12 +17,13 @@ plus the 0.1 specification, conformance vectors and shipped Swift reference impl
 with the Rust-backed products under `swift/`. In LUFF's Marginalia repository,
 "Colophon 0.2" names the Swift layout-2 step whose design 0.3 absorbs.
 
-**0.5 is frozen (2026-11-16).** An account is a keyring of controllers whose identifier is the
+**0.5 is frozen, revision 18 (2026-11-16).** The formats and reader rules are frozen for now; the
+gaps listed in spec §21 are closed in 0.5.x without changing any format, and
+[spec §21.1](spec/colophon-0.5.md#211-what-050-does-not-do) lists what 0.5.0 does not do. An account is a keyring of controllers whose identifier is the
 digest of its first authority record; members act under grants, sessions act for members through
 links and calls, and a home keeps and vouches for the history. See
 the [0.5 spec](spec/colophon-0.5.md), its [guide](spec/colophon-0.5-guide.md), the
-[0.5 conformance vectors](conformance/0.5/) and the [changelog](CHANGELOG.md), which states 0.5's
-limits.
+[0.5 conformance vectors](conformance/0.5/) and the [changelog](CHANGELOG.md).
 
 **0.4 replaces the single root key with a keyring.** Authority belongs to a keyring of
 controllers: passkeys, security keys, device owner keys and recovery kits, with roles and

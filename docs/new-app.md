@@ -59,8 +59,8 @@ The app provisions it before the person creates the account: it asks its home se
 endpoint and token in its own configuration (not in the library). `request` is called once, at creation, with the new account's
 ID, because a home's member request names the account; the session appoints the home in the same step. A home the account
 already names needs only `endpoint` (and `transport` in tests). `deliveryRoutes` are the two ways the home can reach the person
-about a pending change (spec §17.5: two, on different devices or services); `registerRoutes` is the app's call to the home's
-registration, since 0.5 gives notices no wire format. The relay does not implement notices yet: leave `registerRoutes` nil and the
+about a pending change, for a home that offers notices; delivering notices is not part of 0.5 (spec §17.5), and two routes
+are a 0.6 rule. `registerRoutes` is the app's call to the home's registration, since 0.5 gives notices no wire format. The relay does not implement notices yet: leave `registerRoutes` nil and the
 gate shows that the home cannot send notices (`session.duties.routes`). `allowsLoopbackHTTP: true` is for tests against a home on
 this machine only.
 

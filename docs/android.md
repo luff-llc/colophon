@@ -109,6 +109,7 @@ home module and runs every JVM test in `sdk/kotlin` (the 0.4 wrappers too), then
 * Delivery-route registration is a host callback (the relay offers none). No ingress inbox, no Swift-move session
   steps, no typed domain kits in Kotlin.
 * A Kotlin `FolderMedium` assumes one process per folder (Android app-private storage); it takes no file lock.
+* **Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks the three conditions from the creation parameters (one home, every control key on one device, exactly one recovery unit) and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
 
 ## The 0.4 session (`org.luff.colophon`, still in the AAR)
 

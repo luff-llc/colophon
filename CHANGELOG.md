@@ -7,8 +7,8 @@ the digest of its first authority record. Members (apps, devices, agents, server
 grants, sessions act for members through links and calls, and a home keeps and vouches for the
 history. Changes that weaken an account wait as pending transitions that can be vetoed. 0.4
 libraries upgrade in place; libraries of the shipped Swift apps move by a verified succession.
-Spec: [colophon-0.5.md](spec/colophon-0.5.md), frozen at revision 17 with one edit (§18's reference
-setup names one home); [changes from 0.4](spec/colophon-0.5-changes.md);
+Spec: [colophon-0.5.md](spec/colophon-0.5.md), frozen at revision 18 (provisionally;
+see §21); [changes from 0.4](spec/colophon-0.5-changes.md);
 [guide](spec/colophon-0.5-guide.md).
 
 ### Protocol
@@ -42,6 +42,8 @@ setup names one home); [changes from 0.4](spec/colophon-0.5-changes.md);
 - The account engine syncs with a home: head, then authority, records, live state and blobs.
 - The home module (`colophon-home-wasm`) admits only what verifies, receipts transitions and
   vetoes, records due transitions and signs heads. One home is supported per account.
+- A home keeps and serves every pending transition and veto until it is settled, and a host shows
+  each pending change with its due time on every sync. Delivering notices is not part of 0.5.
 - Several homes per account are experimental: exchange between homes is informative in 0.5. The
   two-home tests pass; the open issues are in
   [docs/multi-home-open-issues.md](docs/multi-home-open-issues.md).
@@ -88,24 +90,21 @@ The 2,000-record case meets the Mac limits it was measured against.
 
 - `conformance/0.5/`: the 0.5 vectors, replayed by the Rust verifier. The README indexes what
   covers each required item and names the items that nothing covers yet.
-- Spec §21 records each freeze condition as met or not met.
+- Spec §21 records each freeze condition as met or open, and the owner's decisions: the freeze is
+  provisional, two complete replayers are deferred to v1.0, and the open gaps are closed in 0.5.x
+  without changing any format.
 
 ### Limits
 
-- One home per account. Several homes are experimental; see
-  [docs/multi-home-open-issues.md](docs/multi-home-open-issues.md).
-- Moving an account from one home to another is not proven by a test in 0.5.
-- No push notices. Notices have no wire format; apps poll.
-- No invite link and no multi-part QR code. The invite carries the history by link or paste; the
-  approval is by camera scan.
-- Sync is serial, one request per record, so a new device joining a large library is slow
-  ([docs/performance.md](docs/performance.md)).
-- Libraries of 100,000 records are not usable: opens take tens of seconds, catch-up takes 13 to 15
-  minutes and memory reaches 7.19 GB.
-- Before an account opts in to a later version, a 0.5 device may refuse something newer rather
-  than ask to be updated.
-- Nothing is published to npm, Maven or a Swift registry.
-- Phones, the wasm build and the FFI boundary are not measured.
+What 0.5.0 does not do is one list, in
+[spec §21.1](spec/colophon-0.5.md#211-what-050-does-not-do). It starts with the lock-in limit: an
+account on one home needs that home's cooperation to change its keys or to move to another home.
+
+**Known gap: the §6.4 warnings.** The reference sessions (Swift, Kotlin and Android, JavaScript) do
+not yet give the §6.4 warnings before the genesis is written; they expose `soleDevice` afterwards.
+The warnings stay normative for hosts. Until the sessions give them, an app checks the creation
+parameters (one home, every control key on one device, exactly one recovery unit) and warns before
+it calls create.
 
 ### Withdrawn to 0.6
 

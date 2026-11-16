@@ -185,6 +185,10 @@ growth about 35 MiB), and the blob executor stops on `dispatchPrecondition` if i
   anchor and the removal did not remove (members whose grant it signed, `approve`/`sign` keys it added by immediate entries),
   from the core's `removal_follow_up`. `removeFollowUp(seq:)` revokes and removes them in one action (signed by the owner);
   `keepFollowUp(seq:)` keeps them. Either is remembered in the private journal and the card goes.
+* `pending` carries `dueMs`: the session rebuilds `notices` after every sync, so each pending change is shown with its
+  due time on every sync (spec §17.5 "Showing on sync"). 0.5 defines no notice delivery.
+
+**Known gap: the spec §6.4 warnings before creation.** This session does not yet give the §6.4 warnings before the genesis is written: it exposes `soleDevice` after creation. The warnings stay normative for a host (a person must see them before an account is created). Until the session gives them, an app checks the three conditions from the creation parameters (one home, every control key on one device, exactly one recovery unit) and warns before it calls create. Spec §21.1 lists this among what 0.5.0 does not do.
 
 ## Lock
 

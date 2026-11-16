@@ -4,7 +4,7 @@ Status: design. Revision 16 of the spec stated the whole package; after the inde
 revised once. **Revision 17 cuts it to what shipping 0.5 and a later in-place upgrade need**, on the
 owner's word: "modularity can wait till 0.6, I just don't want to get blocked on shipping 0.5. also
 don't want to do another full on migration once we start to work on 0.6", and "I'm not that worried
-about the unknowns." The 0.5 parts are built, and 0.5 was frozen on 2026-11-16 (spec §21); the
+about the unknowns." The 0.5 parts are built, and 0.5 was frozen on 2026-11-16 at revision 18, provisionally (spec §21); the
 sections marked "Deferred to 0.6" are not built. The spec text is revision 17 of
 [`spec/colophon-0.5.md`](../spec/colophon-0.5.md), mapped in
 [`spec/colophon-0.5-changes.md`](../spec/colophon-0.5-changes.md) §A.12 (rows 159–197, the
