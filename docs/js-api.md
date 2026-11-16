@@ -1,5 +1,9 @@
 # `@colophon/core` JavaScript API (contract)
 
+**This is the legacy 0.4 surface** (`@colophon/core`, `js/src/index.ts`, the playground). It is not the 0.5 session: for 0.5,
+use `@colophon/core/session` (`docs/js-session.md`), where a request carries no code and approval spends a confirmed pairing
+(spec §7.3, §9.1). The 0.4 pairing code below is a hash of the requesting key, not a pairing, and it does not meet §9.1.
+
 The npm package in `js/` wraps `crates/colophon-wasm`. The playground and any web client use only
 this surface. Names here are the contract between the core and the playground; the core may add to
 it, but changes to these names are agreed first.
@@ -47,7 +51,7 @@ export type Records = Map<string, Uint8Array>;
 export interface AccessRequest {
   id: string; label: string; kind: MemberKind;
   namespaces: string[]; access: Access[];
-  pairingCode: string;          // six digits both sides display
+  pairingCode: string;          // 0.4 only: six digits hashed from the requesting key (no nonce; not a §7.3 pairing)
   record: Uint8Array;           // the signed request to hand to the root
 }
 
@@ -96,7 +100,7 @@ export class Library {
   static requestAccess(opts: { libraryID: string; keys: KeyProvider; label: string; kind: MemberKind;
                                namespaces: string[]; access: Access[] }): Promise<AccessRequest>;
   // The root approves or ends access. Ending access rotates every namespace the member could read.
-  approve(request: Uint8Array, grant?: Partial<Grant>): Promise<Outcome<Member>>;
+  approve(request: Uint8Array, grant?: Partial<Grant>): Promise<Outcome<Member>>; // 0.4 only; the 0.5 session takes a pairing
   revoke(memberID: string): Promise<Outcome<void>>;
 
   // Records arriving from elsewhere (another member, a relay).

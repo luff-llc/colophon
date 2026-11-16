@@ -107,9 +107,33 @@ signers, rule, pairing, entropy)` then spend it. A pairing that is not `Confirme
 `Consumed` and left as it was. A confirmed one is spent whatever the answer: for another account or
 another key, confirmed on the joining device, or confirmed by the pairing QR (`existing_scan_qr`,
 which moves the seed only), `refused:outOfScope`; more than ten minutes after the
-approving device's session began, `refused:expired`. The joining device's own confirmed pairing never
-approves. Appointing a home (`homes.appoint`) is outside this rule: its request comes from the home's own
-base (a stated limit of §9.1).
+approving device's session began, or before it (a clock moved back), `refused:expired`. The joining device's
+own confirmed pairing never approves. Appointing a home (`homes.appoint`) is outside this rule: its request
+comes from the home's own base (a stated limit of §9.1).
+
+**The approving device's ledger: one ceremony at a time, every start counted.** Every session the existing
+device starts (`existing_receive_commitment`, `existing_scan_qr`, `scan_request`) comes from its
+`PairingFailureLimiter`:
+
+- Starting one **reserves** one of the five an hour; only a confirmed pairing gives it back (`confirm`, the
+  pairing QR's `send_nonce`, a valid `scan_request`). Abandoning (`AccountPairing.abandon(now_ms)`), rejecting
+  (`reject`), a mismatch, a reveal after the ten-minute timeout (`pairing:timeout`), dropping the object or
+  restarting the device all leave it counted. Five counted in an hour: `pairing:limit`.
+- **One ceremony is live at a time**: while one is (not ended, younger than ten minutes) another start is
+  refused, `pairing:busy`, and never yields a nonce. A relay therefore cannot run sessions with its own keys
+  beside the honest one and pick the one whose code matches. Start a ceremony only when the person asks; a
+  commitment that arrives unasked is shown or dropped, never started.
+- **Persist before the nonce.** `send_nonce` is refused, `pairing:unsealed`, until the host took
+  `limiter.seal(device_key, account, entropy)` after the start; the host writes the sealed bytes and
+  `limiter.generation()` beside them, and only then asks for the nonce. A host that cannot write sends none.
+- **Open on start**: `PairingFailureLimiter.open(sealed, device_key, account, floor, now_ms)`, with the
+  generation recorded beside it as `floor` (0 when none). Missing bytes with a floor, an edited or foreign
+  ledger, another device key, or a generation below the floor open as a spent budget.
+  `PairingFailureLimiter.fresh()` is an in-memory ledger (tests; a device's own request). `is_live(now_ms)`
+  and `may_start(now_ms)` answer without changing anything.
+- **Residual limit:** a host or backup that restores the private store wholesale (the sealed ledger and its
+  recorded generation together) restores the budget; the device key is not a counter, so the core cannot see
+  it. Within one process the ledger never goes back.
 
 ### `AccountEngine`
 
@@ -209,11 +233,11 @@ logs and never carries key material. `Refused` carries the §19 reason; `Denied`
 
 | Variant | `code` | Meaning |
 | --- | --- | --- |
-| `Malformed` | `malformed` | A rule is broken; also an argument that is not valid JSON. Pairing aborts: `pairing:commitmentMismatch`, `pairing:invalidPoint`, `pairing:wrongAccount`, `pairing:invalidRequest` (a scanned request that does not verify). |
+| `Malformed` | `malformed` | A rule is broken; also an argument that is not valid JSON. Pairing aborts: `pairing:commitmentMismatch`, `pairing:invalidPoint`, `pairing:wrongAccount`, `pairing:invalidRequest` (a scanned request that does not verify), `pairing:timeout` (a reveal after the ten-minute ceremony timeout). |
 | `BadSignature` | `badSignature`; from `account_webauthn_check` `badSignature:<check>`, with `check: SignatureCheck` | A signature, assertion, possession proof or key binding failed. Checks: `point rawLength scalar der verify clientData clientDataBound unknownForm type challenge origin crossOrigin relyingParty userPresence userVerification form callOrigin`. |
 | `NewerFormat` | `newerFormat` | Authenticated content of a newer format. |
 | `Unavailable` | `unavailable` | Something needed could not be obtained. |
-| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`). |
+| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`), `pairing:busy` (`pairingBusy`: another ceremony is live), `pairing:unsealed` (`pairingUnsealed`: the ledger was not sealed since the start). |
 | `Denied` | `denied:<reason>`, `reason` | `notGranted revoked expired budgetSpent notReadable unavailable`. |
 | `Host` | `host` | A host callback failed; `detail` is the host's own message (a foreign exception arrives here too). |
 | `Reentered` | `reentered` | A callback called back into the object that was calling it, on the same thread; or a call from another thread waited more than 30 s for an object whose holder was inside a host callback (see "Threads and callbacks"). |
