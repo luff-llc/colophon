@@ -1380,29 +1380,41 @@ pub(crate) fn check_transition(
     if (all.len() as u64) < 1 + max_v {
         return Err(bad_signature("escalation: too few signer units"));
     }
+    let left_out = left_out_homes(&cls, full_set, rule);
     // Receipts (§8.7 validity 2). A home witnesses from its appointment until its revocation is
     // final, whatever its grant's expiry says (§8.5): a date never removes the veto window.
+    // `headQuorum` (at most the homes counted) from distinct homes counted: the homes current in
+    // S, or, for a full set, those that remain after the homes it revokes (the homes its
+    // activation leaves out of its witnesses), none if no home remains. Only a full set may leave
+    // a home out: anything that can be vetoed needs the receipts that witness its window.
     let homes = s.current_homes();
+    let exempt = receipt_exempt(full_set, &left_out);
+    let remaining = homes
+        .iter()
+        .filter(|m| !exempt.contains(&m.request.member_id()))
+        .count();
     let quorum = k.policy.head_quorum() as usize;
     let mut latest_receipt = issued;
     if with_receipts {
         if homes.is_empty() {
             crate::v05::require(receipts.is_empty(), "receipts without a home")?;
         } else {
-            crate::v05::require(
-                receipts.len() == quorum.min(homes.len()),
-                "receipts: wrong count",
-            )?;
             let mut last: Option<String> = None;
+            let mut all_remaining = true;
             for r in receipts {
                 let (home, received) = check_receipt(s, r, &env.digest, issued)?;
                 crate::v05::require(
                     last.as_ref().is_none_or(|l| l < &home),
                     "receipts: not sorted by home or not distinct",
                 )?;
+                all_remaining &= !exempt.contains(&home);
                 last = Some(home);
                 latest_receipt = latest_receipt.max(received);
             }
+            let every_home = receipts.len() == quorum.min(homes.len());
+            let remaining_homes =
+                full_set && all_remaining && receipts.len() == quorum.min(remaining);
+            crate::v05::require(every_home || remaining_homes, "receipts: wrong count")?;
         }
     }
     // Anchor on this branch (validity 3) and issued not before the anchor's.
@@ -1415,21 +1427,14 @@ pub(crate) fn check_transition(
         "issued earlier than the anchor's",
     )?;
     let delay = delay_at(s, anchor_seq).max(k.policy.recovery_delay()) as i64 * SEC;
+    // A full set is due at its latest chosen receipt, or at its `issued` with none (no home, or
+    // none remaining after the homes it revokes).
     let due_ms = if full_set {
-        if homes.is_empty() {
-            issued
-        } else {
-            latest_receipt
-        }
+        latest_receipt
     } else if homes.is_empty() {
         issued
     } else {
         issued.saturating_add(RECEIPT_WINDOW).saturating_add(delay)
-    };
-    let witnesses_revoked = if full_set || rule == Rule::Recovery {
-        cls.revokes.clone()
-    } else {
-        Vec::new()
     };
     let proposer = k
         .controllers
@@ -1448,10 +1453,39 @@ pub(crate) fn check_transition(
         deadline_ms: issued.saturating_add(delay),
         issued_ms: issued,
         removal_only: cls.removal_only,
-        revokes: witnesses_revoked,
+        revokes: left_out,
         undecidable,
         unknown,
     })
+}
+
+/// The homes an activation of a transition leaves out of its witnesses (§8.7 "Revoking a
+/// home"): those it revokes under the stronger authority (a full set, or the recovery rule).
+fn left_out_homes(cls: &Classified, full_set: bool, rule: Rule) -> Vec<String> {
+    if full_set || rule == Rule::Recovery {
+        cls.revokes.clone()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Of the homes an activation leaves out (`left_out`, [`TCheck::revokes`]), those whose receipts
+/// a transition need not carry (§8.7 validity 2): all of them for a full set, none otherwise.
+/// One function for the verifier and the write side, so receipts and witnesses never drift.
+pub(crate) fn receipt_exempt(full_set: bool, left_out: &[String]) -> &[String] {
+    if full_set {
+        left_out
+    } else {
+        &[]
+    }
+}
+
+/// The homes whose receipt of the held transition `t_bytes` an entry recording it in `s` need
+/// not carry ([`receipt_exempt`]); empty when the transition does not judge in `s`.
+pub(crate) fn transition_receipt_exempt(s: &State, t_bytes: &[u8]) -> Vec<String> {
+    check_transition(s, t_bytes, &[], false, true)
+        .map(|t| receipt_exempt(t.full_set, &t.revokes).to_vec())
+        .unwrap_or_default()
 }
 
 /// A receipt (§13.5): returns the home and `received`.
