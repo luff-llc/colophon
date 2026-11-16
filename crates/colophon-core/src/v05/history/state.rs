@@ -181,6 +181,18 @@ pub struct State {
     /// before a fork can be judged (§8.4 `resolve`).
     #[serde(default)]
     pub(super) rule_at: Vec<(u64, bool)>,
+    /// The account's layout (§8.2 "Layout"): 2 for a `/5` account from genesis and for an
+    /// upgraded account from its `upgrade`. A `layout` component that does not raise it voids
+    /// its transition; one that raises it above 2 is `newerFormat` (the upgrade door, §20), so
+    /// a 0.5 reader never holds another value.
+    #[serde(default = "layout_5")]
+    pub(crate) layout: u64,
+}
+
+/// The layout a 0.5 reader understands (§8.2, §20).
+pub(crate) const LAYOUT_5: u64 = 2;
+fn layout_5() -> u64 {
+    LAYOUT_5
 }
 
 impl State {
@@ -188,6 +200,7 @@ impl State {
         let len = self.digests.len();
         crate::v05::require(
             len > 0
+                && self.layout == LAYOUT_5
                 && self.issued.len() == len
                 && self.keyring_at.len() == len
                 && self.delay_at.len() == len
@@ -773,6 +786,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         successor_seq: None,
         migration: None,
         resolved: Vec::new(),
+        layout: LAYOUT_5,
     })
 }
 
@@ -1071,6 +1085,12 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
                 c.recovery_ok_if_full = false;
             }
             "layout" | "migration" | "successor" => {
+                // `layout` is an integer (§8.2); another type is `malformed`.
+                if name == "layout" {
+                    comp.as_u64()
+                        .filter(|n| *n <= crate::v05::encoding::bounds::MAX_INTEGER)
+                        .ok_or_else(|| malformed("layout must be an integer"))?;
+                }
                 // `successor` is `{account}` (§8.7); another member is unknown content.
                 if name == "successor" {
                     for f in comp.as_object().into_iter().flat_map(|m| m.keys()) {
@@ -1674,9 +1694,22 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
         n.successor_seq = Some(act_seq);
         changed = true;
     }
-    if t.change.contains_key("layout") {
-        changed = true;
-    }
+    // §8.2 "Layout": a component that does not raise the layout voids the transition; one that
+    // raises it above 2 is the upgrade door, `newerFormat` once every other check has passed
+    // (reported at the end of this function).
+    let raises_layout = match t.change.get("layout") {
+        Some(v) => {
+            let to = v
+                .as_u64()
+                .ok_or_else(|| malformed("layout must be an integer"))?;
+            if to <= s.layout {
+                return Err(malformed("void: the layout component does not raise the layout"));
+            }
+            changed = true;
+            Some(to)
+        }
+        None => None,
+    };
     if let Some(comp) = t.change.get("resolve") {
         // Valid when the kept entry is on this branch. It discards every other candidate at
         // that seq for a verifier following this branch; with none held it changes nothing but
@@ -1743,6 +1776,11 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     // Unknown content inside the delta is reported only once the delta is otherwise valid, as
     // an immediate entry reports it after its checks (§1, §2.3).
     unknown.check()?;
+    if let Some(to) = raises_layout.filter(|to| *to > LAYOUT_5) {
+        return Err(Failure::NewerFormat(format!(
+            "the transition raises the layout to {to}; this reader knows layout {LAYOUT_5}"
+        )));
+    }
     record_points(&mut n);
     Ok(n)
 }
@@ -3844,5 +3882,6 @@ pub(super) fn from_upgrade(
         successor_seq: None,
         migration: None,
         resolved: Vec::new(),
+        layout: LAYOUT_5,
     })
 }

@@ -1,0 +1,1 @@
+{"description":"A layout raise signed by the control rule without the recovery set's consent: badSignature.","expected":{"result":"badSignature","seq":2},"sections":["8.4","8.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

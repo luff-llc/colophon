@@ -1,0 +1,1 @@
+{"description":"A transition raising the layout to 3 under the control rule (no recovery set): the upgrade door, newerFormat at its activate.","expected":{"result":"newerFormat","seq":2},"sections":["8.2","8.7","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

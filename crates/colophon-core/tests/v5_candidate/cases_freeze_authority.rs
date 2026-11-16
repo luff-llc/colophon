@@ -192,6 +192,126 @@ fn end_sessions(chain: &mut Chain, member: &Key, issued: &str, extra: Value) {
 
 pub fn part(o: &mut Out) {
     f2(o);
+    f3(o);
+}
+
+/// F3, the upgrade door (§8.2 "Layout", §20; design §3).
+fn f3(o: &mut Out) {
+    let (a, k1) = (A.clone(), K1.clone());
+    let layout = |v: Value, signers: Sl| {
+        let (mut c, _) = plain();
+        let t = transition(&c, json!({"layout": v}), signers, &ts(60));
+        activate(&mut c, &t, &[]);
+        c
+    };
+    wc(
+        o,
+        "f3-layout-3",
+        &layout(json!(3), sg![a]),
+        bad("newerFormat", 2),
+        "A transition raising the layout to 3 under the control rule (no recovery set): the upgrade door, newerFormat at its activate.",
+        &["8.2", "8.7", "20"],
+    );
+    wc(
+        o,
+        "f3-layout-2",
+        &layout(json!(2), sg![a]),
+        bad("malformed", 2),
+        "A layout component of 2 in an account at layout 2 does not raise the layout: the transition is void, malformed at its activate.",
+        &["8.2", "8.7"],
+    );
+    wc(
+        o,
+        "f3-layout-not-integer",
+        &layout(json!("3"), sg![a]),
+        bad("malformed", 2),
+        "A layout component that is not an integer is malformed.",
+        &["8.2"],
+    );
+    let mut c = layout(json!(3), sg![a]);
+    grant_agent(&mut c, &a, &ts(120), &a);
+    wc(
+        o,
+        "f3-layout-then-entry",
+        &c,
+        bad("newerFormat", 2),
+        "A layout raise, then a grant: the reader stops at the raise and applies nothing after it.",
+        &["1", "8.2"],
+    );
+    // With a recovery set, raising the layout needs its consent (§8.4).
+    let kr = keyring(
+        vec![
+            ctrl(&a, AC, Some("Mac"), json!({})),
+            ctrl(&k1, &["recover"], Some("Security key"), json!({})),
+        ],
+        Kr {
+            rt: 1,
+            ..Kr::default()
+        },
+    );
+    let mut c = Chain::new();
+    genesis(
+        &mut c,
+        &kr,
+        sg![a],
+        Gen {
+            opt: Opt {
+                adds: sg![k1],
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    let t = transition(&c, json!({"layout": 3}), sg![a], &ts(60));
+    activate(&mut c, &t, &[]);
+    wc(
+        o,
+        "f3-layout-3-no-consent",
+        &c,
+        bad("badSignature", 2),
+        "A layout raise signed by the control rule without the recovery set's consent: badSignature.",
+        &["8.4", "8.5"],
+    );
+
+    // `upgrade/then-v5-layout` (built by `cases_a.rs`) sets layout 2 in an account already at
+    // layout 2: under F3 that transition is void. Its entries are unchanged; its expectation is
+    // replaced here. `upgrade/then-v5-layout-3` keeps the case's intent with a real raise.
+    let dir = "upgrade/then-v5-layout";
+    let case: Value = serde_json::from_slice(&o[&format!("{dir}/case.json")]).unwrap();
+    let mut voided = case.clone();
+    voided["description"] =
+        json!("A layout component that does not raise the layout voids the transition.");
+    voided["expected"]["colophon-0.5"] = json!("malformed");
+    voided["sections"] = json!(["5.1", "8.2", "8.5", "16.1"]);
+    write(o, &format!("{dir}/case.json"), &voided);
+    let mut raised = case;
+    raised["description"] = json!(
+        "After the upgrade, a /5 transition raising the layout to 3 under the control rule: the upgrade door, newerFormat."
+    );
+    raised["expected"]["colophon-0.5"] = json!("newerFormat");
+    raised["sections"] = json!(["5.1", "8.2", "16.1", "20"]);
+    let dir3 = "upgrade/then-v5-layout-3";
+    for seq in 1..=3 {
+        let rel = format!("records/authority/{seq:08}.json");
+        let data = o[&format!("{dir}/{rel}")].clone();
+        write_raw(o, &format!("{dir3}/{rel}"), data);
+    }
+    let rel4 = "records/authority/00000004.json";
+    let act: Value = serde_json::from_slice(&o[&format!("{dir}/{rel4}")]).unwrap();
+    let mut act_body = body_json(&act);
+    let t_env: Value =
+        serde_json::from_slice(&unb64(act_body["transition"].as_str().unwrap())).unwrap();
+    let mut t_body = body_json(&t_env);
+    t_body["change"]["layout"] = json!(3);
+    let signer = software(t_body["by"].as_str().unwrap()).unwrap();
+    act_body["transition"] = json!(emb(&envelope(&t_body, &signer)));
+    // As `cases_a.rs` writes the extension entry: canonical bytes, no trailing newline.
+    write_raw(
+        o,
+        &format!("{dir3}/{rel4}"),
+        canonical(&json!({"body": b64(&canonical(&act_body))})),
+    );
+    write(o, &format!("{dir3}/case.json"), &raised);
 }
 
 /// F2 (§8.5 "Current principal"; design §2).

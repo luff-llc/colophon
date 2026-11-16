@@ -1,0 +1,1 @@
+{"description":"A layout component that is not an integer is malformed.","expected":{"result":"malformed","seq":2},"sections":["8.2"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
