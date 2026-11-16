@@ -1,0 +1,1 @@
+{"description":"A current member's own endSessions with an unknown field: the member rule holds, then the unknown field is newerFormat.","expected":{"result":"newerFormat","seq":3},"sections":["1","8.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

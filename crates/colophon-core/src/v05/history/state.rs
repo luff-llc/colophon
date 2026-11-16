@@ -350,6 +350,118 @@ impl State {
     fn on_branch(&self, seq: u64, d: &str) -> bool {
         seq >= 1 && self.digests.get((seq - 1) as usize).is_some_and(|x| x == d)
     }
+
+    /// The one **current principal** check of §8.5, used wherever a principal's signature is
+    /// accepted, before any unknown content is looked at. `id` is a controller or member ID;
+    /// `claim` says what it signs as; `at_ms` is the entry's `issued` (for a call, the
+    /// verifier's clock). On success returns the principal; on failure says why, and
+    /// [`NotCurrent::failure`] gives the authority result (`badSignature`). A call maps
+    /// [`NotCurrent::Expired`] to `refused:expired` and the rest to `refused:revoked` (§12.3).
+    pub fn current_principal(
+        &self,
+        id: &str,
+        claim: Claim<'_>,
+        at_ms: i64,
+    ) -> std::result::Result<Principal<'_>, NotCurrent> {
+        match claim {
+            Claim::Controller {
+                roles,
+                suspended_ok,
+            } => {
+                let c = self
+                    .keyring
+                    .controllers
+                    .get(id)
+                    .ok_or(NotCurrent::Absent)?;
+                if self.meta.get(id).is_some_and(|m| m.provisional.is_some()) {
+                    return Err(NotCurrent::Provisional);
+                }
+                if !suspended_ok && self.suspended(id, at_ms) {
+                    return Err(NotCurrent::Suspended);
+                }
+                if !roles.is_empty() && !roles.iter().any(|r| c.has(r)) {
+                    return Err(NotCurrent::Role);
+                }
+                Ok(Principal::Controller(c))
+            }
+            Claim::Member | Claim::Home => {
+                // The latest record for this ID: a member ID names one key (§3.3).
+                let m = self
+                    .members
+                    .iter()
+                    .rev()
+                    .find(|m| m.request.member_id() == id)
+                    .ok_or(NotCurrent::Absent)?;
+                if m.revoked_seq.is_some() {
+                    return Err(NotCurrent::Revoked);
+                }
+                if m.provisional.is_some() {
+                    return Err(NotCurrent::Provisional);
+                }
+                if m.expires_ms.is_some_and(|e| at_ms > e) {
+                    return Err(NotCurrent::Expired);
+                }
+                if matches!(claim, Claim::Home) {
+                    if m.home == HomeStatus::NotHome || self.excused.contains(id) {
+                        return Err(NotCurrent::Role);
+                    }
+                    return Ok(Principal::Home(m));
+                }
+                Ok(Principal::Member(m))
+            }
+        }
+    }
+}
+
+/// What a signer signs as, for [`State::current_principal`].
+#[derive(Clone, Copy, Debug)]
+pub enum Claim<'a> {
+    /// A controller holding one of `roles` (any role when empty). `suspended_ok` for what a
+    /// suspended key may still sign (§8.7).
+    Controller {
+        /// Roles the rule allows.
+        roles: &'a [Role],
+        /// A suspended key may sign this.
+        suspended_ok: bool,
+    },
+    /// A member (member rule, links, calls, records).
+    Member,
+    /// A home: a current member appointed by a final activation, its revocation not final.
+    Home,
+}
+
+/// A current principal (§8.5).
+#[derive(Clone, Copy, Debug)]
+pub enum Principal<'a> {
+    /// A controller of the keyring.
+    Controller(&'a Controller),
+    /// A member.
+    Member(&'a MemberRecord),
+    /// A home.
+    Home(&'a MemberRecord),
+}
+
+/// Why a signer is not a current principal (§8.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotCurrent {
+    /// Not in the keyring or member table.
+    Absent,
+    /// Revoked.
+    Revoked,
+    /// Added by an activation that is not final.
+    Provisional,
+    /// Expired at the instant judged.
+    Expired,
+    /// Suspended (§8.7).
+    Suspended,
+    /// Holds no role the rule allows, or is not a home.
+    Role,
+}
+impl NotCurrent {
+    /// The authority result: a signer that is not current is `badSignature` (§8.5).
+    pub fn failure(self) -> Failure {
+        bad_signature(format!("the signer is not a current principal: {self:?}"))
+    }
 }
 
 /// Seq of a raw entry, for reporting an entry whose header doesn't parse.
@@ -1325,9 +1437,12 @@ pub(super) fn check_receipt(
     let (_, received) = o.date("received")?;
     let by = o.key_id("by")?;
     o.finish_closed()?;
-    let key = s
-        .home_key(&by)
-        .ok_or_else(|| malformed("receipt by a key that is not a current home"))?;
+    // A receipt counts only from a current home (§8.5 "Current principal"); one from another
+    // key is a wrong home, `malformed` (§8.5's table).
+    let key = match s.current_principal(&by, Claim::Home, received) {
+        Ok(Principal::Home(m)) => m.request.signing.clone(),
+        _ => return Err(malformed("receipt by a key that is not a current home")),
+    };
     env.verify(&key)
         .map_err(|e| bad_signature(format!("receipt: {e}")))?;
     crate::v05::require(obj == object, "receipt names another object")?;
@@ -2503,9 +2618,11 @@ fn vault_entry(s: &State, e: &Entry) -> Step<State> {
         AuthorityRule::KeyringEntry,
         &mut undecidable,
     )?;
-    let ok = s.current(&e.by).is_some()
-        && !s.suspended(&e.by, e.issued)
-        && (by.has(&Role::Control) || by.has(&Role::Recover))
+    let claim = Claim::Controller {
+        roles: &[Role::Control, Role::Recover],
+        suspended_ok: false,
+    };
+    let ok = s.current_principal(&e.by, claim, e.issued).is_ok()
         && s.retiring
             .as_ref()
             .is_some_and(|r| r.current_at_anchor.contains(&e.by));
@@ -2615,13 +2732,17 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
         .primary
         .as_ref()
         .ok_or_else(|| bad_signature("unsigned entry"))?;
-    // endSessions by the member itself (member rule).
-    if e.kind == "endSessions" {
-        if let Some(m) = s
-            .members
-            .iter()
-            .find(|m| m.request.member_id() == e.by && m.revoked_seq.is_none())
-        {
+    // endSessions by the member itself (member rule). A `by` that names a member must be a
+    // current principal (§8.5): an expired, provisional or revoked member's `endSessions` is
+    // `badSignature`, before its content is looked at.
+    if e.kind == "endSessions" && !s.keyring.controllers.contains_key(&e.by) {
+        let m = match s.current_principal(&e.by, Claim::Member, e.issued) {
+            Ok(Principal::Member(m)) => Some(m),
+            Ok(_) => None,
+            Err(NotCurrent::Absent) => None,
+            Err(n) => return Err(n.failure().into()),
+        };
+        if let Some(m) = m {
             crate::v05::require(
                 e.env.cosignatures.is_empty() && primary.assertion.is_none(),
                 "member rule: raw, one signer",
@@ -2674,7 +2795,11 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
     }
     let signers = e.env.signer_ids();
     for id in &signers {
-        if s.current(id).is_none() || s.suspended(id, e.issued) {
+        let claim = Claim::Controller {
+            roles: &[],
+            suspended_ok: false,
+        };
+        if s.current_principal(id, claim, e.issued).is_err() {
             return Err(bad_signature(
                 "a signer is not current, is suspended or was added provisionally",
             )
