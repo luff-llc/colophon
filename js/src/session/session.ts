@@ -331,10 +331,11 @@ export class ColophonSession {
     this.set({ syncState: { kind: 'syncing' } });
     try {
       const result = await this.worker.exchange(signal);
-      this.set({ homeFaults: result.faults, homeIssues: result.issues, lastSyncedMs: Date.now(), syncState: result.unauthorized ? { kind: 'unauthorized' } : { kind: 'idle' } });
+      this.set({ homeFaults: result.faults, homeIssues: result.issues, lastSyncedMs: Date.now(),
+        syncState: result.unauthorized ? { kind: 'unauthorized' } : result.failed ? { kind: 'error', reason: 'a pass could not finish: the engine was still waiting' } : { kind: 'idle' } });
       if (result.changed || this.phase.kind !== 'ready') await this.refreshKeeping(true);
       else { try { this.apply(await this.worker.currentSnapshot()); } catch { /* the next refresh shows it */ } }
-      return !result.unauthorized;
+      return !result.unauthorized && !result.failed;
     } catch (error) {
       if (error instanceof SessionError && error.code === 'cancelled') { this.set({ syncState: { kind: 'idle' } }); return false; }
       if (error instanceof HomeTransportError) { this.set({ syncState: { kind: 'offline', reason: error.message } }); return false; }

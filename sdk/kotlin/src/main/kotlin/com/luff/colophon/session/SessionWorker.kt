@@ -19,6 +19,7 @@ import com.luff.colophon.CreateParams
 import com.luff.colophon.CreateStage
 import com.luff.colophon.Created
 import com.luff.colophon.ExchangeFaultKind
+import com.luff.colophon.ExchangeStep
 import com.luff.colophon.ExchangeStepKind
 import com.luff.colophon.Home
 import com.luff.colophon.HttpAnswer
@@ -238,7 +239,12 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val custody = memberCustody ?: return
         if (engine.run { it.me() }.kind != StandingKind.MEMBER) return
         val agreements = engine.run { it.beginUnlockEpochs() }
-        if (agreements.isEmpty()) return
+        if (agreements.isEmpty()) {
+            // Revoked/no-readable-namespace members have no finish-unlock step to load records.
+            // The core still requires load before notices/exchange, even when every read is denied.
+            if (!memberOpened) { engine.run { it.load() }; memberOpened = true }
+            return
+        }
         engine.finishUnlockEpochs(custody.answerEpochs(agreements))
         memberOpened = true
     }
@@ -728,7 +734,12 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         configuration.homes.firstOrNull { configured -> home.endpoints.any { it.trim('/') == configured.endpoint.trim('/') } }
 
     class ExchangeResult(var passes: Int = 0, val faults: MutableList<HomeFault> = ArrayList(), val issues: MutableList<HomeIssue> = ArrayList(),
-                         var changed: Boolean = false, var unauthorized: Boolean = false)
+                         var changed: Boolean = false, var unauthorized: Boolean = false,
+                         /** A pass that did not finish (the engine still waited after its one recovery): the exchange failed. */
+                         var failed: Boolean = false)
+
+    /** Tests only: answers `exchange_next` for a home instead of the engine when it returns a step. */
+    @Volatile internal var nextStepOverride: ((String) -> ExchangeStep?)? = null
 
     /**
      * One exchange with every home. The network calls run outside the gate; each engine step and the persistence of
@@ -766,12 +777,17 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                     currentCoroutineContext().ensureActive()
                     if (steps > HomeLimits.STEPS_PER_PASS) { stopped = HomeProblem.TooManySteps(HomeLimits.STEPS_PER_PASS); break@homeLoop }
                     if ((System.nanoTime() - started) / 1_000_000 > exchangeTimeMs) { stopped = HomeProblem.TooSlow((exchangeTimeMs / 1000).toInt()); break@homeLoop }
-                    val step = gated { engine.run { it.exchangeNext(home.id) } }
+                    val step = gated { nextStepOverride?.invoke(home.id) ?: engine.run { it.exchangeNext(home.id) } }
                     when (step.kind) {
                         ExchangeStepKind.DONE -> break
                         // This loop answers every request it is given, so an outstanding one belongs to a pass that was
-                        // interrupted (a cancelled caller): abandon it and run the pass again, once.
-                        ExchangeStepKind.WAITING -> { abortPass(engine, home.id); if (!recovered) { recovered = true; progress = true }; break }
+                        // interrupted (a cancelled caller): abandon it and run the pass again, once. A second `Waiting` after that
+                        // recovery means the pass cannot finish: a failed exchange, never "done".
+                        ExchangeStepKind.WAITING -> {
+                            abortPass(engine, home.id)
+                            if (recovered) { stopped = HomeProblem.StillWaiting; break@homeLoop }
+                            recovered = true; progress = true; break
+                        }
                         ExchangeStepKind.NEED_CALL -> {
                             val need = step.need ?: break
                             try { provideCall(need, home, configured) } catch (e: HomeProblemException) { stopped = e.problem; break@homeLoop }
@@ -811,6 +827,15 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                             if (report.store.isNotEmpty() || report.changes.authorityToSeq != report.changes.authorityFromSeq || report.changes.namespaces.isNotEmpty()) {
                                 result.changed = true; progress = true
                             }
+                            // The core's Unauthorized fault discards the result code. A home's claim about our
+                            // signed call is shown, but only verified records can deny local access or alter keys.
+                            if (answer.status == 403u && request.home == home.id &&
+                                request.headers.any { it.name.equals("authorization", ignoreCase = true) && it.value.startsWith("Colophon ") } &&
+                                Json.obj(answer.body.toString(Charsets.UTF_8))?.string("result") == "refused:revoked") {
+                                stopped = HomeProblem.RemoteCallRefused("refused:revoked")
+                                result.unauthorized = true
+                                break@homeLoop
+                            }
                         }
                     }
                 }
@@ -824,6 +849,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             }
             stopped?.let { problem ->
                 result.issues.add(HomeIssue(home.id, problem))
+                if (problem == HomeProblem.StillWaiting) result.failed = true
                 abortPass(engine, home.id)
             }
         }

@@ -5,7 +5,7 @@
 //   node relay/server.js token               print a new bearer token and its SHA-256
 import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
-import { newToken, startRelay } from './relay.js';
+import { corsOrigins, newToken, startRelay } from './relay.js';
 
 function loadConfig(argv, env) {
   const index = argv.indexOf('--config');
@@ -43,7 +43,19 @@ function loadConfig(argv, env) {
     throw new Error('COLOPHON_RELAY_CLOCK_FILE is a test hook: start the relay with --test-clock to use it, or unset it');
   }
   if (!clockFile && argv.includes('--test-clock')) throw new Error('--test-clock needs COLOPHON_RELAY_CLOCK_FILE');
+  // Origins a browser page may reach this relay from: COLOPHON_RELAY_CORS_ORIGINS (comma
+  // separated) or cors.origins in the config file. Default none: no CORS header is sent. A bad
+  // entry refuses start-up (checked again by createRelay).
+  const corsEnv = env.COLOPHON_RELAY_CORS_ORIGINS;
+  const origins = corsEnv !== undefined
+    ? (corsEnv.trim() === '' ? [] : corsEnv.split(',').map((o) => o.trim()))
+    : config.cors?.origins;
+  if (config.cors !== undefined && (config.cors === null || typeof config.cors !== 'object' || Array.isArray(config.cors))) {
+    throw new Error('cors in the config file must be an object: {"origins": ["https://app.example"]}');
+  }
+  corsOrigins(origins);
   return {
+    cors: { origins: origins ?? [] },
     home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
     clock: clockFile ? () => Number(readFileSync(clockFile, 'utf8').trim()) : undefined,
     tracing: Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1',

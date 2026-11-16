@@ -131,6 +131,49 @@ the machine, never bundled or redistributed:
 | Android Gradle Plugin | 8.7.3 | Library AAR at compileSdk 35 / minSdk 33, matching Gradle 8.14.3. |
 | Kotlin | 2.2.21 | Same pin as the JVM bindings. |
 | JUnit 4.13.2 / AndroidX Test 1.6.x | — | JVM unit tests and the instrumented emulator journey. |
+| `com.google.zxing:core` | 3.5.3 | Apache-2.0. The Android test app only (`apps/test-android`): encodes and decodes the pairing QR codes (Android has no platform QR API). Not in the SDK or the AAR. |
+| `androidx.test:core` | 1.6.1 | Apache-2.0, part of AndroidX Test 1.6.x. The Android test app's instrumented UI test (`ActivityScenario`). |
+
+### Passkeys on Android, and what they pull (resolved for `apps/test-android`, release runtime and instrumented tests)
+
+`sdk/android` and the Android test app depend on Credentials and its Play Services adapter for passkeys (Credential
+Manager with PRF). Gradle resolves this graph for the app (`:app:dependencies`, 2026-11-16). **The Play Services
+artefacts and GoogleID are under the Android Software Development Kit License, not an open-source licence**: they are
+proprietary Google binaries the passkey path needs on devices with Google Play services. The owner accepted them on
+16 November 2026.
+
+| Dependency | Version | Licence | Why |
+| --- | --- | --- | --- |
+| `androidx.credentials:credentials` | 1.5.0 | Apache-2.0 | Credential Manager: passkey registration and assertions with PRF. Direct (SDK and app). |
+| `androidx.credentials:credentials-play-services-auth` | 1.5.0 | Apache-2.0 | The Credential Manager provider adapter for Google Play services. Direct (SDK and app). |
+| `com.google.android.gms:play-services-auth` | 21.1.1 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter. |
+| `com.google.android.gms:play-services-fido` | 21.0.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter (FIDO2, passkeys). |
+| `com.google.android.gms:play-services-identity-credentials` | 16.0.0-alpha02 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter. |
+| `com.google.android.gms:play-services-auth-blockstore` | 16.4.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter. |
+| `com.google.android.gms:play-services-auth-api-phone` | 18.0.2 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by `play-services-auth`. |
+| `com.google.android.gms:play-services-auth-base` | 18.0.10 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by `play-services-auth`. |
+| `com.google.android.gms:play-services-base` | 18.5.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the Play Services artefacts above. |
+| `com.google.android.gms:play-services-basement` | 18.4.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the Play Services artefacts above. |
+| `com.google.android.gms:play-services-tasks` | 18.2.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the Play Services artefacts above. |
+| `com.google.android.libraries.identity.googleid:googleid` | 1.1.0 | Android SDK License: accepted by the owner, 16 November 2026: not open source | Pulled by the adapter (Sign in with Google; unused here). |
+| `androidx.biometric:biometric` | 1.1.0 | Apache-2.0 | Pulled by Credentials. |
+| `androidx.core:core`, `core-ktx` | 1.15.0 | Apache-2.0 | Pulled by Credentials. |
+| `androidx.annotation:annotation` 1.8.1, `annotation-experimental` 1.4.1; `androidx.activity:activity` 1.5.1; `androidx.appcompat:appcompat` and `appcompat-resources` 1.2.0; `androidx.arch.core:core-common`, `core-runtime` 2.2.0; `androidx.collection:collection` 1.4.2; `androidx.concurrent:concurrent-futures` 1.1.0; `androidx.cursoradapter` 1.0.0; `androidx.customview` 1.0.0; `androidx.drawerlayout` 1.0.0; `androidx.fragment:fragment` 1.5.7; `androidx.interpolator` 1.0.0; `androidx.lifecycle:*` 2.6.2; `androidx.loader` 1.0.0; `androidx.profileinstaller` 1.3.0; `androidx.savedstate` 1.2.1; `androidx.startup:startup-runtime` 1.1.1; `androidx.tracing:tracing` 1.2.0; `androidx.vectordrawable:*` 1.1.0; `androidx.versionedparcelable` 1.1.1; `androidx.viewpager` 1.0.0 | as listed | Apache-2.0 | AndroidX libraries pulled by Credentials, Biometric and the Play Services artefacts. |
+| `com.google.guava:listenablefuture` | 1.0 | Apache-2.0 | Pulled by AndroidX. |
+| `org.jetbrains:annotations` | 23.0.0 | Apache-2.0 | Pulled by Kotlin. |
+| `org.jetbrains.kotlin:kotlin-stdlib-jdk7` 1.9.0, `kotlin-stdlib-jdk8` 1.8.0 | as listed | Apache-2.0 | Empty compatibility artefacts pulled by older AndroidX POMs. |
+
+Instrumented tests of the Android test app only (never in the APK):
+
+| Dependency | Version | Licence |
+| --- | --- | --- |
+| `androidx.test:runner` | 1.6.2 | Apache-2.0 |
+| `androidx.test.ext:junit` | 1.2.1 | Apache-2.0 |
+| `androidx.test:monitor` | 1.7.2 | Apache-2.0 |
+| `androidx.test.services:storage` | 1.5.0 | Apache-2.0 |
+| `androidx.concurrent:concurrent-futures-ktx` | 1.1.0 | Apache-2.0 |
+| `junit:junit` | 4.13.2 | EPL-1.0 |
+| `org.hamcrest:hamcrest-core` | 1.3 | BSD-3-Clause |
 
 ## Implemented dependency pins (0.3)
 

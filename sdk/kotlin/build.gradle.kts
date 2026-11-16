@@ -27,3 +27,12 @@ tasks.test {
     }
 }
 tasks.wrapper { distributionType = Wrapper.DistributionType.BIN }
+
+// Test-only main, launched directly by Bun (no Gradle process between its stdin/stdout and the test).
+tasks.register("crossDeviceClasspath") {
+    dependsOn(tasks.testClasses)
+    doLast {
+        layout.buildDirectory.file("cross-device-classpath.txt").get().asFile
+            .writeText(sourceSets["test"].runtimeClasspath.asPath)
+    }
+}

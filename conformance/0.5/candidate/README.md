@@ -1,7 +1,7 @@
 # Colophon 0.5 candidate vectors
 
 **Status: hand-built for review; replayed by the Rust engine, not by the Swift source.** These files go with
-[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 13. The Rust history verifier replays them (`crates/colophon-core/tests/v05_candidate.rs`); no
+[spec/colophon-0.5.md](../../../spec/colophon-0.5.md), revision 17 (the cases listed under "Revision 17" in "Required for freeze" are still to be built). The Rust history verifier replays them (`crates/colophon-core/tests/v05_candidate.rs`); no
 Swift implementation has. Every `expected` outcome is the spec author's reading of the text. The bytes are
 real: `/5` bodies are canonical JSON, and every signature verifies under ordinary ES256 (raw, or
 WebAuthn over `authenticatorData ‖ SHA-256(clientData)` with the challenge checked), except
@@ -146,6 +146,31 @@ Normative for spec §21 condition 1.
 - **Finality:** `final` entries, revoked witnesses, a full set finalizing earlier activations, rule-1 conflicts with and without a primary head.
 - **Vault:** retiring, rotation, self-slots, `rekey` by a recover key.
 - **Exchange:** the pending listing (§14) and its cursors, against a simulated home.
+- **Revision 17** (the freeze package, cut; generators `cases_freeze_*.rs`, home and interface tests
+  where no vector can hold the case):
+  - the layout door (§8.2, §20): a raise to layout 3 (`newerFormat`, the reader stopped once final);
+    a `layout` component that does not raise (void, `malformed`); a raise without the recovery set's
+    consent (`badSignature`); an entry after a final raise (not applied); a provisional raise that a
+    `vetoed` displaces (nothing stops; the history goes on); a provisional raise not yet final (the
+    reader goes on, applying nothing of the later layout); in an account with no home, a raise final
+    at once;
+  - a stopped reader (§1): its calls `unavailable` with fresh heads before the stop; no head
+    accepted; no new record admitted;
+  - the stopped home (§13.6): one home test per row of the table (keeps and serves, forwards,
+    receipts a veto and a removal-only transition anchored at or before N, and each "must not"),
+    and a 0.5 home witnessing a provisional raise and recording its `vetoed`;
+  - the current principal (§8.5): an expired member's `endSessions` and a provisional member's
+    `endSessions` are `badSignature`, with or without an unknown field; a current member's with an
+    unknown field is `newerFormat`;
+  - the confirmed pairing (§9.1, interface tests): an approval without a token, with a token spent
+    once already, with a token for another account, and with a token for another key are refused;
+    the code path and the scan path (the canonical request envelope) each issue one;
+  - homes at `headQuorum` 2 converge to `final` in the order that deadlocked before PR 28's fix
+    (a peer's head arriving before the home's own head is forwarded), reliably, with the two
+    intermittent relay tests (`crates/colophon-home-wasm/tests/v05_relay_home.rs`) passing every
+    run;
+  - Swift (§16.3): an envelope at seq 0, readable or not, is ignored and a valid predecessor stays
+    valid.
 
 ## Still missing: these need an engine (implementation plan, step V1)
 

@@ -13,9 +13,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+source_hash="$(bash scripts/apple-provenance.sh "$PWD" hash)"
 root="${APPLE_TARGET_ROOT:-${CARGO_TARGET_DIR:-$PWD/target}/apple}"
 tc=()
-if [[ -n "${APPLE_TOOLCHAIN:-}" ]]; then tc=("+$APPLE_TOOLCHAIN"); fi
+cargo_cmd=(cargo)
+if [[ -n "${APPLE_TOOLCHAIN:-}" ]]; then
+  tc=(--toolchain "$APPLE_TOOLCHAIN")
+  cargo_cmd=(rustup run "$APPLE_TOOLCHAIN" cargo)
+fi
 # The host build for the bindings uses the same toolchain; its target dir is the caller's.
 if [[ -n "${APPLE_TOOLCHAIN:-}" ]]; then export RUSTUP_TOOLCHAIN="$APPLE_TOOLCHAIN"; fi
 LANGUAGES=swift bash scripts/generate-bindings.sh
@@ -27,34 +32,39 @@ cp swift/Sources/ColophonKit/Generated/ColophonFFI.h "$staging/"
 cp swift/Sources/ColophonKit/Generated/ColophonFFI.modulemap "$staging/module.modulemap"
 args=()
 for target in aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim; do
-  if ! rustup ${tc[@]+"${tc[@]}"} target list --installed | grep -qx "$target"; then
-    rustup ${tc[@]+"${tc[@]}"} target add "$target"
+  if ! rustup target list --installed ${tc[@]+"${tc[@]}"} | grep -qx "$target"; then
+    rustup target add "$target" ${tc[@]+"${tc[@]}"}
   fi
   # One target directory per slice, and no MACOSX_/IPHONEOS_DEPLOYMENT_TARGET: on macOS 27
   # those variables also reach the host proc-macro link and produce dylibs dyld refuses to
   # load ("mis-aligned LINKEDIT string pool"). The toolchain's default minimums (macOS 11,
   # iOS 14 or lower) are below the SDK's floors, so the static slices link cleanly into apps.
   CARGO_TARGET_DIR="$root/$target" \
-    cargo ${tc[@]+"${tc[@]}"} build --locked -p colophon-ffi --release --target "$target"
+    "${cargo_cmd[@]}" build --locked -p colophon-ffi --release --target "$target"
   args+=(-library "$root/$target/$target/release/libcolophon_ffi.a" -headers "$staging")
 done
 if [[ "${SKIP_VISIONOS:-0}" != 1 ]]; then
   nightly="${VISIONOS_TOOLCHAIN:-nightly}"
   if ! rustup run "$nightly" rustc --version >/dev/null 2>&1 || \
-     [[ ! -d "$(rustc +"$nightly" --print sysroot)/lib/rustlib/src/rust/library" ]]; then
+     [[ ! -d "$(rustup run "$nightly" rustc --print sysroot)/lib/rustlib/src/rust/library" ]]; then
     rustup toolchain install "$nightly" --component rust-src
   fi
   for target in aarch64-apple-visionos aarch64-apple-visionos-sim; do
     if [[ "$target" == *-sim ]]; then sdk=xrsimulator; else sdk=xros; fi
     SDKROOT="$(xcrun --sdk "$sdk" --show-sdk-path)" XROS_DEPLOYMENT_TARGET=26.0 \
-      CARGO_TARGET_DIR="$root/$target" cargo +"$nightly" build --locked -Zbuild-std=std,panic_abort \
+      CARGO_TARGET_DIR="$root/$target" rustup run "$nightly" cargo build --locked -Zbuild-std=std,panic_abort \
         -p colophon-ffi --release --target "$target"
     args+=(-library "$root/$target/$target/release/libcolophon_ffi.a" -headers "$staging")
   done
 fi
+# Refuse to attest to slices built while their sources changed.
+[[ "$source_hash" == "$(bash scripts/apple-provenance.sh "$PWD" hash)" ]] || { echo 'build-apple: sources changed during build' >&2; exit 1; }
 # Only replace a previous artifact after all slices built successfully.
 rm -rf "$out/ColophonFFI.next.xcframework"
 xcodebuild -create-xcframework "${args[@]}" -output "$out/ColophonFFI.next.xcframework"
+rm -f "$out/ColophonFFI.source-hash"
 rm -rf "$out/ColophonFFI.xcframework"
 mv "$out/ColophonFFI.next.xcframework" "$out/ColophonFFI.xcframework"
+printf '%s\n' "$source_hash" > "$out/ColophonFFI.source-hash"
+echo "build-apple: recorded source hash $source_hash"
 du -sh "$out/ColophonFFI.xcframework"
