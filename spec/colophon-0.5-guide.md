@@ -1,6 +1,7 @@
 # Colophon 0.5: guide
 
-**Non-normative.** Rationale, host wording and history for [colophon-0.5.md](colophon-0.5.md).
+**Non-normative.** Rationale, host wording and history for [colophon-0.5.md](colophon-0.5.md),
+frozen as 0.5 on 2026-11-16.
 Where this guide and the specification differ, the specification wins. Nothing here is a rule a
 verifier applies.
 

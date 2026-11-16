@@ -1,8 +1,8 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 17, for review, 2026-11-15.** Not frozen, not
-implemented, not released, and no version number has been changed anywhere. Revision 2
-answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
+**Status: frozen, 0.5, 2026-11-16.** The text is revision 17, the final candidate of
+2026-11-15. §21 lists the freeze conditions. History of the revisions: revision 2 answered
+two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
 transitions with veto (§8.7); revision 5 answers two reviews of revision 4 (4032d44) by finishing
 that mechanism's state model; revision 6 answers two reviews of revision 5 (a1decc6) and the
@@ -37,7 +37,7 @@ through a confirmed pairing (§9.1), one current-principal check (§8.5), the up
 small fixes, the home rules the merged and pending home code follows (§13.1, §13.3, §14), the limits
 of 0.5 and what is open at the freeze (§20, §21). The rest of revision 16 is deferred to 0.6, behind the door (changes §A.12,
 [the design](../docs/design-freeze-package.md) "Deferred to 0.6"); the code follows.
-The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
+The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It is normative from the freeze (§21).
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
 [colophon-0.5-guide.md](colophon-0.5-guide.md).

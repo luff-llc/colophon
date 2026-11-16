@@ -1,17 +1,11 @@
-//! Colophon 0.5 (candidate, revision 6): the foundation layers.
+//! Colophon 0.5, frozen 2026-11-16 (`spec/colophon-0.5.md`).
 //!
-//! **Not released, not frozen.** This module implements the parts of
-//! `spec/colophon-0.5.md` that the reviewers consider stable: canonical encoding (§2),
-//! identifiers and descriptors (§3, §5, §6.1, §6.3), signatures including WebAuthn (§4),
-//! member and grant shapes with terms (§9, §10), `/5` operation headers (§11.2–§11.5 as far as
-//! they need no namespace key rotation) and calls (§12) as a pure function over a given view.
+//! Canonical encoding (§2), keys and signatures (§3, §4), the authority history verifier and its
+//! write side (§8), vaults, slots and pairing (§7), members, terms and records (§9 to §11), calls
+//! and heads (§12, §13), homes (§13, `history::home`), upgrade and succession (§15, §16) and the
+//! account engine. See `spec/colophon-0.5-implementation-notes.md`.
 //!
-//! Deliberately **not** here: authority replay (§8.5), pending transitions (§8.7), conflict and
-//! fork classification (§8.6), upgrade (§16.1) and succession (§15, §16.2–§16.3). The call
-//! pipeline takes "is this controller pending addition or removal" as an input instead of
-//! computing it. See `spec/colophon-0.5-implementation-notes.md`.
-//!
-//! The 0.4 engine is untouched. This module shares only the strict duplicate-refusing JSON
+//! The 0.4 engine is kept beside it. This module shares only the strict duplicate-refusing JSON
 //! parser (`keys::strict_json`) and the `p256`, `sha2`, `base64` and `aes-gcm` primitives.
 
 pub mod account;
