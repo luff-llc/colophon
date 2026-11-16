@@ -67,6 +67,7 @@ const open = (src, who_ = who()) => w.AccountEngine.open(src, listing(), who_, c
 const engine = open(new Source());
 check(engine.open_info().mode === w.OpenMode.Cold, "engine over a JS source");
 check(engine.identity().kind === w.AccountIdentityKind.Controller && engine.identity().id === id, "the identity is a record");
+check(engine.status().stopped === undefined, "a status that is not stopped has no stop");
 
 // An unlock from the host's ECDH result, then begin_* and finish, then a replay refused as Consumed.
 const slot = engine.slots()[0];

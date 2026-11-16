@@ -193,6 +193,22 @@ authenticator_data, client_data, WebauthnMode)`, `account_verify_swift_predecess
 `account_webauthn_prf_input`, `account_vault_public`, `account_format_date`, `account_request_info`,
 `account_default_policy`.
 
+### A stopped account
+
+When an activation raising the account's layout above 2 becomes final in the history this engine verified (spec §1
+"A stop", §20), or an authority entry is judged `newerFormat`, `status()` keeps reporting the verdict's `code`
+(`newerFormat`) and sets `stopped: AccountStop { seq, layout }`: the raising activation's seq and the layout it names
+(`layout` is none for an entry of a newer format that is not a raise). It is a stable state of the account, not a
+fault, and a function of the held objects: an engine reopened from its files, from `SavedState` or from a
+checkpoint reports the same. A raise that is still provisional, or that a `vetoed` displaced, stops nothing.
+
+A stopped engine keeps reading what it holds, as of the stop: `members`, `controllers`, `view_json`, `query_json`,
+blobs, `slots` and the unlock calls. It builds nothing new, and refuses before any signature is asked for: every
+`begin_*` that writes authority or records, `transfer_seed`, `accept_seed_transfer` and the move steps return
+`NewerFormat`; `begin_link`, `begin_call`, `exchange_next` and `exchange_begin_call` return `Unavailable` (§12.3 step
+4). `record_due` records the activate that makes a raise final (before that a 0.5 reader records it as any
+activation, §13.6) and nothing after it. The sessions show this as their stopped phase.
+
 ### Key descriptors and controllers
 
 One encoding on the whole surface, input and output: `KeyDescriptorView` is the protocol descriptor of §3.1
@@ -520,7 +536,8 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `SlotController` | `id: String`, `label: String` | A controller a slot names. |
 | `SlotInfo` | `index: u64`, `kind: SlotKind`, `kind_raw: optional<String>`, `label: String`, `controllers: list<SlotController>` | One slot of the current vault, as a chooser shows it. |
 | `SlotPlan` | `controllers: list<String>`, `label: String` | What a slot is built for: its controllers and label. |
-| `Status` | `seq: u64`, `code: String`, `kind: StatusKind`, `reason: optional<String>`, `stop_seq: optional<u64>`, `detail: optional<String>`, `rollback: bool` | The verdict on the verified history. |
+| `Status` | `seq: u64`, `code: String`, `kind: StatusKind`, `reason: optional<String>`, `stop_seq: optional<u64>`, `detail: optional<String>`, `rollback: bool`, `stopped: optional<AccountStop>` | The verdict on the verified history. `stopped` is set when this reader is stopped for the account (§1 "A stop"): a verified state, not a fault (see "A stopped account" in §2). |
+| `AccountStop` | `seq: u64`, `layout: optional<u64>` | Where a reader stopped: the seq of the activation whose final raise stopped it (or of the entry it judged `newerFormat`), and the layout the raise names (none for an entry of a newer format that is not a raise). Only from the verified history, never from a home's answer. |
 | `EntryChange` | `seq: u64`, `kind: String` | An entry that joined the verified branch. |
 | `NamespaceRevision` | `namespace: String`, `revision: u64` | A namespace whose fold changed, with its new revision. |
 | `RefusedHead` | `home: String`, `code: String` | A head a home sent that was refused. |

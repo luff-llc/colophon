@@ -16731,6 +16731,50 @@ public object FfiConverterTypeAccountSigningStep: FfiConverterRustBuffer<Account
 
 
 /**
+ * Where a reader stopped (§1 "A stop", §20): the seq of the activation whose final raise
+ * stopped it (or of the entry it judged `newerFormat`), and the layout the raise names
+ * (none for an entry of a newer format that is not a raise). Only from the verified
+ * history, never from a home's answer.
+ */
+data class AccountStop (
+    val `seq`: kotlin.ULong
+    , 
+    val `layout`: kotlin.ULong?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAccountStop: FfiConverterRustBuffer<AccountStop> {
+    override fun read(buf: ByteBuffer): AccountStop {
+        return AccountStop(
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AccountStop) = (
+            FfiConverterULong.allocationSize(value.`seq`) +
+            FfiConverterOptionalULong.allocationSize(value.`layout`)
+    )
+
+    override fun write(value: AccountStop, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`seq`, buf)
+            FfiConverterOptionalULong.write(value.`layout`, buf)
+    }
+}
+
+
+
+/**
  * Facts about a prepared action.
  */
 data class ActionInfo (
@@ -21834,6 +21878,14 @@ data class Status (
     val `detail`: kotlin.String?
     , 
     val `rollback`: kotlin.Boolean
+    , 
+    /**
+     * Set when this reader is stopped for the account (§1 "A stop"): a verified state, not a
+     * fault. The account was moved to a newer format; what this device holds stays
+     * readable and nothing new is built (writes `NewerFormat`, calls and exchange passes
+     * `Unavailable`).
+     */
+    val `stopped`: AccountStop?
     
 ){
     
@@ -21857,6 +21909,7 @@ public object FfiConverterTypeStatus: FfiConverterRustBuffer<Status> {
             FfiConverterOptionalULong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeAccountStop.read(buf),
         )
     }
 
@@ -21867,7 +21920,8 @@ public object FfiConverterTypeStatus: FfiConverterRustBuffer<Status> {
             FfiConverterOptionalString.allocationSize(value.`reason`) +
             FfiConverterOptionalULong.allocationSize(value.`stopSeq`) +
             FfiConverterOptionalString.allocationSize(value.`detail`) +
-            FfiConverterBoolean.allocationSize(value.`rollback`)
+            FfiConverterBoolean.allocationSize(value.`rollback`) +
+            FfiConverterOptionalTypeAccountStop.allocationSize(value.`stopped`)
     )
 
     override fun write(value: Status, buf: ByteBuffer) {
@@ -21878,6 +21932,7 @@ public object FfiConverterTypeStatus: FfiConverterRustBuffer<Status> {
             FfiConverterOptionalULong.write(value.`stopSeq`, buf)
             FfiConverterOptionalString.write(value.`detail`, buf)
             FfiConverterBoolean.write(value.`rollback`, buf)
+            FfiConverterOptionalTypeAccountStop.write(value.`stopped`, buf)
     }
 }
 
@@ -27397,6 +27452,38 @@ public object FfiConverterOptionalTypeAccountMember: FfiConverterRustBuffer<Acco
         } else {
             buf.put(1)
             FfiConverterTypeAccountMember.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeAccountStop: FfiConverterRustBuffer<AccountStop?> {
+    override fun read(buf: ByteBuffer): AccountStop? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeAccountStop.read(buf)
+    }
+
+    override fun allocationSize(value: AccountStop?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeAccountStop.allocationSize(value)
+        }
+    }
+
+    override fun write(value: AccountStop?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeAccountStop.write(value, buf)
         }
     }
 }
