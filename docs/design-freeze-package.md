@@ -1,61 +1,83 @@
 # Colophon 0.5: the freeze package (design)
 
-Status: design for review, 2026-11-15. Nothing here is built. The spec text is revision 16 of
-[`spec/colophon-0.5.md`](../spec/colophon-0.5.md), mapped in
-[`spec/colophon-0.5-changes.md`](../spec/colophon-0.5-changes.md) §A.12, rows 159 to 190, each
+Status: design, revised once after the independent check of 2026-11-15 (11 High, 6 Medium, 1 Low;
+the spec owner's decisions on each are applied below and listed in §15). Nothing here is built. The
+spec text is revision 16 of [`spec/colophon-0.5.md`](../spec/colophon-0.5.md), mapped in
+[`spec/colophon-0.5-changes.md`](../spec/colophon-0.5-changes.md) §A.12, rows 159 to 197, each
 marked "code follows in the freeze package". Base: `spec-0.5` at `9027b98`.
 
 **The one idea.** When a 0.5 implementation meets something it does not understand, the result is
 "update me" (`newerFormat`), never "this is broken" (`malformed`, `badSignature`,
-`invalidPayload`), and never silent acceptance of something that could change a verdict. Each
-item below is that idea applied to one place, in its smallest sound form.
+`invalidPayload`), and never silent acceptance of something that could change a verdict. Two rules
+govern every judgement call: **never widen who can stop a device**, and **an older reader may say
+"update me" where a newer one decides, but never decides differently.**
 
 **Sources.** The consolidated list of 2026-11-15, the Opus and Daybreak freeze reviews of
 revision 15, the domains survey (`docs/roadmap-domains-as-plugins.md` on `docs-0.6-domains`),
-the three Low findings of the E12 check, and the owed sentence from the home package. Every
-place this design chooses differently from a review is in §12.
+the three Low findings of the E12 check, the owed sentence from the home package, the test apps'
+report on joining by camera, and the independent check of this design.
 
 ## 0. Summary
 
 | Item | Existing vectors that change verdict | Size | Risk |
 | --- | --- | --- | --- |
-| F1 Unknown content, one rule | `rules/t-grant-component-extra-field` (`malformed` → `newerFormat`) | M | Medium: 27 closed parses and eight places that ignore unknown content today |
-| F2 Unknown kinds and components signed another way | none | S | Medium: who can stop a device (§2.4) |
+| P Member approval consumes a confirmed pairing (a live defect) | none (interface) | M | High until fixed: today a relay can substitute a member key |
+| F1 Unknown content, one rule | `rules/t-grant-component-extra-field` (`malformed` → `newerFormat`) | M | Medium: 27 closed parses, eight places that ignore unknown content today |
+| F2 Current principal; unknown kinds stay under the control rule | none (inputs: an expired or provisional member's `endSessions`, `ok`/`newerFormat` → `badSignature`) | S | Low |
+| S Stops: a stopped reader trusts nothing new; the stopped home | none | S–M | Medium: the stopped-home table must be built exactly |
 | F3 The upgrade door (`layout`) | `upgrade/then-v5-layout` (0.5: `ok` → `malformed`, regenerated as two cases) | S | Low |
-| F4 Limits that can be raised; `policy.witnessWindow` | `records/revoke-17-heads`, `succession/authority5-chain-17` (`malformed` → `newerFormat`) | M | Medium: the window threads through every timing rule |
-| F5 Namespaces after genesis; live state beyond one module | none | S–M | Low |
-| F6 One member's unknown term stops only that member | none | L | High: needs the frozen contract of §6.3 |
-| F7 A home's address can change | none | S | Low |
-| F8 A device with nothing gets the history (invites); "not yet a member" | none | S–M | Medium: a bearer credential in a QR code |
+| F4 Limits that can be raised, invariants first; `policy.witnessWindow` | `records/revoke-17-heads`, `succession/authority5-chain-17` (`malformed` → `newerFormat`) | M | Medium: the window threads through every timing rule |
+| F5 Namespaces after genesis (control rule); a normative one-entry live registry | none | S–M | Low |
+| F6 Opaque members, narrow form: only new term fields are member-local | none | M | Medium: rests on the promise of §6 |
+| F7 A home's address can change: signed location statements | none | M | Low |
+| F8 A device with nothing gets the authority chain (invites); `refused:notGranted` | none | S–M | Medium: a bearer credential in a QR code |
 | R Reservations | none | S | Low |
 | L Three Low findings, the owed home sentence, stated limits | none (a Swift predecessor with a readable seq-0 envelope goes `ok` → `malformed`; no vector has one) | S | Low |
 
-Four existing vectors change, each listed with its item. Every other change of verdict is on an
-input no vector holds today; those are listed per item under "Inputs whose verdict changes".
+**Existing vectors that change verdict:** exactly four, unchanged by the revision:
+`rules/t-grant-component-extra-field` (F1), `upgrade/then-v5-layout` (F3),
+`records/revoke-17-heads` and `succession/authority5-chain-17` (F4). Every other change of verdict
+is on an input no vector holds today; each item lists them.
 
-### Order of work and what runs in parallel
+### Order of work: dispatchable streams
 
-The verifier changes fall into three disjoint file sets. Each stream adds its vectors in its own
-generator file (`crates/colophon-core/tests/v5_candidate/cases_freeze_<stream>.rs`) so the
-generator never conflicts.
+**W0 (one commit, before wave 1, by whoever dispatches).** Add the empty generator files
+`crates/colophon-core/tests/v5_candidate/cases_freeze_{authority,swift,records,calls,home}.rs` and
+their `mod` lines in `crates/colophon-core/tests/v5_candidate.rs`. After W0 no stream edits
+`v5_candidate.rs`; each writes only its own generator file and the conformance directories it
+generates. No file belongs to two streams of one wave. A stream starts when everything it depends on
+is merged into `spec-0.5`.
 
-| Wave | Stream | Items | Files | Depends on |
-| --- | --- | --- | --- | --- |
-| 1 | **A. Authority** | F1 (authority sites), F3, F2, F4, F5 (namespaces), F6 (grant side), L1 | `history/state.rs`, `history/keyring.rs`, `history/succession.rs`, `history/home.rs` (receipt site), `slots.rs`, `members.rs`, `terms.rs`, `prescan.rs`, `descriptor.rs`, `heads.rs` | — |
-| 1 | **B. Records and live** | F1 (header, stamp, plaintext), F5 (live, `colophon.` kinds), the fold rules of F1 and F6 | `records.rs`, `live.rs`, `protocol.rs` | the field `MemberRecord.opaque` (name fixed here; A adds it, B reads it, defaulting to `false` until A lands) |
-| 1 | **E. Small** | L3 (Swift seq 0), L2 (prepare-time check) | `history/swift.rs`, `account/action.rs` | — |
-| 2 | **C. Calls** | F1 (signer), F6 (calls), F8 (invite links, `notGranted`), R (no-home rule, reserved principals) | `calls.rs`, `write/calls.rs` | A (opaque flag, policy) |
-| 2 | **D. Home and exchange** | F1 (home storage), F4 (window at the home), F7, R (refusals, `layouts`, `ext/`) | `colophon-home-wasm/src/ops.rs`, `engine/paths.rs`, `engine/exchange.rs`, `history/home.rs` (clock and admission), `relay/home.js` | A (window), B (stable header parse) |
-| 3 | **F. Write side, exports, SDKs** | builders, write fence, surfacing, F8 invites and §7.3 pairing in the session layers | `write/*.rs`, `account/*.rs`, `colophon-ffi/src/v05/api/*`, Swift, Kotlin, JS | A, B, C |
+Common acceptance for every Rust stream (private `CARGO_TARGET_DIR`, Rust 1.99.1):
+`cargo test -p colophon-core --test v05_candidate`, `cargo test -p colophon-core --test
+v5_candidate -- --ignored v5_generator_check`, `cargo test -p colophon-core`, `cargo clippy -p
+colophon-core --all-targets -- -D warnings`. Listed below: the stream's own extra commands.
 
-Inside stream A the order is fixed because every item touches `history/state.rs`: F1 first (it
-changes how unknown content is collected), then F3 (one state field), F2 (the signer rule of
-unknown kinds), F4 (caps and the window), F5, F6 last. At most three builders at once: A, B and E
-in wave 1; C and D in wave 2; F alone.
+**Wave 1** (member approval and the current-principal fix first, as the owner asked).
 
-The checkpoint format (`engine/checkpoint.rs`, §17.2) gains three fields (the layout, the declared
-namespaces in order, and per member `opaque`); it bumps once, in stream A, and B and C read the
-fields through `State` accessors.
+| Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
+| --- | --- | --- | --- | --- | --- |
+| **W1-P Approval** | `crates/colophon-core/src/v05/pairing.rs`, `crates/colophon-core/src/v05/account/action.rs`, `crates/colophon-core/src/v05/write/authority.rs`, `crates/colophon-ffi/src/v05/api/pairing.rs`, `crates/colophon-ffi/src/v05/api/engine.rs`, `crates/colophon-ffi/src/v05/api/action.rs`, `crates/colophon-ffi/src/v05/surface-names.txt`, generated bindings (`swift/Sources/ColophonKit/Generated/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/colophon_ffi.kt`), `swift/Sources/ColophonSession/*`, `swift/Sources/ColophonSessionUI/*`, `swift/Tests/ColophonSessionTests/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/*`, `js/src/session/*`, `js/src/index.ts`, `js/scripts/smoke.mjs`, `playground/src/*`, `examples/ColophonSample/*`, new `crates/colophon-core/tests/v05_freeze_approval.rs` | W0 | P (§P), L2 | none in `conformance/` (an interface rule); tests: approve without a token refused; a token for another key refused; a token spent twice refused; the code path and the scan path each issue one | `cargo test -p colophon-core --test v05_freeze_approval`, `cargo test -p colophon-ffi`, `swift test`, `cd sdk/kotlin && ./gradlew test`, `cd js && npm test`, `cd playground && npm test` |
+| **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/keyring.rs`, `history/succession.rs`, `history/mod.rs`, `slots.rs`, `members.rs`, `terms.rs`, `prescan.rs`, `descriptor.rs`, `heads.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/candidate/{rules,heads,succession,upgrade}/` directories it generates (and the four regenerated vectors) | W0 | first commit F2 (current principal); then F1 authority rows, F3, F4 (verifier, invariants, the window), F5 (declaring), F6 (grant side, `MemberRecord.opaque`), S (the stopped flag `Verdict::stopped`), L1 | §1.5 `rules/`, `heads/`, `succession/` rows; §2.3; §3.4; §4.4; §5.4 `rules/` rows; §6.7 `rules/` rows | — |
+| **W1-C Swift** | `crates/colophon-core/src/v05/history/swift.rs`, `tests/v5_candidate/cases_freeze_swift.rs` | W0 | L3 | `succession/swift-seq-zero` | — |
+
+**Wave 2** (after W1-A merges: it fixes `MemberRecord.opaque`, the stopped flag, the current-principal
+helper and the checkpoint).
+
+| Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
+| --- | --- | --- | --- | --- | --- |
+| **W2-R Records and live** | `crates/colophon-core/src/v05/records.rs`, `live.rs`, `protocol.rs`, `tests/v5_candidate/cases_freeze_records.rs`, `conformance/0.5/candidate/records/` | W1-A | F1 rows 1–5, §1.3, F5 (registry, `colophon.` kinds), F6 (records), S (records held when stopped) | §1.5, §5.4, §6.7 `records/` rows | — |
+| **W2-C Calls, invites, locations** | `crates/colophon-core/src/v05/calls.rs`, `write/calls.rs`, `v05/mod.rs`, new `v05/invite.rs`, new `v05/location.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/candidate/{calls,pairing}/` | W1-A | F1 row 22 (signer bound by `key`), F6 (calls), F8 (invite links and object, `notGranted`), F7 (statement parse and verify), S (stopped → `unavailable`), R (no-home option) | §1.5, §6.7, §7.4, §7a `calls/` and `pairing/` rows | — |
+
+**Wave 3** (after wave 2).
+
+| Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
+| --- | --- | --- | --- | --- | --- |
+| **W3-H Home and exchange** | `crates/colophon-home-wasm/src/*`, `crates/colophon-core/src/v05/history/home.rs`, `engine/paths.rs`, `engine/exchange.rs`, `relay/*`, `tests/v5_candidate/cases_freeze_home.rs`, new `crates/colophon-core/tests/v05_freeze_home.rs` | W2-R (`parse_stable`), W2-C (invite, location) | F1 home storage and the home's receipt site, the stopped home (§13.6), W at the home, F7 (statements stored, forwarded, served; calls only to verified bases), F8 (invite paths at the home; `join_from_invite`), R (refusals, retry signal, `layouts`, `ext/`) | home tests: each row of §13.6's table; location monotonic and rollback; invite refused on `/pending`; `ext/` 412 | `cargo test -p colophon-home-wasm`, `cargo test -p colophon-core --test v05_freeze_home --test v05_home --test v05_engine_home`, `cd relay && npm test` |
+| **W3-G Write side, exports, SDK surfacing** | `crates/colophon-core/src/v05/write/authority.rs`, `write/records.rs`, `account/read.rs`, `account/derived.rs`, `account/mod.rs`, `account/action.rs`, `crates/colophon-ffi/src/v05/api/*`, generated bindings, the three session layers, `playground/src/*` | W3-H's core functions (or run after it) | W in the builders, the declaring `rekey`, invites (`begin_invite`, `join_from_invite`), surfacing (`newer` counts, `opaque`, stopped status, "waiting for approval" for `notGranted`), add-a-namespace | none new | as W1-P |
+
+W1-P and W3-G both touch `account/action.rs`, `write/authority.rs`, the FFI and the session layers,
+in different waves. At most three builders at once (wave 1).
 
 ## 1. F1: Unknown content, one rule
 
@@ -99,11 +121,11 @@ reach different verdicts.
 | 19 | genesis `predecessor` and `predecessor.head` (`succession::prepare`, `:191–192`) | `malformed` | `newerFormat`; an unknown `format` too | genesis signatures and `handover` | refuses |
 | 20 | `migration` subobjects (`succession::migration`, `:773–845`): `predecessor`, `final`, `drain`, namespace, omission, controller, member items; unknown member `kind` or `outcome` | `malformed` | `newerFormat` | the transition's rule and the verified succession | refuses |
 | 21 | grant component of a transition and `homes.appoint` items (`parse_transition_grant`, `members.rs:415`) | `malformed` (closed in revision 15) | `newerFormat`, except `shares`, which stays `malformed` (a known field that is forbidden there) | rule, consent, receipts | refuses at admission (`newerFormat`) |
-| 22 | call `signer` variant (`Call::parse`, `calls.rs:630`) | `malformed` | `newerFormat`; `account` and `organisation` reserved (R) | §12.3 steps 1–3 (possession, audience, window, replay look-up); reserves nothing | answers 403 `newerFormat` |
+| 22 | call `signer` variant (`Call::parse`, `calls.rs:630`) | `malformed` | `malformed` as today, unless `key` is the signing point of a current principal of the account: then `newerFormat` after steps 1–5 (finding 16); `account`, `organisation` reserved and refused | as stated; reserves nothing | 403 |
 | 23 | `layout` value (`apply_delta`, `state.rs:1562`) | never read | F3 | — | F3 |
 | 24 | a count above its 0.5 maximum | `malformed` | F4 | — | F4 |
 | 25 | unknown `(namespace, kind)` or `v` of a live candidate (`live::judge_one`, `records.rs:1777`) | `invalidPayload` | F5 | — | stores it |
-| 26 | member-local unknowns in a grant | the whole history stops | F6 | — | stores the member's records |
+| 26 | a new top-level term field in a grant | the whole history stops | F6 (narrow): that member opaque | — | refuses the member's calls |
 | 27 | request `member`, `service`, grant `shares` and epoch objects, `serves` values | `newerFormat` | unchanged (account-wide, F6) | — | refuses |
 | 28 | descriptor `form` and fields, controller fields and roles, policy fields and values, keyring fields, `countBy`, terms, links, request fields, veto fields, head fields, call fields | `newerFormat` | unchanged | — | as today |
 | 29 | authority, request, call and head envelopes; signature items; `assertion` (`envelope.rs`, `signature.rs:508`, `calls.rs:606,614`) | `malformed` | unchanged: closed | — | — |
@@ -140,15 +162,14 @@ A record that is `newerFormat` must not make a 0.5 reader admit something a newe
 Three rules do that, stated in §11.5 and §11.6:
 
 1. **Steps 1–8 are frozen.** Every header that passes §11.5 steps 1–7 reserves its budget slot and
-   counts its clock (step 8), whatever its unknown content; for step 1 an unknown `level` or
-   `access` value needs only a `records` entry for the namespace. A later version that refuses
-   such a header for a level or access 0.5 does not know refuses it after step 8, as `outOfScope`
+   counts its clock (step 8), whatever its unknown content; for step 1 an unknown `level` needs only a `records` entry for the namespace. A later version that
+   refuses such a header for a level 0.5 does not know refuses it after step 8, as `outOfScope`
    already is. So budgets and clock bounds are the same for every reader.
 2. **`duplicateID`.** A header that sorts after a `newerFormat` header with the same author and ID
    (§11.4 order) is itself `newerFormat`: 0.5 cannot tell whether the first one authenticates.
 3. **Proposals.** A proposal whose first valid resolution in fold order comes after a
-   `newerFormat` record of the same namespace by an author whose `records` entry there has `write`
-   or an access value 0.5 does not know is `newerFormat` (unresolved for this reader), never
+   `newerFormat` record of the same namespace by an author whose `records` entry there has `write` is
+   `newerFormat` (unresolved for this reader), never
    resolved by the later resolution.
 
 Domain folds (last-writer-wins and the rest) skip `newerFormat` records as they skip unknown
@@ -208,9 +229,10 @@ Added (all under `conformance/0.5/candidate/`, built by `cases_freeze_a.rs`, `_b
 | `rules/f1-migration-unknown-field`, `rules/f1-migration-unknown-member-kind` | `newerFormat` |
 | `succession/f1-predecessor-unknown-field`, `succession/f1-predecessor-unknown-format` | genesis `newerFormat` |
 | `succession/f1-succession-veto-unknown-field` | `newerFormat` at the `successionVetoed` |
-| `calls/f1-signer-unknown-variant` | `newerFormat` |
+| `calls/f1-signer-unknown-variant-bound` | `newerFormat` (`key` is a current member's point) |
+| `calls/f1-signer-unknown-variant-unbound` | `malformed` (an outsider's key) |
+| `calls/f1-signer-organisation` | `malformed` (reserved, refused) |
 | `calls/f1-signer-unknown-variant-bad-signature` | `badSignature` |
-| `calls/f1-signer-unknown-variant-wrong-audience` | `refused:audience` |
 
 **Existing vector that changes:** `rules/t-grant-component-extra-field`, `malformed` →
 `newerFormat` (regenerated; its description changes). `rules/t-grant-component-shares` and
@@ -243,107 +265,150 @@ replaced (a note edited by a newer app). This already happens for unknown kinds 
 versions; it is surfaced, never silent, and no protocol verdict depends on it. Hostile input now
 reaches signature checks it used to stop before (row 2); the existing byte bounds contain that.
 
-## 2. F2: Unknown entry kinds and transition components signed another way
+## P. Member approval consumes a confirmed pairing (first in the order of work)
 
 ### Rule
 
-An authority entry of an unknown kind is `newerFormat` once every attached signature verifies
-and `by` and every cosigner are **current principals**: a controller that is not only `sign`, not
-suspended and not added by a provisional activation; or a member (a home included) that is not
-revoked, not expired and not provisional. Otherwise it is `badSignature`, as today. A transition
-with an unknown component is `newerFormat` at the entry that records or embeds it (`activate`,
-`vetoed`, `suspend`) once its signatures verify, every signer is a current controller that is not
-only `sign`, escalation and receipts hold, and its known components meet a rule they allow; a
-transition whose known components meet no rule is `badSignature`. An unsigned entry of an unknown
-kind is `badSignature`.
+The core refuses to prepare or finish a `grant` (and a transition's `grant` component) unless the
+call consumes a **confirmed pairing**: an opaque token the core issues once when §7.3 completes,
+bound to the account and to the exact `member.signing` of the request, and spent by that approval.
+No interface approves a member from a member ID or a prefix code (§9.1, §17.1).
 
-### 2.1 Why, and the alternative rejected
+### The defect
 
-Daybreak holds that today's rule (unknown kinds under the control rule) is enough, because a later
-version can raise the layout first. Opus proposes `newerFormat` for any current non-`sign`
-controller or home. Settled for Opus's direction, widened to members, for three reasons:
+Live on the branch. Swift (`AccessRequest.code(for:)`: `id.prefix(8)`), JS (`pairingCode`:
+`id.slice(0, 8)`) and Kotlin (`id.take(8)`) show a code that is the first 32 bits of the member ID,
+with no commitment and no nonce, and approval consumes no pairing state. A relay that intercepts the
+request grinds about 2^32 signing keys until one has the same prefix, substitutes its request, both
+screens show the same code, and the approver grants the attacker's key. The core and bindings already
+implement §7.3 (`v05/pairing.rs`, `AccountPairing`), but the session layers use it only to move the
+seed, and `begin_approve` is callable on its own.
 
-1. **It does not widen who can stop a device.** Today every current non-`sign` controller can
-   sign some entry whose unknown fields are `newerFormat` (approve keys a `grant`; control and
-   recover keys a `rekey`, whose unknown fields F1 stops ignoring), and every current member,
-   homes included, can sign its own `endSessions`, whose unknown fields are `newerFormat` today.
-   F2 changes the forms a stop can take, not the set of principals who can cause one (§2.4).
-2. **Today's rule turns the foreseeable kinds into forgeries.** Member key rotation, a home
-   rotating its key or resigning, an agent-signed delegated grant (Galley's mandate), a revocation
-   continuation and recovery-only actions are all signed by someone other than the control rule.
-   Under today's rule a 0.5 device calls them `badSignature`: a broken account.
-3. **Layout-first is a ceremony per kind.** Raising the layout needs the control rule and the
-   recovery set's consent (§8.4), so every new kind would need the owner's recovery keys. That is
-   the approval machine the owner rejected; F2 makes the stop happen only where the kind is used.
+### Design
 
-Members are included, against Opus, because they can already stop a device through `endSessions`,
-and because the two kinds Galley most needs (member key rotation, an agent's delegated grant) are
-member-signed.
+- `v05/pairing.rs`: `ConfirmedPairing` gains `account` and `point` (the `E` that paired) and becomes
+  single-use (moved into the call that spends it). It is issued by `confirm` on the code path and by
+  a new `scanned_request(account, request_bytes)` on the camera path (H scans the request from J's
+  screen: `E` is `member.signing`, nothing to compare).
+- `account/action.rs`: `begin_approve(request, terms, signers, seed, pairing: ConfirmedPairing)`
+  refuses `refused:outOfScope` unless `pairing.account` is this account and `pairing.point` equals
+  the request's `member.signing`; the same for `Change::grant`. `write/authority.rs`:
+  `prepare_grant` becomes `pub(crate)` and takes the token, so no other path reaches it. L2 (the
+  prepare-time check of a composite change) lands here too, in `begin_transition`.
+- **Exports.** UniFFI: `AccountEngine.begin_approve` gains a `pairing: Arc<AccountPairing>`
+  argument in the `Confirmed` stage and spends it; `AccountPairing.scan_request(account, request)`
+  returns a confirmed pairing; the old signature is removed (listed in `surface-names.txt`). Wasm
+  (the `web05` build of the same API): the same, the pairing passed as its handle. The legacy 0.3 and
+  0.4 surfaces (`colophon-ffi/src/lib.rs`, `storage_engine.rs`, `colophon-wasm/src/lib.rs`) are not
+  0.5 and keep their own approval; they are out of scope and say so.
+- **Session layers.** Swift `ColophonSession`, Kotlin `ColophonSession`, JS `session`: the request
+  list carries no `pairingCode`; approving opens a pairing (`join`/`existing_receive_commitment`, or
+  the QR scan) whose confirmation is passed to `approve`. The joining side shows the §7.3 six-digit
+  code after the commitment exchange, or shows its request as a QR. `AccessRequest.code(for:)`,
+  `pairingCode` and the Kotlin equivalent are deleted.
+- **Test apps.** `playground` and `examples/ColophonSample`, and the two test apps outside this
+  repository: the approve screen runs the ceremony or scans the request; no code from an ID.
 
-### 2.2 Functions that change
+### Residual risk
 
-`history/state.rs`: `immediate` (the `other =>` arm moves before the controller lookup: a
-`signer_principal` helper resolves `by` and each cosigner among controllers and members, checks
-currency, and verifies each item as an authority signature with UV only when the controller has
-`verification`); `apply` (an unknown unsigned kind: `badSignature`); `classify` and
-`check_transition` (an unknown component sets `rule_unknown`; `recovery_ok` no longer false for
-it); `activate`, `vetoed`, `suspend` (report `newerFormat` when the embedded transition has
-`rule_unknown`, after the checks that do not need its rule, before the determined `issued`, which
-needs the full-set decision).
+Appointing a home is outside the rule (its request comes from the home's own base over TLS and names
+the member); stated as a limit in §9.1.
 
-### 2.3 Vectors
+## 2. F2: Current principal; unknown kinds stay under the control rule
+
+### Rule
+
+An unknown entry kind or transition component stays under today's control rule and is then
+`newerFormat` (withdrawn: the revision that let any current principal sign one). A later kind signed
+another way (by a member, a home or recovery keys alone) is reached only through the upgrade door
+(F3): the account opts in to a later layout once, with the strongest consent, and from then on 0.5
+readers stop anyway. **One opt-in covers a whole format version**, not one per kind. The defect the
+check found stays in the package: one normative **current principal** check (§8.5) used for
+`endSessions` and wherever a principal's signature is accepted, before unknown content is looked at.
+
+### Why
+
+The check showed the earlier F2 widened who can stop a device: with `memberRule: control` and a
+threshold of 2, one approve-, control- or recover-only key cannot meet the control rule today, but
+could sign an unknown kind (finding 1); and a 0.5 reader would stop where the version that defines the
+kind rejects it as unauthorized (finding 3), an older reader deciding differently. Under the control
+rule the signers who can stop a device are exactly those who can already rewrite the keyring.
+
+Finding 2 is a defect of revision 15's code: `immediate`'s member branch checks only
+`revoked_seq.is_none()`, so an expired or provisional member can sign `endSessions`, and with an
+unknown field get `newerFormat`, a stop by a key that is no longer current.
+
+### Functions
+
+`history/state.rs`: a `current_principal(s, id, rule, at_ms) -> Result<Principal>` helper; the
+`endSessions` member branch of `immediate` uses it (expiry at `e.issued`, provisional, revoked);
+`check_item` callers for controllers (suspension, provisional, role), `check_receipt` and heads
+(current home) route through it. The unknown-kind arm and `classify` are unchanged.
+
+### Vectors
 
 | Vector | Expected |
 | --- | --- |
-| `rules/f2-unknown-kind-single-approve` | `newerFormat` (today `badSignature`) |
-| `rules/f2-unknown-kind-recover-only` | `newerFormat` |
-| `rules/f2-unknown-kind-by-home` | `newerFormat` |
-| `rules/f2-unknown-kind-by-member` | `newerFormat` |
-| `rules/f2-unknown-kind-home-and-controller` | `newerFormat` |
-| `rules/f2-unknown-kind-by-sign-controller` | `badSignature` |
-| `rules/f2-unknown-kind-by-revoked-member`, `-expired-member`, `-suspended`, `-provisional` | `badSignature` |
-| `rules/f2-unknown-kind-unsigned` | `badSignature` |
-| `rules/f2-unknown-kind-bad-cosignature` | `badSignature` |
-| `rules/f2-unknown-component-recovery-rule` | `newerFormat` at the `activate` |
-| `rules/f2-unknown-component-known-part-fails` | `badSignature` |
-| `rules/f2-vetoed-unknown-transition` | `newerFormat` at the `vetoed` |
-| `rules/f2-stop-applies-nothing-after` | history `newerFormat` at seq n; a record citing n `authorityBehind`; a call `unavailable` |
+| `rules/f2-end-sessions-expired-member` | `badSignature` (today `ok`) |
+| `rules/f2-end-sessions-provisional-member` | `badSignature` |
+| `rules/f2-end-sessions-expired-unknown-field` | `badSignature`, never `newerFormat` |
+| `rules/f2-end-sessions-current-unknown-field` | `newerFormat` |
+| `rules/f2-unknown-kind-single-approve` | `badSignature` (unchanged rule, now a vector) |
+| `rules/f2-unknown-kind-control-rule` | `newerFormat` |
+| `rules/f2-unknown-component-control-rule` | `newerFormat` at the `activate` |
+| `rules/f2-unknown-component-recovery-rule` | `badSignature` |
 
-**Existing vectors that change:** none (no vector holds an unknown kind by a non-control signer).
-**Inputs whose verdict changes:** unknown kinds and components by such signers, `badSignature` →
-`newerFormat`.
+Existing vectors that change: none.
 
-### 2.4 Who can make a 0.5 device stop, and why that is acceptable
+### Who can stop a 0.5 device
 
-After F1 and F2: any current non-`sign` controller, and any current member (homes included), by an
-entry carrying content 0.5 does not know; and the control rule by any transition. That is the same
-set of principals as today (point 1 of §2.1). For the stop to reach a device the entry must also be
-in the history the device fetches, which means one of:
+Unchanged from today: the control rule (any entry or transition), any single-rule signer within that
+rule's kinds (an unknown field in a `grant`, `renew`, `revoke` or `rekey`), and a current member in
+its own `endSessions`; and now only while each is a current principal, which narrows it.
 
-- **a home that stores it.** A 0.5 home refuses every `newerFormat` entry (422), so a 0.5 home
-  never lets one in. A newer home stores only what its own rules accept, so junk under every
-  version is refused there too. What gets in is real newer content, and "update me" is the right
-  answer.
-- **a hostile primary home.** A hostile primary can already refuse every immediate entry, a
-  denial of service as large; the remedy (revoking it) is unchanged.
-- **no home.** Without a home there is no witness of order: any member can already fork the
-  history at will (two `endSessions` at one seq give `refused:fork`). No new power.
+## S. Stops
 
-A stopped device never applies anything after the stop (§1 "A stop", revision 16): its verified
-history ends before the entry, records citing it or later are held `authorityBehind`, calls whose
-S needs it are `unavailable`, and the host builds nothing for the account until it is updated.
+### Rule
 
-### 2.5 Effect elsewhere
+An authority stop makes the reader **stopped** for the account at once (§1 "A stop"): every call it
+verifies is `unavailable` whatever S is, it accepts no head, admits no record it had not admitted
+before, answers no question of currency, membership or access, and builds nothing. A home that stops
+follows the normative table of §13.6.
 
-Home: none (it already refuses `newerFormat`). Write side: none. Exports and SDKs: none beyond the
-stop reason they already surface.
+### Why
 
-### 2.6 Residual risk
+Finding 4: an unknown entry at N and the attacker's revoke at N+1; a reader that made only the calls
+"needing" N unavailable would still accept the attacker under a fresh head at N−1. A stopped reader
+cannot see N+1, so it must trust nothing new.
 
-A junk kind signed by a current principal, admitted by a hostile primary home or written into an
-account with no home, stops 0.5 devices, and every later version that does not define that kind
-stops too. The same is true today of an unknown term in a grant. The defence is the default of
-two homes (§18).
+### The stopped home (§13.6), and the veto question
+
+Keeps and serves what it holds (what needs no call); forwards every pending object it holds; signs no
+head after the stop, not even a fresh one at N−1 (that is what would let other old readers trust
+stale state); stores and vouches for no authority at or after N; verifies no call (503
+`unavailable`), so it serves nothing under `members` and stores nothing new.
+
+**Decided: it receipts a veto whose transition is anchored before the stop, and a removal-only
+transition anchored before the stop**, judged at its last verified state, inside W. The test: a
+hostile stop must never suppress a veto or a revoke for readers that understand the newer format. A
+receipt only witnesses arrival time; every reader judges the veto's or transition's signers at the
+entry that records it, so a stale receipt cannot make an invalid object count, while refusing could
+leave a veto short of `headQuorum` receipts inside its window. It receipts nothing else.
+
+### What could not be made sound as asked
+
+The owner asked that a stopped home "keep serving what it holds". It can serve only what needs no
+call: under `members`, every read is a call, and verifying one is a trust decision a stopped reader
+must not make (the entry after the stop may revoke the caller). So under `members` a stopped home
+serves `GET {base}`, location statements and nothing else until it is updated or revoked; newer
+devices read through the account's other homes. This is stated in §13.6.
+
+### Functions and vectors
+
+`history/mod.rs` (`Verdict::stopped`), `calls.rs` (step 4), `records.rs` (held when stopped),
+`history/home.rs` and `colophon-home-wasm` (the table). Vectors: `calls/s-stopped-reader-call`
+(`unavailable`, with fresh heads at N−1), `records/s-stopped-new-record` (held); home tests, one per
+row of §13.6.
 
 ## 3. F3: The upgrade door
 
@@ -453,6 +518,21 @@ changes those only after raising the layout.
 | `kept` | §9.5 | the body bound | byte bound: stated limit | — |
 | Hints | §5.2 | 8 | unsigned discovery: unchanged | — |
 
+### 4.1a Invariants first (finding 13)
+
+Before any `newerFormat` for a count above its maximum (or any unknown content), the reader checks
+every version-independent invariant whose inputs are all values it knows (a count above its maximum is
+a known value); a failure is `malformed`. An invariant that needs an unknown value is skipped. The
+list (§2.4): `headQuorum` at least 1 and at most the current homes while there is a home;
+`primaryHome` a current home; `recoveryDelay` at least 3,600 with a home; `threshold`,
+`recoverThreshold` and `addThreshold` against units; at least one `control` controller; holders under
+`countBy: holders`; sorted and distinct lists; slots naming current non-`sign` controllers; §3.3;
+granted namespaces declared and `shares` complete; a `revoke`'s epochs; the rule limits. Functions:
+`Policy::check_homes`, `Keyring::check` and the grant checks run before `Unknown::check` wherever
+their inputs are known (W1-A). Vectors: `rules/f4-headquorum-9-eight-homes` (`malformed`),
+`rules/f4-headquorum-9-nine-homes` (`newerFormat`), `rules/f4-threshold-above-units-with-cap`
+(`malformed`).
+
 ### 4.2 `policy.witnessWindow`
 
 The 300-second witness window becomes `policy.witnessWindow`: optional, absent means 300, range
@@ -497,7 +577,8 @@ namespace counter of F5, `check_transition` and `check_receipt` (W), `delay_at` 
 | `rules/f4-namespaces-256` | `ok` |
 | `rules/f4-namespaces-257` | `newerFormat` at seq 1 |
 | `rules/f4-namespaces-4097` | `malformed` |
-| `rules/f4-headquorum-9` | `newerFormat` at the `activate` |
+| `rules/f4-headquorum-9-nine-homes` | `newerFormat` at the `activate` |
+| `rules/f4-headquorum-9-eight-homes` | `malformed` |
 | `rules/f4-callwindow-above` | `newerFormat`; `upgrade/policy-out-of-range` (below) stays `malformed` |
 | `rules/f4-witness-window-absent` | a receipt at 299 s valid, at 301 s `malformed` |
 | `rules/f4-witness-window-600` | a receipt at 450 s valid; due = `issued` + 600 + delay |
@@ -531,12 +612,12 @@ version that allows more than fit one body must split it, which is its own desig
 ### Rule
 
 A `rekey` epoch for a valid namespace that is not yet declared **declares it**, when that epoch is
-1, under the `rekey` rule, and the account stays within 256 namespaces; epoch 1 is sealed to the
+1, under the **control rule** with UV (no recovery-set consent; finding 15), and the account stays within 256 namespaces; epoch 1 is sealed to the
 current vault (no member has access yet). From the next entry, grants may name it. Namespaces are
 never removed in 0.5. Names beginning `colophon.` are reserved: declaring one is `newerFormat`. A
 live candidate whose `(namespace, kind)` has no live rule this reader knows, or whose `v` its rule
-does not know, is `newerFormat` for that record, not `invalidPayload`. 0.3's kinds table and the
-podcast live rule become the reference implementation's built-in modules, not conformance.
+does not know, is `newerFormat` for that record, not `invalidPayload`. The **0.5 live-rule registry is normative with exactly one entry**, the podcast `position` rule every
+conforming 0.5 reader applies (finding 14); 0.3's kinds table stays a module, not conformance.
 
 ### 5.1 Why, and the alternative rejected
 
@@ -559,13 +640,13 @@ A record whose kind begins `colophon.` and that this reader does not define is `
 that record (today admitted and skipped): `colophon.` kinds are engine kinds, and a new one can
 change what the engine does.
 
-### 5.2 Built-in modules
+### 5.2 The live-rule registry
 
-§11.8's table keeps 0.3 §6's generic rules (modules, views, tools, unknown kinds skipped) and marks
-its namespace table and 0.3 §5.1's podcast specifics as the reference implementation's built-in
-modules. A module that defines a live rule names `(namespace, kind, v)` and derives the slot; a
-conforming implementation without that module answers `newerFormat` for those live candidates. A
-known rule that refuses (a podcast `position` with `seek: true`) is still `invalidPayload`.
+Normative, one entry: 0.3 §5.1's `listening.podcasts` `position`, `v` 1, no `seek`, with its slot
+derivation. Every conforming 0.5 reader applies it whatever modules it has, so two 0.5 readers never
+disagree on a live verdict. Any other `(namespace, kind)` or `v` is `newerFormat` for every 0.5
+reader alike; the registry rule refusing a payload (`seek`) is `invalidPayload`. Folds, views and the
+kinds table stay modules (no verdict).
 
 ### 5.3 Functions that change
 
@@ -580,7 +661,8 @@ state's list. `protocol.rs`: `live_slot` becomes `live_rule(namespace, kind, v) 
 
 | Vector | Expected |
 | --- | --- |
-| `rules/f5-rekey-declares-namespace` | `ok`; a later grant naming it `ok` |
+| `rules/f5-rekey-declares-namespace` | `ok` (control rule); a later grant naming it `ok` |
+| `rules/f5-declare-single-approve` | `badSignature` |
 | `rules/f5-declare-at-epoch-2` | `malformed` |
 | `rules/f5-declare-colophon-namespace` | `newerFormat` |
 | `rules/f5-declare-while-retiring` | `malformed` |
@@ -605,210 +687,139 @@ namespace to an account; reading the namespace list from the state, not the gene
 
 ### 5.6 Residual risk
 
-A single `approve`, `control` or `recover` key can declare namespaces (as it can introduce
-epochs), up to 256 for the account's life with no removal. The rate limit bounds the pace; a
-person is told in the ledger. Removal waits for a later kind.
+The control rule can declare up to 256 permanent namespaces; the rate limit bounds the pace. Removal
+waits for a later kind (after the door).
 
-## 6. F6: One member's unknown term stops only that member
+## 6. F6: Opaque members, narrow form
 
 ### Rule
 
-Unknown content in a grant is **member-local** when it is in the request's `kind`, `custody` or
-top-level fields (not `member`, not `service`), or in the requested or granted `terms` (an unknown
-term field, `access` value, field in a `records` or `services` entry, or a count above its cap),
-except `serves`, `import` and each `records` entry's `namespace`. A grant whose only unknown content
-is member-local applies, and its member is **opaque**: keys, expiry, shares, session number,
-revocation and the rate charge apply as for any member; its records, live candidates and calls are
-`newerFormat` (after the frozen steps of §1.3); unknown kinds it signs follow F2. Unknown condition
-operators make no member opaque: they stay three-valued per record and call (§10.4). Everything
-else unknown in a grant stops the account, as today.
+Only a **new top-level term field** (in the requested or granted `terms`) is member-local. A grant
+whose only unknown content is such fields applies, and its member is **opaque**: keys, expiry,
+shares, session number, revocation and the rate charge apply; its records and live candidates pass
+§11.5 steps 1–8 and are `newerFormat`; every call it makes is `newerFormat`, at a home as anywhere.
+Everything else unknown in a grant stops the account as today: an unknown `access` value, request
+`kind` or `custody`, request field, field of `member`, `service`, a `records` or `services` entry,
+`serves` value, `import`, anything in `shares`, and any count above its maximum. Unknown condition
+operators stay three-valued per record and call and make no member opaque.
 
-### 6.1 What stays account-wide, and why
+### Why the narrow form
 
-| Part | Why it is account-wide |
-| --- | --- |
-| `request.member` (keys), `request.account`, `protocol` | §3.3 key uniqueness is decided for the whole account; an unknown key field could be a key 0.5 cannot register |
-| `request.service`, `terms.serves` | a home receipts, signs heads and counts toward quorum: everyone's verdicts |
-| `terms.import` | an import grant is a transition with its own rule (§9.3) |
-| `records[].namespace` | decides sealing (§7.1) and the namespaces a `revoke` must re-key (§9.5) |
-| `shares`, epoch objects and seals | what is sealed to whom |
-| the grant entry's own fields, and any `renew` field | entry structure |
+The check (finding 6) showed the wide form bought safety by sealing every epoch to any `records`
+member, whatever its unknown access: a future `writeOnly` or `metadataOnly` member would get the keys
+from a 0.5 host. In the narrow form every `records` entry and its access are known, so the epochs
+sealed to an opaque member are exactly those sealed to a member with the same entries, and **no 0.5
+host seals an epoch to a member whose access it does not understand**. The home exception of the
+wide form (an opaque member reading and writing at a 0.5 home) is dropped: what a home serves is
+among the things a new term field may not change, and the smallest sound form serves an opaque
+member nothing through a call.
 
-### 6.2 Opaque members in practice
+### The host fence
 
-- **Records and live:** steps 1–8 with the frozen reading of §1.3 (it reserves and counts), then
-  `newerFormat`. Never admitted, never folded, never resolves a proposal.
-- **Calls:** `newerFormat` after step 5 (the member is found and current). One exception, at a
-  0.5 home: `colophon.home.read` with its own key and no links, and `colophon.home.write` of its own
-  records in namespaces whose `records` entry has a known access that covers the write, are judged
-  by those known parts, exactly as for a member whose grant holds the same known parts. Without
-  this, a 0.5 home would block every newer app's member.
-- **Sealing:** §10.2 is frozen: every `records` entry, whatever its access, receives its
-  namespace's epochs. So a 0.5 host seals new epochs to an opaque member exactly as to any member
-  with the same namespaces, and a `revoke` of it re-keys its namespaces.
-- **Hosts (write fence):** a 0.5 host shows the member as "access needs an update to show", MAY
-  revoke it, end its sessions, renew its shares (shares-only form), and MUST NOT extend its expiry,
-  re-grant it or build any entry whose effect it cannot show the person.
+**Removed as a security rule; stated as interface guidance with no security weight** (finding 7).
+The verifier accepts an extension or re-grant of an opaque member by any host, and that is sound: it
+gives the member nothing a 0.5 reader acts on, because every act of an opaque member is
+`newerFormat` for every 0.5 reader. Making the operation an account-wide `newerFormat` would stop 0.5
+devices whenever a newer host renews a newer app's member, the stop F6 exists to avoid.
 
-### 6.3 The frozen contract (what later versions must keep)
+### The promise later versions keep (§9.8)
 
-F6 is safe only together with these rules, which §10.1 and §20 now state as binding on every later
-version:
+1. A new term field decides only what that member itself may do with its own records and calls. It
+   never changes what is sealed or to whom, what a home serves, any key, epoch or share, what another
+   principal may do or read, which entries are valid, or any entry's rule; such content is a new
+   value or a field outside `terms`, which stops 0.5 readers.
+2. A later version never makes an entry invalid because of a new term field or its coverage; at most
+   it refuses that member's acts.
+3. §11.5 steps 1–8 stay frozen.
+4. Known grammars inside terms are not relaxed.
 
-1. Terms are member-local: they decide only what the member itself may do (its records, calls and
-   links). A later version MUST NOT define a term that changes what any other principal may do or
-   read, which entries are valid, the rule of any entry, or what is sealed; such content goes
-   outside `terms`, where it stops 0.5 for the account.
-2. A later version MUST NOT make an entry invalid because of member-local content, nor because its
-   coverage (§9.2) cannot be decided from 0.5's known parts: at most it refuses that member's acts.
-3. A member's new powers over authority come as new kinds (F2), never as permission to sign a 0.5
-   kind.
-4. §11.5 steps 1–8 are frozen as §1.3 says.
-5. Known grammars inside terms (kinds, purposes, audiences, paths) are not relaxed; a later version
-   adds fields instead.
+### Safety
 
-### 6.4 The safety argument
+Accept: an opaque member's records and calls are `newerFormat`, never admitted. Serve: nothing
+through a call. Decrypt: sealing depends only on known `records` entries with known access. Two 0.5
+readers agree (opacity is a function of the bytes and 0.5's defined term fields). A 0.5 and a later
+reader agree on every entry (promise 1–2) and on budgets and clocks (promise 3); they differ only on
+the opaque member's own acts, where the 0.5 reader says `newerFormat`.
 
-**No 0.5 device accepts, serves or decrypts more for an opaque member than for one it understands.**
-Accept: its records and calls are `newerFormat`, never admitted; its own `endSessions` only ends
-its own links; its unknown kinds stop the device (F2), which any member can already do. Serve: a 0.5
-home serves it exactly what it serves a member with the same known parts, and nothing through
-links. Decrypt: sealing depends only on `records[].namespace` (frozen §10.2), the same for any
-member with those namespaces; a 0.5 host never admits an opaque member itself (it cannot build its
-terms).
+### Functions
 
-**Two 0.5 devices cannot disagree.** Opacity is a pure function of the grant's bytes and 0.5's
-fixed known sets; no domain module, read scope or arrival order enters it.
+`prescan.rs` (`authority_fields("grant")` splits out top-level unknown term fields), `members.rs`
+(`Grant::parse`, `read_granted`, `parse_transition_grant`, `check_granted` on known parts),
+`terms.rs` (keep unknown term fields aside), `history/state.rs` (`MemberRecord.opaque`, checkpoint),
+`records.rs`, `live.rs`, `calls.rs` (opaque → `newerFormat`), `account/read.rs` (listing).
 
-**A 0.5 device and a later one agree on the history.** By contract rules 1–3, every entry's
-validity and rule are decided by 0.5's known parts in every version, so the two hold the same
-entries. They differ only on the opaque member's own acts, where the 0.5 device says
-`newerFormat`. By rule 4 they agree on budgets and clock bounds. By §1.3 rules 2 and 3 a
-`newerFormat` record never lets the 0.5 device admit a duplicate or settle a proposal the later
-one would not.
-
-What could not be made safe without the contract: if a later version invalidated a grant entry
-for a term (instead of refusing the member), a 0.5 device would accept the entries after it while
-the later device stopped at it. The contract forbids that; a later version that breaks it splits
-accounts. **The narrower form, if the contract is not wanted:** make only unknown **term fields**
-member-local (not access values, request kinds or caps), which keeps every known field's meaning
-and still lets each app add terms; everything else stays an account-wide stop.
-
-### 6.5 Why, and the alternatives rejected
-
-Opus proposed this; Daybreak did not address it. Rejected: accepting today's behaviour and telling
-Galley that every new term is a forced upgrade of every app on the account (principle 4 and 5:
-Taupe and Later would stop for a Galley term). Rejected: Opus's write fence of "no authority entry
-at all while an opaque member exists", which would also forbid revoking the opaque member from an
-old device, the one action that must always work; §6.2's fence is narrower.
-
-### 6.6 Functions that change
-
-`prescan.rs`: `authority_fields("grant")` returns `(account_wide, member_local)`; `terms` and a new
-`request_scan` classify. `members.rs`: `Request::parse` and `read_granted` return both sets;
-`check_granted` checks coverage on known parts only (`Terms::covered_by_known`); `Grant::parse`.
-`history/state.rs`: `MemberRecord.opaque: bool` (checkpoint), set in the `grant` arm,
-`transition_members` and `member_record`. `records.rs`: `judge_candidate` (opaque → `newerFormat`
-after step 8), `live.rs::judge_one`. `calls.rs`: `evaluate` and the member arm (opaque →
-`newerFormat`; the home exception via `home_record_writes`, `home_purposes`). `account/read.rs`:
-member listing shows `opaque`. `account/action.rs`: the fence in `begin_renew` (with expiry) and
-grant builders.
-
-### 6.7 Vectors
+### Vectors
 
 | Vector | Expected |
 | --- | --- |
-| `rules/f6-grant-unknown-term` | history `ok`; the member opaque; its record `newerFormat`; another member's record admitted |
-| `rules/f6-grant-unknown-access` | as above |
-| `rules/f6-grant-unknown-request-kind` | as above |
-| `rules/f6-grant-unknown-request-field` | as above |
-| `rules/f6-grant-records-65` | as above |
-| `rules/f6-grant-unknown-operator` | not opaque; a record whose condition is true admitted, unknown `newerFormat` |
-| `rules/f6-grant-unknown-member-field` | history `newerFormat` |
-| `rules/f6-grant-unknown-serves` | history `newerFormat` |
-| `rules/f6-grant-unknown-share-field` | history `newerFormat` |
-| `rules/f6-unknown-term-undeclared-namespace` | `malformed` |
-| `rules/f6-known-malformed-and-unknown-term` | `malformed` (was `newerFormat`; no vector) |
-| `rules/f6-revoke-opaque` | `ok`; a `revoke` omitting its namespace `malformed` |
-| `rules/f6-renew-shares-opaque` | `ok` |
-| `rules/f6-opaque-unknown-kind` | `newerFormat` |
+| `rules/f6-grant-new-term-field` | history `ok`; the member opaque; its record `newerFormat`; another member's record admitted |
+| `rules/f6-grant-unknown-access` | history `newerFormat` (account-wide) |
+| `rules/f6-grant-unknown-request-kind` | history `newerFormat` |
+| `rules/f6-grant-unknown-records-entry-field` | history `newerFormat` |
+| `rules/f6-grant-records-65` | history `newerFormat` |
+| `rules/f6-grant-unknown-operator` | not opaque; condition true → admitted, unknown → `newerFormat` |
+| `rules/f6-new-term-undeclared-namespace` | `malformed` |
+| `rules/f6-revoke-opaque` | `ok` |
+| `rules/f6-renew-opaque` | `ok` (guidance only) |
+| `records/f6-opaque-reserves-budget` | the next record of that member `budgetSpent` |
 | `calls/f6-opaque-call` | `newerFormat` |
-| `calls/f6-opaque-home-read` | `ok` |
-| `calls/f6-opaque-home-write-unknown-access` | `refused:outOfScope` |
-| `records/f6-opaque-reserves-budget` | as `f1-newer-reserves-budget` |
+| `calls/f6-opaque-home-read` | `newerFormat` |
 
-**Existing vectors that change:** none.
-**Inputs whose verdict changes:** a grant with only member-local unknown content, history
-`newerFormat` → `ok` with an opaque member; with member-local unknown content and a malformed known
-part, `newerFormat` → `malformed`.
+Existing vectors that change: none. Inputs whose verdict changes: a grant whose only unknown content
+is a new term field (history `newerFormat` → `ok`, member opaque); one with a new term field and a
+malformed known part (`newerFormat` → `malformed`).
 
-### 6.8 Effect elsewhere
+### Effect elsewhere and residual risk
 
-Home: the call exception of §6.2 in `calls::verify_home_request`. Write side: the fence. Exports:
-member JSON gains `"opaque": true`. SDKs: show the member as needing an update; no new call.
-
-### 6.9 Residual risk
-
-High, and the reason this item needs its own check: the safety rests on the contract of §6.3,
-which binds code not yet written. Domain folds can show stale values (§1.7). A 0.5 home lets an
-opaque member store records under its own author ID that no 0.5 reader admits (bounded by the
-home's quota).
+Home: none beyond refusing the opaque member's calls. Exports: member JSON `"opaque": true`. SDKs:
+show it. Residual: the promise binds code not yet written; domain folds skip `newerFormat` records
+(surfaced by count).
 
 ## 7. F7: A home's address can change
 
 ### Rule
 
-A home's appointed `service.endpoints` are **identifiers**, fixed for that home member: the
-audience of a call to the home is one of them, wherever the home is reached. Where a home is reached
-is discovery: a host may reach it at any `https://` URL whose `GET {base}` names that home member,
-and every object fetched there is verified as usual (heads and receipts under the home's key,
-entries under §8). `homes.update` is not added.
+A home's appointed `service.endpoints` are its identifiers and the audience of every call to it. A
+host sends an authorized request (one with a call) only to an appointed endpoint or to a base named
+by a valid **location statement** (`colophon/location/5`, §14): `{protocol, account, by, bases,
+issued}`, signed `raw` by the home's member key, verified against that key in the client's verified
+state. Monotonic by `issued` (ties: lower body digest); no expiry; replaced by a newer statement,
+ended by the home's revocation. Public like a head: every current home stores, forwards and serves
+the latest statement of every current home at `records/locations/<home ID>.json`, and a shared folder
+holds the same path.
 
-### 7.1 Why, and the alternative rejected
+### Why
 
-Daybreak proposed `homes.update`, a transition replacing endpoints with consent as for appointing a
-home. Rejected: a transition needs the control rule and, because it changes homes, the recovery
-set's consent (§8.4), so a hosted provider changing its hostname would need every customer's
-recovery key, which is the approval machine the owner rejected and puts the operator in the middle
-of the person's keys (principle 1). The "receipt from the new endpoint" it asks for is not
-checkable: a receipt is signed by the home's key wherever it is sent from. Opus's form is adopted:
-the code already takes a home's call audiences from its appointed endpoints
-(`calls::CallConfig::home_endpoints`), and §9.1 already calls them discovery data, so this is a
-statement, not a change.
+Finding 8: with only an unsigned `moved` or a redirect, a forged location could relay the client's
+valid call (bound to the real home's audience) to the real home and read the response, the whole
+history or headers and ciphertext. A statement signed by the home's key proves the new base is the
+home's choice before any call is sent there. Finding 9: the path through another home is now defined
+(the replicated statement). `homes.update` is still rejected (recovery consent per customer per
+hostname change).
 
-### 7.2 The audience after a move, an old device, a hostile change
+### An old device that knows only the dead base
 
-- **Audience:** unchanged, the appointed string. The home's deployment configuration (§10.1)
-  keeps accepting it at its new location.
-- **An old device that knows only the dead address** finds the new one from: an HTTP 308 redirect
-  at the old base, which an operator SHOULD keep for as long as it expects devices to be offline
-  (the reference: a year); `GET {base}`'s optional `moved` member there (R); another current home,
-  which it can reach because the default is two homes; another device of the person (pairing); or
-  the person typing it. A device with none of these waits; nothing it holds is wrong.
-- **A hostile location** (a hijacked DNS name, a forged redirect, a hint): it cannot sign heads or
-  receipts as the home, so it can withhold (`unavailable`) and see call metadata, exactly as a DNS
-  hijack of the home's hostname can today. It cannot change a verdict. A call sent there is bound
-  to its request (§14) and to the home's audience, so relaying it to the real home only does what
-  the signer asked.
+It fetches `records/locations/<home ID>.json` from any other current home or the folder (no call),
+verifies it under the home's key from its own verified state, and calls the new base. **With no other
+home and no folder, recovery needs another device of the person** (the pairing channel) or the person
+typing the base; a 308 at the old base helps only unauthorized fetches.
 
-### 7.3 Functions that change
+### Functions and vectors
 
-None in the verifier. `engine/exchange.rs`: a local, verified location per home (learned from a
-308, `moved`, a peer or the person) used for requests, the appointed endpoint used as audience.
-Home: `relay/home.js` serves `moved` when configured.
+`v05/location.rs` (parse, verify, monotonic choice; W2-C); `engine/exchange.rs` (send calls only to
+verified bases; fetch statements from peers and the folder), `engine/paths.rs` (`Kind::Location`),
+`colophon-home-wasm` (store, forward by `PUT {peer}/records/locations/<id>.json`, serve) (W3-H).
+Vectors: `heads/f7-location-valid` (`ok`), `heads/f7-location-bad-signature` (`badSignature`),
+`heads/f7-location-not-a-home` (`badSignature`), `heads/f7-location-older-ignored` (the later one
+kept), `heads/f7-location-unknown-field` (`newerFormat`); exchange tests: no call to an unverified
+base; recovery through a peer home and through a folder.
 
-### 7.4 Vectors
+### Residual risk
 
-None (the audience rule is today's). Relay tests: a home reached at a second URL accepts calls
-whose audience is its appointed endpoint; a host follows a 308 and verifies the member.
+A home's key still changes only by re-appointment. A compromised home key can point clients anywhere,
+as it can already sign any head.
 
-### 7.5 Residual risk
-
-Rotating a home's key is still a re-appointment (revoke and appoint, uploading again); a later
-home-signed kind can add it under F2. A device offline for longer than the redirect is kept, with
-no other home or device, needs the person.
-
-## 7a. F8: A device with nothing gets the history
+## 7a. F8: A device with nothing gets the authority chain
 
 Found by the test apps: a new device joining an account whose history is `members` can fetch only
 the head, so the apps put the whole authority history in the invite (about 10 KB for a new
@@ -818,10 +829,10 @@ without knowing this.
 
 ### Rule
 
-The approving device makes an **invite link** (§13.4): a link from a current member to a session
-key, whose terms are exactly one or two `services` entries, each a current home's appointed
+The approving device makes an **invite link** (§13.4): a link from its member key (a current
+principal, not a home, not opaque) to a session key, whose terms are exactly one or two `services` entries, each a current home's appointed
 endpoint with `["colophon.history.read"]`, lasting at most an hour (host default ten minutes). A
-home serves the history paths, and nothing else, to calls through it, without checking narrowing or
+home serves the authority chain and its verification pages, and nothing else (not `/pending`), to calls through it, without checking narrowing or
 `depth` against the member's own terms. The **invite** (§7.3, `colophon/invite/5`) carries the
 account ID, the link, the session key's private scalar and `nA`; J fetches and verifies the history
 from seq 1 against the account ID, then answers with its request, which H scans from J's screen.
@@ -848,25 +859,31 @@ home, which holds the history, decides, as §12.3 already lets a member that doe
 
 ### Who signs, what it grants, how long, what a leak exposes
 
-- **Signs:** any current member, with its own key (it can already read the history and forward
-  it). The link's `session` is the member's session number.
-- **Grants:** `GET` of the history paths at the named homes. No records, live values, blobs,
-  pending writes or writes.
+- **Signs:** the approving device's **member key** (a controller approves; a link is a member's
+  instrument, and controllers make no links), which must be a current principal (§8.5), not a home
+  and not opaque. A link of the invite shape from a home's member key is not an invite link
+  (finding 11). The link's `session` is the member's session number.
+- **Grants:** `GET` of the authority chain and what verifying it needs, at the named homes:
+  `{base}/authority`, `records/authority/*`, the predecessor chain and its receipts (a successor
+  genesis's), and the public heads. **Not** `/pending` or `/pending/<digest>`, transitions, vetoes or
+  other receipts (finding 10), no records, live values, blobs or writes.
 - **Lifetime:** at most 3,600 s and within `linkMaxAge`; default 10 minutes (§18). Not single use
   (a history is many pages; each call has its own `requestId` in the replay store). Ended early by
   the member's `endSessions` or revocation.
-- **Leak:** the bearer reads the authority history until the link ends: controller labels, key
+- **Leak:** the bearer reads the authority chain until the link ends: controller labels, key
   IDs and descriptors (relying party, credential IDs, origins), holder labels, members' labels,
   kinds, operators and terms (namespaces, access, audiences, purposes, conditions), namespace names,
-  policy and home endpoints. Every current member already reads all of it; no record, key or write
-  is exposed. **Configurable:** a *bound invite* (third scan: H shows the account, J shows its
+  policy, home endpoints and any predecessor chain. Every current member already reads all of it. It
+  is not the pending feed (proposed removals and additions, vetoes, their signers), no record, key or
+  write. **Configurable:** a *bound invite* (third scan: H shows the account, J shows its
   request, H shows a link bound to the request key with no private scalar) exposes nothing if
   leaked; the default is the one-scan invite.
 
 ### Minimum contents and size
 
 `{"account","key","link":{"body","signature"},"nA","protocol":"colophon/invite/5"}`, the link as a
-JSON object (not base64 twice). One home with a typical endpoint (about 110 bytes): link body about
+JSON object (not base64 twice). The invite is in §1's list of closed objects (finding 17): an extra
+member is `malformed`. One home with a typical endpoint (about 110 bytes): link body about
 580 bytes, invite about 1.1 KB. Two homes with the longest allowed endpoints (512 bytes): about
 2.4 KB, under the 2,953-byte limit of one QR code at the lowest correction level. The size does not
 grow with the number of homes: an account with eight homes names one or two in the invite and J
@@ -896,14 +913,13 @@ and Kotlin (`SessionTypes.kt:154`) show a code made from the first eight hex cha
 member ID, with no commitment and no nonce. That is a 32-bit prefix of a key the requester chose: a
 relay can grind a substitute key with the same prefix offline, the attack §7.3 exists to stop, so
 approval through it does not meet §9.1 ("approval of a request whose key did not pair ... hosts MUST
-NOT offer it"). Fix (stream F): approve a request only after the §7.3 code ceremony with
-`E = member.signing` through `AccountPairing`, or after scanning the request from the requester's
-screen; drop the ID-prefix code.
+NOT offer it"). Fix: item P, first in the order of work: the core refuses an approval that does not consume a
+confirmed pairing for the request's exact key.
 
 ### Functions that change
 
 `calls.rs`: `verify_home_request` and step 6 (`is_invite_link`: exact terms, home audience, one or
-two entries, the hour; skip narrowing and depth), step 7 (history paths only), step 5
+two entries, the hour; skip narrowing and depth), step 7 (authority chain paths only), step 5
 (`refused:notGranted`). `write/calls.rs`: `prepare_invite_link`. A new `v05/invite.rs`: the invite
 object (build, strict parse, size). `engine/exchange.rs`: `join_from_invite` (fetch head and history
 through the link, verify from seq 1). Home: none beyond `calls.rs` (the relay already passes calls
@@ -925,6 +941,11 @@ invite and join flows; the pairing fix above.
 | `calls/f8-invite-after-end-sessions` | `refused:ended` |
 | `calls/f8-invite-by-revoked-member` | `refused:revoked` |
 | `calls/f8-not-yet-member` | `refused:notGranted` |
+| `calls/f8-invite-pending` | `refused:outOfScope` (`/pending`) |
+| `calls/f8-invite-pending-digest` | `refused:outOfScope` |
+| `calls/f8-invite-predecessor` | `ok` |
+| `calls/f8-invite-by-home` | `refused:notNarrower` (a home's link is not an invite link) |
+| `calls/f8-invite-by-expired-member` | `refused:expired` |
 | `pairing/invite.json` | canonical bytes of a one-home and a two-home invite, a no-home invite, and strict-parse refusals (extra member, `key` not matching `to`, `link` for another account) |
 
 Existing vectors that change: none.
@@ -941,10 +962,10 @@ with only a controller cannot invite.
 | --- | --- | --- |
 | `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned` | §14 "Answers", §19 | A home MAY send them (507, 402, 410, 403). An unknown `refused:` from a home refuses only that request and is shown raw. **Retry signal:** `Retry-After` means retry after it; `"permanent": true` in the answer means do not retry that request; neither means retry with backoff. Forwarding counts an answer with `"permanent": true` as delivered. `refused:closed` is not evidence of deletion. A closing home SHOULD keep signing heads until its revocation is final. |
 | purposes `colophon.home.export`, `colophon.home.close` | §12.2 | A 0.5 home refuses them (`refused:outOfScope`, as any other purpose). |
-| principals `account`, `organisation` | §12.2 (call `signer`), §3.1 (descriptor `form`), §9.1 (request `kind`) | Confer nothing. Met in a call signer: `newerFormat` (F1 row 22); as a descriptor form: `newerFormat`, reported last (§1); as a request kind: the member is opaque (F6). |
+| principals `account`, `organisation` | §12.2 (call `signer`), §3.1 (descriptor `form`), §9.1 (request `kind`) | Reserved names, refused in 0.5: a call signer `malformed`; a descriptor form `newerFormat`, reported last (§1); a request kind `newerFormat` for the entry. |
 | calls with no fresh head | §12.3 "No home" | A verifier configured for it (default off) MAY, for its own audience only and never at a home, take S from its persisted verified history fetched within `headMaxAge` from a source the account names or the person configured, when the latest held state has no current home. It never changes an authority verdict. Vectors test the default. |
 | the suite | §20 "Suites" | One suite in 0.5. A later suite adds a `suite` member to the objects it changes (seals, slots and parts, `previousVault`, the vault); absent means suite 1; descriptors keep `form`. An unknown `suite` is `newerFormat` by F1. |
-| `layouts`, `moved` in `GET {base}` | §14 | A 0.5 home answers `"layouts":[2]`; `moved` optional (F7). |
+| `layouts`, `location` in `GET {base}`; `colophon/location/5` | §14 | A 0.5 home answers `"layouts":[2]`; location statements as F7. |
 | `ext/<principal ID>/…` store paths | §14 "Store layout" | A home stores immutable files there written by `colophon.home.write` of that principal with its own key (a current member, or a controller with `approve` or `control`), up to 16 MiB each, serves them under `colophon.home.read`; readers ignore them. Room for side objects (checkpoints, manifests) without a home upgrade. |
 | kinds and namespaces `colophon.*` | §11.8 | F5. |
 
@@ -987,14 +1008,18 @@ gains `no_home_leniency: bool`). Vectors: `calls/r-signer-organisation` (`newerF
 - Authority entries, transitions, vetoes, receipts, heads: verifies, and refuses `newerFormat` with
   422. A home vouches with heads, so it must understand authority; an account uses newer authority
   content only after its homes read it, and a host checks `layouts` before raising the layout (F3).
-- Calls by opaque members: §6.2's exception.
+- Calls by opaque members: refused (`newerFormat`), no exception.
+- A stopped home: §13.6's table (item S).
+- Location statements: stored, forwarded and served for every current home (F7).
 - The witness window: from the state §4.2 names.
 - Unknown request members: 422 `newerFormat`; unknown response members: ignored by clients.
 
 ## 11. Exports and SDKs, in one place
 
 No new export beyond: `begin_rekey` with names to declare (F5); policy JSON with `witnessWindow`
-(F4); member JSON with `opaque` (F6); view JSON with a per-namespace `newer` count (F1). Swift,
+(F4); member JSON with `opaque` (F6); view JSON with a per-namespace `newer` count (F1);
+`begin_approve` spending a confirmed pairing and `AccountPairing.scan_request` (P); `begin_invite`
+and `join_from_invite` (F8); a stopped status (S). Swift,
 Kotlin and JS: surface `newerFormat` (they already map it to `updateRequired`), the count, opaque
 members, and one "add a namespace" call. No SDK type changes shape.
 
@@ -1002,12 +1027,12 @@ members, and one "add a namespace" call. No SDK type changes shape.
 
 | Point | Review | Chosen | Why |
 | --- | --- | --- | --- |
-| F2 rule | Daybreak: today's control rule is enough | any current principal | today's rule makes foreseeable kinds forgeries; layout-first is a recovery-key ceremony per kind; the set of principals who can stop a device is unchanged (§2.1) |
-| F2 signers | Opus: controllers (not `sign`) and homes only | also members | members can already stop a device through `endSessions`; member key rotation and an agent's delegated grant are member-signed |
+| F2 rule | Opus: any current controller or home; Daybreak: today's control rule | Daybreak's, after the independent check | Opus's widens who can stop a device and lets an old reader stop where the new version refuses; one layout opt-in covers a whole later format version |
 | F3 door | Opus: a new `/5` entry kind | `layout` | one door under the strongest rule; already parsed, already a stop for 0.3 and Swift readers |
-| F6 write fence | Opus: no authority entry while an opaque member exists | a narrow fence | revoking the opaque member from an old device must always work |
+| F6 scope | Opus: every member-local unknown (kind, access, terms) | only new top-level term fields | an unknown access would otherwise get epoch keys from a 0.5 host |
+| F6 write fence | Opus: no authority entry while an opaque member exists | interface guidance only, no security weight | an extension of an opaque member gives it nothing a 0.5 reader acts on |
 | F6 conditions | Opus: unknown operators make the member opaque | three-valued, not opaque | §10.4 already decides per record and call; opacity would discard decidable records |
-| F7 | Daybreak: `homes.update` with consent | identifiers plus discovery | consent per customer per hostname change; the endpoint receipt is not checkable; the code already uses appointed endpoints as audiences |
+| F7 | Daybreak: `homes.update` with consent; Opus: discovery with a fixed audience | identifiers plus a home-signed, monotonic location statement | no recovery consent per hostname change, and no call ever goes to a base the home did not sign for |
 | History for a new device | revision 15: over the pairing channel | an invite link to one or two homes | the history does not fit a QR code; links already exist and need only a one-purpose exemption |
 | Compaction | Daybreak: fix before freeze, or accept | accept as a stated limit, with room left | a checkpoint trust anchor is a design of its own; `ext/` side objects and the layout door leave room (principle 9) |
 | Revocation retention pages | Daybreak: add `retain` pages now | stated limit | a later single-rule kind under F2 adds it without a migration |
@@ -1037,7 +1062,7 @@ default this design uses so no work waits:
 For the owner's principles file (private repository):
 
 - **An extension point is only as safe as the promise it asks of later versions.** F6 works only
-  with the frozen contract of §6.3; F1's record-level stop works only with frozen steps 1–8.
+  with the promise later versions keep (§6); F1's record-level stop works only with frozen steps 1–8.
   Design the point and the promise together, and write the promise into the format.
 - **Never widen who can stop a device.** A new stop is acceptable when the set of principals who
   could already cause one is unchanged; measure each new `newerFormat` against that set.
@@ -1046,3 +1071,31 @@ For the owner's principles file (private repository):
 - **Across versions an older reader may say "update me" where a newer one decides, never decide
   differently.** Every rule here is chosen so the older side errs toward `newerFormat` or held,
   never toward `ok` or a refusal the newer side would not give.
+
+## 15. Changes after the independent check (2026-11-15)
+
+| Finding | Severity | Change |
+| --- | --- | --- |
+| 1, 3 F2 widens who can stop; old/new split | High | F2 withdrawn as designed: unknown kinds and components stay under the control rule; later kinds signed another way come after the layout door, one opt-in per format version (§2, spec §8.5, §8.7, §20) |
+| 2 expired or provisional members' `endSessions` | High | one normative current-principal check (§2, spec §8.5), before unknown content; vectors |
+| 4 a stop before a revoke | High | a stopped reader trusts nothing new: every call `unavailable` whatever S (item S, spec §1, §12.3) |
+| 5 stopped homes unspecified | High | the normative table of spec §13.6; it receipts vetoes and removal-only transitions anchored before the stop |
+| 6 F6 seals keys to unknown access | High | narrow form: only new term fields are member-local (§6, spec §9.8, §10.2) |
+| 7 host fence | Medium | removed as a security rule; interface guidance with no security weight, and why (§6) |
+| 8 forged location relays calls | High | home-signed, monotonic location statements; calls only to appointed or signed bases (§7, spec §14) |
+| 9 no path through another home | Medium | statements replicated by every home and a folder (§7) |
+| 10 invite reads `/pending` | High | invite links read the authority chain and its verification pages only (§7a, spec §13.4) |
+| 11 who signs an invite | Medium | the approving device's member key, current, not a home, not opaque (§7a) |
+| 12 approval by prefix code | High | item P: approval consumes a confirmed pairing token; export and SDK changes; first wave |
+| 13 `newerFormat` before invariants | High | invariants with known inputs first (§4.1a, spec §2.4); quorum 9 with 8 homes `malformed` |
+| 14 live verdicts differ between 0.5 readers | High | a normative one-entry live registry (§5.2, spec §11.8) |
+| 15 namespace exhaustion by one key | Medium | declaring needs the control rule (§5, spec §8.2, §8.4) |
+| 16 unknown signer without account authentication | Medium | `malformed` unless `key` is a current principal's point; reserved names refused (spec §12.2) |
+| 17 invite closed or open | Medium | in §1's closed list |
+| 18 order of work | Low | dispatchable streams with exact files, W0 stubs, waves (§0) |
+
+**What could not be made sound as asked:** a stopped home cannot keep serving under `members`,
+because every read there is a call and verifying it is a trust decision (item S); a device that knows
+only a dead base, with no other home and no folder, needs another device (§7); appointing a home is
+outside the pairing token (§P); an approving device that holds only a controller cannot invite
+(§7a).
