@@ -1672,9 +1672,15 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   them once a primary head covers them, and such an entry is exempt from the 300 s clock rule below
   at a non-primary home, however far its `issued` is behind that home's clock: the primary applied
   the rule.
-- **Transitions.** (The forwarding of recording entries or of the authority a peer needs to verify
-  a forwarded head is pending PR 28's fix, §13.3, changes row 211.) Every home receipts and forwards transitions, vetoes, receipts and its heads
-  to every other current home, and appends recording entries (§8.7), whatever the primary does:
+- **Transitions.** Every home receipts and forwards transitions, vetoes, receipts and its heads
+  to every other current home. A home also forwards to every other current home the entries of its
+  history after the latest head of that home it holds, by `POST {peer}/authority` as a host publishes
+  them (no call: §13.4 lets anyone post there, and the peer admits them as it admits any upload), so
+  that every home holds each recording entry another home appended and can sign a head over it; a
+  home's `final` never waits for a head that covers only an entry it does not hold. Before producing
+  any head, a home appends the recording entries that are due, so the head it forwards covers them
+  and the entries go ahead of it. Every home appends recording entries (§8.7), whatever the
+  primary does:
   `activate` once due, `vetoed` once a veto is valid, and `final` as soon as it holds the witness
   heads, before storing anything signed or receipted by what the activation added. A home that
   holds a valid veto MUST NOT store that transition's `activate`. A home stores an `activate` for a
@@ -1828,10 +1834,9 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   before answering `GET {base}/head` the home MUST produce and store the due head; if it cannot
   (its guard refuses, `issued` cannot yet increase, or its history stops at a fork), it answers 503
   with `Retry-After` and MUST NOT serve the older head, at `records/heads/<its ID>.json` too, and it
-  forwards no head to its peers while one is due. **Pending (PR 28):** how a home makes a peer
-  able to verify a head it forwards after appending a recording entry (so that at `headQuorum` 2 two
-  homes cannot wait on each other for `final`) is being fixed in the home code; the forwarding rule
-  will be written here from that fix (changes row 211). It MUST give its heads strictly increasing `issued`, and MUST NOT
+  forwards no head to its peers while one is due. It sends a peer the entries a forwarded head
+  covers before the head (§13.1 "Transitions"), so a peer can always verify it, and at `headQuorum` 2
+  two homes never wait on each other for `final`. It MUST give its heads strictly increasing `issued`, and MUST NOT
   sign a head for a second digest at a seq unless its own verdict shows the first displaced under
   §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
   second head's side; the Equivocation rule above). The guard belongs to home admission, which holds the history: the host

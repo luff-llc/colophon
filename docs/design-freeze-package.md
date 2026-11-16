@@ -1188,7 +1188,9 @@ The independent check of revision 17 (3 High, 2 Medium, 3 Low) confirmed the in-
 (§17). Changes: a layout raise stops a reader or home only once final, with the companion rule for
 later implementations (spec §1, §8.2, §8.7, §13.6, §20); §2.3 describes, case by case, what the 0.5
 verifier does with unknown content, and §20 states the unfortunate cases as limits; the quorum-2
-forwarding rule is a marked placeholder until PR 28's fix (spec §13.1, §13.3, changes row 211); the
+forwarding rule is written from PR 28's fix: a home forwards its entries after a peer's latest head
+by `POST {peer}/authority`, and appends due recording entries before any head (spec §13.1, §13.3,
+changes row 211); the
 candidate README's "Required for freeze" gains the revision 17 cases; genesis namespaces at most 64
 for writers too; the scan path names the canonical request envelope; §20's preservation sentence is
 "including, without limitation"; L3 is withdrawn (seq 0 ignored, as today) and W1-C with it. The
