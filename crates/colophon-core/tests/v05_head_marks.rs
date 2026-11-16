@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn cand() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5/candidate")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5")
 }
 const NOW: i64 = 1_794_387_660_000; // 2026-11-11T09:01:00Z
 

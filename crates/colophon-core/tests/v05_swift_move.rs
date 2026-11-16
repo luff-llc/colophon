@@ -692,12 +692,12 @@ fn the_swift_admission_rule_decides_what_is_copied() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The generator's fixtures (`conformance/0.5/candidate/swift-slots`): the five Swift forms, from
+// The generator's fixtures (`conformance/0.5/swift-slots`): the five Swift forms, from
 // the same reading of the Swift source, in a form a Swift-side test can reproduce.
 
 fn fixture(name: &str) -> Value {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.5/candidate/swift-slots")
+        .join("../../conformance/0.5/swift-slots")
         .join(name)
         .join("fixture.json");
     serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()

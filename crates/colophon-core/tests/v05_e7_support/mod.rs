@@ -118,7 +118,7 @@ pub fn published_scalars() -> BTreeMap<String, Vec<u8>> {
     let mut put = |public: &str, scalar: &str| {
         out.insert(key_id(&dec(public)), dec(scalar));
     };
-    let c = repo().join("conformance/0.5/candidate");
+    let c = repo().join("conformance/0.5");
     for f in ["keys.json", "rules/keys-r4.json"] {
         for k in read_json(&c.join(f))["keys"].as_object().unwrap().values() {
             put(

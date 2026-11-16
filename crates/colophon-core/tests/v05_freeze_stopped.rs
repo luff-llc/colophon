@@ -389,7 +389,7 @@ fn the_engine_runs_no_exchange_pass_when_stopped() {
 
 fn rules_case(name: &str) -> (Objects, i64) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/0.5/candidate/rules")
+        .join("../../conformance/0.5/rules")
         .join(name);
     let mut entries = Vec::new();
     for sub in ["records/authority", "branch-activate/authority"] {

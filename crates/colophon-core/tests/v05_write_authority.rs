@@ -2738,7 +2738,7 @@ fn published_scalars() -> BTreeMap<String, Vec<u8>> {
             out.insert(key_id(&p), s);
         }
     };
-    let c = repo().join("conformance/0.5/candidate");
+    let c = repo().join("conformance/0.5");
     for f in ["keys.json", "rules/keys-r4.json"] {
         let v = read_json(&c.join(f));
         for k in v["keys"].as_object().unwrap().values() {
@@ -2924,7 +2924,7 @@ fn kind_body_round_trips_the_candidate_vectors_field_names_and_encoding() {
     // state-aware replay test below is the one that builds from held objects.
     let scalars = published_scalars();
     let mut files = Vec::new();
-    files_named(&repo().join("conformance/0.5/candidate"), &mut files);
+    files_named(&repo().join("conformance/0.5"), &mut files);
     let (mut total, mut body_same, mut env_same) = (0, 0, 0);
     let mut by_kind: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
@@ -3092,7 +3092,7 @@ fn kind_body_round_trips_the_candidate_vectors_field_names_and_encoding() {
 fn the_account_vector_rebuilds_through_prepare_and_finish() {
     // Genesis, grant and the determined `activate` of the identity account, built from the
     // vector's inputs and the published keys, and verified: the same bytes at every step.
-    let dir = repo().join("conformance/0.5/candidate/account/records/authority");
+    let dir = repo().join("conformance/0.5/account/records/authority");
     let read = |n: &str| std::fs::read(dir.join(n)).unwrap();
     let scalars = published_scalars();
     let g_env: Value = serde_json::from_slice(&read("00000001.json")).unwrap();
@@ -3399,7 +3399,7 @@ fn state_aware_builders_reproduce_vector_entries_from_held_objects() {
     let scalars = published_scalars();
     let mut stats: BTreeMap<String, [usize; 4]> = BTreeMap::new();
     let mut notes = Vec::new();
-    let root = repo().join("conformance/0.5/candidate");
+    let root = repo().join("conformance/0.5");
     let mut dirs = vec![root.join("account")];
     for e in std::fs::read_dir(root.join("rules")).unwrap() {
         let p = e.unwrap().path();

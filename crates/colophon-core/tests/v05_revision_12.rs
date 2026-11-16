@@ -1,7 +1,7 @@
 //! Tests for revision 12 of the 0.5 specification (2026-11-14): finality by excusal (M1), final
 //! successions (M2), possession under handover (M4), the home's proposer cap (L5) and the
 //! Swift steward threshold (L2). The vectors are the Rust generator's
-//! (`conformance/0.5/candidate/`); these tests add what a vector's `expected` cannot say.
+//! (`conformance/0.5/`); these tests add what a vector's `expected` cannot say.
 #![allow(clippy::unwrap_used)]
 use colophon_core::v05::encoding::parse_date;
 use colophon_core::v05::history::{verify_history, Objects, Persisted};
@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn cand() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5/candidate")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/0.5")
 }
 fn files(dir: &Path) -> Vec<Vec<u8>> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir)

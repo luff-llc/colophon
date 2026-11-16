@@ -203,7 +203,7 @@ fn vault_identity_is_derived_under_the_vault_label() {
 #[test]
 fn the_candidate_account_vault_is_reproduced_from_its_seed() {
     // `account` (and every upgrade vector) reuse the 0.4 genesis: vault seed [70; 32].
-    let body = genesis_body("conformance/0.5/candidate/account/records/authority");
+    let body = genesis_body("conformance/0.5/account/records/authority");
     let v = &body["keyring"]["vault"];
     let public = vault_of(70);
     assert_eq!(b64(&public.signing), v["signing"].as_str().unwrap());
@@ -331,7 +331,7 @@ fn a_kit_has_the_one_0_4_derivation() {
 #[test]
 fn the_candidate_genesis_sealed_slot_is_reproduced_and_opens() {
     // The 0.4 genesis the 0.5 vectors reuse: seed [70;32], controller seed 11, entropy [9;32].
-    let body = genesis_body("conformance/0.5/candidate/account/records/authority");
+    let body = genesis_body("conformance/0.5/account/records/authority");
     let published = &body["keyring"]["slots"][0];
     let device = soft(11);
     let controller = raw_controller(&device, &["approve", "control", "recover"], "raw 11");
@@ -472,6 +472,10 @@ fn collect_candidate_text() -> String {
     fn walk(dir: &std::path::Path, out: &mut String) {
         for e in std::fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
+            if p.ends_with("legacy-draft-1") {
+                // Draft-1 fixtures, not 0.5 vectors.
+                continue;
+            }
             if p.is_dir() {
                 walk(&p, out);
             } else if let Ok(t) = std::fs::read_to_string(&p) {
@@ -486,7 +490,7 @@ fn collect_candidate_text() -> String {
         }
     }
     let mut out = String::new();
-    walk(&repo().join("conformance/0.5/candidate"), &mut out);
+    walk(&repo().join("conformance/0.5"), &mut out);
     out
 }
 
@@ -498,7 +502,7 @@ fn gen(n: u8, controllers: &BTreeMap<String, Controller>) -> SlotTarget {
 /// The verifier's state of the candidate `account` vector: vault seed [70;32] and one raw
 /// controller (key seed 11).
 fn account_state() -> State {
-    let dir = repo().join("conformance/0.5/candidate/account/records/authority");
+    let dir = repo().join("conformance/0.5/account/records/authority");
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())

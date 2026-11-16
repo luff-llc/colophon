@@ -94,7 +94,7 @@ fn published_scalars() -> BTreeMap<String, Vec<u8>> {
     let mut put = |public: &str, scalar: &str| {
         out.insert(key_id(&dec(public)), dec(scalar));
     };
-    let c = repo().join("conformance/0.5/candidate");
+    let c = repo().join("conformance/0.5");
     for f in ["keys.json", "rules/keys-r4.json"] {
         for k in read_json(&c.join(f))["keys"].as_object().unwrap().values() {
             put(
@@ -162,7 +162,7 @@ fn base_chain(case: &str) -> Legacy {
 }
 
 fn vector_entry(rel: &str) -> Vec<u8> {
-    let mut b = std::fs::read(repo().join("conformance/0.5/candidate").join(rel)).unwrap();
+    let mut b = std::fs::read(repo().join("conformance/0.5").join(rel)).unwrap();
     if b.last() == Some(&b'\n') {
         b.pop();
     }
@@ -417,7 +417,7 @@ fn finish_holds_an_upgrade_issued_in_the_future() {
 /// The `upgraded-fence` vector's authority entries below the upgrade (seq 1..3) are the 0.4
 /// account: a member and a legacy epoch. Everything above is rebuilt here.
 fn fence_dir() -> PathBuf {
-    repo().join("conformance/0.5/candidate/records/upgraded-fence")
+    repo().join("conformance/0.5/records/upgraded-fence")
 }
 fn fence_prefix() -> Legacy {
     (1..=3)

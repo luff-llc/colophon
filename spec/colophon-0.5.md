@@ -2705,8 +2705,8 @@ deferred to 0.6 is in changes §A.12 and the design's "Deferred to 0.6".
 6. **Galley.** Galley's identity contract is aligned.
 7. **Notices.** The host notice rules (§17.5) pass against a simulated home.
 
-`conformance/0.5/candidate/` holds the vectors built before any implementation; its README lists
-them. The rest are plan step V1.
+`conformance/0.5/` holds the vectors (built at `conformance/0.5/candidate/` and moved at the
+freeze, bytes unchanged); its README lists them and indexes what covers each required item.
 
 **Open at freeze.** What 0.5 does not decide, stated so nothing is left implicit:
 1. Two successors of one predecessor can each verify, for different verifiers (§15.1, the
@@ -2716,7 +2716,7 @@ them. The rest are plan step V1.
 3. Everything revision 16 designed and revision 17 deferred to 0.6 (changes §A.12, the design's
    "Deferred to 0.6"), including invites for a device that holds nothing (§13.4).
 
-**Required vectors.** The list in [conformance/0.5/candidate/README.md](../conformance/0.5/candidate/README.md)
+**Required vectors.** The list in [conformance/0.5/README.md](../conformance/0.5/README.md)
 "Required for freeze" is normative for condition 1.
 
 ## 22. Review log

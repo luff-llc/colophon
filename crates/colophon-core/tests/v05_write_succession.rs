@@ -64,7 +64,7 @@ struct Vector {
     genesis: Vec<u8>,
 }
 fn vectors() -> Vec<Vector> {
-    let root = repo().join("conformance/0.5/candidate/succession");
+    let root = repo().join("conformance/0.5/succession");
     let mut out = Vec::new();
     let mut names: Vec<_> = std::fs::read_dir(&root)
         .unwrap()
@@ -999,9 +999,7 @@ fn the_migration_transition_is_built_activated_and_recorded() {
 // A `/5` predecessor.
 
 fn vec5(name: &str) -> (std::path::PathBuf, Vec<u8>, Vec<Vec<u8>>) {
-    let dir = repo()
-        .join("conformance/0.5/candidate/succession")
-        .join(name);
+    let dir = repo().join("conformance/0.5/succession").join(name);
     (
         dir.clone(),
         strip(std::fs::read(dir.join("genesis.json")).unwrap()),

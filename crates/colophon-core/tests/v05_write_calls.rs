@@ -38,7 +38,7 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 fn cand() -> PathBuf {
-    repo().join("conformance/0.5/candidate")
+    repo().join("conformance/0.5")
 }
 fn read(path: PathBuf) -> Vec<u8> {
     fs::read(path).unwrap()

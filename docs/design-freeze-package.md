@@ -56,13 +56,13 @@ colophon-core --all-targets -- -D warnings`.
 | Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
 | --- | --- | --- | --- | --- | --- |
 | **W1-P Approval** | `crates/colophon-core/src/v05/pairing.rs`, `v05/account/action.rs`, `v05/write/authority.rs`, `crates/colophon-ffi/src/v05/api/{pairing,engine,action}.rs`, `crates/colophon-ffi/src/v05/surface-names.txt`, generated bindings (`swift/Sources/ColophonKit/Generated/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/colophon_ffi.kt`), `swift/Sources/ColophonSession/*`, `swift/Sources/ColophonSessionUI/*`, `swift/Tests/ColophonSessionTests/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/*`, `js/src/session/*`, `js/src/index.ts`, `js/scripts/smoke.mjs`, `playground/src/*`, `examples/ColophonSample/*`, new `crates/colophon-core/tests/v05_freeze_approval.rs` | — | P, L2 | none in `conformance/`; tests: approve without a token refused; a token for another key refused; a token spent twice refused; the code path and the scan path each issue one | `cargo test -p colophon-core --test v05_freeze_approval`, `cargo test -p colophon-ffi`, `swift test`, `cd sdk/kotlin && ./gradlew test`, `cd js && npm test`, `cd playground && npm test` |
-| **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/mod.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/candidate/{rules,upgrade}/` cases it generates (and the regenerated `upgrade/then-v5-layout`) | — | F2 (current principal, first commit), F3 (stored layout, the door), S (the reader's stopped flag, `Verdict::stopped`), L1 | §2 vectors, §3.4 vectors | — |
+| **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/mod.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/{rules,upgrade}/` cases it generates (and the regenerated `upgrade/then-v5-layout`) | — | F2 (current principal, first commit), F3 (stored layout, the door), S (the reader's stopped flag, `Verdict::stopped`), L1 | §2 vectors, §3.4 vectors | — |
 
 **Wave 2** (after W1-A: the stopped flag and the current-principal helper)
 
 | Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
 | --- | --- | --- | --- | --- | --- |
-| **W2-C Calls** | `crates/colophon-core/src/v05/calls.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/candidate/calls/` cases it generates | W1-A | S (a stopped reader's calls `unavailable`) | `calls/s-stopped-reader-call` | — |
+| **W2-C Calls** | `crates/colophon-core/src/v05/calls.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/calls/` cases it generates | W1-A | S (a stopped reader's calls `unavailable`) | `calls/s-stopped-reader-call` | — |
 
 **Wave 3**
 
@@ -199,7 +199,7 @@ read (§17.1). That is the residual risk of §1.7.
 
 ### 1.5 Vectors
 
-Added (all under `conformance/0.5/candidate/`, built by `cases_freeze_a.rs`, `_b.rs`, `_c.rs`):
+Added (all under `conformance/0.5/`, built by `cases_freeze_a.rs`, `_b.rs`, `_c.rs`):
 
 | Vector | Expected |
 | --- | --- |
