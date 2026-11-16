@@ -511,28 +511,63 @@ actor SessionWorker {
     /// The pairing ledger of this device (§7.3): five failed sessions an hour and one ceremony at a time, enforced by
     /// the core. Kept sealed under the device key in the private container (`pairing-ledger.bin`), with its generation
     /// recorded beside it (`pairing-ledger.generation`): a missing, edited or older ledger opens as a spent budget. It
-    /// records sessions only, never a request. One instance per account lives in this worker, so a ceremony's handle
-    /// and the ledger it counts against are the same.
-    private var ledger: (account: String, limiter: PairingFailureLimiter)?
+    /// records sessions only, never a request.
+    ///
+    /// Every change happens under `withLedger`: an exclusive `flock` on `pairing-ledger.lock` in the private container,
+    /// which every process and every session over that container takes, so two instances never change the ledger at
+    /// once. Under the lock the ledger is reloaded whenever the stored generation is not the one held, so a ceremony
+    /// another instance started is seen live (`pairing:busy`), and a change is sealed and written before the lock goes.
+    /// The ledger held, and the stored generation it was loaded at or last persisted as.
+    private var ledger: (account: String, limiter: PairingFailureLimiter, base: UInt64)?
     private var ledgerURL: URL { configuration.privateContainer.appendingPathComponent("pairing-ledger.bin") }
     private var ledgerFloorURL: URL { configuration.privateContainer.appendingPathComponent("pairing-ledger.generation") }
-    private func pairingLedger(_ account: String) throws -> PairingFailureLimiter {
-        if let ledger, ledger.account == account { return ledger.limiter }
+    private var ledgerLockURL: URL { configuration.privateContainer.appendingPathComponent("pairing-ledger.lock") }
+    private func storedGeneration() -> UInt64 {
+        (try? AtomicFile.read(ledgerFloorURL, maximumBytes: 64)).flatMap { UInt64(String(decoding: $0, as: UTF8.self)) } ?? 0
+    }
+    /// The ledger as stored now (the lock is held).
+    private func loadLedger(_ account: String) throws -> PairingFailureLimiter {
         let sealed = (try? AtomicFile.read(ledgerURL, maximumBytes: 1 << 20)) ?? Data()
-        let floor = (try? AtomicFile.read(ledgerFloorURL, maximumBytes: 64)).flatMap { UInt64(String(decoding: $0, as: UTF8.self)) } ?? 0
         let key = try configuration.deviceSecrets.key(for: account)
-        let opened = try key.withUnsafeData { try PairingFailureLimiter.open(sealed: sealed, deviceKey: $0, account: account, floor: floor, nowMs: nowMs) }
-        ledger = (account, opened)
+        let opened = try key.withUnsafeData {
+            try PairingFailureLimiter.open(sealed: sealed, deviceKey: $0, account: account, floor: storedGeneration(), nowMs: nowMs)
+        }
+        ledger = (account, opened, try opened.generation())
         return opened
     }
-    /// Persists the sealed ledger, then its generation. Throws when either cannot be written: a start is then never
-    /// answered with a nonce (fail closed), and the ledger in memory keeps counting it.
-    private func keepLedger(_ account: String) throws {
-        guard let ledger, ledger.account == account else { return }
+    /// Persists the sealed ledger, then its generation (the lock is held). Throws when either cannot be written: a start
+    /// is then never answered with a nonce (fail closed).
+    private func keepLedger(_ account: String, _ limiter: PairingFailureLimiter) throws {
         let key = try configuration.deviceSecrets.key(for: account)
-        let sealed = try key.withUnsafeData { k in try withEntropy(32) { try ledger.limiter.seal(deviceKey: k, account: account, entropy: $0) } }
+        let sealed = try key.withUnsafeData { k in try withEntropy(32) { try limiter.seal(deviceKey: k, account: account, entropy: $0) } }
         try AtomicFile.write(sealed, to: ledgerURL)
-        try AtomicFile.write(Data(String(try ledger.limiter.generation()).utf8), to: ledgerFloorURL)
+        let generation = try limiter.generation()
+        try AtomicFile.write(Data(String(generation).utf8), to: ledgerFloorURL)
+        ledger = (account, limiter, generation)
+    }
+    /// Runs `body` on the ledger under the cross-instance lock; a change it made is persisted before the lock is released,
+    /// also when it throws.
+    private func withLedger<T>(_ account: String, _ body: (PairingFailureLimiter) throws -> T) throws -> T {
+        try FileManager.default.createDirectory(at: configuration.privateContainer, withIntermediateDirectories: true)
+        let fd = open(ledgerLockURL.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw SessionError.notReady }
+        defer { close(fd) }
+        while flock(fd, LOCK_EX) != 0 { guard errno == EINTR else { throw SessionError.notReady } }
+        defer { flock(fd, LOCK_UN) }
+        var limiter: PairingFailureLimiter
+        // The held ledger is current when the store still has the generation it was loaded or persisted at; its own
+        // later changes (a confirmed pairing's release) are then kept. Otherwise another instance wrote: reload.
+        if let held = ledger, held.account == account, held.base == storedGeneration() { limiter = held.limiter }
+        else { limiter = try loadLedger(account) }
+        let before = ledger?.base ?? 0
+        do {
+            let out = try body(limiter)
+            if try limiter.generation() != before { try keepLedger(account, limiter) }
+            return out
+        } catch {
+            if (try? limiter.generation()) != before { try? keepLedger(account, limiter) }
+            throw error
+        }
     }
     /// The joining device: a code-path pairing for its own member key. Send `commitment()` with the request.
     func beginJoinPairing() async throws -> AccountPairing {
@@ -545,15 +580,17 @@ actor SessionWorker {
         }
     }
     /// The approving device's person started a ceremony for one incoming commitment: a session that reserves one of
-    /// the five an hour, and the nonce to send back. While another is live this is refused (`pairing:busy`); the
-    /// reservation is persisted before the nonce exists, and if it cannot be, no nonce is produced.
+    /// the five an hour, and the nonce to send back. While another is live (in this session or any other instance over
+    /// the same private container) this is refused (`pairing:busy`); the reservation is persisted before the nonce
+    /// exists, and if it cannot be, no nonce is produced.
     func beginApproval(commitment: Data) async throws -> ApprovalStart {
         try await gated {
             if engine == nil { _ = try await reconcile() }
             guard let account = accountID else { throw SessionError.notReady }
-            let limiter = try pairingLedger(account)
-            let pairing = try AccountPairing.existingReceiveCommitment(account: account, commitment: commitment, limiter: limiter, nowMs: nowMs)
-            do { try keepLedger(account) } catch { try? pairing.abandon(nowMs: nowMs); throw error }
+            let at = nowMs
+            let pairing = try withLedger(account) { limiter in
+                try AccountPairing.existingReceiveCommitment(account: account, commitment: commitment, limiter: limiter, nowMs: at)
+            }
             let nonce = try withEntropy(32) { try pairing.sendNonce(na: $0) }
             return ApprovalStart(pairing: pairing, nonce: nonce)
         }
@@ -563,30 +600,30 @@ actor SessionWorker {
     func approvalCode(pairing: AccountPairing, e: Data, nb: Data) async throws -> String {
         try await gated {
             guard let account = accountID else { throw SessionError.notReady }
-            let limiter = try pairingLedger(account)
-            // The start was persisted counted, so a failure here needs no write to stay counted; the ledger is kept anyway.
-            do { return try pairing.receiveReveal(e: e, nb: nb, limiter: limiter, nowMs: nowMs) }
-            catch { try? keepLedger(account); throw error }
+            let at = nowMs
+            return try withLedger(account) { try pairing.receiveReveal(e: e, nb: nb, limiter: $0, nowMs: at) }
         }
     }
     /// The codes did not match (or the person stopped): the session ends on this device, counted.
     func rejectPairing(_ pairing: AccountPairing) async throws {
         try await gated {
             guard let account = accountID else { throw SessionError.notReady }
-            let limiter = try pairingLedger(account)
-            switch try pairing.stage() {
-            case .code, .revealed: try pairing.reject(limiter: limiter, nowMs: nowMs)
-            default: try pairing.abandon(nowMs: nowMs)
+            let at = nowMs
+            try withLedger(account) { limiter in
+                switch try pairing.stage() {
+                case .code, .revealed: try pairing.reject(limiter: limiter, nowMs: at)
+                default: try pairing.abandon(nowMs: at)
+                }
             }
-            try keepLedger(account)
         }
     }
     /// Ends a ceremony this device started, in any stage before it is confirmed (the person cancelled, the other device
     /// went away). It stays counted.
     func abandonApproval(_ pairing: AccountPairing) async throws {
         try await gated {
-            try pairing.abandon(nowMs: nowMs)
-            if let account = accountID { try keepLedger(account) }
+            let at = nowMs
+            guard let account = accountID else { try pairing.abandon(nowMs: at); return }
+            try withLedger(account) { _ in try pairing.abandon(nowMs: at) }
         }
     }
     /// The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's
@@ -595,12 +632,16 @@ actor SessionWorker {
         try await gated {
             if engine == nil { _ = try await reconcile() }
             guard let account = accountID else { throw SessionError.notReady }
-            let limiter = try pairingLedger(account)
-            let scanned = Result { try AccountPairing.scanRequest(account: account, request: data, limiter: limiter, nowMs: nowMs) }
-            try keepLedger(account)
-            let pairing = try scanned.get()
+            let at = nowMs
+            let pairing = try withLedger(account) { try AccountPairing.scanRequest(account: account, request: data, limiter: $0, nowMs: at) }
             return ScannedRequest(request: Self.accessRequest(try accountRequestInfo(raw: data)), pairing: pairing)
         }
+    }
+    /// Keeps a change the app made to the ledger directly (a confirmed pairing gives its reservation back); a lost write
+    /// only leaves it counted.
+    private func keepLedgerChange(_ account: String) {
+        guard ledger?.account == account else { return }
+        _ = try? withLedger(account) { _ in () }
     }
 
     static func accountKind(_ kind: MemberKind) -> AccountMemberKind {
@@ -664,7 +705,7 @@ actor SessionWorker {
                 try await persist(written, on: owner)
             }
             // The confirmed pairing gave its reservation back; keep the ledger (a lost write only leaves it counted).
-            if let account = accountID { try? keepLedger(account) }
+            if let account = accountID { keepLedgerChange(account) }
             return try await reconcile()
         }
     }

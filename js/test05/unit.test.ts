@@ -732,7 +732,7 @@ describe('approval and pairing', () => {
     first.close(); second.close();
   });
 
-  test('the attack: many parallel starts beside the honest ceremony yield at most one nonce', async () => {
+  test('many starts through one session yield one nonce (its worker serializes them; the core lets one live)', async () => {
     const { first, second } = await ledgerWorld();
     const commitments: Uint8Array[] = [];
     for (let i = 0; i < 40; i++) commitments.push(await commitment(second));
@@ -755,7 +755,7 @@ describe('approval and pairing', () => {
     first.close(); second.close();
   });
 
-  test('a ledger rolled back to an earlier copy, or deleted, does not restore the budget after a relaunch', async () => {
+  test('the ledger alone rolled back (its recorded generation kept), or deleted, does not restore the budget after a relaunch', async () => {
     const { first, second, store, secrets, member, owner } = await ledgerWorld();
     await first.session.abandonApproval((await first.session.beginApproval(await commitment(second))).pairing);
     const early = (await store.read('pairing-ledger.bin'))!;
@@ -770,5 +770,31 @@ describe('approval and pairing', () => {
     await again.session.restore();
     await expect(again.session.beginApproval(await commitment(second))).rejects.toThrow();
     again.close(); first.close(); second.close();
+  });
+
+  test('two sessions over one store (two tabs, two workers) yield exactly one nonce', async () => {
+    const { first, second, store, secrets, member, owner } = await ledgerWorld();
+    const other = await Device.make({ medium: first.medium, privateStore: store, secrets, member, owner });
+    await other.session.restore();
+    const commitments: Uint8Array[] = [];
+    for (let i = 0; i < 20; i++) commitments.push(await commitment(second));
+    const sessions = [first.session, other.session];
+    const results = await Promise.allSettled(commitments.map((c, i) => sessions[i % 2]!.beginApproval(c)));
+    expect(results.filter(r => r.status === 'fulfilled').length).toBe(1);
+    other.close(); first.close(); second.close();
+  });
+
+  test('the residual limit: a wholesale restore of the ledger and its generation restores the budget', async () => {
+    const { first, second, store, secrets, member, owner } = await ledgerWorld();
+    await first.session.abandonApproval((await first.session.beginApproval(await commitment(second))).pairing);
+    const early = (await store.read('pairing-ledger.bin'))!;
+    const earlyFloor = (await store.read('pairing-ledger.generation'))!;
+    for (let i = 0; i < 4; i++) await first.session.abandonApproval((await first.session.beginApproval(await commitment(second))).pairing);
+    await store.write('pairing-ledger.bin', early);
+    await store.write('pairing-ledger.generation', earlyFloor);
+    const relaunched = await Device.make({ medium: first.medium, privateStore: store, secrets, member, owner });
+    await relaunched.session.restore();
+    await relaunched.session.beginApproval(await commitment(second));
+    relaunched.close(); first.close(); second.close();
   });
 });

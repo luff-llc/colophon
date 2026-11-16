@@ -145,12 +145,14 @@ class ApprovalPairingTest {
         } finally { first.close(); second.close() }
     }
 
-    /** The attack of the check: many starts beside the honest ceremony get no second nonce. */
-    @Test fun manyParallelStartsYieldAtMostOneNonce() = runBlocking<Unit> {
+    /** Many starts through one session (its worker serializes them; the core lets one live) get one nonce. */
+    @Test fun manyStartsThroughOneSessionYieldOneNonce() = runBlocking<Unit> {
         val (first, second) = world()
         try {
             val commitments = (0 until 40).map { commitment(second.session) }
-            val nonces = commitments.map { c -> async { runCatching { first.session.beginApproval(c) }.isSuccess } }.awaitAll().count { it }
+            // The handles are kept, as a host keeps a ceremony it runs: dropping one ends it (counted).
+            val started = commitments.map { c -> async { runCatching { first.session.beginApproval(c) }.getOrNull() } }.awaitAll().filterNotNull()
+            val nonces = started.size
             assertEquals(1, nonces, "one live ceremony, one nonce")
         } finally { first.close(); second.close() }
     }
@@ -174,8 +176,8 @@ class ApprovalPairingTest {
         } finally { first.close(); second.close() }
     }
 
-    /** A ledger rolled back to an earlier copy, or deleted, does not restore the budget after a relaunch. */
-    @Test fun aRolledBackLedgerDoesNotRestoreTheBudget() = runBlocking<Unit> {
+    /** The ledger alone rolled back to an earlier copy (its recorded generation kept), or deleted, does not restore the budget after a relaunch. */
+    @Test fun aRolledBackLedgerAloneDoesNotRestoreTheBudget() = runBlocking<Unit> {
         val (first, second) = world()
         val ledger = File(first.dir, "pairing-ledger.bin")
         try {
@@ -192,6 +194,40 @@ class ApprovalPairingTest {
             again.session.restore()
             assertFails { again.session.beginApproval(commitment(second.session)) }
             again.session.shutdown()
+        } finally { first.close(); second.close() }
+    }
+
+    /** The attack across instances: two sessions over one private directory start ceremonies at the same time, on two threads. The ledger lock and the reload under it let exactly one succeed. */
+    @Test fun twoSessionsOverOneStoreYieldExactlyOneNonce() = runBlocking<Unit> {
+        val (first, second) = world()
+        val other = Device(medium = first.medium, member = first.member, owner = first.owner, secrets = first.secrets, dir = first.dir)
+        try {
+            other.session.restore()
+            val commitments = (0 until 20).map { commitment(second.session) }
+            val sessions = listOf(first.session, other.session)
+            // The handles are kept, as a host keeps a ceremony it runs: dropping one ends it (counted).
+            val started = commitments.mapIndexed { i, c ->
+                async(kotlinx.coroutines.Dispatchers.Default) { runCatching { sessions[i % 2].beginApproval(c) }.getOrNull() }
+            }.awaitAll().filterNotNull()
+            val nonces = started.size
+            assertEquals(1, nonces, "one ceremony live across both sessions")
+        } finally { other.session.shutdown(); first.close(); second.close() }
+    }
+
+    /** The residual limit, as a test: restoring the sealed ledger and its recorded generation together (a wholesale restore of the private directory) restores the budget. Nothing on the device can tell; the docs say so. */
+    @Test fun aWholesaleRestoreOfLedgerAndGenerationRestoresTheBudget() = runBlocking<Unit> {
+        val (first, second) = world()
+        val ledger = File(first.dir, "pairing-ledger.bin")
+        val floor = File(first.dir, "pairing-ledger.generation")
+        try {
+            first.session.abandonApproval(first.session.beginApproval(commitment(second.session)).pairing)
+            val early = ledger.readBytes() to floor.readBytes()
+            repeat(4) { first.session.abandonApproval(first.session.beginApproval(commitment(second.session)).pairing) }
+            ledger.writeBytes(early.first); floor.writeBytes(early.second)
+            val relaunched = Device(medium = first.medium, member = first.member, owner = first.owner, secrets = first.secrets, dir = first.dir)
+            relaunched.session.restore()
+            relaunched.session.beginApproval(commitment(second.session))
+            relaunched.session.shutdown()
         } finally { first.close(); second.close() }
     }
 }

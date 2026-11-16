@@ -136,18 +136,20 @@ import ColophonSession
         _ = try await first.session.beginApproval(commitment: try await commitment(second.session))
     }
 
-    /// The attack of the check: many starts on the approving device beside the honest ceremony get no second nonce.
-    @Test func manyParallelStartsYieldAtMostOneNonce() async throws {
+    /// Many starts through one session (its worker serializes them; the core lets one live) get one nonce.
+    @Test func manyStartsThroughOneSessionYieldOneNonce() async throws {
         let (first, second) = await world()
         var commitments: [Data] = []
         for _ in 0..<40 { commitments.append(try await commitment(second.session)) }
         let session = first.session
         // All started at once; the worker serializes them, the core lets one live.
-        let tasks = commitments.map { c in Task { @MainActor in (try? await session.beginApproval(commitment: c)) != nil } }
-        var nonces = 0
+        // The handles are kept, as a host keeps a ceremony it runs: dropping one ends it (counted).
+        let tasks = commitments.map { c in Task { @MainActor in try? await session.beginApproval(commitment: c) } }
+        var started: [ApprovalStart] = []
         for task in tasks {
-            if await task.value { nonces += 1 }
+            if let s = await task.value { started.append(s) }
         }
+        let nonces = started.count
         #expect(nonces == 1, "one live ceremony, one nonce")
     }
 
@@ -172,8 +174,9 @@ import ColophonSession
         await #expect(throws: (any Error).self) { _ = try await first.session.beginApproval(commitment: try await commitment(second.session)) }
     }
 
-    /// A ledger rolled back to an earlier copy, or deleted, does not restore the budget after a relaunch.
-    @Test func aRolledBackLedgerDoesNotRestoreTheBudget() async throws {
+    /// The ledger alone rolled back to an earlier copy (its recorded generation kept), or deleted, does not restore the
+    /// budget after a relaunch.
+    @Test func aRolledBackLedgerAloneDoesNotRestoreTheBudget() async throws {
         let (first, second) = await world()
         let ledger = first.home.appendingPathComponent("pairing-ledger.bin")
         let start = try await first.session.beginApproval(commitment: try await commitment(second.session))
@@ -191,5 +194,45 @@ import ColophonSession
         let again = first.relaunch()
         await again.restore()
         await #expect(throws: (any Error).self) { _ = try await again.beginApproval(commitment: try await commitment(second.session)) }
+    }
+
+    /// The attack across instances: two sessions over one private container (two processes, an app and its extension)
+    /// start ceremonies at the same time. The ledger lock and the reload under it let exactly one succeed.
+    @Test func twoSessionsOverOneStoreYieldExactlyOneNonce() async throws {
+        let (first, second) = await world()
+        let other = first.relaunch()
+        await other.restore()
+        var commitments: [Data] = []
+        for _ in 0..<20 { commitments.append(try await commitment(second.session)) }
+        let sessions = [first.session, other]
+        let tasks = commitments.enumerated().map { i, c in
+            Task { @MainActor in try? await sessions[i % 2].beginApproval(commitment: c) }
+        }
+        // The handles are kept, as a host keeps a ceremony it runs: dropping one ends it (counted).
+        var started: [ApprovalStart] = []
+        for task in tasks {
+            if let s = await task.value { started.append(s) }
+        }
+        let nonces = started.count
+        #expect(nonces == 1, "one ceremony live across both sessions")
+    }
+
+    /// The residual limit, as a test: restoring the sealed ledger and its recorded generation together (a wholesale
+    /// restore of the private container) restores the budget. Nothing on the device can tell; the docs say so.
+    @Test func aWholesaleRestoreOfLedgerAndGenerationRestoresTheBudget() async throws {
+        let (first, second) = await world()
+        let ledger = first.home.appendingPathComponent("pairing-ledger.bin")
+        let floor = first.home.appendingPathComponent("pairing-ledger.generation")
+        let start = try await first.session.beginApproval(commitment: try await commitment(second.session))
+        try await first.session.abandonApproval(start.pairing)
+        let (early, earlyFloor) = (try Data(contentsOf: ledger), try Data(contentsOf: floor))
+        for _ in 0..<4 {
+            let s = try await first.session.beginApproval(commitment: try await commitment(second.session))
+            try await first.session.abandonApproval(s.pairing)
+        }
+        try early.write(to: ledger); try earlyFloor.write(to: floor)
+        let relaunched = first.relaunch()
+        await relaunched.restore()
+        _ = try await relaunched.beginApproval(commitment: try await commitment(second.session))
     }
 }
