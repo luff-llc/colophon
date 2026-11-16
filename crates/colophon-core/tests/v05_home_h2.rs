@@ -54,7 +54,7 @@ fn approve(f: &mut Fixture, n: u8, at: i64) -> Vec<u8> {
     let id = f.host.identity(n);
     let req = request_for(f, &f.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), at);
     let seed = f.host.fresh();
-    let pairing = paired(&f, &req);
+    let pairing = paired(f, &req);
     let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed, pairing).unwrap();
     run(&mut f.account, &f.host, action).entries[0].1.clone()
 }
