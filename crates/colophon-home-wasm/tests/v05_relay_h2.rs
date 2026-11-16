@@ -459,7 +459,10 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     // The device whose entry after X lost to the resolution sees the conflict at that seq: B's
     // head names the `activate` there (the engine reports it; its host signs again, §8.6).
     let faults = relay_pass(&mut ctl_x, &w.src, &w.hb, &mut wire, &w.host, now + 2);
-    assert!(faults.iter().any(|f| matches!(f, colophon_core::v05::engine::exchange::Fault::Fork { .. })), "{faults:?}");
+    // (Through the head, `refused:fork`, or, when the head is due at that instant and B answers
+    // 503, through the push of its entry: 409.)
+    use colophon_core::v05::engine::exchange::Fault;
+    assert!(faults.iter().any(|f| matches!(f, Fault::Fork { .. } | Fault::Conflict { .. })), "{faults:?}");
 }
 
 // ---------------------------------------------------------------------------------------------

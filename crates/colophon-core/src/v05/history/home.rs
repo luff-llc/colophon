@@ -158,6 +158,25 @@ struct ObservedReceipt {
     envelope: Vec<u8>,
     first_seen_ms: i64,
     serving: Vec<ServingInterval>,
+    /// The home that signed it: each signing home has its own share of the buffer.
+    #[serde(default)]
+    by: String,
+    /// Its `received`, from which it expires ([`unmatched_expiry`]).
+    #[serde(default)]
+    received_ms: i64,
+}
+/// Receipts of objects the home does not hold yet, kept per signing home (§13.1: forwarded
+/// receipts may arrive before their object). 8 homes at most share 4,096.
+const UNMATCHED_PER_HOME: usize = 512;
+/// When a receipt of an object the home never received stops being kept: the object's `issued` is
+/// at most its `received`, so its due time is at most `received` + 300 s + the recovery delay,
+/// and 7 days after that nothing can be recorded of it (§8.7: an `activate` or `vetoed` is
+/// `issued` at most 7 days after its due time or latest receipt) and a home may drop it (§14).
+fn unmatched_expiry(received_ms: i64, st: &State) -> i64 {
+    received_ms
+        .saturating_add(WINDOW)
+        .saturating_add((st.keyring.policy.recovery_delay() as i64).saturating_mul(1000))
+        .saturating_add(WEEK)
 }
 /// Admission is pure: commit `state` and sign `receipts` in the host, even when `result` refuses.
 #[derive(Clone, Debug)]
@@ -646,12 +665,27 @@ pub fn admit(home: &HomeState, incoming: &[u8], now: &str) -> Admission {
 /// (§13.1 "Other homes store them once a primary head covers them"), since the primary's head may
 /// name a later entry of the same upload. Nothing in `later` is admitted here.
 pub fn admit_with(home: &HomeState, incoming: &[u8], later: &[Vec<u8>], now: &str) -> Admission {
+    admit_full(home, incoming, later, &[], now)
+}
+
+/// [`admit_with`], with the receipts of the same `POST {base}/pending` batch (`batch`): a veto
+/// that is late at this home is judged with an in-window receipt in its own batch.
+fn admit_full(
+    home: &HomeState,
+    incoming: &[u8],
+    later: &[Vec<u8>],
+    batch: &[Vec<u8>],
+    now: &str,
+) -> Admission {
     let mut next = home.clone();
     let mut receipts = Vec::new();
     let mut admitted_head: Option<Vec<u8>> = None;
     let result = (|| -> AdmitResult<()> {
         let now_ms = date(now, "home clock")?;
         let (persisted, prefix, fork) = home.context_any(now_ms)?;
+        // Receipts of objects that never came expire (`unmatched_expiry`).
+        next.unmatched_receipts
+            .retain(|r| r.received_ms == 0 || now_ms <= unmatched_expiry(r.received_ms, &prefix));
         let env = AuthEnvelope::parse(
             incoming,
             bounds::AUTHORITY_BODY,
@@ -850,12 +884,20 @@ pub fn admit_with(home: &HomeState, incoming: &[u8], later: &[Vec<u8>], now: &st
                 // with at least one in-window receipt from another current home, held already
                 // as for a forwarded transition (§13.1); the home signs no receipt of its own.
                 let late = now_ms > at.saturating_add(WINDOW) || now_ms > t.deadline_ms;
+                // The receipt may be held already (forwarded before the veto), or come in the
+                // same batch as the veto: it is judged here either way, never through the
+                // buffer's capacity.
                 if late
-                    && !next.unmatched_receipts.iter().any(|r| {
-                        check_receipt(&st, &r.envelope, &env.digest, at).is_ok_and(
-                            |(by, received)| by != home.home && received <= t.deadline_ms,
-                        )
-                    })
+                    && !next
+                        .unmatched_receipts
+                        .iter()
+                        .map(|r| &r.envelope)
+                        .chain(batch.iter())
+                        .any(|r| {
+                            check_receipt(&st, r, &env.digest, at).is_ok_and(
+                                |(by, received)| by != home.home && received <= t.deadline_ms,
+                            )
+                        })
                 {
                     return Err(Refusal::Late);
                 }
@@ -948,15 +990,21 @@ pub fn admit_with(home: &HomeState, incoming: &[u8], later: &[Vec<u8>], now: &st
                         .iter()
                         .any(|r| r.envelope == incoming)
                     {
-                        if next.unmatched_receipts.len() >= 4_096 {
+                        // Each signing home has its own share: one home filling its share
+                        // never refuses another's receipts. A receipt sent with its object in
+                        // one batch never needs this buffer (`admit_pending_batch`).
+                        let share = next.unmatched_receipts.iter().filter(|r| r.by == by).count();
+                        if share >= UNMATCHED_PER_HOME {
                             return Err(
-                                Failure::Unavailable("unmatched receipt capacity".into()).into()
+                                Failure::Unavailable("unmatched receipt capacity of this home".into()).into()
                             );
                         }
                         next.unmatched_receipts.push(ObservedReceipt {
                             envelope: incoming.to_vec(),
                             first_seen_ms: now_ms,
                             serving: next.serving.clone(),
+                            by: by.clone(),
+                            received_ms: received,
                         });
                     }
                     return Err(Failure::Unavailable("receipt's object is not held".into()).into());
@@ -1812,25 +1860,27 @@ pub fn admit_pending_batch(
     let mut next = home.clone();
     let mut results = Vec::new();
     let mut receipts = Vec::new();
-    // Receipts first, their results set aside: a receipt whose object is not held yet is kept
-    // (§13.1, forwarded receipts), so that an object later in the same batch finds it. A veto
-    // more than 300 s after its `issued` is stored only with an in-window receipt of it from
-    // another current home that the home already holds (§13.1), and a host or a home sending
-    // the veto with that receipt in one request must not depend on their order. Each object,
-    // receipts included, then gets its result in request order.
-    for object in objects {
-        let is_receipt = AuthEnvelope::parse(
-            object,
-            bounds::RECEIPT_BODY,
-            bounds::RECEIPT_ENVELOPE,
-            false,
-        )
-        .is_ok_and(|e| e.value.get("protocol").and_then(Value::as_str) == Some("colophon/receipt/5"));
-        if is_receipt {
-            next = admit(&next, object, now).state;
-        }
-    }
-    for object in objects {
+    // Transitions and vetoes first, in request order, each judged with the receipts of the
+    // batch (a veto more than 300 s after its `issued` is stored with an in-window receipt of
+    // it from another current home, §13.1, and that receipt may come in this very request);
+    // then the receipts, which find their objects stored. A receipt sent with its object never
+    // depends on the buffer of receipts whose object is not held. Results stay in request order.
+    let is_receipt = |o: &Vec<u8>| {
+        RawEnvelope::parse(o, bounds::RECEIPT_BODY, false)
+            .is_ok_and(|e| e.value.get("protocol").and_then(Value::as_str) == Some("colophon/receipt/5"))
+    };
+    let batch: Vec<Vec<u8>> = objects
+        .iter()
+        .filter(|o| is_receipt(o))
+        .filter_map(|o| crate::v05::encoding::strict_parse(o).and_then(|v| canonical(&v)).ok())
+        .collect();
+    let mut by_index: Vec<Option<AdmitResult<()>>> = vec![None; objects.len()];
+    let order: Vec<usize> = (0..objects.len())
+        .filter(|i| !is_receipt(&objects[*i]))
+        .chain((0..objects.len()).filter(|i| is_receipt(&objects[*i])))
+        .collect();
+    for i in order {
+        let object = &objects[i];
         let parsed = AuthEnvelope::parse(
             object,
             bounds::TRANSITION_ENVELOPE,
@@ -1848,7 +1898,7 @@ pub fn admit_pending_batch(
             Ok(env)
         });
         let result = match parsed {
-            Ok(_) => admit(&next, object, now),
+            Ok(_) => admit_full(&next, object, &[], &batch, now),
             Err(f) => Admission {
                 state: next.clone(),
                 result: Err(f.into()),
@@ -1856,8 +1906,9 @@ pub fn admit_pending_batch(
             },
         };
         next = result.state;
-        results.push(result.result);
+        by_index[i] = Some(result.result);
         receipts.extend(result.receipts);
     }
+    results.extend(by_index.into_iter().map(|r| r.unwrap_or(Err(Refusal::Conflict))));
     Ok((next, results, receipts))
 }

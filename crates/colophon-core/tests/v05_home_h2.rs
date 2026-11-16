@@ -9,7 +9,12 @@ mod support;
 mod support_relay;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use colophon_core::v05::encoding::{canonical, digest};
-use colophon_core::v05::history::home::{admit, admit_with, HomeState, Refusal, ServingInterval};
+use colophon_core::v05::history::home::{
+    admit, admit_pending_batch, admit_with, finish_receipt, HomeState, Refusal, ServingInterval,
+};
+use colophon_core::v05::account::{Change, Incoming};
+use colophon_core::v05::history::Objects;
+use colophon_core::v05::write::authority::TransitionRule;
 use colophon_core::v05::write::format_date;
 use serde_json::{json, Value};
 use support::*;
@@ -114,4 +119,105 @@ fn fork_evidence_heads_are_kept_but_at_most_four_per_home() {
         .count();
     assert_eq!(off, 4, "the newest four of six");
     assert_eq!(heads.len(), 5, "and the head over the held entry");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The H2 check (2026-11-15), finding 1: receipts of objects the home does not hold.
+
+/// Three homes, A the primary; the home state of A.
+fn three_homes() -> (Fixture, HomeState, [HomeKeys; 3]) {
+    let keys = [HomeKeys::new(0x77), HomeKeys::new(0x78), HomeKeys::new(0x7a)];
+    let mut f = create_with(&[NS], "public", 1);
+    appoint_homes(&mut f, &[(&keys[0], BASE_A), (&keys[1], BASE_B), (&keys[2], "https://home-c.example")]);
+    let now = f.account.now_ms();
+    let a = HomeState::new(keys[0].id.clone(), f.account.objects(),
+        vec![ServingInterval { from_ms: now, through_ms: None }], now).unwrap();
+    (f, a, keys)
+}
+fn receipt(keys: &HomeKeys, account: &str, object: &str, received: i64) -> Vec<u8> {
+    let body = canonical(&json!({"protocol": "colophon/receipt/5", "account": account, "object": object,
+        "received": format_date(received), "by": keys.id})).unwrap();
+    canonical(&json!({"body": STANDARD.encode(&body), "signature": STANDARD.encode(keys.sign(&body).signature)})).unwrap()
+}
+fn merge(f: &mut Fixture, pending: Vec<Vec<u8>>, at: i64) {
+    f.account.merge(Incoming { objects: Objects { pending, ..Objects::default() }, records: vec![] }, at).unwrap();
+}
+
+/// A transition by one unit, receipted by home A. Returns (transition, its digest, A's state).
+fn receipted(f: &mut Fixture, a: HomeState, ka: &HomeKeys, t: i64) -> (Vec<u8>, String, HomeState) {
+    f.account.advance(t).unwrap();
+    let action = f
+        .account
+        .begin_transition(&Change::policy(json!({"callWindow": 600})), &[f.d.clone()], TransitionRule::Control)
+        .unwrap();
+    let tr = run(&mut f.account, &f.host, action).pending[0].clone();
+    let d = body_digest(&tr);
+    let now = format_date(t + 1_000);
+    let adm = admit(&a, &tr, &now);
+    assert_eq!(adm.result, Ok(()));
+    let draft = &adm.receipts[0];
+    let env = canonical(&json!({"body": STANDARD.encode(&draft.body),
+        "signature": STANDARD.encode(ka.sign(&draft.body).signature)})).unwrap();
+    let a = finish_receipt(&adm.state, &d, &env, &now).unwrap();
+    merge(f, vec![env], t + 1_000);
+    (tr, d, a)
+}
+
+/// A hostile current home (B) fills the buffer of receipts for objects A does not hold with
+/// receipts of random digests. The owner's veto reaches A late, in one batch with B's in-window
+/// receipt of it: A stores the veto (§13.1) whatever the buffer holds. Another home's (C's)
+/// receipts still find room: one home cannot use another's share. And the buffer's items expire.
+#[test]
+fn a_late_veto_with_its_receipt_is_stored_however_full_the_unmatched_buffer() {
+    let (mut f, a, [ka, kb, kc]) = three_homes();
+    let account = f.account.id().as_str().to_string();
+    let t = f.account.now_ms() + 60_000;
+    let (_tr, d, mut a) = receipted(&mut f, a, &ka, t);
+    // B floods A: 4,096 receipts of objects nobody holds.
+    let flood_at = t + 2_000;
+    for chunk in (0..4_096u32).collect::<Vec<_>>().chunks(16) {
+        let objs: Vec<Vec<u8>> = chunk.iter().map(|i| receipt(&kb, &account, &digest(&i.to_le_bytes()), flood_at)).collect();
+        let (next, _, _) = admit_pending_batch(&a, &objs, &format_date(flood_at)).unwrap();
+        a = next;
+    }
+    // The owner's veto, from the other unit; B receipts it in time; it reaches A 400 s late.
+    let veto_at = t + 3_000;
+    f.account.advance(veto_at).unwrap();
+    let action = f.account.begin_veto(&d, &[f.p.clone()]).unwrap();
+    let veto = run(&mut f.account, &f.host, action).pending.iter().find(|p| {
+        let v: Value = serde_json::from_slice(p).unwrap();
+        let b: Value = serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+        b["protocol"] == "colophon/veto/5"
+    }).unwrap().clone();
+    let dv = body_digest(&veto);
+    let rb = receipt(&kb, &account, &dv, veto_at + 10_000);
+    let late = format_date(veto_at + 400_000);
+    let (next, results, own) = admit_pending_batch(&a, &[veto.clone(), rb], &late).unwrap();
+    assert_eq!(results, vec![Ok(()), Ok(())], "the late veto and its receipt are stored");
+    assert!(own.is_empty(), "A signs no receipt of a late veto");
+    let held = next.pending_object(&dv, veto_at + 400_000).unwrap().expect("the veto is held and listed");
+    assert_eq!(held.receipts.len(), 1);
+    // C's share is its own: its receipt of an object A does not hold yet is kept, and counts
+    // once the object arrives (here: a second transition C receipted before A saw it).
+    let t2 = veto_at + 500_000;
+    f.account.advance(t2).unwrap();
+    let action = f
+        .account
+        .begin_transition(&Change::policy(json!({"callWindow": 601})), &[f.d.clone(), f.p.clone()], TransitionRule::Control)
+        .unwrap();
+    let tr2 = run(&mut f.account, &f.host, action).pending[0].clone();
+    let d2 = body_digest(&tr2);
+    let rc = receipt(&kc, &account, &d2, t2 + 1_000);
+    let a2 = admit(&next, &rc, &format_date(t2 + 1_500)).state;
+    let a2 = admit(&a2, &tr2, &format_date(t2 + 2_000)).state;
+    let by: Vec<String> = a2.pending_object(&d2, t2 + 2_000).unwrap().unwrap().receipts.iter()
+        .map(|r| { let v: Value = serde_json::from_slice(r).unwrap(); let b: Value = serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap(); b["by"].as_str().unwrap().to_string() })
+        .collect();
+    assert!(by.contains(&kc.id), "C's receipt was kept although B's share is full: {by:?}");
+    // B's receipts expire 300 s + the recovery delay + 7 days after their `received`: then B's
+    // share is free again.
+    let later = flood_at + 300_000 + 3_600_000 + 7 * 86_400_000 + 1_000;
+    let r_new = receipt(&kb, &account, &digest(b"new object"), later);
+    let after = admit(&a2, &r_new, &format_date(later));
+    assert_ne!(after.result, Err(Refusal::Verification(colophon_core::v05::Failure::Unavailable("unmatched receipt capacity of this home".into()))));
 }
