@@ -32,6 +32,8 @@ let package = Package(name: "ColophonSDK", platforms: [.macOS(.v14), .iOS(.v17),
   .testTarget(name: "ColophonStorageTests", dependencies: ["ColophonKitStorage", "ColophonFolderHelper"], path: "swift/Tests/ColophonStorageTests"),
   // A second process for the folder medium's crash and cross-process tests. Not a product; never shipped.
   .executableTarget(name: "ColophonFolderHelper", dependencies: ["ColophonKitStorage"], path: "swift/Tests/ColophonFolderHelper"),
+  // JSON-line device for the cross-SDK tests. Not a library product; never shipped.
+  .executableTarget(name: "ColophonCrossDevice", dependencies: ["ColophonSession", "ColophonKitStorage"], path: "swift/Tests/ColophonCrossDevice"),
   .binaryTarget(name: "ColophonFFI", path: "sdk/apple/ColophonFFI.xcframework"),
   .target(name: "ColophonKit", dependencies: ["ColophonFFI"], path: "swift/Sources/ColophonKit",
           exclude: ["Generated/ColophonFFI.h", "Generated/ColophonFFI.modulemap"],

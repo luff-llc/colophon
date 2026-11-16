@@ -142,6 +142,8 @@ sealed class HomeProblem {
     data class CallNotBound(val why: String) : HomeProblem()
     /** This device's own check of the call refused it, by the home's rule over what the device holds. No call was sent. */
     data class CallRefused(val code: String) : HomeProblem()
+    /** Unverified refusal of this device's signed call by a home. Stops its pass; never denies local data or wipes keys. */
+    data class RemoteCallRefused(val code: String) : HomeProblem()
 }
 
 internal class HomeProblemException(val problem: HomeProblem) : Exception(problem.toString())
