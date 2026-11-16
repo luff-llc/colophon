@@ -861,7 +861,10 @@ the same `seq` and `previous` and different bodies. A verifier classifies a conf
 Y using only the objects it holds — entries, transitions, vetoes, receipts and heads — so every
 verifier holding the same objects reaches the same verdict, in any order. What it held before
 never selects a branch (§13.3). Several envelopes over one body are one candidate (§2.2): it is
-valid when any of them is, and an envelope that does not verify is ignored.
+valid when any of them is, and an envelope that does not verify is ignored. A head counts in these
+rules, for covering an entry and toward `headQuorum`, only when its home is current and unexpired
+at the head's own `issued` (§13.3); the primary home is not re-chosen by expiry, so an expired
+primary home's later heads count for nothing.
 
 With more than two valid candidates, apply the comparisons below to every pair. A candidate
 stands only if every comparison involving it selects it. If none does (including a cycle), the
