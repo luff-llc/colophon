@@ -101,4 +101,10 @@ tasks.withType<Test>().configureEach {
     testLogging { events("passed", "skipped", "failed"); showStandardStreams = false }
 }
 
+// Reproducible archives (scripts/package-release.sh): fixed entry order, no build-time timestamps.
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
 

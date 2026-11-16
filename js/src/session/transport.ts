@@ -176,7 +176,10 @@ export type HomeProblem =
   /** A request needed a call this host cannot bind to its exact request. No call was sent. */
   | { kind: 'callNotBound'; why: string }
   /** This device's own check of the call refused it, by the home's rule over what the device holds. No call was sent. */
-  | { kind: 'callRefused'; code: string };
+  | { kind: 'callRefused'; code: string }
+  /** The engine still had a request outstanding after the pass was abandoned and run again once: the pass could not
+   *  finish, and the exchange failed. */
+  | { kind: 'stillWaiting' };
 
 export interface HomeIssue { home: string; problem: HomeProblem }
 

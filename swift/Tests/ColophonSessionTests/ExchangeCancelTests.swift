@@ -53,4 +53,27 @@ import Testing
         #expect(!after.isEmpty, "the next pass sent nothing: the engine still held the cancelled request")
         #expect(after.first == "get \(base)/head", "the next pass starts again from the head: \(Array(after))")
     }
+
+    /// An engine that answers `Waiting` again after the one recovery: the pass cannot finish. Before the fix the loop ended
+    /// on the second `Waiting` with no fault, `syncNow()` returned true and an app called it a complete sync.
+    @Test func aPassThatStillWaitsAfterItsRecoveryFails() async throws {
+        let base = "https://waiting-home.test/v1/accounts/w"
+        let home = SimHome(base: base)
+        let make: @Sendable (String) async throws -> Data = { account in
+            home.setAccount(account)
+            return try home.memberRequest(account: account, createdMs: Int64(Date().timeIntervalSince1970 * 1000) - 5000)
+        }
+        let device = Device(homes: [HomeConfiguration(endpoint: URL(string: base + "/")!, request: make, transport: home)], createWithoutHome: false)
+        await device.session.create()
+        device.session.stopSync()
+        try #require(device.session.phase == .ready, "\(device.session.phase)")
+        let worker = device.session.worker
+        await worker.setNextStepOverride { _ in ExchangeStep(kind: .waiting, request: nil, need: nil) }
+        let ok = await device.session.syncNow()
+        #expect(!ok, "a pass that still waits is a failed sync")
+        #expect(device.session.homeIssues.contains { $0.problem == .stillWaiting }, "named: \(device.session.homeIssues)")
+        if case .error = device.session.syncState {} else { Issue.record("sync state \(device.session.syncState)") }
+        await worker.setNextStepOverride(nil)
+        #expect(await device.session.syncNow(), "the next real pass succeeds")
+    }
 }

@@ -21,3 +21,5 @@ dist/
 /sdk/android/.kotlin/
 /sdk/apple/*/*.a
 /sdk/kotlin/.kotlin/
+
+/sdk/apple/ColophonFFI.source-hash

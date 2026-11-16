@@ -223,8 +223,19 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
     suspend fun view(namespace: String): String = facade {
         restore()
         if (!hasUsableContent) throw SessionError.NotReady()
-        worker.view(namespace)
+        // Fenced as `query` is: a fold that returns after the session locked, lost access or changed account is stale.
+        val lease = context
+        val observed = _state.value.namespaceRevisions[namespace] ?: 0u
+        try {
+            val result = worker.view(namespace)
+            afterViewForTests?.invoke()
+            if (context != lease || !hasUsableContent || (_state.value.namespaceRevisions[namespace] ?: 0u) != observed) throw SessionError.StaleRevision()
+            result
+        } catch (e: CancellationException) { throw e
+        } catch (e: Exception) { if (context == lease) handleCommandError(e); throw e }
     }
+    /** Tests only: runs between the worker's answer to `view` and the fence. */
+    @Volatile internal var afterViewForTests: (suspend () -> Unit)? = null
     /** The verified history as the engine reports it (JSON). */
     suspend fun ledger(): String = facade { restore(); worker.ledger() }
 
@@ -337,10 +348,11 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         return try {
             val result = worker.exchange()
             set { copy(homeFaults = result.faults.toList(), homeIssues = result.issues.toList(), lastSyncedMs = System.currentTimeMillis(),
-                syncState = if (result.unauthorized) HomeSyncState.Unauthorized else HomeSyncState.Idle) }
+                syncState = if (result.unauthorized) HomeSyncState.Unauthorized
+                    else if (result.failed) HomeSyncState.Error("a pass could not finish: the engine was still waiting") else HomeSyncState.Idle) }
             if (result.changed || phase != SessionPhase.Ready) refresh(true)
             else try { apply(worker.currentSnapshot()) } catch (e: CancellationException) { throw e } catch (_: Exception) {}
-            !result.unauthorized
+            !result.unauthorized && !result.failed
         } catch (e: CancellationException) { throw e
         } catch (e: HomeTransportException.Offline) { set { copy(syncState = HomeSyncState.Offline(e.reason)) }; false
         } catch (e: AccountException) {
