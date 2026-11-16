@@ -912,4 +912,111 @@ mod tests {
         v["version"] = serde_json::json!(6);
         assert!(Persisted::from_bytes(&serde_json::to_vec(&v).unwrap()).is_err());
     }
+
+    /// Every object of a vector: its entries, every `branch-*` entry, and its held objects
+    /// (`objects/head*.json` as heads, the rest as pending), as the conformance runner loads them.
+    fn case(name: &str) -> Objects {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/0.5/candidate/rules")
+            .join(name);
+        let files = |d: std::path::PathBuf| -> Vec<Vec<u8>> {
+            let mut p: Vec<_> = std::fs::read_dir(d)
+                .map(|r| r.map(|e| e.unwrap().path()).collect())
+                .unwrap_or_default();
+            p.sort();
+            p.iter().map(|p| std::fs::read(p).unwrap()).collect()
+        };
+        let mut o = Objects {
+            entries: files(dir.join("records/authority")),
+            ..Objects::default()
+        };
+        let mut subs: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        subs.sort();
+        for p in subs {
+            let n = p.file_name().unwrap().to_string_lossy().to_string();
+            if n.starts_with("branch-") {
+                o.entries.extend(files(p.join("authority")));
+            }
+        }
+        let mut held: Vec<_> = std::fs::read_dir(dir.join("objects"))
+            .map(|r| r.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        held.sort();
+        for p in held {
+            let n = p.file_name().unwrap().to_string_lossy().to_string();
+            if n.starts_with("head") {
+                o.heads.push(std::fs::read(&p).unwrap());
+            } else {
+                o.pending.push(std::fs::read(&p).unwrap());
+            }
+        }
+        o
+    }
+
+    fn summary(v: &Verdict) -> (String, u64, Option<u64>, Vec<String>) {
+        (v.code(), v.seq(), v.stopped, v.branch.clone())
+    }
+
+    /// The order guard over every F2 and F3 vector: the verdict, the seq, the stop and the
+    /// branch are the same for the entries reversed, sorted by bytes and shuffled (a fixed
+    /// permutation per vector), with the heads and pending objects reordered too.
+    #[test]
+    fn f2_and_f3_verdicts_do_not_depend_on_object_order() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/0.5/candidate/rules");
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("f2-") || n.starts_with("f3-"))
+            .collect();
+        names.sort();
+        assert!(names.len() >= 25, "{names:?}");
+        for name in names {
+            let base = case(&name);
+            let want = summary(&verify_history(&base, &Persisted::default(), NOW));
+            let mut orders: Vec<Objects> = Vec::new();
+            let mut rev = base.clone();
+            rev.entries.reverse();
+            rev.heads.reverse();
+            rev.pending.reverse();
+            orders.push(rev);
+            let mut sorted = base.clone();
+            sorted.entries.sort();
+            sorted.heads.sort();
+            sorted.pending.sort();
+            orders.push(sorted);
+            let mut shuffled = base.clone();
+            let n = shuffled.entries.len();
+            for i in 0..n {
+                // A fixed permutation: swap i with (7i + 3) mod n.
+                shuffled.entries.swap(i, (7 * i + 3) % n);
+            }
+            orders.push(shuffled);
+            for (k, objs) in orders.iter().enumerate() {
+                let got = summary(&verify_history(objs, &Persisted::default(), NOW));
+                assert_eq!(got, want, "{name}, order {k}");
+            }
+        }
+    }
+
+    /// A checkpoint taken while a layout raise is provisional, then the veto arrives late (the
+    /// `vetoed` entry and an entry after it): the resumed verdict equals a full replay's, and
+    /// nothing stops.
+    #[test]
+    fn a_late_veto_after_a_provisional_raise_checkpoint_matches_replay() {
+        let all = case("f3-raise-vetoed");
+        let provisional = case("f3-raise-provisional");
+        let cp = Persisted::checkpoint(&provisional, &Persisted::default(), NOW);
+        assert_eq!(cp.stopped(), None);
+        let resumed = Persisted::from_bytes(&cp.to_bytes().unwrap()).unwrap();
+        let late = verify_history(&all, &resumed, NOW);
+        let full = verify_history(&all, &Persisted::default(), NOW);
+        assert_eq!(summary(&late), summary(&full));
+        assert_eq!(full.code(), "ok");
+        assert_eq!(full.stopped, None);
+        assert_eq!(full.branch.len(), 4);
+    }
 }

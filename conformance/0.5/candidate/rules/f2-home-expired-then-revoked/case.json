@@ -1,0 +1,1 @@
+{"description":"The account's only home has expired: it is not current (§8.5), so the transition revoking it needs no receipt, is due when issued and has no witness.","expected":{"result":"ok","seq":3},"sections":["8.5","8.7","13.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

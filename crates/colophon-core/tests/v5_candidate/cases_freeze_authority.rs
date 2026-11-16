@@ -199,6 +199,7 @@ pub fn part(o: &mut Out) {
     f2(o);
     f3(o);
     f3_final(o);
+    fix_round(o);
 }
 
 fn head_of(chain: &Chain, home: &Key, at: i64, seq: usize) -> Value {
@@ -575,5 +576,309 @@ fn f2(o: &mut Out) {
         bad("badSignature", 2),
         "A transition whose only component is unknown, signed by the recovery rule alone: unknown components need the control rule, so badSignature.",
         &["8.4", "8.7"],
+    );
+}
+
+/// A home's appointment item, optionally with an expiry in its granted terms.
+fn appointment(acct: &str, label: &str, expires: Option<i64>) -> (Value, Key) {
+    let slug = label.to_lowercase().replace(' ', "");
+    let (k, a) = (
+        derived(&format!("w1a/{slug}/signing")),
+        derived(&format!("w1a/{slug}/agreement")),
+    );
+    let mut item = home_appointment(acct, &k, &a, label);
+    if let Some(e) = expires {
+        item["terms"]["expires"] = json!(ts(e));
+    }
+    (item, k)
+}
+
+/// An account of `ctrls` (the first is primary; the others prove possession), `rt` recover units,
+/// `quorum` as `headQuorum`, and homes appointed at once at 60 s by `appointers` (final then,
+/// there being no home before).
+fn account(
+    ctrls: &[(&Key, &[&str])],
+    rt: i64,
+    quorum: i64,
+    homes: &[(&str, Option<i64>)],
+    appointers: Sl,
+) -> (Chain, Vec<Key>) {
+    let kr = keyring(
+        ctrls
+            .iter()
+            .map(|(k, r)| ctrl(*k, r, None, json!({})))
+            .collect(),
+        Kr {
+            rt,
+            policy: Some(policy_with(&[("headQuorum", json!(quorum))])),
+            ..Kr::default()
+        },
+    );
+    let adds: Vec<&dyn Signer> = ctrls[1..].iter().map(|(k, _)| *k as &dyn Signer).collect();
+    let mut c = Chain::new();
+    genesis(
+        &mut c,
+        &kr,
+        &[ctrls[0].0 as &dyn Signer],
+        Gen {
+            opt: Opt {
+                adds: &adds,
+                ..Opt::default()
+            },
+            ..Gen::default()
+        },
+    );
+    let acct = account_id(&c);
+    let (items, keys): (Vec<Value>, Vec<Key>) = homes
+        .iter()
+        .map(|(l, e)| appointment(&acct, l, *e))
+        .unzip();
+    if !items.is_empty() {
+        let t = transition(&c, json!({"homes": {"appoint": items}}), appointers, &ts(60));
+        activate(&mut c, &t, &[]);
+    }
+    (c, keys)
+}
+
+/// The independent check's fix round (2026-11-16): homes that expire (§8.5, §8.7), a suspended
+/// key's `suspend` (§8.7), and the layout raise's remaining paths to finality and conflict.
+fn fix_round(o: &mut Out) {
+    let (a, b, k1) = (A.clone(), B.clone(), K1.clone());
+    const E1: i64 = 2 * 86_400; // a home's expiry: 2026-11-13T08:00:00Z
+    let after = E1 + 3_600;
+
+    // The only home expires; then a transition revokes it, and another appoints a new home.
+    // Neither needs a receipt (no current home at its `issued`) and each is final at once.
+    let (base, keys) = account(&[(&a, AC)], 0, 1, &[("Home one", Some(E1))], sg![a]);
+    let mut c = base.clone();
+    let t = transition(&c, json!({"homes": {"revoke": [keys[0].id]}}), sg![a], &ts(after));
+    activate(&mut c, &t, &[]);
+    wc(
+        o,
+        "f2-home-expired-then-revoked",
+        &c,
+        ok_at(3),
+        "The account's only home has expired: it is not current (§8.5), so the transition revoking it needs no receipt, is due when issued and has no witness.",
+        &["8.5", "8.7", "13.5"],
+    );
+    let acct = account_id(&base);
+    let mut c = base.clone();
+    let (h2, _) = appointment(&acct, "Home two", None);
+    let t = transition(&c, json!({"homes": {"appoint": [h2]}}), sg![a], &ts(after));
+    activate(&mut c, &t, &[]);
+    wc(
+        o,
+        "f2-home-expired-then-replaced",
+        &c,
+        ok_at(3),
+        "The account's only home has expired; a transition appointing a new home needs no receipt and is final at once.",
+        &["8.5", "8.7"],
+    );
+
+    // Two homes at headQuorum 2; one expires. A later transition needs one receipt (the
+    // unexpired home's) and has that home alone as witness; its `final` carries one head.
+    let (base, keys) = account(
+        &[(&a, AC)],
+        0,
+        2,
+        &[("Home one", Some(E1)), ("Home two", None)],
+        sg![a],
+    );
+    let acct = account_id(&base);
+    let h2 = keys[1].clone();
+    let mut c = base.clone();
+    let t = transition(&c, json!({"policy": {"callWindow": 120}}), sg![a], &ts(after));
+    let r = receipt_of(&acct, &t, &h2, &ts(after + 1));
+    activate(&mut c, &t, &[r]);
+    let head = head_of(&c, &h2, after + W + D + 60, 3);
+    final_of(&mut c, 3, &head);
+    wc(
+        o,
+        "f2-home-one-of-two-expired",
+        &c,
+        ok_at(4),
+        "headQuorum 2 with two homes, one expired: the transition needs the receipt of the one current home (at most the current homes), which alone witnesses it, and its final carries that home's head.",
+        &["8.5", "8.7", "13.5"],
+    );
+
+    // A receipt from the only home, given before it expires; the home expires before the
+    // activation, so the activation has no witness and is final at once. The transition raises
+    // the layout, so finality shows as the stop.
+    let e2 = R0 + 86_400;
+    let (base, keys) = account(&[(&a, AC)], 0, 1, &[("Home one", Some(e2))], sg![a]);
+    let acct = account_id(&base);
+    let mut c = base.clone();
+    let t = transition(&c, json!({"layout": 3}), sg![a], &ts(R0));
+    let r = receipt_of(&acct, &t, &keys[0], &ts(R0 + 1));
+    activate(&mut c, &t, &[r]);
+    wc(
+        o,
+        "f2-home-expired-before-due",
+        &c,
+        bad("newerFormat", 3),
+        "The only home receipts a layout raise and expires before its due time: the receipt counts (judged at the transition's issued), the home is no witness of the activation (judged at its issued), so the raise is final at once and the reader stops.",
+        &["8.5", "8.7", "20"],
+    );
+
+    // A suspends B; B, now suspended, signs a suspend of A: badSignature (§8.7).
+    let (mut c, _) = account(&[(&a, AC), (&b, AC)], 0, 1, &[], sg![a]);
+    let t1 = transition(&c, json!({"keyring": {"remove": [b.id]}}), sg![a], &ts(60));
+    c.add(
+        "suspend",
+        &a,
+        &ts(120),
+        &a,
+        Opt::default(),
+        json!({"key": b.id, "transition": emb(&t1), "receipts": []}),
+    );
+    let t2 = transition(&c, json!({"keyring": {"remove": [a.id]}}), sg![b], &ts(130));
+    c.add(
+        "suspend",
+        &b,
+        &ts(140),
+        &b,
+        Opt::default(),
+        json!({"key": a.id, "transition": emb(&t2), "receipts": []}),
+    );
+    wc(
+        o,
+        "f2-suspended-key-suspends",
+        &c,
+        bad("badSignature", 3),
+        "A suspends B; B, while suspended, signs a suspend of A. A suspended key may sign transitions and vetoes but not a suspend (§8.7): badSignature.",
+        &["8.5", "8.7"],
+    );
+
+    // A raise made final by a later full set's anchor (A and B both sign, all control keys).
+    let (base, keys) = account(&[(&a, AC), (&b, AC)], 0, 1, &[("Home one", None)], sg![a]);
+    let acct = account_id(&base);
+    let h1 = keys[0].clone();
+    let mut c = base.clone();
+    let t = transition(&c, json!({"layout": 3}), sg![a], &ts(R0));
+    let r = receipt_of(&acct, &t, &h1, &ts(R0 + 1));
+    activate(&mut c, &t, &[r]);
+    let at = DUE0 + 60;
+    let t2 = transition(&c, json!({"policy": {"callWindow": 120}}), sg![a, b], &ts(at));
+    let r2 = receipt_of(&acct, &t2, &h1, &ts(at + 1));
+    append_unsigned(
+        &mut c,
+        "activate",
+        &a.id,
+        &ts(at + 1),
+        json!({"transition": emb(&t2), "receipts": [emb(&r2)]}),
+    );
+    wc(
+        o,
+        "f3-raise-final-by-full-set",
+        &c,
+        bad("newerFormat", 3),
+        "A provisional layout raise, then a full set anchored at it: the full set's anchor makes the raise final (§8.7), so the reader stops at the raise.",
+        &["8.7", "20"],
+    );
+
+    // A raise made final by excusal: the recovery key alone revokes the only home, removal-only
+    // and with no witness, so the home is excused and the raise has no remaining witness.
+    // B (control) does not sign the raise, so A and K1 are not a full set.
+    let (base, keys) = account(
+        &[(&a, AC), (&b, AC), (&k1, &["recover"])],
+        1,
+        1,
+        &[("Home one", None)],
+        sg![a, k1],
+    );
+    let acct = account_id(&base);
+    let h1 = keys[0].clone();
+    let mut c = base.clone();
+    let t = transition(&c, json!({"layout": 3}), sg![a, k1], &ts(R0));
+    let r = receipt_of(&acct, &t, &h1, &ts(R0 + 1));
+    activate(&mut c, &t, &[r]);
+    let at = DUE0 + 60;
+    let t2 = transition(&c, json!({"homes": {"revoke": [h1.id]}}), sg![k1], &ts(at));
+    let r2 = receipt_of(&acct, &t2, &h1, &ts(at + 1));
+    activate(&mut c, &t2, &[r2]);
+    wc(
+        o,
+        "f3-raise-final-by-excusal",
+        &c,
+        bad("newerFormat", 3),
+        "A provisional layout raise whose only witness is then revoked by the recovery rule (removal-only, final at once): the home is excused, the raise has no remaining witness and is final, so the reader stops at the raise.",
+        &["8.7", "20"],
+    );
+
+    // A raise with another component applies or voids as a whole.
+    let one = |change: Value| {
+        let (mut c, _) = plain();
+        let t = transition(&c, change, sg![a], &ts(60));
+        activate(&mut c, &t, &[]);
+        c
+    };
+    wc(
+        o,
+        "f3-raise-with-policy",
+        &one(json!({"layout": 3, "policy": {"callWindow": 120}})),
+        bad("newerFormat", 2),
+        "A layout raise together with a policy change, no home: the transition applies as a whole and is final at once, so the reader stops at it.",
+        &["8.7", "20"],
+    );
+    let a_other = ctrl(&a, &["approve"], Some("Mac"), json!({}));
+    wc(
+        o,
+        "f3-raise-with-void-component",
+        &one(json!({"layout": 3, "keyring": {"add": [a_other]}})),
+        bad("malformed", 2),
+        "A layout raise together with a component that voids the transition (adding a present key with other roles): the whole transition is void, malformed, and nothing stops.",
+        &["8.7", "20"],
+    );
+
+    // A fork at seq 3 (two grants, no home to decide it), resolved by a `resolve` activation on
+    // one branch. The raise rides on the kept branch, then on the discarded one.
+    let (base, _) = plain();
+    let (x_k, x_a) = (derived("w1a/agent-x/signing"), derived("w1a/agent-x/agreement"));
+    let (y_k, y_a) = (derived("w1a/agent-y/signing"), derived("w1a/agent-y/agreement"));
+    let mut x = base.clone();
+    grant_agent_with(&mut x, &a, &ts(60), &a, &x_k, &x_a, EXPIRES);
+    let mut y = base.clone();
+    grant_agent_with(&mut y, &a, &ts(61), &a, &y_k, &y_a, EXPIRES);
+    let x2 = sha(&body_of(&x.envs[1]));
+    let resolve = |c: &Chain, raise: bool| {
+        let mut change = json!({"resolve": {"kept": {"seq": 2, "digest": x2}}});
+        if raise {
+            change["layout"] = json!(3);
+        }
+        transition(c, change, sg![a], &ts(120))
+    };
+    let mut kept = x.clone();
+    let t = resolve(&kept, true);
+    activate(&mut kept, &t, &[]);
+    write_case(
+        o,
+        "f3-raise-on-kept-branch",
+        &kept,
+        bad("newerFormat", 3),
+        "A fork at seq 2 resolved by a resolve activation that also raises the layout: the branch keeps itself, the raise is final at once (no home), and the reader stops at it.",
+        &["8.6", "20"],
+        vec![],
+        None,
+        vec![("y".into(), vec![(2, y.envs[1].clone())])],
+    );
+    let mut kept = x.clone();
+    let t = resolve(&kept, false);
+    activate(&mut kept, &t, &[]);
+    let mut lost = y.clone();
+    let t = transition(&lost, json!({"layout": 3}), sg![a], &ts(120));
+    activate(&mut lost, &t, &[]);
+    write_case(
+        o,
+        "f3-raise-on-discarded-branch",
+        &kept,
+        ok_at(3),
+        "A fork at seq 2: one branch raises the layout, the other resolves the fork in its own favour. The resolve wins, the raising branch is discarded, and nothing stops.",
+        &["8.6", "20"],
+        vec![],
+        None,
+        vec![(
+            "y".into(),
+            vec![(2, lost.envs[1].clone()), (3, lost.envs[2].clone())],
+        )],
     );
 }
