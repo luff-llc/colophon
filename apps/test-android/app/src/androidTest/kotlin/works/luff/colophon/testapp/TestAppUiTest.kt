@@ -131,6 +131,7 @@ class TestAppUiTest {
         waitFor("the notes", 60) { view("addNote")?.isEnabled == true }
         addNote(note)
         main { model.sync() }
+        assertTrue("the note did not reach the home: ${model.lastSync?.detail}", model.lastSync?.kind == SyncOutcome.Kind.COMPLETE)
         scenario.close()
     }
 

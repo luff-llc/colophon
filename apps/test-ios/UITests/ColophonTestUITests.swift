@@ -153,6 +153,8 @@ import XCTest
         tapTab("Status")
         scrollTap(app.buttons["syncNow"])
         wait(app.staticTexts["syncOutcome"], 60)
+        XCTAssertEqual(app.staticTexts["syncOutcome"].value as? String, "complete", "the note did not reach the home: \(app.staticTexts["syncDetail"].label)")
+        sleep(1)
     }
 
     /// Step: sync until the note written on the other device is listed.

@@ -80,7 +80,7 @@ struct SyncOutcomeView: View {
             Text("Last sync: \(outcome.kind.rawValue) at \(outcome.at.formatted(date: .omitted, time: .standard))")
                 .font(.footnote.bold()).foregroundStyle(outcome.kind == .complete ? Color.green : Color.orange)
                 .accessibilityIdentifier("syncOutcome").accessibilityValue(outcome.kind.rawValue)
-            Text(outcome.detail).font(.caption2).textSelection(.enabled)
+            Text(outcome.detail).font(.caption2).textSelection(.enabled).accessibilityIdentifier("syncDetail")
         }
     }
 }
