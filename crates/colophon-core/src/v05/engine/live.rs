@@ -176,6 +176,7 @@ impl<S: RecordSource> Engine<S> {
         seed: [u8; 32],
     ) -> Result<std::result::Result<PendingLive, Denial>> {
         self.check_ready()?;
+        self.account.refuse_if_stopped()?;
         let crate::v05::account::Standing::Member(me) = self.account.me() else {
             return Err(malformed("this session is not a member"));
         };

@@ -596,6 +596,7 @@ impl<S: RecordSource> Engine<S> {
         request_id: [u8; 32],
     ) -> Result<crate::v05::account::PendingAction> {
         self.check_ready()?;
+        self.account.refuse_call_if_stopped()?;
         let h = self
             .exchange
             .homes
@@ -632,6 +633,8 @@ impl<S: RecordSource> Engine<S> {
     /// records before live state before blobs. After `Done` the next call starts a new pass.
     pub fn exchange_next(&mut self, home: &str) -> Result<Step> {
         self.check_ready()?;
+        // A stopped reader runs no exchange pass (§1 "A stop"): it accepts no head and asks no call.
+        self.account.refuse_call_if_stopped()?;
         let info = self
             .account
             .homes()

@@ -48,6 +48,7 @@ impl<S: RecordSource> Engine<S> {
         seed: [u8; 32],
     ) -> Result<Outcome<BlobWriter>> {
         self.check_ready()?;
+        self.account.refuse_if_stopped()?;
         if let Some(d) = self.account.write_denial(namespace) {
             return Ok(Outcome::failure(d));
         }

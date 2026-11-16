@@ -432,6 +432,7 @@ impl Account {
         pairing: &ConfirmedPairing,
         entropy_seed: [u8; 32],
     ) -> Result<SealedBox> {
+        self.refuse_if_stopped()?;
         require(
             pairing.account() == self.d.auth.account(),
             "the pairing is for another account",
@@ -452,6 +453,7 @@ impl Account {
         sealed: &SealedBox,
         pairing: &ConfirmedPairing,
     ) -> Result<Changes> {
+        self.refuse_if_stopped()?;
         require(
             pairing.account() == self.d.auth.account(),
             "the pairing is for another account",

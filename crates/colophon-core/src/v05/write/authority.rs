@@ -175,7 +175,13 @@ fn verify_appended(
     let mut all = objects.clone();
     all.entries.push(env.to_vec());
     let verdict = verify_history(&all, &Persisted::default(), now_ms);
-    stop_to_error(&verdict.stop)?;
+    // The entry that makes a layout raise final stops the reader at the raise (§1 "A stop"): a
+    // verified state, not a failure of this entry, which must still be the branch head. A 0.5
+    // reader records it as any activation until the raise is final (§13.6).
+    let final_raise = verdict.state.as_ref().and_then(|s| s.stopped_at());
+    if final_raise.is_none() || final_raise != verdict.stopped {
+        stop_to_error(&verdict.stop)?;
+    }
     let want = digest(body);
     require(
         verdict.branch.len() as u64 == seq && verdict.branch.last() == Some(&want),

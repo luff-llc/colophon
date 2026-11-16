@@ -224,13 +224,31 @@ pub struct Status {
     pub detail: Option<String>,
     /// The persisted high-water mark is not on the verified branch (§13.3).
     pub rollback: bool,
+    /// Set when this reader is **stopped** for the account (§1 "A stop"): a verified state, not
+    /// an error. The account was moved to a format this reader does not know; it keeps
+    /// reading what it holds, as of the stop, and builds nothing (see [`Account::stopped`]).
+    #[serde(default)]
+    pub stopped: Option<Stopped>,
 }
+
+/// Where a reader stopped (§1 "A stop", §20 "The upgrade door"). Derived only from the verified
+/// history: never from a home's answer or a refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stopped {
+    /// The seq of the authority entry the stop names: the activation that raised the layout
+    /// (final on the verified branch), or the entry this reader judged `newerFormat`.
+    pub seq: u64,
+    /// The layout the raise names (above 2), or `None` when the stop is an entry of a newer
+    /// format rather than a layout raise.
+    pub layout: Option<u64>,
+}
+
 impl Status {
     /// True when nothing stops writing.
     pub fn is_clean(&self) -> bool {
         self.code == "ok" && !self.rollback
     }
-    fn of(v: &Verdict) -> Self {
+    fn of(v: &Verdict, objects: &Objects) -> Self {
         let (stop_seq, detail) = match &v.stop {
             None => (None, None),
             Some(Stop::Failed { seq, failure }) => (Some(*seq), Some(failure.detail().to_string())),
@@ -243,8 +261,48 @@ impl Status {
             stop_seq,
             detail,
             rollback: v.rollback,
+            stopped: stopped_of(v, objects),
         }
     }
+}
+
+/// The stop of a verdict, with the layout its raising activation names when the stopping entry
+/// is on the verified branch (a final raise). An entry judged `newerFormat` is not on the branch
+/// (the branch ends before it), and names no layout this reader can read.
+fn stopped_of(v: &Verdict, objects: &Objects) -> Option<Stopped> {
+    let seq = v.stopped?;
+    let layout = usize::try_from(seq)
+        .ok()
+        .and_then(|s| s.checked_sub(1))
+        .and_then(|i| v.branch.get(i))
+        .and_then(|digest| raised_layout(objects, digest));
+    Some(Stopped { seq, layout })
+}
+
+/// The layout an `activate` entry with body digest `digest` raises to: its embedded
+/// transition's `change.layout`, when above 2. Read from the held bytes the verifier already
+/// accepted on the branch; anything else is `None`.
+fn raised_layout(objects: &Objects, digest: &str) -> Option<u64> {
+    use crate::v05::encoding::bounds;
+    use crate::v05::history::envelope::AuthEnvelope;
+    let entry = objects.entries.iter().find_map(|b| {
+        AuthEnvelope::parse(b, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY.saturating_mul(2), false)
+            .ok()
+            .filter(|e| e.digest == digest)
+    })?;
+    if entry.value.get("kind").and_then(serde_json::Value::as_str) != Some("activate") {
+        return None;
+    }
+    let embedded = entry.value.get("transition").and_then(serde_json::Value::as_str)?;
+    let bytes =
+        crate::v05::encoding::decode_base64(embedded, bounds::TRANSITION_ENVELOPE).ok()?;
+    let t = AuthEnvelope::parse(&bytes, bounds::TRANSITION_ENVELOPE, bounds::TRANSITION_ENVELOPE, false)
+        .ok()?;
+    t.value
+        .get("change")
+        .and_then(|c| c.get("layout"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|l| *l > 2)
 }
 
 /// The work of the latest derivation, and the sum since the account opened.
@@ -780,7 +838,7 @@ impl Account {
                 c.namespaces.insert(name.clone(), rev);
             }
         }
-        c.status = Some(Status::of(&self.d.verdict));
+        c.status = Some(Status::of(&self.d.verdict, &self.d.effective));
         c
     }
 
@@ -864,7 +922,7 @@ impl Account {
         self.note_pending();
         let now = self.pending_digests();
         changes.pending.gone.retain(|g| !now.contains(g));
-        changes.status = Some(Status::of(&self.d.verdict));
+        changes.status = Some(Status::of(&self.d.verdict, &self.d.effective));
         changes
     }
 
@@ -1007,7 +1065,39 @@ impl Account {
     }
     /// Where the verifier stands.
     pub fn status(&self) -> Status {
-        Status::of(&self.d.verdict)
+        Status::of(&self.d.verdict, &self.d.effective)
+    }
+    /// `Some` when this reader is **stopped** for the account (§1 "A stop"): a final layout
+    /// raise on the verified branch, or an entry it judged `newerFormat`. A stable state, not an
+    /// error, and one that survives a reopen from the objects or from saved state (it is a
+    /// function of the held objects). What the account holds stays readable, as of the stop:
+    /// records, blobs, the member list. Nothing new is built: an authority entry, a transition,
+    /// a veto, a record, a seed transfer or a move step is refused `newerFormat` (§1: the host
+    /// asks to be updated), and a link, a call or an exchange pass is refused `unavailable`
+    /// (§12.3 step 4), each before any signature is asked for. A raise that is provisional or
+    /// vetoed stops nothing.
+    pub fn stopped(&self) -> Option<Stopped> {
+        stopped_of(&self.d.verdict, &self.d.effective)
+    }
+    /// §1 "A stop": a stopped reader's host builds no entry, transition, veto, record or move
+    /// step and asks to be updated: `newerFormat`.
+    pub(crate) fn refuse_if_stopped(&self) -> Result<()> {
+        match self.d.verdict.stopped {
+            Some(seq) => Err(crate::v05::Failure::NewerFormat(format!(
+                "stopped for the account at seq {seq}: update to continue"
+            ))),
+            None => Ok(()),
+        }
+    }
+    /// §1 "A stop", §12.3 step 4: a stopped reader builds no link or call and runs no exchange
+    /// pass, whatever S would be: `unavailable`.
+    pub(crate) fn refuse_call_if_stopped(&self) -> Result<()> {
+        match self.d.verdict.stopped {
+            Some(seq) => Err(crate::v05::Failure::Unavailable(format!(
+                "stopped for the account at seq {seq}: newer format, update to continue"
+            ))),
+            None => Ok(()),
+        }
     }
     /// The body digests of the verified branch, in seq order (seq 1 first).
     pub fn branch_digests(&self) -> &[String] {
@@ -1313,7 +1403,7 @@ impl Account {
                 c.namespaces.insert(name.clone(), rev);
             }
         }
-        c.status = Some(Status::of(&self.d.verdict));
+        c.status = Some(Status::of(&self.d.verdict, &self.d.effective));
         Ok(c)
     }
 
@@ -1785,7 +1875,7 @@ impl Account {
         self.note_pending();
         let now = self.pending_digests();
         changes.pending.gone.retain(|g| !now.contains(g));
-        changes.status = Some(Status::of(&self.d.verdict));
+        changes.status = Some(Status::of(&self.d.verdict, &self.d.effective));
         Ok(Some(changes))
     }
 

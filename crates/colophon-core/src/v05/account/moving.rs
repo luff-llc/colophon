@@ -243,6 +243,7 @@ impl Account {
     /// the due time, after F or a recorded veto), for a key that is not eligible, and for fewer
     /// keys than the `handover` had.
     pub fn begin_swift_veto(&self, params: &SwiftVetoParams) -> Result<PendingSwiftVeto> {
+        self.refuse_if_stopped()?;
         let s = self.stage_is(&[MoveStage::Waiting], "a veto is made during the wait")?;
         let held = self.objects.pending.iter().any(|p| {
             AuthEnvelope::parse(p, bounds::VETO_BODY, bounds::VETO_ENVELOPE, true)
@@ -269,6 +270,7 @@ impl Account {
         signers: Vec<String>,
         issued_ms: i64,
     ) -> Result<PendingMove> {
+        self.refuse_if_stopped()?;
         let s = self.stage_is(
             &[MoveStage::Due],
             "F is written once the succession is due, and only once",
@@ -312,6 +314,7 @@ impl Account {
         item: &CopyItem,
         seed: [u8; 32],
     ) -> Result<CopyWrite> {
+        self.refuse_if_stopped()?;
         self.stage_is(
             &[MoveStage::Verified],
             "records are copied after F, once the succession is verified",
@@ -475,6 +478,7 @@ impl Account {
         signers: &[String],
         seed: [u8; 32],
     ) -> Result<PendingMove> {
+        self.refuse_if_stopped()?;
         require(
             self.owed_shares().iter().any(|o| o.member == member),
             "that member is owed no shares: the shares step is done, or not needed",
@@ -515,6 +519,7 @@ impl Account {
         issued_ms: i64,
         signers: Vec<String>,
     ) -> Result<PendingMove> {
+        self.refuse_if_stopped()?;
         self.stage_is(
             &[MoveStage::Verified],
             "the migration is written after F and the copy",

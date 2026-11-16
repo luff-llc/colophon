@@ -1039,6 +1039,11 @@ impl<S: RecordSource> Engine<S> {
     pub fn status(&self) -> Status {
         self.account.status()
     }
+    /// Where this reader stopped, if it is stopped for the account (§1 "A stop"; see
+    /// [`crate::v05::account::Account::stopped`]).
+    pub fn stopped(&self) -> Option<crate::v05::account::Stopped> {
+        self.account.stopped()
+    }
     /// Members whose `writes` budget spans namespaces this replica does not read (0.3 §4,
     /// `budgetScopeUnavailable`): a budget is counted across all of a member's namespaces, so
     /// a partial replica cannot tell how much of it is spent. This replica refuses local
@@ -1218,6 +1223,7 @@ impl<S: RecordSource> Engine<S> {
         seed: [u8; 32],
     ) -> Result<std::result::Result<crate::v05::account::PendingAction, Denial>> {
         self.check_ready()?;
+        self.account.refuse_if_stopped()?;
         if let Some(d) = self.partial_budget_denial() {
             return Ok(Err(d));
         }
@@ -1658,6 +1664,7 @@ impl<S: RecordSource> Engine<S> {
         seed: [u8; 32],
     ) -> Result<std::result::Result<crate::v05::account::PendingAction, Denial>> {
         self.check_ready()?;
+        self.account.refuse_if_stopped()?;
         let crate::v05::account::Standing::Member(me) = self.account.me() else {
             return Err(Failure::Refused(Reason::NotGranted));
         };
