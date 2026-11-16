@@ -11,8 +11,9 @@ import XCTest
         app = XCUIApplication()
     }
 
-    private func launch(reset: Bool) {
+    private func launch(reset: Bool, link: String? = nil) {
         app.launchArguments = reset ? ["-uiTestReset"] : []
+        if let link { app.launchEnvironment["COLOPHON_OPEN_URL"] = link }
         app.launch()
     }
 
@@ -114,6 +115,7 @@ import XCTest
 
     // MARK: Steps of the two-device run
 
+    private func env(_ name: String) -> String? { ProcessInfo.processInfo.environment[name].flatMap { $0.isEmpty ? nil : $0 } }
     private var note: String { ProcessInfo.processInfo.environment["COLOPHON_NOTE"] ?? "note from the iPhone" }
 
     /// Step: create an account and show the invite (debug builds write it to Documents/outbox.txt).
@@ -127,7 +129,7 @@ import XCTest
 
     /// Step: approve the request that arrived by link (`colophontest://request?p=…`), after the codes are read.
     func testScriptApprove() {
-        launch(reset: false)
+        launch(reset: false, link: env("COLOPHON_REQUEST").map { "colophontest://request?p=\($0)" })
         wait(app.buttons.matching(NSPredicate(format: "label == %@", "Devices")).firstMatch, 30)
         tapTab("Devices")
         wait(app.buttons["approve"], 60, "no request is waiting")
@@ -135,6 +137,12 @@ import XCTest
         let gone = NSPredicate(format: "exists == false")
         expectation(for: gone, evaluatedWith: app.buttons["approve"])
         waitForExpectations(timeout: 60)
+    }
+
+    /// Step: join with the invite in `TEST_RUNNER_COLOPHON_INVITE` and wait for the pairing code.
+    func testScriptJoin() {
+        launch(reset: true, link: env("COLOPHON_INVITE").map { "colophontest://join?p=\($0)" })
+        wait(app.staticTexts["pairingCode"], 60, "the device did not reach waiting for approval")
     }
 
     /// Step: write a note.

@@ -45,12 +45,15 @@ struct SyncOutcome: Sendable {
 
     init() {
         #if DEBUG
-        // UI tests start from a fresh install's state.
+        // UI tests start from a fresh install's state, and may hand the app a link at launch (a link opened from outside
+        // asks "Open in…?" first, which a scripted run cannot answer).
+        let link = ProcessInfo.processInfo.environment["COLOPHON_OPEN_URL"].flatMap(URL.init(string:))
         if CommandLine.arguments.contains("-uiTestReset") {
             settings = Settings()
-            Task { await resetDevice() }
+            Task { await resetDevice(); if let link { await open(link) } }
             return
         }
+        if let link { Task { await open(link) } }
         #endif
         if settings.slot != nil { openSession(request: nil) }
         record("app started; home prefix \(settings.homePrefix), reach \(settings.reachPrefix.isEmpty ? "-" : settings.reachPrefix)")

@@ -283,8 +283,8 @@ parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: 
 parameters.allowLocalEndpointReuse = true
 let listener: NWListener
 do { listener = try NWListener(using: parameters) } catch { fail("cannot listen on 127.0.0.1:\(options.port): \(error)") }
-listener.newConnectionHandler = { Connection($0, service: service).start() }
-listener.stateUpdateHandler = { state in
+listener.newConnectionHandler = { @Sendable connection in Connection(connection, service: service).start() }
+listener.stateUpdateHandler = { @Sendable state in
     switch state {
     case .ready: print("{\"listening\":{\"host\":\"127.0.0.1\",\"port\":\(options.port)},\"relay\":\"http://127.0.0.1:\(options.relayPort)/v1/libraries/\"}"); fflush(stdout)
     case .failed(let error): fail("listener failed: \(error)")
@@ -297,7 +297,7 @@ listener.start(queue: service.queue)
 let signalSources = [SIGINT, SIGTERM].map { sig in
     signal(sig, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: sig, queue: service.queue)
-    source.setEventHandler { service.stopRelay(); exit(0) }
+    source.setEventHandler { @Sendable in service.stopRelay(); exit(0) }
     source.resume()
     return source
 }
