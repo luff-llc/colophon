@@ -21,7 +21,7 @@ class ApprovalPairingTest {
     }
     private suspend fun isMember(device: Device, owner: Device): Boolean {
         owner.session.refresh()
-        return owner.session.members.any { it.id == device.session.memberId }
+        return owner.session.state.value.members.any { it.id == device.session.memberId }
     }
 
     @Test fun aListedRequestCarriesNoCodeAndTheJoiningDeviceShowsNone() = runBlocking<Unit> {
