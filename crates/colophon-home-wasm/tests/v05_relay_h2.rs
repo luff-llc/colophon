@@ -449,10 +449,15 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     // `issued` than the one before, §13.3; both homes now append the activate and the final and
     // give each other their entries).
     let tick = std::cell::Cell::new(at + 5_000);
-    eventually("B's head over the resolution", 30, || {
+    // The devices sync once both homes hold the same history and B's head covers all of it (B
+    // may still append the `final` after the `activate`).
+    eventually("B's head over the resolution, both homes alike", 30, || {
         tick.set(tick.get() + 50);
         w.clocks(tick.get());
-        head_at(b).is_some_and(|(s, _, _)| s > n)
+        let eb = entries(b);
+        eb.len() > n as usize + 1
+            && eb == entries(&w.a)
+            && head_at(b).is_some_and(|(s, _, _)| s == eb.len() as u64)
     });
     let (s, file) = b.get(&format!("/records/authority/{n:08}.json"));
     assert_eq!((s, digest_of(&serde_json::from_slice(&file).unwrap())), (200, dx.clone()));
@@ -476,7 +481,7 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     let mut ctl_new = controller_engine(&w.f, &w.host, &src_new, &w.f.d.clone(), now);
     pass_without_calls(&mut ctl_new, &src_new, &w.hb, &mut wire, &w.host, now + 1);
     assert_eq!(ctl_new.account().status().code, "ok");
-    assert_eq!(ctl_new.account().head(), ctl_b.account().head());
+    assert_eq!(ctl_new.account().head(), ctl_b.account().head(), "B now holds {:?}", kinds_at(b));
     // The device whose entry after X lost to the resolution sees the conflict at that seq, at the
     // primary (A), which takes immediate entries: through the head, `refused:fork` or a head
     // naming the `activate` there, or through the push of its entry, 409 (the engine reports it;
