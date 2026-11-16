@@ -983,14 +983,15 @@ serve the losing entry.
   it; a key the transition would remove may sign.
 - **Receipt** (§13.5): by a current home, `received` within 300 s after the object's `issued`.
   **Choosing receipts (a rule for a recorder):** an entry carries exactly `headQuorum` receipts for
-  an object, from the homes with the lowest member IDs whose valid receipts the recorder holds,
+  an object (for a full set of which the recorder holds fewer, at most the homes that remain after
+  the homes it revokes, and from those homes only, none if none remains), from the homes with the lowest member IDs whose valid receipts the recorder holds,
   for each home its receipt with the lowest body digest, sorted by home ID, so honest recorders
   holding the same receipts build the same entry. For a veto the receipts that may be chosen are
   those valid under §13.5 and **received at or before the transition's veto deadline**; a later
   receipt is skipped, never chosen, and never blocks the entry. **A verifier judges only the
   receipts the entry carries, for validity:** `headQuorum` receipts (at most the current homes)
-  from distinct current homes, sorted by home ID, each valid under §13.5, in window and, for a
-  veto, at or before the deadline. It never refuses an entry because a different valid receipt
+  from distinct current homes, or for a full set as validity rule 2 allows, sorted by home ID,
+  each valid under §13.5, in window and, for a veto, at or before the deadline. It never refuses an entry because a different valid receipt
   exists or is held: a verdict that depended on which objects a verifier holds would let one
   home split verifiers. Two `vetoed` (or two `activate`) entries for one object that differ only
   in receipts are ordered by §8.6 rule 1 (the lower body digest stands, the other is dropped). A
@@ -1000,18 +1001,25 @@ serve the losing entry.
 **Times.** For a transition T judged in state S:
 - the delay is the larger of `recoveryDelay` at T's anchor and in S;
 - **due** = T's `issued` + 300 s + delay; **veto deadline** = T's `issued` + delay;
-- a **full set** (below) is due at its latest chosen receipt's `received`, or at its `issued` if S
-  has no home; it has no veto deadline.
+- a **full set** (below) is due at its latest chosen receipt's `received`, or at its `issued` if it
+  carries none (S has no home, or none remains after the homes it revokes); it has no veto
+  deadline. Then nothing but its anchor's `issued` and the 7-day bound limits how far back its
+  `issued` may be, as in an account with no home.
 
 **Validity of T at an entry E** (`suspend`, `activate`, `vetoed`), against the state S immediately
 before E:
 1. its signers meet the rule, consent and escalation, and each is current with the role it signed
    with (`badSignature`);
-2. it has `headQuorum` valid receipts from distinct homes current in S, unless S has no home
-   (`malformed`);
+2. it has `headQuorum` valid receipts (at most the current homes) from distinct homes current in
+   S, unless S has no home; or, for a full set only, `headQuorum` (at most the remaining homes)
+   from distinct remaining homes, the homes current in S less the homes it revokes, none if no
+   home remains (`malformed`). A full set leaves the homes it revokes out of its receipts, as
+   out of its witnesses. Nothing else leaves a home out: a transition that can be vetoed needs the
+   receipts of the homes that witness its window;
 3. its anchor is on E's branch (`malformed`).
 
-A transition whose only receipting homes are revoked before activation is dead.
+A transition whose only receipting homes are revoked before activation is dead, unless it is a
+full set and they are homes it revokes itself: it needs no receipt from those (rule 2).
 
 A home admits a transition (receipts it) by judging it at the home's **current head**, not at a
 later state (§13.1); validity at an entry is judged at that entry, as above.
@@ -1026,7 +1034,10 @@ another unit.
 **Full set.** T is a full set, can't be vetoed and is due as above when it has at least two signer
 units and either (a) meets the recovery rule and every current `recover` controller signed it, or
 (b) meets the control rule, every current `control` controller signed it, and, if it needs
-consent, every current `recover` controller too. "Current" includes every key T removes. Whoever
+consent, every current `recover` controller too. "Current" includes every key T removes. Either
+definition makes T a full set, whichever rule T is otherwise judged under, but (a) only where the
+recovery rule may make T's components and (b) only where the control rule may (consent included):
+being a full set lets through no component that rule refuses. Whoever
 holds every recovery key is treated as the owner.
 
 **Removal-only transitions.** A transition is **removal-only** when every component only
@@ -1043,7 +1054,10 @@ witness its own removal therefore stays. Removing such a home needs the **strong
 full set, or the recovery rule where recovery controllers exist — whose activation's witnesses
 leave out the homes it revokes, so finality needs only the remaining homes. An account with no
 recovery controllers and a dead or unwilling home needs every control key (full set (b)) to drop
-it.
+it. A full set needs no receipt from the homes it revokes (validity 2), so a home that is gone or
+refuses never blocks it; if no home remains it is final at once and the account has no home. It
+then appoints one as an account with no home does: dropping a home and appointing another are two
+transitions.
 
 **Liveness of recovery.** While `headQuorum` honest homes are current and reachable and the owner
 holds every recovery controller, no one without the recovery rule can make those homes'
@@ -1062,8 +1076,9 @@ from heads it has seen or the order it saw things in.
   whose revocation isn't final yet; a home is excused only once its revocation is final), less the
   homes it revokes itself under the stronger authority. For a
   full set they are those of them that remain after it. A home witnesses, and its receipts are
-  required and accepted, from the final activation that appoints it until its revocation is final,
-  whatever its grant's expiry says (§8.5); a home that stops answering blocks finality until it is
+  accepted, from the final activation that appoints it until its revocation is final, whatever its
+  grant's expiry says (§8.5); its receipts are required for the same span, except by a full set
+  that revokes it (validity 2); a home that stops answering blocks finality until it is
   revoked.
 - **Final.** An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering
@@ -1698,7 +1713,8 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   holds a valid veto MUST NOT store that transition's `activate`. A home stores an `activate` for a
   transition it didn't receipt only if it first saw the transition, or a receipt of it forwarded by
   another current home, within 300 s after the transition's `issued`, or it was not serving for any
-  part of that window. Otherwise it refuses that `activate` for ever and notifies the controllers,
+  part of that window, or the transition is a full set that revokes it (§8.7 validity 2).
+  Otherwise it refuses that `activate` for ever and notifies the controllers,
   and it **still stores and serves the transition and its receipts** (§14), so the owner can veto
   it before its deadline; a late transition with a valid veto is vetoed like any other. A veto that
   reaches a home more than 300 s after its `issued` is stored and served when it comes with at
@@ -2506,8 +2522,9 @@ knowledge of pending transitions, so:
 - **What to tell people.** Hosts MUST say, when an account is set up with one device, that a
   stolen sole device can't veto, and in every notice that the delay protects who controls the
   account, not data a stolen key could already read (wording: guide §5).
-- **Quorum 2.** At `headQuorum` ≥ 2, a transition that fewer than `headQuorum` homes receipt within
-  300 s of its `issued` is dead; hosts MUST say so and offer to sign it again.
+- **Quorum 2.** At `headQuorum` ≥ 2, a transition that gets fewer receipts than §8.7's validity
+  rule 2 requires of it (`headQuorum`, or for a full set the smaller number its remaining homes
+  allow) within 300 s of its `issued` is dead; hosts MUST say so and offer to sign it again.
 - **Testability.** These are host requirements with observable behaviour, tested with a simulated
   home (§21).
 
@@ -2649,6 +2666,10 @@ authority before the raise.
 - **The witness window** is a constant 300 s.
 - **A home's address** is the endpoint in its immutable request; a home that changes hostname is
   revoked and a new home appointed (uploading again).
+- **A lost home in a one-unit account.** An account whose `control` and `recover` controllers form
+  one unit can't form a full set, so it can't drop a home that is gone or refuses. Its way out is a
+  new, unrelated account and an import of the records its devices hold; a succession does not help,
+  since it needs the old home too.
 - **No compaction.** A new device replays the authority history from genesis, and records are kept
   as written; pruning records 0.5 readers expect comes after the door, and persisted verifier state
   is already a local checkpoint (§17.2).

@@ -65,6 +65,12 @@ pub fn transition_timing(
     })
 }
 
+/// The homes whose receipts an entry recording the held `transition` in `s` need not carry: the
+/// homes a full set revokes, as its witnesses leave them out (§8.7 validity 2); none otherwise.
+pub(crate) fn transition_receipt_exempt(s: &State, transition: &[u8]) -> Vec<String> {
+    state::transition_receipt_exempt(s, transition)
+}
+
 /// Check a held transition the way a home does before it receipts it: the transition's own
 /// checks, its unknown content, that it is not already recorded, and that its delta would
 /// apply at the head (a transition that would be void at activation is refused here).

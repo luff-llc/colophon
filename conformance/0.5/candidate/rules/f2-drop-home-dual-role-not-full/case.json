@@ -1,0 +1,1 @@
+{"description":"As f2-drop-home-full-set-a-dual-role, but a second recovery key K2 exists and does not sign: A and K1 are not every recovery controller, so the transition is no full set and needs the only home's receipt: malformed.","expected":{"result":"malformed","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

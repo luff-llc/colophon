@@ -589,18 +589,30 @@ fn q_get(query: &str, key: &str) -> Option<String> {
 impl SimHome {
     /// A home that holds the history `f.account` holds now.
     pub fn new(f: &Fixture, home: &str, base: &str, now_ms: i64) -> Self {
+        Self::holding(&f.account, f.account.objects(), home, base, now_ms)
+    }
+    /// A newly appointed home given the history `account` holds now, without the heads of the
+    /// homes before it.
+    pub fn of_account(account: &Account, home: &str, base: &str, now_ms: i64) -> Self {
+        let objects = Objects {
+            heads: Vec::new(),
+            ..account.objects().clone()
+        };
+        Self::holding(account, &objects, home, base, now_ms)
+    }
+    fn holding(account: &Account, objects: &Objects, home: &str, base: &str, now_ms: i64) -> Self {
         let state = HomeState::new(
             home.to_string(),
-            f.account.objects(),
+            objects,
             vec![ServingInterval {
                 from_ms: 0,
                 through_ms: None,
             }],
             now_ms,
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e:?}"));
         let mut entries = BTreeMap::new();
-        for e in &f.account.objects().entries {
+        for e in &objects.entries {
             entries.insert(entry_seq(e), e.clone());
         }
         let mut files = BTreeMap::new();
@@ -618,7 +630,7 @@ impl SimHome {
             files,
             log,
             requests: Vec::new(),
-            account: f.account.id().as_str().to_string(),
+            account: account.id().as_str().to_string(),
         }
     }
     pub fn head_seq(&self) -> u64 {
@@ -938,6 +950,41 @@ pub fn appoint_home(f: &mut Fixture) -> String {
     let rec = f.account.record_due().unwrap();
     assert_eq!(rec.len(), 1);
     h
+}
+
+/// The `homes` change that appoints a new home: the host makes its key (`n`) and signs its
+/// request, served at `endpoint`. Returns the home's member ID and the change.
+pub fn home_appointment(
+    host: &mut Host,
+    account: &Account,
+    n: u8,
+    endpoint: &str,
+) -> (String, Change) {
+    let h = host.identity(n);
+    let p = host.ids[&h].public();
+    let created = format_date(account.now_ms());
+    let prepared = prepare_request(&RequestSpec {
+        account: account.id(),
+        signing: &p.signing,
+        agreement: &p.agreement,
+        label: "New home",
+        kind: "server",
+        terms: json!({"serves": ["home"]}),
+        created: &created,
+        custody: None,
+        operator: None,
+        endpoints: Some(vec![endpoint.into()]),
+    })
+    .unwrap();
+    let sig = SignatureResult {
+        signature: host.ids[&h].sign(prepared.step().body()).to_vec(),
+        assertion: None,
+    };
+    let req = finish_request(&prepared, &sig).unwrap();
+    let change = Change::homes(
+        json!({"appoint": [{"request": b64(&req.raw), "terms": {"serves": ["home"]}}]}),
+    );
+    (h, change)
 }
 
 /// A member's engine over `src`: opened, unlocked by its shares, records loaded.

@@ -81,8 +81,17 @@ fn signed(value: &Value) -> Vec<u8> {
         .unwrap()
 }
 fn setup(name: &str, second: bool, serving: Vec<ServingInterval>, now: i64) -> HomeState {
+    setup_through(name, 2, second, serving, now)
+}
+fn setup_through(
+    name: &str,
+    last: u64,
+    second: bool,
+    serving: Vec<ServingInterval>,
+    now: i64,
+) -> HomeState {
     let objects = Objects {
-        entries: (1..=2)
+        entries: (1..=last)
             .map(|seq| fixture(name, &format!("records/authority/{seq:08}.json")))
             .collect(),
         ..Default::default()
@@ -803,4 +812,55 @@ fn signed_heads_are_pruned_to_what_the_guard_needs() {
     assert!(home
         .guard_head(3, &st.history()[2], "2026-11-11T09:00:14Z", clock)
         .is_err());
+}
+
+/// The embedded transition of an `activate` entry.
+fn embedded_transition(entry: &[u8]) -> Vec<u8> {
+    STANDARD
+        .decode(body(entry)["transition"].as_str().unwrap())
+        .unwrap()
+}
+
+/// §8.7 "Revoking a home": a full set that revokes a home needs no receipt from it, and that home
+/// is no witness of it. Reached late, having never seen the transition, the revoked home still
+/// stores the activation: the permanent late-activation rule protects the veto window a home
+/// witnesses, and it witnesses nothing of its own removal by a full set.
+#[test]
+fn a_home_revoked_by_a_full_set_stores_it_without_its_own_receipt() {
+    // Anchored at seq 2 and issued a day before the grant at seq 3, the full set is recorded at
+    // seq 4; the home first sees it then, long after the transition's window, while serving.
+    let name = "f2-drop-home-full-set-within-bound";
+    let entry = fixture(name, "records/authority/00000004.json");
+    let at = time(&entry);
+    assert!(time(&embedded_transition(&entry)) + 300_000 < at);
+    assert!(body(&entry)["receipts"].as_array().unwrap().is_empty());
+    let home = setup_through(name, 3, false, always(), at);
+    assert_eq!(admit(&home, &entry, &stamp(at + 60_000)).result, Ok(()));
+}
+
+/// The home that remains receipts a full set revoking the other as usual, stores its activation
+/// carrying that receipt, and, never having seen it, refuses it late as before.
+#[test]
+fn a_remaining_home_receipts_a_full_set_that_revokes_the_other_as_usual() {
+    let name = "f2-drop-one-of-two-homes";
+    let entry = fixture(name, "records/authority/00000003.json");
+    let t = embedded_transition(&entry);
+    let at_t = time(&t);
+    let at = time(&entry);
+    let receipt = STANDARD
+        .decode(body(&entry)["receipts"][0].as_str().unwrap())
+        .unwrap();
+    let remaining = body(&receipt)["by"].as_str().unwrap().to_string();
+    let home = setup(name, true, always(), at_t);
+    let admitted = admit(&home, &t, &stamp(at_t));
+    assert_eq!(admitted.result, Ok(()));
+    assert_eq!(admitted.receipts.len(), 1);
+    let draft: Value = serde_json::from_slice(&admitted.receipts[0].body).unwrap();
+    assert_eq!(draft["by"], remaining.as_str());
+    assert_eq!(admit(&admitted.state, &entry, &stamp(at)).result, Ok(()));
+    let unseen = setup(name, true, always(), at);
+    assert_eq!(
+        admit(&unseen, &entry, &stamp(at + 600_000)).result,
+        Err(Refusal::Late)
+    );
 }

@@ -1,0 +1,1 @@
+{"description":"The account's only controller, one unit, revokes the only home with no receipt. One unit is never a full set, so the receipt is required: malformed.","expected":{"result":"malformed","seq":3},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

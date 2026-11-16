@@ -678,16 +678,67 @@ pub fn choose_receipts(
     object_issued_ms: i64,
     not_after_ms: Option<i64>,
 ) -> Result<Vec<Vec<u8>>> {
-    let homes = state.current_homes();
-    if homes.is_empty() {
+    choose_receipts_among(
+        state,
+        held,
+        object_digest,
+        object_issued_ms,
+        not_after_ms,
+        &[],
+    )
+}
+
+/// [`choose_receipts`] for the held transition `t_bytes` an entry records (`activate`,
+/// `suspend`). From every current home as for any object when enough receipts are held; for a
+/// full set that are not, from the homes that remain after the homes it revokes, none if no home
+/// remains (§8.7 validity 2), so a device whose only home is gone can still record it.
+pub fn choose_transition_receipts(
+    state: &State,
+    held: &[Vec<u8>],
+    t_bytes: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let env = AuthEnvelope::parse(
+        t_bytes,
+        bounds::TRANSITION_ENVELOPE,
+        bounds::TRANSITION_ENVELOPE,
+        true,
+    )?;
+    let issued = issued_of(&env)?;
+    let every = choose_receipts_among(state, held, &env.digest, issued, None, &[]);
+    let exempt = crate::v05::history::transition_receipt_exempt(state, t_bytes);
+    match every {
+        Err(_) if !exempt.is_empty() => {
+            choose_receipts_among(state, held, &env.digest, issued, None, &exempt)
+        }
+        r => r,
+    }
+}
+
+fn choose_receipts_among(
+    state: &State,
+    held: &[Vec<u8>],
+    object_digest: &str,
+    object_issued_ms: i64,
+    not_after_ms: Option<i64>,
+    exempt: &[String],
+) -> Result<Vec<Vec<u8>>> {
+    let homes = state
+        .current_homes()
+        .into_iter()
+        .filter(|m| !exempt.contains(&m.request.member_id()))
+        .count();
+    if homes == 0 {
         return Ok(Vec::new());
     }
-    let quorum = (state.keyring().policy.head_quorum() as usize).min(homes.len());
+    let quorum = (state.keyring().policy.head_quorum() as usize).min(homes);
     let mut best: BTreeMap<String, Receipt> = BTreeMap::new();
     for bytes in held {
         let Some(r) = parse_receipt(state, bytes) else {
             continue;
         };
+        if exempt.contains(&r.by) {
+            continue;
+        }
         if r.object != object_digest
             || r.received_ms < object_issued_ms
             || r.received_ms > object_issued_ms.saturating_add(RECEIPT_WINDOW_MS)
@@ -1170,19 +1221,7 @@ pub fn prepare_suspend(
 ) -> Result<PendingBatch> {
     let state = head_state(objects, now_ms)?;
     let t_bytes = find_pending(objects, transition_digest, "colophon/transition/5")?.clone();
-    let env = AuthEnvelope::parse(
-        &t_bytes,
-        bounds::TRANSITION_ENVELOPE,
-        bounds::TRANSITION_ENVELOPE,
-        true,
-    )?;
-    let receipts = choose_receipts(
-        &state,
-        &objects.pending,
-        &env.digest,
-        issued_of(&env)?,
-        None,
-    )?;
+    let receipts = choose_transition_receipts(&state, &objects.pending, &t_bytes)?;
     prepare_signed(
         objects,
         now_ms,
@@ -1239,19 +1278,7 @@ pub fn prepare_activate(
     }
     let state = head_state(objects, now_ms)?;
     let t_bytes = find_pending(objects, transition_digest, "colophon/transition/5")?.clone();
-    let env = AuthEnvelope::parse(
-        &t_bytes,
-        bounds::TRANSITION_ENVELOPE,
-        bounds::TRANSITION_ENVELOPE,
-        true,
-    )?;
-    let receipts = choose_receipts(
-        &state,
-        &objects.pending,
-        &env.digest,
-        issued_of(&env)?,
-        None,
-    )?;
+    let receipts = choose_transition_receipts(&state, &objects.pending, &t_bytes)?;
     let timing = transition_timing(&state, &t_bytes, &receipts)?;
     if timing.due_ms > now_ms {
         return Err(unavailable(format!(
@@ -1348,13 +1375,7 @@ fn prepare_activate_resolve(
         predecessor: objects.predecessor.clone(),
     };
     let state = head_state(&scoped, now_ms)?;
-    let receipts = choose_receipts(
-        &state,
-        &objects.pending,
-        &env.digest,
-        issued_of(&env)?,
-        None,
-    )?;
+    let receipts = choose_transition_receipts(&state, &objects.pending, &t_bytes)?;
     let timing = transition_timing(&state, &t_bytes, &receipts)?;
     if timing.due_ms > now_ms {
         return Err(unavailable(format!(
