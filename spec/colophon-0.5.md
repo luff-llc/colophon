@@ -33,9 +33,9 @@ its fix round answers the check of revision 15 and the owner's decisions, and st
 ahead of the code (the verifier, E12; the home, H2; changes §A.11); revision 16 was the freeze
 package; revision 17 cuts it to what shipping 0.5 and a later in-place upgrade need: approval only
 through a confirmed pairing (§9.1), one current-principal check (§8.5), the upgrade door (`layout`,
-§8.2, §20) with what a reader and a home do at a stop (§1, §13.6), invites for a device with nothing
-and `refused:notGranted` (§7.3, §12.3, §13.4), text-only reservations, three small fixes and the
-limits of 0.5 (§20). The rest of revision 16 is deferred to 0.6, behind the door (changes §A.12,
+§8.2, §20) with what a reader and a home do at a stop (§1, §13.6), text-only reservations, three
+small fixes, the home rules the merged and pending home code follows (§13.1, §13.3, §14), the limits
+of 0.5 and what is open at the freeze (§20, §21). The rest of revision 16 is deferred to 0.6, behind the door (changes §A.12,
 [the design](../docs/design-freeze-package.md) "Deferred to 0.6"); the code follows.
 The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
@@ -574,28 +574,6 @@ is `accountID`, `e` the 65-byte point and `nB` the 32-byte nonce, standard padde
 (§2.2), keys sorted as §2.1 says (`account`, `e`, `nB`, `protocol`). A reader parses strictly
 (§2.3), refuses any other member, protocol, length or non-canonical byte, and an `E` that is
 not a valid point.
-
-**Invites.** To let a device that holds nothing join, the existing side H shows an **invite**, the
-canonical JSON (§2.1) of the closed object
-`{"account":"<64 hex>","key":"<base64>","link":{"body":"<base64>","signature":"<base64>"},"nA":"<base64>","protocol":"colophon/invite/5"}`:
-`account` the account ID; `link` an invite link envelope (§13.4) as a JSON object, not re-encoded;
-`key` the 32-byte private scalar of the link's `to.signing` when H generated that key (absent when
-the link is bound to J's request key); `nA` H's 32-byte nonce (§7.4). `link` and `key` are absent
-for an account with no home: its history is in the store the devices share (a folder), which the
-invite does not name. A reader parses it strictly (§2.3), checks that `link` names `account` and
-that `key` matches `to.signing`, and refuses anything else as `malformed`. The link is made by H's
-member key, never by a home's (§13.4). It is never
-authenticated: J learns nothing from it it can't verify, because the history it fetches verifies
-against `account` (§5.1, §8). J then fetches the head and the history with calls through the link
-(asOf the head's entry), verifies it from seq 1, and answers with its request (§9.1); H scanning
-the request from J's screen is the QR alternative above, which binds `E` = `member.signing`, and
-`nA` reached J in the invite. An invite with one home is about 1.1 KB and with two homes of
-512-byte endpoints at most about 2.4 KB, within one QR code (2,953 bytes at the lowest correction
-level) whatever the number of homes, because the rest are read from the history. **A bound
-invite** (a setting; the default is the one-scan invite above): H first shows an invite with only
-`account` and `nA`, J shows its request, and H then shows a second invite whose link is bound to the
-request's `member.signing` and which carries no `key`, so a leaked invite exposes nothing; it costs
-a third scan.
 
 ### 7.4 Moving the seed to a new device
 
@@ -1573,9 +1551,7 @@ A verifier MUST, in order (the pipeline of §1):
        else `badSignature`.
      - For an assertion, the `origin` must be exactly one of the verifier's call-ceremony origins
        for its `rp`, else `refused:origin`.
-   - **A member:** a member ID that no grant or appointment in the history the verifier holds
-     names is `refused:notGranted` ("not yet a member"; revision 15 said `refused:revoked`). It
-     must be present, not revoked, and not added by an activation with no
+   - **A member:** it must be present, not revoked, and not added by an activation with no
      `final` in the history the verifier holds, else `refused:revoked`, and not expired at the verifier's clock (`expires` is the last
      valid moment), else `refused:expired`.
 6. **Chain.** First the bindings, for every link from the member outward: it verifies under the
@@ -1584,8 +1560,7 @@ A verifier MUST, in order (the pipeline of §1):
    the first link's `session` equals the member's session number, else `refused:ended`;
    `notBefore` ≤ now ≤ `expires`, `expires` within the previous link's and the member's and within
    `linkMaxAge` of `notBefore`, else `refused:expired`; its terms narrow the parent's, else
-   `refused:notNarrower` (an invite link at a home it names is exempt, §13.4); its `to.signing` is
-   no principal's point (§3.3), else `malformed`.
+   `refused:notNarrower`; its `to.signing` is no principal's point (§3.3), else `malformed`.
 7. **Purpose.** For a member, its terms and every link's must allow `audience` and `purpose`, and
    no `conditions` predicate may be false on `args` (§10.4). For a controller, `purpose` must be
    among the verifier's configured purposes for controller calls; there is no generic or fallback
@@ -1655,7 +1630,9 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
 
 - **Ordering.** Immediate entries go first to the primary home (`policy.primaryHome`, else the
   earliest-appointed current home), which stores the first valid entry per seq. Other homes store
-  them once a primary head covers them.
+  them once a primary head covers them, and such an entry is exempt from the 300 s clock rule below
+  at a non-primary home, however far its `issued` is behind that home's clock: the primary applied
+  the rule.
 - **Transitions.** Every home receipts and forwards transitions, vetoes, receipts and its heads
   to every other current home, and appends recording entries (§8.7), whatever the primary does:
   `activate` once due, `vetoed` once a veto is valid, and `final` as soon as it holds the witness
@@ -1671,7 +1648,16 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   already holds, as a forwarded transition is; the home signs no receipt of its own for it.
   Without such a receipt it is `refused:late` and not stored. A home
   persists, per object, when it first saw it, its own serving intervals over the object's window,
-  and its decision, and reuses that decision after a restart.
+  and its decision, and reuses that decision after a restart. **Serving intervals are never
+  under-recorded:** a home records ahead of time, durably and before it serves, until when it may
+  serve, and after a restart closes its last interval at the end of what it recorded, never earlier;
+  whatever is uncertain counts as serving (so an `activate` of a transition whose whole window fell
+  while the home was down is stored).
+- **Receipts without their object.** A forwarded receipt may arrive before the object it receipts.
+  A home keeps such receipts, a bounded number per signing home, and drops each once nothing could
+  be recorded of its object any more (its `received` plus 300 s plus `recoveryDelay` plus 7 days).
+  Receipts delivered in one request with their object are taken first, so the object is judged with
+  them.
 - **Clock.** A home refuses an entry more than 60 s ahead of its clock (`refused:early`), and an
   immediate entry or a full set whose `issued` is more than 300 s behind it (`refused:late`). So at
   an honest primary an immediate entry's `issued` is its admission time to within 300 s. The
@@ -1800,8 +1786,9 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   an entry it hasn't verified. A head is **due** when the home has none, when its latest head
   does not name the home's latest entry, or when `headMaxAge` / 2 has passed since its `issued`;
   before answering `GET {base}/head` the home MUST produce and store the due head; if it cannot
-  (its guard refuses, or `issued` cannot yet increase), it fails the request and MUST NOT serve
-  the older head. It MUST give its heads strictly increasing `issued`, and MUST NOT
+  (its guard refuses, `issued` cannot yet increase, or its history stops at a fork), it answers 503
+  with `Retry-After` and MUST NOT serve the older head, at `records/heads/<its ID>.json` too, and it
+  forwards no head to its peers while one is due. It MUST give its heads strictly increasing `issued`, and MUST NOT
   sign a head for a second digest at a seq unless its own verdict shows the first displaced under
   §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
   second head's side; the Equivocation rule above). The guard belongs to home admission, which holds the history: the host
@@ -1829,39 +1816,11 @@ records, live values or blob chunks, which need `colophon.home.read` (§14).
 and the `PUT` of another home's head (§14); and, under `public`, `GET` of the history paths. So a
 device with nothing yet fetches, under `public`, the head, the history and the pending feed, and
 under `members` only the head and `GET {base}`. Everything else needs a call. In 0.5 a home
-serves nothing more to a key it does not know, except through an invite link (below); once
-approved, the device calls the home as a member.
-
-**An invite link.** Under `members`, a device that holds nothing gets the history through a link
-(§12.1) that the approving device's **member key** makes for it (a controller approves; a link is a
-member's instrument, and controllers make no links). An **invite link** is a first link (its
-`session` the member's session number) whose `from` is a current principal (§8.5) that is a member
-and **not a home**, whose terms are exactly `{"services":[…]}` with one or two
-entries, each the appointed endpoint (§9.1) of a current home as `audience` and
-`["colophon.history.read"]` as `purposes`, and whose `expires` is at most 3,600 s after its
-`notBefore` (and within `linkMaxAge`, §12.3 step 6). A link of that shape from a home's member key is
-not an invite link. A home verifies a call through an invite link under §12.3 with two differences:
-step 6 checks no narrowing against the member's terms and needs no `depth`, and step 7 allows exactly
-`colophon.history.read` for `GET` of the **authority chain** and what verifying it needs, and
-nothing else: `{base}/authority`, `records/authority/*`, `{base}/predecessor/authority/*` and
-`records/predecessor/authority/*` with their receipts (`receipts/<successor genesis digest>/*`), and
-the heads (public anyway). Not `/pending`, not `/pending/<digest>`, not `transitions/`, `vetoes/` or
-other receipts, no record, live value, blob or write. It is not single use: a history takes many
-pages, and each call has its own `requestId`. It ends at `expires`, by the member's `endSessions`
-(§9.6) or by its revocation or expiry. Its `to.signing` is a fresh session key (§3.3 rule 4) or the
-joining device's request key; the device that holds the matching private key is the bearer.
-
-**What a leaked invite exposes.** Until it ends, whoever holds the invite (the link and, when the
-invite carries it, the session key) can read the account's authority chain from the homes it names:
-every controller's label, key ID and descriptor (relying party, credential ID, origins), holder
-labels, every member's label, kind, operator and terms (namespaces, access, audiences, purposes,
-conditions), namespace names, policy and home endpoints, and the predecessor chain if there is one.
-That is what every current member can already read (§13.4). It is not the pending feed (proposed
-transitions, vetoes and their signers), no record, no epoch key, no seed and no write. A host that
-wants a leaked invite to expose nothing binds the link to the joining device's request key instead
-(a bound invite, §7.3 "Invites"). A host offers a lifetime of 10 minutes by default (a setting, up
-to the 3,600 s above).
-
+serves nothing more to a key it does not know: under `members` the approving device hands the new
+device the authority history out of band (the reference SDKs carry it in the join invite, over the
+pairing channel, §7.3, §9.1), the new device verifies it from seq 1 against the account ID, and once
+approved it calls the home. The history of a new account is about 10 KB, more than one QR code
+holds, so joining by camera alone does not carry it in 0.5 (a limit, §20).
 
 ### 13.5 Receipt
 
@@ -1918,14 +1877,22 @@ on its branch, and every receipt of them, until 7 days after the transition's du
 MAY drop them. One object appears once in a listing; a listing from cursor 0 until `more` is false
 is complete for the moment it ends. The admission caps (§13.1) bound a listing at 128 transitions
 (2 for each of at most 64 units), 8 vetoes each and one receipt per home per object: at most
-10,368 objects. Hosts poll with `after` set to the last cursor they saw (§17.5). Reading
+10,368 objects. Only what is still listed counts toward that bound: a settled object (one with a
+recording entry on the branch) or an expired one does not. Hosts poll with `after` set to the last cursor they saw (§17.5). Reading
 follows §13.4, which includes recover-only and suspended controllers.
 
 A home that is a successor's home also serves `GET {base}/predecessor/authority/<8 digits>.json`
 (and its receipts) for the predecessor's history through its final entry (§15.1); a host
 publishes those entries to it by `PUT {base}/predecessor/authority/<8 digits>.json`. Such a home
 holds the provisioned account's genesis and takes predecessor entries only as the hash chain that
-genesis claims, from its `head` down, and serves none of them before its first upload is verified.
+genesis claims, from its `head` down, and serves none of them before its first upload is verified:
+before the appointment a Swift successor's first upload cannot verify without its predecessor, so
+the home keeps that genesis (its digest is the account ID), takes the predecessor entries with no
+call, each only if it is the one the chain names (the claimed `head.digest`, then each entry's
+`previous`), bounded per account, and the first upload is sent again. After the appointment it takes
+a predecessor entry by `PUT` only under a `colophon.home.write` call by a controller with `approve`
+or `control`, not suspended, or a `sign` controller listing `{base}`, never a member's, and only
+when the account claims a Swift predecessor and the entry's `seq` is at most F's.
 A `PUT` or
 `POST` of an envelope whose body equals a stored one answers 200. The home keeps the envelope it
 stored and MAY keep the new one too (§2.2); which envelopes it keeps never changes a verdict.
@@ -2473,7 +2440,6 @@ ranges.
 | `countBy` | `keys` (person), `holders` (company) | `keys`, `holders` | transition with consent |
 | `policy.recoveryDelay` | 259,200 s (72 h) | 0–2,592,000 s; ≥ 3,600 s with a home | transition with consent |
 | `policy.headMaxAge`, `callWindow`, `linkMaxAge` | 300 s, 300 s, 86,400 s | §6.3 | lowering immediate; raising by transition |
-| Invite lifetime (§13.4) | 10 minutes; one-scan invite | up to 3,600 s; bound invite | the inviting host |
 | `policy.headQuorum` | 1 | 1–8, at most the homes | transition with consent |
 | `policy.history`, `memberRule` | `members`; `single` (person), `control` (company) | §6.3 | tightening immediate; loosening by transition |
 | `policy.primaryHome` | absent | a current home | transition with consent |
@@ -2515,7 +2481,7 @@ homes at `headQuorum` 2, the company reference; hosts SHOULD offer it to people 
 | Records (§11.5) | `newerFormat` (an unknown condition result); refused `notGranted`, `expired`, `revoked`, `wrongEpoch`, `clockJump`, `budgetSpent`, `outOfScope`, `invalidPayload`, `duplicateID`, `wrongFormat`, `budgetScopeUnavailable`; held `revokedBackdated`, `authorityBehind`, `unavailable` |
 | Evidence (§8.6, §15.1) | equivocation evidence; `malformed` entries after a final entry |
 | Transitions (§8.7) | pending, due, vetoed, activated (provisional or final), void |
-| Calls (§12.3) | `refused:audience`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`, `refused:notGranted` (a member no grant names), `refused:revoked`, `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:outOfScope`, `refused:origin`; `unavailable` (no history, too few fresh heads, or a stopped reader) |
+| Calls (§12.3) | `refused:audience`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`, `refused:revoked` (also for a member no grant names, §20), `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:outOfScope`, `refused:origin`; `unavailable` (no history, too few fresh heads, or a stopped reader) |
 | Homes, reserved (§14) | `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned`; any other `refused:` from a home refuses that request only and is shown raw |
 | Heads (§13.3) | `refused:fork`, `refused:rollback`; `unavailable` |
 | Succession (§15) | `refused:fork`; unverified claim |
@@ -2527,7 +2493,7 @@ check as an optional diagnostic.
 
 **Versions.** 0.5 accepts exactly these markers: `colophon/authority/5`, `/request/5`, `/link/5`,
 `/call/5`, `/head/5`, `/receipt/5`, `/transition/5`, `/veto/5`, `/equivocation/5`,
-`/operation/5`, `colophon/pair-qr/5` (the QR payload, §7.3), `colophon/invite/5` (the invite, §7.3), the legacy markers of an upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
+`/operation/5`, `colophon/pair-qr/5` (the QR payload, §7.3), the legacy markers of an upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
 `colophon/relay/3`, and `colophon/swift-keyring/2` for predecessors. A verifier MUST NOT read a
 0.5 account under 0.4 rules, and MUST NOT accept a `/3` or `/4` object where §11.5 or §16.1 fences
 it out. A later version that adds markers will say which 0.5 markers it retires; until an account
@@ -2557,6 +2523,7 @@ defines it, and admits `/5` records that cite authority before the raise.
 | `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned` | home answers (§14) | refuse that request only |
 | kinds and namespaces beginning `colophon.` | records and namespaces | reserved for this protocol; only this document defines them; met in 0.5, judged as today |
 | `layouts` | `GET {base}` (§14) | as §14 says |
+| `refused:notGranted` for a call | §12.3 step 5 | reserved for "not yet a member"; in 0.5 a call by a member ID that no grant names is `refused:revoked`, and hosts word it as waiting for approval |
 
 **Limits of 0.5** (stated, not rules):
 - **Before an account opts in, a 0.5 device that meets something newer may refuse it rather than ask
@@ -2583,8 +2550,9 @@ defines it, and admits `/5` records that cite authority before the raise.
   (§13.1); an account uses newer authority content only once its homes read it; appointing a home
   is outside the confirmed-pairing rule (§9.1).
 - **Successions:** two successors of one predecessor can each verify (§15.1).
-- **No home:** no witness of time or order (§13.1); a device that holds only a controller cannot
-  make an invite (§13.4).
+- **No home:** no witness of time or order (§13.1).
+- **Joining:** under `members` a new device gets the authority history only from the approving
+  device, out of band (§13.4); it does not fit one QR code.
 
 What is not in this version is listed in the guide §6; what revision 16 designed and revision 17
 deferred to 0.6 is in changes §A.12 and the design's "Deferred to 0.6".
@@ -2606,6 +2574,14 @@ deferred to 0.6 is in changes §A.12 and the design's "Deferred to 0.6".
 
 `conformance/0.5/candidate/` holds the vectors built before any implementation; its README lists
 them. The rest are plan step V1.
+
+**Open at freeze.** What 0.5 does not decide, stated so nothing is left implicit:
+1. Two successors of one predecessor can each verify, for different verifiers (§15.1, the
+   implementation notes' open item 2); the host rule keeps honest hosts from making it.
+2. The removal follow-up (§17.5) lists only what the removed key added since the transition's
+   anchor; a wider list is a question for after 0.5.
+3. Everything revision 16 designed and revision 17 deferred to 0.6 (changes §A.12, the design's
+   "Deferred to 0.6"), including invites for a device that holds nothing (§13.4).
 
 **Required vectors.** The list in [conformance/0.5/candidate/README.md](../conformance/0.5/candidate/README.md)
 "Required for freeze" is normative for condition 1.

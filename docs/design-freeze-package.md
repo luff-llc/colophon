@@ -11,10 +11,11 @@ withdrawn ones marked) and §A.13 (rows 198–202). Base: `spec-0.5` at `25027b0
 
 **In 0.5:** P (approval consumes a confirmed pairing), F2 (the current-principal check; unknown kinds
 stay under the control rule), F3 (the layout door; one opt-in covers a whole later format version),
-S (a stopped reader and a stopped home, in the form the door needs), F8 (invites, `refused:notGranted`),
-text-only reservations, the three Low fixes, the owed predecessor sentence, and the stated limits.
+S (a stopped reader and a stopped home, in the form the door needs), text-only reservations
+(`refused:notGranted` among them), the three Low fixes, the home rules the home code follows (spec
+§13.1, §13.3, §14; code in PR 28), the stated limits and what is open at the freeze.
 
-**Deferred to 0.6, behind the door:** F1, F4, F5, F6, F7. Their sections below are kept so the work is
+**Deferred to 0.6:** F1, F4, F5, F6, F7 behind the door, and F8 (invites), which needs no door. Their sections below are kept so the work is
 not lost, each marked **"Deferred to 0.6: not a 0.5 rule"**; §16 summarizes them. In 0.5, revision
 15's behaviour stands in each place.
 
@@ -29,10 +30,9 @@ where a newer one decides, but never decides differently.
 | F2 Current principal; unknown kinds stay under the control rule | none (inputs: an expired or provisional member's `endSessions`, `ok`/`newerFormat` → `badSignature`) | S | Low |
 | F3 The upgrade door (`layout`) | `upgrade/then-v5-layout` (0.5: `ok` → `malformed`, regenerated as two cases) | S | Low |
 | S Stops at the door: a stopped reader, the stopped home | none | S | Medium: the stopped-home table must be built exactly |
-| F8 A device with nothing gets the authority chain (invites); `refused:notGranted` | none | S–M | Medium: a bearer credential in a QR code |
 | R Text-only reservations | none | S | Low |
 | L Three Low findings, the owed home sentence, stated limits | none (a Swift predecessor with a readable seq-0 envelope goes `ok` → `malformed`; no vector has one) | S | Low |
-| F1, F4, F5, F6, F7 | withdrawn in revision 17 (deferred to 0.6) | — | — |
+| F1, F4, F5, F6, F7, F8 | withdrawn in revision 17 (deferred to 0.6) | — | — |
 
 **Existing vectors that change verdict:** one, `upgrade/then-v5-layout` (F3). The three that revision
 16 would have changed (`rules/t-grant-component-extra-field`, `records/revoke-17-heads`,
@@ -62,14 +62,14 @@ colophon-core --all-targets -- -D warnings`.
 
 | Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
 | --- | --- | --- | --- | --- | --- |
-| **W2-C Calls and invites** | `crates/colophon-core/src/v05/calls.rs`, `write/calls.rs`, `v05/mod.rs`, new `v05/invite.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/candidate/{calls,pairing}/` cases it generates | W1-A | S (a stopped reader's calls `unavailable`), F8 (invite links, the invite object, `refused:notGranted`) | §S and §7a `calls/` and `pairing/` rows | — |
+| **W2-C Calls** | `crates/colophon-core/src/v05/calls.rs`, `tests/v5_candidate/cases_freeze_calls.rs`, `conformance/0.5/candidate/calls/` cases it generates | W1-A | S (a stopped reader's calls `unavailable`) | `calls/s-stopped-reader-call` | — |
 
 **Wave 3**
 
 | Stream | Owns exactly | Depends on | Items | Vectors and generator | Extra acceptance |
 | --- | --- | --- | --- | --- | --- |
-| **W3-H Home** | `crates/colophon-home-wasm/src/*`, `crates/colophon-core/src/v05/history/home.rs`, `engine/paths.rs`, `engine/exchange.rs`, `relay/*`, `tests/v5_candidate/cases_freeze_home.rs`, new `crates/colophon-core/tests/v05_freeze_home.rs` | W2-C | S (the stopped home, §13.6), F8 (invite paths at the home; `join_from_invite`), R (`layouts`, refusal names shown raw) | home tests: each row of §13.6; an invite refused on `/pending`; unknown `refused:` refuses one request | `cargo test -p colophon-home-wasm`, `cargo test -p colophon-core --test v05_freeze_home --test v05_home --test v05_engine_home`, `cd relay && npm test` |
-| **W3-G Write side, exports, SDK surfacing** | `crates/colophon-core/src/v05/account/{read,derived,mod}.rs`, `crates/colophon-ffi/src/v05/api/*` other than W1-P's (and those once W1-P is merged), the three session layers, `playground/src/*` | W1-P, W2-C (and W3-H's core functions, so after it or in step) | invites (`begin_invite`, `join_from_invite`), the stopped status, "waiting for approval" for `notGranted` | none new | as W1-P |
+| **W3-H Home** | `crates/colophon-home-wasm/src/*`, `crates/colophon-core/src/v05/history/home.rs`, `engine/paths.rs`, `engine/exchange.rs`, `relay/*`, `tests/v5_candidate/cases_freeze_home.rs`, new `crates/colophon-core/tests/v05_freeze_home.rs` | W2-C and PR 28 merged | S (the stopped home, §13.6), R (`layouts`, refusal names shown raw) | home tests: each row of §13.6; unknown `refused:` refuses one request | `cargo test -p colophon-home-wasm`, `cargo test -p colophon-core --test v05_freeze_home --test v05_home --test v05_engine_home`, `cd relay && npm test` |
+| **W3-G Write side, exports, SDK surfacing** | `crates/colophon-core/src/v05/account/{read,derived,mod}.rs`, `crates/colophon-ffi/src/v05/api/*` other than W1-P's (and those once W1-P is merged), the three session layers, `playground/src/*` | W1-P, W2-C, W3-H | the stopped status; "waiting for approval" wording for a member no grant names | none new | as W1-P |
 
 W1-P and W3-G both touch the FFI and the session layers, in different waves. At most three builders
 at once (wave 1).
@@ -833,6 +833,10 @@ as it can already sign any head.
 
 ## 7a. F8: A device with nothing gets the authority chain
 
+> **Deferred to 0.6 (revision 17): not a 0.5 rule.** In 0.5 the approving device hands over the
+> authority history out of band (spec §13.4), and `refused:notGranted` is only a reserved name.
+> Summary: §16.
+
 Found by the test apps: a new device joining an account whose history is `members` can fetch only
 the head, so the apps put the whole authority history in the invite (about 10 KB for a new
 account, far over one QR code's 2,953 bytes), and joining by camera does not work. Revision 15's
@@ -976,6 +980,7 @@ with only a controller cannot invite.
 | principals `account`, `organisation` | spec §20 | Refused in 0.5, as any unknown value is today: a call signer `malformed`; a descriptor form or request kind `newerFormat`. |
 | kinds and namespaces `colophon.*` | spec §20 | Reserved; 0.5 writers do not use names the spec does not define; met in 0.5, judged as today. |
 | `layouts` in `GET {base}` | spec §14 | A 0.5 home answers `"layouts":[2]` (the door's host rule needs it). |
+| `refused:notGranted` for a call | spec §20 | Reserved for "not yet a member"; 0.5 answers `refused:revoked` for a member no grant names, and hosts word it as waiting for approval. |
 
 Withdrawn in revision 17 (deferred): the no-home call option, the suite discriminator, `location`,
 `colophon/location/5` and `ext/`. Functions: `colophon-home-wasm/src/ops.rs` (`identity`/`limits`
@@ -1016,14 +1021,15 @@ an unknown `refused:` is surfaced raw.
   cannot judge. An account uses newer authority content only after its homes read it; a host checks
   `layouts` before raising the layout (F3).
 - At and after a stop: §13.6's table (S).
-- Invite links: serves the authority chain and its verification pages through them, never `/pending`
-  (F8).
+- The rules of PR 28: predecessor staging and `PUT` by a controller only; the non-primary exemption
+  from the 300 s rule; 503 with `Retry-After` when a head is due and cannot be signed; serving
+  intervals never under-recorded; bounded, expiring unmatched receipts; settled objects off the cap.
 - Reserved refusals: may send them (R).
 
 ## 11. Exports and SDKs, in one place (0.5)
 
-`begin_approve` spending a confirmed pairing and `AccountPairing.scan_request` (P); `begin_invite`
-and `join_from_invite` (F8); a stopped status (S); "waiting for approval" for `refused:notGranted`.
+`begin_approve` spending a confirmed pairing and `AccountPairing.scan_request` (P); a stopped status
+(S); "waiting for approval" wording for a member no grant names.
 Swift, Kotlin and JS surface `newerFormat` as `updateRequired`, as today. No other SDK change.
 
 ## 12. Where this design differs from a review, and why
@@ -1130,6 +1136,12 @@ rule that a later version changes an account's rules only after the raise (spec 
 - **F7, a home's address can change** (§7). Home-signed, monotonic `colophon/location/5` statements,
   replicated by homes and folders; calls only to appointed or signed bases. In 0.5 a home's address is
   the endpoint in its immutable request; changing it means revoking and appointing a new home.
+- **F8, invites for a device that holds nothing** (§7a). A member-signed invite link for
+  `colophon.history.read` of the authority chain at one or two homes, at most an hour, the closed
+  `colophon/invite/5` object fitting one QR code, and `refused:notGranted` for a member no grant
+  names. In 0.5 the approving device hands the history over out of band (about 10 KB for a new
+  account, more than one QR code), and a member no grant names is `refused:revoked`. This one needs
+  no door (§17).
 - Also deferred: the no-home call option, the suite discriminator, `ext/` side objects, the refusal
   retry signal (§8).
 
@@ -1154,6 +1166,7 @@ succession to a new account.** Checked item by item:
 | Long histories | Compaction or checkpoints after the raise (when 0.5 readers are already stopped), on the same account. |
 | Devices that stay on 0.5 | They stop at the raise and write nothing citing authority after it; the later version admits their `/5` records that cite authority before the raise (spec §20). |
 | Homes that stay on 0.5 | They refuse the raise and stop (§13.6); the owner updates or revokes them, inside the same account. |
+| Joining by an invite (F8, deferred) | Needs **no** opt-in: it changes only what a home serves to a bearer of a link a current member signed, and what the two devices exchange. Nothing is written into the account (a link is never an authority entry or record), so no 0.5 reader judges anything new. A 0.5 home refuses the link (it fails narrowing today), and the devices fall back to handing the history over out of band; a newer home serves it. The account's data is the same either way. |
 
 **The answer: none.** One dependency, which is why F3 stays: the door works only once the 0.5
 verifier reads `layout` and stops above 2. Today's code accepts a `layout` change without reading it,
