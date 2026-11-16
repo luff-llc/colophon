@@ -170,7 +170,22 @@ Normative for spec §21 condition 1.
     requirement: 0.5 supports one home per account, and exchange between homes is experimental
     (spec §13.1; open issues in `docs/multi-home-open-issues.md`);
   - Swift (§16.3): an envelope at seq 0, readable or not, is ignored and a valid predecessor stays
-    valid.
+    valid;
+  - dropping a home that is gone (§8.7 validity 2, "Revoking a home"; changes rows 224–226): full
+    set (b), and full set (a) by two recovery units, drop a silent sole home with no receipt, final
+    at once, leaving no home (`rules/f2-drop-home-full-set-b`, `-full-set-a`), then appoint a new
+    one (`-then-appoint`); one control and one recovery unit do the same (`-one-control-one-recovery`);
+    with two homes only the remaining home's receipt is needed and it alone witnesses
+    (`rules/f2-drop-one-of-two-homes`), and the revoked home's receipt alone is `malformed`
+    (`-revoked-receipt-only`); the sole home's receipt given anyway is still `ok`
+    (`-full-set-with-receipt`); without the receipt the control rule, the recovery rule (not a full
+    set) and one unit stay `malformed` (`-control-rule-no-receipt`, `-recovery-rule-no-receipt`,
+    `-one-unit`); a full set with no home remaining issued more than 7 days before the entry it
+    follows is `malformed`, within that `ok` (`-full-set-backdated`, `-full-set-within-bound`);
+    the revoked home stores the activation without its own receipt and a remaining home receipts
+    as usual (`crates/colophon-core/tests/v05_home.rs`); a device whose only home never answers
+    records the full set, then appoints and uses a new home
+    (`crates/colophon-core/tests/v05_engine_home.rs`).
 
 ## Still missing: these need an engine (implementation plan, step V1)
 
