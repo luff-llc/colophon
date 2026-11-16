@@ -1,0 +1,1 @@
+{"description":"A transition whose only component is unknown, under the control rule: newerFormat at its activate.","expected":{"result":"newerFormat","seq":2},"sections":["8.5","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

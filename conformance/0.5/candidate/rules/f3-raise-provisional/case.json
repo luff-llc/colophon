@@ -1,0 +1,1 @@
+{"description":"A layout raise activated but not final (its home has signed no head over it): it changes no rule this reader applies, so the reader is not stopped.","expected":{"result":"ok","seq":3},"sections":["8.7","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

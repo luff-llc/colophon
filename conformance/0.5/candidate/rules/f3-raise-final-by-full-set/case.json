@@ -1,0 +1,1 @@
+{"description":"A provisional layout raise, then a full set anchored at it: the full set's anchor makes the raise final (§8.7), so the reader stops at the raise.","expected":{"result":"newerFormat","seq":3},"sections":["8.7","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
