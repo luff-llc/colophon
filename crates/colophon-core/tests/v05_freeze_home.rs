@@ -27,6 +27,97 @@ fn take(home: HomeState, keys: &HomeKeys, object: &[u8], now: i64) -> HomeState 
     let signed = receipt(keys, body(object)["account"].as_str().unwrap(), object, now);
     finish_receipt(&a.state, &object_digest(object), &signed, &format_date(now)).unwrap()
 }
+
+// The same later-kind construction as the core's f2-unknown-kind-control-rule vector:
+// an ordinary authority header and unknown content, signed by a current control key.
+fn unknown_entry(f: &support::Fixture, seq: u64, previous: &str) -> Vec<u8> {
+    let bytes = canonical(&json!({"protocol":"colophon/authority/5", "seq":seq,
+        "previous":previous, "issued":format_date(NOW), "by":f.d,
+        "kind":"later", "value":1}))
+    .unwrap();
+    canonical(&json!({"body":support::b64(&bytes),
+        "signature":support::b64(&f.host.ids[&f.d].sign(&bytes))}))
+    .unwrap()
+}
+
+#[test]
+fn authenticated_unknown_entry_stops_at_the_held_prefix_without_storing_the_entry() {
+    let keys = HomeKeys::new(0x77);
+    let f = fixture("public", &[(&keys, BASE_A)]);
+    let home = HomeState::new(keys.id.clone(), f.account.objects(), vec![], NOW).unwrap();
+    let (n, previous) = f.account.head();
+    let entry = unknown_entry(&f, n + 1, &previous);
+    let p = home.persisted().unwrap();
+    let verdict = verify_history(
+        &Objects {
+            entries: vec![entry.clone()],
+            ..Default::default()
+        },
+        &p,
+        NOW,
+    );
+    assert_eq!(verdict.code(), "newerFormat");
+    assert_eq!(verdict.state.unwrap().history().len() as u64, n);
+
+    // Every offer is against the original active home. Neither schema failures, bad/missing
+    // authentication, nor authenticated entries outside N+1 on our head may set its floor.
+    let mut bad = value(&entry);
+    bad["signature"] = json!(support::b64(&[0; 64]));
+    let mut unsigned = value(&entry);
+    unsigned.as_object_mut().unwrap().remove("signature");
+    let mut malformed = body(&entry);
+    malformed["seq"] = json!(0);
+    let malformed =
+        canonical(&json!({"body":support::b64(&canonical(&malformed).unwrap())})).unwrap();
+    for refused in [
+        canonical(&bad).unwrap(),
+        canonical(&unsigned).unwrap(),
+        malformed,
+        unknown_entry(&f, n + 2, &previous),
+        unknown_entry(&f, n + 1, &"a".repeat(64)),
+    ] {
+        let a = admit(&home, &refused, &format_date(NOW));
+        assert!(a.result.is_err());
+        assert_eq!(a.state.to_bytes().unwrap(), home.to_bytes().unwrap());
+        assert!(!a.state.is_stopped(NOW).unwrap());
+    }
+
+    let target = transition(&f, json!({"policy":{"callWindow":600}}), &f.k, NOW);
+    let home = take(home, &keys, &target, NOW);
+    let before = home.persisted().unwrap().objects().unwrap().clone();
+    let a = admit(&home, &entry, &format_date(NOW));
+    assert_eq!(a.result.unwrap_err().code(), "newerFormat");
+    assert!(a.receipts.is_empty());
+    let mut home = HomeState::from_bytes(&a.state.to_bytes().unwrap()).unwrap();
+    assert_eq!(home.persisted().unwrap().stop_floor(), Some((n + 1, None)));
+    assert_eq!(
+        serde_json::to_value(home.persisted().unwrap().objects().unwrap()).unwrap(),
+        serde_json::to_value(&before).unwrap()
+    );
+    let (_, verdict) = home.verified_history(support::T0).unwrap();
+    assert!(
+        verdict.is_stopped(),
+        "even a clock reset must keep the floor"
+    );
+    let st = verdict.state.unwrap();
+    assert_eq!(st.history().len() as u64, n);
+    assert!(home
+        .guard_head(n, &previous, &format_date(NOW), &format_date(NOW))
+        .is_err());
+    assert!(home
+        .pending_object(&object_digest(&target), NOW)
+        .unwrap()
+        .is_some());
+    // Its receipt rebuilds the checkpoint without the unknown entry's evidence.
+    home = take(home, &keys, &veto(&f, &target, &f.d, NOW), NOW);
+    home = HomeState::from_bytes(&home.to_bytes().unwrap()).unwrap();
+    assert_eq!(
+        home.persisted().unwrap().objects().unwrap().entries,
+        before.entries
+    );
+    assert!(home.is_stopped(NOW).unwrap());
+}
+
 fn setup() -> Stopped {
     setup_with_competing_entry(false)
 }

@@ -284,7 +284,7 @@ impl HomeState {
     pub fn persisted(&self) -> Result<Persisted> {
         Persisted::from_bytes(&self.checkpoint)
     }
-    /// A permanent format stop, derived from the held history on every open (§13.6).
+    /// A permanent format stop, derived from the stored history and stop floor on open (§13.6).
     pub fn is_stopped(&self, now_ms: i64) -> Result<bool> {
         Ok(self.verified_history(now_ms)?.1.is_stopped())
     }
@@ -294,7 +294,16 @@ impl HomeState {
     /// Return the parsed checkpoint too, so a caller serving it does not decode it twice.
     pub fn verified_history(&self, now_ms: i64) -> Result<(Persisted, Verdict)> {
         let p = self.persisted()?;
-        let v = verify_history(&Objects::default(), &p, verification_clock(&p, now_ms));
+        let mut v = verify_history(&Objects::default(), &p, verification_clock(&p, now_ms));
+        // Like the device reader, a home keeps a verified stop even without its evidence.
+        // In particular, an unknown entry is refused rather than retained in the object store.
+        if let Some((seq, _)) = p.stop_floor() {
+            v.stopped = Some(seq);
+            v.stop = Some(Stop::Failed {
+                seq,
+                failure: Failure::NewerFormat("the home is stopped; update it".into()),
+            });
+        }
         Ok((p, v))
     }
     /// Persist atomically alongside the caller's committed history.
@@ -784,7 +793,9 @@ fn admit_full(
     let result = (|| -> AdmitResult<()> {
         let now_ms = date(now, "home clock")?;
         let (persisted, prefix, fork) = home.context_any(now_ms)?;
-        let stopped = persisted.stopped().is_some() || prefix.stopped_at().is_some();
+        let stopped = persisted.stop_floor().is_some()
+            || persisted.stopped().is_some()
+            || prefix.stopped_at().is_some();
         if stopped {
             // Judge only §13.6's two receipt exceptions, before changing any stored facts.
             let env = AuthEnvelope::parse(incoming, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)?;
@@ -1329,7 +1340,7 @@ const OFF_BRANCH: usize = 4;
 /// those objects, not merged with the old ones, so nothing dropped comes back; the head marks,
 /// the succession flag and the higher high-water mark are kept.
 fn verification_clock(p: &Persisted, now_ms: i64) -> i64 {
-    if p.stopped().is_some() {
+    if p.stop_floor().is_some() || p.stopped().is_some() {
         p.objects().into_iter().flat_map(|o| &o.entries)
             .filter_map(|b| parse_entry(b).ok().map(|e| e.issued))
             .max().unwrap_or(now_ms).max(now_ms)
@@ -1339,7 +1350,7 @@ fn verification_clock(p: &Persisted, now_ms: i64) -> i64 {
 }
 
 fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64) -> Result<()> {
-    let p = Persisted::from_bytes(&next.checkpoint)?;
+    let mut p = Persisted::from_bytes(&next.checkpoint)?;
     let now_ms = verification_clock(&p, now_ms);
     let before = p.objects().cloned().unwrap_or_default();
     let mut heads = before.heads.clone();
@@ -1348,7 +1359,13 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
             heads.push(h.to_vec());
         }
     }
-    let st = verify_history(&Objects::default(), &p, now_ms).state;
+    let verdict = verify_history(&Objects::default(), &p, now_ms);
+    // Both causes have the same monotone memory. A final raise's retained evidence may
+    // later disappear too; rebuilding or pruning a checkpoint must never clear its stop.
+    if let Some(seq) = p.stopped().or(verdict.stopped) {
+        p = p.with_stop_floor(seq, None);
+    }
+    let st = verdict.state;
     let settled = st
         .as_ref()
         .and_then(|st| st.activations().iter().filter(|a| a.final_).map(|a| a.seq).max())
@@ -1357,6 +1374,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
     let heads = kept_heads(&heads, settled, &branch);
     let pending: Vec<Vec<u8>> = next.pending.iter().map(|o| o.envelope.clone()).collect();
     if heads == before.heads && pending == before.pending {
+        next.checkpoint = p.to_bytes()?;
         return Ok(());
     }
     let objects = Objects {
@@ -1365,7 +1383,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
         heads,
         predecessor: before.predecessor,
     };
-    let mut rebuilt = Persisted::rebuild(&objects, &next.checkpoint, now_ms);
+    let mut rebuilt = Persisted::rebuild(&objects, &p.to_bytes()?, now_ms);
     let lower = match (&p.high_water, &rebuilt.high_water) {
         (Some((old, _)), Some((new, _))) => old > new,
         (Some(_), None) => true,
@@ -1459,6 +1477,14 @@ fn admit_entry(
     // Verify authority and schema before home-side refusals; no invalid bytes enter storage.
     let verdict = verify_history(&objects, persisted, now_ms.max(entry.issued));
     if let Some(stop) = verdict.stop {
+        // Only a verifier stop at this authenticated N+1, on our own head, can set the
+        // floor. The verified history still ends at N; retain none of the refused entry.
+        // Keep the reader's stop-seq convention (the unknown entry's seq, N+1).
+        if verdict.stopped == Some(entry.seq)
+            && verdict.state.as_ref().is_some_and(|s| s.history() == st.history())
+        {
+            next.checkpoint = persisted.clone().with_stop_floor(entry.seq, None).to_bytes()?;
+        }
         // The entry making a layout raise final is verified and retained. The next entry
         // will be refused by the stopped-home gate, including in the same upload.
         if !(verdict.stopped.is_some()

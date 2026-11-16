@@ -945,6 +945,8 @@ fn post_authority(req: &Value) -> R<Value> {
                 let later: Vec<Vec<u8>> =
                     entries[i + 1..].iter().filter_map(|e| canonical(e).ok()).collect();
                 let a = admit_with(&h, &b, &later, &now);
+                // A refused authenticated unknown-format entry carries the permanent stop
+                // in a.state, with no entry to store. Return it for commit before the 422.
                 l.home = Some(a.state);
                 sign.extend(signs(&a.receipts));
                 a.result

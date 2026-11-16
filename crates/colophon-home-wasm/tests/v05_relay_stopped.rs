@@ -134,8 +134,13 @@ fn stop(w: &World, target: Option<&[u8]>) -> (Vec<u8>, Vec<u8>, u64) {
 }
 fn assert_head_unavailable(relay: &Relay, home: &str) {
     for path in ["/head".into(), format!("/records/heads/{home}.json")] {
-        let (s, headers, _) = http(relay.port, "GET", &relay.url(&path), &[], &[]);
+        let (s, headers, bytes) = http(relay.port, "GET", &relay.url(&path), &[], &[]);
         assert_eq!(s, 503, "{path}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"result":"unavailable"}),
+            "{path}"
+        );
         assert!(headers
             .iter()
             .any(|(k, v)| k == "retry-after" && !v.is_empty()));
@@ -163,6 +168,152 @@ fn assert_unavailable(
         (503, json!({"result":"unavailable"})),
         "{method} {path}"
     );
+}
+
+// As in f2-unknown-kind-control-rule: unknown content follows a genuine control signature.
+fn unknown_entry(w: &World, seq: u64) -> Vec<u8> {
+    let (_, previous) = w.f.account.head();
+    let bytes = canonical(&json!({"protocol":"colophon/authority/5", "seq":seq,
+        "previous":previous, "issued":format_date(NOW), "by":w.f.d,
+        "kind":"later", "value":1}))
+    .unwrap();
+    canonical(&json!({"body":b64(&bytes),
+        "signature":b64(&w.f.host.ids[&w.f.d].sign(&bytes))}))
+    .unwrap()
+}
+
+#[test]
+fn unknown_authenticated_entry_stops_home_permanently() {
+    let Some(mut w) = world("h4-unknown-format", "public") else {
+        return;
+    };
+    let n = w.f.account.head().0;
+    let target = transition(&w.f, json!({"policy":{"callWindow":600}}), &w.f.k, NOW);
+    assert_eq!(post_object(&w.relay, &target).0, 200);
+    let before = json_get(&w.relay, "/authority").1;
+    let checkpoint = w.scratch.path().join("data/home/home-state.json");
+    let old_state = std::fs::read(&checkpoint).unwrap();
+    let entry = unknown_entry(&w, n + 1);
+    assert_eq!(
+        w.relay.post(
+            "/authority",
+            &json!({"from":n+1,
+        "entries":[value(&entry)], "receipts":[]})
+        ),
+        (422, json!({"result":"newerFormat"}))
+    );
+    assert_ne!(
+        std::fs::read(&checkpoint).unwrap(),
+        old_state,
+        "stop is committed before the 422"
+    );
+    for restarted in [false, true] {
+        if restarted {
+            w.relay = w.relay.restart(&w.keys, NOW, &[]);
+        }
+        assert_head_unavailable(&w.relay, &w.keys.id);
+        for headers in [
+            vec![],
+            vec![("Authorization".into(), "Colophon not-a-call".into())],
+            auth(&own_call(&w, "GET", "/changes", b"")),
+        ] {
+            assert_unavailable(&w.relay, "GET", "/changes", &headers, b"");
+        }
+        assert_eq!(json_get(&w.relay, "/authority").1, before);
+        assert_eq!(
+            w.relay.get(&format!("/records/authority/{n:08}.json")).0,
+            200
+        );
+        assert_eq!(
+            w.relay
+                .get(&format!("/records/authority/{:08}.json", n + 1))
+                .0,
+            404
+        );
+        assert!(!w
+            .scratch
+            .path()
+            .join(format!("data/home/records/authority/{:08}.json", n + 1))
+            .exists());
+        assert_eq!(
+            w.relay
+                .get(&format!("/pending/{}", object_digest(&target)))
+                .0,
+            200
+        );
+        if !restarted {
+            continue;
+        }
+        let v = veto(&w.f, &target, &w.f.d, NOW);
+        let (status, reply) = post_object(&w.relay, &v);
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["receipts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            w.relay
+                .get(&format!("/records/vetoes/{}.json", object_digest(&v)))
+                .0,
+            200
+        );
+        assert_eq!(
+            w.relay
+                .get(&format!(
+                    "/records/receipts/{}/{}.receipt.json",
+                    object_digest(&v),
+                    w.keys.id
+                ))
+                .0,
+            200
+        );
+        assert_head_unavailable(&w.relay, &w.keys.id);
+    }
+}
+
+#[test]
+fn bad_signature_and_sequence_gap_unknown_entries_stop_nothing() {
+    let Some(mut w) = world("h4-unknown-refused", "public") else {
+        return;
+    };
+    let n = w.f.account.head().0;
+    let mut bad = value(&unknown_entry(&w, n + 1));
+    bad["signature"] = json!(b64(&[0; 64]));
+    assert_eq!(
+        w.relay.post(
+            "/authority",
+            &json!({"from":n+1,
+        "entries":[bad], "receipts":[]})
+        ),
+        (422, json!({"result":"badSignature"}))
+    );
+    assert_eq!(w.relay.get("/head").0, 200);
+    let gap = unknown_entry(&w, n + 2);
+    assert_eq!(
+        w.relay
+            .post(
+                "/authority",
+                &json!({"from":n+2,
+        "entries":[value(&gap)], "receipts":[]})
+            )
+            .0,
+        409
+    );
+    for restarted in [false, true] {
+        if restarted {
+            w.relay = w.relay.restart(&w.keys, NOW, &[]);
+        }
+        assert_eq!(w.relay.get("/head").0, 200);
+        assert_eq!(
+            json_get(&w.relay, "/authority").1["entries"]
+                .as_array()
+                .unwrap()
+                .len() as u64,
+            n
+        );
+        assert_eq!(
+            w.relay.get("/changes").0,
+            401,
+            "an active home still challenges for a call"
+        );
+    }
 }
 
 #[test]

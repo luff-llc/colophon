@@ -246,6 +246,10 @@ export class HomeSlot {
     const handle = await fsp.open(staged, 'w', 0o600);
     try { await handle.write(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
     await fsp.rename(staged, this.file(name));
+    // The rename must be durable too: in particular, a refused unknown-format entry's
+    // stop has no stored entry to replay if a crash were to lose the checkpoint update.
+    const directory = await fsp.open(this.slot.root, 'r');
+    try { await directory.sync(); } finally { await directory.close(); }
   }
 
   async commit(state) {
@@ -345,7 +349,7 @@ export class HomeSlot {
       if (!(error instanceof ModuleError)) throw error;
       outcome = 'due';
     }
-    if (outcome === 'due') throw new HttpError(503, 'The head is due and cannot be signed yet', { 'retry-after': '1' });
+    if (outcome === 'due') throw new HttpError(503, 'The head is due and cannot be signed yet', { 'retry-after': '1' }, { result: 'unavailable' });
     const head = await this.headEnvelope();
     if (!head) throw new HttpError(404, 'No head');
     send(res, 200, head);
