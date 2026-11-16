@@ -39,6 +39,8 @@ import XCTest
 
     private func createWithSoftwareOwner() {
         let create = app.buttons["createSoftware"]
+        // The setup form is longer than the screen: scroll until the button is there.
+        for _ in 0..<8 where !create.exists { app.swipeUp() }
         wait(create, 20)
         create.tap()
         wait(app.navigationBars["Notes"], 90, "the account was not created; is apps/test-home running?")
@@ -111,7 +113,7 @@ import XCTest
         app.swipeUp()
         scrollTap(app.buttons["signOut"])
         app.buttons["confirmSignOut"].firstMatch.tap()
-        wait(app.buttons["createSoftware"], 30, "after sign out the device is back at setup")
+        wait(app.navigationBars["Colophon test"], 30, "after sign out the device is back at setup")
     }
 
     // MARK: Steps of the two-device run

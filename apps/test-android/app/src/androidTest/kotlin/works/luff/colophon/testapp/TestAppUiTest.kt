@@ -1,5 +1,6 @@
 package works.luff.colophon.testapp
 
+import android.net.Uri
 import android.view.View
 import android.widget.EditText
 import android.widget.TextView
@@ -118,6 +119,7 @@ class TestAppUiTest {
     @Test fun scriptApprove() {
         assumeTrue(args.getString("step") == "approve")
         start(reset = false)
+        args.getString("request")?.let { p -> main { model.open(Uri.parse("colophontest://request?p=$p")) } }
         waitFor("the tabs", 30) { view("tabDevices") != null }
         click("tabDevices")
         // The link only shows the request: import it, confirm the codes, then approve.
@@ -136,6 +138,9 @@ class TestAppUiTest {
     @Test fun scriptConfirmJoin() {
         assumeTrue(args.getString("step") == "confirmJoin")
         start(reset = false)
+        // The link as the system would deliver it, in this process (`am instrument` restarts the app, so a link opened
+        // before the step would be lost with the process).
+        args.getString("invite")?.let { p -> main { model.open(Uri.parse("colophontest://join?p=$p")) } }
         waitFor("the confirmation screen", 30) { view("confirmJoin") != null }
         assertTrue("the host is shown", textOf("confirmHost")?.isNotEmpty() == true)
         click("confirmJoin")
