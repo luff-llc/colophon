@@ -362,6 +362,9 @@ revision 15's text and behaviour there. Rows **code follows in the freeze packag
 | 215 | §8.2: at most 64 genesis namespaces for a writer as for a verifier (the writer's 256 is a code defect being fixed) | the revision 17 check, Medium 5 |
 | 216 | §9.1: the scan path of a confirmed pairing scans exactly the canonical request envelope, whose `member.signing` is the key | the revision 17 check, Low 6 |
 | 217 | §20: the preservation sentence reads "including, without limitation" and names every category a later verifier keeps | the revision 17 check, Low 8 |
+| 218 | §13.1 "Transitions": candidate exchange. A home whose latest head of another home names an entry its branch lacks at that seq forwards its branch from the last shared entry (at most 64 entries per pass, head first); a home stores a valid non-standing candidate that a held head of another home covers (a head that counts in a conflict, as the verifier reads it), still answering 409 or `refused:fork`; at most 4 entries per seq and one such candidate per covering home; a standing candidate is stored beyond that; a late-refused `activate` never. **Code in PR 28** | the check of PR 28's forwarding fix, High 2 |
+| 219 | §13.1 "Transitions": a home forwards to each peer on its own; per pass, newly listed transitions and vetoes first, then entries and head, then the peer's backlog. **Code in PR 28** | the check of PR 28's forwarding fix, High 3 |
+| 220 | §13.3: a home that cannot yet determine which recording entries are due produces no head and answers 503; in a candidate exchange the head goes ahead of the entries. **Code in PR 28** | the home builder's fix |
 
 ## B. Galley's requirements
 

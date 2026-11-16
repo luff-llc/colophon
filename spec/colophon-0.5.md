@@ -1677,7 +1677,19 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   history after the latest head of that home it holds, by `POST {peer}/authority` as a host publishes
   them (no call: §13.4 lets anyone post there, and the peer admits them as it admits any upload), so
   that every home holds each recording entry another home appended and can sign a head over it; a
-  home's `final` never waits for a head that covers only an entry it does not hold. Before producing
+  home's `final` never waits for a head that covers only an entry it does not hold. When a home's
+  latest head of another home names an entry that its own branch lacks at that seq, the two homes
+  are on different branches: the home forwards that home its branch from the seq after the last
+  entry both share, at most 64 entries per pass, with its head first. A home stores a valid
+  candidate that does not stand when a head it holds of another home covers it, a head that counts
+  in a conflict (§8.6: its home current on the branch it covers and unexpired at its `issued`),
+  and still answers 409 (or `refused:fork`), so both homes come
+  to hold the same candidates and reach the same verdict (§8.6). It keeps at most 4 entries per
+  seq and at most one such candidate per covering home; a candidate that stands is stored beyond
+  that, and an `activate` refused under the rule below is never stored as a candidate. A home
+  forwards to each peer on its own, so a slow or silent peer delays no other; each pass to a peer
+  sends newly listed transitions and vetoes first, then the home's entries and head, then what that
+  peer has not yet taken. Before producing
   any head, a home appends the recording entries that are due, so the head it forwards covers them
   and the entries go ahead of it. Every home appends recording entries (§8.7), whatever the
   primary does:
@@ -1834,8 +1846,10 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   before answering `GET {base}/head` the home MUST produce and store the due head; if it cannot
   (its guard refuses, `issued` cannot yet increase, or its history stops at a fork), it answers 503
   with `Retry-After` and MUST NOT serve the older head, at `records/heads/<its ID>.json` too, and it
-  forwards no head to its peers while one is due. It sends a peer the entries a forwarded head
-  covers before the head (§13.1 "Transitions"), so a peer can always verify it, and at `headQuorum` 2
+  forwards no head to its peers while one is due. A home that cannot yet determine which recording
+  entries are due produces no head either, and answers 503 the same way. It sends a peer the
+  entries a forwarded head covers before the head (§13.1 "Transitions"; in a candidate exchange the
+  head goes first), so a peer can always verify it, and at `headQuorum` 2
   two homes never wait on each other for `final`. It MUST give its heads strictly increasing `issued`, and MUST NOT
   sign a head for a second digest at a seq unless its own verdict shows the first displaced under
   §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
