@@ -45,6 +45,7 @@ fn permit_error(e: PermitRefused) -> AccountError {
     let (code, reason) = match e {
         PermitRefused::LimitReached => ("pairing:limit", "pairingLimit"),
         PermitRefused::CeremonyLive => ("pairing:busy", "pairingBusy"),
+        PermitRefused::ClockImplausible => ("pairing:clock", "pairingClock"),
     };
     AccountError::Refused {
         code: code.into(),
@@ -813,7 +814,7 @@ mod tests {
     /// one, to pick the one whose code matches. Only the first start yields a nonce; every other
     /// is refused, so the relay has one code to match, not hundreds of thousands.
     #[test]
-    fn many_parallel_starts_yield_at_most_one_nonce() {
+    fn many_sequential_starts_against_one_ledger_yield_one_nonce() {
         let limiter = PairingFailureLimiter::wrap(FailureLimiter::new());
         let mut nonces = 0;
         let mut held = Vec::new();

@@ -440,3 +440,49 @@ fn a_pairing_is_refused_before_its_session_began() {
     let r = f.account.begin_approve(&req.raw, terms("write"), &[f.d.clone()], seed, h);
     assert_eq!(refused(r), "refused:expired");
 }
+
+/// An implausible clock starts nothing, and no time the ledger keeps saturates its timeout or its hour.
+#[test]
+fn an_implausible_clock_starts_nothing() {
+    use colophon_core::v05::pairing::MAX_CLOCK_MS;
+    let mut lim = FailureLimiter::new();
+    assert_eq!(lim.permit(i64::MAX).unwrap_err(), PermitRefused::ClockImplausible);
+    assert_eq!(lim.permit(-1).unwrap_err(), PermitRefused::ClockImplausible);
+    assert!(lim.may_start(1_000), "a refused clock left nothing behind");
+    // The latest accepted clock still times out.
+    let _p = lim.permit(MAX_CLOCK_MS).unwrap();
+    assert!(lim.is_live(MAX_CLOCK_MS));
+}
+
+/// A forward clock mistake clears once the clock is corrected and an hour of it has passed; it never stays spent.
+#[test]
+fn a_forward_clock_mistake_clears_after_an_hour_of_the_corrected_clock() {
+    let t = 1_794_384_000_000_i64;
+    let future = t + 10 * 365 * 24 * 3_600_000;
+    let mut lim = FailureLimiter::new();
+    for i in 0..5 {
+        lim.permit(future + i).unwrap().abandon(&mut lim, future + i);
+    }
+    assert_eq!(lim.permit(future + 10).unwrap_err(), PermitRefused::LimitReached);
+    // Corrected: still floored for an hour of the corrected clock (a rollback gains nothing sooner).
+    assert_eq!(lim.permit(t).unwrap_err(), PermitRefused::LimitReached);
+    assert_eq!(lim.permit(t + 30 * 60_000).unwrap_err(), PermitRefused::LimitReached);
+    // An hour later the ledger re-anchors at the corrected clock and the future entries go.
+    assert!(lim.permit(t + 3_600_000).is_ok());
+}
+
+/// The residual limit, as a test: restoring the sealed ledger and its recorded generation together (a wholesale
+/// restore of the private store) restores the budget. The core cannot see it; the docs state it.
+#[test]
+fn a_wholesale_restore_of_ledger_and_generation_restores_the_budget() {
+    let acct = AccountId::parse(&"ab".repeat(32)).unwrap();
+    let mut lim = FailureLimiter::new();
+    let early = lim.seal(&acct, &KEY, [1; 32]).unwrap();
+    let early_floor = lim.generation();
+    for t in 0..5 {
+        lim.permit(t).unwrap().abandon(&mut lim, t);
+    }
+    assert!(!lim.may_start(10));
+    let restored = FailureLimiter::open(&early, &acct, &KEY, early_floor, 10);
+    assert!(restored.may_start(10), "the residual limit: a wholesale restore restores the budget");
+}

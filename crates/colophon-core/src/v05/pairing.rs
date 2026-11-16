@@ -619,6 +619,11 @@ pub fn scanned_request(
 /// How long one ceremony on the existing side may run (§7.3 "a timeout"): ten minutes from its
 /// permit. A ceremony past it is over: its next step aborts and a new one may start.
 pub const CEREMONY_TIMEOUT_MS: i64 = 10 * 60 * 1000;
+/// The latest clock the ledger accepts: the end of the year 9999. A start beyond it is refused, and no time the ledger
+/// keeps can overflow its timeout or its hour.
+pub const MAX_CLOCK_MS: i64 = 253_402_300_799_999;
+/// How far behind the ledger's floor a clock may fall before the ledger watches for a correction: five minutes.
+pub const CLOCK_TOLERANCE_MS: i64 = 5 * 60 * 1000;
 const HOUR_MS: i64 = 3_600_000;
 
 /// The live ceremony of an existing device: the reservation it holds and when it began.
@@ -666,6 +671,9 @@ pub struct FailureLimiter {
     /// The generation last sealed (this process only).
     #[serde(skip)]
     sealed_generation: u64,
+    /// When the clock first fell more than [`CLOCK_TOLERANCE_MS`] behind the floor (see `correct_clock`).
+    #[serde(default)]
+    behind_since_ms: Option<i64>,
 }
 
 /// Permission to start one pairing session, taken from the limiter: a reservation (see
@@ -698,6 +706,8 @@ pub enum PermitRefused {
     LimitReached,
     /// Another ceremony is live on this device: one at a time.
     CeremonyLive,
+    /// The clock is outside 1970 to 9999 ([`MAX_CLOCK_MS`]): no session starts on it.
+    ClockImplausible,
 }
 pub use PermitRefused::LimitReached;
 impl std::fmt::Display for PermitRefused {
@@ -705,6 +715,7 @@ impl std::fmt::Display for PermitRefused {
         f.write_str(match self {
             Self::LimitReached => "pairing: 5 failed sessions in the last hour",
             Self::CeremonyLive => "pairing: another ceremony is live on this device",
+            Self::ClockImplausible => "pairing: the clock is implausible",
         })
     }
 }
@@ -723,6 +734,8 @@ impl FailureLimiter {
         now_ms.max(self.latest_ms)
     }
     fn touch(&mut self, now_ms: i64) -> i64 {
+        let now_ms = now_ms.clamp(0, MAX_CLOCK_MS);
+        self.correct_clock(now_ms);
         let now = self.effective(now_ms);
         self.latest_ms = now;
         self.failures_ms.retain(|t| *t > now - HOUR_MS);
@@ -734,6 +747,32 @@ impl FailureLimiter {
             self.live = None;
         }
         now
+    }
+    /// A clock that stays more than [`CLOCK_TOLERANCE_MS`] behind the ledger's floor for an hour of its own time
+    /// was a forward mistake (or a rollback, which gains nothing: an hour is what the counted sessions would have aged
+    /// anyway). The ledger then re-anchors at that clock: entries and a live ceremony stamped in the future go, so a
+    /// corrected clock clears, never staying spent.
+    fn correct_clock(&mut self, now_ms: i64) {
+        if now_ms.saturating_add(CLOCK_TOLERANCE_MS) >= self.latest_ms {
+            if self.behind_since_ms.take().is_some() {
+                self.changed();
+            }
+            return;
+        }
+        match self.behind_since_ms {
+            Some(since) if now_ms >= since && now_ms - since >= HOUR_MS => {
+                self.latest_ms = now_ms;
+                self.failures_ms.retain(|t| *t <= now_ms);
+                self.reserved.retain(|(_, t)| *t <= now_ms);
+                if self.live.is_some_and(|l| l.started_ms > now_ms) {
+                    self.live = None;
+                }
+                self.behind_since_ms = None;
+            }
+            Some(since) if now_ms >= since => return,
+            _ => self.behind_since_ms = Some(now_ms),
+        }
+        self.changed();
     }
     fn changed(&mut self) {
         self.generation = self.generation.saturating_add(1);
@@ -781,6 +820,9 @@ impl FailureLimiter {
     /// Start a session: a [`Permit`] that reserves one of the five, or why not. Sessions cannot
     /// start without one, and only one is live at a time.
     pub fn permit(&mut self, now_ms: i64) -> Result<Permit, PermitRefused> {
+        if !(0..=MAX_CLOCK_MS).contains(&now_ms) {
+            return Err(PermitRefused::ClockImplausible);
+        }
         let now = self.touch(now_ms);
         if self.live.is_some() {
             return Err(PermitRefused::CeremonyLive);
