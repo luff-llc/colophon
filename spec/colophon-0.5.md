@@ -1721,8 +1721,10 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   transition it didn't receipt only if it first saw the transition, or a receipt of it forwarded by
   another current home, within 300 s after the transition's `issued`, or it was not serving for any
   part of that window, or the transition is a full set that revokes it (§8.7 validity 2).
-  Otherwise it refuses that `activate` for ever and notifies the controllers,
-  and it **still stores and serves the transition and its receipts** (§14), so the owner can veto
+  Otherwise it refuses that `activate` for ever (0.5 delivers no notice of this, §17.5; a device
+  that submits the `activate` gets `refused:late`, 422 in §14, and the transition stays among the
+  pending objects the home serves), and it **still stores and serves the transition and its
+  receipts** (§14), so the owner can veto
   it before its deadline; a late transition with a valid veto is vetoed like any other. A veto that
   reaches a home more than 300 s after its `issued` is stored and served when it comes with at
   least one receipt of it from another current home that is in window (§13.5) and that the home
@@ -2795,7 +2797,6 @@ The one list. The README, the changelog and §18 point here.
    and appoints another, but no session journey moves an account. The
    engine reports a home's 421 and does not follow it, and if the old home is gone nothing in 0.5
    tells another device where the new one is.
-
 3. **Only one-home operation is supported; several homes are experimental.** They are optional (§13.1, §18); the open
    issues are in [docs/multi-home-open-issues.md](../docs/multi-home-open-issues.md).
 4. **What one home can do undetected.** It can withhold the history indefinitely, and a device
