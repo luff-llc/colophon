@@ -805,8 +805,7 @@ fn a_head_asked_for_at_a_due_time_covers_what_is_due_then() {
     let mut a = a;
     a.stop();
     let mut quiet = Relay::start_with(&ka, &account, BASE_A, &dir, due, &[], port, json!({"tickMs": 600_000}));
-    let (s, h, _) = head_at(&quiet).map(|(s, d, i)| (s, d, i)).expect("a head");
-    let _ = h;
+    let (s, _, _) = head_at(&quiet).expect("a head");
     assert_eq!(s, n + 1, "the head asked for at the due time covers the activate due then");
     quiet.stop();
     // With ticks, at the same clock reading, the activation is made final.
