@@ -680,3 +680,93 @@ fn a_transition_is_submitted_to_the_home_and_who_has_receipted_it_is_tracked() {
     assert_eq!(w.laptop.receipted_by(&digest), vec![home.clone()]);
     let _ = (&w.phone_id, &w.laptop_id, Step::Done);
 }
+
+/// A home that never answers: every request fails as if the host were unreachable.
+struct Silent;
+impl Wire for Silent {
+    fn call(&mut self, _host: &Host, _req: &Request, _now_ms: i64) -> Response {
+        Response {
+            status: 503,
+            headers: vec![],
+            body: Vec::new(),
+        }
+    }
+}
+
+/// §8.7 "Revoking a home": the account's only home is gone. The owner signs a full set (every
+/// control key, with the recovery keys' consent) that revokes it; with no home remaining it needs
+/// no receipt, so the device records it at once and the account has no home. It then appoints a
+/// new home and works with it.
+#[test]
+fn a_full_set_drops_a_silent_only_home_and_the_account_appoints_another() {
+    let (mut s, _) = setup(LISTEN, &[]);
+    let mut host = std::mem::replace(&mut s.f.host, Host::new());
+    let (d, p, k) = (s.f.d.clone(), s.f.p.clone(), s.f.k.clone());
+    let src = device_source(&s);
+    let mut ctl = controller_engine(&s.f, &host, &src, &d, NOW);
+    let old = s.home.clone();
+    let f = sync_pass(&mut ctl, &src, &old, &mut s.sim, &host, NOW);
+    assert!(f.is_empty(), "{f:?}");
+    assert_eq!(ctl.account().homes().len(), 1);
+
+    // The home stops answering. The full set is signed and recorded with no receipt.
+    let action = ctl
+        .account()
+        .begin_transition(
+            &colophon_core::v05::account::Change::homes(json!({"revoke": [old.clone()]})),
+            &[d.clone(), p.clone(), k.clone()],
+            colophon_core::v05::write::authority::TransitionRule::Control,
+        )
+        .unwrap();
+    engine_finish(&mut ctl, &host, &src, action);
+    let _ = sync_pass(&mut ctl, &src, &old, &mut Silent, &host, NOW + 1_000);
+    let recorded = ctl.record_due().unwrap();
+    assert_eq!(recorded.len(), 1, "the full set's activate, with no receipt");
+    for w in &recorded {
+        src.publish_stores(&w.stores);
+    }
+    assert!(ctl.account().homes().is_empty(), "the account has no home");
+    assert!(ctl.account().pending().is_empty());
+
+    // An account with no home appoints one at once, then works with it: a transition is
+    // submitted to the new home and receipted by it.
+    let base = "https://home2.example";
+    let (new, change) = home_appointment(&mut host, ctl.account(), 71, &format!("{base}/"));
+    let action = ctl
+        .account()
+        .begin_transition(
+            &change,
+            &[d.clone(), k.clone()],
+            colophon_core::v05::write::authority::TransitionRule::Control,
+        )
+        .unwrap();
+    engine_finish(&mut ctl, &host, &src, action);
+    let recorded = ctl.record_due().unwrap();
+    assert_eq!(recorded.len(), 1, "the appointment, at once with no home");
+    for w in &recorded {
+        src.publish_stores(&w.stores);
+    }
+    let homes = ctl.account().homes();
+    assert_eq!(homes.len(), 1);
+    assert_eq!(homes[0].id, new);
+    let mut sim2 = SimHome::of_account(ctl.account(), &new, base, NOW + 2_000);
+    let f = sync_pass(&mut ctl, &src, &new, &mut sim2, &host, NOW + 2_000);
+    assert!(f.is_empty(), "{f:?}");
+    let action = ctl
+        .account()
+        .begin_transition(
+            &colophon_core::v05::account::Change::policy(json!({"callWindow": 600})),
+            &[d.clone(), p.clone()],
+            colophon_core::v05::write::authority::TransitionRule::Control,
+        )
+        .unwrap();
+    engine_finish(&mut ctl, &host, &src, action);
+    let digest = ctl.account().pending()[0].digest.clone();
+    let f = sync_pass(&mut ctl, &src, &new, &mut sim2, &host, NOW + 3_000);
+    assert!(f.is_empty(), "{f:?}");
+    assert_eq!(ctl.receipted_by(&digest), vec![new.clone()]);
+    assert!(sim2
+        .requests
+        .iter()
+        .any(|r| r.starts_with("Post /pending")));
+}

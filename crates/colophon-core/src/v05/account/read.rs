@@ -12,7 +12,7 @@ use crate::v05::history::{transition_timing, HomeStatus, Objects, State};
 use crate::v05::records::{Level, Outcome as Admission, OwedShare, ProposalState};
 use crate::v05::slots::Slot;
 use crate::v05::terms::Access;
-use crate::v05::write::authority::choose_receipts;
+use crate::v05::write::authority::choose_transition_receipts;
 use crate::v05::write::format_date;
 use crate::v05::Result;
 use serde::{Deserialize, Serialize};
@@ -318,7 +318,7 @@ pub(super) fn pending_transitions(objects: &Objects, state: &State) -> Vec<Pendi
                 })
                 .unwrap_or_default()
         };
-        let receipts = choose_receipts(state, &objects.pending, &env.digest, issued, None).ok();
+        let receipts = choose_transition_receipts(state, &objects.pending, &bytes).ok();
         let timing = receipts
             .as_ref()
             .and_then(|r| transition_timing(state, &bytes, r).ok());
