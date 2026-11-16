@@ -120,9 +120,10 @@ pub struct Persisted {
 
 /// Checkpoint format. 2 added `held_until`; 3 added the successor fields; 4 added the per-home
 /// head high-water marks and the fork a `resolve` names; 6 (E12) holds in the state's `points`
-/// every key a transition or vault rotation added, which a format-5 state lacks. A checkpoint of
-/// another format is refused, and the caller rebuilds it from its retained objects.
-const CHECKPOINT_VERSION: u32 = 6;
+/// every key a transition or vault rotation added, which a format-5 state lacks; 7 (the freeze
+/// package) holds the state's `layout` and the seq at which the reader is stopped (§1 "A stop").
+/// A checkpoint of another format is refused, and the caller rebuilds it from its retained objects.
+const CHECKPOINT_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Checkpoint {
@@ -139,6 +140,8 @@ struct Checkpoint {
     /// The succession was seen verified (additive: absent means not seen).
     #[serde(default)]
     succession_verified: bool,
+    /// The seq at which the verdict stopped the reader (format 7, [`Verdict::stopped`]).
+    stopped: Option<u64>,
 }
 
 impl Persisted {
@@ -150,6 +153,13 @@ impl Persisted {
             head_marks: BTreeMap::new(),
             succession_verified: false,
         }
+    }
+
+    /// The seq at which the checkpointed verdict stopped the reader (§1 "A stop",
+    /// [`Verdict::stopped`]), so a host that reads its checkpoint before replaying can refuse
+    /// to build and answer nothing new.
+    pub fn stopped(&self) -> Option<u64> {
+        self.checkpoint.as_ref().and_then(|cp| cp.stopped)
     }
 
     /// Whether this verifier saw its account's succession verified (§15.1).
@@ -236,6 +246,7 @@ impl Persisted {
                 high_water,
                 head_marks: previous.head_marks.clone(),
                 succession_verified: previous.succession_verified,
+                stopped: verdict.stopped,
             }),
         }
     }
@@ -380,8 +391,21 @@ pub struct Verdict {
     /// The earliest clock time at which a candidate that was held at an already decided seq
     /// is judged again (§8.1, §17.2). A resumed verifier replays once the clock reaches it.
     pub held_until: Option<i64>,
+    /// `Some(seq)` when the reader is **stopped** for the account (§1 "A stop"): its verdict on
+    /// the authority entry at `seq` is `newerFormat`, so its verified history ends before that
+    /// entry. A stopped reader trusts nothing new: every call it verifies is `unavailable`
+    /// whatever seq the call names (§12.3 step 4), it accepts no head (§13.3), admits no record
+    /// or live candidate it had not admitted before the stop (each is held, §11.5), answers no
+    /// question of currency, membership or access, and its host builds nothing. What it showed
+    /// before may stay on screen, marked as from a stopped account. A home follows §13.6.
+    /// Derived from [`Verdict::stop`]; [`Persisted`] carries it in the checkpoint.
+    pub stopped: Option<u64>,
 }
 impl Verdict {
+    /// True when the reader is stopped for the account ([`Verdict::stopped`], §1 "A stop").
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.is_some()
+    }
     /// The §1 result code of the verification: `ok`, `held`, `refused:fork` or a failure's.
     pub fn code(&self) -> String {
         match &self.stop {
@@ -495,6 +519,7 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         rollback: false,
         conflicts: Vec::new(),
         held_until: None,
+        stopped: None,
     };
     let mut st: Option<State> = None;
     if let Some(result) = upgrade::bootstrap(objects, now_ms) {
@@ -505,6 +530,7 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
             }
             Err(stop) => {
                 verdict.stop = Some(stop);
+                verdict.stopped = stopped_at(&verdict.stop);
                 return verdict;
             }
         }
@@ -555,7 +581,19 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         }
     }
     verdict.state = st;
+    verdict.stopped = stopped_at(&verdict.stop);
     verdict
+}
+
+/// §1 "A stop": the seq of the authority entry whose verdict is `newerFormat`.
+fn stopped_at(stop: &Option<Stop>) -> Option<u64> {
+    match stop {
+        Some(Stop::Failed {
+            seq,
+            failure: Failure::NewerFormat(_),
+        }) => Some(*seq),
+        _ => None,
+    }
 }
 
 /// What a fold over the held entries needs: the candidates by seq, the held objects and the clock.
@@ -746,6 +784,7 @@ impl Folder<'_> {
                 rollback: false,
                 conflicts: Vec::new(),
                 held_until: None,
+                stopped: None,
             };
             sub.branch.push(e.env.digest.clone());
             let end = self.run(Some(next.clone()), &mut sub, false);
@@ -783,4 +822,67 @@ fn by_seq_all(by_seq: &BTreeMap<u64, Vec<Result<Entry, Failure>>>) -> Vec<&Entry
 /// Unknown content found in an authority entry's kind fields by the pre-scan (§8.5 step 4).
 pub(crate) fn prescan(kind: &str, body: &serde_json::Value) -> Unknown {
     crate::v05::prescan::authority_fields(kind, body).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The entries of a candidate vector's `rules/<name>/records/authority/`.
+    fn vector(name: &str) -> Objects {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/0.5/candidate/rules")
+            .join(name)
+            .join("records/authority");
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        Objects {
+            entries: files.iter().map(|p| std::fs::read(p).unwrap()).collect(),
+            ..Objects::default()
+        }
+    }
+    const NOW: i64 = 1_795_132_800_000; // 2026-11-20T00:00:00Z
+
+    /// §1 "A stop": a `newerFormat` authority entry stops the reader at its seq, and the
+    /// checkpoint carries it across a save and a load.
+    #[test]
+    fn a_newer_format_entry_stops_the_reader_and_the_checkpoint_keeps_it() {
+        let objects = vector("f3-layout-3");
+        let v = verify_history(&objects, &Persisted::default(), NOW);
+        assert_eq!(v.code(), "newerFormat");
+        assert_eq!(v.stopped, Some(2));
+        assert!(v.is_stopped());
+        let cp = Persisted::checkpoint(&objects, &Persisted::default(), NOW);
+        assert_eq!(cp.stopped(), Some(2));
+        let back = Persisted::from_bytes(&cp.to_bytes().unwrap()).unwrap();
+        assert_eq!(back.stopped(), Some(2));
+        // Resuming from the checkpoint stops again at the same entry.
+        let again = verify_history(&Objects::default(), &back, NOW);
+        assert_eq!(again.stopped, Some(2));
+    }
+
+    /// Other failures do not stop the reader: `malformed` and `badSignature` are not a stop.
+    #[test]
+    fn other_failures_are_not_a_stop() {
+        for name in ["f3-layout-2", "f3-layout-3-no-consent"] {
+            let v = verify_history(&vector(name), &Persisted::default(), NOW);
+            assert_ne!(v.code(), "ok", "{name}");
+            assert_eq!(v.stopped, None, "{name}");
+        }
+        let ok = verify_history(&vector("f2-unknown-kind-single-approve"), &Persisted::default(), NOW);
+        assert_eq!(ok.stopped, None);
+    }
+
+    /// A checkpoint of the format before 7 is refused, so it is rebuilt from its objects.
+    #[test]
+    fn a_format_6_checkpoint_is_refused() {
+        let objects = vector("f3-layout-3");
+        let cp = Persisted::checkpoint(&objects, &Persisted::default(), NOW);
+        let mut v: serde_json::Value = serde_json::from_slice(&cp.to_bytes().unwrap()).unwrap();
+        v["version"] = serde_json::json!(6);
+        assert!(Persisted::from_bytes(&serde_json::to_vec(&v).unwrap()).is_err());
+    }
 }
