@@ -28,7 +28,9 @@ import com.luff.colophon.KeepMode
 import com.luff.colophon.ListedPath
 import com.luff.colophon.Notices
 import com.luff.colophon.PairingTransferKey
+import com.luff.colophon.PairingFailureLimiter
 import com.luff.colophon.Report
+import com.luff.colophon.RequestInfo
 import com.luff.colophon.RequestSpec
 import com.luff.colophon.RevokeKeep
 import com.luff.colophon.RuleKind
