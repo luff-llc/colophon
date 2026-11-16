@@ -132,7 +132,8 @@ fn view_for(dir: &Path, case: &Value, now: i64) -> Result<AccountView, String> {
     let ver = &case["verifier"];
     let objects = objects_for(dir, ver);
     let verdict = verify_history(&objects, &Persisted::default(), now);
-    if verdict.stop.is_some() {
+    // A stopped history still gives a view: the call is judged, and is `unavailable` (§1 "A stop").
+    if verdict.stop.is_some() && !verdict.is_stopped() {
         return Err(format!(
             "history: {} at seq {}",
             verdict.code(),
