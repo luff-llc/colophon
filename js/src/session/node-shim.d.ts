@@ -9,6 +9,7 @@ declare module 'node:fs' {
   export function fsyncSync(fd: number): void;
   export function closeSync(fd: number): void;
   export function renameSync(from: string, to: string): void;
+  export function linkSync(existing: string, path: string): void;
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
   export function readdirSync(path: string, options: { withFileTypes: true }): Dirent[];
   export function lstatSync(path: string): Stats;

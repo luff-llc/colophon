@@ -39,8 +39,8 @@ function sleep(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBu
  * folder is renamed to `commit-…` (the commit point), and only then are the files renamed into place. A failure or a
  * kill before the commit point leaves nothing; after it, the next `listing`, `write` or open completes the batch
  * (a committed batch is never discarded: if it cannot be completed the store is `unavailable`, not partly written).
- * A lock folder with the owner's process ID keeps two processes from publishing at once; a dead owner's lock is taken
- * over.
+ * A lock file with its holder's token keeps two processes from publishing at once; a dead holder's lock is taken over
+ * (see `locked`).
  */
 export class FileMedium implements RecordMedium {
   private readonly journal: string;
@@ -84,6 +84,7 @@ export class FileMedium implements RecordMedium {
   /** The bytes at `path`, or nothing. A path that leaves the root through a symbolic link is refused. */
   private held(path: string): Uint8Array | undefined {
     RecordPaths.validate(path);
+    this.settle();
     const full = join(this.root, path);
     if (!fs.existsSync(full)) return undefined;
     try {
@@ -121,6 +122,8 @@ export class FileMedium implements RecordMedium {
       }
       const commit = join(this.journal, `commit-${id}`);
       try {
+        // A holder that was displaced commits nothing.
+        if (!this.holding()) throw new Error('the store\'s lock was lost');
         fs.renameSync(stage, commit);
       } catch (error) {
         fs.rmSync(stage, { recursive: true, force: true });
@@ -135,11 +138,25 @@ export class FileMedium implements RecordMedium {
     if (wrote) this.hints.emit();
   }
 
+  /**
+   * A read never sees a batch half applied. While a batch is between its commit point and its last rename, its
+   * `commit-…` folder exists: a reader that finds one takes the lock (so it waits for a writer that is still working, in
+   * this process or another) and completes the batch before it reads. A reader that cannot get the lock fails as
+   * `unavailable`; it is never handed part of a batch. Inside this medium's own locked section nothing is done.
+   */
+  private settle(): void {
+    if (this.token !== undefined) return;
+    let committed: boolean;
+    try { committed = fs.readdirSync(this.journal, { withFileTypes: true }).some(entry => entry.name.startsWith('commit-')); }
+    catch (error) { throw StorageError.unavailable('the record store\'s journal could not be read', error); }
+    if (committed) this.locked(() => this.recover());
+  }
+
   /** Completes every committed batch and discards every uncommitted one. */
   private recover(): void {
     for (const entry of fs.readdirSync(this.journal, { withFileTypes: true })) {
       if (entry.name.startsWith('commit-')) this.apply(join(this.journal, entry.name));
-      else if (entry.name.startsWith('stage-')) fs.rmSync(join(this.journal, entry.name), { recursive: true, force: true });
+      else if (entry.name.startsWith('stage-') || entry.name.startsWith('dead-')) fs.rmSync(join(this.journal, entry.name), { recursive: true, force: true });
     }
   }
 
@@ -176,27 +193,47 @@ export class FileMedium implements RecordMedium {
     this.onStep('cleaned');
   }
 
+  /**
+   * Runs `body` holding the store's lock: the file `.colophon.nosync/lock`, created exclusively, holding this
+   * holder's token (its process ID and a random part). A lock whose process is dead is taken over by renaming it away
+   * and checking that what was moved is the dead holder's token; anything else is put back. There is no kernel lock
+   * here (Node and Bun have none that is portable), so a live holder can still be displaced in the instant between
+   * another process's check and its rename. That is why `holding()` is asked again just before a batch's commit point:
+   * a displaced holder commits nothing.
+   */
   private locked<T>(body: () => T): T {
     const lock = join(this.journal, 'lock');
-    const owner = join(lock, 'owner');
+    const token = `${process.pid}:${randomUUID()}`;
+    const read = (path: string): string | undefined => { try { return new TextDecoder().decode(fs.readFileSync(path)); } catch { return undefined; } };
     for (let attempt = 0; ; attempt++) {
-      try { fs.mkdirSync(lock); break; } catch {
-        let pid = 0;
-        try { pid = Number(new TextDecoder().decode(fs.readFileSync(owner))); } catch { /* being created or removed */ }
-        let alive = pid === process.pid;
-        if (!alive && pid > 0) { try { process.kill(pid, 0); alive = true; } catch { alive = false; } }
-        // An owner that is dead, or a lock with no owner for a while, is taken over.
-        if ((pid > 0 && !alive) || (pid === 0 && attempt > 20)) { fs.rmSync(lock, { recursive: true, force: true }); continue; }
-        if (attempt > 400) throw StorageError.unavailable('the record store is in use by another process');
-        sleep(5);
+      try { writeDurably(lock, new TextEncoder().encode(token)); break; } catch { /* held, or being taken */ }
+      const holder = read(lock);
+      const pid = holder === undefined ? 0 : Number(holder.split(':')[0]);
+      let alive = pid === process.pid;
+      if (!alive && pid > 0) { try { process.kill(pid, 0); alive = true; } catch { alive = false; } }
+      if (holder !== undefined && pid > 0 && !alive) {
+        const grave = join(this.journal, `dead-${randomUUID()}`);
+        try { fs.renameSync(lock, grave); } catch { continue; }
+        if (read(grave) !== holder) {
+          // Not the dead holder's: another process took the lock in between. Give it back unless a third already holds it.
+          try { fs.linkSync(grave, lock); } catch { /* someone holds it; the displaced holder finds out in holding() */ }
+        }
+        fs.rmSync(grave, { force: true });
+        continue;
       }
+      if (attempt > 400) throw StorageError.unavailable('the record store is in use by another process');
+      sleep(5);
     }
-    try {
-      writeDurably(owner, new TextEncoder().encode(String(process.pid)));
-      return body();
-    } finally {
-      fs.rmSync(lock, { recursive: true, force: true });
+    this.token = token;
+    try { return body(); } finally {
+      this.token = undefined;
+      if (read(lock) === token) fs.rmSync(lock, { force: true });
     }
+  }
+  private token: string | undefined;
+  /** Whether this medium still holds the lock it took. */
+  private holding(): boolean {
+    try { return this.token !== undefined && new TextDecoder().decode(fs.readFileSync(join(this.journal, 'lock'))) === this.token; } catch { return false; }
   }
 
   changes(listener: () => void): () => void { return this.hints.add(listener); }

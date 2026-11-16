@@ -70,16 +70,17 @@ export async function putBlob(session: ColophonSession, data: Uint8Array, option
     kind = 'colophon.blobReference'; size = existing.size; type = existing.mediaType;
     payload = JSON.stringify({ reference, required, digest, retain: true });
   } else {
-    const writer = await worker.inGate(async () => worker.requireEngine().run(e => withEntropy(32, entropy => e.begin_blob(namespace, mediaType, entropy))));
+    // The writer holds an epoch key. The session tracks it: `lock` frees it at once, and every use after that is refused.
+    const writer = await worker.inGate(async () => worker.blobWriter(worker.requireEngine().run(e => withEntropy(32, entropy => e.begin_blob(namespace, mediaType, entropy)))));
     let manifestText: string;
     try {
       for (let at = 0; at < data.length; at += CHUNK) {
-        const sealed = plain<BlobChunk>(writer.push(data.subarray(at, Math.min(data.length, at + CHUNK))));
+        const sealed = plain<BlobChunk>(writer.use(w => w.push(data.subarray(at, Math.min(data.length, at + CHUNK)))));
         await worker.storage.write([{ path: sealed.path, bytes: sealed.bytes }]);
         if (lease !== session.context) throw new SessionError('destinationChanged');
       }
-      manifestText = writer.finish();
-    } finally { try { writer.free(); } catch { /* finished */ } }
+      manifestText = writer.use(w => w.finish());
+    } finally { writer.release(); }
     kind = 'colophon.blobPublish';
     // The signed manifest is embedded byte for byte: no numeric re-encoding.
     payload = `{"reference":${JSON.stringify(reference)},"required":${required ? 'true' : 'false'},"manifest":${manifestText}}`;

@@ -113,16 +113,19 @@ export class PasskeyProvider implements AsyncKeyProvider {
           ...(prfSalt ? { extensions: { prf: { eval: { first: owned(prfSalt) } } } as AuthenticationExtensionsClientInputs } : {}),
         },
       }), 'The passkey prompt was cancelled');
-      if (!same(new Uint8Array(credential.rawId), this.descriptor.credential!)) throw new KeyCustodyError('credentialMissing', 'Another credential answered');
-      const response = credential.response as AuthenticatorAssertionResponse;
+      // The PRF output is taken first, into memory this SDK wipes: the browser's own buffer is adopted, and every
+      // failure below wipes it. A missing output is a failure, never a fallback.
       const first = (credential.getClientExtensionResults() as PrfOutputs).prf?.results?.first;
+      const output = first === undefined ? undefined : first instanceof ArrayBuffer ? new Uint8Array(first) : new Uint8Array(first.buffer, first.byteOffset, first.byteLength);
       let prf: SecretBytes | undefined;
-      if (prfSalt) {
-        // The browser's own buffer is adopted and wiped with the secret; a missing output is a failure, never a fallback.
-        const bytes = first === undefined ? undefined : first instanceof ArrayBuffer ? new Uint8Array(first) : new Uint8Array(first.buffer, first.byteOffset, first.byteLength);
-        if (!bytes || bytes.length !== 32) { bytes?.fill(0); throw new KeyCustodyError('unsupportedHere', 'The passkey returned no PRF output'); }
-        prf = SecretBytes.adopt(bytes);
-      }
+      try {
+        if (!same(new Uint8Array(credential.rawId), this.descriptor.credential!)) throw new KeyCustodyError('credentialMissing', 'Another credential answered');
+        if (prfSalt) {
+          if (!output || output.length !== 32) throw new KeyCustodyError('unsupportedHere', 'The passkey returned no PRF output');
+          prf = SecretBytes.adopt(output);
+        } else output?.fill(0);
+      } catch (error) { output?.fill(0); throw error; }
+      const response = credential.response as AuthenticatorAssertionResponse;
       return { signature: new Uint8Array(response.signature).slice(), authenticatorData: new Uint8Array(response.authenticatorData).slice(), clientData: new Uint8Array(response.clientDataJSON).slice(), prf };
     } catch (error) { throw KeyCustodyError.from(error); }
   }

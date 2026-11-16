@@ -24,7 +24,7 @@ const sleep = (ms: number, signal: AbortSignal): Promise<void> => new Promise(re
  * surfaces what a person must see (pending changes, unseen activations, "this account has no home", update required).
  * Own exactly one per page and account, and call `init()` (the wasm module) before constructing it.
  *
- * Published state is `state`, an immutable value replaced on every change; `subscribe` is told when it is. What the
+ * Published state is `state`, a value the session replaces on every change and never changes in place (read-only); `subscribe` is told when it is. What the
  * session decides: nothing about the account. Every verdict is the engine's. The twin of the Swift and Kotlin
  * `ColophonSession`, with the same names where JavaScript allows.
  */
@@ -54,10 +54,10 @@ export class ColophonSession {
   constructor(configuration: SessionConfiguration) {
     this.worker = new SessionWorker(configuration);
     this.homesConfigured = (configuration.homes ?? []).length > 0;
-    this.current = {
+    this.current = Object.freeze<SessionState>({
       phase: { kind: 'opening' }, revision: 0, namespaceRevisions: {}, members: [], requests: [], context: crypto.randomUUID(), notices: emptyNotices,
-      homes: [], duties: noDuties, syncState: this.homesConfigured ? { kind: 'idle' } : { kind: 'disabled' }, homeFaults: [], homeIssues: [],
-    };
+      homes: [], duties: noDuties, syncState: this.homesConfigured ? { kind: 'idle' } : { kind: 'disabled' }, homeFaults: [], homeIssues: [], setupPending: false,
+    });
   }
 
   /** Everything the session publishes. */
@@ -82,7 +82,7 @@ export class ColophonSession {
   get context(): string { return this.current.context; }
 
   private set(change: Partial<SessionState>): void {
-    this.current = { ...this.current, ...change };
+    this.current = Object.freeze({ ...this.current, ...change });
     for (const listener of [...this.listeners]) { try { listener(this.current); } catch { /* a listener's failure is its own */ } }
   }
 
@@ -137,7 +137,8 @@ export class ColophonSession {
    */
   async create(): Promise<void> {
     await this.restore();
-    if (this.phase.kind !== 'noLibrary') return;
+    // A new account, or the unfinished setup of one this device made.
+    if (this.phase.kind !== 'noLibrary' && !this.current.setupPending) return;
     this.retryCreate = true;
     this.set({ phase: { kind: 'creating' } });
     const lease = this.context;
@@ -148,14 +149,19 @@ export class ColophonSession {
       if (this.homesConfigured) { try { this.apply(await this.worker.registerRoutes()); } catch { /* shown as an unregistered route */ } }
     } catch (error) {
       if (lease !== this.context) return;
-      if (error instanceof SessionError && error.code === 'noHome') { this.retryCreate = false; this.set({ lastError: error.message, phase: { kind: 'noLibrary' } }); }
-      else this.fail(error);
+      if (error instanceof SessionError && error.code === 'noHome') { this.retryCreate = false; this.set({ lastError: error.message, phase: { kind: 'noLibrary' } }); return; }
+      this.fail(error);
+      // If the genesis was stored before the failure, say so: the phase and `setupPending` tell the app that retry finishes it.
+      try {
+        const snapshot = await this.worker.refresh();
+        if (lease === this.context && snapshot.setupPending) { this.apply(snapshot); this.set({ lastError: describe(error) }); }
+      } catch { /* the failure above stands */ }
     }
   }
   /** Retries the lifecycle action that failed, an interrupted create included. */
   async retry(): Promise<void> {
     await this.refresh();
-    if (this.retryCreate && this.phase.kind === 'noLibrary') await this.create();
+    if (this.current.setupPending || (this.retryCreate && this.phase.kind === 'noLibrary')) await this.create();
   }
 
   /** One write, bound to the revision observed when the person began the action. */
@@ -231,8 +237,10 @@ export class ColophonSession {
   keepFollowUp(seq: bigint): Promise<void> { return this.owner(() => this.worker.keepFollowUp(seq)); }
   /** One call to veto a pending transition (§17.5): signs, stores, and submits to every home until each receipted it or 300 s passed. */
   async veto(transition: string): Promise<void> {
-    await this.owner(signal => this.worker.veto(transition, signal));
-    await this.submitUntilReceipted(transition, 'veto');
+    // What is submitted and waited for is the veto object itself, by its own digest.
+    // It is done when every home receipted it, or when the transition is no longer pending (a home recorded the veto,
+    // after which the other homes have nothing left to receipt).
+    await this.submitted('veto', signal => this.worker.veto(transition, signal), () => !this.worker.isPending(transition));
   }
   /** Proposes a change to the account (spec §8.7: homes, keyring, policy) signed with the owner's keys, and submits it. Returns its digest. */
   proposeTransition(changeJson: string): Promise<string> { return this.submitted('transition', signal => this.worker.submitTransition(changeJson, signal)); }
@@ -240,12 +248,12 @@ export class ColophonSession {
   resign(transition: string): Promise<string> { return this.submitted('transition', signal => this.worker.resign(transition, signal)); }
   /** Suspends `key` while `transition` is pending (§8.7), and submits it like a veto. */
   suspendKey(key: string, transition: string): Promise<string> { return this.submitted('suspend', signal => this.worker.suspend(key, transition, signal)); }
-  private async submitted(kind: Submission['kind'], body: (signal: AbortSignal) => Promise<{ digest: string; snapshot: SessionSnapshot }>): Promise<string> {
+  private async submitted(kind: Submission['kind'], body: (signal: AbortSignal) => Promise<{ digest: string; snapshot: SessionSnapshot }>, settled?: () => boolean): Promise<string> {
     await this.restore();
     let digest: string;
     try { const done = await body(this.life.signal); this.apply(done.snapshot); digest = done.digest; }
     catch (error) { this.handleCommandError(error); throw error; }
-    await this.submitUntilReceipted(digest, kind);
+    await this.submitUntilReceipted(digest, kind, 300_000, settled);
     return digest;
   }
   /** Records that the person saw one activation. A pending transition stays until it is vetoed, activates or is dead. */
@@ -263,7 +271,7 @@ export class ColophonSession {
   }
 
   /** §17.5 submission: exchanges with every home, repeated until each receipted `object` or `deadlineMs` passed. */
-  async submitUntilReceipted(object: string, kind: Submission['kind'], deadlineMs = 300_000): Promise<void> {
+  async submitUntilReceipted(object: string, kind: Submission['kind'], deadlineMs = 300_000, settled?: () => boolean): Promise<void> {
     if (!this.homesConfigured || object === '') return;
     const end = performance.now() + deadlineMs;
     let wait = 500;
@@ -275,7 +283,7 @@ export class ColophonSession {
         const counts = this.worker.receipts(object);
         last = { object, kind, receipted: counts.receipted, homes: counts.homes, finished: false };
         this.record(last);
-        if (counts.homes === 0 || counts.receipted >= counts.homes) break;
+        if (counts.homes === 0 || counts.receipted >= counts.homes || settled?.() === true) break;
       } catch { /* not ready now: try again */ }
       await sleep(Math.min(wait, Math.max(0, end - performance.now())), this.life.signal);
       wait = Math.min(wait * 2, 15_000);
@@ -390,7 +398,7 @@ export class ColophonSession {
     const lost = !phaseUsable(s.phase);
     this.set({
       phase: s.phase, revision: s.revision, namespaceRevisions: s.namespaceRevisions, libraryId: s.libraryId ?? this.current.libraryId,
-      memberId: s.memberId ?? this.current.memberId, members: s.members, requests: s.requests, notices: s.notices, homes: s.homes,
+      memberId: s.memberId ?? this.current.memberId, members: s.members, requests: s.requests, notices: s.notices, homes: s.homes, setupPending: s.setupPending,
       duties: { ...s.duties, submissions: this.sortedSubmissions() }, lastError: undefined,
     });
     this.usable = !lost;

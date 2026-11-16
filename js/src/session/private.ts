@@ -46,6 +46,8 @@ const untext = new TextDecoder('utf-8', { fatal: true });
 export class SessionJournal {
   account: string | undefined;
   left = false;
+  /** The account was created here and its first setup (homes appointed, this device approved) has not finished. */
+  setupPending = false;
   shownSeq = 0n;
   shownTransitions: string[] = [];
   /** Activations above `shownSeq` the person marked seen one by one. */
@@ -59,7 +61,7 @@ export class SessionJournal {
 
   encode(): Uint8Array {
     return text.encode(JSON.stringify({
-      account: this.account ?? null, left: this.left, shownSeq: this.shownSeq.toString(), shownTransitions: this.shownTransitions,
+      account: this.account ?? null, left: this.left, setupPending: this.setupPending, shownSeq: this.shownSeq.toString(), shownTransitions: this.shownTransitions,
       seenActivations: [...this.seenActivations].map(String), routes: Object.fromEntries(this.routes),
       signedChanges: Object.fromEntries(this.signedChanges), answeredRemovals: [...this.answeredRemovals].map(String),
     }));
@@ -80,6 +82,7 @@ export class SessionJournal {
     const j = new SessionJournal();
     j.account = typeof m.account === 'string' ? m.account : undefined;
     j.left = m.left === true;
+    j.setupPending = m.setupPending === true;
     j.shownSeq = typeof m.shownSeq === 'string' && /^[0-9]{1,20}$/.test(m.shownSeq) ? BigInt(m.shownSeq) : 0n;
     j.shownTransitions = strings(m.shownTransitions);
     j.seenActivations = new Set(seqs(m.seenActivations));

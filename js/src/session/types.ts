@@ -193,12 +193,14 @@ export interface SessionState {
   lastSyncedMs?: number;
   homeFaults: HomeFault[];
   homeIssues: HomeIssue[];
+  /** This device created the account and its first setup was interrupted: `retry()` finishes it. */
+  setupPending: boolean;
 }
 
 /** What the worker hands the facade after each operation. */
 export interface SessionSnapshot {
   phase: SessionPhase; revision: number; namespaceRevisions: Record<string, bigint>; libraryId?: string; memberId?: string;
-  members: AccountMember[]; requests: AccessRequest[]; notices: SessionNotices; homes: Home[]; duties: HostDuties;
+  members: AccountMember[]; requests: AccessRequest[]; notices: SessionNotices; homes: Home[]; duties: HostDuties; setupPending: boolean;
 }
 /** A refusal that carries the fresh snapshot so the facade shows what the person must now see. */
 export class SessionRefusal extends Error {

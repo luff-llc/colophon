@@ -199,12 +199,26 @@ export class KeyCustody {
   }
 }
 
+/**
+ * Builds one glue record per item. If one cannot be built, the records already built are freed (the wasm side wipes a
+ * freed secret record), so no half-built list is left holding secrets until the garbage collector runs.
+ */
+function records<I, R extends { free(): void }>(list: readonly I[], make: (item: I) => R): R[] {
+  const out: R[] = [];
+  try {
+    for (const item of list) out.push(make(item));
+    return out;
+  } catch (error) {
+    for (const record of out) { try { record.free(); } catch { /* already consumed */ } }
+    throw error;
+  }
+}
 /** Fresh glue records for one call; the SDK's own copies of the secrets are wiped by the caller right after it. */
 export const toSignatures = (list: readonly HostSignature[]): glue.Signature[] =>
-  list.map(s => new glue.Signature(s.signature.slice(), s.authenticatorData?.slice(), s.clientData?.slice()));
+  records(list, s => new glue.Signature(s.signature.slice(), s.authenticatorData?.slice(), s.clientData?.slice()));
 export const toPrfAnswers = (list: readonly HostPrfAnswer[]): glue.PrfAnswer[] =>
-  list.map(a => a.secret.lend(out => new glue.PrfAnswer(a.authenticatorData.slice(), a.clientData.slice(), a.signature.slice(), out)));
+  records(list, a => a.secret.lend(out => new glue.PrfAnswer(a.authenticatorData.slice(), a.clientData.slice(), a.signature.slice(), out)));
 export const toUnlockSecrets = (list: readonly HostUnlockSecret[]): glue.UnlockSecret[] =>
-  list.map(a => a.secret.lend(secret => new glue.UnlockSecret(a.kind, secret)));
+  records(list, a => a.secret.lend(secret => new glue.UnlockSecret(a.kind, secret)));
 export const toEpochAnswers = (list: readonly HostEpochAnswer[]): glue.EpochAnswer[] =>
-  list.map(a => a.secret.lend(shared => new glue.EpochAnswer(a.namespace, a.epoch, shared)));
+  records(list, a => a.secret.lend(shared => new glue.EpochAnswer(a.namespace, a.epoch, shared)));

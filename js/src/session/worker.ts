@@ -69,6 +69,8 @@ export class SessionWorker {
   private ceremonies = new AbortController();
   /** Owner engines open right now (each lives for one owner operation), so `lock` locks them too. */
   private readonly openOwners = new Set<ColophonEngine>();
+  /** Blob writers in use (each holds an epoch key), so `lock` frees them too. */
+  private readonly openWriters = new Set<{ free(): void }>();
   /** The longest one exchange with one home may take (tests shorten it). */
   exchangeTimeMs: number;
 
@@ -127,11 +129,29 @@ export class SessionWorker {
     engine?.lock();
     for (const owner of [...this.openOwners]) owner.lock();
     this.openOwners.clear();
+    // A blob writer holds an epoch key: freed now, so it encrypts nothing more (`blobWriter` refuses a freed one).
+    for (const writer of [...this.openWriters]) { try { writer.free(); } catch { /* already finished */ } }
+    this.openWriters.clear();
     this.ceremonies.abort(new SessionError('cancelled'));
     this.ceremonies = new AbortController();
     return this.snapshot({ kind: 'locked' });
   }
   unlock(): Promise<SessionSnapshot> { return this.gated(() => { this.lockedFlag = false; return this.reconcile(); }); }
+  /**
+   * A blob writer the session can end. `use` runs one call on it and refuses (`Locked`) once the session was locked or
+   * the writer released; `release` frees it.
+   */
+  blobWriter(writer: glue.AccountBlobWriter): { use<T>(body: (writer: glue.AccountBlobWriter) => T): T; release(): void } {
+    if (this.lockedFlag) { try { writer.free(); } catch { /* freed */ } throw makeFault('Locked', 'locked', 'the session was locked'); }
+    this.openWriters.add(writer);
+    return {
+      use: body => {
+        if (!this.openWriters.has(writer)) throw makeFault('Locked', 'locked', 'the session was locked while a blob was being stored');
+        return body(writer);
+      },
+      release: () => { if (this.openWriters.delete(writer)) { try { writer.free(); } catch { /* finished */ } } },
+    };
+  }
   private tracked(owner: ColophonEngine): ColophonEngine {
     if (this.lockedFlag) { owner.lock(); throw makeFault('Locked', 'locked', 'the session was locked'); }
     this.openOwners.add(owner);
@@ -227,7 +247,8 @@ export class SessionWorker {
     if (!samePhase(phase, this.lastPhase) || !sameRevisions) this.revision++;
     this.lastPhase = phase; this.lastRevisions = revisions;
     return { phase, revision: this.revision, namespaceRevisions: revisions, libraryId: this.accountId, memberId: this.memberId,
-      members: more.members ?? [], requests: more.requests ?? [], notices: more.notices ?? emptyNotices, homes: more.homes ?? [], duties: more.duties ?? noDuties };
+      members: more.members ?? [], requests: more.requests ?? [], notices: more.notices ?? emptyNotices, homes: more.homes ?? [], duties: more.duties ?? noDuties,
+      setupPending: this.journal.setupPending };
   }
 
   private async build(): Promise<SessionSnapshot> {
@@ -240,6 +261,10 @@ export class SessionWorker {
     const requests = this.pendingRequests(members);
     const homes = plain<Home[]>(engine.run(e => e.homes()));
     let phase: SessionPhase;
+    if (this.journal.setupPending) {
+      // This device made the account and its first setup did not finish: nothing waits for an approval nobody can give.
+      return this.snapshot({ kind: 'failed', failure: { kind: 'other', detail: 'Setting up this library was interrupted. Retry to finish it.' } }, { members, requests, homes });
+    }
     if (standing.kind === glue.StandingKind.Unknown) {
       await this.ensureOwnRequest();
       return this.snapshot({ kind: 'waitingForApproval', code: pairingCode(this.memberId ?? '') }, { members, requests, homes });
@@ -562,10 +587,16 @@ export class SessionWorker {
     });
   }
   /** Signs a veto of the pending transition with the keys this device holds and stores it; the next exchange submits it. */
-  veto(transition: string, signal?: AbortSignal): Promise<SessionSnapshot> {
-    return this.ownerOperation(signal, async (owner, custody, ownerId, waiting) => {
-      const signers = this.signers(owner, ownerId, glue.SignerNeed.Veto);
-      await owner.execute(custody, e => e.begin_veto(transition, signers, NOTHING), this.persistOn(owner), waiting);
+  veto(transition: string, signal?: AbortSignal): Promise<{ digest: string; snapshot: SessionSnapshot }> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile(signal);
+      // The veto is its own object (`vetoes/<digest>.json`): its digest, not the transition's, is what homes receipt.
+      const digest = await this.withOwner(signal, async (owner, custody, ownerId, waiting) => {
+        const signers = this.signers(owner, ownerId, glue.SignerNeed.Veto);
+        const written = await owner.execute(custody, e => e.begin_veto(transition, signers, NOTHING), this.persistOn(owner), waiting);
+        return objectDigest(written.stores, 'vetoes/') ?? '';
+      });
+      return { digest, snapshot: await this.reconcile(signal) };
     });
   }
   /** Adds a controller key (a second device, a passkey, a security key); the new key signs its own possession proof. */
@@ -610,14 +641,25 @@ export class SessionWorker {
 
   // Create
 
+/**
+   * Creates the account. The genesis is stored first and the journal marks the setup as pending; appointing the homes
+   * and approving this device follow. If one of those fails (a home that does not answer, a cancelled prompt, a closed
+   * tab), the next `create` finishes the setup from where it stopped instead of leaving an account nobody can enter.
+   */
   create(signal?: AbortSignal): Promise<SessionSnapshot> {
     return this.gated(async () => {
       await this.loadJournal();
-      if (this.engine || this.journal.account !== undefined || this.storage.listing().some(e => e.path.startsWith('authority/'))) throw new SessionError('destinationChanged');
+      if (this.lockedFlag) throw makeFault('Locked', 'locked', 'the session is locked');
       if (this.homes.length === 0 && !this.configuration.createWithoutHome) throw new SessionError('noHome');
       if (!this.homes.every(h => h.isAllowed)) throw new SessionError('insecureHome');
-      if (this.lockedFlag) throw makeFault('Locked', 'locked', 'the session is locked');
       const waiting = this.waiting(signal);
+      if (this.journal.setupPending && this.journal.account !== undefined) {
+        // Resume: the owner unlocks its slot as for any owner operation, and the remaining steps run.
+        this.accountId = this.journal.account;
+        await this.withOwner(signal, (owner, custody, ownerId) => this.finishSetup(owner, this.journal.account!, ownerId, custody, waiting));
+        return this.reconcile(signal);
+      }
+      if (this.engine || this.journal.account !== undefined || this.storage.listing().some(e => e.path.startsWith('authority/'))) throw new SessionError('destinationChanged');
       this.journal.left = false;
       let custody = await this.ownerCustody();
       const ownerKey = await keyDescriptorOf(this.configuration.ownerController);
@@ -647,7 +689,7 @@ export class SessionWorker {
       const { creation, created } = await runCreation(params, identity, custody, this.nowMs, waiting);
       try {
         await this.storage.write(created.stores.map(s => ({ path: s.path, bytes: s.bytes })));
-        this.journal.account = created.account; this.accountId = created.account;
+        this.journal.account = created.account; this.journal.setupPending = true; this.accountId = created.account;
         await this.saveJournal();
         // The creation's own engine: unlocked as the creation left it, so the owner is asked once at first run.
         const deviceKey = await this.configuration.deviceSecrets.key(created.account);
@@ -656,7 +698,7 @@ export class SessionWorker {
           owner = this.tracked(ColophonEngine.openCreated(creation, { medium: this.storage, listing: this.storage.listing(), identity, account: created.account,
             namespaces: this.libraryNamespaces, deviceKey, nowMs: this.nowMs }));
         } finally { deviceKey.close(); }
-        await this.setUpFirstDevice(owner, created.account, ownerId, custody, waiting);
+        try { await this.finishSetup(owner, created.account, ownerId, custody, waiting); } finally { this.release(owner); }
       } finally {
         try { creation.free(); } catch { /* consumed */ }
       }
@@ -664,32 +706,39 @@ export class SessionWorker {
     });
   }
 
-  /** Appoints the homes in one transition recorded at once, and approves this device's member, with the creation's own engine. */
-  private async setUpFirstDevice(owner: ColophonEngine, account: string, ownerId: string, custody: KeyCustody, waiting: AbortSignal): Promise<void> {
-    try {
-      const appoint: { request: string; terms: unknown }[] = [];
-      for (const home of this.homes) {
-        const makeRequest = home.configuration.request;
-        if (!makeRequest) continue;
-        const raw = await raceAbort(makeRequest(account), waiting);
-        const info = plain<RequestInfo>(glue.account_request_info(raw));
-        appoint.push({ request: base64(raw), terms: JSON.parse(info.termsJson) as unknown });
+  /**
+   * The first setup of an account this device made: the homes appointed in one transition recorded at once, and this
+   * device's member approved. Every step looks at what the account already holds, so it can run again after a failure.
+   */
+  private async finishSetup(owner: ColophonEngine, account: string, ownerId: string, custody: KeyCustody, waiting: AbortSignal): Promise<void> {
+    if (plain<Home[]>(owner.run(e => e.homes())).length === 0) {
+      if (plain<unknown[]>(owner.run(e => e.pending())).length === 0) {
+        const appoint: { request: string; terms: unknown }[] = [];
+        for (const home of this.homes) {
+          const makeRequest = home.configuration.request;
+          if (!makeRequest) continue;
+          const raw = await raceAbort(makeRequest(account), waiting);
+          const info = plain<RequestInfo>(glue.account_request_info(raw));
+          appoint.push({ request: base64(raw), terms: JSON.parse(info.termsJson) as unknown });
+        }
+        if (appoint.length > 0) {
+          const change = JSON.stringify({ homes: { appoint } });
+          const signers = this.signers(owner, ownerId, glue.SignerNeed.Control);
+          await owner.execute(custody, e => e.begin_transition(change, signers, glue.RuleKind.Control, NOTHING), this.persistOn(owner), waiting);
+        }
       }
-      if (appoint.length > 0) {
-        const change = JSON.stringify({ homes: { appoint } });
-        const signers = this.signers(owner, ownerId, glue.SignerNeed.Control);
-        await owner.execute(custody, e => e.begin_transition(change, signers, glue.RuleKind.Control, NOTHING), this.persistOn(owner), waiting);
-        for (const due of plain<Written[]>(owner.run(e => e.record_due()))) await this.persist(due.stores, owner);
-      }
-      this.memberId = await keyIdOf(this.memberKeys);
-      this.accountId = account;
+      for (const due of plain<Written[]>(owner.run(e => e.record_due()))) await this.persist(due.stores, owner);
+    }
+    this.memberId = await keyIdOf(this.memberKeys);
+    this.accountId = account;
+    if (!plain<AccountMember[]>(owner.run(e => e.members())).some(m => m.id === this.memberId)) {
       const memberRaw = await this.ownRequestBytes(waiting);
       const memberTerms = terms(this.configuration.namespaces, this.access);
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
       await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(memberRaw, memberTerms, signers, entropy)), this.persistOn(owner), waiting);
-    } finally {
-      this.release(owner);
     }
+    this.journal.setupPending = false;
+    await this.saveJournal();
   }
 
   // Leave and rejoin
@@ -913,6 +962,10 @@ export class SessionWorker {
   receipts(object: string): { receipted: number; homes: number } {
     const engine = this.requireEngine();
     return { receipted: engine.run(e => e.receipted_by(object)).length, homes: plain<Home[]>(engine.run(e => e.exchange_homes())).length };
+  }
+  /** Whether the transition `digest` is still pending in what this device holds. */
+  isPending(digest: string): boolean {
+    return plain<{ digest: string }[]>(this.requireEngine().run(e => e.pending())).some(p => p.digest === digest);
   }
   /** Test hook. */
   engineForTests(): ColophonEngine | undefined { return this.engine; }

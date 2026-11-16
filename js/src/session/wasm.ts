@@ -58,12 +58,16 @@ function convert(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(convert);
   if (typeof value === 'object' && typeof (value as { free?: unknown }).free === 'function') {
     const out: Record<string, unknown> = {};
-    const prototype = Object.getPrototypeOf(value) as object;
-    for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(prototype))) {
-      if (typeof descriptor.get !== 'function' || name.startsWith('__')) continue;
-      out[camel(name)] = convert(descriptor.get.call(value));
+    try {
+      const prototype = Object.getPrototypeOf(value) as object;
+      for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(prototype))) {
+        if (typeof descriptor.get !== 'function' || name.startsWith('__')) continue;
+        out[camel(name)] = convert(descriptor.get.call(value));
+      }
+    } finally {
+      // Freed whether or not every getter answered.
+      try { (value as { free(): void }).free(); } catch { /* already freed */ }
     }
-    (value as { free(): void }).free();
     return out;
   }
   return value;

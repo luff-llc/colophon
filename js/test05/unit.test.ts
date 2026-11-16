@@ -1,11 +1,11 @@
 // Unit tests of the session layer under Bun: the rules the other SDKs' checks found broken, each shown not to be here.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   attachPageLifecycle, FetchHomeTransport, gateContent, glue, HomeLimits, HomeTransportError, init, KeyCustody, KeyCustodyError, MemoryDeviceSecrets, MemoryMedium,
-  MemoryPrivateStore, SecretBytes, SessionError, StorageError, WebCryptoKeyProvider,
+  MemoryPrivateStore, plain, putBlob, SecretBytes, SessionError, StorageError, WebCryptoKeyProvider,
   type AsyncKeyProvider, type EpochAgreement, type HomeConfiguration, type HomeTransport, type PrfRequest, type UnlockInput,
 } from '../src/session/index.js';
 import { FileMedium, FilePrivateStore, type FileMediumStep } from '../src/session/node.js';
@@ -218,6 +218,48 @@ describe('stores are all or none', () => {
     expect(existsSync(join(journal, commit))).toBe(true);
   });
 
+  test('a reader never sees a file batch half applied: while one is being published it waits or fails, never part', async () => {
+    const root = temporary();
+    const reader = new FileMedium(root);
+    const seen: string[] = [];
+    const look = (path: string): string => { try { reader.read(path); return 'held'; } catch (error) { return (error as Error).message.includes('in use') ? 'refused' : 'absent'; } };
+    const writer = new FileMedium(root, { onStep: (step, index) => {
+      // Between the first and the second rename of the batch, from another medium over the same folder.
+      if (step === 'applied' && index === 0) seen.push(look('ops/a.json'), look('ops/b.json'));
+    } });
+    expect([look('ops/a.json'), look('ops/b.json')]).toEqual(['absent', 'absent']);
+    await writer.write(batch);
+    expect(seen).toEqual(['refused', 'refused']);
+    expect([look('ops/a.json'), look('ops/b.json')]).toEqual(['held', 'held']);
+    // A reader that arrives after a writer died in the middle completes the batch before it answers.
+    const second = temporary();
+    let crashed = false;
+    const crashing = new FileMedium(second, { onStep: (step, index) => { if (!crashed && step === 'applied' && index === 0) { crashed = true; throw new Error('crash'); } } });
+    await expect(crashing.write(batch)).rejects.toThrow();
+    expect(new TextDecoder().decode(crashing.read('ops/b.json'))).toBe('b');
+  }, 20_000);
+
+  test('the file lock: a dead holder is taken over, a live one is waited for, a displaced holder commits nothing', async () => {
+    const root = temporary();
+    new FileMedium(root);
+    const lock = join(root, '.colophon.nosync', 'lock');
+    // A process ID that is not running (the largest a system allows is far below this).
+    writeFileSync(lock, '999999999:left-by-a-killed-process');
+    const medium = new FileMedium(root);
+    await medium.write([{ path: 'ops/a.json', bytes: bytes('a') }]);
+    expect(existsSync(lock)).toBe(false);
+    // A live holder (this process, another token) is not displaced.
+    writeFileSync(lock, `${process.pid}:another-live-holder`);
+    expect(() => medium.listing()).toThrow(/in use by another process/);
+    expect(new TextDecoder().decode(readFileSync(lock))).toBe(`${process.pid}:another-live-holder`);
+    rmSync(lock);
+    // The lock is lost between staging and the commit point: nothing of the batch is published.
+    const displaced = new FileMedium(root, { onStep: step => { if (step === 'staged') writeFileSync(lock, '999999999:took-it'); } });
+    await expect(displaced.write(batch)).rejects.toMatchObject({ reason: 'unavailable' });
+    expect(new FileMedium(root).listing().map(e => e.path)).toEqual(['ops/a.json']);
+    expect(readdirSync(join(root, '.colophon.nosync'))).toEqual([]);
+  });
+
   test('a file medium refuses conflicts, bad paths and symbolic links, and reads what it wrote', async () => {
     const root = temporary();
     const medium = new FileMedium(root);
@@ -243,6 +285,20 @@ describe('private state', () => {
     const saved = { verifier: bytes('v'), checkpoint: bytes('c'), parts: [{ namespace: 'notes', bytes: bytes('p') }] };
     expect(decodeSaved(encodeSaved(saved))).toEqual(saved);
     expect(() => decodeSaved(encodeSaved(saved).slice(0, 9))).toThrow();
+  });
+});
+
+describe('the engine boundary', () => {
+  test('a returned record is freed even when one of its getters throws; published state is frozen', async () => {
+    let freed = 0;
+    class Fake { get good(): number { return 1; } get bad(): number { throw new Error('getter failed'); } free(): void { freed++; } }
+    expect(() => plain(new Fake())).toThrow('getter failed');
+    expect(freed).toBe(1);
+    const device = await Device.make();
+    expect(Object.isFrozen(device.session.state)).toBe(true);
+    await device.session.create();
+    expect(Object.isFrozen(device.session.state)).toBe(true);
+    device.close();
   });
 });
 
@@ -344,6 +400,26 @@ describe('a session without a home', () => {
     device.close();
   });
 
+  test('locking while a blob is being stored ends its writer: no chunk is encrypted after lock', async () => {
+    const device = await Device.make();
+    await device.session.create();
+    const medium = device.medium as MemoryMedium;
+    const real = medium.write.bind(medium);
+    let chunkWrites = 0; let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    medium.write = async writes => { if (writes.some(w => w.path.startsWith('blobs/'))) { chunkWrites++; await blocked; } return real(writes); };
+    const storing = putBlob(device.session, new Uint8Array(200_000).fill(4), { namespace: 'notes', mediaType: 'text/plain', reference: 'r' }).then(() => 'stored', error => error as Error);
+    for (let n = 0; n < 200 && chunkWrites === 0; n++) await sleep(5);
+    expect(chunkWrites).toBe(1);
+    device.session.lock();
+    release();
+    const outcome = await storing;
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as { kind?: string }).kind).toBe('Locked');
+    expect(chunkWrites).toBe(1);
+    device.close();
+  });
+
   test('a key prompt nobody answers does not hold lock, and the session works afterwards', async () => {
     const real = await WebCryptoKeyProvider.generate();
     let hang = false; let prompts = 0;
@@ -415,6 +491,40 @@ describe('a cancelled or broken pass never leaves the engine waiting', () => {
     const kind = step.kind; step.free();
     return kind === glue.ExchangeStepKind.Waiting;
   };
+
+  test('a creation whose home setup fails is finished by retry: no account is left that nobody can enter', async () => {
+    for (const failAt of ['home request', 'member request'] as const) {
+      const relay = await RelayHome.make(host, `https://home.test/v1/accounts/setup-${crypto.randomUUID().slice(0, 8)}`);
+      let failing = true; let requests = 0;
+      const realMember = await WebCryptoKeyProvider.generate();
+      // The member key signs its own request after the homes are appointed: failing there interrupts the setup later.
+      const member: AsyncKeyProvider = { publicKeys: () => realMember.publicKeys(), sharedSecret: (p, s) => realMember.sharedSecret(p, s),
+        sign: (body, signal) => { if (failing && failAt === 'member request') throw new Error('member key unavailable'); return realMember.sign(body, signal); } };
+      const homes: HomeConfiguration[] = [{ endpoint: `${relay.base}/`, transport: relay.transport(), request: async account => {
+        requests++;
+        if (failing && failAt === 'home request') throw new Error('home setup failed');
+        await relay.start(account, []); return relay.memberRequest(account);
+      } }];
+      const device = await Device.make({ homes, member });
+      await device.session.create();
+      device.session.stopSync();
+      expect([failAt, device.session.phase.kind, device.session.state.setupPending]).toEqual([failAt, 'failed', true]);
+      await device.session.refresh();
+      expect([failAt, device.session.phase.kind]).toEqual([failAt, 'failed']);
+      expect(gateContent(device.session.state, device.session.hasUsableContent)).toMatchObject({ kind: 'screen', actions: ['retry'] });
+      failing = false;
+      await device.session.retry();
+      device.session.stopSync();
+      expect([failAt, device.session.phase.kind, device.session.state.setupPending, device.session.homes.length]).toEqual([failAt, 'ready', false, 1]);
+      // The home was appointed once: a resumed setup does not appoint it again.
+      expect([failAt, requests]).toEqual([failAt, failAt === 'home request' ? 2 : 1]);
+      await note(device.session, 'after setup');
+      let ok = false;
+      for (let n = 0; n < 40 && !ok; n++) { ok = await device.session.syncNow() && device.session.homeIssues.length === 0 && device.session.homeFaults.length === 0; if (!ok) await sleep(100); }
+      expect([failAt, ok]).toEqual([failAt, true]);
+      device.close();
+    }
+  }, 120_000);
 
   test('cancelled while the transport waits, cancelled after it answered, offline, and a home that never answers', async () => {
     const { device, mode, stop } = await withHome(1500);

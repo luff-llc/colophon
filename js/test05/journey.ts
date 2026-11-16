@@ -148,6 +148,12 @@ export async function journey(host: RelayHost, history: HistoryAccess, homeCount
     assert(shown, () => `the second device shows the pending change: ${second.describe()}`);
     assert(shown.vetoable, "the phone's owner key may veto it");
     await second.session.veto(digest);
+    // The veto was submitted as its own object, by its own digest, and every home receipted that.
+    const vetoed = second.session.duties.submissions.find(s => s.kind === 'veto');
+    assert(vetoed && vetoed.object !== digest && /^[0-9a-f]{64}$/.test(vetoed.object), () => `the veto is submitted by its own digest: ${JSON.stringify(second.session.duties.submissions)}`);
+    // Done when every home receipted it, or when a home recorded the veto (then the others have nothing left to receipt).
+    assert(vetoed.finished && vetoed.homes === homeCount && vetoed.receipted >= 1, () => `a home receipted the veto: ${JSON.stringify(vetoed)}`);
+    assert(vetoed.receipted === homeCount || !second.session.notices.pending.some(p => p.digest === digest), () => `the veto is receipted everywhere or recorded: ${JSON.stringify(vetoed)}`);
     assert(await settle(second), () => second.describe());
     let gone = false;
     for (let n = 0; n < 60 && !gone; n++) {

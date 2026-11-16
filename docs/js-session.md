@@ -58,7 +58,13 @@ session.subscribe(state => render(state));
 * `now` is the clock the engine judges by; tests move it. `exchangeTimeMs` is the longest one exchange with one home may
   take (default 180 s).
 
-State is `session.state`, an immutable value replaced on every change; `subscribe` is told when it is.
+State is `session.state`: a frozen value the session replaces on every change and never changes in place (the records
+inside it are shared, so treat them as read-only). `subscribe` is told when it is replaced.
+
+**A creation can be finished later.** The genesis is stored first and the journal marks the setup as pending; appointing
+the homes and approving this device follow. If one of those fails (a home that does not answer, a cancelled prompt, a
+closed tab), the phase is `failed` with `state.setupPending`, and `retry()` (or `create()`) finishes the setup from where
+it stopped: a home already appointed is not appointed again. No account is left that nobody can enter.
 
 ## Storage
 
@@ -75,8 +81,13 @@ error), so `RecordMedium.listing`, `read` and `readBlob` are synchronous and `wr
 * **`FileMedium`** publishes each batch through a journal in `.colophon.nosync/`: staged and synchronised files with a
   record of the batch, a rename of the staging folder to `commit-…` (the commit point), then renames into place. Before
   the commit point a failure leaves nothing; after it the next `listing`, `write` or open completes the batch. A
-  committed batch is never discarded: if it cannot be completed the store is `unavailable` and the journal is kept. A
-  lock folder holding the owner's process ID keeps two processes apart; a dead owner's lock is taken over.
+  committed batch is never discarded: if it cannot be completed the store is `unavailable` and the journal is kept.
+  **A read never sees a batch half applied:** a reader that finds a `commit-…` folder takes the lock (waiting for a
+  writer still at work) and completes the batch before it answers, or fails as `unavailable`. The lock is a file
+  created exclusively that holds its holder's token; only the holder removes it, a dead holder's lock is taken over by
+  a rename that is checked, and a holder asks again that it still holds the lock just before the commit point. There
+  is no kernel lock here (Node and Bun have no portable one), so two processes can still overlap in the instant
+  between one's check and its rename; batches are then still whole, each in its own journal folder.
 * A batch is checked whole before anything is stored (`planBatch`): a bad path, a size over 40 MiB or different bytes at
   an immutable path refuses all of it. Exact duplicates are idempotent; `state/` and `heads/` are replaceable.
 
@@ -124,9 +135,11 @@ A runtime that shows a 3xx answer (Bun, Node) hands it to the engine, which repo
 redirect): that is `HomeProblem.redirected`, and the pass is abandoned.
 
 **A browser needs CORS from the home.** The relay sends no CORS headers today, so a page on another origin cannot reach
-it; the browser tests reach the relay through a same-origin proxy. A deployed web client needs the home (or the door in
-front of it) to answer preflights and allow its origin, the `Authorization`, `If-Match` and `If-None-Match` request
-headers and the methods GET, POST and PUT.
+it; the browser tests reach the relay through a same-origin proxy. A deployed web client needs the home itself (devices reach it directly) to answer
+preflights without a call and to send, on every answer including refusals, CORS headers for its allowed origins: the
+methods GET, POST and PUT, the request headers `Authorization`, `Content-Type`, `If-Match` and `If-None-Match`, and the
+exposed headers `ETag`, `Retry-After` and `WWW-Authenticate`. A refusal without them reaches the page as a network
+failure, and the engine never sees its code.
 
 ## The exchange
 
@@ -155,7 +168,8 @@ usable)` maps a phase to the library or to a screen with its actions; content is
 is usable.
 
 `lock()` is synchronous and immediate: it overwrites the engine's keys and opened plaintext, locks any owner engine
-open for an operation, and aborts every key ceremony and exchange pass in flight. It does not wait for the operation
+open for an operation, frees every blob writer in use (each holds an epoch key; no chunk is encrypted after `lock`),
+and aborts every key ceremony and exchange pass in flight. It does not wait for the operation
 in flight or for **a key prompt nobody answers**: every provider call races the session's abort signal, so a hung
 prompt ends as `cancelled` and holds neither `lock` nor the operations queued behind it. `attachPageLifecycle` locks
 when the page is hidden (at once by default; a delay or `'never'` is a setting) and unlocks or refreshes when it is
@@ -168,7 +182,9 @@ the stores all or none**, then publishes the new state. `query` and `view` read.
 names. `notices` and `duties` carry what spec §17.5 and §18 say a person must see: pending transitions with `vetoable`,
 unseen activations, `noHome`, the sole-device warning, dead transitions, delivery routes, the removal follow-up
 (`removeFollowUp`, `keepFollowUp`). `veto`, `proposeTransition`, `resign` and `suspendKey` submit to every home until
-each receipted it or 300 s passed. `acknowledgeActivation` marks one activation seen and never dismisses a pending
+each receipted it or 300 s passed. A veto is submitted and waited for by **its own digest** (`vetoes/<digest>.json`),
+not the transition's; it is also done when the transition is no longer pending, because once a home has recorded the
+veto the other homes have nothing left to receipt. `acknowledgeActivation` marks one activation seen and never dismisses a pending
 transition.
 
 ## Differences from the Swift and Kotlin sessions
@@ -194,7 +210,8 @@ the tests against the SDK's own types), and runs:
   all-or-none batches (a throw at every step of a file batch, a real SIGKILL at every step, a committed batch that
   cannot be completed is kept); a pass cancelled while the transport waits, after it answered, offline, and with a home
   that never answers, each followed by a clean pass; a key prompt nobody answers and `lock`; lock in the middle of a
-  pass; a store that refuses a finished write; a relaunch over files that resumes from saved state.
+  pass; a store that refuses a finished write; a relaunch over files that resumes from saved state; a reader during a
+  file batch; the file lock; a blob writer ended by `lock`; a creation whose home setup fails, finished by `retry`.
 * **In a real browser engine** (`bun js/test05/run-browser.ts`: headless Chrome driven over the DevTools protocol by
   Bun, no npm driver): the same three journeys; `IndexedDBMedium` (a refused batch stores nothing, a reopen holds
   exactly what was committed, a second instance cannot make the first replace a record); `CryptoKey` handles that
