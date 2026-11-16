@@ -423,6 +423,88 @@ fn an_unreadable_swift_envelope_is_ignored_where_another_stands() {
     assert_eq!(full(&verify_history(&o, &Persisted::default(), now)), va);
 }
 
+/// §16.3 "Sequence zero": a readable envelope whose `seq` is 0 makes the predecessor `malformed`,
+/// whatever else is held and in whatever order it arrives; its wrapper not verifying does not
+/// change that (readable is the outer JSON, `body`, body JSON, `seq`, `issued` and `signer`). One
+/// at seq 0 that cannot be read is ignored, as any unreadable envelope beside a standing entry.
+#[test]
+fn a_readable_swift_envelope_at_seq_zero_makes_the_predecessor_malformed() {
+    use colophon_core::v05::history::swift;
+    use colophon_core::v05::Failure;
+    let (_, base, now) = other_cases()
+        .into_iter()
+        .find(|(d, _, _)| d.ends_with("succession/swift-keyring"))
+        .unwrap();
+    let want = full(&verify_history(&base, &Persisted::default(), now));
+    let at_zero = |edit: &dyn Fn(&mut Value)| {
+        let v: Value = serde_json::from_slice(&base.predecessor[0]).unwrap();
+        let mut body: Value =
+            serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap())
+                .unwrap();
+        body["seq"] = Value::from(0);
+        edit(&mut body);
+        let mut w = v.clone();
+        w["body"] = Value::String(STANDARD.encode(canonical(&body).unwrap()));
+        serde_json::to_vec(&w).unwrap()
+    };
+    // The genesis body at seq 0 under the genesis's signature (which does not verify over it).
+    let readable = at_zero(&|_| {});
+    let unreadable = at_zero(&|b| b["issued"] = Value::from("soon"));
+    let mut verdicts = Vec::new();
+    for variant in 0..4 {
+        let mut o = base.clone();
+        match variant {
+            0 => o.predecessor.insert(0, readable.clone()),
+            1 => o.predecessor.push(readable.clone()),
+            2 => {
+                o.predecessor.push(readable.clone());
+                o.predecessor.sort();
+            }
+            _ => {
+                o.predecessor.push(readable.clone());
+                o.predecessor.reverse();
+            }
+        }
+        let direct = swift::verify(&o.predecessor);
+        assert!(
+            matches!(direct, Err(Failure::Malformed(_))),
+            "variant {variant}: {:?}",
+            direct.map(|h| h.entries.len())
+        );
+        let v = verify_history(&o, &Persisted::default(), now);
+        assert!(
+            v.state
+                .as_ref()
+                .is_none_or(|s| s.verified_succession().is_none()),
+            "variant {variant}: the succession verified over a seq-0 envelope"
+        );
+        verdicts.push(full(&v));
+    }
+    assert!(
+        verdicts.windows(2).all(|w| w[0] == w[1]),
+        "order changed the verdict"
+    );
+    // A seq-0 envelope beside broken envelopes over another entry: still malformed, either order.
+    let mut o = base.clone();
+    o.predecessor.extend(broken_copies(&base.predecessor[1]));
+    o.predecessor.push(readable.clone());
+    let a = format!("{:?}", swift::verify(&o.predecessor).map(|h| h.entries.len()));
+    o.predecessor.reverse();
+    let b = format!("{:?}", swift::verify(&o.predecessor).map(|h| h.entries.len()));
+    assert_eq!(a, b);
+    assert!(a.starts_with("Err(Malformed("), "{a}");
+    // Unreadable at seq 0: ignored, first or last.
+    for first in [true, false] {
+        let mut o = base.clone();
+        if first {
+            o.predecessor.insert(0, unreadable.clone());
+        } else {
+            o.predecessor.push(unreadable.clone());
+        }
+        assert_eq!(full(&verify_history(&o, &Persisted::default(), now)), want);
+    }
+}
+
 #[test]
 fn high_water_detects_rollback_and_never_selects_a_branch() {
     let dir = cand().join("rules/t-conflict-no-evidence");

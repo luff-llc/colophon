@@ -298,7 +298,8 @@ fn read_envelope(bytes: &[u8]) -> std::result::Result<ReadEnvelope, (Option<u64>
 /// ignored where anything readable stands at its seq, as the `/5` fold and the `/4` bootstrap
 /// treat theirs (§16.3 "Envelopes"); only when nothing readable is at that seq is its failure
 /// the predecessor's, that of the unreadable envelope there with the lowest envelope digest. One
-/// whose seq cannot be read names no seq and is ignored.
+/// whose seq cannot be read names no seq and is ignored. A readable envelope whose `seq` is 0
+/// makes the predecessor malformed (§16.3 "Sequence zero"); an unreadable one there is ignored.
 pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
     // Envelope bytes to the record they carry, or why their wrapper is unusable.
     type Envelopes = BTreeMap<Vec<u8>, Result<Record>>;
@@ -351,6 +352,10 @@ pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
             .entry(bytes.clone())
             .or_insert(record);
     }
+    // §16.3 "Sequence zero": the sequence is contiguous from entry 1, so a readable envelope at
+    // seq 0 (whatever its wrapper) makes the predecessor malformed. Judged on the whole set,
+    // before any entry, so neither arrival order nor another failure decides the verdict.
+    require(!parsed.contains_key(&0), "Swift entry at seq 0")?;
     let mut out = History {
         account: String::new(),
         entries: Vec::new(),
