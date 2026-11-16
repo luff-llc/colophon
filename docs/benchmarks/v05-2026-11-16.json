@@ -1,0 +1,1273 @@
+{
+  "cargo_target_dir": "/Users/mikelxc/.pressroom/lanes/colophon/default/1/target",
+  "commit": "25027b0a15960f436b95cb21accc01ca921999a0",
+  "date": "2026-11-16",
+  "fixture_shape": "N immutable operations in reading.saved: 83 required blob manifests followed by N-83 distinct captured items; one writer, 64 authority entries; fixed 83 blobs / 249 chunks / 10,880,387 plaintext bytes at every size. Prefix has N/10 operations, all authority, all blobs; saved before any home pass.",
+  "fixtures": [
+    {
+      "account": "b35b9f7243872468c3ce79543adb1aebf82dd97c47ab9753e9a9d5c146ce8fdf",
+      "authority": 64,
+      "blob_references": 83,
+      "chunks": 249,
+      "home": "96343a7df44b0ea87920a4b66f469faa",
+      "member": "d465fcba73c2cd4100048d8a0c13fb38",
+      "records": 2000,
+      "saved_bytes": 4663315,
+      "stored_files": 2314
+    },
+    {
+      "account": "b35b9f7243872468c3ce79543adb1aebf82dd97c47ab9753e9a9d5c146ce8fdf",
+      "authority": 64,
+      "blob_references": 83,
+      "chunks": 249,
+      "home": "96343a7df44b0ea87920a4b66f469faa",
+      "member": "d465fcba73c2cd4100048d8a0c13fb38",
+      "records": 10000,
+      "saved_bytes": 19675073,
+      "stored_files": 10314
+    },
+    {
+      "account": "b35b9f7243872468c3ce79543adb1aebf82dd97c47ab9753e9a9d5c146ce8fdf",
+      "authority": 64,
+      "blob_references": 83,
+      "chunks": 249,
+      "home": "96343a7df44b0ea87920a4b66f469faa",
+      "member": "d465fcba73c2cd4100048d8a0c13fb38",
+      "records": 100000,
+      "saved_bytes": 189884865,
+      "stored_files": 100314
+    }
+  ],
+  "machine": {
+    "chip": "Apple M3 Max",
+    "cores": 16,
+    "memory_gib": 64,
+    "model": "MacBook Pro Mac15,9",
+    "os": "27.0.1",
+    "performance_cores": 12,
+    "rustc": "rustc 1.91.1 (ed61e7d7e 2025-11-07)"
+  },
+  "measurements": [
+    {
+      "case": "cold",
+      "held_operations": 2000,
+      "ms": 833.3942079999999,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 2000,
+      "peak_rss_bytes": 87064576,
+      "phases_ms": {
+        "authority_checkpoint": 43.706333,
+        "exchange": 0.00041799999985414615,
+        "inventory": 0.487958,
+        "saved_read": 0.000083,
+        "unlock_load": 789.199416
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 1,
+      "signatures_verified": 2000,
+      "size": 2000,
+      "uptime": "0:45  4 users, load averages: 12.27 15.07 17.41"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 2000,
+      "ms": 212.273416,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 104120320,
+      "phases_ms": {
+        "authority_checkpoint": 34.038,
+        "exchange": 0.00016700000000469117,
+        "inventory": 0.462708,
+        "saved_read": 0.613416,
+        "unlock_load": 177.159125
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 1,
+      "signatures_verified": 0,
+      "size": 2000,
+      "uptime": "0:45  4 users, load averages: 12.27 15.07 17.41"
+    },
+    {
+      "case": "write",
+      "ms": 15.686625,
+      "phases_ms": {
+        "finish_verify_apply": 1.941875,
+        "prepare_sign": 2.659542,
+        "refresh": 3.233167,
+        "store_fsync": 7.851749999999999
+      },
+      "run": 1,
+      "size": 2000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:45  4 users, load averages: 12.27 15.07 17.41"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 2000,
+      "ms": 16660.025459,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 1800,
+      "peak_rss_bytes": 112246784,
+      "phases_ms": {
+        "authority_checkpoint": 14.786417,
+        "exchange": 16614.742209000004,
+        "inventory": 0.162958,
+        "saved_read": 0.18425,
+        "unlock_load": 30.149625
+      },
+      "records_read": 265,
+      "requests": 1807,
+      "run": 1,
+      "signatures_verified": 1800,
+      "size": 2000,
+      "uptime": "0:45  4 users, load averages: 12.27 15.07 17.41"
+    },
+    {
+      "case": "cold",
+      "held_operations": 2000,
+      "ms": 1010.854833,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 2000,
+      "peak_rss_bytes": 87228416,
+      "phases_ms": {
+        "authority_checkpoint": 52.496584,
+        "exchange": 0.00045700000009674113,
+        "inventory": 0.482667,
+        "saved_read": 0.000292,
+        "unlock_load": 957.874833
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 2,
+      "signatures_verified": 2000,
+      "size": 2000,
+      "uptime": "0:45  4 users, load averages: 13.09 15.06 17.35"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 2000,
+      "ms": 223.580375,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 103628800,
+      "phases_ms": {
+        "authority_checkpoint": 37.050582999999996,
+        "exchange": 0.00025000000002251,
+        "inventory": 0.66075,
+        "saved_read": 0.664042,
+        "unlock_load": 185.20475
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 2,
+      "signatures_verified": 0,
+      "size": 2000,
+      "uptime": "0:46  4 users, load averages: 13.09 15.06 17.35"
+    },
+    {
+      "case": "write",
+      "ms": 41.846791,
+      "phases_ms": {
+        "finish_verify_apply": 1.954708,
+        "prepare_sign": 2.328125,
+        "refresh": 2.837541,
+        "store_fsync": 34.726208
+      },
+      "run": 2,
+      "size": 2000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:46  4 users, load averages: 13.09 15.06 17.35"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 2000,
+      "ms": 21345.507458,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 1800,
+      "peak_rss_bytes": 111919104,
+      "phases_ms": {
+        "authority_checkpoint": 14.769833,
+        "exchange": 21301.246750000002,
+        "inventory": 0.14375,
+        "saved_read": 0.19316599999999998,
+        "unlock_load": 29.153959
+      },
+      "records_read": 265,
+      "requests": 1807,
+      "run": 2,
+      "signatures_verified": 1800,
+      "size": 2000,
+      "uptime": "0:46  4 users, load averages: 13.09 15.06 17.35"
+    },
+    {
+      "case": "cold",
+      "held_operations": 2000,
+      "ms": 846.891834,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 2000,
+      "peak_rss_bytes": 86474752,
+      "phases_ms": {
+        "authority_checkpoint": 43.834166,
+        "exchange": 0.00037599999996018596,
+        "inventory": 0.514583,
+        "saved_read": 0.000167,
+        "unlock_load": 802.542542
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 3,
+      "signatures_verified": 2000,
+      "size": 2000,
+      "uptime": "0:46  4 users, load averages: 13.67 15.05 17.29"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 2000,
+      "ms": 227.288083,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 104136704,
+      "phases_ms": {
+        "authority_checkpoint": 37.276375,
+        "exchange": 0.0003329999999834854,
+        "inventory": 0.495459,
+        "saved_read": 0.6735829999999999,
+        "unlock_load": 188.842333
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 3,
+      "signatures_verified": 0,
+      "size": 2000,
+      "uptime": "0:46  4 users, load averages: 13.67 15.05 17.29"
+    },
+    {
+      "case": "write",
+      "ms": 17.10725,
+      "phases_ms": {
+        "finish_verify_apply": 2.02725,
+        "prepare_sign": 2.357541,
+        "refresh": 2.895833,
+        "store_fsync": 9.826375
+      },
+      "run": 3,
+      "size": 2000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:46  4 users, load averages: 13.67 15.05 17.29"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 2000,
+      "ms": 17866.177667,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 1800,
+      "peak_rss_bytes": 112672768,
+      "phases_ms": {
+        "authority_checkpoint": 15.681125,
+        "exchange": 17817.995666,
+        "inventory": 0.16262500000000002,
+        "saved_read": 0.215584,
+        "unlock_load": 32.122667
+      },
+      "records_read": 265,
+      "requests": 1807,
+      "run": 3,
+      "signatures_verified": 1800,
+      "size": 2000,
+      "uptime": "0:46  4 users, load averages: 13.67 15.05 17.29"
+    },
+    {
+      "case": "cold",
+      "held_operations": 2000,
+      "ms": 871.081125,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 2000,
+      "peak_rss_bytes": 86622208,
+      "phases_ms": {
+        "authority_checkpoint": 48.965459,
+        "exchange": 0.00041600000008656934,
+        "inventory": 0.518166,
+        "saved_read": 0.0,
+        "unlock_load": 821.597084
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 4,
+      "signatures_verified": 2000,
+      "size": 2000,
+      "uptime": "0:46  5 users, load averages: 13.74 14.98 17.21"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 2000,
+      "ms": 220.603625,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 104529920,
+      "phases_ms": {
+        "authority_checkpoint": 34.536833,
+        "exchange": 0.00025100000001998524,
+        "inventory": 0.473458,
+        "saved_read": 0.591333,
+        "unlock_load": 185.00175
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 4,
+      "signatures_verified": 0,
+      "size": 2000,
+      "uptime": "0:46  5 users, load averages: 13.74 14.98 17.21"
+    },
+    {
+      "case": "write",
+      "ms": 16.096875,
+      "phases_ms": {
+        "finish_verify_apply": 1.988667,
+        "prepare_sign": 2.362083,
+        "refresh": 3.137083,
+        "store_fsync": 8.608625
+      },
+      "run": 4,
+      "size": 2000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:46  5 users, load averages: 13.74 14.98 17.21"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 2000,
+      "ms": 17424.181709,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 1800,
+      "peak_rss_bytes": 112476160,
+      "phases_ms": {
+        "authority_checkpoint": 15.019834,
+        "exchange": 17378.017375000003,
+        "inventory": 0.155875,
+        "saved_read": 0.242959,
+        "unlock_load": 30.745666
+      },
+      "records_read": 265,
+      "requests": 1807,
+      "run": 4,
+      "signatures_verified": 1800,
+      "size": 2000,
+      "uptime": "0:46  5 users, load averages: 13.74 14.98 17.21"
+    },
+    {
+      "case": "cold",
+      "held_operations": 2000,
+      "ms": 856.676833,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 2000,
+      "peak_rss_bytes": 86671360,
+      "phases_ms": {
+        "authority_checkpoint": 43.706041,
+        "exchange": 0.00037599999996018596,
+        "inventory": 0.52375,
+        "saved_read": 0.00025,
+        "unlock_load": 812.446416
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 5,
+      "signatures_verified": 2000,
+      "size": 2000,
+      "uptime": "0:46  5 users, load averages: 12.65 14.65 17.04"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 2000,
+      "ms": 207.86516699999999,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 103956480,
+      "phases_ms": {
+        "authority_checkpoint": 34.774417,
+        "exchange": 0.00016700000000469117,
+        "inventory": 0.5045409999999999,
+        "saved_read": 0.669917,
+        "unlock_load": 171.916125
+      },
+      "records_read": 2065,
+      "requests": 0,
+      "run": 5,
+      "signatures_verified": 0,
+      "size": 2000,
+      "uptime": "0:47  5 users, load averages: 12.65 14.65 17.04"
+    },
+    {
+      "case": "write",
+      "ms": 41.015167,
+      "phases_ms": {
+        "finish_verify_apply": 1.885166,
+        "prepare_sign": 2.399334,
+        "refresh": 2.897292,
+        "store_fsync": 33.833124999999995
+      },
+      "run": 5,
+      "size": 2000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:47  5 users, load averages: 12.65 14.65 17.04"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 2000,
+      "ms": 16512.229667,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 1800,
+      "peak_rss_bytes": 113491968,
+      "phases_ms": {
+        "authority_checkpoint": 15.0965,
+        "exchange": 16467.171583,
+        "inventory": 0.162292,
+        "saved_read": 0.22979200000000002,
+        "unlock_load": 29.569499999999998
+      },
+      "records_read": 265,
+      "requests": 1807,
+      "run": 5,
+      "signatures_verified": 1800,
+      "size": 2000,
+      "uptime": "0:47  5 users, load averages: 12.65 14.65 17.04"
+    },
+    {
+      "case": "cold",
+      "held_operations": 10000,
+      "ms": 3763.453542,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 10000,
+      "peak_rss_bytes": 405143552,
+      "phases_ms": {
+        "authority_checkpoint": 51.434,
+        "exchange": 0.0004169999997429841,
+        "inventory": 2.2410419999999998,
+        "saved_read": 0.00025,
+        "unlock_load": 3709.777833
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 1,
+      "signatures_verified": 10000,
+      "size": 10000,
+      "uptime": "0:47  5 users, load averages: 14.73 14.89 17.04"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 10000,
+      "ms": 1023.7482499999999,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 450396160,
+      "phases_ms": {
+        "authority_checkpoint": 118.98125,
+        "exchange": 0.0002909999998337298,
+        "inventory": 2.065375,
+        "saved_read": 2.6350000000000002,
+        "unlock_load": 900.066334
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 1,
+      "signatures_verified": 0,
+      "size": 10000,
+      "uptime": "0:47  5 users, load averages: 16.11 15.17 17.13"
+    },
+    {
+      "case": "write",
+      "ms": 36.317541,
+      "phases_ms": {
+        "finish_verify_apply": 2.17375,
+        "prepare_sign": 2.404334,
+        "refresh": 15.199499999999999,
+        "store_fsync": 16.539749999999998
+      },
+      "run": 1,
+      "size": 10000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:47  5 users, load averages: 16.11 15.17 17.13"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 10000,
+      "ms": 92445.697208,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 9000,
+      "peak_rss_bytes": 472121344,
+      "phases_ms": {
+        "authority_checkpoint": 24.041959000000002,
+        "exchange": 92323.49187400001,
+        "inventory": 0.349584,
+        "saved_read": 0.381958,
+        "unlock_load": 97.431833
+      },
+      "records_read": 1065,
+      "requests": 9023,
+      "run": 1,
+      "signatures_verified": 9000,
+      "size": 10000,
+      "uptime": "0:47  5 users, load averages: 18.19 15.62 17.27"
+    },
+    {
+      "case": "cold",
+      "held_operations": 10000,
+      "ms": 5041.926917,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 10000,
+      "peak_rss_bytes": 407420928,
+      "phases_ms": {
+        "authority_checkpoint": 61.261125,
+        "exchange": 0.0007080000004862086,
+        "inventory": 2.2835,
+        "saved_read": 0.000042,
+        "unlock_load": 4978.381542
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 2,
+      "signatures_verified": 10000,
+      "size": 10000,
+      "uptime": "0:49  5 users, load averages: 13.74 14.77 16.77"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 10000,
+      "ms": 1210.3651659999998,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 450002944,
+      "phases_ms": {
+        "authority_checkpoint": 142.652,
+        "exchange": 0.0004169999997429841,
+        "inventory": 2.166333,
+        "saved_read": 4.420041,
+        "unlock_load": 1061.126375
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 2,
+      "signatures_verified": 0,
+      "size": 10000,
+      "uptime": "0:49  5 users, load averages: 13.76 14.76 16.76"
+    },
+    {
+      "case": "write",
+      "ms": 88.762917,
+      "phases_ms": {
+        "finish_verify_apply": 2.252291,
+        "prepare_sign": 2.449833,
+        "refresh": 54.596083,
+        "store_fsync": 29.464208
+      },
+      "run": 2,
+      "size": 10000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:49  5 users, load averages: 13.76 14.76 16.76"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 10000,
+      "ms": 91169.464875,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 9000,
+      "peak_rss_bytes": 473972736,
+      "phases_ms": {
+        "authority_checkpoint": 25.269040999999998,
+        "exchange": 91037.36112599999,
+        "inventory": 0.568708,
+        "saved_read": 1.752333,
+        "unlock_load": 104.513667
+      },
+      "records_read": 1065,
+      "requests": 9023,
+      "run": 2,
+      "signatures_verified": 9000,
+      "size": 10000,
+      "uptime": "0:49  5 users, load averages: 13.76 14.76 16.76"
+    },
+    {
+      "case": "cold",
+      "held_operations": 10000,
+      "ms": 4455.701709000001,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 10000,
+      "peak_rss_bytes": 408174592,
+      "phases_ms": {
+        "authority_checkpoint": 77.938084,
+        "exchange": 0.00033400000029359944,
+        "inventory": 2.711833,
+        "saved_read": 0.0005,
+        "unlock_load": 4375.050958
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 3,
+      "signatures_verified": 10000,
+      "size": 10000,
+      "uptime": "0:50  5 users, load averages: 17.71 15.88 16.99"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 10000,
+      "ms": 1047.114666,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 448823296,
+      "phases_ms": {
+        "authority_checkpoint": 124.45854200000001,
+        "exchange": 0.0004999999998744897,
+        "inventory": 2.1597500000000003,
+        "saved_read": 13.975541,
+        "unlock_load": 906.520333
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 3,
+      "signatures_verified": 0,
+      "size": 10000,
+      "uptime": "0:50  5 users, load averages: 17.25 15.82 16.96"
+    },
+    {
+      "case": "write",
+      "ms": 30.187625,
+      "phases_ms": {
+        "finish_verify_apply": 2.334292,
+        "prepare_sign": 2.398875,
+        "refresh": 15.359042,
+        "store_fsync": 10.095084
+      },
+      "run": 3,
+      "size": 10000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:50  5 users, load averages: 17.25 15.82 16.96"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 10000,
+      "ms": 87424.213666,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 9000,
+      "peak_rss_bytes": 471842816,
+      "phases_ms": {
+        "authority_checkpoint": 24.038542,
+        "exchange": 87300.243749,
+        "inventory": 0.658375,
+        "saved_read": 1.738208,
+        "unlock_load": 97.534792
+      },
+      "records_read": 1065,
+      "requests": 9023,
+      "run": 3,
+      "signatures_verified": 9000,
+      "size": 10000,
+      "uptime": "0:50  5 users, load averages: 17.25 15.82 16.96"
+    },
+    {
+      "case": "cold",
+      "held_operations": 10000,
+      "ms": 7102.030208,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 10000,
+      "peak_rss_bytes": 406978560,
+      "phases_ms": {
+        "authority_checkpoint": 66.75375,
+        "exchange": 0.0005420000006779446,
+        "inventory": 2.563458,
+        "saved_read": 0.000083,
+        "unlock_load": 7032.712375
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 4,
+      "signatures_verified": 10000,
+      "size": 10000,
+      "uptime": "0:52  5 users, load averages: 14.56 15.20 16.61"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 10000,
+      "ms": 1002.9745839999999,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 448970752,
+      "phases_ms": {
+        "authority_checkpoint": 122.38312499999999,
+        "exchange": 0.00016800000003058813,
+        "inventory": 2.044375,
+        "saved_read": 4.21425,
+        "unlock_load": 874.332666
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 4,
+      "signatures_verified": 0,
+      "size": 10000,
+      "uptime": "0:52  5 users, load averages: 14.14 15.10 16.55"
+    },
+    {
+      "case": "write",
+      "ms": 29.965875,
+      "phases_ms": {
+        "finish_verify_apply": 2.115083,
+        "prepare_sign": 2.5136659999999997,
+        "refresh": 14.638625000000001,
+        "store_fsync": 10.698292
+      },
+      "run": 4,
+      "size": 10000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:52  5 users, load averages: 14.14 15.10 16.55"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 10000,
+      "ms": 89716.915958,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 9000,
+      "peak_rss_bytes": 471990272,
+      "phases_ms": {
+        "authority_checkpoint": 23.578333,
+        "exchange": 89599.03762599999,
+        "inventory": 0.540875,
+        "saved_read": 1.469291,
+        "unlock_load": 92.289833
+      },
+      "records_read": 1065,
+      "requests": 9023,
+      "run": 4,
+      "signatures_verified": 9000,
+      "size": 10000,
+      "uptime": "0:52  5 users, load averages: 14.14 15.10 16.55"
+    },
+    {
+      "case": "cold",
+      "held_operations": 10000,
+      "ms": 4962.4237920000005,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 10000,
+      "peak_rss_bytes": 406159360,
+      "phases_ms": {
+        "authority_checkpoint": 70.607084,
+        "exchange": 0.0006670000002486631,
+        "inventory": 4.041582999999999,
+        "saved_read": 0.000083,
+        "unlock_load": 4887.774375
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 5,
+      "signatures_verified": 10000,
+      "size": 10000,
+      "uptime": "0:54  5 users, load averages: 13.63 14.80 16.30"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 10000,
+      "ms": 1060.507875,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 0,
+      "peak_rss_bytes": 454180864,
+      "phases_ms": {
+        "authority_checkpoint": 121.70975,
+        "exchange": 0.0002910000000611035,
+        "inventory": 2.148834,
+        "saved_read": 4.05325,
+        "unlock_load": 932.59575
+      },
+      "records_read": 10065,
+      "requests": 0,
+      "run": 5,
+      "signatures_verified": 0,
+      "size": 10000,
+      "uptime": "0:54  5 users, load averages: 13.34 14.72 16.26"
+    },
+    {
+      "case": "write",
+      "ms": 30.860792,
+      "phases_ms": {
+        "finish_verify_apply": 2.174833,
+        "prepare_sign": 2.405167,
+        "refresh": 14.62,
+        "store_fsync": 11.6605
+      },
+      "run": 5,
+      "size": 10000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:54  5 users, load averages: 13.34 14.72 16.26"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 10000,
+      "ms": 66576.643209,
+      "open_mode": "Resumed",
+      "passes": 1,
+      "payloads_decrypted": 9000,
+      "peak_rss_bytes": 474955776,
+      "phases_ms": {
+        "authority_checkpoint": 23.857083000000003,
+        "exchange": 66452.67396000001,
+        "inventory": 0.5836250000000001,
+        "saved_read": 1.649125,
+        "unlock_load": 97.87941599999999
+      },
+      "records_read": 1065,
+      "requests": 9023,
+      "run": 5,
+      "signatures_verified": 9000,
+      "size": 10000,
+      "uptime": "0:54  5 users, load averages: 13.34 14.72 16.26"
+    },
+    {
+      "case": "cold",
+      "held_operations": 100000,
+      "ms": 45054.341708,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 4422189056,
+      "phases_ms": {
+        "authority_checkpoint": 178.268125,
+        "exchange": 0.0005420000015874393,
+        "inventory": 24.568875000000002,
+        "saved_read": 0.0,
+        "unlock_load": 44851.504166
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 1,
+      "signatures_verified": 100000,
+      "size": 100000,
+      "uptime": "0:57  5 users, load averages: 23.27 16.98 16.76"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 100000,
+      "ms": 23879.679500000002,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 5582028800,
+      "phases_ms": {
+        "authority_checkpoint": 1141.5717089999998,
+        "exchange": 0.00024900000425986946,
+        "inventory": 22.461042,
+        "saved_read": 29.918875,
+        "unlock_load": 22685.727625
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 1,
+      "signatures_verified": 0,
+      "size": 100000,
+      "uptime": "0:57  5 users, load averages: 26.26 18.67 17.39"
+    },
+    {
+      "case": "write",
+      "ms": 176.954,
+      "phases_ms": {
+        "finish_verify_apply": 2.0185,
+        "prepare_sign": 2.106042,
+        "refresh": 166.392166,
+        "store_fsync": 6.437
+      },
+      "run": 1,
+      "size": 100000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "0:57  5 users, load averages: 26.26 18.67 17.39"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 100000,
+      "ms": 795813.9861659999,
+      "open_mode": "Resumed",
+      "passes": 4,
+      "payloads_decrypted": 90000,
+      "peak_rss_bytes": 6784008192,
+      "phases_ms": {
+        "authority_checkpoint": 121.982041,
+        "exchange": 794811.0765419998,
+        "inventory": 2.354833,
+        "saved_read": 5.892083,
+        "unlock_load": 872.680667
+      },
+      "records_read": 10065,
+      "requests": 90209,
+      "run": 1,
+      "signatures_verified": 90000,
+      "size": 100000,
+      "uptime": "0:58  5 users, load averages: 29.39 20.34 18.05"
+    },
+    {
+      "case": "cold",
+      "held_operations": 100000,
+      "ms": 54047.577042,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 4388651008,
+      "phases_ms": {
+        "authority_checkpoint": 263.883,
+        "exchange": 0.0003749999959836714,
+        "inventory": 26.356416,
+        "saved_read": 0.000042,
+        "unlock_load": 53757.337209
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 2,
+      "signatures_verified": 100000,
+      "size": 100000,
+      "uptime": "1:11  5 users, load averages: 51.87 54.56 35.26"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 100000,
+      "ms": 18718.974792,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 5578375168,
+      "phases_ms": {
+        "authority_checkpoint": 1110.944667,
+        "exchange": 0.0002500000009604264,
+        "inventory": 22.162333,
+        "saved_read": 37.752375,
+        "unlock_load": 17548.115167
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 2,
+      "signatures_verified": 0,
+      "size": 100000,
+      "uptime": "1:12  5 users, load averages: 24.52 46.53 33.48"
+    },
+    {
+      "case": "write",
+      "ms": 184.144209,
+      "phases_ms": {
+        "finish_verify_apply": 1.9880829999999998,
+        "prepare_sign": 1.8895,
+        "refresh": 170.11437500000002,
+        "store_fsync": 10.152167
+      },
+      "run": 2,
+      "size": 100000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "1:12  5 users, load averages: 24.52 46.53 33.48"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 100000,
+      "ms": 795279.924542,
+      "open_mode": "Resumed",
+      "passes": 4,
+      "payloads_decrypted": 90000,
+      "peak_rss_bytes": 6903627776,
+      "phases_ms": {
+        "authority_checkpoint": 114.313958,
+        "exchange": 794305.8891250001,
+        "inventory": 2.260542,
+        "saved_read": 4.137459,
+        "unlock_load": 853.323458
+      },
+      "records_read": 10065,
+      "requests": 90209,
+      "run": 2,
+      "signatures_verified": 90000,
+      "size": 100000,
+      "uptime": "1:13  5 users, load averages: 24.39 44.53 33.13"
+    },
+    {
+      "case": "cold",
+      "held_operations": 100000,
+      "ms": 47376.501165999995,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 4419387392,
+      "phases_ms": {
+        "authority_checkpoint": 153.75508299999998,
+        "exchange": 0.0004169999956502579,
+        "inventory": 22.88925,
+        "saved_read": 0.000166,
+        "unlock_load": 47199.856250000004
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 3,
+      "signatures_verified": 100000,
+      "size": 100000,
+      "uptime": "1:26  5 users, load averages: 11.70 59.99 56.68"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 100000,
+      "ms": 18405.400333999998,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 5553586176,
+      "phases_ms": {
+        "authority_checkpoint": 1099.500583,
+        "exchange": 0.0002519999979995191,
+        "inventory": 21.357666000000002,
+        "saved_read": 35.622625,
+        "unlock_load": 17248.919208
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 3,
+      "signatures_verified": 0,
+      "size": 100000,
+      "uptime": "1:27  5 users, load averages: 14.55 53.34 54.41"
+    },
+    {
+      "case": "write",
+      "ms": 176.990584,
+      "phases_ms": {
+        "finish_verify_apply": 2.09675,
+        "prepare_sign": 2.0084999999999997,
+        "refresh": 159.003084,
+        "store_fsync": 13.882
+      },
+      "run": 3,
+      "size": 100000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "1:27  5 users, load averages: 14.55 53.34 54.41"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 100000,
+      "ms": 874884.1757919999,
+      "open_mode": "Resumed",
+      "passes": 4,
+      "payloads_decrypted": 90000,
+      "peak_rss_bytes": 7185285120,
+      "phases_ms": {
+        "authority_checkpoint": 117.385542,
+        "exchange": 873887.188125,
+        "inventory": 2.387,
+        "saved_read": 4.119875,
+        "unlock_load": 873.09525
+      },
+      "records_read": 10065,
+      "requests": 90209,
+      "run": 3,
+      "signatures_verified": 90000,
+      "size": 100000,
+      "uptime": "1:27  5 users, load averages: 15.58 51.08 53.57"
+    },
+    {
+      "case": "cold",
+      "held_operations": 100000,
+      "ms": 53791.011750000005,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 4421566464,
+      "phases_ms": {
+        "authority_checkpoint": 154.21875,
+        "exchange": 0.0004160000025876798,
+        "inventory": 22.8975,
+        "saved_read": 0.000167,
+        "unlock_load": 53613.894917000005
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 4,
+      "signatures_verified": 100000,
+      "size": 100000,
+      "uptime": "1:42  5 users, load averages: 77.87 37.29 36.96"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 100000,
+      "ms": 25793.627625,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 5576851456,
+      "phases_ms": {
+        "authority_checkpoint": 1322.267166,
+        "exchange": 0.0005420000015874393,
+        "inventory": 23.537499999999998,
+        "saved_read": 40.762333,
+        "unlock_load": 24407.060084
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 4,
+      "signatures_verified": 0,
+      "size": 100000,
+      "uptime": "1:42  5 users, load averages: 61.58 39.52 37.81"
+    },
+    {
+      "case": "write",
+      "ms": 184.284125,
+      "phases_ms": {
+        "finish_verify_apply": 2.067917,
+        "prepare_sign": 2.020625,
+        "refresh": 171.698291,
+        "store_fsync": 8.497042
+      },
+      "run": 4,
+      "size": 100000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "1:42  5 users, load averages: 61.58 39.52 37.81"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 100000,
+      "ms": 803820.737791,
+      "open_mode": "Resumed",
+      "passes": 4,
+      "payloads_decrypted": 90000,
+      "peak_rss_bytes": 6945161216,
+      "phases_ms": {
+        "authority_checkpoint": 119.965292,
+        "exchange": 802844.2175830001,
+        "inventory": 3.564542,
+        "saved_read": 4.199458,
+        "unlock_load": 848.790916
+      },
+      "records_read": 10065,
+      "requests": 90209,
+      "run": 4,
+      "signatures_verified": 90000,
+      "size": 100000,
+      "uptime": "1:43  5 users, load averages: 45.71 38.14 37.39"
+    },
+    {
+      "case": "cold",
+      "held_operations": 100000,
+      "ms": 46127.211125,
+      "open_mode": "Cold",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 4401152000,
+      "phases_ms": {
+        "authority_checkpoint": 150.323583,
+        "exchange": 0.00037600000359816477,
+        "inventory": 21.948875,
+        "saved_read": 0.000125,
+        "unlock_load": 45954.938166
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 5,
+      "signatures_verified": 100000,
+      "size": 100000,
+      "uptime": "1:56  5 users, load averages: 20.08 19.82 24.94"
+    },
+    {
+      "case": "resumed",
+      "held_operations": 100000,
+      "ms": 19622.380542,
+      "open_mode": "Resumed",
+      "passes": 0,
+      "payloads_decrypted": 100000,
+      "peak_rss_bytes": 5531484160,
+      "phases_ms": {
+        "authority_checkpoint": 1067.5366669999999,
+        "exchange": 0.00016599999798927456,
+        "inventory": 21.09925,
+        "saved_read": 35.2575,
+        "unlock_load": 18498.486959
+      },
+      "records_read": 100065,
+      "requests": 0,
+      "run": 5,
+      "signatures_verified": 0,
+      "size": 100000,
+      "uptime": "1:57  5 users, load averages: 18.75 19.71 24.62"
+    },
+    {
+      "case": "write",
+      "ms": 179.827291,
+      "phases_ms": {
+        "finish_verify_apply": 2.037417,
+        "prepare_sign": 1.9249589999999999,
+        "refresh": 157.234375,
+        "store_fsync": 18.630416
+      },
+      "run": 5,
+      "size": 100000,
+      "stored_bytes": 1066,
+      "stores": 1,
+      "uptime": "1:57  5 users, load averages: 18.75 19.71 24.62"
+    },
+    {
+      "case": "catchup",
+      "held_operations": 100000,
+      "ms": 788784.5511660001,
+      "open_mode": "Resumed",
+      "passes": 4,
+      "payloads_decrypted": 90000,
+      "peak_rss_bytes": 7175733248,
+      "phases_ms": {
+        "authority_checkpoint": 114.354292,
+        "exchange": 787821.4398740001,
+        "inventory": 2.503792,
+        "saved_read": 4.6031249999999995,
+        "unlock_load": 841.650083
+      },
+      "records_read": 10065,
+      "requests": 90209,
+      "run": 5,
+      "signatures_verified": 90000,
+      "size": 100000,
+      "uptime": "1:58  5 users, load averages: 16.72 19.18 24.31"
+    }
+  ],
+  "pressroom_threads": "2",
+  "profile": "release (workspace LTO=true, opt-level=s)",
+  "rss_method": "getrusage(RUSAGE_SELF), Darwin ru_maxrss bytes; fresh child per case/run, sampled before write; includes process setup and simulated home for catchup",
+  "started_utc": "2026-11-16T05:45:33Z",
+  "stopped_unusable": false,
+  "timing_boundary": "Cold/resumed: read host inventory manifest, read sealed saved bytes if resumed, Engine::open, software ECDH and finish_unlock_epochs (all disk record reads and judgement). Catchup additionally runs all simulated-home passes and fsyncs received stores. Write after resumed open includes advance/refresh/record_due, prepare/software sign/finish and file+directory fsync. Excludes fixture/saved-state construction, simulator hydration, process launch, key setup, UI, checkpoint saving, network and language ABI. OS filesystem caches uncontrolled/warm; cold means no engine saved state."
+}
