@@ -549,6 +549,7 @@ fn a_late_veto_is_stored_with_another_homes_in_window_receipt_and_signs_none() {
     b.set_clock(issued + 1_000);
     let (s, out) = b.post("/pending", &json!({"objects": [veto.clone()]}));
     assert_eq!(s, 200, "{out}");
+    assert!(out["receipts"][0].is_object(), "B receipts the veto: {out}");
     assert_eq!(body_of(&out["receipts"][0])["by"], w.hb.as_str());
     b.stop();
     // A comes back 400 s after the veto's `issued`: alone, the veto is late.

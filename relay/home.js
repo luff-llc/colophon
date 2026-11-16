@@ -472,7 +472,8 @@ export class HomeSlot {
         });
         return true;
       }
-      const r = this.wasm.call({ op: 'pending_object', state: this.state, now: this.clock(), digest: rest });
+      // Under the lock, like every history read: never an object before its file is stored.
+      const r = await this.lock(async () => this.wasm.call({ op: 'pending_object', state: this.state, now: this.clock(), digest: rest }));
       if (!r.found) throw new HttpError(404, 'Not found');
       send(res, 200, { envelope: JSON.parse(unb64(r.envelope)), receipts: r.receipts.map((x) => JSON.parse(unb64(x))) });
       return true;
