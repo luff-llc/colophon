@@ -1,8 +1,8 @@
 # Colophon 0.5
 
 **Status: frozen, 0.5, 2026-11-16.** The text is revision 17, the final candidate of
-2026-11-15. §21 lists the freeze conditions. History of the revisions: revision 2 answered
-two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
+2026-11-15, with one edit at the freeze: §18's reference setup names one home, matching
+§13.1. §21 lists the freeze conditions. History of the revisions: revision 2 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
 transitions with veto (§8.7); revision 5 answers two reviews of revision 4 (4032d44) by finishing
 that mechanism's state model; revision 6 answers two reviews of revision 5 (a1decc6) and the
@@ -2558,7 +2558,7 @@ ranges.
 | Control keys | each device's owner key, and one passkey per platform or password manager, `approve` + `control`; **at least one control key not on the phone** (for example a computer's device key) | each founder's device keys and passkeys, `holder` the founder |
 | Recovery keys | two security keys, **`recover` only**, `prf` slot where delivered, **kept apart** | two per founder |
 | Other | a kit or device key not tied to any one domain | the same per founder |
-| Homes | two, `headQuorum` 1 | three, `headQuorum` 2 |
+| Homes | one; several are optional and experimental in 0.5 (§13.1) | one; several are optional and experimental in 0.5 (§13.1) |
 | Counting | `keys`; thresholds 1, 1, 1 | `holders`; `threshold` and `recoverThreshold` 2 of 3; `memberRule` `control` |
 
 A person with only a phone can't keep a control key off it: hosts SHOULD offer one security key
@@ -2574,10 +2574,10 @@ hide a transition until its deadline has passed (§13.1), and with one stolen ke
 are the person reference for availability only. The setup that resists one hostile home is three
 homes at `headQuorum` 2, the company reference; hosts SHOULD offer it to people too.
 
-**Several homes are experimental in 0.5** (§13.1 "One home is supported in 0.5"). The two- and
-three-home references above are the intended setups, but they depend on exchange between homes,
-which is informative in 0.5, so an account set up that way may fail to make progress. One home is
-the supported configuration in 0.5.
+**One home is supported in 0.5; several are optional and experimental** (§13.1 "One home is
+supported in 0.5"). The reference is one home. Two homes at `headQuorum` 1 for a person and three
+at `headQuorum` 2 for a company depend on exchange between homes, which is informative in 0.5, so an
+account set up that way may fail to make progress.
 
 ## 19. Results and reasons
 
