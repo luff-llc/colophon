@@ -18,6 +18,9 @@ see §21); [changes from 0.4](spec/colophon-0.5-changes.md);
   Finality is recorded in the history (`activate`, `vetoed`, `final`), so every verifier reaches
   the same verdict from the same objects, in any order.
 - Conflicts: evidence, forks with and without homes, and `resolve`, which keeps one branch.
+- Dropping a lost home (§8.7): a full set needs no receipt from the homes it revokes, so a home
+  that is gone or refuses cannot block it. An account with two units (for example one control key
+  and one separate recovery key) can drop the home, appoint another and continue.
 - Vault and slots (§7): removing a slotted controller retires the vault, and a `vault` entry and a
   `rekey` follow. Pairing by code or by scanning the request; the seed moves to a new device under
   its own label.
@@ -98,7 +101,9 @@ The 2,000-record case meets the Mac limits it was measured against.
 
 What 0.5.0 does not do is one list, in
 [spec §21.1](spec/colophon-0.5.md#211-what-050-does-not-do). It starts with the lock-in limit: an
-account on one home needs that home's cooperation to change its keys or to move to another home.
+account whose control and recovery controllers all sit in one unit cannot drop a home that is lost
+or refuses (a full set takes two units); its way out is a new, unrelated account and an import of
+the records the person's devices hold.
 
 **Known gap: the §6.4 warnings.** The reference sessions (Swift, Kotlin and Android, JavaScript) do
 not yet give the §6.4 warnings before the genesis is written; they expose `soleDevice` afterwards.

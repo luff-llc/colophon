@@ -191,8 +191,9 @@ builder refuses a member whose grant has no role.
 > let the app sync at least every few days: nothing else tells you about a waiting change. A stolen key can still read whatever it could already
 > read, and can keep signing in until you suspend or remove it. Your account's history is kept by
 > one service, its home: while it is down, changes wait; if it turns dishonest while someone also
-> has one of your keys, you can lose the account, and if it is lost or refuses, the way out is a new
-> account (spec §21.1).
+> has one of your keys, you can lose the account. If it is lost or refuses, two of your keys in
+> separate units (a control key and a separate recovery key) can drop it and appoint another; with
+> only one unit the way out is a new account (spec §21.1).
 
 **An account with no home.** Tell the person: "Nothing keeps a record of when things happened on
 this account. Someone who once held one of your keys can later show a new device a different

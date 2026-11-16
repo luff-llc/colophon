@@ -2780,15 +2780,22 @@ the sessions. A journey proving a move to another home is not built.
 
 The one list. The README, the changelog and §18 point here.
 
-1. **An account on one home needs that home's cooperation to change its keys or to move to another
-   home.** If the home is lost or refuses, the way out is a new, unrelated account and an import of
-   the records the person's devices hold.
+1. **An account whose control and recovery controllers all sit in one unit cannot drop a home that
+   is lost or refuses** (§8.7 needs a full set, which takes two units). Its way out is a new,
+   unrelated account and an import of the records the person's devices hold. An account with two
+   units (for example one control key and one separate recovery key) can drop the home with a full
+   set, without that home's receipt, appoint another, and continue.
 2. **Moving an account to another home is not proven by a journey.** With a cooperative home it
    works, with the device carrying everything: appoint the new home, then (if set) move
    `primaryHome`, then revoke the old home, each a transition that waits out the recovery delay
-   (`issued` + 300 s + `recoveryDelay`, 72 hours 5 minutes by default). The engine reports a home's
-   421 and does not follow it, and if the old home is gone nothing in 0.5 tells a device where the
-   new one is.
+   (`issued` + 300 s + `recoveryDelay`, 72 hours 5 minutes by default). Away from an uncooperative
+   home it is possible with a full set (item 1): the engine test
+   `crates/colophon-core/tests/v05_engine_home.rs`,
+   `a_full_set_drops_a_silent_only_home_and_the_account_appoints_another`, drops a silent sole home
+   and appoints another, but no session journey moves an account. The
+   engine reports a home's 421 and does not follow it, and if the old home is gone nothing in 0.5
+   tells another device where the new one is.
+
 3. **Only one-home operation is supported; several homes are experimental.** They are optional (§13.1, §18); the open
    issues are in [docs/multi-home-open-issues.md](../docs/multi-home-open-issues.md).
 4. **What one home can do undetected.** It can withhold the history indefinitely, and a device
