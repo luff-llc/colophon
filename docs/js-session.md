@@ -51,6 +51,7 @@ session.subscribe(state => render(state));
 * `keys` is the content member: it signs records and opens the member's epoch shares (a silent ECDH). `ownerController`
   is a controller of the account, asked only for owner operations: creation, approving a member, revoking, adding a
   controller, veto, seed transfer.
+* **One home** is the supported configuration in 0.5; more than one is experimental (spec §13.1).
 * **Homes (spec §18).** `create()` refuses with `noHome` unless `homes` is non-empty or `createWithoutHome` is set, and a
   home whose endpoint is not `https` is `insecureHome`. `HomeConfiguration.request` is called with the new account's ID
   and answers with the home's signed member request; the session appoints the home in a transition signed by the owner
@@ -88,6 +89,14 @@ error), so `RecordMedium.listing`, `read` and `readBlob` are synchronous and `wr
   a rename that is checked, and a holder asks again that it still holds the lock just before the commit point. There
   is no kernel lock here (Node and Bun have no portable one), so two processes can still overlap in the instant
   between one's check and its rename; batches are then still whole, each in its own journal folder.
+* **The private store and the pairing ledger.** `IndexedDBPrivateStore` writes each value in one `readwrite`
+  transaction with **strict durability**, the strongest commit IndexedDB offers: when the promise resolves the browser
+  has committed it to disk. The session writes the sealed pairing ledger and its generation, and awaits both, before it
+  releases a ceremony's nonce. `FilePrivateStore` (Node) syncs the file, renames it into place and syncs the directory.
+  `MemoryPrivateStore` keeps nothing across a reload; a host's own `PrivateStore` gives only the durability it implements,
+  and the five-an-hour bound across crashes is as durable as that. Starts are serialized by
+  a Web Lock shared by every tab and worker of the origin; where the platform has no `navigator.locks` (Node, Bun) the
+  lock covers one process only, so two processes over one `FilePrivateStore` are not coordinated.
 * A batch is checked whole before anything is stored (`planBatch`): a bad path, a size over 40 MiB or different bytes at
   an immutable path refuses all of it. Exact duplicates are idempotent; `state/` and `heads/` are replaceable.
 
@@ -166,9 +175,43 @@ wakes it.
 ## Phases, the gate, and lock
 
 Phases: `opening`, `noLibrary`, `creating`, `waitingForApproval` (with its code), `ready`, `refreshing`,
-`waitingForDownload`, `retry`, `denied`, `unavailable`, `updateRequired`, `failed`, `locked`. `gateContent(state,
+`waitingForDownload`, `retry`, `denied`, `unavailable`, `updateRequired`, `stopped`, `failed`, `locked`. `gateContent(state,
 usable)` maps a phase to the library or to a screen with its actions; content is shown only while the session says it
 is usable.
+
+### A stopped account, a home's refusals, waiting for approval (freeze package)
+
+**Stopped.** When a layout raise (spec §20) becomes final in the history this device verified, or it judges an authority
+entry `newerFormat`, the engine's status carries `stopped` and the session's phase is **stopped** (Swift
+`.stopped(seq:layout:)`, Kotlin `SessionPhase.Stopped(seq, layout)`, JS `{ kind: 'stopped', seq, layout? }`): this app must
+be updated to continue with this account. It comes only from the verified status, never from a home's answer or a
+refusal. What the device holds stays readable (`hasUsableContent` is true, as of the stop); every write is refused by the
+core (`newerFormat`) and the phase stays, with no fault shown; no exchange runs (`syncState` is disabled, the loop waits
+for an event with no timer or backoff, and no home is contacted); it persists across relaunch; lock, unlock and sign-out
+work. The gate shows the content with a status line, or the screen `library.stopped` ("Update to continue"), with no retry.
+While stopped the session does not refresh content: what it held when the stop was verified stays readable, and records
+that arrive later are not admitted (the engine ignores them as well). The session persists the stop in its sealed saved
+state the moment it sees it, so a relaunch whose store has lost the raise is still stopped (see `docs/bindings-05.md`).
+The existing `updateRequired` remains for an account the engine cannot open at all.
+
+**A home's refusals.** A home's error answer is read for its `result` only, validated against the §1 grammar (a named
+result, or `refused:` and a reason of a lower-case letter then letters and digits, at most 48 characters) from a JSON body
+of at most 64 KiB; no other byte of the body is kept (`HomeRefusal`, JS `homeRefusal`). A `refused:<name>` the session does
+not know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed` and `refused:notProvisioned`
+included, is the existing home issue `remoteCallRefused`, now with the name as given and the home's `Retry-After`: it
+refuses only that request (the pass goes on), except a refusal of this device's signed call (403), which ends the pass as
+before; a 403 that names a refusal for a request that carried no call is not retried with a call. It is never a state of
+the account. A `Retry-After` (whole seconds, 1 to 86,400) is honoured, as session policy (0.5 specifies it only for 429 and a home that
+cannot sign a due head): the home is not
+contacted again before then, and its refusal stays shown meanwhile. `503 {"result":"unavailable"}`, which a stopped home
+answers (§13.6), is the issue `homeUnavailable`: the sync state is offline with "The home is not available right now"
+(`HomeWords`), the loop backs off, and the device is not stopped. The retry signal of a refusal body is deferred (§16 of
+the design), so `Retry-After` is the only signal honoured.
+
+**Waiting for approval.** 0.5 keeps `refused:revoked` for a call by a member no grant names (`refused:notGranted` is
+reserved). A device that asked to join and holds no grant for itself (its standing is unknown) shows a home's or its own
+check's `refused:revoked` as the issue `waitingForApproval`, not as revoked; its phase is `waitingForApproval`. A device
+that holds its own verified revocation is `denied`, as before.
 
 `lock()` is synchronous and immediate: it overwrites the engine's keys and opened plaintext, locks any owner engine
 open for an operation, frees every blob writer in use (each holds an epoch key; no chunk is encrypted after `lock`),

@@ -726,14 +726,15 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
 
   // The scheduler: recording entries, heads and forwarding for every home slot, on the relay's clock.
+  // Slots tick concurrently (each runs one pass at a time), so one slot never waits on another.
   const tickAll = async () => {
-    for (const name of homeSlots.keys()) {
+    await Promise.all([...homeSlots.keys()].map(async (name) => {
       let s;
-      try { s = await slot(name); } catch { continue; }
-      if (s.closing || s.released) continue;
+      try { s = await slot(name); } catch { return; }
+      if (s.closing || s.released) return;
       enter(s);
       try { await s.home.tick(); } catch (error) { console.error(`home tick failed for slot ${name}: ${error.message}`); } finally { leave(s); }
-    }
+    }));
   };
   let timer = null;
   if (homeSlots.size > 0) for (const name of homeSlots.keys()) await slot(name);

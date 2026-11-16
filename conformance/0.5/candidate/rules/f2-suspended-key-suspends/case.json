@@ -1,0 +1,1 @@
+{"description":"A suspends B; B, while suspended, signs a suspend of A. A suspended key may sign transitions and vetoes but not a suspend (§8.7): badSignature.","expected":{"result":"badSignature","seq":3},"sections":["8.5","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

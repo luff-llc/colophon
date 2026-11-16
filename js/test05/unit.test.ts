@@ -6,12 +6,12 @@ import { join } from 'node:path';
 import {
   attachPageLifecycle, FetchHomeTransport, gateContent, glue, HomeLimits, HomeTransportError, init, KeyCustody, KeyCustodyError, MemoryDeviceSecrets, MemoryMedium,
   MemoryPrivateStore, plain, putBlob, SecretBytes, SessionError, StorageError, WebCryptoKeyProvider,
-  type AsyncKeyProvider, type EpochAgreement, type HomeConfiguration, type HomeTransport, type PrfRequest, type UnlockInput,
+  type AccessRequest, type AsyncKeyProvider, type EpochAgreement, type HomeConfiguration, type HomeTransport, type PrfRequest, type RequestInfo, type UnlockInput,
 } from '../src/session/index.js';
 import { FileMedium, FilePrivateStore, type FileMediumStep } from '../src/session/node.js';
 import { decodeSaved, encodeSaved, SessionJournal } from '../src/session/private.js';
 import { raceAbort } from '../src/session/errors.js';
-import { admitted, Device, note, RelayHome, sleep } from './support.ts';
+import { admitted, approveByScan, Device, note, pairByCode, RelayHome, sleep } from './support.ts';
 import { BunRelayHost } from './relay-bun.ts';
 
 const host = new BunRelayHost();
@@ -309,8 +309,9 @@ describe('the gate', () => {
     expect(gateContent({ phase: { kind: 'retry' } }, true)).toMatchObject({ kind: 'content', status: 'Refresh failed' });
     expect(gateContent({ phase: { kind: 'locked' } }, true)).toMatchObject({ kind: 'screen', id: 'library.locked', actions: ['unlock'] });
     expect(gateContent({ phase: { kind: 'denied' } }, true)).toMatchObject({ kind: 'screen', id: 'library.denied' });
-    expect(gateContent({ phase: { kind: 'waitingForApproval', code: 'ABCD-1234' } }, false)).toMatchObject({ kind: 'screen', id: 'library.waiting' });
-    expect((gateContent({ phase: { kind: 'waitingForApproval', code: 'ABCD-1234' } }, false) as { message: string }).message).toContain('ABCD-1234');
+    expect(gateContent({ phase: { kind: 'waitingForApproval' } }, false)).toMatchObject({ kind: 'screen', id: 'library.waiting' });
+    // The joining device shows no code of its own (spec §9.1): the six digits appear only while it pairs.
+    expect((gateContent({ phase: { kind: 'waitingForApproval' } }, false) as { message: string }).message).toContain('same code');
     expect(gateContent({ phase: { kind: 'updateRequired' } }, false)).toMatchObject({ id: 'library.updateRequired', actions: [] });
   });
 });
@@ -432,9 +433,9 @@ describe('a session without a home', () => {
     await first.session.create();
     const asking = await Device.make({ medium: (first.medium as MemoryMedium).copy(p => p.startsWith('authority/')) });
     await asking.session.restore();
-    await first.session.importRequest(await asking.session.exportRequest());
+    const scanned = await first.session.scanRequest(await asking.session.exportRequest());
     hang = true;
-    const approving = first.session.approve(first.session.requests[0]!);
+    const approving = first.session.approve(scanned.request, scanned.pairing);
     const outcome = approving.then(() => 'approved', error => error as Error);
     for (let n = 0; n < 200 && prompts === 0; n++) await sleep(5);
     expect(prompts).toBe(1);
@@ -449,7 +450,8 @@ describe('a session without a home', () => {
     hang = false;
     await first.session.unlock();
     expect(first.session.phase.kind).toBe('ready');
-    await first.session.approve(first.session.requests[0]!);
+    // The interrupted approval spent its pairing: a new scan approves.
+    await approveByScan(asking.session, first.session);
     expect(first.session.members.some(m => m.id === asking.session.memberId)).toBe(true);
     first.close(); asking.close();
   });
@@ -578,4 +580,221 @@ describe('a cancelled or broken pass never leaves the engine waiting', () => {
     expect(await settled(device)).toBe(true);
     device.close();
   }, 60_000);
+});
+
+// Approval spends a confirmed pairing for exactly the request's key (spec §7.3, §9.1): no code from a member ID, no
+// approval from the list or the bytes alone, from an unconfirmed pairing, for another device, or twice.
+describe('approval and pairing', () => {
+  async function world(): Promise<[Device, Device]> {
+    const first = await Device.make();
+    await first.session.create();
+    const second = await Device.make({ medium: first.medium });
+    await second.session.restore();
+    return [first, second];
+  }
+  function requestView(raw: Uint8Array): AccessRequest {
+    const info = plain<RequestInfo>(glue.account_request_info(raw));
+    return { id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, record: info.raw, namespaces: [], access: [] };
+  }
+  async function isMember(device: Device, owner: Device): Promise<boolean> {
+    await owner.session.refresh();
+    return owner.session.members.some(m => m.id === device.session.memberId);
+  }
+
+  test('a listed request carries no code and the joining device shows none', async () => {
+    const [first, second] = await world();
+    expect(second.session.phase).toEqual({ kind: 'waitingForApproval' });
+    await first.session.refresh();
+    const listed = first.session.requests[0]!;
+    expect(listed.id).toBe(second.session.memberId!);
+    expect('pairingCode' in listed).toBe(false);
+    first.close(); second.close();
+  });
+
+  test('a code the person did not confirm approves nothing', async () => {
+    const [first, second] = await world();
+    const raw = await second.session.exportRequest();
+    const j = await second.session.beginJoinPairing();
+    const start = await first.session.beginApproval(j.commitment());
+    const reveal = j.receive_nonce(start.nonce)!;
+    await first.session.approvalCode(start.pairing, reveal.e, reveal.nb);
+    // The request travels with the commitment; a scan now would be refused (one ceremony at a time).
+    const request = requestView(raw);
+    await expect(first.session.approve(request, start.pairing)).rejects.toThrow();
+    expect(await isMember(second, first)).toBe(false);
+    first.close(); second.close();
+  });
+
+  test('a pairing for one device does not approve another, and is spent by the refusal', async () => {
+    const [first, second] = await world();
+    const attacker = await Device.make({ medium: first.medium });
+    await attacker.session.restore();
+    const { pairing } = await pairByCode(second.session, first.session);
+    const substituted = (await first.session.scanRequest(await attacker.session.exportRequest())).request;
+    await expect(first.session.approve(substituted, pairing)).rejects.toThrow();
+    expect(await isMember(attacker, first)).toBe(false);
+    const real = (await first.session.scanRequest(await second.session.exportRequest())).request;
+    await expect(first.session.approve(real, pairing)).rejects.toThrow();
+    first.close(); second.close(); attacker.close();
+  });
+
+  test('one pairing approves once', async () => {
+    const [first, second] = await world();
+    const scanned = await first.session.scanRequest(await second.session.exportRequest());
+    await first.session.approve(scanned.request, scanned.pairing);
+    expect(await isMember(second, first)).toBe(true);
+    expect(scanned.pairing.stage()).toBe(glue.PairingStage.Spent);
+    await expect(first.session.approve(scanned.request, scanned.pairing)).rejects.toThrow();
+    first.close(); second.close();
+  });
+
+  test("the joining device's own pairing does not approve", async () => {
+    const [first, second] = await world();
+    const j = await second.session.beginJoinPairing();
+    const start = await first.session.beginApproval(j.commitment());
+    j.receive_nonce(start.nonce);
+    j.confirm();
+    const request = requestView(await second.session.exportRequest());
+    await expect(first.session.approve(request, j)).rejects.toThrow();
+    expect(await isMember(second, first)).toBe(false);
+    first.close(); second.close();
+  });
+
+  test('scanning a request stores nothing', async () => {
+    const [first, second] = await world();
+    const raw = await second.session.exportRequest();
+    const before = (first.medium as MemoryMedium).listing().map(e => e.path).sort();
+    const scanned = await first.session.scanRequest(raw);
+    expect(scanned.request.id).toBe(second.session.memberId!);
+    expect((first.medium as MemoryMedium).listing().map(e => e.path).sort()).toEqual(before);
+    first.close(); second.close();
+  });
+
+  test('mismatches abort on both devices and are bounded five an hour', async () => {
+    const [first, second] = await world();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const j = await second.session.beginJoinPairing();
+      const start = await first.session.beginApproval(j.commitment());
+      const reveal = j.receive_nonce(start.nonce)!;
+      if (attempt % 2 === 0) {
+        await expect(first.session.approvalCode(start.pairing, reveal.e, new Uint8Array(32))).rejects.toThrow();
+      } else {
+        await first.session.approvalCode(start.pairing, reveal.e, reveal.nb);
+        await first.session.rejectPairing(start.pairing);
+      }
+      await second.session.rejectPairing(j);
+      expect(j.stage()).toBe(glue.PairingStage.Spent);
+      expect(start.pairing.stage()).toBe(glue.PairingStage.Spent);
+    }
+    const j = await second.session.beginJoinPairing();
+    await expect(first.session.beginApproval(j.commitment())).rejects.toThrow();
+    first.close(); second.close();
+  });
+
+  test('a failed creation is not erased by a sync pass', async () => {
+    // Deterministic: the pass runs after the failure (the Kotlin session showed the race as "noLibrary, no error").
+    const device = await Device.make({ homes: [{ endpoint: 'http://home.example/v1/' }] });
+    await device.session.create();
+    const phase = device.session.phase, error = device.session.lastError;
+    expect(phase.kind).toBe('failed');
+    expect(error).toContain('HTTPS');
+    expect(await device.session.syncNow()).toBe(false);
+    expect(device.session.phase).toEqual(phase);
+    expect(device.session.lastError).toBe(error);
+    device.close();
+  });
+
+  // The approving device's ledger: one ceremony at a time, every start counted (§7.3).
+  class FlakyStore extends MemoryPrivateStore {
+    failLedger = false;
+    override async write(name: string, bytes: Uint8Array): Promise<void> {
+      if (this.failLedger && name === 'pairing-ledger.bin') throw new Error('disk full');
+      return super.write(name, bytes);
+    }
+  }
+  async function ledgerWorld(): Promise<{ first: Device; second: Device; store: FlakyStore; secrets: MemoryDeviceSecrets; member: AsyncKeyProvider; owner: AsyncKeyProvider }> {
+    const store = new FlakyStore(); const secrets = new MemoryDeviceSecrets();
+    const member = await WebCryptoKeyProvider.generate(); const owner = await WebCryptoKeyProvider.generate();
+    const first = await Device.make({ privateStore: store, secrets, member, owner });
+    await first.session.create();
+    const second = await Device.make({ medium: first.medium });
+    await second.session.restore();
+    return { first, second, store, secrets, member, owner };
+  }
+  const commitment = async (s: Device) => (await s.session.beginJoinPairing()).commitment();
+
+  test('a second commitment while one ceremony is live is refused and yields no nonce', async () => {
+    const { first, second } = await ledgerWorld();
+    const live = await first.session.beginApproval(await commitment(second));
+    await expect(first.session.beginApproval(await commitment(second))).rejects.toMatchObject({ code: 'pairing:busy' });
+    await first.session.abandonApproval(live.pairing);
+    await first.session.beginApproval(await commitment(second));
+    first.close(); second.close();
+  });
+
+  test('many starts through one session yield one nonce (its worker serializes them; the core lets one live)', async () => {
+    const { first, second } = await ledgerWorld();
+    const commitments: Uint8Array[] = [];
+    for (let i = 0; i < 40; i++) commitments.push(await commitment(second));
+    const results = await Promise.allSettled(commitments.map(c => first.session.beginApproval(c)));
+    expect(results.filter(r => r.status === 'fulfilled').length).toBe(1);
+    first.close(); second.close();
+  });
+
+  test('abandoned ceremonies stay counted: five close the hour', async () => {
+    const { first, second } = await ledgerWorld();
+    for (let i = 0; i < 5; i++) await first.session.abandonApproval((await first.session.beginApproval(await commitment(second))).pairing);
+    await expect(first.session.beginApproval(await commitment(second))).rejects.toMatchObject({ code: 'pairing:limit' });
+    first.close(); second.close();
+  });
+
+  test('when the ledger cannot be persisted, no nonce is produced', async () => {
+    const { first, second, store } = await ledgerWorld();
+    store.failLedger = true;
+    await expect(first.session.beginApproval(await commitment(second))).rejects.toThrow('disk full');
+    first.close(); second.close();
+  });
+
+  test('the ledger alone rolled back (its recorded generation kept), or deleted, does not restore the budget after a relaunch', async () => {
+    const { first, second, store, secrets, member, owner } = await ledgerWorld();
+    await first.session.abandonApproval((await first.session.beginApproval(await commitment(second))).pairing);
+    const early = (await store.read('pairing-ledger.bin'))!;
+    for (let i = 0; i < 4; i++) await first.session.abandonApproval((await first.session.beginApproval(await commitment(second))).pairing);
+    await store.write('pairing-ledger.bin', early);
+    const relaunched = await Device.make({ medium: first.medium, privateStore: store, secrets, member, owner });
+    await relaunched.session.restore();
+    await expect(relaunched.session.beginApproval(await commitment(second))).rejects.toThrow();
+    relaunched.close();
+    await store.remove('pairing-ledger.bin');
+    const again = await Device.make({ medium: first.medium, privateStore: store, secrets, member, owner });
+    await again.session.restore();
+    await expect(again.session.beginApproval(await commitment(second))).rejects.toThrow();
+    again.close(); first.close(); second.close();
+  });
+
+  test('two sessions over one store (two tabs, two workers) yield exactly one nonce', async () => {
+    const { first, second, store, secrets, member, owner } = await ledgerWorld();
+    const other = await Device.make({ medium: first.medium, privateStore: store, secrets, member, owner });
+    await other.session.restore();
+    const commitments: Uint8Array[] = [];
+    for (let i = 0; i < 20; i++) commitments.push(await commitment(second));
+    const sessions = [first.session, other.session];
+    const results = await Promise.allSettled(commitments.map((c, i) => sessions[i % 2]!.beginApproval(c)));
+    expect(results.filter(r => r.status === 'fulfilled').length).toBe(1);
+    other.close(); first.close(); second.close();
+  });
+
+  test('the residual limit: a wholesale restore of the ledger and its generation restores the budget', async () => {
+    const { first, second, store, secrets, member, owner } = await ledgerWorld();
+    await first.session.abandonApproval((await first.session.beginApproval(await commitment(second))).pairing);
+    const early = (await store.read('pairing-ledger.bin'))!;
+    const earlyFloor = (await store.read('pairing-ledger.generation'))!;
+    for (let i = 0; i < 4; i++) await first.session.abandonApproval((await first.session.beginApproval(await commitment(second))).pairing);
+    await store.write('pairing-ledger.bin', early);
+    await store.write('pairing-ledger.generation', earlyFloor);
+    const relaunched = await Device.make({ medium: first.medium, privateStore: store, secrets, member, owner });
+    await relaunched.session.restore();
+    await relaunched.session.beginApproval(await commitment(second));
+    relaunched.close(); first.close(); second.close();
+  });
 });

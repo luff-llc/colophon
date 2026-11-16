@@ -17,6 +17,8 @@ use crate::v05::history::envelope::AuthEnvelope;
 use crate::v05::history::keyring::Keyring;
 use crate::v05::history::Stop;
 use crate::v05::ids::AccountId;
+use crate::v05::members::Request;
+use crate::v05::pairing::ConfirmedPairing;
 use crate::v05::records::{EpochKeys, HeldRecord, Level};
 use crate::v05::slots::{
     plan_rotation, PrfRequest, PrfResult, Slot, SlotBuild, SlotPlan, SlotTarget,
@@ -391,8 +393,23 @@ impl Account {
     // -----------------------------------------------------------------------------------------
     // Shared helpers.
 
+    /// §1 "A stop": an action prepared before the stop is refused at its next step with the result
+    /// its begin would give now: `unavailable` for a link or call, `newerFormat` for the rest.
+    fn refuse_stale(&self, action: &PendingAction) -> Result<()> {
+        let call = matches!(
+            &action.stage,
+            Stage::Sign(s) if matches!(s.work, Work::Link(_) | Work::Call(..) | Work::HomeCall(..))
+        );
+        if call {
+            self.refuse_call_if_stopped()
+        } else {
+            self.refuse_if_stopped()
+        }
+    }
+
     /// Writes need a clean history and no rollback (§13.3).
     fn require_writable(&self) -> Result<()> {
+        self.refuse_if_stopped()?;
         self.d.auth.require_clean()?;
         if self.d.verdict.rollback {
             return Err(Failure::Refused(Reason::Rollback));
@@ -491,14 +508,22 @@ impl Account {
 
     /// Admit a member (§9.2): a `grant` with `shares` sealing every historical epoch of every
     /// granted namespace to its agreement key. `request` is the member's signed request.
+    ///
+    /// It spends `pairing` (§9.1, §17.1): a pairing confirmed on this device for this account
+    /// whose `E` is exactly the request's `member.signing`, within its lifetime; anything else is
+    /// `refused:outOfScope` (another account, another key, the joining side's pairing, the pairing QR) or
+    /// `refused:expired`, and nothing is prepared. The pairing is consumed whatever the answer:
+    /// a refused or abandoned approval needs a new pairing.
     pub fn begin_approve(
         &self,
         request: &[u8],
         terms: Value,
         signers: &[String],
         seed: [u8; 32],
+        pairing: ConfirmedPairing,
     ) -> Result<PendingAction> {
         self.require_writable()?;
+        self.spend_pairing(request, pairing)?;
         let batch = prepare_grant(
             &self.d.effective,
             self.now_ms,
@@ -510,6 +535,14 @@ impl Account {
             seed,
         )?;
         Ok(self.batch_action("approve", batch))
+    }
+
+    /// Spend a confirmed pairing on the request `request` (§9.1): the request must parse and
+    /// verify, and the pairing must be this device's, for this account and exactly the request's
+    /// `member.signing`, within its lifetime.
+    fn spend_pairing(&self, request: &[u8], pairing: ConfirmedPairing) -> Result<()> {
+        let req = Request::parse(request, true)?;
+        pairing.spend_for_grant(self.d.auth.account(), &req.signing, self.now_ms)
     }
 
     /// Extend a member's expiry (§9.4), sealing the epochs no earlier object sealed to it.
@@ -736,6 +769,7 @@ impl Account {
     /// after it is in the keyring ([`Account::begin_add_slot`]), on a device that holds the
     /// seed ([`Account::transfer_seed`], [`Account::accept_seed_transfer`]).
     pub fn begin_add_controller(&self, add: &AddController) -> Result<PendingAction> {
+        self.refuse_if_stopped()?;
         match &add.mode {
             AddMode::Immediate { signers } => self.begin_keyring(
                 &KeyringEdit {
@@ -951,6 +985,7 @@ impl Account {
             &action.account == self.d.auth.account(),
             "the action is for another account",
         )?;
+        self.refuse_stale(&action)?;
         let Stage::Prf(stage) = action.stage else {
             return Err(malformed("this action needs no PRF assertions"));
         };
@@ -1072,7 +1107,45 @@ impl Account {
 
     /// Propose a pending transition (§8.7) anchored on the head: thresholds, policy, homes,
     /// controllers, a vault change. A possession proof is a step for every controller it adds.
+    /// A change with a `grant` component is refused here (`refused:outOfScope`): it spends a
+    /// confirmed pairing, through [`Account::begin_grant_transition`] (§9.1).
     pub fn begin_transition(
+        &self,
+        change: &Change,
+        signers: &[String],
+        rule: TransitionRule,
+    ) -> Result<PendingAction> {
+        if change.0.contains_key("grant") {
+            return Err(Failure::Refused(Reason::OutOfScope));
+        }
+        self.transition_inner(change, signers, rule)
+    }
+
+    /// Propose a pending transition whose change carries a `grant` component (an import grant,
+    /// §9.3), spending `pairing` on the granted request exactly as [`Account::begin_approve`]
+    /// does (§9.1, §17.1). A change without a `grant` with a request is `malformed` here and no
+    /// signature is asked for.
+    pub fn begin_grant_transition(
+        &self,
+        change: &Change,
+        signers: &[String],
+        rule: TransitionRule,
+        pairing: ConfirmedPairing,
+    ) -> Result<PendingAction> {
+        self.require_writable()?;
+        let request = change
+            .0
+            .get("grant")
+            .and_then(|g| g.get("request"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| malformed("the change has no grant with a request"))?;
+        // The envelope is bounded by its body (16 KiB) and a signature, in base64.
+        let request = crate::v05::encoding::decode_base64(request, 2 * bounds::REQUEST_BODY)?;
+        self.spend_pairing(&request, pairing)?;
+        self.transition_inner(change, signers, rule)
+    }
+
+    fn transition_inner(
         &self,
         change: &Change,
         signers: &[String],
@@ -1081,6 +1154,7 @@ impl Account {
         self.require_writable()?;
         self.control_remains(change)?;
         self.check_grant_component(change)?;
+        self.check_members_against_change_keys(change)?;
         let batch = prepare_transition(
             &self.d.effective,
             self.now_ms,
@@ -1100,6 +1174,62 @@ impl Account {
     /// prepare, not found void later.
     fn check_grant_component(&self, change: &Change) -> Result<()> {
         crate::v05::history::check_transition_members(self.d.auth.state(), &change.0, self.now_ms)
+    }
+
+    /// L2 (§17.1): each member the change adds (its `grant`, each `homes.appoint`) is judged
+    /// against the state the change's other components produce, not only the old state. A
+    /// member key that is a key of a controller the same change adds or updates, or of the vault
+    /// it puts in place, is void at activation (§3.3), so it is refused here, before any
+    /// signature is asked for. Key IDs are compared as well as points (§3.3).
+    fn check_members_against_change_keys(&self, change: &Change) -> Result<()> {
+        let mut keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+        let mut add = |p: &[u8]| {
+            keys.insert(p.to_vec());
+            keys.insert(crate::v05::ids::key_id(p).into_bytes());
+        };
+        if let Some(k) = change.0.get("keyring") {
+            for field in ["add", "update"] {
+                for v in k.get(field).and_then(Value::as_array).into_iter().flatten() {
+                    let c = Controller::parse(v.clone(), field)?;
+                    add(c.key().signing());
+                    if let Some(a) = c.key().agreement() {
+                        add(a);
+                    }
+                }
+            }
+        }
+        if let Some(v) = change.0.get("vault").and_then(|v| v.get("vault")) {
+            for field in ["signing", "agreement"] {
+                if let Some(s) = v.get(field).and_then(Value::as_str) {
+                    add(&crate::v05::encoding::decode_base64(s, 65)?);
+                }
+            }
+        }
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let appointed = change
+            .0
+            .get("homes")
+            .and_then(|h| h.get("appoint"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for item in appointed.chain(change.0.get("grant")) {
+            let Some(text) = item.get("request").and_then(Value::as_str) else {
+                continue;
+            };
+            let raw = crate::v05::encoding::decode_base64(text, 2 * bounds::REQUEST_BODY)?;
+            let req = Request::parse(&raw, true)?;
+            for p in [&req.signing, &req.agreement] {
+                require(
+                    !keys.contains(p.as_slice())
+                        && !keys.contains(crate::v05::ids::key_id(p).as_bytes()),
+                    "a member the change adds uses a key the same change puts in the keyring (§3.3)",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// §6.2: some controller holds `control`. Refused at prepare when a change removes or
@@ -1275,6 +1405,7 @@ impl Account {
         signers: &[String],
         rule: TransitionRule,
     ) -> Result<PendingAction> {
+        self.refuse_if_stopped()?;
         if self.d.verdict.rollback {
             return Err(Failure::Refused(Reason::Rollback));
         }
@@ -1564,6 +1695,7 @@ impl Account {
         not_before_ms: i64,
         expires_ms: i64,
     ) -> Result<PendingAction> {
+        self.refuse_call_if_stopped()?;
         let me = self.me_member()?;
         crate::v05::write::check_issued(not_before_ms)?;
         crate::v05::write::check_issued(expires_ms)?;
@@ -1610,6 +1742,9 @@ impl Account {
         request_id: [u8; 32],
         target: CallTarget,
     ) -> Result<PendingAction> {
+        // A stopped reader builds no call (§1 "A stop", §12.3 step 4): refused before a
+        // signature is asked for.
+        self.refuse_call_if_stopped()?;
         let view = self.call_view()?;
         let st = self.d.auth.state();
         let seq = st.history().len() as u64;
@@ -1670,6 +1805,7 @@ impl Account {
         call: &HomeCall,
         request_id: [u8; 32],
     ) -> Result<PendingAction> {
+        self.refuse_call_if_stopped()?;
         require(
             call.method.bytes().all(|b| b.is_ascii_uppercase()) && !call.method.is_empty(),
             "the method is an upper-case HTTP method",
@@ -1742,6 +1878,12 @@ impl Account {
             &action.account == self.d.auth.account(),
             "the action is for another account",
         )?;
+        // An action prepared before the account stopped is refused here with the result its begin
+        // would now give, and dropped (§1 "A stop"): nothing is signed into an envelope, returned or
+        // stored after the stop. Every finish of a prepared action passes here (`record_due` too:
+        // it records nothing once stopped; the entry that makes a raise final is recorded while the
+        // account is not yet stopped).
+        self.refuse_stale(&action)?;
         let info = action.info;
         let Stage::Sign(stage) = action.stage else {
             return Err(malformed("the PRF assertions have not been provided"));
@@ -1949,6 +2091,13 @@ impl Account {
         match &d.verdict.stop {
             None | Some(Stop::Held { .. }) => {}
             same if *same == self.d.verdict.stop => {}
+            // Recording the entry that makes a layout raise final (§1 "A stop", §13.6: before
+            // the raise is final a 0.5 reader records it as any activation): the account is
+            // then stopped, a verified state, and builds nothing more.
+            Some(Stop::Failed { seq, .. })
+                if self.d.verdict.stopped.is_none()
+                    && d.verdict.stopped == Some(*seq)
+                    && d.auth.state().stopped_at() == Some(*seq) => {}
             Some(Stop::Fork { .. }) => return Err(Failure::Refused(Reason::Fork)),
             Some(Stop::Failed { failure, .. }) => return Err(failure.clone()),
         }

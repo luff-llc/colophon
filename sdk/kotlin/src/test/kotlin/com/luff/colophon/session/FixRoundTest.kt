@@ -148,8 +148,8 @@ class FixRoundTest {
                 privateDirectory = Files.createTempDirectory("colophon-kotlin-hung-").toFile(), keys = first.member, ownerController = hung,
                 createWithoutHome = true, deviceSecrets = MemoryDeviceSecrets()))
             third.restore()
-            val request = third.requests.single()
-            val job = async { third.approve(request) }
+            val scanned = third.scanRequest(second.session.exportRequest())
+            val job = async { third.approve(scanned.request, scanned.pairing) }
             withTimeout(10_000) { prompting.await() }
             job.cancel()
             val locked = withTimeoutOrNull(5_000) { third.lock(); true }

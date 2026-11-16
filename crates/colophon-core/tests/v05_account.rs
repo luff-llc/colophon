@@ -450,9 +450,16 @@ fn admit(f: &mut Fixture, member: &str, label: &str, kind: &str, asked: Value, g
     let host = &f.host;
     let req = request_for(f, host, member, label, kind, asked, f.account.now_ms());
     let seed = f.host.fresh();
+    // The approving device scanned the request from the joining device (§7.3, §9.1).
+    let pairing = colophon_core::v05::pairing::scanned_request(
+        f.account.id(),
+        &req.raw,
+        FailureLimiter::new().permit(f.account.now_ms()).unwrap(),
+    )
+    .unwrap();
     let action = f
         .account
-        .begin_approve(&req.raw, granted, &[f.d.clone()], seed)
+        .begin_approve(&req.raw, granted, &[f.d.clone()], seed, pairing)
         .unwrap();
     run(&mut f.account, &f.host, action);
 }

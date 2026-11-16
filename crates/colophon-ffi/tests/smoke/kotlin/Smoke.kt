@@ -76,7 +76,7 @@ fun main() {
     check(inputs.size == 1 && inputs[0].kind == UnlockKind.ECDH, "the slot asks for one ECDH")
     engine.finishUnlockSlot(slot.index, listOf(UnlockSecret(UnlockKind.ECDH, ecdh(macAgree, inputs[0].enc))))
     check(engine.isUnlocked(), "unlocked from the host's ECDH result")
-    check(engine.status().kind == StatusKind.OK && engine.controllers().size == 1, "typed status and controllers")
+    check(engine.status().kind == StatusKind.OK && engine.status().stopped == null && engine.controllers().size == 1, "typed status, not stopped, and controllers")
     check(engine.controllers()[0].roles == listOf(ControllerRole.APPROVE, ControllerRole.CONTROL) && engine.identity().kind == AccountIdentityKind.CONTROLLER, "roles and identity are enums")
 
     val action = engine.beginAddController(controller(lap, lapAgree, "Laptop", listOf(ControllerRole.APPROVE)), AddMode.IMMEDIATE, listOf(id), RuleKind.CONTROL, ByteArray(0))

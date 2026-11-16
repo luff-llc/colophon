@@ -132,7 +132,8 @@ fn view_for(dir: &Path, case: &Value, now: i64) -> Result<AccountView, String> {
     let ver = &case["verifier"];
     let objects = objects_for(dir, ver);
     let verdict = verify_history(&objects, &Persisted::default(), now);
-    if verdict.stop.is_some() {
+    // A stopped history still gives a view: the call is judged, and is `unavailable` (§1 "A stop").
+    if verdict.stop.is_some() && !verdict.is_stopped() {
         return Err(format!(
             "history: {} at seq {}",
             verdict.code(),
@@ -915,6 +916,12 @@ fn classify(rel: &str) -> Option<&'static str> {
     None
 }
 
+/// Name prefixes of the freeze package's `rules/` cases (`docs/design-freeze-package.md`: F2,
+/// the current principal, and F3, the layout door); each is a history case. `records/`,
+/// `calls/`, `heads/`, `succession/` and `upgrade/` cases are routed by their directory,
+/// whatever their name.
+const FREEZE_RULES_PREFIXES: [&str; 2] = ["f2-", "f3-"];
+
 fn is_history_case(rel: &str) -> bool {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     rel == "account"
@@ -922,10 +929,14 @@ fn is_history_case(rel: &str) -> bool {
             && (name.starts_with("t-")
                 || name.starts_with("i-")
                 || name.starts_with("row-")
+                || FREEZE_RULES_PREFIXES.iter().any(|p| name.starts_with(p))
                 || name == "equivocation"
                 || name == "equivocation-displaced"
                 || name == "rollback"))
 }
+
+/// What an unclassified case reports; the runner counts it as a failure.
+const UNCLASSIFIED: &str = "unclassified: not run";
 
 #[test]
 fn candidate_conformance() {
@@ -1021,11 +1032,27 @@ fn candidate_conformance() {
         } else if name.starts_with("veto-webauthn-") {
             run_veto_sig(&dir, &case)
         } else {
-            Outcome::NotImplemented("unclassified: not run")
+            Outcome::NotImplemented(UNCLASSIFIED)
         };
         results.push((rel, outcome));
     }
     results.push(("pairing/pairing.json".into(), run_pairing()));
+    // Every other file under `pairing/` is named here or fails as unclassified. The invite
+    // vector (F8) has no runner until `v05/invite.rs` exists (W2-C).
+    let mut pairing_files: Vec<String> = fs::read_dir(cand().join("pairing"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "pairing.json")
+        .collect();
+    pairing_files.sort();
+    for n in pairing_files {
+        let o = if n == "invite.json" {
+            Outcome::NotImplemented("the invite object's runner comes with v05/invite.rs (W2-C)")
+        } else {
+            Outcome::NotImplemented(UNCLASSIFIED)
+        };
+        results.push((format!("pairing/{n}"), o));
+    }
 
     let (mut pass, mut fail, mut ni) = (0, 0, 0);
     let mut unexpected = Vec::new();
@@ -1038,6 +1065,12 @@ fn candidate_conformance() {
             Outcome::Fail(s) => {
                 fail += 1;
                 println!("FAIL  {rel}: {s}");
+                unexpected.push(rel.clone());
+            }
+            // A case no runner classifies is a failure, never a quiet skip.
+            Outcome::NotImplemented(why) if *why == UNCLASSIFIED => {
+                fail += 1;
+                println!("FAIL  {rel}: {why}");
                 unexpected.push(rel.clone());
             }
             Outcome::NotImplemented(why) => {
@@ -1103,7 +1136,8 @@ fn run_pairing() -> Outcome {
         let r = ExistingWaiting::receive_commitment(
             &account,
             n32(want_c.clone()),
-            limiter.permit(0).unwrap(),
+            // One live ceremony per ledger: each refuse row is its own session.
+            colophon_core::v05::pairing::FailureLimiter::new().permit(0).unwrap(),
         )
         .send_nonce(na)
         .0

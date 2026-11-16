@@ -1133,6 +1133,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_end_sessions(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_grant_transition(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_import(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountengine_begin_keyring(
@@ -1351,6 +1353,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountmove_steps(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_accountpairing_abandon(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountpairing_commitment(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountpairing_confirm(
@@ -1369,9 +1373,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_accountpairing_stage(
     ): Int
+    external fun uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_generation(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_is_live(
+    ): Int
     external fun uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_may_start(
     ): Int
-    external fun uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_to_state(
+    external fun uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_seal(
     ): Int
     external fun uniffi_colophon_ffi_checksum_method_pairingtransferkey_public(
     ): Int
@@ -1453,7 +1461,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_accountpairing_join_qr(
     ): Int
-    external fun uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_from_state(
+    external fun uniffi_colophon_ffi_checksum_constructor_accountpairing_scan_request(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_fresh(
+    ): Int
+    external fun uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_open(
     ): Int
     external fun uniffi_colophon_ffi_checksum_constructor_pairingtransferkey_create(
     ): Int
@@ -1811,13 +1823,15 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_add_slot(`ptr`: Long,`signer`: RustBuffer.ByValue,`plan`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_approve(`ptr`: Long,`request`: RustBuffer.ByValue,`termsJson`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_approve(`ptr`: Long,`request`: RustBuffer.ByValue,`termsJson`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`pairing`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_blob(`ptr`: Long,`namespace`: RustBuffer.ByValue,`mediaType`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_end_my_sessions(`ptr`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_end_sessions(`ptr`: Long,`member`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_accountengine_begin_grant_transition(`ptr`: Long,`changeJson`: RustBuffer.ByValue,`signers`: RustBuffer.ByValue,`rule`: RustBuffer.ByValue,`pairing`: Long,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_colophon_ffi_fn_method_accountengine_begin_import(`ptr`: Long,`namespace`: RustBuffer.ByValue,`batchJson`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -2059,6 +2073,10 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_colophon_ffi_fn_constructor_accountpairing_join_qr(`account`: RustBuffer.ByValue,`e`: RustBuffer.ByValue,`nb`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_colophon_ffi_fn_constructor_accountpairing_scan_request(`account`: RustBuffer.ByValue,`request`: RustBuffer.ByValue,`limiter`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_accountpairing_abandon(`ptr`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_colophon_ffi_fn_method_accountpairing_commitment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_method_accountpairing_confirm(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2081,11 +2099,17 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_colophon_ffi_fn_free_pairingfailurelimiter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_from_state(`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_fresh(uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_open(`sealed`: RustBuffer.ByValue,`deviceKey`: RustBuffer.ByValue,`account`: RustBuffer.ByValue,`floor`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_pairingfailurelimiter_generation(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_colophon_ffi_fn_method_pairingfailurelimiter_is_live(`ptr`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_colophon_ffi_fn_method_pairingfailurelimiter_may_start(`ptr`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    external fun uniffi_colophon_ffi_fn_method_pairingfailurelimiter_to_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_colophon_ffi_fn_method_pairingfailurelimiter_seal(`ptr`: Long,`deviceKey`: RustBuffer.ByValue,`account`: RustBuffer.ByValue,`entropy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_colophon_ffi_fn_clone_pairingtransferkey(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -2769,7 +2793,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot() and 0xFFFF) != 16458) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() and 0xFFFF) != 48078) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() and 0xFFFF) != 12821) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_blob() and 0xFFFF) != 26001) {
@@ -2779,6 +2803,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_end_sessions() and 0xFFFF) != 46090) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_grant_transition() and 0xFFFF) != 63919) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_import() and 0xFFFF) != 64191) {
@@ -2820,7 +2847,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_suspend() and 0xFFFF) != 12346) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_transition() and 0xFFFF) != 15310) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_transition() and 0xFFFF) != 1156) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountengine_begin_unlock_epochs() and 0xFFFF) != 60825) {
@@ -3108,10 +3135,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountmove_steps() and 0xFFFF) != 32622) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountpairing_abandon() and 0xFFFF) != 34220) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountpairing_commitment() and 0xFFFF) != 18527) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_accountpairing_confirm() and 0xFFFF) != 787) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_accountpairing_confirm() and 0xFFFF) != 36711) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_accountpairing_digits() and 0xFFFF) != 52369) {
@@ -3135,10 +3165,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_method_accountpairing_stage() and 0xFFFF) != 51135) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_may_start() and 0xFFFF) != 10122) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_generation() and 0xFFFF) != 25863) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_to_state() and 0xFFFF) != 28839) {
+    if ((lib.uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_is_live() and 0xFFFF) != 43796) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_may_start() and 0xFFFF) != 3427) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_seal() and 0xFFFF) != 33154) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_method_pairingtransferkey_public() and 0xFFFF) != 26060) {
@@ -3261,7 +3297,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_colophon_ffi_checksum_constructor_accountpairing_join_qr() and 0xFFFF) != 17885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_from_state() and 0xFFFF) != 60989) {
+    if ((lib.uniffi_colophon_ffi_checksum_constructor_accountpairing_scan_request() and 0xFFFF) != 60272) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_fresh() and 0xFFFF) != 61851) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_open() and 0xFFFF) != 48477) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_colophon_ffi_checksum_constructor_pairingtransferkey_create() and 0xFFFF) != 49812) {
@@ -5198,9 +5240,13 @@ public interface AccountEngineInterface {
     fun `beginAddSlot`(`signer`: kotlin.String, `plan`: SlotPlan, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
-     * Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
+     * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+     * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+     * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+     * `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+     * it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
      */
-    fun `beginApprove`(`request`: kotlin.ByteArray, `termsJson`: kotlin.String, `signers`: List<kotlin.String>, `entropy`: kotlin.ByteArray): AccountAction
+    fun `beginApprove`(`request`: kotlin.ByteArray, `termsJson`: kotlin.String, `signers`: List<kotlin.String>, `pairing`: AccountPairing, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
      * Start a streaming blob upload (32 fresh bytes).
@@ -5216,6 +5262,13 @@ public interface AccountEngineInterface {
      * End a member's sessions. No entropy.
      */
     fun `beginEndSessions`(`member`: kotlin.String, `signers`: List<kotlin.String>, `entropy`: kotlin.ByteArray): AccountAction
+    
+    /**
+     * A pending transition whose `change_json` carries a `grant` component (an import grant,
+     * §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+     * with a `grant`. No entropy.
+     */
+    fun `beginGrantTransition`(`changeJson`: kotlin.String, `signers`: List<kotlin.String>, `rule`: RuleKind, `pairing`: AccountPairing, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
      * An import batch (the 0.4 batch JSON) under a grant that carries `import`. 32 bytes.
@@ -5285,7 +5338,9 @@ public interface AccountEngineInterface {
     fun `beginSuspend`(`key`: kotlin.String, `transition`: kotlin.String, `signer`: kotlin.String, `entropy`: kotlin.ByteArray): AccountAction
     
     /**
-     * A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+     * A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+     * component is `refused:outOfScope` here: it spends a confirmed pairing through
+     * `begin_grant_transition` (§9.1). No entropy.
      */
     fun `beginTransition`(`changeJson`: kotlin.String, `signers`: List<kotlin.String>, `rule`: RuleKind, `entropy`: kotlin.ByteArray): AccountAction
     
@@ -5989,9 +6044,13 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
 
     
     /**
-     * Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
+     * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+     * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+     * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+     * `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+     * it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
      */
-    @Throws(AccountException::class)override fun `beginApprove`(`request`: kotlin.ByteArray, `termsJson`: kotlin.String, `signers`: List<kotlin.String>, `entropy`: kotlin.ByteArray): AccountAction {
+    @Throws(AccountException::class)override fun `beginApprove`(`request`: kotlin.ByteArray, `termsJson`: kotlin.String, `signers`: List<kotlin.String>, `pairing`: AccountPairing, `entropy`: kotlin.ByteArray): AccountAction {
             return FfiConverterTypeAccountAction.lift(
     callWithHandle {
     uniffiRustCallWithError(AccountException) { _status ->
@@ -6001,6 +6060,7 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
         FfiConverterByteArray.lower(`request`),
         FfiConverterString.lower(`termsJson`),
         FfiConverterSequenceString.lower(`signers`),
+        FfiConverterTypeAccountPairing.lower(`pairing`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }
     }
@@ -6059,6 +6119,30 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
         
         FfiConverterString.lower(`member`),
         FfiConverterSequenceString.lower(`signers`),
+        FfiConverterByteArray.lower(`entropy`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * A pending transition whose `change_json` carries a `grant` component (an import grant,
+     * §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+     * with a `grant`. No entropy.
+     */
+    @Throws(AccountException::class)override fun `beginGrantTransition`(`changeJson`: kotlin.String, `signers`: List<kotlin.String>, `rule`: RuleKind, `pairing`: AccountPairing, `entropy`: kotlin.ByteArray): AccountAction {
+            return FfiConverterTypeAccountAction.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accountengine_begin_grant_transition(
+        it,
+        
+        FfiConverterString.lower(`changeJson`),
+        FfiConverterSequenceString.lower(`signers`),
+        FfiConverterTypeRuleKind.lower(`rule`),
+        FfiConverterTypeAccountPairing.lower(`pairing`),
         FfiConverterByteArray.lower(`entropy`),_status)
 }
     }
@@ -6346,7 +6430,9 @@ open class AccountEngine: Disposable, AutoCloseable, AccountEngineInterface
 
     
     /**
-     * A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+     * A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+     * component is `refused:outOfScope` here: it spends a confirmed pairing through
+     * `begin_grant_transition` (§9.1). No entropy.
      */
     @Throws(AccountException::class)override fun `beginTransition`(`changeJson`: kotlin.String, `signers`: List<kotlin.String>, `rule`: RuleKind, `entropy`: kotlin.ByteArray): AccountAction {
             return FfiConverterTypeAccountAction.lift(
@@ -8840,12 +8926,19 @@ public object FfiConverterTypeAccountMove: FfiConverter<AccountMove, Long> {
 public interface AccountPairingInterface {
     
     /**
+     * End the session now, in any stage before it is confirmed: abandoned, it stays counted in
+     * the existing device's ledger (§7.3). A confirmed or spent session is left as it is.
+     */
+    fun `abandon`(`nowMs`: kotlin.Long)
+    
+    /**
      * The joiner's commitment `C` (32 bytes), to send first.
      */
     fun `commitment`(): kotlin.ByteArray
     
     /**
-     * The person saw the same code on both screens.
+     * The person saw the same code on both screens. On the existing device the ceremony's
+     * reservation goes back: a confirmed pairing is not a failure.
      */
     fun `confirm`()
     
@@ -8997,6 +9090,24 @@ open class AccountPairing: Disposable, AutoCloseable, AccountPairingInterface
 
     
     /**
+     * End the session now, in any stage before it is confirmed: abandoned, it stays counted in
+     * the existing device's ledger (§7.3). A confirmed or spent session is left as it is.
+     */
+    @Throws(AccountException::class)override fun `abandon`(`nowMs`: kotlin.Long)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_accountpairing_abandon(
+        it,
+        
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * The joiner's commitment `C` (32 bytes), to send first.
      */
     @Throws(AccountException::class)override fun `commitment`(): kotlin.ByteArray {
@@ -9014,7 +9125,8 @@ open class AccountPairing: Disposable, AutoCloseable, AccountPairingInterface
 
     
     /**
-     * The person saw the same code on both screens.
+     * The person saw the same code on both screens. On the existing device the ceremony's
+     * reservation goes back: a confirmed pairing is not a failure.
      */
     @Throws(AccountException::class)override fun `confirm`()
         = 
@@ -9234,6 +9346,29 @@ open class AccountPairing: Disposable, AutoCloseable, AccountPairingInterface
         FfiConverterString.lower(`account`),
         FfiConverterByteArray.lower(`e`),
         FfiConverterByteArray.lower(`nb`),_status)
+}
+    )
+    }
+    
+
+        
+    /**
+     * The existing device scanned a membership request from the joining device's screen
+     * (§7.3, §7a): the request must verify and name `account`; the pairing is then confirmed
+     * for its `member.signing` and may approve that one request. The host attests the scan.
+     * A bad request is `pairing:invalidRequest` or `pairing:wrongAccount` and counts as a
+     * failure.
+     */
+    @Throws(AccountException::class) fun `scanRequest`(`account`: kotlin.String, `request`: kotlin.ByteArray, `limiter`: PairingFailureLimiter, `nowMs`: kotlin.Long): AccountPairing {
+            return FfiConverterTypeAccountPairing.lift(
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_constructor_accountpairing_scan_request(
+    
+        
+        FfiConverterString.lower(`account`),
+        FfiConverterByteArray.lower(`request`),
+        FfiConverterTypePairingFailureLimiter.lower(`limiter`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     )
     }
@@ -13481,27 +13616,42 @@ public object FfiConverterTypeNativeLibrary: FfiConverter<NativeLibrary, Long> {
 
 
 /**
- * The five-failures-per-hour ledger of an existing device (§7.3). Plain data the host keeps:
- * persist `to_state` and restore it with `from_state`, or the limit holds only for this process.
+ * The pairing ledger of an existing device (§7.3): five failed sessions an hour, one ceremony at
+ * a time. The host persists it sealed: `seal` after every change, `open` on start. An edited,
+ * foreign or unreadable ledger, or one older than the generation the host recorded beside it,
+ * opens as a spent budget.
  */
 public interface PairingFailureLimiterInterface {
     
     /**
-     * Whether a session may start now.
+     * The ledger's generation, raised by every change: record it beside the sealed ledger.
+     */
+    fun `generation`(): kotlin.ULong
+    
+    /**
+     * Whether a ceremony is live now.
+     */
+    fun `isLive`(`nowMs`: kotlin.Long): kotlin.Boolean
+    
+    /**
+     * Whether a session may start now (none live, budget left).
      */
     fun `mayStart`(`nowMs`: kotlin.Long): kotlin.Boolean
     
     /**
-     * The state to persist (an opaque text the host stores and gives back).
+     * The ledger sealed for `account` under the device-held key, to persist (with `generation`
+     * recorded beside it) before acting on the change. 32 bytes of entropy.
      */
-    fun `toState`(): kotlin.String
+    fun `seal`(`deviceKey`: kotlin.ByteArray, `account`: kotlin.String, `entropy`: kotlin.ByteArray): kotlin.ByteArray
     
     companion object
 }
 
 /**
- * The five-failures-per-hour ledger of an existing device (§7.3). Plain data the host keeps:
- * persist `to_state` and restore it with `from_state`, or the limit holds only for this process.
+ * The pairing ledger of an existing device (§7.3): five failed sessions an hour, one ceremony at
+ * a time. The host persists it sealed: `seal` after every change, `open` on start. An edited,
+ * foreign or unreadable ledger, or one older than the generation the host recorded beside it,
+ * opens as a spent budget.
  */
 open class PairingFailureLimiter: Disposable, AutoCloseable, PairingFailureLimiterInterface
 {
@@ -13606,7 +13756,42 @@ open class PairingFailureLimiter: Disposable, AutoCloseable, PairingFailureLimit
 
     
     /**
-     * Whether a session may start now.
+     * The ledger's generation, raised by every change: record it beside the sealed ledger.
+     */
+    @Throws(AccountException::class)override fun `generation`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_pairingfailurelimiter_generation(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Whether a ceremony is live now.
+     */
+    @Throws(AccountException::class)override fun `isLive`(`nowMs`: kotlin.Long): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(AccountException) { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_method_pairingfailurelimiter_is_live(
+        it,
+        
+        FfiConverterLong.lower(`nowMs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Whether a session may start now (none live, budget left).
      */
     @Throws(AccountException::class)override fun `mayStart`(`nowMs`: kotlin.Long): kotlin.Boolean {
             return FfiConverterBoolean.lift(
@@ -13624,15 +13809,19 @@ open class PairingFailureLimiter: Disposable, AutoCloseable, PairingFailureLimit
 
     
     /**
-     * The state to persist (an opaque text the host stores and gives back).
+     * The ledger sealed for `account` under the device-held key, to persist (with `generation`
+     * recorded beside it) before acting on the change. 32 bytes of entropy.
      */
-    @Throws(AccountException::class)override fun `toState`(): kotlin.String {
-            return FfiConverterString.lift(
+    @Throws(AccountException::class)override fun `seal`(`deviceKey`: kotlin.ByteArray, `account`: kotlin.String, `entropy`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
     callWithHandle {
     uniffiRustCallWithError(AccountException) { _status ->
-    UniffiLib.uniffi_colophon_ffi_fn_method_pairingfailurelimiter_to_state(
+    UniffiLib.uniffi_colophon_ffi_fn_method_pairingfailurelimiter_seal(
         it,
-        _status)
+        
+        FfiConverterByteArray.lower(`deviceKey`),
+        FfiConverterString.lower(`account`),
+        FfiConverterByteArray.lower(`entropy`),_status)
 }
     }
     )
@@ -13648,15 +13837,34 @@ open class PairingFailureLimiter: Disposable, AutoCloseable, PairingFailureLimit
     companion object {
         
     /**
-     * A limiter from saved state, or a fresh one from an empty string.
+     * A new, empty ledger held in memory (a device that keeps none, or a test).
+     */ fun `fresh`(): PairingFailureLimiter {
+            return FfiConverterTypePairingFailureLimiter.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_fresh(
+    
+        _status)
+}
+    )
+    }
+    
+
+        
+    /**
+     * The ledger the host stored for `account` (empty when none), opened under the device-held
+     * key; `floor` is the generation the host recorded beside it (0 when none).
      */
-    @Throws(AccountException::class) fun `fromState`(`state`: kotlin.String): PairingFailureLimiter {
+    @Throws(AccountException::class) fun `open`(`sealed`: kotlin.ByteArray, `deviceKey`: kotlin.ByteArray, `account`: kotlin.String, `floor`: kotlin.ULong, `nowMs`: kotlin.Long): PairingFailureLimiter {
             return FfiConverterTypePairingFailureLimiter.lift(
     uniffiRustCallWithError(AccountException) { _status ->
-    UniffiLib.uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_from_state(
+    UniffiLib.uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_open(
     
         
-        FfiConverterString.lower(`state`),_status)
+        FfiConverterByteArray.lower(`sealed`),
+        FfiConverterByteArray.lower(`deviceKey`),
+        FfiConverterString.lower(`account`),
+        FfiConverterULong.lower(`floor`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     )
     }
@@ -16517,6 +16725,50 @@ public object FfiConverterTypeAccountSigningStep: FfiConverterRustBuffer<Account
             FfiConverterByteArray.write(value.`signingKey`, buf)
             FfiConverterOptionalString.write(value.`challenge`, buf)
             FfiConverterBoolean.write(value.`uv`, buf)
+    }
+}
+
+
+
+/**
+ * Where a reader stopped (§1 "A stop", §20): the seq of the activation whose final raise
+ * stopped it (or of the entry it judged `newerFormat`), and the layout the raise names
+ * (none for an entry of a newer format that is not a raise). Only from the verified
+ * history, never from a home's answer.
+ */
+data class AccountStop (
+    val `seq`: kotlin.ULong
+    , 
+    val `layout`: kotlin.ULong?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAccountStop: FfiConverterRustBuffer<AccountStop> {
+    override fun read(buf: ByteBuffer): AccountStop {
+        return AccountStop(
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AccountStop) = (
+            FfiConverterULong.allocationSize(value.`seq`) +
+            FfiConverterOptionalULong.allocationSize(value.`layout`)
+    )
+
+    override fun write(value: AccountStop, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`seq`, buf)
+            FfiConverterOptionalULong.write(value.`layout`, buf)
     }
 }
 
@@ -21626,6 +21878,14 @@ data class Status (
     val `detail`: kotlin.String?
     , 
     val `rollback`: kotlin.Boolean
+    , 
+    /**
+     * Set when this reader is stopped for the account (§1 "A stop"): a verified state, not a
+     * fault. The account was moved to a newer format; what this device holds stays
+     * readable and nothing new is built (writes `NewerFormat`, calls and exchange passes
+     * `Unavailable`).
+     */
+    val `stopped`: AccountStop?
     
 ){
     
@@ -21649,6 +21909,7 @@ public object FfiConverterTypeStatus: FfiConverterRustBuffer<Status> {
             FfiConverterOptionalULong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeAccountStop.read(buf),
         )
     }
 
@@ -21659,7 +21920,8 @@ public object FfiConverterTypeStatus: FfiConverterRustBuffer<Status> {
             FfiConverterOptionalString.allocationSize(value.`reason`) +
             FfiConverterOptionalULong.allocationSize(value.`stopSeq`) +
             FfiConverterOptionalString.allocationSize(value.`detail`) +
-            FfiConverterBoolean.allocationSize(value.`rollback`)
+            FfiConverterBoolean.allocationSize(value.`rollback`) +
+            FfiConverterOptionalTypeAccountStop.allocationSize(value.`stopped`)
     )
 
     override fun write(value: Status, buf: ByteBuffer) {
@@ -21670,6 +21932,7 @@ public object FfiConverterTypeStatus: FfiConverterRustBuffer<Status> {
             FfiConverterOptionalULong.write(value.`stopSeq`, buf)
             FfiConverterOptionalString.write(value.`detail`, buf)
             FfiConverterBoolean.write(value.`rollback`, buf)
+            FfiConverterOptionalTypeAccountStop.write(value.`stopped`, buf)
     }
 }
 
@@ -27189,6 +27452,38 @@ public object FfiConverterOptionalTypeAccountMember: FfiConverterRustBuffer<Acco
         } else {
             buf.put(1)
             FfiConverterTypeAccountMember.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeAccountStop: FfiConverterRustBuffer<AccountStop?> {
+    override fun read(buf: ByteBuffer): AccountStop? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeAccountStop.read(buf)
+    }
+
+    override fun allocationSize(value: AccountStop?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeAccountStop.allocationSize(value)
+        }
+    }
+
+    override fun write(value: AccountStop?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeAccountStop.write(value, buf)
         }
     }
 }

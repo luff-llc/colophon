@@ -66,7 +66,11 @@ private class CrossDriver {
     private lateinit var owner: StoredKeys
     private var pairing: AccountPairing? = null
     private var transferKey: PairingTransferKey? = null
-    private val limiter = PairingFailureLimiter.fromState("")
+    /** The approval ceremony's session on this device (§7.3, §9.1); on the approving device, the request that came with the commitment. */
+    private var approval: AccountPairing? = null
+    private var approvalRequest: ByteArray? = null
+    private val limiter = PairingFailureLimiter.fresh()
+    private var pairingAccount = ""
     private val refused = Collections.synchronizedList(ArrayList<String>())
     private fun state(): Map<String, Any?> {
         val s = session ?: return mapOf()
@@ -133,11 +137,16 @@ private class CrossDriver {
             }
             "scan" -> {
                 pairing?.close()
+                pairingAccount = text("account")
                 pairing = if (text("mode") == "qr") AccountPairing.existingScanQr(text("account"), data("qr"), limiter, 1000)
                     else AccountPairing.existingReceiveCommitment(text("account"), data("commitment"), limiter, 1000)
                 return true
             }
-            "nonce" -> return encode(pairing!!.sendNonce(data("na")))
+            "nonce" -> {
+                // The ledger is sealed (an app persists it) before the nonce leaves (§7.3).
+                limiter.seal(ByteArray(32) { 0x44 }, pairingAccount, ByteArray(32) { 1 })
+                return encode(pairing!!.sendNonce(data("na")))
+            }
             "receiveNonce" -> {
                 val r = pairing!!.receiveNonce(data("na"))
                 return if (r == null) mapOf("stage" to pairing!!.stage().name.lowercase()) else mapOf("e" to encode(r.e), "nb" to encode(r.nb), "digits" to pairing!!.digits())
@@ -158,7 +167,36 @@ private class CrossDriver {
             "refuseCalls" -> refusesCalls.set(c["enabled"] as Boolean)
             "sync" -> { refused.clear(); s.syncNow(); s.refresh() }
             "request" -> return encode(s.exportRequest())
-            "approve" -> { s.importRequest(data("request")); s.approve(s.requests.first()) }
+            // Approval pairs the two devices by the six-digit code through their sessions (§7.3, §9.1). The orchestrator
+            // only carries the messages; each half runs in its own process.
+            "approvalJoin" -> {
+                val request = s.exportRequest()
+                approval = s.beginJoinPairing()
+                return mapOf("request" to encode(request), "commitment" to encode(approval!!.commitment()))
+            }
+            "approvalBegin" -> {
+                approvalRequest = data("request")
+                val start = s.beginApproval(data("commitment"))
+                approval = start.pairing
+                return encode(start.nonce)
+            }
+            "approvalReveal" -> {
+                val r = approval!!.receiveNonce(data("nonce")) ?: error("not a code-path joiner")
+                return mapOf("e" to encode(r.e), "nb" to encode(r.nb), "digits" to approval!!.digits())
+            }
+            "approvalCode" -> return s.approvalCode(approval!!, data("e"), data("nb"))
+            "approvalConfirm" -> {
+                val matches = approval!!.digits() == text("digits")
+                if (matches) approval!!.confirm() else s.rejectPairing(approval!!)
+                return mapOf("accepted" to matches, "stage" to approval!!.stage().name.lowercase())
+            }
+            "approve" -> {
+                val raw = approvalRequest ?: error("no paired request to approve")
+                val pairing = approval ?: error("no paired request to approve")
+                val info = accountRequestInfo(raw)
+                s.approve(AccessRequest(info.member, info.label, info.kind, info.termsJson, info.raw), pairing)
+                approval = null; approvalRequest = null
+            }
             "revoke" -> s.revoke(text("member"))
             "write" -> s.perform(DomainCommand("reading.saved", "capture", data("payload").toString(Charsets.UTF_8)), s.observedRevision)
             "ledger" -> return Json.parse(s.ledger())

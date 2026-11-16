@@ -1,10 +1,10 @@
 import { KeyCustodyError, HomeTransportError, SessionError, StorageError } from './errors.js';
 import { keyDescriptorOf, type AsyncKeyProvider } from './keys.js';
 import type { AccountMember, Home, SealedSeed } from './records.js';
-import type { HomeIssue } from './transport.js';
+import { HomeWords, type HomeIssue } from './transport.js';
 import {
   emptyNotices, failureMessage, noDuties, phaseUsable, samePhase, SessionRefusal,
-  type AccessRequest, type DomainCommand, type HomeFault, type HostDuties, type ObservedRevision, type SessionConfiguration, type SessionNotices,
+  type AccessRequest, type ApprovalStart, type DomainCommand, type HomeFault, type HostDuties, type ObservedRevision, type ScannedRequest, type SessionConfiguration, type SessionNotices,
   type SessionPhase, type SessionSnapshot, type SessionState, type Submission, type WriteReceipt,
 } from './types.js';
 import { glue, isAccountFault } from './wasm.js';
@@ -184,8 +184,32 @@ export class ColophonSession {
     }
   }
 
-  /** Approves a member's request with the owner controller. `termsJson` overrides the requested terms. */
-  approve(request: AccessRequest, termsJson?: string): Promise<void> { return this.owner(signal => this.worker.approve(request, termsJson, signal)); }
+  /**
+   * Approves a member's request with the owner controller, spending `pairing`: confirmed on this device for exactly this
+   * request's key (spec §9.1), by the six-digit code (`beginApproval`, `approvalCode`, then `pairing.confirm()` once the
+   * person saw the same digits on both devices) or by `scanRequest`. Any other pairing is refused; a pairing is spent
+   * whatever the answer. `termsJson` overrides the requested terms.
+   */
+  approve(request: AccessRequest, pairing: glue.AccountPairing, termsJson?: string): Promise<void> { return this.owner(signal => this.worker.approve(request, pairing, termsJson, signal)); }
+
+  // Pairing before approval (§7.3)
+
+  /**
+   * The joining device, code path: a pairing for this device's member key. Send `pairing.commitment()` to the approving
+   * device; when its nonce arrives, `pairing.receive_nonce(na)` gives the reveal to send back and `pairing.digits()` the six
+   * digits to show. On a match `pairing.confirm()`, otherwise `rejectPairing(pairing)`.
+   */
+  async beginJoinPairing(): Promise<glue.AccountPairing> { await this.restore(); return this.worker.beginJoinPairing(); }
+  /** The approving device's person starts a ceremony for one incoming commitment: send `nonce` back. Call it only when the person asked (an incoming commitment is never started by itself). One ceremony at a time; every start counts toward five an hour until it confirms (§7.3). */
+  async beginApproval(commitment: Uint8Array): Promise<ApprovalStart> { await this.restore(); return this.worker.beginApproval(commitment); }
+  /** The approving device received the reveal: the six digits to show. A reveal that does not open the commitment aborts and counts as a failure. */
+  approvalCode(pairing: glue.AccountPairing, e: Uint8Array, nb: Uint8Array): Promise<string> { return this.worker.approvalCode(pairing, e, nb); }
+  /** The codes differed or the person stopped: the session ends on this device and counts as a failure. */
+  rejectPairing(pairing: glue.AccountPairing): Promise<void> { return this.worker.rejectPairing(pairing); }
+  /** Ends a ceremony this device started (the person cancelled, the other device went away). It stays counted. */
+  abandonApproval(pairing: glue.AccountPairing): Promise<void> { return this.worker.abandonApproval(pairing); }
+  /** The approving device scanned a request from the joining device's screen (its canonical envelope, §9.1). Nothing is stored. */
+  async scanRequest(data: Uint8Array): Promise<ScannedRequest> { await this.restore(); return this.worker.scanRequest(data); }
   revoke(memberId: string): Promise<void> { return this.owner(signal => this.worker.revoke(memberId, signal)); }
   /** Leaves locally; does not revoke the member or delete the person's records. */
   async leave(): Promise<void> {
@@ -198,9 +222,7 @@ export class ColophonSession {
     try { const s = await this.worker.rejoin(keys); if (lease === this.context) { this.apply(s); this.startWatching(); this.startSyncLoop(); } }
     catch (error) { if (lease === this.context) this.fail(error); }
   }
-  /** Takes a request that arrived out of band (a file, a code) and shows it for approval. */
-  importRequest(data: Uint8Array): Promise<void> { return this.owner(() => this.worker.importRequest(data)); }
-  /** This device's own signed membership request, to hand to an approver. */
+  /** This device's own signed membership request (its canonical envelope), to show as a QR code for the approving device to scan (`scanRequest`). */
   async exportRequest(): Promise<Uint8Array> { await this.restore(); return this.worker.exportRequest(); }
 
   /** A bounded core query (`query_json`), fenced against namespace and identity changes. Returns the value's JSON. */
@@ -328,9 +350,21 @@ export class ColophonSession {
   private async runSync(signal: AbortSignal): Promise<boolean> {
     await this.restore();
     if (signal.aborted) return false;
+    // With no library there is nothing to exchange. A pass here would refresh to `noLibrary` and erase what a failed
+    // `create()` just published (its `failed` phase and error), which an app would see as a missing error.
+    if (this.current.libraryId === undefined) return false;
+    // A stopped account runs no exchange (spec §1 "A stop"): not a failure, and nothing to retry.
+    if (this.phase.kind === 'stopped') { this.set({ syncState: { kind: 'disabled' } }); return true; }
     this.set({ syncState: { kind: 'syncing' } });
     try {
       const result = await this.worker.exchange(signal);
+      if (result.stopped) { this.set({ syncState: { kind: 'disabled' } }); await this.refreshKeeping(true); return true; }
+      // A home that answered `503 {"result":"unavailable"}` is not available: shown so, retried with backoff (never as this
+      // device being stopped, which only its own verified history decides).
+      if (result.homeUnavailable && !result.changed) {
+        this.set({ homeFaults: result.faults, homeIssues: result.issues, syncState: { kind: 'offline', reason: HomeWords.unavailable } });
+        return false;
+      }
       this.set({ homeFaults: result.faults, homeIssues: result.issues, lastSyncedMs: Date.now(),
         syncState: result.unauthorized ? { kind: 'unauthorized' } : result.failed ? { kind: 'error', reason: 'a pass could not finish: the engine was still waiting' } : { kind: 'idle' } });
       if (result.changed || this.phase.kind !== 'ready') await this.refreshKeeping(true);
@@ -363,7 +397,9 @@ export class ColophonSession {
         const ok = this.phase.kind === 'locked' ? true : await this.syncNow(signal);
         failures = ok ? 0 : failures + 1;
         // Success: poll after duties.pollIntervalMs or when a local change arrives. Failure: capped, jittered backoff.
-        const wait = ok ? this.duties.pollIntervalMs : Math.min(60, 2 ** Math.max(0, failures - 1)) * (0.5 + Math.random() / 2) * 1000;
+        // Stopped: no timer and no backoff. Only an event wakes the loop (the longest timer a runtime keeps), and each pass
+        // returns at once without contacting a home.
+        const wait = this.phase.kind === 'stopped' ? 2_147_483_647 : ok ? this.duties.pollIntervalMs : Math.min(60, 2 ** Math.max(0, failures - 1)) * (0.5 + Math.random() / 2) * 1000;
         const woken = new AbortController();
         this.wakeSync = () => woken.abort();
         await sleep(wait, AbortSignal.any([signal, woken.signal]));
@@ -419,6 +455,9 @@ export class ColophonSession {
     } else this.set({ lastError: describe(error) });
   }
   private fail(error: unknown): void {
+    // A stopped account refuses every write (`newerFormat`) and every call (`unavailable`): that is the stopped phase the
+    // person already sees, not a new fault, so the phase and the readable content stay.
+    if (this.phase.kind === 'stopped' && isAccountFault(error) && (error.kind === 'NewerFormat' || error.kind === 'Unavailable')) return;
     this.set({ lastError: describe(error) });
     let phase: SessionPhase;
     if (isAccountFault(error)) {

@@ -144,8 +144,11 @@ import Observation
             throw error
         }
     }
-    /// Approves a member's request with the owner controller (a passkey owner is asked to confirm).
-    public func approve(_ request: AccessRequest, grant: GrantOptions? = nil) async throws {
+    /// Approves a member's request with the owner controller (a passkey owner is asked to confirm), spending
+    /// `pairing`: confirmed on this device for exactly this request's key (spec §9.1), by the six-digit code
+    /// (`beginApproval`, `approvalCode`, then `pairing.confirm()` once the person saw the same digits on both
+    /// devices) or by `scanRequest`. Any other pairing is refused; a pairing is spent whatever the answer.
+    public func approve(_ request: AccessRequest, pairing: AccountPairing, grant: GrantOptions? = nil) async throws {
         await restore()
         let lease = context
         do {
@@ -153,9 +156,38 @@ import Observation
                 SessionWorker.terms(namespaces: options.namespaces ?? worker.configuration.namespaces,
                                     access: options.access ?? [.read, .write], expires: options.expires, budget: options.writeBudget)
             }
-            let snapshot = try await worker.approve(request, terms: terms)
+            let snapshot = try await worker.approve(request, pairing: pairing, terms: terms)
             if lease == context { apply(snapshot) }
         } catch { if lease == context { handleCommandError(error) }; throw error }
+    }
+
+    // MARK: Pairing before approval (§7.3)
+
+    /// The joining device, code path: a pairing for this device's member key. Send `pairing.commitment()` to the
+    /// approving device; when its nonce arrives, `pairing.receiveNonce(na:)` gives the reveal to send back and
+    /// `pairing.digits()` the six digits to show. The person compares them with the approving device's: on a
+    /// match `pairing.confirm()`, otherwise `rejectPairing(_:)` (and the approving device aborts too).
+    public func beginJoinPairing() async throws -> AccountPairing { await restore(); return try await worker.beginJoinPairing() }
+    /// The approving device's person starts a ceremony for one incoming commitment: send `nonce` back. Call it only
+    /// when the person asked (an incoming commitment is never started by itself). One ceremony at a time: while one is
+    /// live (not confirmed, rejected or abandoned, and younger than ten minutes) another is refused; every start counts
+    /// toward five an hour until it confirms (§7.3).
+    public func beginApproval(commitment: Data) async throws -> ApprovalStart {
+        await restore(); return try await worker.beginApproval(commitment: commitment)
+    }
+    /// The approving device received the joining device's reveal: the six digits to show. A reveal that does not
+    /// open the commitment aborts (`pairing:commitmentMismatch`) and counts as a failure.
+    public func approvalCode(pairing: AccountPairing, e: Data, nb: Data) async throws -> String {
+        try await worker.approvalCode(pairing: pairing, e: e, nb: nb)
+    }
+    /// The codes differed or the person stopped: the session ends on this device and counts as a failure.
+    public func rejectPairing(_ pairing: AccountPairing) async throws { try await worker.rejectPairing(pairing) }
+    /// Ends a ceremony this device started (the person cancelled, the other device went away). It stays counted.
+    public func abandonApproval(_ pairing: AccountPairing) async throws { try await worker.abandonApproval(pairing) }
+    /// The approving device scanned a request from the joining device's screen (its canonical envelope, §9.1).
+    /// Nothing is stored; approve the result's request with its pairing.
+    public func scanRequest(_ data: Data) async throws -> ScannedRequest {
+        await restore(); return try await worker.scanRequest(data)
     }
     public func revoke(memberID: String) async throws {
         await restore()
@@ -178,16 +210,8 @@ import Observation
         do { let snapshot = try await worker.rejoin(keys: keys); guard lease == context else { return }; apply(snapshot); await startWatching(); startSyncLoop() }
         catch { if lease == context { fail(error) } }
     }
-    /// Takes a request that arrived out of band (a file, AirDrop, a code) and shows it for approval. The file is read
-    /// on a background executor, never on the main actor.
-    public func importRequest(from url: URL) async throws { try await importRequest(try await BlobIO.readRequest(url)) }
-    public func importRequest(_ data: Data) async throws {
-        await restore()
-        let lease = context
-        do { let snapshot = try await worker.importRequest(data); if lease == context { apply(snapshot) } }
-        catch { if lease == context { handleCommandError(error) }; throw error }
-    }
-    /// This device's own signed membership request, to hand to an approver (a QR code, a file).
+    /// This device's own signed membership request (its canonical envelope), to show as a QR code for the approving
+    /// device to scan (`scanRequest`).
     public func exportRequest() async throws -> Data { await restore(); return try await worker.exportRequest() }
 
     /// Reads a bounded core query. Results are fenced against namespace and identity changes.
@@ -351,11 +375,20 @@ import Observation
     @ObservationIgnored private var syncChain: Task<Bool, Never>?
     private func runSync() async -> Bool {
         await restore()
+        // With no library there is nothing to exchange. A pass here would refresh to `noLibrary` and erase what a failed
+        // `create()` just published (its `failed` phase and error), which an app would see as a missing error.
+        guard libraryID != nil else { return false }
+        // A stopped account runs no exchange (spec §1 "A stop"): not a failure, and nothing to retry.
+        if phase.isStopped { syncState = .disabled; return true }
         if syncState != .syncing { syncState = .syncing }
         do {
             let result = try await worker.exchange()
             homeFaults = result.faults; homeIssues = result.issues
             lastSynced = .now
+            if result.stopped { syncState = .disabled; await refresh(preservingCommandFailure: true); return true }
+            // A home that answered `503 {"result":"unavailable"}` is not available: shown so, retried with backoff (never as
+            // this device being stopped, which only its own verified history decides).
+            if result.homeUnavailable, !result.changed { syncState = .offline(reason: HomeWords.unavailable); return false }
             syncState = result.unauthorized ? .unauthorized : result.failed ? .error(reason: "a pass could not finish: the engine was still waiting") : .idle
             if result.changed || phase != .ready { await refresh(preservingCommandFailure: true) }
             else if let snapshot = try? await worker.currentSnapshot() { apply(snapshot) }
@@ -387,6 +420,9 @@ import Observation
             while !Task.isCancelled {
                 guard let self else { return }
                 let ok = await self.syncNow()
+                // Stopped: no timer and no backoff. Only an event (a refresh, lock, unlock, an explicit `requestSync`) wakes the
+                // loop, and each pass returns at once without contacting a home.
+                if self.phase.isStopped { await self.syncSignal.wait(); continue }
                 failures = ok ? 0 : failures + 1
                 let signal = self.syncSignal
                 // Success: poll again after `duties.pollInterval` (recoveryDelay / 6, as §17.5 asks at least; 15 s while a
@@ -459,7 +495,7 @@ import Observation
         batchTask?.cancel(); batchTask = nil
         await refresh(preservingCommandFailure: true)
     }
-    public var hasUsableContent: Bool { usable && [.ready, .refreshing, .waitingForDownload, .retry].contains(phase) }
+    public var hasUsableContent: Bool { usable && ([.ready, .refreshing, .waitingForDownload, .retry].contains(phase) || phase.isStopped) }
 
     private func apply(_ snapshot: SessionSnapshot) {
         guard snapshot.revision >= revision else { return }
@@ -494,6 +530,9 @@ import Observation
     }
     private func fail(_ error: any Error) {
         if error is CancellationError { return }
+        // A stopped account refuses every write (`newerFormat`) and every call (`unavailable`): that is the stopped phase
+        // the person already sees, not a new fault, so the phase and the readable content stay.
+        if phase.isStopped, let colophon = error as? ColophonError, colophon.isNewerFormat || colophon.code.hasPrefix("unavailable") { return }
         lastError = error.localizedDescription
         switch error {
         case let colophon as ColophonError:

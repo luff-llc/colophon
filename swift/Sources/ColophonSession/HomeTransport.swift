@@ -122,9 +122,63 @@ public enum HomeProblem: Error, Equatable, Sendable {
     /// The engine still had a request outstanding after the pass was abandoned and run again once: the pass could not
     /// finish, and the exchange failed.
     case stillWaiting
-    /// A home refused this device's signed call. This is an unverified remote claim, not proof of revocation;
-    /// the pass stops, but local access and keys remain governed by verified account records.
-    case remoteCallRefused(code: String)
+    /// A home refused a request of this device with a `refused:<reason>` result (spec §14, §19). `code` is the result as
+    /// the home gave it, validated against the result grammar and bounded (`HomeRefusal`); a name this session does not
+    /// know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed` and `refused:notProvisioned`
+    /// included, is shown as received. It refuses only that request: an unverified remote claim, never a verified state of
+    /// the account (`refused:closed` is not evidence that anything was deleted, and `refused:revoked` is not proof of
+    /// revocation; only verified authority records deny local reads or change custody). A refused call (401/403) ends the
+    /// pass; any other refusal lets it go on. `retryAfterSeconds` is the home's `Retry-After`, honoured: the home is not
+    /// contacted again before then.
+    case remoteCallRefused(code: String, retryAfterSeconds: Int? = nil)
+    /// The home answered `503 {"result":"unavailable"}`: the home is not available (a stopped home answers so, §13.6). It
+    /// says nothing about this device or the account; the exchange is retried with backoff (and not before
+    /// `retryAfterSeconds`, when the home sent `Retry-After`).
+    case homeUnavailable(retryAfterSeconds: Int?)
+    /// This device asked to join and holds no grant for itself, and a home (or its own check) answered `refused:revoked`
+    /// for its call: in 0.5 that is the result for a member no grant names (`refused:notGranted` is reserved), so the
+    /// device is waiting for approval, not revoked. A device that holds its own verified revocation is `denied`.
+    case waitingForApproval
+}
+
+/// The one thing a session reads from a home's error answer: its `result`, only when it is a result the spec's §1 grammar
+/// allows (`ok`, `malformed`, `badSignature`, `newerFormat`, `unavailable`, or `refused:<reason>` with a reason of a
+/// lower-case letter then letters and digits, at most 48 characters), from a JSON body of at most 64 KiB. Every other byte
+/// of the body is dropped, never echoed: a hostile home could put record or call bytes there. With it, `Retry-After` in
+/// whole seconds (1 to 86,400).
+public struct HomeRefusal: Equatable, Sendable {
+    public static let named: Set<String> = ["ok", "malformed", "badSignature", "newerFormat", "unavailable"]
+    public let status: UInt32
+    public let code: String?
+    public let retryAfterSeconds: Int?
+    /// `503` with `{"result":"unavailable"}`: the home is not available.
+    public var isHomeUnavailable: Bool { status == 503 && code == "unavailable" }
+
+    /// Nil for a success, or an answer that carries neither a valid result nor a `Retry-After`.
+    public init?(status: UInt32, headers: [Header], body: Data) {
+        guard status >= 400 else { return nil }
+        let code = Self.result(of: body)
+        let retry = headers.first { $0.name.lowercased() == "retry-after" }.flatMap { Self.seconds($0.value) }
+        guard code != nil || retry != nil else { return nil }
+        self.status = status; self.code = code; self.retryAfterSeconds = retry
+    }
+    public static func isValid(_ text: String) -> Bool {
+        if named.contains(text) { return true }
+        guard text.hasPrefix("refused:"), text.utf8.count <= 8 + 48 else { return false }
+        let reason = text.dropFirst(8)
+        guard let first = reason.first, first.isASCII, first.isLowercase else { return false }
+        return reason.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+    }
+    static func result(of body: Data) -> String? {
+        guard body.count <= 64 * 1024, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let result = object["result"] as? String, isValid(result) else { return nil }
+        return result
+    }
+    static func seconds(_ text: String) -> Int? {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, t.count <= 6, t.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(t), (1...86_400).contains(n) else { return nil }
+        return n
+    }
 }
 
 public struct HomeIssue: Equatable, Sendable {
@@ -145,4 +199,10 @@ public typealias RelaySyncState = HomeSyncState
 public struct HomeFault: Equatable, Sendable {
     public let home: String
     public let fault: ExchangeFault
+}
+
+/// Words a host may show for a home's state.
+public enum HomeWords {
+    /// `HomeProblem.homeUnavailable`: the home answered `503 {"result":"unavailable"}`.
+    public static let unavailable = "The home is not available right now. This app will try again."
 }

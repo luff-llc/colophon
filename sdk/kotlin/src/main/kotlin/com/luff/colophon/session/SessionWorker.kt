@@ -9,6 +9,7 @@ import com.luff.colophon.AccountRequest
 import com.luff.colophon.AccountDenialReason
 import com.luff.colophon.AccountCreation
 import com.luff.colophon.AccountPairing
+import com.luff.colophon.AccountStop
 import com.luff.colophon.AddMode
 import com.luff.colophon.AuthorityObjects
 import com.luff.colophon.ByteString
@@ -28,7 +29,10 @@ import com.luff.colophon.KeepMode
 import com.luff.colophon.ListedPath
 import com.luff.colophon.Notices
 import com.luff.colophon.PairingTransferKey
+import com.luff.colophon.PairingFailureLimiter
+import com.luff.colophon.PairingStage
 import com.luff.colophon.Report
+import com.luff.colophon.RequestInfo
 import com.luff.colophon.RequestSpec
 import com.luff.colophon.RevokeKeep
 import com.luff.colophon.RuleKind
@@ -38,6 +42,7 @@ import com.luff.colophon.SignForm
 import com.luff.colophon.Signature
 import com.luff.colophon.SignerNeed
 import com.luff.colophon.SlotPlan
+import com.luff.colophon.Standing
 import com.luff.colophon.StandingKind
 import com.luff.colophon.StatusKind
 import com.luff.colophon.Store
@@ -103,6 +108,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     private var memberOpened = false
     private val journalFile = File(configuration.privateDirectory, "session.json")
     private val cache = SavedStateCache(configuration.privateDirectory)
+    /** Per home, the clock time (ms) before which it is not contacted again (a `Retry-After` it sent with a result). */
+    private val notBefore = HashMap<String, Long>()
+    /** Per home, the refusal that came with its `Retry-After`, shown again while the home is not contacted. */
+    private val waitingIssue = HashMap<String, HomeIssue>()
+    private suspend fun isStopped(engine: ColophonEngine): Boolean = engine.run { it.status() }.stopped != null
 
     // Gate
 
@@ -199,7 +209,8 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         fun objects(prefix: String) = entries.filter { it.path.startsWith(prefix) }.map { ByteString(medium.read(it.path)) }
         val pending = objects("transitions/") + objects("vetoes/") + objects("receipts/")
         val report = accountVerifyHistory(AuthorityObjects(objects("authority/"), pending, objects("heads/"), objects("predecessor/")), nowMs)
-        if (report.kind == StatusKind.NEWER_FORMAT) throw AccountException.NewerFormat(report.code, report.detail ?: "")
+        // A history that stops at a final layout raise still names its account: the engine opens it, stopped (spec §1).
+        if (report.kind == StatusKind.NEWER_FORMAT && report.account == null) throw AccountException.NewerFormat(report.code, report.detail ?: "")
         return report.account ?: throw AccountException.Malformed(report.code, report.detail ?: "the library's history does not verify")
     }
 
@@ -225,6 +236,8 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
 
     private suspend fun refreshEngine(entries: List<MediumEntry>) {
         val engine = engine ?: return
+        // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
+        if (isStopped(engine)) return
         val list = listed(entries)
         val at = nowMs
         engine.run { it.advance(at) }
@@ -252,7 +265,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     suspend fun saveCheckpoint() = gated {
         val engine = engine ?: return@gated
         val account = accountId ?: return@gated
-        if (lastPhase != SessionPhase.Ready) return@gated
+        if (lastPhase != SessionPhase.Ready && !lastPhase.isStopped) return@gated
+        persistSaved(engine, account)
+    }
+    /** Seals and stores the engine's saved state (inside the gate). A stopped account's saved state carries the stop as a floor. */
+    private suspend fun persistSaved(engine: ColophonEngine, account: String) {
         engine.run { it.verifyBatch(128u) }
         val state = engine.run { e -> withEntropy(32) { e.save(it) } }
         cache.save(account, state)
@@ -268,10 +285,31 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         return SessionSnapshot(phase, revision, revisions, accountId, memberId, members, requests, notices, homes, duties)
     }
 
+    /**
+     * The stopped phase (spec §1 "A stop"): only from the verified status. What the device holds stays readable as of the
+     * stop (revisions are published for the namespaces this member may read); no notices or duties are computed: a
+     * stopped reader answers no question of currency, and the host builds nothing.
+     */
+    private suspend fun stoppedSnapshot(engine: ColophonEngine, stop: AccountStop, standing: Standing): SessionSnapshot {
+        // The moment the stop is verified it is persisted (the sealed saved state carries it as a floor).
+        if (!lastPhase.isStopped) accountId?.let { persistSaved(engine, it) }
+        val members = engine.run { it.members() }
+        val homes = engine.run { it.homes() }
+        val revisions = LinkedHashMap<String, ULong>()
+        if (standing.kind == StandingKind.MEMBER && standing.member?.revokedAt == null) {
+            for (r in engine.run { it.revisions() }) {
+                if (r.namespace in configuration.libraryNamespaces && engine.run { it.access(r.namespace) } == null) revisions[r.namespace] = r.revision
+            }
+            if (revisions.isNotEmpty()) revisions["colophon.authority"] = engine.run { it.headSeq() }
+        }
+        return snapshot(SessionPhase.Stopped(stop.seq.toLong(), stop.layout?.toLong()), members, revisions = revisions, homes = homes)
+    }
+
     private suspend fun build(): SessionSnapshot {
         val engine = engine ?: return snapshot(SessionPhase.NoLibrary)
         val standing = engine.run { it.me() }
         val status = engine.run { it.status() }
+        status.stopped?.let { return stoppedSnapshot(engine, it, standing) }
         if (status.kind == StatusKind.NEWER_FORMAT) return snapshot(SessionPhase.UpdateRequired)
         val members = engine.run { it.members() }
         val pending = pendingRequests(members)
@@ -280,7 +318,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         when (standing.kind) {
             StandingKind.UNKNOWN -> {
                 ensureOwnRequest()
-                return snapshot(SessionPhase.WaitingForApproval(AccessRequest.code(memberId ?: "")), members, pending, homes = homes)
+                return snapshot(SessionPhase.WaitingForApproval, members, pending, homes = homes)
             }
             StandingKind.CONTROLLER -> phase = SessionPhase.Failed(SessionFailure.Other("this identity is a controller, not a member"))
             StandingKind.MEMBER -> {
@@ -473,11 +511,6 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         ensureOwnRequest()
         storage().read(requestPath(id))
     }
-    suspend fun importRequest(data: ByteArray): SessionSnapshot = gated {
-        val info = accountRequestInfo(data)
-        storage().write(listOf(MediumWrite(requestPath(info.member), info.raw)))
-        reconcile()
-    }
     private fun pendingRequests(members: List<AccountMember>): List<AccessRequest> {
         val known = members.map { it.id }.toSet()
         val out = ArrayList<AccessRequest>()
@@ -485,9 +518,125 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             if (!entry.path.startsWith("requests/")) continue
             val info = try { accountRequestInfo(storage().read(entry.path)) } catch (_: Exception) { continue }
             if (info.member in known || info.member == memberId) continue
-            out.add(AccessRequest(info.member, info.label, info.kind, info.termsJson, AccessRequest.code(info.member), info.raw))
+            out.add(accessRequest(info))
         }
         return out
+    }
+    private fun accessRequest(info: RequestInfo) = AccessRequest(info.member, info.label, info.kind, info.termsJson, info.raw)
+
+    // Pairing before approval (§7.3, §9.1)
+
+    /**
+     * The pairing ledger of this device (§7.3): five failed sessions an hour and one ceremony at a time, enforced by the
+     * core. Kept sealed under the device key in the private directory (`pairing-ledger.bin`), its generation recorded beside
+     * it (`pairing-ledger.generation`): a missing, edited or older ledger opens as a spent budget. It records sessions only,
+     * never a request.
+     *
+     * Every change happens under [withLedger]: a lock on `pairing-ledger.lock` in the private directory, taken by every
+     * process ([java.nio.channels.FileChannel.lock]) and every session in this process (a JVM-wide monitor per file, since
+     * one JVM cannot hold two file locks on one file), so two instances never change the ledger at once. Under the lock the
+     * ledger is reloaded whenever the stored generation is not the one this worker loaded or persisted, so a ceremony
+     * another instance started is seen live (`pairing:busy`), and a change is sealed and written before the lock goes.
+     */
+    private var ledger: Triple<String, PairingFailureLimiter, ULong>? = null
+    private val ledgerFile = File(configuration.privateDirectory, "pairing-ledger.bin")
+    private val ledgerFloorFile = File(configuration.privateDirectory, "pairing-ledger.generation")
+    private val ledgerLockFile = File(configuration.privateDirectory, "pairing-ledger.lock")
+    private fun storedGeneration(): ULong = AtomicFile.read(ledgerFloorFile, 64)?.toString(Charsets.UTF_8)?.trim()?.toULongOrNull() ?: 0uL
+    private fun loadLedger(account: String): PairingFailureLimiter {
+        val sealed = AtomicFile.read(ledgerFile, 1 shl 20) ?: ByteArray(0)
+        val opened = configuration.deviceSecrets.key(account).use { key -> key.lend { PairingFailureLimiter.open(sealed, it, account, storedGeneration(), nowMs) } }
+        ledger = Triple(account, opened, opened.generation())
+        return opened
+    }
+    /** Persists the sealed ledger, then its generation (the lock is held). Throws when either cannot be written: a start is then never answered with a nonce (fail closed). */
+    private fun keepLedger(account: String, limiter: PairingFailureLimiter) {
+        val sealed = configuration.deviceSecrets.key(account).use { key -> key.lend { k -> withEntropy(32) { limiter.seal(k, account, it) } } }
+        AtomicFile.write(ledgerFile, sealed)
+        val generation = limiter.generation()
+        AtomicFile.write(ledgerFloorFile, generation.toString().toByteArray(Charsets.UTF_8))
+        ledger = Triple(account, limiter, generation)
+    }
+    /** Runs [body] on the ledger under the cross-instance lock; a change it made is persisted before the lock is released, also when it throws. */
+    private fun <T> withLedger(account: String, body: (PairingFailureLimiter) -> T): T {
+        configuration.privateDirectory.mkdirs()
+        val monitor = ledgerMonitors.computeIfAbsent(ledgerLockFile.canonicalPath) { Any() }
+        synchronized(monitor) {
+            java.nio.channels.FileChannel.open(ledgerLockFile.toPath(), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE).use { channel ->
+                channel.lock().use {
+                    // The held ledger is current when the store still has the generation it was loaded or persisted at;
+                    // its own later changes (a confirmed pairing's release) are then kept. Otherwise another instance wrote.
+                    val held = ledger
+                    val limiter = if (held != null && held.first == account && held.third == storedGeneration()) held.second else loadLedger(account)
+                    val base = ledger?.third ?: 0uL
+                    try {
+                        val out = body(limiter)
+                        if (limiter.generation() != base) keepLedger(account, limiter)
+                        return out
+                    } catch (e: Exception) {
+                        if (runCatching { limiter.generation() }.getOrNull() != base) runCatching { keepLedger(account, limiter) }
+                        throw e
+                    }
+                }
+            }
+        }
+    }
+    /** Keeps a change the app made to the ledger directly (a confirmed pairing gives its reservation back); a lost write only leaves it counted. */
+    private fun keepLedgerChange(account: String) {
+        if (ledger?.first != account) return
+        runCatching { withLedger(account) { } }
+    }
+    /** The joining device: a code-path pairing for its own member key. Send `commitment()` with the request. */
+    suspend fun beginJoinPairing(): AccountPairing = gated {
+        loadJournal()
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        val e = memberKeys.publicKeys().signing
+        withEntropy(32) { AccountPairing.join(account, e, it) }
+    }
+    /**
+     * The approving device's person started a ceremony for one incoming commitment: a session that reserves one of the five
+     * an hour, and the nonce to send back. While another is live (in this session or any other instance over the same
+     * private directory) this is refused (`pairing:busy`); the reservation is persisted before the nonce exists, and if it
+     * cannot be, no nonce is produced.
+     */
+    suspend fun beginApproval(commitment: ByteArray): ApprovalStart = gated {
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        val at = nowMs
+        val pairing = withLedger(account) { AccountPairing.existingReceiveCommitment(account, commitment, it, at) }
+        ApprovalStart(pairing, withEntropy(32) { pairing.sendNonce(it) })
+    }
+    /** The approving device received the reveal: the six digits both screens show. A mismatch or a reveal after the ten-minute timeout aborts (it stays counted). */
+    suspend fun approvalCode(pairing: AccountPairing, e: ByteArray, nb: ByteArray): String = gated {
+        val account = accountId ?: throw SessionError.NotReady()
+        val at = nowMs
+        withLedger(account) { pairing.receiveReveal(e, nb, it, at) }
+    }
+    /** The codes did not match (or the person stopped): the session ends on this device, counted. */
+    suspend fun rejectPairing(pairing: AccountPairing) = gated {
+        val account = accountId ?: throw SessionError.NotReady()
+        val at = nowMs
+        withLedger(account) { limiter ->
+            when (pairing.stage()) {
+                PairingStage.CODE, PairingStage.REVEALED -> pairing.reject(limiter, at)
+                else -> pairing.abandon(at)
+            }
+        }
+    }
+    /** Ends a ceremony this device started, in any stage before it is confirmed. It stays counted. */
+    suspend fun abandonApproval(pairing: AccountPairing) = gated {
+        val at = nowMs
+        val account = accountId
+        if (account == null) pairing.abandon(at) else withLedger(account) { pairing.abandon(at) }
+    }
+    /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored about the request. */
+    suspend fun scanRequest(data: ByteArray): ScannedRequest = gated {
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        val at = nowMs
+        val pairing = withLedger(account) { AccountPairing.scanRequest(account, data, it, at) }
+        ScannedRequest(accessRequest(accountRequestInfo(data)), pairing)
     }
 
     // Owner operations
@@ -527,13 +676,16 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         return chosen.ifEmpty { listOf(ownerId) }
     }
 
-    suspend fun approve(request: AccessRequest, terms: String?): SessionSnapshot = gated {
+    /** Approves `request`, spending `pairing`: confirmed on this device for exactly the request's key (§9.1). Any other pairing is refused; it is spent whatever the answer. */
+    suspend fun approve(request: AccessRequest, pairing: AccountPairing, terms: String?): SessionSnapshot = gated {
         if (engine == null) reconcile()
         withOwner { owner, custody, ownerId ->
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
             val t = terms ?: request.termsJson
-            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, it) } }
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, pairing, it) } }
         }
+        // The confirmed pairing gave its reservation back; keep the ledger (a lost write only leaves it counted).
+        accountId?.let { keepLedgerChange(it) }
         reconcile()
     }
     suspend fun revoke(member: String): SessionSnapshot = gated {
@@ -680,9 +832,15 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             memberId = KeyCustody.keyId(memberKeys)
             accountId = account
             val memberRaw = ownRequestBytes()
+            // This device made the request itself, with its own member key: there is no second device to pair with, so it
+            // reads its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
+            // The creation's engine keeps the time it opened at; bring it to the scan's time, which the pairing may not precede (§9.1).
+            val at = nowMs
+            owner.run { it.advance(at) }
+            val own = AccountPairing.scanRequest(account, memberRaw, PairingFailureLimiter.fresh(), at)
             val terms = terms(configuration.namespaces, configuration.access, null, null)
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
-            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, it) } }
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, own, it) } }
         } finally {
             release(owner)
         }
@@ -736,7 +894,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     class ExchangeResult(var passes: Int = 0, val faults: MutableList<HomeFault> = ArrayList(), val issues: MutableList<HomeIssue> = ArrayList(),
                          var changed: Boolean = false, var unauthorized: Boolean = false,
                          /** A pass that did not finish (the engine still waited after its one recovery): the exchange failed. */
-                         var failed: Boolean = false)
+                         var failed: Boolean = false,
+                         /** The account is stopped (a final layout raise this device verified, spec §1 "A stop"): no pass runs, and a pass that brought the stop in ended there. Not a failure. */
+                         var stopped: Boolean = false,
+                         /** A home answered `503 {"result":"unavailable"}`: the home is not available. Retried with backoff; not about this device. */
+                         var homeUnavailable: Boolean = false)
 
     /** Tests only: answers `exchange_next` for a home instead of the engine when it returns a step. */
     @Volatile internal var nextStepOverride: ((String) -> ExchangeStep?)? = null
@@ -750,8 +912,18 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val result = ExchangeResult()
         val engine = engine ?: return@onLane result
         val homes = engine.run { it.exchangeHomes() }
+        // This device asked to join and holds no grant for itself: a `refused:revoked` for its own call means "not approved yet".
+        val awaitingApproval = runCatching { engine.run { it.me() }.kind == StandingKind.UNKNOWN }.getOrDefault(false)
         for (home in homes) {
             val configured = transportFor(home) ?: continue
+            // The home asked for time (`Retry-After`): it is not contacted again before then.
+            // What it said stays shown until then.
+            val until = notBefore[home.id]
+            if (until != null && nowMs < until) {
+                waitingIssue[home.id]?.let { said -> result.issues.add(said); if (said.problem is HomeProblem.HomeUnavailable) result.homeUnavailable = true }
+                continue
+            }
+            waitingIssue.remove(home.id)
             if (!configured.isAllowed) { result.issues.add(HomeIssue(home.id, HomeProblem.InsecureEndpoint(configured.endpoint))); continue }
             configured.bearerToken?.let { token -> engine.run { it.exchangeSetBearer(home.id, token) } }
             // The pass starts from fresh local state.
@@ -761,11 +933,15 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                 engine.run { it.refresh(list) }
                 unlockIfPossible()
             }
+            // A stopped account runs no exchange pass (spec §1 "A stop": it accepts no head and asks no call).
+            if (isStopped(engine)) { result.stopped = true; break }
             val started = System.nanoTime()
             var progress = true
             var passIndex = 0
             var stopped: HomeProblem? = null
             var recovered = false
+            // The pass was left for a `Retry-After`: the answer was not given to the engine, so its request is abandoned.
+            var abandon = false
             try {
             // A pass can end before everything moved (the engine plans the next stage from what the home just said):
             // run passes until one moves nothing, at most HomeLimits.PASSES.
@@ -790,7 +966,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                         }
                         ExchangeStepKind.NEED_CALL -> {
                             val need = step.need ?: break
-                            try { provideCall(need, home, configured) } catch (e: HomeProblemException) { stopped = e.problem; break@homeLoop }
+                            try { provideCall(need, home, configured) } catch (e: HomeProblemException) { stopped = if (e.problem == HomeProblem.CallRefused("refused:revoked") && awaitingApproval) HomeProblem.WaitingForApproval else e.problem; break@homeLoop }
                         }
                         ExchangeStepKind.REQUEST -> {
                             val request = step.request ?: break
@@ -812,6 +988,43 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                             val answer: HttpAnswer = sent ?: run { stopped = HomeProblem.TooSlow((exchangeTimeMs / 1000).toInt()); break@homeLoop }
                             val limit = HomeLimits.responseBytes(request.url)
                             if (answer.body.size > limit) { stopped = HomeProblem.ResponseTooLarge(limit); break@homeLoop }
+                            // A home's answer that carries a §1 result (spec §14, §19): read only the `result`, validated
+                            // against the result grammar and bounded ([HomeRefusal]), never any other byte of the body. It is
+                            // the home's word about one request, not a verified state of the account.
+                            var refusedCall: HomeProblem? = null
+                            val refusal = if (request.home == home.id) HomeRefusal.of(answer.status.toInt(), answer.headers, answer.body) else null
+                            if (refusal != null) {
+                                refusal.retryAfterSeconds?.let { notBefore[home.id] = nowMs + it * 1000L }
+                                if (refusal.isHomeUnavailable) {
+                                    // `503 {"result":"unavailable"}` (a stopped or overloaded home, §13.6): the home is not
+                                    // available. The pass stops and the session retries with backoff.
+                                    stopped = HomeProblem.HomeUnavailable(refusal.retryAfterSeconds)
+                                    if (refusal.retryAfterSeconds != null) waitingIssue[home.id] = HomeIssue(home.id, stopped!!)
+                                    result.homeUnavailable = true
+                                    break@homeLoop
+                                }
+                                val code = refusal.code
+                                if (code != null && code.startsWith("refused:")) {
+                                    // A device that asked to join and holds no grant for itself sees `refused:revoked` for its
+                                    // own call (0.5 keeps that result; `refused:notGranted` is reserved): waiting for approval.
+                                    val problem = if (code == "refused:revoked" && awaitingApproval) HomeProblem.WaitingForApproval
+                                        else HomeProblem.RemoteCallRefused(code, refusal.retryAfterSeconds)
+                                    val signed = request.headers.any { it.name.equals("authorization", ignoreCase = true) && it.value.startsWith("Colophon ") }
+                                    if (answer.status == 401u) {
+                                        // The challenge for a call: the engine asks for one.
+                                    } else if (answer.status == 403u && signed) {
+                                        // This device's signed call was refused: the engine is told, then the pass ends with the
+                                        // home's word, as for any refused call.
+                                        refusedCall = problem
+                                    } else {
+                                        // Any other refusal refuses only that request (an unknown or reserved name included) and
+                                        // the pass goes on, unless the home asked for time (`Retry-After`).
+                                        val issue = HomeIssue(home.id, problem)
+                                        if (issue !in result.issues) result.issues.add(issue)
+                                        if (refusal.retryAfterSeconds != null) { waitingIssue[home.id] = issue; abandon = true; break@homeLoop }
+                                    }
+                                } else if (refusal.retryAfterSeconds != null) { abandon = true; break@homeLoop }
+                            }
                             // The answer and the persistence of its stores are one step: never abandoned half way.
                             val report: Report = gated {
                                 withContext(NonCancellable) {
@@ -827,15 +1040,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                             if (report.store.isNotEmpty() || report.changes.authorityToSeq != report.changes.authorityFromSeq || report.changes.namespaces.isNotEmpty()) {
                                 result.changed = true; progress = true
                             }
-                            // The core's Unauthorized fault discards the result code. A home's claim about our
-                            // signed call is shown, but only verified records can deny local access or alter keys.
-                            if (answer.status == 403u && request.home == home.id &&
-                                request.headers.any { it.name.equals("authorization", ignoreCase = true) && it.value.startsWith("Colophon ") } &&
-                                Json.obj(answer.body.toString(Charsets.UTF_8))?.string("result") == "refused:revoked") {
-                                stopped = HomeProblem.RemoteCallRefused("refused:revoked")
-                                result.unauthorized = true
-                                break@homeLoop
-                            }
+                            if (refusedCall != null) { stopped = refusedCall; result.unauthorized = true; break@homeLoop }
                         }
                     }
                 }
@@ -845,13 +1050,19 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                 // A transport failure, an engine error or a cancelled caller: the request in flight is forgotten, what was
                 // pulled and verified is kept, and the next pass starts clean. This runs even when the caller was cancelled.
                 abortPass(engine, home.id)
+                // The pass brought in the final raise that stops this account: the engine then refuses the next step
+                // (`unavailable`). That is the stop, not a fault of the exchange.
+                if (e !is kotlinx.coroutines.CancellationException && runCatching { isStopped(engine) }.getOrDefault(false)) {
+                    result.stopped = true; result.changed = true; break
+                }
                 throw e
             }
-            stopped?.let { problem ->
+            val problem = stopped
+            if (problem != null) {
                 result.issues.add(HomeIssue(home.id, problem))
                 if (problem == HomeProblem.StillWaiting) result.failed = true
                 abortPass(engine, home.id)
-            }
+            } else if (abandon) abortPass(engine, home.id)
         }
         result
     }
@@ -971,3 +1182,6 @@ internal object AccountCreator {
         }
     }
 }
+
+/** One monitor per ledger lock file in this JVM: a JVM cannot hold two file locks on one file, so sessions in one process wait here first. */
+private val ledgerMonitors = java.util.concurrent.ConcurrentHashMap<String, Any>()

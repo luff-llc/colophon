@@ -43,7 +43,7 @@ field; `u64` and `i64` are `bigint`; `optional<T>` is `undefined`.
 | `AccountCreation` | Creation before any store exists: PRF, genesis, first `rekey`; the result is the account ID and the stores; `open_engine(source, listing, namespaces, batch, key, now_ms)` then opens the session over the stored result, unlocked as the creation left it (the owner is asked once at first run). |
 | `SwiftSuccessorCreation` | The genesis of the account that succeeds a Swift library: the carried controllers, the rebuilt slots (one passkey assertion each), the `handover`; the result is the account ID and the stores. Every other step of the Swift move needs an account made this way. |
 | `AccountRequest` | A device's membership request before it is a member (public values only). |
-| `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | The pairing ceremony (§7.3). |
+| `AccountPairing`, `PairingFailureLimiter`, `PairingTransferKey` | The pairing ceremony (§7.3). A confirmed `AccountPairing` is also what approving a member spends (§9.1): see "Approving a member" below. |
 | `AccountMove` | A prepared move step: the 0.4 upgrade, a Swift veto, F, a copier's shares, the migration. |
 | `SwiftSource`, `SwiftCopyPlan`, `SwiftCopyDestination`, `SwiftCopyResult`, `AccountCopyWrite` | The Swift record copy: the predecessor library with its vault and keys, the plan with the host's translator, the import writes, the finished copy. |
 | `AccountBlobWriter`, `AccountLiveWrite` | A streaming blob upload; a prepared live write. |
@@ -66,7 +66,7 @@ nothing and consumes the action; prepare again with fresh entropy. An action fin
 
 | `begin_*` | Arguments (besides `entropy`) | Entropy |
 | --- | --- | --- |
-| `begin_approve` | `request: bytes`, `terms_json`, `signers` | 32 |
+| `begin_approve` | `request: bytes`, `terms_json`, `signers`, `pairing: AccountPairing` (confirmed; spent) | 32 |
 | `begin_renew` / `begin_renew_shares` | `member`, `expires_ms` (renew only), `signers` | 32 |
 | `begin_revoke` | `member`, `keep: RevokeKeep`, `signers` | 32 |
 | `begin_end_sessions` / `begin_end_my_sessions` | `member`, `signers` / none | 0 |
@@ -76,11 +76,77 @@ nothing and consumes the action; prepare again with fresh entropy. An action fin
 | `begin_add_slot` | `signer`, `plan: SlotPlan` | 32 |
 | `begin_rotate_vault` | `signer`, `has_plans: bool`, `plans: list<SlotPlan>` | 64 (new seed, entropy) |
 | `begin_remove_controller` | `remove`, `keep`, `signers`, `rule`, `rotate: bool` | 64 if `rotate`, else 0 |
-| `begin_transition` | `change_json`, `signers`, `rule` | 0 |
+| `begin_transition` | `change_json`, `signers`, `rule` (a change with a `grant` is `refused:outOfScope`) | 0 |
+| `begin_grant_transition` | `change_json` with a `grant`, `signers`, `rule`, `pairing: AccountPairing` (confirmed; spent) | 0 |
 | `begin_veto` / `begin_suspend` / `begin_resolve` | as the core | 0 |
 | `begin_write` / `begin_propose` | `namespace`, `kind`, `payload_json` | 32 |
 | `begin_resolution` | `namespace`, `accept`, `proposals` | 32 |
 | `begin_import` | `namespace`, `batch_json` | 32 |
+
+### Approving a member
+
+The core prepares a `grant` (or a transition's `grant` component) only by spending a confirmed
+pairing for exactly the request's key (spec §9.1, §17.1). No call approves a member from its ID or a
+code made from it. Exactly two pairings approve:
+
+1. **The code (§7.3).** The joining device calls `AccountPairing.join(account, e, nb)` with `e` its
+   request's `member.signing` and sends `commitment()`; the approving device calls
+   `existing_receive_commitment(account, commitment, limiter, now_ms)` and `send_nonce(na)`; the joiner's
+   `receive_nonce(na)` returns the reveal; the approving device's `receive_reveal(e, nb, limiter, now_ms)`
+   returns the six digits, which both screens show (`digits()`). The person confirms they match:
+   `confirm()` on the approving device. A mismatch is `reject(limiter, now_ms)` on either device and,
+   on the approving one, counts as a failure; five failures in an hour close the limiter.
+2. **The request scanned**, the scan path's one payload (§9.1): the approving device scans the
+   canonical request envelope from the joining device's screen:
+   `AccountPairing.scan_request(account, request, limiter, now_ms)` is confirmed for that request's
+   `member.signing` (a request that does not verify is `pairing:invalidRequest`, another account
+   `pairing:wrongAccount`; each counts as a failure). It carries no nonces and cannot move the seed.
+
+`begin_approve(request, terms_json, signers, pairing, entropy)` and `begin_grant_transition(change_json,
+signers, rule, pairing, entropy)` then spend it. A pairing that is not `Confirmed` (or already `Spent`) is
+`Consumed` and left as it was. A confirmed one is spent whatever the answer: for another account or
+another key, confirmed on the joining device, or confirmed by the pairing QR (`existing_scan_qr`,
+which moves the seed only), `refused:outOfScope`; more than ten minutes after the
+approving device's session began, or before it (a clock moved back), `refused:expired`. The joining device's
+own confirmed pairing never approves. Appointing a home (`homes.appoint`) is outside this rule: its request
+comes from the home's own base (a stated limit of §9.1).
+
+**The approving device's ledger: one ceremony at a time, every start counted.** Every session the existing
+device starts (`existing_receive_commitment`, `existing_scan_qr`, `scan_request`) comes from its
+`PairingFailureLimiter`:
+
+- Starting one **reserves** one of the five an hour; only a confirmed pairing gives it back (`confirm`, the
+  pairing QR's `send_nonce`, a valid `scan_request`). Abandoning (`AccountPairing.abandon(now_ms)`), rejecting
+  (`reject`), a mismatch, a reveal after the ten-minute timeout (`pairing:timeout`), dropping the object or
+  restarting the device all leave it counted. Five counted in an hour: `pairing:limit`.
+- **One ceremony is live at a time**: while one is (not ended, younger than ten minutes) another start is
+  refused, `pairing:busy`, and never yields a nonce. A relay therefore cannot run sessions with its own keys
+  beside the honest one and pick the one whose code matches. Start a ceremony only when the person asks; a
+  commitment that arrives unasked is shown or dropped, never started.
+- **Persist before the nonce.** `send_nonce` is refused, `pairing:unsealed`, until the host took
+  `limiter.seal(device_key, account, entropy)` after the start; the host writes the sealed bytes and
+  `limiter.generation()` beside them, and only then asks for the nonce. A host that cannot write sends none.
+- **Open on start**: `PairingFailureLimiter.open(sealed, device_key, account, floor, now_ms)`, with the
+  generation recorded beside it as `floor` (0 when none). Missing bytes with a floor, an edited or foreign
+  ledger, another device key, or a generation below the floor open as a spent budget.
+  `PairingFailureLimiter.fresh()` is an in-memory ledger (tests; a device's own request). `is_live(now_ms)`
+  and `may_start(now_ms)` answer without changing anything.
+- **Every instance over one store.** One limiter object coordinates only itself. The session layers take a lock that
+  every instance sharing the private store takes (Swift: `flock` on `pairing-ledger.lock`; Kotlin: `FileChannel.lock` on
+  it, behind a JVM-wide monitor; JavaScript: a Web Lock, or a process-wide lock where the platform has none), reload the
+  ledger under it whenever the stored generation is not the one they hold, and write before releasing it. A host that
+  uses the bindings directly must do the same: two limiters opened from one store must never start ceremonies apart.
+- **Clock.** A start on a clock outside 1970 to 9999 is refused (`pairing:clock`); nothing the ledger keeps can then
+  overflow its timeout or its hour. A clock moved back is floored (the ledger keeps the latest time it saw) until it has
+  stayed more than five minutes behind that floor for an hour of its own time; the ledger then re-anchors at it, dropping
+  what was stamped in the future. A forward mistake therefore clears an hour after the clock is corrected, and moving the
+  clock back gains nothing the hour would not have given.
+- `fresh()` is for a device that keeps no ledger (a test, a device's own request at creation): a host must never call
+  it for an account whose ledger exists, or the budget is gone. `seal` takes 32 bytes of fresh entropy on every call:
+  the GCM nonce comes from it, so entropy must never be reused under one device key.
+- **Residual limit:** a host or backup that restores the private store wholesale (the sealed ledger and its
+  recorded generation together) restores the budget; the device key is not a counter, so the core cannot see
+  it. Within one process the ledger never goes back.
 
 ### `AccountEngine`
 
@@ -126,6 +192,48 @@ Standalone: `account_verify_history`, `account_webauthn_check(KeyDescriptorView,
 authenticator_data, client_data, WebauthnMode)`, `account_verify_swift_predecessor`, `account_key_id`,
 `account_webauthn_prf_input`, `account_vault_public`, `account_format_date`, `account_request_info`,
 `account_default_policy`.
+
+### A stopped account
+
+When an activation raising the account's layout above 2 becomes final in the history this engine verified (spec §1
+"A stop", §20), or an authority entry is judged `newerFormat`, `status()` keeps reporting the verdict's `code`
+(`newerFormat`) and sets `stopped: AccountStop { seq, layout }`: the raising activation's seq and the layout it names
+(`layout` is none for an entry of a newer format that is not a raise). It is a stable state of the account, not a
+fault, and a function of the held objects: an engine reopened from its files, from `SavedState` or from a
+checkpoint reports the same. A raise that is still provisional, or that a `vetoed` displaced, stops nothing.
+
+A stopped engine keeps reading what it holds, as of the stop: `members`, `controllers`, `view_json`, `query_json`,
+blobs, `slots` and the unlock calls. It builds nothing new, and refuses before any signature is asked for: every
+`begin_*` that writes authority or records, `transfer_seed`, `accept_seed_transfer` and the move steps return
+`NewerFormat`; `begin_link`, `begin_call`, `exchange_next` and `exchange_begin_call` return `Unavailable` (§12.3 step
+4). `record_due` records the activate that makes a raise final (before that a 0.5 reader records it as any
+activation, §13.6) and nothing after it. The sessions show this as their stopped phase.
+
+**What "held as of the stop" means.** The fold as it stood when the stop was first verified is what stays readable.
+Records and live values that arrive afterwards are ignored (not admitted, not deleted from any store), and that includes
+those that come in the same merge as the authority that stops the account and those that were on disk but not yet read
+when the stop was learnt. Authority objects are still taken: the verifier applies nothing after the raise, so they can
+only show the stop again.
+
+**The stop is checked at every step, not only at begin.** An action prepared before the stop is refused at its next step
+(`provide_prf`, `finish`, `finish_live_write`, `finish_move`) with the result its begin would give now, and its prepared
+state is dropped: nothing is signed into an envelope, returned or stored. The one exception is the recording, by
+`record_due`, of the entry that makes a raise final, which happens while the account is not yet stopped. An exchange
+ticket from before the stop is discarded: `exchange_answer` returns `Unavailable` and merges nothing, and
+`exchange_provide_call` and `exchange_want_blob` are refused. `exchange_abort` stays allowed. A blob writer that was
+already open (`AccountBlobWriter`) is a standalone sealer and cannot take this check. The chunks it seals are not records,
+and the manifest still needs a write that is refused.
+
+**The stop is a floor.** `save` persists a verified stop in the sealed saved state, with its seq and layout. An engine
+opened from that state reports `stopped` and builds nothing, even when its store no longer holds the raise: evidence that
+goes missing never undoes a stop on that device. (A final activation is never displaced, so the floor is never cleared.)
+`Status.code` is then the verdict's own; `Status.stopped` comes from the floor. The sessions save the moment they first
+see the stop, and they save in the stopped phase as well as in ready.
+
+**A 403 that names a refusal.** A home's `403 {"result":"refused:<name>"}` to a request that carried no call refuses that
+request (`ExchangeFault` `Refused` with the code). It is not asked again with a call. Only a 401 means "sign and retry"
+(§14: a request that needs a call and carries none is answered 401). A 403 with no valid result is still taken as asking
+for a call, as before. A 403 to a request that carried a call ends the pass, as before.
 
 ### Key descriptors and controllers
 
@@ -180,11 +288,11 @@ logs and never carries key material. `Refused` carries the §19 reason; `Denied`
 
 | Variant | `code` | Meaning |
 | --- | --- | --- |
-| `Malformed` | `malformed` | A rule is broken; also an argument that is not valid JSON. Pairing aborts: `pairing:commitmentMismatch`, `pairing:invalidPoint`, `pairing:wrongAccount`. |
+| `Malformed` | `malformed` | A rule is broken; also an argument that is not valid JSON. Pairing aborts: `pairing:commitmentMismatch`, `pairing:invalidPoint`, `pairing:wrongAccount`, `pairing:invalidRequest` (a scanned request that does not verify), `pairing:timeout` (a reveal after the ten-minute ceremony timeout). |
 | `BadSignature` | `badSignature`; from `account_webauthn_check` `badSignature:<check>`, with `check: SignatureCheck` | A signature, assertion, possession proof or key binding failed. Checks: `point rawLength scalar der verify clientData clientDataBound unknownForm type challenge origin crossOrigin relyingParty userPresence userVerification form callOrigin`. |
 | `NewerFormat` | `newerFormat` | Authenticated content of a newer format. |
 | `Unavailable` | `unavailable` | Something needed could not be obtained. |
-| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`). |
+| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`), `pairing:busy` (`pairingBusy`: another ceremony is live), `pairing:clock` (`pairingClock`: an implausible clock), `pairing:unsealed` (`pairingUnsealed`: the ledger was not sealed since the start). |
 | `Denied` | `denied:<reason>`, `reason` | `notGranted revoked expired budgetSpent notReadable unavailable`. |
 | `Host` | `host` | A host callback failed; `detail` is the host's own message (a foreign exception arrives here too). |
 | `Reentered` | `reentered` | A callback called back into the object that was calling it, on the same thread; or a call from another thread waited more than 30 s for an object whose holder was inside a host callback (see "Threads and callbacks"). |
@@ -454,7 +562,8 @@ Enums are C-like. A record's `optional` field is set only as its doc says.
 | `SlotController` | `id: String`, `label: String` | A controller a slot names. |
 | `SlotInfo` | `index: u64`, `kind: SlotKind`, `kind_raw: optional<String>`, `label: String`, `controllers: list<SlotController>` | One slot of the current vault, as a chooser shows it. |
 | `SlotPlan` | `controllers: list<String>`, `label: String` | What a slot is built for: its controllers and label. |
-| `Status` | `seq: u64`, `code: String`, `kind: StatusKind`, `reason: optional<String>`, `stop_seq: optional<u64>`, `detail: optional<String>`, `rollback: bool` | The verdict on the verified history. |
+| `Status` | `seq: u64`, `code: String`, `kind: StatusKind`, `reason: optional<String>`, `stop_seq: optional<u64>`, `detail: optional<String>`, `rollback: bool`, `stopped: optional<AccountStop>` | The verdict on the verified history. `stopped` is set when this reader is stopped for the account (§1 "A stop"): a verified state, not a fault (see "A stopped account" in §2). |
+| `AccountStop` | `seq: u64`, `layout: optional<u64>` | Where a reader stopped: the seq of the activation whose final raise stopped it (or of the entry it judged `newerFormat`), and the layout the raise names (none for an entry of a newer format that is not a raise). Only from the verified history, never from a home's answer. |
 | `EntryChange` | `seq: u64`, `kind: String` | An entry that joined the verified branch. |
 | `NamespaceRevision` | `namespace: String`, `revision: u64` | A namespace whose fold changed, with its new revision. |
 | `RefusedHead` | `home: String`, `code: String` | A head a home sent that was refused. |
@@ -596,7 +705,7 @@ The 0.4 exports stay (an in-place upgrade reads a 0.4 library with them first). 
 | `begin_layout` | none: a 0.5 account is at layout 2 from genesis |
 | `begin_add_controller`, `begin_recovery_add`, `begin_add_passkey` | `begin_add_controller`, `AccountPairing`, `transfer_seed`, `accept_seed_transfer` |
 | `begin_remove_controller`, `begin_keyring` | `begin_remove_controller`, `begin_rotate_vault`, `begin_keyring`, `begin_transition` |
-| `begin_import_grant`, `begin_import`, `import_output_id`, `import_occurrence_id`, `import_identity_category`, `reconcile_import_prefix` | `begin_approve` with `terms_json` carrying `import`; `begin_import` |
+| `begin_import_grant`, `begin_import`, `import_output_id`, `import_occurrence_id`, `import_identity_category`, `reconcile_import_prefix` | `begin_grant_transition` with a `grant` whose terms carry `import` (§9.3: an import grant is a transition); `begin_import` |
 | `live_generation`, `written_operation`, `written_operation_json`, `operation_at` | `record_verdict`, `operation_at_json`, `live_heads`, `begin_live_write` |
 | `tools` | `tools_json` |
 | `begin_request`, `request_info`, `AccessRequest`, `PublicKeys` | `AccountRequest`, `account_request_info` |

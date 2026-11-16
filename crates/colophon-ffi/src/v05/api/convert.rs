@@ -408,6 +408,10 @@ pub(crate) fn status(s: &acc::Status) -> Status {
         stop_seq: s.stop_seq,
         detail: s.detail.clone(),
         rollback: s.rollback,
+        stopped: s.stopped.map(|t| AccountStop {
+            seq: t.seq,
+            layout: t.layout,
+        }),
     }
 }
 pub(crate) fn changes(c: &acc::Changes) -> Changes {

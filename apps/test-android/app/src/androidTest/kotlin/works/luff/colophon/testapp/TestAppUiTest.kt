@@ -11,6 +11,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -85,6 +86,8 @@ class TestAppUiTest {
 
         click("tabStatus")
         waitFor("phase Ready", 10) { textOf("phase") == "Ready" }
+        assertNull("a ready account shows no stopped notice", view("stoppedStatus"))
+        assertNull("an approved device is not waiting", view("waitingStatus"))
         click("syncNow")
         waitFor("a complete sync", 60) { textOf("syncOutcome")?.startsWith("Last sync: complete") == true }
         waitFor("the last head", 10) { textOf("lastHead")?.startsWith("seq ") == true }
@@ -122,19 +125,15 @@ class TestAppUiTest {
         args.getString("request")?.let { p -> main { model.open(Uri.parse("colophontest://request?p=$p")) } }
         waitFor("the tabs", 30) { view("tabDevices") != null }
         click("tabDevices")
-        // The link only shows the request: import it, confirm the codes, then approve.
-        waitFor("the linked request", 30) { view("importLinked") != null }
-        click("importLinked")
-        waitFor("a waiting request", 60) { view("codesMatch") != null }
-        assertTrue("Approve waits for the codes", view("approve")?.isEnabled == false)
-        click("codesMatch")
-        waitFor("Approve enabled", 10) { view("approve")?.isEnabled == true }
+        // The harness read the request off the joining device's screen and stands in for the camera (debug builds only).
+        // The scan confirms a pairing for that request's key; the person still approves it.
+        waitFor("the scanned request", 60) { view("scannedRequest") != null }
         click("approve")
         waitFor("the approval", 60) { view("approve") == null && model.busy == null }
         scenario.close()
     }
 
-    /** Step: a join link was opened; confirm it on the confirmation screen and wait for the pairing code. */
+    /** Step: a join link was opened; confirm it on the confirmation screen and wait for approval (the request is shown for the owner device to scan). */
     @Test fun scriptConfirmJoin() {
         assumeTrue(args.getString("step") == "confirmJoin")
         start(reset = false)
@@ -144,7 +143,7 @@ class TestAppUiTest {
         waitFor("the confirmation screen", 30) { view("confirmJoin") != null }
         assertTrue("the host is shown", textOf("confirmHost")?.isNotEmpty() == true)
         click("confirmJoin")
-        waitFor("the pairing code", 60) { view("pairingCode") != null }
+        waitFor("waiting for approval", 60) { view("waitingForApproval") != null }
         scenario.close()
     }
 

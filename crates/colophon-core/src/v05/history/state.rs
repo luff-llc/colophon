@@ -181,6 +181,23 @@ pub struct State {
     /// before a fork can be judged (§8.4 `resolve`).
     #[serde(default)]
     pub(super) rule_at: Vec<(u64, bool)>,
+    /// The account's layout (§8.2 "Layout"): 2 for a `/5` account from genesis and for an
+    /// upgraded account from its `upgrade`. A `layout` component that does not raise it voids
+    /// its transition. One that raises it above 2 is the upgrade door (§20): it changes no rule
+    /// this reader applies, so the value stays 2, and its activation is kept in `raises`.
+    #[serde(default = "layout_5")]
+    pub(crate) layout: u64,
+    /// Seqs of the activations on this branch that raise the layout above 2 (§20). The reader
+    /// is stopped once one of them is final ([`State::stopped_at`]); while provisional, a
+    /// `vetoed` or a resolved fork can still displace it.
+    #[serde(default)]
+    pub(crate) raises: Vec<u64>,
+}
+
+/// The layout a 0.5 reader understands (§8.2, §20).
+pub(crate) const LAYOUT_5: u64 = 2;
+fn layout_5() -> u64 {
+    LAYOUT_5
 }
 
 impl State {
@@ -188,6 +205,7 @@ impl State {
         let len = self.digests.len();
         crate::v05::require(
             len > 0
+                && self.layout == LAYOUT_5
                 && self.issued.len() == len
                 && self.keyring_at.len() == len
                 && self.delay_at.len() == len
@@ -349,6 +367,130 @@ impl State {
     }
     fn on_branch(&self, seq: u64, d: &str) -> bool {
         seq >= 1 && self.digests.get((seq - 1) as usize).is_some_and(|x| x == d)
+    }
+
+    /// The seq of the activation that stopped this reader (§1 "A stop", §20): the first
+    /// activation on this branch that raises the layout above 2 and is final (§8.7 "Final",
+    /// which with no home is at once). A raise that is still provisional stops nothing, so a
+    /// `vetoed` or a resolved fork that displaces it is applied as usual. Once stopped, the
+    /// reader applies no further entry.
+    pub fn stopped_at(&self) -> Option<u64> {
+        self.raises
+            .iter()
+            .copied()
+            .find(|r| self.activations.iter().any(|a| a.seq == *r && a.final_))
+    }
+
+    /// The one **current principal** check of §8.5, used wherever a principal's signature is
+    /// accepted, before any unknown content is looked at. `id` is a controller or member ID;
+    /// `claim` says what it signs as; `at_ms` is the entry's `issued` (for a call, the
+    /// verifier's clock). On success returns the principal; on failure says why, and
+    /// [`NotCurrent::failure`] gives the authority result (`badSignature`). A call maps
+    /// [`NotCurrent::Expired`] to `refused:expired` and the rest to `refused:revoked` (§12.3).
+    pub fn current_principal(
+        &self,
+        id: &str,
+        claim: Claim<'_>,
+        at_ms: i64,
+    ) -> std::result::Result<Principal<'_>, NotCurrent> {
+        match claim {
+            Claim::Controller {
+                roles,
+                suspended_ok,
+            } => {
+                let c = self
+                    .keyring
+                    .controllers
+                    .get(id)
+                    .ok_or(NotCurrent::Absent)?;
+                if self.meta.get(id).is_some_and(|m| m.provisional.is_some()) {
+                    return Err(NotCurrent::Provisional);
+                }
+                if !suspended_ok && self.suspended(id, at_ms) {
+                    return Err(NotCurrent::Suspended);
+                }
+                if !roles.is_empty() && !roles.iter().any(|r| c.has(r)) {
+                    return Err(NotCurrent::Role);
+                }
+                Ok(Principal::Controller(c))
+            }
+            Claim::Member | Claim::Home => {
+                // The latest record for this ID: a member ID names one key (§3.3).
+                let m = self
+                    .members
+                    .iter()
+                    .rev()
+                    .find(|m| m.request.member_id() == id)
+                    .ok_or(NotCurrent::Absent)?;
+                if m.revoked_seq.is_some() {
+                    return Err(NotCurrent::Revoked);
+                }
+                if m.provisional.is_some() {
+                    return Err(NotCurrent::Provisional);
+                }
+                if m.expires_ms.is_some_and(|e| at_ms > e) {
+                    return Err(NotCurrent::Expired);
+                }
+                if matches!(claim, Claim::Home) {
+                    if m.home == HomeStatus::NotHome || self.excused.contains(id) {
+                        return Err(NotCurrent::Role);
+                    }
+                    return Ok(Principal::Home(m));
+                }
+                Ok(Principal::Member(m))
+            }
+        }
+    }
+}
+
+/// What a signer signs as, for [`State::current_principal`].
+#[derive(Clone, Copy, Debug)]
+pub enum Claim<'a> {
+    /// A controller holding one of `roles` (any role when empty). `suspended_ok` for what a
+    /// suspended key may still sign (§8.7).
+    Controller {
+        /// Roles the rule allows.
+        roles: &'a [Role],
+        /// A suspended key may sign this.
+        suspended_ok: bool,
+    },
+    /// A member (member rule, links, calls, records).
+    Member,
+    /// A home: a current member appointed by a final activation, its revocation not final.
+    Home,
+}
+
+/// A current principal (§8.5).
+#[derive(Clone, Copy, Debug)]
+pub enum Principal<'a> {
+    /// A controller of the keyring.
+    Controller(&'a Controller),
+    /// A member.
+    Member(&'a MemberRecord),
+    /// A home.
+    Home(&'a MemberRecord),
+}
+
+/// Why a signer is not a current principal (§8.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotCurrent {
+    /// Not in the keyring or member table.
+    Absent,
+    /// Revoked.
+    Revoked,
+    /// Added by an activation that is not final.
+    Provisional,
+    /// Expired at the instant judged.
+    Expired,
+    /// Suspended (§8.7).
+    Suspended,
+    /// Holds no role the rule allows, or is not a home.
+    Role,
+}
+impl NotCurrent {
+    /// The authority result: a signer that is not current is `badSignature` (§8.5).
+    pub fn failure(self) -> Failure {
+        bad_signature(format!("the signer is not a current principal: {self:?}"))
     }
 }
 
@@ -582,7 +724,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         )?;
         namespaces.push(n);
     }
-    crate::v05::require(namespaces.len() <= 64, "at most 64 namespaces")?;
+    super::check_namespace_count(namespaces.len())?;
     keyring.policy.check_homes(&[])?;
     let mut points = BTreeSet::new();
     let mut uses = Vec::new();
@@ -661,6 +803,8 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         successor_seq: None,
         migration: None,
         resolved: Vec::new(),
+        layout: LAYOUT_5,
+        raises: Vec::new(),
     })
 }
 
@@ -959,6 +1103,12 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
                 c.recovery_ok_if_full = false;
             }
             "layout" | "migration" | "successor" => {
+                // `layout` is an integer (§8.2); another type is `malformed`.
+                if name == "layout" {
+                    comp.as_u64()
+                        .filter(|n| *n <= crate::v05::encoding::bounds::MAX_INTEGER)
+                        .ok_or_else(|| malformed("layout must be an integer"))?;
+                }
                 // `successor` is `{account}` (§8.7); another member is unknown content.
                 if name == "successor" {
                     for f in comp.as_object().into_iter().flat_map(|m| m.keys()) {
@@ -1230,7 +1380,8 @@ pub(crate) fn check_transition(
     if (all.len() as u64) < 1 + max_v {
         return Err(bad_signature("escalation: too few signer units"));
     }
-    // Receipts (§8.7 validity 2).
+    // Receipts (§8.7 validity 2). A home witnesses from its appointment until its revocation is
+    // final, whatever its grant's expiry says (§8.5): a date never removes the veto window.
     let homes = s.current_homes();
     let quorum = k.policy.head_quorum() as usize;
     let mut latest_receipt = issued;
@@ -1325,6 +1476,9 @@ pub(super) fn check_receipt(
     let (_, received) = o.date("received")?;
     let by = o.key_id("by")?;
     o.finish_closed()?;
+    // A receipt counts only from a current home: appointed by a final activation, its revocation
+    // not final, not excused (§8.7). Its grant's expiry does not end its witnessing (§8.5); one
+    // from another key is a wrong home, `malformed` (§8.5's table).
     let key = s
         .home_key(&by)
         .ok_or_else(|| malformed("receipt by a key that is not a current home"))?;
@@ -1559,9 +1713,22 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
         n.successor_seq = Some(act_seq);
         changed = true;
     }
-    if t.change.contains_key("layout") {
-        changed = true;
-    }
+    // §8.2 "Layout": a component that does not raise the layout voids the transition; one that
+    // raises it above 2 is the upgrade door: recorded once every other check has passed (at the
+    // end of this function), and a stop once its activation is final.
+    let raises_layout = match t.change.get("layout") {
+        Some(v) => {
+            let to = v
+                .as_u64()
+                .ok_or_else(|| malformed("layout must be an integer"))?;
+            if to <= s.layout {
+                return Err(malformed("void: the layout component does not raise the layout"));
+            }
+            changed = true;
+            Some(to)
+        }
+        None => None,
+    };
     if let Some(comp) = t.change.get("resolve") {
         // Valid when the kept entry is on this branch. It discards every other candidate at
         // that seq for a verifier following this branch; with none held it changes nothing but
@@ -1581,19 +1748,23 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     let new_k = Keyring::parse(raw_keyring, 0)
         .map_err(|e| malformed(format!("void: the result breaks §6: {}", e.detail())))?;
     check_keyring_keys(s, &new_k).map_err(|e| malformed(format!("void: {}", e.detail())))?;
-    // A member this delta adds uses no key of the keyring it puts in place (§3.3).
-    let mut keyring_points: BTreeSet<Vec<u8>> = BTreeSet::new();
+    // A member this delta adds uses no key, and no key ID, of the keyring it puts in place
+    // (§3.3 rule 2, "including within one entry or transition").
+    let mut keyring_points: Vec<Vec<u8>> = Vec::new();
     for c in new_k.controllers.values() {
-        keyring_points.insert(c.key().signing().to_vec());
+        keyring_points.push(c.key().signing().to_vec());
         keyring_points.extend(c.key().agreement().map(<[u8]>::to_vec));
     }
-    keyring_points.insert(new_k.vault.0.clone());
-    keyring_points.insert(new_k.vault.1.clone());
+    keyring_points.push(new_k.vault.0.clone());
+    keyring_points.push(new_k.vault.1.clone());
     for m in &new_members {
         crate::v05::require(
-            !keyring_points.contains(&m.request.signing)
-                && !keyring_points.contains(&m.request.agreement),
-            "void: a member key is a key of the keyring (§3.3)",
+            !member_collides(
+                &keyring_points,
+                &[&m.request.signing, &m.request.agreement],
+                key_id,
+            ),
+            "void: a member key or key ID is one of the keyring (§3.3)",
         )?;
     }
     // Unknown content the delta brought into the keyring (a policy field, a slot or vault
@@ -1628,8 +1799,23 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     // Unknown content inside the delta is reported only once the delta is otherwise valid, as
     // an immediate entry reports it after its checks (§1, §2.3).
     unknown.check()?;
+    // A raise above 2 changes no rule this reader applies: it is recorded, and the reader stops
+    // once its activation is final ([`State::stopped_at`]).
+    if raises_layout.is_some_and(|to| to > LAYOUT_5) {
+        n.raises.push(act_seq);
+    }
     record_points(&mut n);
     Ok(n)
+}
+
+/// §3.3 rule 2 within one transition: a member point equals a keyring point, or the two have
+/// the same key ID under `kid` (a parameter so a test can substitute a colliding function; a
+/// real collision needs 128 bits of work).
+fn member_collides(keyring: &[Vec<u8>], member: &[&Vec<u8>], kid: impl Fn(&[u8]) -> String) -> bool {
+    let ids: BTreeSet<String> = keyring.iter().map(|p| kid(p)).collect();
+    member
+        .iter()
+        .any(|p| keyring.iter().any(|k| k == *p) || ids.contains(&kid(p)))
 }
 
 /// `previousVault` (§8.3): the current vault seed (32 bytes) sealed to the new vault, an HPKE
@@ -1928,6 +2114,13 @@ pub(crate) fn apply(
     now_ms: i64,
 ) -> Step<State> {
     let _ = (pending, heads);
+    // A final layout raise stops the reader: nothing after it is applied (§1 "A stop", §20).
+    if let Some(r) = s.stopped_at() {
+        return Err(Failure::NewerFormat(format!(
+            "the account raised its layout above {LAYOUT_5} at seq {r}, and that is final"
+        ))
+        .into());
+    }
     // After a `successor` activation F the account admits only the entries that settle it
     // (§8.7, §15.1): a `final`, or, as a conflicting candidate at F's seq, a `vetoed` that
     // displaces F while it is provisional. Once F is final the account is closed.
@@ -2419,8 +2612,13 @@ fn suspend(s: &State, e: &Entry) -> Step<State> {
     if !t_env.signer_ids().contains(&e.by) {
         return Err(bad_signature("the suspending key is not a signer of the transition").into());
     }
-    if s.current(&e.by).is_none() {
-        return Err(bad_signature("the suspending key is not current").into());
+    // A suspended key may sign transitions and vetoes, never a `suspend` (§8.7).
+    let claim = Claim::Controller {
+        roles: &[],
+        suspended_ok: false,
+    };
+    if let Err(n) = s.current_principal(&e.by, claim, e.issued) {
+        return Err(bad_signature(format!("the suspending key is not current: {n:?}")).into());
     }
     let t = check_transition(s, &t_bytes, &receipts, true, true)?;
     if s.recorded.contains(&t.digest) {
@@ -2503,9 +2701,11 @@ fn vault_entry(s: &State, e: &Entry) -> Step<State> {
         AuthorityRule::KeyringEntry,
         &mut undecidable,
     )?;
-    let ok = s.current(&e.by).is_some()
-        && !s.suspended(&e.by, e.issued)
-        && (by.has(&Role::Control) || by.has(&Role::Recover))
+    let claim = Claim::Controller {
+        roles: &[Role::Control, Role::Recover],
+        suspended_ok: false,
+    };
+    let ok = s.current_principal(&e.by, claim, e.issued).is_ok()
         && s.retiring
             .as_ref()
             .is_some_and(|r| r.current_at_anchor.contains(&e.by));
@@ -2615,13 +2815,17 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
         .primary
         .as_ref()
         .ok_or_else(|| bad_signature("unsigned entry"))?;
-    // endSessions by the member itself (member rule).
-    if e.kind == "endSessions" {
-        if let Some(m) = s
-            .members
-            .iter()
-            .find(|m| m.request.member_id() == e.by && m.revoked_seq.is_none())
-        {
+    // endSessions by the member itself (member rule). A `by` that names a member must be a
+    // current principal (§8.5): an expired, provisional or revoked member's `endSessions` is
+    // `badSignature`, before its content is looked at.
+    if e.kind == "endSessions" && !s.keyring.controllers.contains_key(&e.by) {
+        let m = match s.current_principal(&e.by, Claim::Member, e.issued) {
+            Ok(Principal::Member(m)) => Some(m),
+            Ok(_) => None,
+            Err(NotCurrent::Absent) => None,
+            Err(n) => return Err(n.failure().into()),
+        };
+        if let Some(m) = m {
             crate::v05::require(
                 e.env.cosignatures.is_empty() && primary.assertion.is_none(),
                 "member rule: raw, one signer",
@@ -2674,7 +2878,11 @@ fn immediate(s: &State, e: &Entry) -> Step<State> {
     }
     let signers = e.env.signer_ids();
     for id in &signers {
-        if s.current(id).is_none() || s.suspended(id, e.issued) {
+        let claim = Claim::Controller {
+            roles: &[],
+            suspended_ok: false,
+        };
+        if s.current_principal(id, claim, e.issued).is_err() {
             return Err(bad_signature(
                 "a signer is not current, is suspended or was added provisionally",
             )
@@ -3373,13 +3581,57 @@ pub(super) fn covered_by_home_head(
     y: &Entry,
     home: &str,
 ) -> bool {
-    let Some(key) = s.home_key(home) else {
+    // A head counts only when its home is current on the branch it covers at the seq it covers
+    // (not finally revoked there) and unexpired at the head's own `issued` (§8.6, §13.3): a
+    // revoked or expired home's later heads decide nothing.
+    let Some(m) = s
+        .current_homes()
+        .into_iter()
+        .find(|m| m.request.member_id() == home)
+    else {
         return false;
     };
     let branch = descendants(all, &y.env.digest);
     heads.heads.iter().any(|h| {
-        h.by == home && h.seq >= y.seq && branch.contains(&h.digest) && h.env.verify(&key).is_ok()
+        h.by == home
+            && h.seq >= y.seq
+            && m.expires_ms.is_none_or(|e| h.issued <= e)
+            && branch.contains(&h.digest)
+            && h.env.verify(&m.request.signing).is_ok()
+            && home_current_at(s, all, y, home, &h.digest)
     })
+}
+
+/// Whether `home` is still a current home (§8.7: appointed by a final activation, its
+/// revocation not final, not excused) in the state after the entry `head` on the branch from `y`:
+/// the entries from `y` to it, each applied to the state before it. The clock is not consulted
+/// (nothing is held for time), so the answer depends only on the entries. An entry on the way
+/// that does not apply leaves the head counting for nothing.
+fn home_current_at(s: &State, all: &[&Entry], y: &Entry, home: &str, head: &str) -> bool {
+    let by_digest: BTreeMap<&str, &Entry> = all.iter().map(|e| (e.env.digest.as_str(), *e)).collect();
+    let mut path: Vec<&Entry> = Vec::new();
+    let mut d = head;
+    loop {
+        let Some(e) = by_digest.get(d) else {
+            return false;
+        };
+        path.push(e);
+        if e.env.digest == y.env.digest {
+            break;
+        }
+        match (e.seq > y.seq, e.previous.as_deref()) {
+            (true, Some(p)) => d = p,
+            _ => return false,
+        }
+    }
+    let mut st = s.clone();
+    for e in path.into_iter().rev() {
+        match apply(&st, e, &Pending::default(), &HeadSet::default(), all.to_vec(), i64::MAX) {
+            Ok(n) => st = n,
+            Err(_) => return false,
+        }
+    }
+    st.current_homes().iter().any(|m| m.request.member_id() == home)
 }
 
 /// Decide a conflict among valid candidates at one seq (§8.6). `None` is a fork.
@@ -3719,5 +3971,40 @@ pub(super) fn from_upgrade(
         successor_seq: None,
         migration: None,
         resolved: Vec::new(),
+        layout: LAYOUT_5,
+        raises: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// L1 (§3.3 rule 2): a member and a keyring key with one key ID in one transition are
+    /// refused. A real collision needs 128 bits of work, so the key-ID function is substituted:
+    /// one that maps every point to the same ID makes any two distinct points collide.
+    #[test]
+    fn a_member_with_a_keyring_key_id_in_one_transition_collides() {
+        let keyring = vec![vec![4u8; 65], vec![5u8; 65]];
+        let member = vec![6u8; 65];
+        let other = vec![7u8; 65];
+        // Distinct points, distinct real key IDs: no collision.
+        assert!(!member_collides(&keyring, &[&member, &other], key_id));
+        // The same point: a collision whatever the key-ID function.
+        assert!(member_collides(&keyring, &[&keyring[1]], key_id));
+        // Distinct points with one key ID: a collision (the rule before L1 compared points only).
+        let same = |_: &[u8]| "00000000000000000000000000000000".to_string();
+        assert!(member_collides(&keyring, &[&member], same));
+        // A function that collides only for one chosen pair.
+        let pair = |p: &[u8]| {
+            if p == [6u8; 65].as_slice() || p == [5u8; 65].as_slice() {
+                "c0111de0c0111de0c0111de0c0111de0".to_string()
+            } else {
+                key_id(p)
+            }
+        };
+        assert!(member_collides(&keyring, &[&member], pair));
+        assert!(!member_collides(&keyring, &[&other], pair));
+    }
 }

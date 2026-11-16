@@ -7,7 +7,6 @@ import VisionKit
 struct DevicesView: View {
     @Environment(AppModel.self) private var model
     @State private var invite: String?
-    @State private var request = ""
     @State private var scanning = false
 
     var body: some View {
@@ -22,46 +21,27 @@ struct DevicesView: View {
                             .accessibilityIdentifier("showInvite")
                     }
                 } header: { Text("1. The new device scans or pastes this") }
-                if let pending = model.pendingRequestText {
-                    Section("A request arrived by link") {
-                        Text("It is not imported until you choose to. Import it only if you expect a device to join.").font(.footnote)
-                        HStack {
-                            Button("Import it") { Task { await model.importRequest(pending) } }.accessibilityIdentifier("importLinked")
-                            Spacer()
-                            Button("Ignore", role: .destructive) { model.pendingRequestText = nil }
-                        }.buttonStyle(.borderless)
-                    }
-                }
                 Section {
-                    TextField("Paste its request (CTR1.…)", text: $request, axis: .vertical).lineLimit(2...5)
-                        .font(.system(.footnote, design: .monospaced)).accessibilityIdentifier("requestField")
-                    HStack {
-                        Button("Import request") { Task { await model.importRequest(request); request = "" } }
-                            .disabled(request.isEmpty).accessibilityIdentifier("importRequest")
-                        Spacer()
-                        if ScannerView.isAvailable { Button("Scan") { scanning = true } }
+                    if ScannerView.isAvailable {
+                        Button("Scan its request") { scanning = true }.accessibilityIdentifier("scanRequest")
+                    } else {
+                        Text("This device has no camera: approve from a device that can scan the request.").font(.footnote)
                     }
-                } header: { Text("2. Then take its request") }
-                if !model.visibleRequests.isEmpty {
+                    Text("Point the camera at the new device's screen. Only a request read from that screen can be approved.").font(.footnote)
+                } header: { Text("2. Then scan its request") }
+                if let scanned = model.scanned {
                     Section {
                         Text(TrustWords.approve).font(.footnote).foregroundStyle(.secondary)
-                        ForEach(model.visibleRequests) { request in
-                            let confirmed = model.confirmedCodes.contains(request.id)
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(request.pairingCode).font(.system(.title2, design: .monospaced)).accessibilityIdentifier("requestCode")
-                                Text("\(request.label) · \(request.id)").font(.caption)
-                                HStack {
-                                    Button(confirmed ? "Codes match ✓" : "The codes match") { model.confirmCodes(request) }
-                                        .disabled(confirmed).accessibilityIdentifier("codesMatch")
-                                    Spacer()
-                                    Button("Approve") { Task { await model.approve(request) } }
-                                        .disabled(!confirmed).accessibilityIdentifier("approve")
-                                    Spacer()
-                                    Button("Reject", role: .destructive) { model.reject(request) }.accessibilityIdentifier("reject")
-                                }.buttonStyle(.borderless)
-                            }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(scanned.request.label).font(.headline).accessibilityIdentifier("scannedRequest")
+                            Text("\(scanned.request.kind) · \(scanned.request.id)").font(.caption)
+                            HStack {
+                                Button("Approve") { Task { await model.approveScanned() } }.accessibilityIdentifier("approve")
+                                Spacer()
+                                Button("Reject", role: .destructive) { model.rejectScanned() }.accessibilityIdentifier("reject")
+                            }.buttonStyle(.borderless)
                         }
-                    } header: { Text("3. Compare the codes") }
+                    } header: { Text("3. Approve the device you scanned") }
                 }
             } else {
                 Section { Text("This device joined the account with a member key only: it cannot add, approve or revoke devices.").font(.footnote) }
@@ -83,7 +63,7 @@ struct DevicesView: View {
         }
         .navigationTitle("Devices")
         .sheet(isPresented: $scanning) {
-            ScannerView { text in scanning = false; Task { await model.importRequest(text) } }
+            ScannerView { text in scanning = false; Task { await model.scanRequest(text) } }
         }
     }
 }
@@ -138,6 +118,12 @@ struct StatusView: View {
     @ViewBuilder private func sessionSections(_ session: ColophonSession) -> some View {
         Section("Session") {
             row("Phase", String(describing: session.phase)).accessibilityIdentifier("phase")
+            if session.phase.isStopped {
+                Text(AppModel.Words.stopped).foregroundStyle(.orange).accessibilityIdentifier("stoppedNotice")
+            }
+            if session.phase == .waitingForApproval {
+                Text(AppModel.Words.waitingForApproval).accessibilityIdentifier("waitingNotice")
+            }
             row("Account", session.libraryID ?? "-")
             row("This device's key", session.memberID ?? "-")
             row("Owner", model.settings.owner?.rawValue ?? "-")

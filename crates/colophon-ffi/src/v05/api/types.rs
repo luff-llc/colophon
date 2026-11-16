@@ -349,6 +349,21 @@ record! {
         pub stop_seq: Option<u64>,
         pub detail: Option<String>,
         pub rollback: bool,
+        /// Set when this reader is stopped for the account (§1 "A stop"): a verified state, not a
+        /// fault. The account was moved to a newer format; what this device holds stays
+        /// readable and nothing new is built (writes `NewerFormat`, calls and exchange passes
+        /// `Unavailable`).
+        pub stopped: Option<AccountStop>,
+    }
+}
+record! {
+    /// Where a reader stopped (§1 "A stop", §20): the seq of the activation whose final raise
+    /// stopped it (or of the entry it judged `newerFormat`), and the layout the raise names
+    /// (none for an entry of a newer format that is not a raise). Only from the verified
+    /// history, never from a home's answer.
+    pub struct AccountStop {
+        pub seq: u64,
+        pub layout: Option<u64>,
     }
 }
 record! {

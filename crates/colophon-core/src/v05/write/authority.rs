@@ -175,7 +175,13 @@ fn verify_appended(
     let mut all = objects.clone();
     all.entries.push(env.to_vec());
     let verdict = verify_history(&all, &Persisted::default(), now_ms);
-    stop_to_error(&verdict.stop)?;
+    // The entry that makes a layout raise final stops the reader at the raise (§1 "A stop"): a
+    // verified state, not a failure of this entry, which must still be the branch head. A 0.5
+    // reader records it as any activation until the raise is final (§13.6).
+    let final_raise = verdict.state.as_ref().and_then(|s| s.stopped_at());
+    if final_raise.is_none() || final_raise != verdict.stopped {
+        stop_to_error(&verdict.stop)?;
+    }
     let want = digest(body);
     require(
         verdict.branch.len() as u64 == seq && verdict.branch.last() == Some(&want),
@@ -406,6 +412,8 @@ pub struct GenesisParams {
 /// that meet the control rule over the new keyring, and a possession proof for every other
 /// controller.
 pub fn prepare_genesis(p: &GenesisParams, now_ms: i64) -> Result<PendingBatch> {
+    // The verifier caps genesis at 64 namespaces; the builder refuses what it would.
+    crate::v05::history::check_namespace_count(p.namespaces.len())?;
     let k = Keyring::parse(p.keyring.clone(), 1)?;
     validate_slots(&k.controllers, &k.slots, 1)?;
     require(!p.signers.is_empty(), "genesis needs a signer")?;
@@ -804,6 +812,13 @@ fn transition_batch(
     now_ms: i64,
     p: &TransitionParams,
 ) -> Result<PendingBatch> {
+    // The upgrade door (§20, design §3.5): a `layout` component that does not raise the layout
+    // voids its transition, and one that raises it is a later version's; 0.5 writes neither.
+    if p.change.get("layout").is_some() {
+        return Err(malformed(
+            "a 0.5 writer builds no `layout` component: one that does not raise the layout voids its transition, and 0.5 has no raise to write",
+        ));
+    }
     check_signers_current(state, &p.signers, i64::MAX)?;
     let k = state.keyring();
     let new_threshold = p
@@ -1964,37 +1979,11 @@ fn judge_veto(
     let s = verified_state(&before, account, ctx.now_ms)?;
     check_pending_veto(&s, &t_bytes, &receipts, veto)?;
     let timing = transition_timing(&s, &t_bytes, &receipts)?;
-    // The home's receipt of the veto, before the deadline.
-    let r = RawEnvelope::parse_bounded(
-        receipt,
-        bounds::RECEIPT_BODY,
-        bounds::RECEIPT_ENVELOPE,
-        true,
-    )?;
-    let mut o = Obj::new(r.value.clone(), "receipt")?;
-    require(
-        o.string("protocol")? == "colophon/receipt/5" && o.string("account")? == account,
-        "not a receipt of this account",
-    )?;
-    require(
-        o.digest("object")? == v.digest,
-        "the receipt is not of this veto",
-    )?;
-    let (_, received) = o.date("received")?;
-    let home = o.key_id("by")?;
-    o.finish_closed()?;
-    let key = s
-        .current_homes()
-        .into_iter()
-        .find(|m| m.request.member_id() == home)
-        .map(|m| m.request.signing.clone())
-        .ok_or_else(|| bad_signature("the receipt is not by a home current at the activation"))?;
-    r.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
+    // The home's receipt of the veto, before the deadline, judged by the verifier's own receipt
+    // check (shape, a current home's key, the veto, the window).
     let v_issued = issued_of(&v)?;
-    require(
-        received >= v_issued && received <= v_issued.saturating_add(RECEIPT_WINDOW_MS),
-        "the receipt is outside its window",
-    )?;
+    let (home, received) =
+        crate::v05::history::check_receipt(&s, receipt, &v.digest, v_issued)?;
     require(
         received <= timing.deadline_ms,
         "the home receipted the veto after the deadline",

@@ -39,7 +39,7 @@ use colophon_core::v05::write::succession::*;
 use colophon_core::v05::write::{format_date, SignatureResult};
 use serde_json::{json, Value};
 use support::MemSource;
-use support_relay::{eventually, free_port, http, prerequisites, HomeKeys, Relay, Scratch, BASE_A};
+use support_relay::{eventually, http, prerequisites, HomeKeys, Relay, Scratch, BASE_A};
 use swift::{body_digest, keyring_library_with, sha, Host, SwiftFixture};
 
 const T0: i64 = 1_794_384_000_000; // 2026-11-11T08:00:00Z
@@ -542,8 +542,7 @@ fn predecessor_staging_survives_kills() {
     let t = acct.swift_succession().unwrap().status.timing.clone().unwrap();
     let scratch = Scratch::new("succession-kills");
     let at = t.window_start_ms + 30 * SEC;
-    let port = free_port();
-    let mut relay = Relay::start_on(&keys, &account, BASE_A, scratch.path(), at, &[], port);
+    let mut relay = Relay::start_on(&keys, &account, BASE_A, scratch.path(), at, &[], 0);
     let mut entries: Vec<(u64, Value)> = acct.objects().entries.iter()
         .map(|e| (support::entry_seq(e), serde_json::from_slice(e).unwrap())).collect();
     entries.sort_by_key(|(s, _)| *s);

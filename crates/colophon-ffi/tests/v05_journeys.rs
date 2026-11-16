@@ -238,7 +238,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     );
     assert_eq!(r1.kind, AccountMemberKind::Device);
     let approve = ctl
-        .begin_approve(r1.raw, terms.to_string(), vec![d.clone()], host.fresh(32))
+        .begin_approve(r1.raw.clone(), terms.to_string(), vec![d.clone()], scanned(&ctl, &r1.raw, NOW), host.fresh(32))
         .unwrap();
     assert_eq!(approve.kind().unwrap(), ActionKind::Approve);
     let w = finish(&ctl, &host, approve);
@@ -269,7 +269,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
     let tk = PairingTransferKey::create(host.fresh(32)).unwrap();
     let joiner = AccountPairing::join(account.clone(), tk.public(), host.fresh(32)).unwrap();
     assert_eq!(joiner.stage().unwrap(), PairingStage::Joiner);
-    let limiter = PairingFailureLimiter::from_state(String::new()).unwrap();
+    let limiter = PairingFailureLimiter::fresh();
     let existing = AccountPairing::existing_receive_commitment(
         account.clone(),
         joiner.commitment().unwrap(),
@@ -277,6 +277,8 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
         NOW,
     )
     .unwrap();
+    // The ledger is sealed (persisted, in an app) before the nonce leaves (§7.3).
+    limiter.seal(DEVICE_KEY.to_vec(), account.clone(), host.fresh(32)).unwrap();
     let na = existing.send_nonce(host.fresh(32)).unwrap();
     let reveal = joiner.receive_nonce(na).unwrap().unwrap();
     let shown = existing
@@ -295,7 +297,7 @@ fn journey_one_create_approve_write_pair_and_sync_two_engines() {
         PairingStage::Confirmed,
         "a wrong-stage call consumes nothing"
     );
-    assert!(limiter.to_state().unwrap().len() < 200);
+    assert!(limiter.may_start(NOW).unwrap(), "the confirmed ceremony gave its reservation back");
     let sealed = ctl.transfer_seed(existing.clone(), host.fresh(32)).unwrap();
     // A seed sealed to another pairing's key is refused.
     let other = PairingTransferKey::create(host.fresh(32)).unwrap();
@@ -549,6 +551,7 @@ fn a_prepared_action_cannot_be_altered_replayed_or_finished_elsewhere() {
             raw.clone(),
             terms.to_string(),
             vec![d.clone()],
+            scanned(e, raw, NOW),
             host.fresh(32),
         )
     };
@@ -558,6 +561,7 @@ fn a_prepared_action_cannot_be_altered_replayed_or_finished_elsewhere() {
             r.raw.clone(),
             terms.to_string(),
             vec![d.clone()],
+            scanned(&engine, &r.raw, NOW),
             vec![1; 31]
         ),
         Err(AccountError::Bound { .. })
@@ -594,7 +598,7 @@ fn a_prepared_action_cannot_be_altered_replayed_or_finished_elsewhere() {
     assert!(!done.stores.is_empty());
     // Hostile arguments are typed errors, never panics.
     assert!(matches!(
-        engine.begin_approve(vec![1, 2], "not json".into(), vec![], host.fresh(32)),
+        engine.begin_approve(vec![1, 2], "not json".into(), vec![], scanned(&engine, &r.raw, NOW), host.fresh(32)),
         Err(AccountError::Malformed { .. }) | Err(AccountError::Unavailable { .. })
     ));
     assert!(engine
@@ -602,6 +606,7 @@ fn a_prepared_action_cannot_be_altered_replayed_or_finished_elsewhere() {
             vec![1, 2],
             terms.to_string(),
             vec![d.clone()],
+            scanned(&engine, &r.raw, NOW),
             host.fresh(32)
         )
         .is_err());
@@ -1012,7 +1017,7 @@ fn a_record_changed_under_the_engine_is_a_typed_integrity_failure() {
         vec![],
     );
     let a = ctl
-        .begin_approve(r.raw, terms.to_string(), vec![d.clone()], host.fresh(32))
+        .begin_approve(r.raw.clone(), terms.to_string(), vec![d.clone()], scanned(&ctl, &r.raw, NOW), host.fresh(32))
         .unwrap();
     src.store(&finish(&ctl, &host, a).stores);
     let me = open_engine(&src, &format!("member:{m}"), &created.account);

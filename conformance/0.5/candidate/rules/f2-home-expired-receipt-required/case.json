@@ -1,0 +1,1 @@
+{"description":"The same transition activated at once with no receipt, as if the expired home did not count: its receipt is still required, so the activate is malformed. A date never removes the veto window.","expected":{"result":"malformed","seq":3},"sections":["8.5","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

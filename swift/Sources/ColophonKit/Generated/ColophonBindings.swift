@@ -1411,9 +1411,13 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
     func beginAddSlot(signer: String, plan: SlotPlan, entropy: Data) throws  -> AccountAction
     
     /**
-     * Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
+     * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+     * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+     * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+     * `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+     * it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
      */
-    func beginApprove(request: Data, termsJson: String, signers: [String], entropy: Data) throws  -> AccountAction
+    func beginApprove(request: Data, termsJson: String, signers: [String], pairing: AccountPairing, entropy: Data) throws  -> AccountAction
     
     /**
      * Start a streaming blob upload (32 fresh bytes).
@@ -1429,6 +1433,13 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
      * End a member's sessions. No entropy.
      */
     func beginEndSessions(member: String, signers: [String], entropy: Data) throws  -> AccountAction
+    
+    /**
+     * A pending transition whose `change_json` carries a `grant` component (an import grant,
+     * §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+     * with a `grant`. No entropy.
+     */
+    func beginGrantTransition(changeJson: String, signers: [String], rule: RuleKind, pairing: AccountPairing, entropy: Data) throws  -> AccountAction
     
     /**
      * An import batch (the 0.4 batch JSON) under a grant that carries `import`. 32 bytes.
@@ -1498,7 +1509,9 @@ public protocol AccountEngineProtocol: AnyObject, Sendable {
     func beginSuspend(key: String, transition: String, signer: String, entropy: Data) throws  -> AccountAction
     
     /**
-     * A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+     * A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+     * component is `refused:outOfScope` here: it spends a confirmed pairing through
+     * `begin_grant_transition` (§9.1). No entropy.
      */
     func beginTransition(changeJson: String, signers: [String], rule: RuleKind, entropy: Data) throws  -> AccountAction
     
@@ -2146,9 +2159,13 @@ open func beginAddSlot(signer: String, plan: SlotPlan, entropy: Data)throws  -> 
 }
     
     /**
-     * Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
+     * Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+     * account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+     * pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+     * `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+     * it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
      */
-open func beginApprove(request: Data, termsJson: String, signers: [String], entropy: Data)throws  -> AccountAction  {
+open func beginApprove(request: Data, termsJson: String, signers: [String], pairing: AccountPairing, entropy: Data)throws  -> AccountAction  {
     return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
     uniffi_colophon_ffi_fn_method_accountengine_begin_approve(
@@ -2156,6 +2173,7 @@ open func beginApprove(request: Data, termsJson: String, signers: [String], entr
         FfiConverterData.lower(request),
         FfiConverterString.lower(termsJson),
         FfiConverterSequenceString.lower(signers),
+        FfiConverterTypeAccountPairing_lower(pairing),
         FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
@@ -2199,6 +2217,25 @@ open func beginEndSessions(member: String, signers: [String], entropy: Data)thro
             self.uniffiCloneHandle(),
         FfiConverterString.lower(member),
         FfiConverterSequenceString.lower(signers),
+        FfiConverterData.lower(entropy),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A pending transition whose `change_json` carries a `grant` component (an import grant,
+     * §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+     * with a `grant`. No entropy.
+     */
+open func beginGrantTransition(changeJson: String, signers: [String], rule: RuleKind, pairing: AccountPairing, entropy: Data)throws  -> AccountAction  {
+    return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountengine_begin_grant_transition(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(changeJson),
+        FfiConverterSequenceString.lower(signers),
+        FfiConverterTypeRuleKind_lower(rule),
+        FfiConverterTypeAccountPairing_lower(pairing),
         FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
@@ -2418,7 +2455,9 @@ open func beginSuspend(key: String, transition: String, signer: String, entropy:
 }
     
     /**
-     * A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+     * A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+     * component is `refused:outOfScope` here: it spends a confirmed pairing through
+     * `begin_grant_transition` (§9.1). No entropy.
      */
 open func beginTransition(changeJson: String, signers: [String], rule: RuleKind, entropy: Data)throws  -> AccountAction  {
     return try  FfiConverterTypeAccountAction_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
@@ -4052,12 +4091,19 @@ public func FfiConverterTypeAccountMove_lower(_ value: AccountMove) -> UInt64 {
 public protocol AccountPairingProtocol: AnyObject, Sendable {
     
     /**
+     * End the session now, in any stage before it is confirmed: abandoned, it stays counted in
+     * the existing device's ledger (§7.3). A confirmed or spent session is left as it is.
+     */
+    func abandon(nowMs: Int64) throws 
+    
+    /**
      * The joiner's commitment `C` (32 bytes), to send first.
      */
     func commitment() throws  -> Data
     
     /**
-     * The person saw the same code on both screens.
+     * The person saw the same code on both screens. On the existing device the ceremony's
+     * reservation goes back: a confirmed pairing is not a failure.
      */
     func confirm() throws 
     
@@ -4214,7 +4260,39 @@ public static func joinQr(account: String, e: Data, nb: Data)throws  -> AccountP
 })
 }
     
+    /**
+     * The existing device scanned a membership request from the joining device's screen
+     * (§7.3, §7a): the request must verify and name `account`; the pairing is then confirmed
+     * for its `member.signing` and may approve that one request. The host attests the scan.
+     * A bad request is `pairing:invalidRequest` or `pairing:wrongAccount` and counts as a
+     * failure.
+     */
+public static func scanRequest(account: String, request: Data, limiter: PairingFailureLimiter, nowMs: Int64)throws  -> AccountPairing  {
+    return try  FfiConverterTypeAccountPairing_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_accountpairing_scan_request(
+        FfiConverterString.lower(account),
+        FfiConverterData.lower(request),
+        FfiConverterTypePairingFailureLimiter_lower(limiter),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
 
+    
+    /**
+     * End the session now, in any stage before it is confirmed: abandoned, it stays counted in
+     * the existing device's ledger (§7.3). A confirmed or spent session is left as it is.
+     */
+open func abandon(nowMs: Int64)throws   {try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_accountpairing_abandon(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+}
+}
     
     /**
      * The joiner's commitment `C` (32 bytes), to send first.
@@ -4229,7 +4307,8 @@ open func commitment()throws  -> Data  {
 }
     
     /**
-     * The person saw the same code on both screens.
+     * The person saw the same code on both screens. On the existing device the ceremony's
+     * reservation goes back: a confirmed pairing is not a failure.
      */
 open func confirm()throws   {try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
@@ -6837,25 +6916,40 @@ public func FfiConverterTypeNativeLibrary_lower(_ value: NativeLibrary) -> UInt6
 
 
 /**
- * The five-failures-per-hour ledger of an existing device (§7.3). Plain data the host keeps:
- * persist `to_state` and restore it with `from_state`, or the limit holds only for this process.
+ * The pairing ledger of an existing device (§7.3): five failed sessions an hour, one ceremony at
+ * a time. The host persists it sealed: `seal` after every change, `open` on start. An edited,
+ * foreign or unreadable ledger, or one older than the generation the host recorded beside it,
+ * opens as a spent budget.
  */
 public protocol PairingFailureLimiterProtocol: AnyObject, Sendable {
     
     /**
-     * Whether a session may start now.
+     * The ledger's generation, raised by every change: record it beside the sealed ledger.
+     */
+    func generation() throws  -> UInt64
+    
+    /**
+     * Whether a ceremony is live now.
+     */
+    func isLive(nowMs: Int64) throws  -> Bool
+    
+    /**
+     * Whether a session may start now (none live, budget left).
      */
     func mayStart(nowMs: Int64) throws  -> Bool
     
     /**
-     * The state to persist (an opaque text the host stores and gives back).
+     * The ledger sealed for `account` under the device-held key, to persist (with `generation`
+     * recorded beside it) before acting on the change. 32 bytes of entropy.
      */
-    func toState() throws  -> String
+    func seal(deviceKey: Data, account: String, entropy: Data) throws  -> Data
     
 }
 /**
- * The five-failures-per-hour ledger of an existing device (§7.3). Plain data the host keeps:
- * persist `to_state` and restore it with `from_state`, or the limit holds only for this process.
+ * The pairing ledger of an existing device (§7.3): five failed sessions an hour, one ceremony at
+ * a time. The host persists it sealed: `seal` after every change, `open` on start. An edited,
+ * foreign or unreadable ledger, or one older than the generation the host recorded beside it,
+ * opens as a spent budget.
  */
 open class PairingFailureLimiter: PairingFailureLimiterProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -6909,13 +7003,29 @@ open class PairingFailureLimiter: PairingFailureLimiterProtocol, @unchecked Send
 
     
     /**
-     * A limiter from saved state, or a fresh one from an empty string.
+     * A new, empty ledger held in memory (a device that keeps none, or a test).
      */
-public static func fromState(state: String)throws  -> PairingFailureLimiter  {
+public static func fresh() -> PairingFailureLimiter  {
+    return try!  FfiConverterTypePairingFailureLimiter_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_fresh(uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The ledger the host stored for `account` (empty when none), opened under the device-held
+     * key; `floor` is the generation the host recorded beside it (0 when none).
+     */
+public static func `open`(sealed: Data, deviceKey: Data, account: String, floor: UInt64, nowMs: Int64)throws  -> PairingFailureLimiter  {
     return try  FfiConverterTypePairingFailureLimiter_lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
-    uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_from_state(
-        FfiConverterString.lower(state),uniffiCallStatus
+    uniffi_colophon_ffi_fn_constructor_pairingfailurelimiter_open(
+        FfiConverterData.lower(sealed),
+        FfiConverterData.lower(deviceKey),
+        FfiConverterString.lower(account),
+        FfiConverterUInt64.lower(floor),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -6923,7 +7033,32 @@ public static func fromState(state: String)throws  -> PairingFailureLimiter  {
 
     
     /**
-     * Whether a session may start now.
+     * The ledger's generation, raised by every change: record it beside the sealed ledger.
+     */
+open func generation()throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_pairingfailurelimiter_generation(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether a ceremony is live now.
+     */
+open func isLive(nowMs: Int64)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+        uniffiCallStatus in
+    uniffi_colophon_ffi_fn_method_pairingfailurelimiter_is_live(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether a session may start now (none live, budget left).
      */
 open func mayStart(nowMs: Int64)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
@@ -6936,13 +7071,17 @@ open func mayStart(nowMs: Int64)throws  -> Bool  {
 }
     
     /**
-     * The state to persist (an opaque text the host stores and gives back).
+     * The ledger sealed for `account` under the device-held key, to persist (with `generation`
+     * recorded beside it) before acting on the change. 32 bytes of entropy.
      */
-open func toState()throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
+open func seal(deviceKey: Data, account: String, entropy: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeAccountError_lift) {
         uniffiCallStatus in
-    uniffi_colophon_ffi_fn_method_pairingfailurelimiter_to_state(
-            self.uniffiCloneHandle(),uniffiCallStatus
+    uniffi_colophon_ffi_fn_method_pairingfailurelimiter_seal(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(deviceKey),
+        FfiConverterString.lower(account),
+        FfiConverterData.lower(entropy),uniffiCallStatus
     )
 })
 }
@@ -8811,6 +8950,66 @@ public func FfiConverterTypeAccountSigningStep_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeAccountSigningStep_lower(_ value: AccountSigningStep) -> RustBuffer {
     return FfiConverterTypeAccountSigningStep.lower(value)
+}
+
+
+/**
+ * Where a reader stopped (§1 "A stop", §20): the seq of the activation whose final raise
+ * stopped it (or of the entry it judged `newerFormat`), and the layout the raise names
+ * (none for an entry of a newer format that is not a raise). Only from the verified
+ * history, never from a home's answer.
+ */
+public struct AccountStop: Equatable, Hashable {
+    public let seq: UInt64
+    public let layout: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(seq: UInt64, layout: UInt64?) {
+        self.seq = seq
+        self.layout = layout
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AccountStop: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccountStop: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccountStop {
+        return
+            try AccountStop(
+                seq: FfiConverterUInt64.read(from: &buf), 
+                layout: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AccountStop, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterOptionUInt64.write(value.layout, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountStop_lift(_ buf: RustBuffer) throws -> AccountStop {
+    return try FfiConverterTypeAccountStop.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountStop_lower(_ value: AccountStop) -> RustBuffer {
+    return FfiConverterTypeAccountStop.lower(value)
 }
 
 
@@ -15256,10 +15455,23 @@ public struct Status: Equatable, Hashable {
     public let stopSeq: UInt64?
     public let detail: String?
     public let rollback: Bool
+    /**
+     * Set when this reader is stopped for the account (§1 "A stop"): a verified state, not a
+     * fault. The account was moved to a newer format; what this device holds stays
+     * readable and nothing new is built (writes `NewerFormat`, calls and exchange passes
+     * `Unavailable`).
+     */
+    public let stopped: AccountStop?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(seq: UInt64, code: String, kind: StatusKind, reason: String?, stopSeq: UInt64?, detail: String?, rollback: Bool) {
+    public init(seq: UInt64, code: String, kind: StatusKind, reason: String?, stopSeq: UInt64?, detail: String?, rollback: Bool, 
+        /**
+         * Set when this reader is stopped for the account (§1 "A stop"): a verified state, not a
+         * fault. The account was moved to a newer format; what this device holds stays
+         * readable and nothing new is built (writes `NewerFormat`, calls and exchange passes
+         * `Unavailable`).
+         */stopped: AccountStop?) {
         self.seq = seq
         self.code = code
         self.kind = kind
@@ -15267,6 +15479,7 @@ public struct Status: Equatable, Hashable {
         self.stopSeq = stopSeq
         self.detail = detail
         self.rollback = rollback
+        self.stopped = stopped
     }
 
     
@@ -15291,7 +15504,8 @@ public struct FfiConverterTypeStatus: FfiConverterRustBuffer {
                 reason: FfiConverterOptionString.read(from: &buf), 
                 stopSeq: FfiConverterOptionUInt64.read(from: &buf), 
                 detail: FfiConverterOptionString.read(from: &buf), 
-                rollback: FfiConverterBool.read(from: &buf)
+                rollback: FfiConverterBool.read(from: &buf), 
+                stopped: FfiConverterOptionTypeAccountStop.read(from: &buf)
         )
     }
 
@@ -15303,6 +15517,7 @@ public struct FfiConverterTypeStatus: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.stopSeq, into: &buf)
         FfiConverterOptionString.write(value.detail, into: &buf)
         FfiConverterBool.write(value.rollback, into: &buf)
+        FfiConverterOptionTypeAccountStop.write(value.stopped, into: &buf)
     }
 }
 
@@ -23173,6 +23388,30 @@ fileprivate struct FfiConverterOptionTypeAccountMember: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAccountStop: FfiConverterRustBuffer {
+    typealias SwiftType = AccountStop?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAccountStop.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAccountStop.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeActionInfo: FfiConverterRustBuffer {
     typealias SwiftType = ActionInfo?
 
@@ -26351,7 +26590,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_add_slot() != 16458) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() != 48078) {
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_approve() != 12821) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_blob() != 26001) {
@@ -26361,6 +26600,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_end_sessions() != 46090) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_grant_transition() != 63919) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_import() != 64191) {
@@ -26402,7 +26644,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_suspend() != 12346) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_transition() != 15310) {
+    if (uniffi_colophon_ffi_checksum_method_accountengine_begin_transition() != 1156) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountengine_begin_unlock_epochs() != 60825) {
@@ -26690,10 +26932,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountmove_steps() != 32622) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_colophon_ffi_checksum_method_accountpairing_abandon() != 34220) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_colophon_ffi_checksum_method_accountpairing_commitment() != 18527) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_accountpairing_confirm() != 787) {
+    if (uniffi_colophon_ffi_checksum_method_accountpairing_confirm() != 36711) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_accountpairing_digits() != 52369) {
@@ -26717,10 +26962,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_method_accountpairing_stage() != 51135) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_may_start() != 10122) {
+    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_generation() != 25863) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_to_state() != 28839) {
+    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_is_live() != 43796) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_may_start() != 3427) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_method_pairingfailurelimiter_seal() != 33154) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_method_pairingtransferkey_public() != 26060) {
@@ -26843,7 +27094,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_colophon_ffi_checksum_constructor_accountpairing_join_qr() != 17885) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_from_state() != 60989) {
+    if (uniffi_colophon_ffi_checksum_constructor_accountpairing_scan_request() != 60272) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_fresh() != 61851) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_colophon_ffi_checksum_constructor_pairingfailurelimiter_open() != 48477) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_colophon_ffi_checksum_constructor_pairingtransferkey_create() != 49812) {

@@ -8,8 +8,10 @@
 use super::action::{next_owner, AccountAction};
 use super::convert as cv;
 use super::fault::AccountError;
+use super::pairing::AccountPairing;
 use super::types::*;
 use super::{guard, Cell, HostFault, HostSource, Source, Versions};
+use colophon_core::v05::pairing::ConfirmedPairing;
 use colophon_core::blobs::{BlobRead, BlobWriter};
 use colophon_core::model::Outcome;
 use colophon_core::v05::account::RevokeKeep as CoreKeep;
@@ -566,13 +568,125 @@ macro_rules! begin_methods {
     };
 }
 
-begin_methods! {
-    /// Approve a request (a `grant`; `terms_json` with `import` is an import grant). 32 bytes of entropy.
-    fn begin_approve(request: Vec<u8>, terms_json: String, signers: Vec<String>) Approve |e, s| {
-        let sd = seeds32(s, 1)?;
-        let terms = auth_json(&terms_json, "terms")?;
-        done(e.account().begin_approve(&request, terms, &names(signers, "signers")?, sd[0]))
+/// The calls that approve a member spend a confirmed pairing (§9.1). They take the pairing
+/// object as their last argument before the entropy, so they are written out per build.
+impl AccountEngine {
+    /// Refuse a pairing that is not confirmed before anything else, leaving it as it was; the
+    /// confirmed one is taken (and so spent) only inside the engine's hold, after the engine is
+    /// known to be live.
+    fn paired<F>(
+        &self,
+        kind: ActionKind,
+        pairing: &AccountPairing,
+        entropy: Vec<u8>,
+        f: F,
+    ) -> R<AccountAction>
+    where
+        F: FnOnce(&Engine<Source>, &[u8], ConfirmedPairing) -> R<Prepared>,
+    {
+        if let Err(e) = pairing.require_confirmed() {
+            let mut entropy = entropy;
+            wipe(&mut entropy);
+            return Err(e);
+        }
+        self.prepare(kind, entropy, |e, s| f(e, s, pairing.take_confirmed()?))
     }
+    fn approve_inner(
+        &self,
+        request: Vec<u8>,
+        terms_json: String,
+        signers: Vec<String>,
+        pairing: &AccountPairing,
+        entropy: Vec<u8>,
+    ) -> R<AccountAction> {
+        self.paired(ActionKind::Approve, pairing, entropy, |e, s, token| {
+            let sd = seeds32(s, 1)?;
+            let terms = auth_json(&terms_json, "terms")?;
+            let signers = names(signers, "signers")?;
+            done(e.account().begin_approve(&request, terms, &signers, sd[0], token))
+        })
+    }
+    fn grant_transition_inner(
+        &self,
+        change_json: String,
+        signers: Vec<String>,
+        rule: RuleKind,
+        pairing: &AccountPairing,
+        entropy: Vec<u8>,
+    ) -> R<AccountAction> {
+        self.paired(ActionKind::Transition, pairing, entropy, |e, s, token| {
+            no_entropy(s)?;
+            let c = auth_json(&change_json, "the change")?;
+            let Value::Object(map) = c else {
+                return Err(AccountError::bad("the change is an object"));
+            };
+            let signers = names(signers, "signers")?;
+            done(e.account().begin_grant_transition(&Change(map), &signers, cv::rule(rule), token))
+        })
+    }
+}
+#[cfg(feature = "native05")]
+#[uniffi::export]
+impl AccountEngine {
+    /// Approve a request (a `grant`), spending `pairing`: confirmed on this device, for this
+    /// account and exactly the request's `member.signing` (§9.1). Another account or key, or a
+    /// pairing confirmed on the joining device, is `refused:outOfScope`; an expired one
+    /// `refused:expired`; one that is not confirmed (or already spent) is refused and left as
+    /// it was. A confirmed pairing is spent whatever the answer. 32 bytes of entropy.
+    pub fn begin_approve(
+        &self,
+        request: Vec<u8>,
+        terms_json: String,
+        signers: Vec<String>,
+        pairing: Arc<AccountPairing>,
+        entropy: Vec<u8>,
+    ) -> Result<Arc<AccountAction>, AccountError> {
+        self.approve_inner(request, terms_json, signers, &pairing, entropy)
+            .map(Arc::new)
+    }
+    /// A pending transition whose `change_json` carries a `grant` component (an import grant,
+    /// §9.3), spending `pairing` as `begin_approve` does. `begin_transition` refuses a change
+    /// with a `grant`. No entropy.
+    pub fn begin_grant_transition(
+        &self,
+        change_json: String,
+        signers: Vec<String>,
+        rule: RuleKind,
+        pairing: Arc<AccountPairing>,
+        entropy: Vec<u8>,
+    ) -> Result<Arc<AccountAction>, AccountError> {
+        self.grant_transition_inner(change_json, signers, rule, &pairing, entropy)
+            .map(Arc::new)
+    }
+}
+#[cfg(feature = "web05")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+impl AccountEngine {
+    /// Approve a request (a `grant`), spending `pairing` (§9.1). 32 bytes of entropy.
+    pub fn begin_approve(
+        &self,
+        request: Vec<u8>,
+        terms_json: String,
+        signers: Vec<String>,
+        pairing: &AccountPairing,
+        entropy: Vec<u8>,
+    ) -> Result<AccountAction, AccountError> {
+        self.approve_inner(request, terms_json, signers, pairing, entropy)
+    }
+    /// A pending transition with a `grant` component, spending `pairing` (§9.1). No entropy.
+    pub fn begin_grant_transition(
+        &self,
+        change_json: String,
+        signers: Vec<String>,
+        rule: RuleKind,
+        pairing: &AccountPairing,
+        entropy: Vec<u8>,
+    ) -> Result<AccountAction, AccountError> {
+        self.grant_transition_inner(change_json, signers, rule, pairing, entropy)
+    }
+}
+
+begin_methods! {
     /// Renew a member's expiry. 32 bytes of entropy.
     fn begin_renew(member: String, expires_ms: i64, signers: Vec<String>) Renew |e, s| {
         let sd = seeds32(s, 1)?;
@@ -662,7 +776,9 @@ begin_methods! {
         done(e.account().begin_remove_controller(
             &names(remove, "remove")?, &names(keep, "keep")?, &names(signers, "signers")?, cv::rule(rule), rotation))
     }
-    /// A pending transition; `change_json` is the §8.7 `change` object. No entropy.
+    /// A pending transition; `change_json` is the §8.7 `change` object. A change with a `grant`
+    /// component is `refused:outOfScope` here: it spends a confirmed pairing through
+    /// `begin_grant_transition` (§9.1). No entropy.
     fn begin_transition(change_json: String, signers: Vec<String>, rule: RuleKind) Transition |e, s| {
         no_entropy(s)?;
         let c = auth_json(&change_json, "the change")?;

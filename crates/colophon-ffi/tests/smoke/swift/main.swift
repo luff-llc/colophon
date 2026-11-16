@@ -86,7 +86,7 @@ let peer = try P256.KeyAgreement.PublicKey(x963Representation: inputs[0].enc)
 let shared = try agreement.sharedSecretFromKeyAgreement(with: peer).withUnsafeBytes { Data($0) }
 _ = try engine.finishUnlockSlot(index: slot.index, secrets: [UnlockSecret(kind: .ecdh, secret: shared)])
 check(try engine.isUnlocked(), "the engine unlocks from the host's ECDH result")
-check(try engine.status().kind == .ok && (try engine.controllers().count) == 1, "typed status and controllers")
+check(try engine.status().kind == .ok && (try engine.status().stopped) == nil && (try engine.controllers().count) == 1, "typed status, not stopped, and controllers")
 check(try engine.controllers()[0].roles == [.approve, .control] && (try engine.identity().kind) == .controller, "roles and identity are enums")
 check(try action0IsTyped(engine), "an action's kind is an enum")
 

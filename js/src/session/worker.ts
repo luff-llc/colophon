@@ -4,15 +4,15 @@ import { descriptorView, KeyCustody, keyDescriptorOf, keyIdOf, toPrfAnswers, toS
 import type { MediumEntry, RecordMedium } from './medium.js';
 import { SavedStateCache, SessionJournal, type SavedStateData } from './private.js';
 import type {
-  AccountDenial, AccountMember, CallNeed, Controller, Created, EpochAgreement, ExchangeStep, HistoryReport, Home, KeyDescriptor, Notices, Policy,
+  AccountDenial, AccountMember, AccountStop, CallNeed, Controller, Created, EpochAgreement, ExchangeStep, HistoryReport, Home, KeyDescriptor, Notices, Policy,
   PrfRequest, RemovalFollowUp, Report, RequestInfo, SealedSeed, SigningStep, SlotInfo, Standing, Status, Store, UnlockInput, Written, NamespaceRevision,
 } from './records.js';
 import { closeAll, withEntropy } from './secrets.js';
-import { HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest } from './transport.js';
+import { homeRefusal, HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest } from './transport.js';
 import {
-  ConfiguredHome, emptyNotices, noDuties, noticesFrom, pairingCode, phaseUsable, samePhase, SessionRefusal,
-  type AccessRequest, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
-  type SessionConfiguration, type SessionNotices, type SessionPhase, type SessionSnapshot, type WriteReceipt,
+  ConfiguredHome, emptyNotices, noDuties, noticesFrom, phaseUsable, samePhase, SessionRefusal,
+  type AccessRequest, type ApprovalStart, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
+  type SessionConfiguration, type SessionNotices, type ScannedRequest, type SessionPhase, type SessionSnapshot, type WriteReceipt,
 } from './types.js';
 import { glue, isAccountFault, makeFault, plain } from './wasm.js';
 
@@ -40,6 +40,11 @@ export interface ExchangeResult {
   passes: number; faults: HomeFault[]; issues: HomeIssue[]; changed: boolean; unauthorized: boolean;
   /** A pass that did not finish (the engine still waited after its one recovery): the exchange failed. */
   failed: boolean;
+  /** The account is stopped (a final layout raise this device verified, spec §1 "A stop"): no pass runs, and a pass that
+   *  brought the stop in ended there. Not a failure. */
+  stopped?: boolean;
+  /** A home answered `503 {"result":"unavailable"}`: the home is not available. Retried with backoff; not about this device. */
+  homeUnavailable?: boolean;
 }
 
 /**
@@ -187,7 +192,8 @@ export class SessionWorker {
     const objects = (prefix: string): glue.ByteString[] => entries.filter(e => e.path.startsWith(prefix)).map(e => new glue.ByteString(medium.read(e.path)));
     const pending = [...objects('transitions/'), ...objects('vetoes/'), ...objects('receipts/')];
     const report = plain<HistoryReport>(glue.account_verify_history(new glue.AuthorityObjects(objects('authority/'), pending, objects('heads/'), objects('predecessor/')), BigInt(this.nowMs)));
-    if (report.kind === glue.StatusKind.NewerFormat) throw makeFault('NewerFormat', report.code, report.detail ?? '');
+    // A history that stops at a final layout raise still names its account: the engine opens it, stopped (spec §1).
+    if (report.kind === glue.StatusKind.NewerFormat && report.account === undefined) throw makeFault('NewerFormat', report.code, report.detail ?? '');
     if (report.account === undefined) throw makeFault('Malformed', report.code, report.detail ?? "the library's history does not verify");
     return report.account;
   }
@@ -216,6 +222,8 @@ export class SessionWorker {
   private async refreshEngine(entries: readonly MediumEntry[], signal?: AbortSignal): Promise<void> {
     const engine = this.engine;
     if (!engine) return;
+    // A stopped account reads nothing new (spec §1 "A stop"): what it held when the stop was verified stays readable.
+    if (this.isStopped(engine)) return;
     plain(engine.run(e => e.advance(BigInt(this.nowMs))));
     plain(engine.run(e => e.refresh(listed(entries))));
     for (const written of plain<Written[]>(engine.run(e => e.record_due()))) await this.persist(written.stores);
@@ -232,13 +240,17 @@ export class SessionWorker {
     engine.finishUnlockEpochs(await custody.answerEpochs(agreements, this.waiting(signal)));
   }
 
+  /** Seals and stores the engine's saved state (inside the gate). A stopped account's saved state carries the stop as a floor. */
+  private async persistSaved(engine: ColophonEngine, account: string): Promise<void> {
+    plain(engine.run(e => e.verify_batch(128n)));
+    const state = plain<SavedStateData>(engine.run(e => withEntropy(32, seed => e.save(seed))));
+    await this.cache.save(account, state);
+  }
   saveCheckpoint(): Promise<void> {
     return this.gated(async () => {
       const engine = this.engine; const account = this.accountId;
-      if (!engine || account === undefined || this.lastPhase.kind !== 'ready') return;
-      plain(engine.run(e => e.verify_batch(128n)));
-      const state = plain<SavedStateData>(engine.run(e => withEntropy(32, seed => e.save(seed))));
-      await this.cache.save(account, state);
+      if (!engine || account === undefined || (this.lastPhase.kind !== 'ready' && this.lastPhase.kind !== 'stopped')) return;
+      await this.persistSaved(engine, account);
     });
   }
 
@@ -255,11 +267,33 @@ export class SessionWorker {
       setupPending: this.journal.setupPending };
   }
 
+  /**
+   * The stopped phase (spec §1 "A stop"): only from the verified status. What the device holds stays readable as of the
+   * stop (revisions are published for the namespaces this member may read); no notices or duties are computed: a
+   * stopped reader answers no question of currency, and the host builds nothing.
+   */
+  private async stoppedSnapshot(engine: ColophonEngine, stop: AccountStop, standing: Standing): Promise<SessionSnapshot> {
+    // The moment the stop is verified it is persisted (the sealed saved state carries it as a floor).
+    if (this.lastPhase.kind !== 'stopped' && this.accountId !== undefined) await this.persistSaved(engine, this.accountId);
+    const members = plain<AccountMember[]>(engine.run(e => e.members()));
+    const homes = plain<Home[]>(engine.run(e => e.homes()));
+    const revisions: Record<string, bigint> = {};
+    if (standing.kind === glue.StandingKind.Member && standing.member?.revokedAt === undefined) {
+      for (const r of plain<NamespaceRevision[]>(engine.run(e => e.revisions()))) {
+        if (this.libraryNamespaces.includes(r.namespace) && plain<AccountDenial | undefined>(engine.run(e => e.access(r.namespace))) === undefined) revisions[r.namespace] = r.revision;
+      }
+      if (Object.keys(revisions).length > 0) revisions['colophon.authority'] = engine.run(e => e.head_seq());
+    }
+    const phase: SessionPhase = stop.layout === undefined ? { kind: 'stopped', seq: Number(stop.seq) } : { kind: 'stopped', seq: Number(stop.seq), layout: Number(stop.layout) };
+    return this.snapshot(phase, { members, namespaceRevisions: revisions, homes });
+  }
+
   private async build(): Promise<SessionSnapshot> {
     const engine = this.engine;
     if (!engine) return this.snapshot(this.lockedFlag ? { kind: 'locked' } : { kind: 'noLibrary' });
     const standing = plain<Standing>(engine.run(e => e.me()));
     const status = plain<Status>(engine.run(e => e.status()));
+    if (status.stopped) return await this.stoppedSnapshot(engine, status.stopped, standing);
     if (status.kind === glue.StatusKind.NewerFormat) return this.snapshot({ kind: 'updateRequired' });
     const members = plain<AccountMember[]>(engine.run(e => e.members()));
     const requests = this.pendingRequests(members);
@@ -271,7 +305,7 @@ export class SessionWorker {
     }
     if (standing.kind === glue.StandingKind.Unknown) {
       await this.ensureOwnRequest();
-      return this.snapshot({ kind: 'waitingForApproval', code: pairingCode(this.memberId ?? '') }, { members, requests, homes });
+      return this.snapshot({ kind: 'waitingForApproval' }, { members, requests, homes });
     } else if (standing.kind === glue.StandingKind.Controller) {
       phase = { kind: 'failed', failure: { kind: 'other', detail: 'this identity is a controller, not a member' } };
     } else if (standing.member?.revokedAt !== undefined) {
@@ -479,13 +513,6 @@ export class SessionWorker {
       return this.storage.read(this.requestPath(id));
     });
   }
-  importRequest(data: Uint8Array): Promise<SessionSnapshot> {
-    return this.gated(async () => {
-      const info = plain<RequestInfo>(glue.account_request_info(data));
-      await this.storage.write([{ path: this.requestPath(info.member), bytes: info.raw }]);
-      return this.reconcile();
-    });
-  }
   private pendingRequests(members: readonly AccountMember[]): AccessRequest[] {
     const known = new Set(members.map(m => m.id));
     const out: AccessRequest[] = [];
@@ -494,12 +521,141 @@ export class SessionWorker {
       let info: RequestInfo;
       try { info = plain<RequestInfo>(glue.account_request_info(this.storage.read(entry.path))); } catch { continue; }
       if (known.has(info.member) || info.member === this.memberId) continue;
-      const records = requestedRecords(info.termsJson);
-      out.push({ id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, pairingCode: pairingCode(info.member), record: info.raw,
-        namespaces: records.map(r => r.namespace), access: records.some(r => r.access === 'write') ? ['read', 'write'] : ['read'] });
+      out.push(accessRequest(info));
     }
     return out;
   }
+
+  // Pairing before approval (§7.3, §9.1)
+
+  /**
+   * The pairing ledger of this device (§7.3): five failed sessions an hour and one ceremony at a time, enforced by the
+   * core. Kept sealed under the device key in the private store (`pairing-ledger.bin`), its generation recorded beside it
+   * (`pairing-ledger.generation`): a missing, edited or older ledger opens as a spent budget. It records sessions only,
+   * never a request.
+   *
+   * Every change happens under `withLedger`: an exclusive Web Lock (`navigator.locks`, shared by every tab and worker of
+   * the origin) named for the account, or, where the platform has none (Node, Bun), a lock shared by every session in this
+   * process. Under the lock the ledger is reloaded whenever the stored generation is not the one this worker loaded or
+   * persisted, so a ceremony another instance started is seen live (`pairing:busy`), and a change is written before the
+   * lock goes. Separate processes over one file store without Web Locks are not coordinated (docs/js-session.md).
+   */
+  private pairingLedgerHeld: { account: string; limiter: glue.PairingFailureLimiter; base: bigint } | undefined;
+  private async storedGeneration(): Promise<bigint> {
+    const bytes = await this.configuration.privateStore.read('pairing-ledger.generation');
+    return bytes ? BigInt(new TextDecoder().decode(bytes).trim() || '0') : 0n;
+  }
+  private async loadLedger(account: string): Promise<glue.PairingFailureLimiter> {
+    const sealed = (await this.configuration.privateStore.read('pairing-ledger.bin')) ?? new Uint8Array(0);
+    const floor = await this.storedGeneration();
+    const key = await this.configuration.deviceSecrets.key(account);
+    let opened: glue.PairingFailureLimiter;
+    try { opened = key.lend(k => glue.PairingFailureLimiter.open(sealed, k, account, floor, BigInt(this.nowMs))); } finally { key.close(); }
+    this.pairingLedgerHeld = { account, limiter: opened, base: opened.generation() };
+    return opened;
+  }
+  /** Persists the sealed ledger, then its generation (the lock is held). Throws when either cannot be written: a start is then never answered with a nonce (fail closed). */
+  private async keepLedger(account: string, limiter: glue.PairingFailureLimiter): Promise<void> {
+    const key = await this.configuration.deviceSecrets.key(account);
+    let sealed: Uint8Array;
+    try { sealed = key.lend(k => withEntropy(32, entropy => limiter.seal(k, account, entropy))); } finally { key.close(); }
+    await this.configuration.privateStore.write('pairing-ledger.bin', sealed);
+    const generation = limiter.generation();
+    await this.configuration.privateStore.write('pairing-ledger.generation', new TextEncoder().encode(generation.toString()));
+    this.pairingLedgerHeld = { account, limiter, base: generation };
+  }
+  /** Runs `body` on the ledger under the cross-instance lock; a change it made is persisted before the lock is released, also when it throws. */
+  private withLedger<T>(account: string, body: (limiter: glue.PairingFailureLimiter) => T): Promise<T> {
+    return withExclusiveLock(`colophon:pairing-ledger:${account}`, async () => {
+      // The held ledger is current when the store still has the generation it was loaded or persisted at; its own later
+      // changes (a confirmed pairing's release) are then kept. Otherwise another instance wrote: reload.
+      const held = this.pairingLedgerHeld;
+      const limiter = held?.account === account && held.base === await this.storedGeneration() ? held.limiter : await this.loadLedger(account);
+      const base = this.pairingLedgerHeld?.base ?? 0n;
+      let out: T;
+      try { out = body(limiter); } catch (error) {
+        try { if (limiter.generation() !== base) await this.keepLedger(account, limiter); } catch { /* counted already */ }
+        throw error;
+      }
+      if (limiter.generation() !== base) await this.keepLedger(account, limiter);
+      return out;
+    });
+  }
+  /** Keeps a change the app made to the ledger directly (a confirmed pairing gives its reservation back); a lost write only leaves it counted. */
+  private async keepLedgerChange(account: string): Promise<void> {
+    if (this.pairingLedgerHeld?.account !== account) return;
+    try { await this.withLedger(account, () => undefined); } catch { /* stays counted */ }
+  }
+  /** The joining device: a code-path pairing for its own member key. Send `commitment()` with the request. */
+  beginJoinPairing(): Promise<glue.AccountPairing> {
+    return this.gated(async () => {
+      await this.loadJournal();
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const e = (await this.memberKeys.publicKeys()).signing;
+      return withEntropy(32, nb => glue.AccountPairing.join(account, e, nb));
+    });
+  }
+  /**
+   * The approving device's person started a ceremony for one incoming commitment: a session that reserves one of the five an
+   * hour, and the nonce to send back. While another is live (in this session or any other instance sharing the lock and
+   * the store) this is refused (`pairing:busy`); the reservation is persisted before the nonce exists, and if it cannot
+   * be, no nonce is produced.
+   */
+  beginApproval(commitment: Uint8Array): Promise<ApprovalStart> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const at = BigInt(this.nowMs);
+      const pairing = await this.withLedger(account, limiter => glue.AccountPairing.existing_receive_commitment(account, commitment, limiter, at));
+      return { pairing, nonce: withEntropy(32, na => pairing.send_nonce(na)) };
+    });
+  }
+  /** The approving device received the reveal: the six digits both screens show. A mismatch or a reveal after the ten-minute timeout aborts (it stays counted). */
+  approvalCode(pairing: glue.AccountPairing, e: Uint8Array, nb: Uint8Array): Promise<string> {
+    return this.gated(async () => {
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const at = BigInt(this.nowMs);
+      return this.withLedger(account, limiter => pairing.receive_reveal(e, nb, limiter, at));
+    });
+  }
+  /** The codes did not match (or the person stopped): the session ends on this device, counted. */
+  rejectPairing(pairing: glue.AccountPairing): Promise<void> {
+    return this.gated(async () => {
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const at = BigInt(this.nowMs);
+      await this.withLedger(account, limiter => {
+        const stage = pairing.stage();
+        if (stage === glue.PairingStage.Code || stage === glue.PairingStage.Revealed) pairing.reject(limiter, at);
+        else pairing.abandon(at);
+      });
+    });
+  }
+  /** Ends a ceremony this device started, in any stage before it is confirmed. It stays counted. */
+  abandonApproval(pairing: glue.AccountPairing): Promise<void> {
+    return this.gated(async () => {
+      const at = BigInt(this.nowMs);
+      const account = this.accountId;
+      if (account === undefined) { pairing.abandon(at); return; }
+      await this.withLedger(account, () => pairing.abandon(at));
+    });
+  }
+  /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored about the request. */
+  scanRequest(data: Uint8Array): Promise<ScannedRequest> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const at = BigInt(this.nowMs);
+      const pairing = await this.withLedger(account, limiter => glue.AccountPairing.scan_request(account, data, limiter, at));
+      return { request: accessRequest(plain<RequestInfo>(glue.account_request_info(data))), pairing };
+    });
+  }
+
 
   // Owner operations
 
@@ -550,10 +706,13 @@ export class SessionWorker {
     });
   }
 
-  approve(request: AccessRequest, termsJson?: string, signal?: AbortSignal): Promise<SessionSnapshot> {
+  /** Approves `request`, spending `pairing`: confirmed on this device for exactly the request's key (§9.1). Any other pairing is refused; it is spent whatever the answer. */
+  approve(request: AccessRequest, pairing: glue.AccountPairing, termsJson?: string, signal?: AbortSignal): Promise<SessionSnapshot> {
     return this.ownerOperation(signal, async (owner, custody, ownerId, waiting) => {
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
-      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(request.record, termsJson ?? request.termsJson, signers, entropy)), this.persistOn(owner), waiting);
+      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(request.record, termsJson ?? request.termsJson, signers, pairing, entropy)), this.persistOn(owner), waiting);
+      // The confirmed pairing gave its reservation back; keep the ledger (a lost write only leaves it counted).
+      if (this.accountId !== undefined) await this.keepLedgerChange(this.accountId);
     });
   }
   revoke(member: string, signal?: AbortSignal): Promise<SessionSnapshot> {
@@ -737,9 +896,17 @@ export class SessionWorker {
     this.accountId = account;
     if (!plain<AccountMember[]>(owner.run(e => e.members())).some(m => m.id === this.memberId)) {
       const memberRaw = await this.ownRequestBytes(waiting);
+      // This device made the request itself, with its own member key: there is no second device to pair with, so it reads
+      // its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
+      // The creation's engine keeps the time it opened at; bring it to the scan's time, which the pairing may not precede (§9.1).
+      const at = BigInt(this.nowMs);
+      plain(owner.run(e => e.advance(at)));
+      const fresh = glue.PairingFailureLimiter.fresh();
+      const own = glue.AccountPairing.scan_request(account, memberRaw, fresh, at);
+      fresh.free();
       const memberTerms = terms(this.configuration.namespaces, this.access);
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
-      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(memberRaw, memberTerms, signers, entropy)), this.persistOn(owner), waiting);
+      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(memberRaw, memberTerms, signers, own, entropy)), this.persistOn(owner), waiting);
     }
     this.journal.setupPending = false;
     await this.saveJournal();
@@ -807,6 +974,13 @@ export class SessionWorker {
    */
   /** Tests only: answers `exchange_next` for a home instead of the engine when it returns a step. */
   nextStepOverride?: (home: string) => ExchangeStep | undefined;
+  /** Per home, the clock time (ms) before which it is not contacted again (a `Retry-After` it sent with a result). */
+  private readonly notBefore = new Map<string, number>();
+  /** Per home, the refusal that came with its `Retry-After`, shown again while the home is not contacted. */
+  private readonly waitingIssue = new Map<string, HomeIssue>();
+  private isStopped(engine: ColophonEngine): boolean {
+    try { return plain<Status>(engine.run(e => e.status())).stopped !== undefined; } catch { return false; }
+  }
 
   async exchange(caller?: AbortSignal): Promise<ExchangeResult> {
     // Locking the session ends the pass in flight, as a cancelled caller does.
@@ -816,10 +990,22 @@ export class SessionWorker {
     const engine = this.engine;
     if (!engine) return result;
     const homes = plain<Home[]>(engine.run(e => e.exchange_homes()));
+    // This device asked to join and holds no grant for itself: a `refused:revoked` for its own call means "not approved yet".
+    let awaitingApproval = false;
+    try { awaitingApproval = plain<Standing>(engine.run(e => e.me())).kind === glue.StandingKind.Unknown; } catch { /* not known */ }
     for (const home of homes) {
       throwIfAborted(signal);
       const configured = this.transportFor(home);
       if (!configured) continue;
+      // The home asked for time (`Retry-After`): it is not contacted again before then.
+      // What it said stays shown until then.
+      const until = this.notBefore.get(home.id);
+      if (until !== undefined && this.nowMs < until) {
+        const said = this.waitingIssue.get(home.id);
+        if (said) { result.issues.push(said); if (said.problem.kind === 'homeUnavailable') result.homeUnavailable = true; }
+        continue;
+      }
+      this.waitingIssue.delete(home.id);
       if (!configured.isAllowed) { result.issues.push({ home: home.id, problem: { kind: 'insecureEndpoint', url: configured.endpoint } }); continue; }
       const token = configured.configuration.bearerToken;
       if (token !== undefined) engine.run(e => e.exchange_set_bearer(home.id, token));
@@ -829,11 +1015,15 @@ export class SessionWorker {
         plain(engine.run(e => e.refresh(listed(this.storage.listing()))));
         await this.unlockIfPossible(signal);
       });
+      // A stopped account runs no exchange pass (spec §1 "A stop": it accepts no head and asks no call).
+      if (this.isStopped(engine)) { result.stopped = true; break; }
       const started = performance.now();
       const elapsed = (): number => performance.now() - started;
       const tooSlow = (): HomeProblem => ({ kind: 'tooSlow', seconds: Math.round(this.exchangeTimeMs / 1000) });
       let stopped: HomeProblem | undefined;
       let finished = false;
+      // The pass was left for a `Retry-After`: the answer was not given to the engine, so its request is abandoned.
+      let abandon = false;
       try {
         let progress = true; let passIndex = 0; let recovered = false;
         // A pass can end before everything moved (the engine plans the next stage from what the home just said): run
@@ -858,7 +1048,7 @@ export class SessionWorker {
             if (step.kind === glue.ExchangeStepKind.NeedCall) {
               if (!step.need) break;
               try { await this.provideCall(step.need, home, configured, signal); } catch (error) {
-                if (error instanceof HomeProblemError) { stopped = error.problem; break homeLoop; }
+                if (error instanceof HomeProblemError) { stopped = error.problem.kind === 'callRefused' && error.problem.code === 'refused:revoked' && awaitingApproval ? { kind: 'waitingForApproval' } : error.problem; break homeLoop; }
                 throw error;
               }
               continue;
@@ -895,6 +1085,43 @@ export class SessionWorker {
             } finally { clearTimeout(timer); }
             const limit = HomeLimits.responseBytes(request.url);
             if (answer.body.length > limit) { stopped = { kind: 'responseTooLarge', limit }; break homeLoop; }
+            // A home's answer that carries a §1 result (spec §14, §19): read only the `result`, validated against the result
+            // grammar and bounded (`homeRefusal`), never any other byte of the body. It is the home's word about one
+            // request, not a verified state of the account.
+            let refusedCall: HomeProblem | undefined;
+            const refusal = request.home === home.id ? homeRefusal(answer) : undefined;
+            if (refusal) {
+              if (refusal.retryAfterSeconds !== undefined) this.notBefore.set(home.id, this.nowMs + refusal.retryAfterSeconds * 1000);
+              const retry = refusal.retryAfterSeconds !== undefined ? { retryAfterSeconds: refusal.retryAfterSeconds } : {};
+              if (refusal.status === 503 && refusal.code === 'unavailable') {
+                // `503 {"result":"unavailable"}` (a stopped or overloaded home, §13.6): the home is not available. The pass
+                // stops and the session retries with backoff; it says nothing about this device.
+                stopped = { kind: 'homeUnavailable', ...retry };
+                if (refusal.retryAfterSeconds !== undefined) this.waitingIssue.set(home.id, { home: home.id, problem: stopped });
+                result.homeUnavailable = true;
+                break homeLoop;
+              }
+              const code = refusal.code;
+              if (code !== undefined && code.startsWith('refused:')) {
+                // A device that asked to join and holds no grant for itself sees `refused:revoked` for its own call (0.5
+                // keeps that result; `refused:notGranted` is reserved): it is waiting for approval.
+                const problem: HomeProblem = code === 'refused:revoked' && awaitingApproval
+                  ? { kind: 'waitingForApproval' } : { kind: 'remoteCallRefused', code, ...retry };
+                const signed = request.headers.some(h => h.name.toLowerCase() === 'authorization' && h.value.startsWith('Colophon '));
+                if (answer.status === 401) {
+                  // The challenge for a call: the engine asks for one.
+                } else if (answer.status === 403 && signed) {
+                  // This device's signed call was refused: the engine is told, then the pass ends with the home's word.
+                  refusedCall = problem;
+                } else {
+                  // Any other refusal refuses only that request (an unknown or reserved name included) and the pass goes
+                  // on, unless the home asked for time (`Retry-After`).
+                  const issue = { home: home.id, problem };
+                  if (!result.issues.some(i => i.home === home.id && JSON.stringify(i.problem) === JSON.stringify(problem))) result.issues.push(issue);
+                  if (refusal.retryAfterSeconds !== undefined) { this.waitingIssue.set(home.id, issue); abandon = true; break homeLoop; }
+                }
+              } else if (refusal.retryAfterSeconds !== undefined) { abandon = true; break homeLoop; }
+            }
             throwIfAborted(signal);
             // The answer and the persistence of its stores are one step: never abandoned half way.
             const report = await this.gated(async () => {
@@ -910,14 +1137,21 @@ export class SessionWorker {
             if (report.store.length > 0 || report.changes.authorityToSeq !== report.changes.authorityFromSeq || report.changes.namespaces.length > 0) {
               result.changed = true; progress = true;
             }
+            if (refusedCall) { stopped = refusedCall; result.unauthorized = true; break homeLoop; }
           }
           result.passes++;
         }
-        finished = stopped === undefined;
+        finished = stopped === undefined && !abandon;
+      } catch (error) {
+        // The pass brought in the final raise that stops this account: the engine then refuses the next step
+        // (`unavailable`). That is the stop, not a fault of the exchange.
+        if (signal.aborted || !this.isStopped(engine)) throw error;
+        result.stopped = true; result.changed = true;
       } finally {
         // Every exit that is not a completed pass abandons the request in flight, a cancelled caller included.
         if (!finished) await this.abortPass(engine, home.id);
       }
+      if (result.stopped) break;
       if (stopped) {
         result.issues.push({ home: home.id, problem: stopped });
         if (stopped.kind === 'stillWaiting') result.failed = true;
@@ -1065,4 +1299,27 @@ export function queryResult(text: string): string {
   if (o.ok === true && 'value' in o) return JSON.stringify(o.value);
   const reason = typeof o.reason === 'string' && knownReasons.has(o.reason) ? o.reason : 'unavailable';
   return JSON.stringify({ ok: false, reason });
+}
+
+/** A request as an approver sees it: no code (approving spends a confirmed pairing, §9.1). */
+function accessRequest(info: RequestInfo): AccessRequest {
+  const records = requestedRecords(info.termsJson);
+  return { id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, record: info.raw,
+    namespaces: records.map(r => r.namespace), access: records.some(r => r.access === 'write') ? ['read', 'write'] : ['read'] };
+}
+
+/**
+ * Runs `body` holding an exclusive lock named `name`: a Web Lock where the platform has `navigator.locks` (every tab and
+ * worker of the origin shares it), otherwise a lock shared by everything in this process.
+ */
+const processLocks = new Map<string, Promise<unknown>>();
+function withExclusiveLock<T>(name: string, body: () => Promise<T>): Promise<T> {
+  const locks = (globalThis as { navigator?: { locks?: { request: (n: string, o: { mode: 'exclusive' }, cb: () => Promise<T>) => Promise<T> } } }).navigator?.locks;
+  if (locks) return locks.request(name, { mode: 'exclusive' }, body);
+  const previous = processLocks.get(name) ?? Promise.resolve();
+  const run = previous.then(body, body);
+  const settled = run.then(() => undefined, () => undefined);
+  processLocks.set(name, settled);
+  void settled.then(() => { if (processLocks.get(name) === settled) processLocks.delete(name); });
+  return run;
 }

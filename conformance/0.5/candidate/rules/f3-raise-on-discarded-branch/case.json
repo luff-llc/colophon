@@ -1,0 +1,1 @@
+{"description":"A fork at seq 2: one branch raises the layout, the other resolves the fork in its own favour. The resolve wins, the raising branch is discarded, and nothing stops.","expected":{"result":"ok","seq":3},"sections":["8.6","20"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

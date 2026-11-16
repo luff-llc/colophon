@@ -19,7 +19,11 @@ export interface UnlockInput { kind: glue.UnlockKind; controller: string; enc: U
 export interface EpochAgreement { namespace: string; epoch: bigint; recipient: string; recipientPoint: Uint8Array; peer: Uint8Array }
 export interface SlotController { id: string; label: string }
 export interface SlotInfo { index: bigint; kind: glue.SlotKind; kindRaw?: string; label: string; controllers: SlotController[] }
-export interface Status { seq: bigint; code: string; kind: glue.StatusKind; reason?: string; stopSeq?: bigint; detail?: string; rollback: boolean }
+export interface Status { seq: bigint; code: string; kind: glue.StatusKind; reason?: string; stopSeq?: bigint; detail?: string; rollback: boolean;
+  /** Set when this reader is stopped for the account (§1 "A stop"): a verified state, not a fault. */
+  stopped?: AccountStop }
+/** Where a reader stopped: the raising activation's seq and the layout it names (none for an entry of a newer format). */
+export interface AccountStop { seq: bigint; layout?: bigint }
 export interface NamespaceRevision { namespace: string; revision: bigint }
 export interface Changes {
   authorityFromSeq: bigint; authorityToSeq: bigint; namespaces: NamespaceRevision[]; membersAdded: string[]; membersRevoked: string[];

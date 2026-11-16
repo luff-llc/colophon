@@ -10,7 +10,7 @@ import com.luff.colophon.ByteString
 import com.luff.colophon.accountVerifyHistory
 import com.luff.colophon.Pending
 import com.luff.colophon.PublicKeys
-import com.luff.colophon.session.AccessRequest
+import com.luff.colophon.session.ScannedRequest
 import com.luff.colophon.session.AsyncKeyProvider
 import com.luff.colophon.session.ColophonSession
 import com.luff.colophon.session.DomainCommand
@@ -18,6 +18,7 @@ import com.luff.colophon.session.FolderMedium
 import com.luff.colophon.session.HomeConfiguration
 import com.luff.colophon.session.HomeFault
 import com.luff.colophon.session.HomeProblem
+import com.luff.colophon.session.HomeWords
 import com.luff.colophon.session.MediumWrite
 import com.luff.colophon.session.ObservedRevision
 import com.luff.colophon.session.SecretBytes
@@ -76,10 +77,16 @@ class AppModel(private val app: Context) {
         const val OWNER_ALIAS = "$PREFIX.owner"
         const val DEVICE_KEY_ALIAS = "$PREFIX.device-key"
         const val ATTEMPT_LIMIT = 5
+        /** The status screen's words for a stopped account and for a device waiting for approval: not faults. */
+        const val STOPPED_WORDS = "This account was moved to a newer format; update the app. What this device holds is still readable here."
+        const val WAITING_WORDS = "Waiting for approval: this device asked to join and is not approved yet (the home answers refused:revoked until then)."
         fun message(e: Throwable): String = "${e.javaClass.simpleName}: ${e.message ?: ""}".trim()
-        /** A home problem in words: a home's refusal of this device's call is the home's claim, not a verified revocation. */
+        /** A home problem in words: a home's refusal is the home's claim with the name it gave, never a verified state of the account. */
         fun describe(p: HomeProblem): String = when (p) {
-            is HomeProblem.RemoteCallRefused -> "the home refused this device's call (${if (ResultCode.isValid(p.code)) p.code else "no result"}): the home's claim, not a verified revocation; local notes and keys are unchanged"
+            is HomeProblem.RemoteCallRefused -> "the home refused a request (${if (ResultCode.isValid(p.code)) p.code else "no result"}): the home's claim, not a verified state of the account; local notes and keys are unchanged" +
+                (p.retryAfterSeconds?.let { "; it asked to wait $it s" } ?: "")
+            is HomeProblem.HomeUnavailable -> HomeWords.UNAVAILABLE
+            HomeProblem.WaitingForApproval -> WAITING_WORDS
             HomeProblem.StillWaiting -> "a pass could not finish: the engine was still waiting"
             else -> p.toString()
         }
@@ -221,10 +228,8 @@ class AppModel(private val app: Context) {
         val accountShort: String get() = invite.account.take(8) + "…" + invite.account.takeLast(4)
     }
     var pendingInvite: PendingInvite? = null; private set
-    /** A request a link brought, shown in Devices for the person to import or ignore; never imported by the link. */
-    var pendingRequestText: String? = null
-    /** Requests whose code the person said matches on both screens, this run only. */
-    val confirmedCodes = HashSet<String>()
+    /** A request scanned from the joining device's screen, with the confirmed pairing the scan made (spec §7.3, §9.1), shown in Devices until the person approves or rejects it. Nothing is stored for it. */
+    var scanned: ScannedRequest? = null; private set
 
     /** Decodes an invite (bounded) and shows it for confirmation. Stores nothing. */
     suspend fun prepareJoin(text: String) = perform("Read invite") {
@@ -307,35 +312,30 @@ class AppModel(private val app: Context) {
         if (BuildConfig.DEBUG) withContext(Dispatchers.IO) { paths.outbox.writeText(text) }
     }
 
-    suspend fun importRequest(text: String) = perform("Import request") {
+    /** The camera read the joining device's request (its canonical envelope, the scan path's one payload, spec §9.1): the session confirms a pairing for exactly that key and stores nothing. Invalid or foreign requests count as failed sessions in the session's limiter (five an hour). */
+    suspend fun scanRequest(text: String) = perform("Scan request") {
         val session = session ?: throw SessionError.NotReady()
-        checkAttempts()
-        pendingRequestText = null
-        val request = try { PairingPayload.decodeRequest(text) } catch (e: Exception) { countFailure(); throw e }
-        session.importRequest(request)
-        record("imported a request; waiting: ${session.requests.joinToString { "${it.label} ${it.pairingCode}" }}")
+        val s = session.scanRequest(PairingPayload.decodeRequest(text))
+        scanned = s
+        record("scanned a request from ${s.request.label} ${s.request.id}")
     }
 
-    /** The person says the code on this screen and on the joining device are the same. */
-    fun confirmCodes(request: AccessRequest) { confirmedCodes.add(request.id); record("codes confirmed for ${request.label} ${request.pairingCode}") }
-
-    /** Discards a request: it is hidden from now on and counts as a failed attempt. */
-    fun reject(request: AccessRequest) {
-        confirmedCodes.remove(request.id)
-        settings = settings.copy(rejected = settings.rejected + request.id)
-        countFailure()
-        record("rejected the request ${request.label} ${request.pairingCode}")
+    /** The person does not want this device: the scanned request and its pairing are dropped. Nothing was stored. */
+    fun rejectScanned() {
+        scanned?.let { record("rejected the request ${it.request.label} ${it.request.id}") }
+        scanned = null
     }
 
-    /** The requests waiting, without the ones the person rejected. */
-    val visibleRequests: List<AccessRequest> get() = (session?.requests ?: listOf()).filter { it.id !in settings.rejected }
-
-    suspend fun approve(request: AccessRequest) = perform("Approve ${request.pairingCode}") {
-        val session = session ?: throw SessionError.NotReady()
-        if (request.id !in confirmedCodes) throw Provisioner.Failure("confirm that the codes match first")
-        session.approve(request)
-        record("approved ${request.label} ${request.id}")
-        sync()
+    /** Approves the scanned request, spending its pairing (the core refuses any other). */
+    suspend fun approveScanned() {
+        val s = scanned ?: return
+        perform("Approve ${s.request.label}") {
+            val session = session ?: throw SessionError.NotReady()
+            scanned = null
+            session.approve(s.request, s.pairing)
+            record("approved ${s.request.label} ${s.request.id}")
+            sync()
+        }
     }
 
     suspend fun revoke(member: AccountMember) = perform("Revoke ${member.label}") {
@@ -463,9 +463,11 @@ class AppModel(private val app: Context) {
         val p = uri.getQueryParameter("p") ?: return
         record("opened link ${uri.host}")
         when {
-            // A link only fills a screen the person must confirm: it never joins, imports or approves by itself.
+            // A link only fills a screen the person must confirm: it never joins or approves by itself.
             uri.host == "join" && settings.slot == null -> prepareJoin(p)
-            uri.host == "request" && isOwner -> { pendingRequestText = p; record("a request arrived by link: shown in Devices, not imported") }
+            // Scripted runs only: the test harness stands in for the camera that reads the joining device's screen. A
+            // release build takes no request by link: a request is approved only from a scan (spec §9.1).
+            uri.host == "request" && isOwner && BuildConfig.DEBUG -> scanRequest(p)
             else -> { actionError = "This link does not fit this device's state (${uri.host})."; bump() }
         }
     }

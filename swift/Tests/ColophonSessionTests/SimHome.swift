@@ -22,6 +22,8 @@ final class SimHome: HomeTransport, @unchecked Sendable {
     private(set) var pendingObjects: [Data] = []
     private var pendingList: [[String: Any]] = []
     var online = true
+    /// Answers a request instead of the home when it returns an answer (a refusal, a 503, a `Retry-After`).
+    var answer: (@Sendable (HttpRequest) -> HttpAnswer?)?
     /// Whether reading records and the change feed needs a call.
     var requireCalls = false
     /// Every call that was refused, with its reason, and every call accepted.
@@ -81,6 +83,7 @@ final class SimHome: HomeTransport, @unchecked Sendable {
     func send(_ request: HttpRequest) async throws -> HttpAnswer {
         try lock.withLock {
             guard online else { throw HomeTransportError.offline("the home is offline") }
+            if let answer, let given = answer(request) { requestLog.append("ANSWERED \(request.url)"); return given }
             guard request.url.hasPrefix(base) else { return response(404) }
             let rest = String(request.url.dropFirst(base.count))
             let parts = rest.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)

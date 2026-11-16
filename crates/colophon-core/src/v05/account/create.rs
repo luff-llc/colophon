@@ -160,11 +160,12 @@ impl Creation {
         require(
             params.controllers.len() <= 64
                 && params.slots.len() <= 256
-                && params.namespaces.len() <= 256
                 && params.signers.len() <= 64
                 && params.rekey_signers.len() <= 64,
-            "more controllers, slots, namespaces or signers than §6.2 allows",
+            "more controllers, slots or signers than §6.2 allows",
         )?;
+        // The verifier's genesis cap (§8.2): never create an account it would refuse.
+        crate::v05::history::check_namespace_count(params.namespaces.len())?;
         require(
             params.namespaces.windows(2).all(|w| w[0] < w[1])
                 && params
@@ -362,4 +363,45 @@ fn open_created(objects: Objects, me: Identity, now_ms: i64, seed: VaultSeed) ->
     let id = account.id().clone();
     account.adopt_seed(seed, &id)?;
     Ok(account)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::v05::history::{MAX_NAMESPACES, TOO_MANY_NAMESPACES};
+
+    fn params(namespaces: usize) -> CreateParams {
+        CreateParams {
+            label: "Account".into(),
+            namespaces: (0..namespaces).map(|i| format!("n{i:03}")).collect(),
+            controllers: Vec::new(),
+            slots: vec![SlotPlan {
+                controllers: vec!["x".into()],
+                label: "Slot".into(),
+            }],
+            threshold: None,
+            recover_threshold: None,
+            add_threshold: None,
+            count_by_holders: false,
+            policy: None,
+            signers: Vec::new(),
+            rekey_signers: Vec::new(),
+            vault_seed: [1; 32],
+            entropy: [2; 32],
+            epoch_seed: [3; 32],
+        }
+    }
+
+    /// Creation refuses more namespaces than the verifier's genesis cap (§8.2), with the
+    /// verifier's own diagnostic, before it reads anything else: 65 is refused for the count,
+    /// 64 passes the count and fails later (here, for having no controller).
+    #[test]
+    fn creation_refuses_more_namespaces_than_the_verifier_accepts() {
+        let me = || Identity::Controller("x".into());
+        let e = Creation::begin(params(MAX_NAMESPACES + 1), me(), 0).err().unwrap();
+        assert_eq!(e.detail(), TOO_MANY_NAMESPACES);
+        let e = Creation::begin(params(MAX_NAMESPACES), me(), 0).err().unwrap();
+        assert_ne!(e.detail(), TOO_MANY_NAMESPACES);
+    }
 }

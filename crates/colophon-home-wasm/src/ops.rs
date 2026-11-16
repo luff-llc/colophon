@@ -917,6 +917,8 @@ fn post_authority(req: &Value) -> R<Value> {
     let mut sign: Vec<Value> = Vec::new();
     let mut accepted = Vec::new();
     let mut outcome = json!({"outcome": "ok"});
+    let mut deferred: Option<Value> = None;
+    let mut evidence = false;
     for (i, e) in entries.iter().enumerate() {
         let Ok(b) = canonical(e) else {
             outcome = json!({"outcome": "refused", "result": "malformed"});
@@ -969,15 +971,26 @@ fn post_authority(req: &Value) -> R<Value> {
         };
         match result {
             Ok(()) => accepted.push(seq),
+            // A candidate stored as evidence (§13.1 candidate exchange) keeps its answer (409 or
+            // `refused:fork`), and the rest of its branch in the request is still judged.
+            Err(r) if l.home.as_ref().map(held).transpose()?.is_some_and(|o| o.entries.contains(&b)) => {
+                deferred.get_or_insert_with(|| refusal(&r));
+            }
             Err(r) => {
                 outcome = refusal(&r);
                 break;
             }
         }
     }
+    if outcome["outcome"] == "ok" {
+        if let Some(d) = deferred.take() {
+            outcome = d;
+            evidence = true;
+        }
+    }
     // Receipts that came with the entries are admitted as `POST /pending` admits them, and
     // stored like any other object.
-    if outcome["outcome"] == "ok" {
+    if outcome["outcome"] == "ok" || evidence {
         for b in &receipt_bytes {
             if let Some(h) = l.home.take() {
                 let a = admit(&h, b, &now);
@@ -1503,57 +1516,113 @@ fn forward_objects(req: &Value) -> R<Value> {
 /// `final`) the peer has not recorded thus gives it that entry, and the peer can then sign a head
 /// over it: without this, a home whose head covers only an entry the peer does not hold leaves the
 /// peer waiting for ever at `headQuorum` 2 (its `final` needs this home's head over the
-/// activation). Nothing when the peer's head names another branch (a fork: it answers 409
-/// anyway), when the peer holds everything, or at a fork here.
+/// activation).
+///
+/// Candidate exchange (§13.1): when the peer's latest head names an entry this home's branch does
+/// not have at that seq, the homes are on different branches. This home then sends its branch
+/// from the seq after the last entry both share, found by walking back from the peer's entry when
+/// it holds it, else from the highest held head of the peer over an entry of this branch; at most
+/// 64 entries, and never starting more than 63 before the peer's head, so the entry at the
+/// peer's seq is always in the request. `"exchange": true` tells the host to put its own head
+/// first, so the peer holds the head that covers the candidates (it stores them as evidence).
+/// Nothing when the peer holds everything, or at a fork here.
 fn forward_entries(req: &Value) -> R<Value> {
     let l = load(req)?;
     let now_ms = i64_of(req, "now")?;
     let peer = str_of(req, "peer")?;
+    let none = json!({"from": 0, "entries": []});
     let Some(h) = l.home.as_ref() else {
-        return Ok(json!({"from": 0, "entries": []}));
+        return Ok(none);
     };
     let v = view(h, now_ms)?;
     if v.fork.is_some() {
-        return Ok(json!({"from": 0, "entries": []}));
+        return Ok(none);
     }
     let history = v.state.history();
-    let mut covered = 0u64;
-    if let Some(objects) = v.persisted.objects() {
-        if let Some((seq, digest, _)) = own_latest_head(objects, peer) {
-            let on_branch = usize::try_from(seq.saturating_sub(1))
+    let Some(objects) = v.persisted.objects() else {
+        return Ok(none);
+    };
+    let by_digest: BTreeMap<String, &Vec<u8>> = objects
+        .entries
+        .iter()
+        .filter_map(|e| {
+            AuthEnvelope::parse(e, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)
                 .ok()
-                .and_then(|i| history.get(i))
-                .is_some_and(|d| *d == digest);
-            if !on_branch && seq as usize <= history.len() {
-                return Ok(json!({"from": 0, "entries": []}));
+                .map(|env| (env.digest, e))
+        })
+        .collect();
+    // Each held entry's seq and `previous`, by digest.
+    let links: BTreeMap<String, (u64, Option<String>)> = objects
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let env = AuthEnvelope::parse(e, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false).ok()?;
+            let seq = env.value.get("seq")?.as_u64()?;
+            let prev = env.value.get("previous").and_then(Value::as_str).map(str::to_string);
+            Some((env.digest, (seq, prev)))
+        })
+        .collect();
+    let on_branch = |seq: u64, digest: &str| {
+        usize::try_from(seq.saturating_sub(1))
+            .ok()
+            .and_then(|i| history.get(i))
+            .is_some_and(|d| d == digest)
+    };
+    let mut from = 1u64;
+    let mut exchange = false;
+    if let Some((seq, digest, _)) = own_latest_head(objects, peer) {
+        // The peer's entry, when held, gives the last shared seq by its `previous` links.
+        let mut walked: Option<u64> = None;
+        let mut at = digest.clone();
+        for _ in 0..=64 {
+            if let Some((s, prev)) = links.get(&at) {
+                if on_branch(*s, &at) {
+                    walked = Some(*s);
+                    break;
+                }
+                match prev {
+                    Some(p) => at = p.clone(),
+                    None => break,
+                }
+            } else {
+                break;
             }
-            covered = seq;
+        }
+        if on_branch(seq, &digest) {
+            from = seq + 1;
+        } else if walked.is_some() || (seq as usize) <= history.len() {
+            exchange = true;
+            let shared = walked.unwrap_or_else(|| {
+                objects
+                    .heads
+                    .iter()
+                    .filter_map(|h| {
+                        let raw = RawEnvelope::parse(h, bounds::HEAD_BODY, false).ok()?;
+                        let a = raw.value.get("authority")?;
+                        let (s, d) = (a["seq"].as_u64()?, a["digest"].as_str()?);
+                        (raw.value.get("by")?.as_str()? == peer && s < seq && on_branch(s, d))
+                            .then_some(s)
+                    })
+                    .max()
+                    .unwrap_or(0)
+            });
+            from = (shared + 1).max(seq.saturating_sub(63)).max(1);
+        } else {
+            // A head beyond this home's history over an entry it does not hold: the peer is
+            // ahead, on this branch or another; its entries come from the peer.
+            return Ok(none);
         }
     }
-    if covered as usize >= history.len() {
-        return Ok(json!({"from": 0, "entries": []}));
+    if from as usize > history.len() {
+        return Ok(none);
     }
-    let by_digest: BTreeMap<String, &Vec<u8>> = v
-        .persisted
-        .objects()
-        .map(|o| {
-            o.entries
-                .iter()
-                .filter_map(|e| {
-                    AuthEnvelope::parse(e, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)
-                        .ok()
-                        .map(|env| (env.digest, e))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     let entries: Vec<String> = history
         .iter()
-        .skip(covered as usize)
+        .skip(from as usize - 1)
         .take(64)
         .filter_map(|d| by_digest.get(d).map(|b| b64(b)))
         .collect();
-    Ok(json!({"from": covered + 1, "entries": entries}))
+    Ok(json!({"from": from, "entries": entries, "exchange": exchange}))
 }
 
 /// Whether a peer's answer to `POST {peer}/pending` with one object delivered it: a 200, or a

@@ -1,0 +1,1 @@
+{"description":"The primary home is finally revoked at seq 4 on X's branch and then signs a head at seq 4 covering X: it is not a current home there, so the head counts for nothing and the activate at seq 3 stands.","expected":{"result":"ok","seq":3},"sections":["8.6","8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

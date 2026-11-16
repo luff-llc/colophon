@@ -104,6 +104,7 @@ public enum GateModel {
             switch phase {
             case .ready: return .content(status: nil, controls: [])
             case .retry: return .content(status: "Refresh failed", controls: [retry])
+            case .stopped: return .content(status: StoppedWords.status, controls: [])
             case .waitingForDownload: return .content(status: "Updating Your Library…", controls: [retry])
             default: return .content(status: "Updating Your Library…", controls: [])
             }
@@ -128,6 +129,8 @@ public enum GateModel {
             return screen("Waiting for Your Library", "", "library.waitingForDownload", progress: .indeterminate("Waiting for Your Library"), [])
         case .creating: return screen("Creating Your Library", "", "library.creating", progress: .indeterminate("Creating Your Library"), [])
         case .retry: return screen("Couldn’t Open Your Library", "Retry to try again.", "library.retryPhase", [retry] + recovery)
+        case .stopped:
+            return screen(StoppedWords.title, StoppedWords.message, "library.stopped", [])
         case .updateRequired:
             return screen("Update Required", "This library uses a newer storage layout. Update this app to open it. Your folder, identity and records are unchanged.",
                           "library.updateRequired", [retry])
@@ -136,10 +139,10 @@ public enum GateModel {
                 ?? .indeterminate("Upgrading library")
             return screen("Your Library Is Being Upgraded", "Your existing library is kept while the upgrade completes.", "library.migrating",
                           progress: progress, [retry])
-        case .waitingForApproval(let code):
+        case .waitingForApproval:
             return screen("Waiting for Approval",
-                          "On a device with access, open Library settings. Approve \(presentation.appName) only when both devices show the same code.",
-                          "library.waitingForApproval", code: code,
+                          "On a device with access, open Library settings and scan this device's request, or pair with the six-digit code. Approve \(presentation.appName) only when both devices show the same code.",
+                          "library.waitingForApproval",
                           [GateControl(.checkAgain, "Check Again", "library.retryPairing")] + recovery
                             + [GateControl(.cancelPairing, "Cancel Pairing", "library.cancelPairing", .cancel)])
         case .denied:
@@ -226,4 +229,12 @@ public enum GateModel {
         case .keepFollowUp(let seq): await model.run { try await session.keepFollowUp(seq: seq) }
         }
     }
+}
+
+/// The words for a stopped account (`SessionPhase.stopped`): a verified state of the account, shown as what it is. No
+/// error, no retry: this app must be updated to continue, and what this device holds stays readable.
+public enum StoppedWords {
+    public static let title = "Update to Continue"
+    public static let message = "This account was moved to a newer format. Update the app to continue. What this device already holds stays readable here; nothing is changed or lost."
+    public static let status = "This account was moved to a newer format; update the app to continue. You can still read what this device holds."
 }

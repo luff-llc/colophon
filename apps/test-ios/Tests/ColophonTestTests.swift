@@ -36,6 +36,20 @@ import ColophonSession
         #expect(observer.snapshot().lastRefusal?.detail == "refused:revoked")
     }
 
+    /// The status screen's words: a home's refusal with the name it gave (an unknown or reserved one too), the home being
+    /// unavailable, waiting for approval, and a stopped account, none of them worded as a fault of the account.
+    @Test func theStatusWordsForRefusalsWaitingAndAStop() {
+        for code in ["refused:overQuota", "refused:noEntitlement", "refused:closed", "refused:notProvisioned", "refused:somethingNew"] {
+            let words = AppModel.describe(.remoteCallRefused(code: code))
+            #expect(words.contains(code) && words.contains("not a verified state"), "\(words)")
+        }
+        #expect(AppModel.describe(.remoteCallRefused(code: "refused:window", retryAfterSeconds: 120)).contains("120 s"))
+        #expect(AppModel.describe(.homeUnavailable(retryAfterSeconds: nil)) == HomeWords.unavailable)
+        #expect(AppModel.describe(.waitingForApproval).hasPrefix("Waiting for approval"))
+        #expect(!AppModel.describe(.waitingForApproval).contains("revoked:"), "not worded as a revocation")
+        #expect(AppModel.Words.stopped.contains("moved to a newer format") && AppModel.Words.stopped.contains("update the app"))
+    }
+
     @Test func theResultGrammar() {
         for good in ["ok", "malformed", "badSignature", "newerFormat", "unavailable", "refused:revoked", "refused:outOfScope"] {
             #expect(ResultCode.isValid(good), "\(good)")
@@ -87,12 +101,12 @@ import ColophonSession
         await model.resetDevice()
     }
 
-    /// A request link is shown, never imported or approved by itself; approval needs the codes confirmed first.
-    @Test func aRequestLinkIsOnlyShown() async throws {
+    /// A request link never approves: a device without an account takes none, and nothing is scanned or stored for it.
+    @Test func aRequestLinkNeverApproves() async throws {
         let model = AppModel()
         await model.resetDevice()
         await model.open(URL(string: "colophontest://request?p=CTR1.abc")!)
-        #expect(model.pendingRequestText == nil, "a device without an account takes no request link")
+        #expect(model.scanned == nil, "a device without an account takes no request")
         #expect(model.actionError != nil)
     }
 }

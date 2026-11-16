@@ -11,10 +11,10 @@ export { IndexedDBMedium, IndexedDBPrivateStore, WebCryptoDeviceSecrets, WebCryp
 export { MemoryDeviceSecrets, MemoryPrivateStore, type DeviceSecretStore, type PrivateStore } from './private.js';
 export { KeyCustody, WebCryptoKeyProvider, keyDescriptorOf, keyIdOf, type AsyncKeyProvider, type KeyAssertion } from './keys.js';
 export { PasskeyProvider, type CredentialClient, type PasskeyRegistration } from './passkey.js';
-export { FetchHomeTransport, HomeLimits, type FetchTransportOptions, type HomeAnswer, type HomeHeader, type HomeIssue, type HomeProblem, type HomeRequest, type HomeSyncState, type HomeTransport } from './transport.js';
+export { FetchHomeTransport, HomeLimits, HomeWords, homeRefusal, isResultCode, type HomeRefusal, type FetchTransportOptions, type HomeAnswer, type HomeHeader, type HomeIssue, type HomeProblem, type HomeRequest, type HomeSyncState, type HomeTransport } from './transport.js';
 export * from './types.js';
 export { ColophonSession } from './session.js';
 export { blobAvailability, blobData, downloadRequiredBlobs, prefetchBlob, putBlob, setBlobReference, type BlobAvailabilityState, type ColophonBlob } from './blobs.js';
-export { attachPageLifecycle, gateContent, performGateAction, type GateAction, type GateContent, type PageLifecycleOptions } from './gate.js';
+export { attachPageLifecycle, gateContent, performGateAction, StoppedWords, type GateAction, type GateContent, type PageLifecycleOptions } from './gate.js';
 export { ColophonEngine } from './engine.js';
 export type { ExchangeResult } from './worker.js';

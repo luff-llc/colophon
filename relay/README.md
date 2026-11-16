@@ -13,6 +13,10 @@ behave exactly as the 0.3 relay always did: a token is storage access, never mem
 relay holds no keys. `GET {base}` keeps the marker `colophon/relay/3` (0.5 §20 lists it, and §14
 says a home *adds* `home` to that response).
 
+One home per account is the supported configuration in 0.5. Several homes for one account work in
+the tests, but exchange between them (forwarding and candidate exchange) is experimental
+(spec §13.1; open issues in `docs/multi-home-open-issues.md`).
+
 ## Run it
 
 ```sh

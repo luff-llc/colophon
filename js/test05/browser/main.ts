@@ -6,7 +6,7 @@ import {
   WebCryptoDeviceSecrets, WebCryptoKeyProvider, WebCryptoKeyStore, type HomeConfiguration, type KeyDescriptor,
 } from '../../src/session/index.js';
 import { journey, journeys } from '../journey.ts';
-import { admitted, assert, Device, equal, note, RelayHome, sleep, type RelayHost } from '../support.ts';
+import { admitted, approveByScan, assert, Device, equal, note, RelayHome, sleep, type RelayHost } from '../support.ts';
 
 const lines: string[] = [];
 const failures: string[] = [];
@@ -161,8 +161,7 @@ async function main(): Promise<void> {
       homes: homes(false) });
     await asking.session.restore();
     asking.session.stopSync();
-    await again.session.importRequest(await asking.session.exportRequest());
-    await again.session.approve(again.session.requests[0]!);
+    await approveByScan(asking.session, again.session);
     assert(again.session.members.some(m => m.id === asking.session.memberId), 'the passkey owner approved the second device');
     assert(await settle(again), () => describe(again.session));
     for (let n = 0; n < 20 && asking.session.phase.kind !== 'ready'; n++) { await asking.session.syncNow(); await asking.session.refresh(); await sleep(100); }

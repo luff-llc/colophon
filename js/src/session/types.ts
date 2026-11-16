@@ -9,12 +9,21 @@ import { glue } from './wasm.js';
 /** Where the session stands. The engine decides every verdict; the session only chooses what to show. */
 export type SessionPhase =
   | { kind: 'opening' } | { kind: 'noLibrary' } | { kind: 'creating' } | { kind: 'waitingForDownload' }
-  | { kind: 'waitingForApproval'; code: string }
+  /** This device asked to join and is not approved yet. It shows no code of its own: the six-digit code appears only while it pairs with the approving device (`ColophonSession.beginJoinPairing()`). */
+  | { kind: 'waitingForApproval' }
   /** A revoked member, or a grant that no longer allows reading. */
   | { kind: 'denied' }
   | { kind: 'unavailable'; reason: string }
   /** Authenticated content of a newer format than this client evaluates. Nothing is changed or lost. */
-  | { kind: 'updateRequired' }
+    /**
+   * New in 0.5 (freeze package): this account was moved to a newer format. A layout raise (spec §20) became final in the
+   * history this device verified, so this app must be updated to continue with the account. A verified state, never a
+   * home's word or a refusal. What the device holds stays readable (`hasUsableContent`), as of the stop; nothing is
+   * written and no exchange runs; it persists across relaunch; lock and sign-out still work. `seq` is the raising
+   * activation's, `layout` the one it names (absent: an entry of a newer format, not a raise).
+   */
+  | { kind: 'stopped'; seq: number; layout?: number }
+| { kind: 'updateRequired' }
   | { kind: 'ready' }
   /** A refresh is in flight; previously verified content is still usable. */
   | { kind: 'refreshing' }
@@ -27,7 +36,7 @@ export type SessionFailure = { kind: 'keysUnavailable'; detail: string } | { kin
 export function failureMessage(f: SessionFailure): string {
   return f.kind === 'keysUnavailable' ? `Your identity keys are unavailable. Unlock this device or restore key access, then retry. ${f.detail}` : f.detail;
 }
-export const phaseUsable = (p: SessionPhase): boolean => p.kind === 'ready' || p.kind === 'refreshing' || p.kind === 'waitingForDownload' || p.kind === 'retry';
+export const phaseUsable = (p: SessionPhase): boolean => p.kind === 'ready' || p.kind === 'refreshing' || p.kind === 'waitingForDownload' || p.kind === 'retry' || p.kind === 'stopped';
 export const samePhase = (a: SessionPhase, b: SessionPhase): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 /** A command is bound to the context and revision observed before the person's action began. */
@@ -122,18 +131,23 @@ export interface SessionConfiguration {
   exchangeTimeMs?: number;
 }
 
-/** A member's request for access, as an approver sees it. */
+/**
+ * A member's request for access, as an approver sees it. It carries no code: approving it spends a confirmed pairing for
+ * exactly its key (spec §9.1), from the six-digit code (`beginApproval`, `approvalCode`) or from scanning the request on the
+ * joining device's screen (`scanRequest`).
+ */
 export interface AccessRequest {
   /** The member's key ID. */
   id: string; label: string; kind: glue.AccountMemberKind; termsJson: string;
-  /** A short code both devices derive from the key ID: compare it before approving. */
-  pairingCode: string;
-  /** The request exactly as signed. */
+  /** The request exactly as signed (the canonical envelope); the joining device shows it as a QR code (`exportRequest()`). */
   record: Uint8Array;
   namespaces: string[];
   access: ('read' | 'write')[];
 }
-export function pairingCode(id: string): string { const head = id.slice(0, 8).toUpperCase(); return `${head.slice(0, 4)}-${head.slice(4, 8)}`; }
+/** The approving device's half of the six-digit code (§7.3): the session it opened when the commitment arrived, and the nonce to send back. */
+export interface ApprovalStart { pairing: glue.AccountPairing; nonce: Uint8Array }
+/** A request scanned from the joining device's screen, with the confirmed pairing that scan made (§7.3, §9.1). Nothing is stored for it. */
+export interface ScannedRequest { request: AccessRequest; pairing: glue.AccountPairing }
 
 /** What a person may be shown about this account that is not content (§17.5, §18). */
 export interface SessionNotices {

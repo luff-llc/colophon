@@ -274,9 +274,7 @@ class MainActivity : Activity() {
         content.button("Status") { go(Screen.STATUS); chosen = Screen.STATUS }
     }
     private fun waitingList(d: LinearLayout) {
-        val code = (model.session?.phase as? SessionPhase.WaitingForApproval)?.code ?: "-"
-        d.text(code, 32f, mono = true, tag = "pairingCode")
-        d.text("On the owner device: Devices, then scan this code or paste this request. Approve only if it shows the same code.", 12f)
+        d.text("On the owner device: Devices, then scan this device's request below with its camera.", 12f, tag = "waitingForApproval")
         d.text(TrustWords.WAITING, 12f, color = Color.GRAY)
         model.shownPayload?.takeIf { it.startsWith(PairingPayload.REQUEST) }?.let { d.payload(it) }
             ?: d.button("Show this device's request", "showRequest") { launch { model.requestPayload() } }
@@ -299,10 +297,12 @@ class MainActivity : Activity() {
     }
     private fun notesList(d: LinearLayout) {
         val session = model.session ?: return
-        (content.findViewWithTag<View>("addNote") as? Button)?.isEnabled = session.hasUsableContent && model.busy == null
+        (content.findViewWithTag<View>("addNote") as? Button)?.isEnabled = session.hasUsableContent && !session.phase.isStopped && model.busy == null
         when (val phase = session.phase) {
             SessionPhase.Locked -> { d.text("Locked", 20f, bold = true); d.button("Unlock", "unlock") { launch { model.unlock() } }; return }
             SessionPhase.Ready, SessionPhase.Refreshing, SessionPhase.Retry, SessionPhase.WaitingForDownload -> {}
+            // A verified state, not a fault: what the device holds stays readable; nothing new can be written.
+            is SessionPhase.Stopped -> d.text(AppModel.STOPPED_WORDS, color = Color.rgb(200, 120, 0), tag = "stoppedNotice")
             else -> { d.text("Not ready. Phase: $phase\n${session.lastError ?: ""}", tag = "notReady"); return }
         }
         model.notesProblem?.let { d.text(it, color = Color.RED, tag = "notesProblem") }
@@ -354,29 +354,21 @@ class MainActivity : Activity() {
         }
         content.header("1. The new device scans or pastes this")
         content.button("Add a device: show the invite", "showInvite") { launch { try { model.invitePayload() } catch (e: Exception) { model.actionError = AppModel.message(e); render() } } }
-        content.header("2. Then take its request")
-        val request = content.field("Paste its request (CTR1.…)", "", "requestField", lines = 4)
-        content.button("Import request", "importRequest") { launch { model.importRequest(request.text.toString()); request.setText("") } }
-        content.button("Scan") { scan { text -> launch { model.importRequest(text) } } }
+        content.header("2. Then scan its request")
+        content.text("Point the camera at the new device's screen. Only a request read from that screen can be approved.", 12f)
+        content.button("Scan its request", "scanRequest") { scan { text -> launch { model.scanRequest(text) } } }
     }
     private fun devicesList(d: LinearLayout) {
         val session = model.session ?: return
         if (model.isOwner) {
             model.shownPayload?.takeIf { it.startsWith(PairingPayload.INVITE) }?.let { d.header("Invite"); d.payload(it) }
-            model.pendingRequestText?.let { pending ->
-                d.header("A request arrived by link")
-                d.text("It is not imported until you choose to. Import it only if you expect a device to join.", 12f)
-                d.button("Import it", "importLinked") { launch { model.importRequest(pending) } }
-                d.button("Ignore") { model.pendingRequestText = null; render() }
-            }
-            if (model.visibleRequests.isNotEmpty()) { d.header("3. Compare the codes"); d.text(TrustWords.APPROVE, 12f, color = Color.GRAY) }
-            for (request in model.visibleRequests) {
-                val confirmed = request.id in model.confirmedCodes
-                d.text(request.pairingCode, 24f, mono = true, tag = "requestCode")
-                d.text("${request.label} · ${request.id}", 12f)
-                d.button(if (confirmed) "Codes match ✓" else "The codes match", "codesMatch") { model.confirmCodes(request); render() }.isEnabled = !confirmed
-                d.button("Approve", "approve") { launch { model.approve(request) } }.isEnabled = confirmed
-                d.button("Reject", "reject") { model.reject(request); render() }
+            model.scanned?.let { scanned ->
+                d.header("3. Approve the device you scanned")
+                d.text(TrustWords.APPROVE, 12f, color = Color.GRAY)
+                d.text(scanned.request.label, 18f, bold = true, tag = "scannedRequest")
+                d.text("${scanned.request.kind} · ${scanned.request.id}", 12f)
+                d.button("Approve", "approve") { launch { model.approveScanned() } }
+                d.button("Reject", "reject") { model.rejectScanned(); render() }
             }
         }
         d.header("Members")
@@ -415,6 +407,8 @@ class MainActivity : Activity() {
             val s = session.state.value
             d.header("Session")
             d.row("Phase", "${s.phase}", "phase")
+            if (s.phase.isStopped) d.text(AppModel.STOPPED_WORDS, color = Color.rgb(200, 120, 0), tag = "stoppedStatus")
+            if (s.phase is SessionPhase.WaitingForApproval) d.text(AppModel.WAITING_WORDS, tag = "waitingStatus")
             d.row("Account", s.libraryId ?: "-")
             d.row("This device's key", s.memberId ?: "-")
             d.row("Owner", model.settings.owner?.wire ?: "-")
@@ -469,6 +463,6 @@ class MainActivity : Activity() {
  *  ceremony land in the SDKs, an invite is not authenticated. */
 object TrustWords {
     const val INVITE = "Join only with an invite you got in person or over a channel you trust. The invite is not signed: it does not prove who made it, or that the home and the account are theirs."
-    const val WAITING = "The code lets the owner device check that the request it received is this device's, unchanged. It does not prove that the invite came from the person you think."
-    const val APPROVE = "Compare this code with the one on the joining device. A matching code shows the request came from that device unchanged; it does not prove who holds the device. Confirm only after checking; reject if the codes differ."
+    const val WAITING = "The owner device scans this request from this screen, so it approves this device's own key and no other. It does not prove that the invite came from the person you think."
+    const val APPROVE = "This request was read from the new device's screen, so approving it admits that device's key and no other. It does not prove who holds the device. Reject it if you did not mean to add this device."
 }
