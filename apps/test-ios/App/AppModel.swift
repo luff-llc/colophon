@@ -50,7 +50,12 @@ struct SyncOutcome: Sendable {
         let link = ProcessInfo.processInfo.environment["COLOPHON_OPEN_URL"].flatMap(URL.init(string:))
         if CommandLine.arguments.contains("-uiTestReset") {
             settings = Settings()
-            Task { await resetDevice(); if let link { await open(link) } }
+            let token = ProcessInfo.processInfo.environment["COLOPHON_PROVISIONER_TOKEN"]
+            Task {
+                await resetDevice()
+                if let token { settings.provisionerToken = token; try? Paths.save(settings) }
+                if let link { await open(link) }
+            }
             return
         }
         if let link { Task { await open(link) } }
@@ -168,8 +173,9 @@ struct SyncOutcome: Sendable {
         return localized.map { "\($0) [\(error)]" } ?? "\(error)"
     }
 
-    func updateHome(prefix: String, reach: String, provisioner: String) {
+    func updateHome(prefix: String, reach: String, provisioner: String, token: String) {
         guard settings.slot == nil else { return }
+        settings.provisionerToken = token.trimmingCharacters(in: .whitespaces)
         settings.homePrefix = prefix.trimmingCharacters(in: .whitespaces)
         settings.reachPrefix = reach.trimmingCharacters(in: .whitespaces)
         settings.provisioner = provisioner.trimmingCharacters(in: .whitespaces)
@@ -186,12 +192,12 @@ struct SyncOutcome: Sendable {
             next.owner = owner
             if owner == .passkey { next.passkey = try await registerPasskey() }
             guard let base = next.homeBase else { return }
-            let service = next.provisioner, slot = next.slot ?? ""
+            let service = next.provisioner, token = next.provisionerToken, slot = next.slot ?? ""
             settings = next
             try Paths.save(settings)
             record("creating an account at \(base) (owner: \(owner.rawValue))")
             openSession(request: { account in
-                try await Provisioner.memberRequest(service: service, slot: slot, base: base, account: account)
+                try await Provisioner.memberRequest(service: service, token: token, slot: slot, base: base, account: account)
             })
             guard let session else { return }
             if owner == .passkey {
@@ -222,28 +228,84 @@ struct SyncOutcome: Sendable {
         return PasskeyRecord(attestationObject: attestation, relyingParty: rp, authorityOrigins: origins)
     }
 
-    func join(_ text: String) async {
+    /// An invite that a link, a scan or a paste brought, waiting for the person to confirm it. Nothing is stored and no
+    /// request is sent until they do.
+    struct PendingInvite: Equatable {
+        let text: String
+        let invite: PairingPayload.Invite
+        /// The home's host, and the account ID in short form, as the confirmation screen shows them.
+        var host: String { URL(string: invite.homePrefix)?.host ?? invite.homePrefix }
+        var accountShort: String { String(invite.account.prefix(8)) + "…" + String(invite.account.suffix(4)) }
+    }
+    private(set) var pendingInvite: PendingInvite?
+    /// A request a link brought, shown in Devices for the person to import or ignore; never imported by the link.
+    var pendingRequestText: String?
+    /// Requests whose code the person said matches on both screens, this run only.
+    private(set) var confirmedCodes: Set<String> = []
+
+    /// Decodes an invite (bounded) and shows it for confirmation. Stores nothing.
+    func prepareJoin(_ text: String) async {
+        await perform("Read invite") {
+            try checkAttempts()
+            do {
+                let invite = try PairingPayload.decodeInvite(text)
+                pendingInvite = PendingInvite(text: text, invite: invite)
+                record("invite read: home \(pendingInvite?.host ?? "-"), account \(pendingInvite?.accountShort ?? "-"); waiting for confirmation")
+            } catch { countFailure(); throw error }
+        }
+    }
+    func cancelJoin() { pendingInvite = nil; record("invite dismissed") }
+
+    /// The person confirmed: verify the invite's history in memory first, and only when it verifies and names the account
+    /// the invite claims, store it and the settings, open the session and show this device's request.
+    func confirmJoin() async {
+        guard let pending = pendingInvite else { return }
         await perform("Join account") {
-            let invite = try PairingPayload.decodeInvite(text)
+            try checkAttempts()
+            let invite = pending.invite
+            let files = invite.history
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            let verified = try await Task.detached { () throws -> String? in
+                let entries = files.sorted { $0.key < $1.key }.map { ByteString(bytes: $0.value) }
+                let report = try accountVerifyHistory(objects: AuthorityObjects(entries: entries, pending: [], heads: [], predecessor: []), nowMs: now)
+                return report.account
+            }.value
+            guard verified == invite.account else {
+                countFailure()
+                throw Provisioner.Failure(text: "the invite's history does not verify as account \(pending.accountShort); nothing was stored")
+            }
             var next = settings
             next.homePrefix = invite.homePrefix; next.slot = invite.slot; next.owner = OwnerChoice.none
-            // The history goes into this device's store before the session opens it; the engine verifies it.
-            let files = invite.history
             try await Task.detached {
                 try FileManager.default.createDirectory(at: Paths.records, withIntermediateDirectories: true)
                 try FolderMedium(folder: Paths.records).write(files.sorted { $0.key < $1.key }.map { MediumWrite(path: $0.key, bytes: $0.value) })
             }.value
             settings = next
             try Paths.save(settings)
-            record("joining account \(invite.account) at \(next.homeBase ?? "-") with \(files.count) history entries")
+            pendingInvite = nil
+            record("joining account \(invite.account) at \(next.homeBase ?? "-") with \(files.count) verified history entries")
             openSession(request: nil)
             guard let session else { return }
             await session.restore()
             guard session.libraryID == invite.account else {
-                throw Provisioner.Failure(text: "the history in the invite is for account \(session.libraryID ?? "none"), not \(invite.account)")
+                throw Provisioner.Failure(text: "the stored history is for account \(session.libraryID ?? "none"), not \(invite.account)")
             }
             _ = try await requestPayload()
         }
+    }
+
+    // MARK: Attempts (spec §7.3 allows an existing side no more than 5 failed sessions an hour; the apps hold both sides to it)
+
+    static let attemptLimit = 5
+    private func recentFailures() -> [Date] { settings.failures.filter { Date.now.timeIntervalSince($0) < 3600 } }
+    private func checkAttempts() throws {
+        guard recentFailures().count < Self.attemptLimit else {
+            throw Provisioner.Failure(text: "\(Self.attemptLimit) pairing attempts failed or were rejected in the last hour: wait before trying again")
+        }
+    }
+    private func countFailure() {
+        settings.failures = recentFailures() + [Date.now]
+        try? Paths.save(settings)
     }
 
     /// This account's invite: the home and the `authority/` history, read off the main actor.
@@ -279,14 +341,33 @@ struct SyncOutcome: Sendable {
     func importRequest(_ text: String) async {
         await perform("Import request") {
             guard let session else { throw SessionError.notReady }
-            try await session.importRequest(try PairingPayload.decodeRequest(text))
+            try checkAttempts()
+            pendingRequestText = nil
+            let request: Data
+            do { request = try PairingPayload.decodeRequest(text) } catch { countFailure(); throw error }
+            try await session.importRequest(request)
             record("imported a request; waiting: \(session.requests.map { "\($0.label) \($0.pairingCode)" }.joined(separator: ", "))")
         }
     }
 
+    /// The person says the code on this screen and on the joining device are the same.
+    func confirmCodes(_ request: AccessRequest) { confirmedCodes.insert(request.id); record("codes confirmed for \(request.label) \(request.pairingCode)") }
+
+    /// Discards a request: it is hidden from now on and counts as a failed attempt.
+    func reject(_ request: AccessRequest) {
+        confirmedCodes.remove(request.id)
+        settings.rejected.insert(request.id)
+        countFailure()
+        record("rejected the request \(request.label) \(request.pairingCode)")
+    }
+
+    /// The requests waiting, without the ones the person rejected.
+    var visibleRequests: [AccessRequest] { (session?.requests ?? []).filter { !settings.rejected.contains($0.id) } }
+
     func approve(_ request: AccessRequest) async {
         await perform("Approve \(request.pairingCode)") {
             guard let session else { throw SessionError.notReady }
+            guard confirmedCodes.contains(request.id) else { throw Provisioner.Failure(text: "confirm that the codes match first") }
             try await session.approve(request)
             record("approved \(request.label) \(request.id)")
             await sync()
@@ -439,8 +520,9 @@ struct SyncOutcome: Sendable {
         guard url.scheme == "colophontest", let p = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "p" })?.value else { return }
         record("opened link \(url.host ?? "-")")
         switch url.host {
-        case "join" where settings.slot == nil: await join(p)
-        case "request" where isOwner: await importRequest(p)
+        // A link only fills a screen the person must confirm: it never joins, imports or approves by itself.
+        case "join" where settings.slot == nil: await prepareJoin(p)
+        case "request" where isOwner: pendingRequestText = p; record("a request arrived by link: shown in Devices, not imported")
         default: actionError = "This link does not fit this device's state (\(url.host ?? "-"))."
         }
     }

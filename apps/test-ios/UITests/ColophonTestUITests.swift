@@ -14,6 +14,7 @@ import XCTest
     private func launch(reset: Bool, link: String? = nil) {
         app.launchArguments = reset ? ["-uiTestReset"] : []
         if let link { app.launchEnvironment["COLOPHON_OPEN_URL"] = link }
+        if reset, let token = env("COLOPHON_PROVISIONER_TOKEN") { app.launchEnvironment["COLOPHON_PROVISIONER_TOKEN"] = token }
         app.launch()
     }
 
@@ -132,7 +133,13 @@ import XCTest
         launch(reset: false, link: env("COLOPHON_REQUEST").map { "colophontest://request?p=\($0)" })
         wait(app.buttons.matching(NSPredicate(format: "label == %@", "Devices")).firstMatch, 30)
         tapTab("Devices")
-        wait(app.buttons["approve"], 60, "no request is waiting")
+        // The link only shows the request: import it, confirm the codes, then approve.
+        wait(app.buttons["importLinked"], 30, "the linked request is not shown")
+        app.buttons["importLinked"].tap()
+        wait(app.buttons["codesMatch"], 60, "no request is waiting")
+        XCTAssertFalse(app.buttons["approve"].isEnabled, "Approve waits for the codes to be confirmed")
+        app.buttons["codesMatch"].tap()
+        waitEnabled(app.buttons["approve"], 10)
         app.buttons["approve"].tap()
         let gone = NSPredicate(format: "exists == false")
         expectation(for: gone, evaluatedWith: app.buttons["approve"])
@@ -142,6 +149,10 @@ import XCTest
     /// Step: join with the invite in `TEST_RUNNER_COLOPHON_INVITE` and wait for the pairing code.
     func testScriptJoin() {
         launch(reset: true, link: env("COLOPHON_INVITE").map { "colophontest://join?p=\($0)" })
+        // The link only fills the confirmation screen; the person confirms.
+        wait(app.buttons["confirmJoin"], 30, "the confirmation screen did not appear")
+        XCTAssertTrue(app.staticTexts["confirmHost"].exists || app.descendants(matching: .any)["confirmHost"].exists)
+        app.buttons["confirmJoin"].tap()
         wait(app.staticTexts["pairingCode"], 60, "the device did not reach waiting for approval")
     }
 

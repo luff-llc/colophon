@@ -1,3 +1,4 @@
+import Compression
 import Foundation
 
 /// The two payloads the test apps pass between devices (as a QR code, a pasted text or a deep link), the same bytes on
@@ -20,12 +21,13 @@ enum PairingPayload {
         var history: [String: Data]
     }
 
-    enum Failure: LocalizedError {
-        case notAPayload, badHistory(String)
+    enum Failure: LocalizedError, Equatable {
+        case notAPayload, badHistory(String), tooLarge
         var errorDescription: String? {
             switch self {
             case .notAPayload: "This is not a Colophon test invite or request."
             case .badHistory(let path): "The invite carries a path that is not account history: \(path)"
+            case .tooLarge: "This payload is larger than an invite or a request may be."
             }
         }
     }
@@ -73,12 +75,41 @@ enum PairingPayload {
     }
 
     private static func body(_ text: String, prefix: String) throws -> Data? {
+        guard text.utf8.count <= maximumText else { throw Failure.tooLarge }
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.hasPrefix(prefix), let raw = unb64url(String(t.dropFirst(prefix.count))) else { return nil }
         return try inflate(raw)
     }
     private static func deflate(_ data: Data) throws -> Data { try (data as NSData).compressed(using: .zlib) as Data }
-    private static func inflate(_ data: Data) throws -> Data { try (data as NSData).decompressed(using: .zlib) as Data }
+    /// The most an inflated payload may be (as on Android), and the longest text taken at all.
+    static let maximumInflated = 32 * 1024 * 1024
+    static let maximumText = 8 * 1024 * 1024
+    /// Raw DEFLATE, stopped as soon as the output passes `maximumInflated`: a small bomb in a link cannot exhaust the app.
+    static func inflate(_ data: Data) throws -> Data {
+        var stream = compression_stream(dst_ptr: UnsafeMutablePointer<UInt8>(bitPattern: 1)!, dst_size: 0,
+                                        src_ptr: UnsafePointer<UInt8>(bitPattern: 1)!, src_size: 0, state: nil)
+        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else { throw Failure.notAPayload }
+        defer { compression_stream_destroy(&stream) }
+        var out = Data()
+        let chunk = 64 * 1024
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: chunk)
+        defer { buffer.deallocate() }
+        return try data.withUnsafeBytes { (input: UnsafeRawBufferPointer) throws -> Data in
+            guard let base = input.bindMemory(to: UInt8.self).baseAddress else { throw Failure.notAPayload }
+            stream.src_ptr = base; stream.src_size = input.count
+            while true {
+                stream.dst_ptr = buffer; stream.dst_size = chunk
+                let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                out.append(buffer, count: chunk - stream.dst_size)
+                if out.count > maximumInflated { throw Failure.tooLarge }
+                switch status {
+                case COMPRESSION_STATUS_END: return out
+                case COMPRESSION_STATUS_OK: if stream.src_size == 0 && stream.dst_size == chunk { throw Failure.notAPayload }
+                default: throw Failure.notAPayload
+                }
+            }
+        }
+    }
     static func b64url(_ data: Data) -> String {
         data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")

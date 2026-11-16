@@ -7,6 +7,7 @@ struct SetupView: View {
     @State private var prefix = ""
     @State private var reach = ""
     @State private var provisioner = ""
+    @State private var token = ""
     @State private var invite = ""
     @State private var scanning = false
 
@@ -29,6 +30,9 @@ struct SetupView: View {
                 }
                 LabeledContent("Home service") {
                     TextField("provisions a new account's home", text: $provisioner).accessibilityIdentifier("provisioner")
+                }
+                LabeledContent("Home service token") {
+                    SecureField("printed by the home service at start-up", text: $token).accessibilityIdentifier("provisionerToken")
                 }
                 HStack {
                     Button("Use staging") {
@@ -56,7 +60,7 @@ struct SetupView: View {
                 TextField("Paste an invite (CTJ1.…)", text: $invite, axis: .vertical).lineLimit(3...6)
                     .font(.system(.footnote, design: .monospaced)).accessibilityIdentifier("invite")
                 HStack {
-                    Button("Join") { Task { await model.join(invite) } }.disabled(invite.isEmpty).accessibilityIdentifier("join")
+                    Button("Join") { Task { await model.prepareJoin(invite) } }.disabled(invite.isEmpty).accessibilityIdentifier("join")
                     Spacer()
                     if ScannerView.isAvailable { Button("Scan") { scanning = true } }
                 }
@@ -67,13 +71,13 @@ struct SetupView: View {
         }
         .navigationTitle("Colophon test")
         .disabled(model.busy != nil)
-        .onAppear { prefix = model.settings.homePrefix; reach = model.settings.reachPrefix; provisioner = model.settings.provisioner }
+        .onAppear { prefix = model.settings.homePrefix; reach = model.settings.reachPrefix; provisioner = model.settings.provisioner; token = model.settings.provisionerToken }
         .sheet(isPresented: $scanning) {
-            ScannerView { text in scanning = false; invite = text; Task { await model.join(text) } }
+            ScannerView { text in scanning = false; invite = text; Task { await model.prepareJoin(text) } }
         }
     }
 
-    private func save() { model.updateHome(prefix: prefix, reach: reach, provisioner: provisioner) }
+    private func save() { model.updateHome(prefix: prefix, reach: reach, provisioner: provisioner, token: token) }
 }
 
 /// A joining device that is not approved yet: its request and code, for the owner device.
@@ -88,6 +92,7 @@ struct WaitingView: View {
                 Text(code).font(.system(.largeTitle, design: .monospaced)).accessibilityIdentifier("pairingCode")
                 Text("On the owner device: Devices, Add a device, then scan this code or paste this request. Approve only if it shows the same code.")
                     .font(.footnote)
+                Text(TrustWords.waiting).font(.footnote).foregroundStyle(.secondary)
             }
             if let payload {
                 Section("This device's request") {
@@ -116,5 +121,40 @@ struct PayloadText: View {
                 .accessibilityIdentifier("payload").accessibilityValue(text)
             Button("Copy") { UIPasteboard.general.string = text }.accessibilityIdentifier("copyPayload")
         }
+    }
+}
+
+/// What the pairing does and does not prove, the same words on iPhone and Android. Until a signed invite and the §7.3
+/// ceremony land in the SDKs, an invite is not authenticated.
+enum TrustWords {
+    static let invite = "Join only with an invite you got in person or over a channel you trust. The invite is not signed: it does not prove who made it, or that the home and the account are theirs."
+    static let waiting = "The code lets the owner device check that the request it received is this device's, unchanged. It does not prove that the invite came from the person you think."
+    static let approve = "Compare this code with the one on the joining device. A matching code shows the request came from that device unchanged; it does not prove who holds the device. Confirm only after checking; reject if the codes differ."
+}
+
+/// A link, a scan or a paste only fills this screen: nothing is stored and nothing is sent until the person confirms.
+struct JoinConfirmView: View {
+    @Environment(AppModel.self) private var model
+    let pending: AppModel.PendingInvite
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Ask to join this account?") {
+                    LabeledContent("Home", value: pending.host).accessibilityIdentifier("confirmHost")
+                    LabeledContent("Account", value: pending.accountShort).accessibilityIdentifier("confirmAccount")
+                    Text("This device will store the account's history, then ask the account's owner device to approve it.").font(.footnote)
+                }
+                Section { Text(TrustWords.invite).font(.footnote).foregroundStyle(.orange) }
+                if let error = model.actionError { Section { Text(error).font(.footnote).foregroundStyle(.red).accessibilityIdentifier("confirmError") } }
+                Section {
+                    Button("Ask to join") { Task { await model.confirmJoin() } }.accessibilityIdentifier("confirmJoin")
+                    Button("Cancel", role: .cancel) { model.cancelJoin() }.accessibilityIdentifier("cancelJoin")
+                }
+            }
+            .navigationTitle("Join")
+            .disabled(model.busy != nil)
+        }
+        .interactiveDismissDisabled()
     }
 }

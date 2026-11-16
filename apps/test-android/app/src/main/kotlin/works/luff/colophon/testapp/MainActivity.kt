@@ -44,7 +44,7 @@ import java.util.Date
  * changes. Every view a test touches carries a tag.
  */
 class MainActivity : Activity() {
-    enum class Screen { SETUP, WAITING, NOTES, EDIT, DEVICES, STATUS, LOG }
+    enum class Screen { SETUP, CONFIRM_JOIN, WAITING, NOTES, EDIT, DEVICES, STATUS, LOG }
 
     val model: AppModel get() = (application as TestApplication).model
     private lateinit var root: LinearLayout
@@ -98,7 +98,7 @@ class MainActivity : Activity() {
 
     private fun currentScreen(): Screen {
         val session = model.session
-        if (model.settings.slot == null) return Screen.SETUP
+        if (model.settings.slot == null) return if (model.pendingInvite != null) Screen.CONFIRM_JOIN else Screen.SETUP
         if (session?.phase is SessionPhase.WaitingForApproval) return Screen.WAITING
         return chosen
     }
@@ -116,6 +116,7 @@ class MainActivity : Activity() {
             buildTabs(now)
             when (now) {
                 Screen.SETUP -> setupScreen()
+                Screen.CONFIRM_JOIN -> confirmJoinScreen()
                 Screen.WAITING -> waitingScreen()
                 Screen.NOTES -> notesScreen()
                 Screen.EDIT -> editScreen()
@@ -141,7 +142,7 @@ class MainActivity : Activity() {
 
     private fun buildTabs(now: Screen) {
         tabs.removeAllViews()
-        if (now == Screen.SETUP || now == Screen.WAITING) return
+        if (now == Screen.SETUP || now == Screen.CONFIRM_JOIN || now == Screen.WAITING) return
         for ((label, target) in listOf("Notes" to Screen.NOTES, "Devices" to Screen.DEVICES, "Status" to Screen.STATUS, "Log" to Screen.LOG)) {
             tabs.addView(Button(this).apply {
                 text = label; tag = "tab$label"; isEnabled = target != now
@@ -231,20 +232,38 @@ class MainActivity : Activity() {
         val prefix = content.field("Home URL prefix (https://…/)", model.settings.homePrefix, "homePrefix")
         val reach = content.field("Reach over (empty: as named)", model.settings.reachPrefix, "reachPrefix")
         val provisioner = content.field("Home service (provisions a new account's home)", model.settings.provisioner, "provisioner")
+        val token = content.field("Home service token (printed at its start-up)", model.settings.provisionerToken, "provisionerToken").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
         val presets = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         presets.button("Use staging", "useStaging") { prefix.setText(BuildDefaults.stagingPrefix); reach.setText(""); provisioner.setText(BuildDefaults.stagingProvisioner) }
         presets.button("Use this Mac") { prefix.setText(BuildDefaults.homePrefix); reach.setText(BuildDefaults.reachPrefix); provisioner.setText(BuildDefaults.provisioner) }
         content.addView(presets)
         content.text("A new account gets the slot “t…” under the prefix. “Reach over” sends the home's requests there instead (a relay on the Mac, through adb reverse); leave it empty for a real https home.", 12f, color = Color.GRAY)
-        fun save() = model.updateHome(prefix.text.toString(), reach.text.toString(), provisioner.text.toString())
+        fun save() = model.updateHome(prefix.text.toString(), reach.text.toString(), provisioner.text.toString(), token.text.toString())
         content.header("New account")
         content.button("Create with a passkey", "createPasskey") { save(); launch { model.create(OwnerChoice.PASSKEY) } }
-        content.button("Create with a Keystore owner key (test only)", "createDeviceKey") { save(); launch { model.create(OwnerChoice.DEVICE_KEY) } }
+        if (TestOwner.AVAILABLE) {
+            content.button("Create with a Keystore owner key (test only)", "createDeviceKey") { save(); launch { model.create(OwnerChoice.DEVICE_KEY) } }
+        }
         content.text("Passkey: relying party ${BuildDefaults.relyingParty}; it works only where that domain lists this app (see the README).", 12f, color = Color.GRAY)
         content.header("Join an account")
         val invite = content.field("Paste an invite (CTJ1.…)", "", "invite", lines = 6)
-        content.button("Join", "join") { launch { model.join(invite.text.toString()) } }
-        content.button("Scan") { scan { text -> launch { model.join(text) } } }
+        content.button("Join", "join") { launch { model.prepareJoin(invite.text.toString()) } }
+        content.button("Scan") { scan { text -> launch { model.prepareJoin(text) } } }
+    }
+
+    // MARK: Confirm a join (a link, a scan or a paste only fills this screen; nothing is stored until Ask to join)
+
+    private fun confirmJoinScreen() {
+        val pending = model.pendingInvite ?: return
+        content.header("Ask to join this account?")
+        content.row("Home", pending.host, "confirmHost")
+        content.row("Account", pending.accountShort, "confirmAccount")
+        content.text("This device will store the account's history, then ask the account's owner device to approve it.", 13f)
+        content.text(TrustWords.INVITE, 12f, color = Color.rgb(200, 120, 0))
+        content.button("Ask to join", "confirmJoin") { launch { model.confirmJoin() } }
+        content.button("Cancel", "cancelJoin") { model.cancelJoin(); render() }
     }
 
     // MARK: Waiting
@@ -258,6 +277,7 @@ class MainActivity : Activity() {
         val code = (model.session?.phase as? SessionPhase.WaitingForApproval)?.code ?: "-"
         d.text(code, 32f, mono = true, tag = "pairingCode")
         d.text("On the owner device: Devices, then scan this code or paste this request. Approve only if it shows the same code.", 12f)
+        d.text(TrustWords.WAITING, 12f, color = Color.GRAY)
         model.shownPayload?.takeIf { it.startsWith(PairingPayload.REQUEST) }?.let { d.payload(it) }
             ?: d.button("Show this device's request", "showRequest") { launch { model.requestPayload() } }
         model.lastSync?.let { syncOutcome(d, it) }
@@ -343,11 +363,20 @@ class MainActivity : Activity() {
         val session = model.session ?: return
         if (model.isOwner) {
             model.shownPayload?.takeIf { it.startsWith(PairingPayload.INVITE) }?.let { d.header("Invite"); d.payload(it) }
-            if (session.requests.isNotEmpty()) d.header("3. Approve if the codes match")
-            for (request in session.requests) {
+            model.pendingRequestText?.let { pending ->
+                d.header("A request arrived by link")
+                d.text("It is not imported until you choose to. Import it only if you expect a device to join.", 12f)
+                d.button("Import it", "importLinked") { launch { model.importRequest(pending) } }
+                d.button("Ignore") { model.pendingRequestText = null; render() }
+            }
+            if (model.visibleRequests.isNotEmpty()) { d.header("3. Compare the codes"); d.text(TrustWords.APPROVE, 12f, color = Color.GRAY) }
+            for (request in model.visibleRequests) {
+                val confirmed = request.id in model.confirmedCodes
                 d.text(request.pairingCode, 24f, mono = true, tag = "requestCode")
                 d.text("${request.label} · ${request.id}", 12f)
-                d.button("Approve", "approve") { launch { model.approve(request) } }
+                d.button(if (confirmed) "Codes match ✓" else "The codes match", "codesMatch") { model.confirmCodes(request); render() }.isEnabled = !confirmed
+                d.button("Approve", "approve") { launch { model.approve(request) } }.isEnabled = confirmed
+                d.button("Reject", "reject") { model.reject(request); render() }
             }
         }
         d.header("Members")
@@ -434,4 +463,12 @@ class MainActivity : Activity() {
         const val SCAN = 1
         const val PHOTO = 2
     }
+}
+
+/** What the pairing does and does not prove, the same words as the iPhone app. Until a signed invite and the §7.3
+ *  ceremony land in the SDKs, an invite is not authenticated. */
+object TrustWords {
+    const val INVITE = "Join only with an invite you got in person or over a channel you trust. The invite is not signed: it does not prove who made it, or that the home and the account are theirs."
+    const val WAITING = "The code lets the owner device check that the request it received is this device's, unchanged. It does not prove that the invite came from the person you think."
+    const val APPROVE = "Compare this code with the one on the joining device. A matching code shows the request came from that device unchanged; it does not prove who holds the device. Confirm only after checking; reject if the codes differ."
 }

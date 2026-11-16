@@ -36,6 +36,7 @@ echo "build-test-android: $apk ($(wc -c < "$apk" | tr -d ' ') bytes)"
 if [[ "${1:-}" == --test ]]; then
   adb="$ANDROID_HOME/platform-tools/adb"
   "$adb" get-state >/dev/null || { echo "build-test-android: no emulator or device on adb" >&2; exit 1; }
+  cargo build --locked --quiet --target wasm32-unknown-unknown --release -p colophon-home-wasm
   data="$(mktemp -d "${TMPDIR:-/tmp}/colophon-test-home.XXXXXX")"
   swift build --package-path apps/test-home -c debug >/dev/null
   apps/test-home/.build/debug/colophon-test-home --data "$data" > "$data/out" 2> "$data/log" &
@@ -47,10 +48,12 @@ if [[ "${1:-}" == --test ]]; then
   }
   trap cleanup EXIT
   for _ in $(seq 50); do grep -q listening "$data/out" 2>/dev/null && break; sleep 0.2; done
+  token=$(sed -nE 's/.*"token":"([0-9a-f]+)".*/\1/p' "$data/out")
+  [[ -n "$token" ]] || { echo "build-test-android: the home service did not start" >&2; cat "$data/log" >&2; exit 1; }
   "$adb" reverse tcp:8790 tcp:8790
   "$adb" reverse tcp:8791 tcp:8791
   set +e
-  "${gradle[@]}" :app:connectedDebugAndroidTest
+  "${gradle[@]}" -Pandroid.testInstrumentationRunnerArguments.token="$token" :app:connectedDebugAndroidTest
   status=$?
   set -e
   echo "build-test-android: home service log:"; cat "$data/log"

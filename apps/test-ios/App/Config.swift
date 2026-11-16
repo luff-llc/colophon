@@ -50,13 +50,34 @@ struct Settings: Codable, Sendable, Equatable {
     var homePrefix: String
     var reachPrefix: String
     var provisioner: String
+    /// The token the local home service printed at start-up (it refuses requests without it).
+    var provisionerToken = ""
     /// The account's slot at the home; set when this device creates or joins an account.
     var slot: String?
     var owner: OwnerChoice?
     var passkey: PasskeyRecord?
+    /// Failed or rejected pairing attempts (the last hour counts; see `AppModel.attemptLimit`).
+    var failures: [Date] = []
+    /// Requests the person rejected (member key IDs, public).
+    var rejected: Set<String> = []
 
     init(defaults: BuildDefaults = .current) {
         homePrefix = defaults.homePrefix; reachPrefix = defaults.reachPrefix; provisioner = defaults.provisioner
+    }
+
+    private enum CodingKeys: String, CodingKey { case homePrefix, reachPrefix, provisioner, provisionerToken, slot, owner, passkey, failures, rejected }
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = BuildDefaults.current
+        homePrefix = try c.decodeIfPresent(String.self, forKey: .homePrefix) ?? defaults.homePrefix
+        reachPrefix = try c.decodeIfPresent(String.self, forKey: .reachPrefix) ?? defaults.reachPrefix
+        provisioner = try c.decodeIfPresent(String.self, forKey: .provisioner) ?? defaults.provisioner
+        provisionerToken = try c.decodeIfPresent(String.self, forKey: .provisionerToken) ?? ""
+        slot = try c.decodeIfPresent(String.self, forKey: .slot)
+        owner = try c.decodeIfPresent(OwnerChoice.self, forKey: .owner)
+        passkey = try c.decodeIfPresent(PasskeyRecord.self, forKey: .passkey)
+        failures = try c.decodeIfPresent([Date].self, forKey: .failures) ?? []
+        rejected = try c.decodeIfPresent(Set<String>.self, forKey: .rejected) ?? []
     }
 
     /// The home's base URL as the account names it (no trailing slash).

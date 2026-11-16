@@ -12,7 +12,11 @@ let child: ReturnType<typeof Bun.spawn> | undefined;
 let token = '';
 
 async function start(data: string, p: number): Promise<{ proc: ReturnType<typeof Bun.spawn>; line: string; err: string }> {
-  const proc = Bun.spawn([binary, '--data', data, '--port', String(p), '--relay-port', String(p + 1)], { stdout: 'pipe', stderr: 'pipe' });
+  // The relay never starts here (no slot is provisioned), so any file stands in for the home module.
+  const wasm = join(data, '..', `module-${p}.wasm`);
+  writeFileSync(wasm, '');
+  dirs.push(wasm);
+  const proc = Bun.spawn([binary, '--data', data, '--port', String(p), '--relay-port', String(p + 1), '--wasm', wasm], { stdout: 'pipe', stderr: 'pipe' });
   const reader = proc.stdout.getReader();
   const first = await Promise.race([reader.read(), proc.exited.then(() => ({ value: undefined }))]);
   const line = first.value ? new TextDecoder().decode(first.value) : '';

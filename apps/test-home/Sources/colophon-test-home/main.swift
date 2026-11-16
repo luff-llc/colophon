@@ -95,6 +95,7 @@ final class Service: @unchecked Sendable {
         try Self.secureDirectory(options.data)
         key = try Self.loadOrCreateKey(at: options.data.appendingPathComponent("home-key.jwk"))
         slots = (try? JSONDecoder().decode([String: Slot].self, from: Data(contentsOf: options.data.appendingPathComponent("slots.json")))) ?? [:]
+        _ = wasm()  // fail at start-up, not at the first account, when the home module is missing
     }
 
     // MARK: Key

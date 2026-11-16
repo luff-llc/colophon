@@ -1,6 +1,7 @@
 package works.luff.colophon.testapp
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.SecureRandom
@@ -34,6 +35,12 @@ data class Settings(
     val owner: OwnerChoice? = null,
     /** The passkey's core-parsed descriptor (public). */
     val passkeyDescriptor: String? = null,
+    /** The token the local home service printed at start-up (it refuses requests without it). */
+    val provisionerToken: String = "",
+    /** Failed or rejected pairing attempts, in ms (the last hour counts; see `AppModel.ATTEMPT_LIMIT`). */
+    val failures: List<Long> = listOf(),
+    /** Requests the person rejected (member key IDs, public). */
+    val rejected: Set<String> = setOf(),
 ) {
     /** The home's base URL as the account names it (no trailing slash). */
     val homeBase: String? get() = slot?.let { (if (homePrefix.endsWith("/")) homePrefix else "$homePrefix/") + it }
@@ -41,6 +48,7 @@ data class Settings(
     fun json(): String = JSONObject().apply {
         put("homePrefix", homePrefix); put("reachPrefix", reachPrefix); put("provisioner", provisioner)
         slot?.let { put("slot", it) }; owner?.let { put("owner", it.wire) }; passkeyDescriptor?.let { put("passkey", it) }
+        put("provisionerToken", provisionerToken); put("failures", JSONArray(failures)); put("rejected", JSONArray(rejected.sorted()))
     }.toString()
 
     companion object {
@@ -48,7 +56,9 @@ data class Settings(
             val o = JSONObject(text)
             return Settings(o.optString("homePrefix", BuildDefaults.homePrefix), o.optString("reachPrefix", BuildDefaults.reachPrefix),
                 o.optString("provisioner", BuildDefaults.provisioner), o.optString("slot").ifEmpty { null },
-                OwnerChoice.of(o.optString("owner").ifEmpty { null }), o.optString("passkey").ifEmpty { null })
+                OwnerChoice.of(o.optString("owner").ifEmpty { null }), o.optString("passkey").ifEmpty { null }, o.optString("provisionerToken"),
+                o.optJSONArray("failures")?.let { a -> (0 until a.length()).map { a.getLong(it) } } ?: listOf(),
+                o.optJSONArray("rejected")?.let { a -> (0 until a.length()).map { a.getString(it) }.toSet() } ?: setOf())
         }
         fun newSlot(): String = "t" + ByteArray(5).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
     }

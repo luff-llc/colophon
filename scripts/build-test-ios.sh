@@ -42,6 +42,7 @@ if [[ "$mode" == --test ]]; then
   sim="${2:?build-test-ios: --test needs a simulator name or UDID}"
   udid=$(xcrun simctl list devices available | grep -F "$sim (" | head -n 1 | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/')
   [[ -n "$udid" ]] || { echo "build-test-ios: no available simulator named $sim" >&2; exit 1; }
+  cargo build --locked --quiet --target wasm32-unknown-unknown --release -p colophon-home-wasm
   data="$(mktemp -d "${TMPDIR:-/tmp}/colophon-test-home.XXXXXX")"
   swift build --package-path apps/test-home -c debug >/dev/null
   apps/test-home/.build/debug/colophon-test-home --data "$data" > "$data/out" 2> "$data/log" &
@@ -54,12 +55,14 @@ if [[ "$mode" == --test ]]; then
   }
   trap cleanup EXIT
   for _ in $(seq 50); do grep -q listening "$data/out" 2>/dev/null && break; sleep 0.2; done
+  token=$(sed -nE 's/.*"token":"([0-9a-f]+)".*/\1/p' "$data/out")
+  [[ -n "$token" ]] || { echo "build-test-ios: the home service did not start" >&2; cat "$data/log" >&2; exit 1; }
   if xcrun simctl list devices | grep -F "$udid" | grep -q Shutdown; then xcrun simctl boot "$udid"; booted=1; fi
   set +e
-  xcodebuild -project "$project" -scheme ColophonTest -configuration Debug -destination "id=$udid" \
+  TEST_RUNNER_COLOPHON_PROVISIONER_TOKEN="$token" xcodebuild -project "$project" -scheme ColophonTest -configuration Debug -destination "id=$udid" \
     -derivedDataPath "$derived" CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual ${overrides[@]+"${overrides[@]}"} \
-    -only-testing:ColophonTestUITests/ColophonTestUITests/${COLOPHON_UI_TEST:-testOneDeviceJourney} test 2>&1 \
-    | tee "${COLOPHON_TEST_LOG:-/dev/null}" | grep -E "Test Case|error:|passed|failed|TEST (SUCCEEDED|FAILED)"
+    -only-testing:ColophonTestTests -only-testing:ColophonTestUITests/ColophonTestUITests/${COLOPHON_UI_TEST:-testOneDeviceJourney} test 2>&1 \
+    | tee "${COLOPHON_TEST_LOG:-/dev/null}" | grep -E "Test Case|Test run|✘|error:|passed|failed|TEST (SUCCEEDED|FAILED)"
   status=${PIPESTATUS[0]}
   set -e
   echo "build-test-ios: home service log:"; cat "$data/log"

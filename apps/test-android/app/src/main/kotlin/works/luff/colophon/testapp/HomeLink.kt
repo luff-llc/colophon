@@ -34,7 +34,7 @@ class HomeObserver {
 
     @Synchronized fun record(method: String, path: String, answer: HttpAnswer) {
         val status = answer.status.toInt()
-        val seen = HomeSighting.Answer(method, path, status, if (status >= 400) refusalDetail(answer.body) else "", System.currentTimeMillis())
+        val seen = HomeSighting.Answer(method, path, status, if (status >= 400) (ResultCode.of(answer.body) ?: "no result") else "", System.currentTimeMillis())
         val head = if ((path.endsWith("/head") || path.contains("/records/heads/")) && status == 200) head(answer.body) else null
         // A 401 asks for a call (the session then sends one); it is not a refusal.
         state = state.copy(last = seen, requests = state.requests + 1, transportError = null,
@@ -42,9 +42,11 @@ class HomeObserver {
     }
     @Synchronized fun record(error: Throwable) { state = state.copy(transportError = error.toString()) }
 
-    private fun refusalDetail(body: ByteArray): String =
-        try { JSONObject(String(body)).optString("result").ifEmpty { null } } catch (_: Exception) { null }
-            ?: String(body.copyOf(minOf(body.size, 200)))
+    /** A head's `issued` as a plain UTC date, or "-": nothing else from a response body is kept. */
+    companion object {
+        private val DATE = Regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z\$")
+        fun plainDate(value: Any?): String = (value as? String)?.takeIf { it.length <= 30 && DATE.matches(it) } ?: "-"
+    }
 
     /** A signed head is an envelope whose `body` is base64 JSON with `authority.seq` and `issued`. */
     private fun head(data: ByteArray): HomeSighting.Head? = try {
@@ -57,7 +59,7 @@ class HomeObserver {
             return null
         }
         val seq = (find(body, "seq") as? Number)?.toLong()
-        seq?.let { HomeSighting.Head(it, (find(body, "issued") as? String) ?: "-", System.currentTimeMillis()) }
+        seq?.let { HomeSighting.Head(it, plainDate(find(body, "issued")), System.currentTimeMillis()) }
     } catch (_: Exception) { null }
 }
 
@@ -66,10 +68,11 @@ class HomeObserver {
  * name the account appoints) goes to the same path under `reachPrefix`: a relay on the Mac, which the emulator reaches
  * through `adb reverse` on its own loopback. Plain `http` only to a loopback address (the SDK's rule).
  */
-class MappedTransport(homePrefix: String, reachPrefix: String, private val observer: HomeObserver) : HomeTransport {
+class MappedTransport(homePrefix: String, reachPrefix: String, private val observer: HomeObserver, inner: HomeTransport? = null) : HomeTransport {
     private val home = if (homePrefix.endsWith("/")) homePrefix else "$homePrefix/"
     private val reach = if (reachPrefix.isEmpty() || reachPrefix.endsWith("/")) reachPrefix else "$reachPrefix/"
-    private val inner = HttpHomeTransport(allowingLoopbackHttp = reach.isNotEmpty())
+    // `inner` is for tests; by default HttpHomeTransport, loopback http allowed only when a reach prefix is set.
+    private val inner: HomeTransport = inner ?: HttpHomeTransport(allowingLoopbackHttp = reach.isNotEmpty())
 
     override suspend fun send(request: HttpRequest): HttpAnswer {
         var url = request.url
@@ -91,7 +94,7 @@ class MappedTransport(homePrefix: String, reachPrefix: String, private val obser
 object Provisioner {
     class Failure(message: String) : Exception(message)
 
-    suspend fun memberRequest(service: String, slot: String, base: String, account: String): ByteArray = withContext(Dispatchers.IO) {
+    suspend fun memberRequest(service: String, token: String, slot: String, base: String, account: String): ByteArray = withContext(Dispatchers.IO) {
         if (!(service.startsWith("https://") || HomeLimits.isAllowed(service, true))) {
             throw Failure("The home service URL must be https, or http on this device's loopback: $service")
         }
@@ -102,13 +105,31 @@ object Provisioner {
             connection.instanceFollowRedirects = false
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
+            if (token.isNotEmpty()) connection.setRequestProperty("Authorization", "Bearer $token")
             val body = JSONObject().put("slot", slot).put("base", base).put("account", account).toString().toByteArray()
             connection.outputStream.use { it.write(body) }
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
-            if (status != 200) throw Failure("The home service answered $status: ${String(bytes.copyOf(minOf(bytes.size, 300)))}")
+            if (status != 200) throw Failure("The home service answered $status")
             bytes
         } finally { connection.disconnect() }
+    }
+}
+
+/**
+ * The one thing from a refusal body the app shows or logs: its `result`, and only when it is a result the spec's §1
+ * grammar allows (`ok`, `malformed`, `badSignature`, `newerFormat`, `unavailable`, `refused:<reason>` with a short
+ * alphanumeric reason). Anything else, and every other byte of the body, is dropped: a hostile home could put record
+ * or call bytes there. The iPhone app's `ResultCode` is the same rule.
+ */
+object ResultCode {
+    private val NAMED = setOf("ok", "malformed", "badSignature", "newerFormat", "unavailable")
+    private val REFUSED = Regex("^refused:[a-z][A-Za-z0-9]{0,47}$")
+    fun isValid(text: String): Boolean = text in NAMED || REFUSED.matches(text)
+    fun of(body: ByteArray): String? {
+        if (body.size > 64 * 1024) return null
+        val result = try { JSONObject(String(body)).opt("result") as? String } catch (_: Exception) { null } ?: return null
+        return result.takeIf { isValid(it) }
     }
 }

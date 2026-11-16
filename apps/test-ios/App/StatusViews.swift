@@ -22,6 +22,16 @@ struct DevicesView: View {
                             .accessibilityIdentifier("showInvite")
                     }
                 } header: { Text("1. The new device scans or pastes this") }
+                if let pending = model.pendingRequestText {
+                    Section("A request arrived by link") {
+                        Text("It is not imported until you choose to. Import it only if you expect a device to join.").font(.footnote)
+                        HStack {
+                            Button("Import it") { Task { await model.importRequest(pending) } }.accessibilityIdentifier("importLinked")
+                            Spacer()
+                            Button("Ignore", role: .destructive) { model.pendingRequestText = nil }
+                        }.buttonStyle(.borderless)
+                    }
+                }
                 Section {
                     TextField("Paste its request (CTR1.…)", text: $request, axis: .vertical).lineLimit(2...5)
                         .font(.system(.footnote, design: .monospaced)).accessibilityIdentifier("requestField")
@@ -32,16 +42,26 @@ struct DevicesView: View {
                         if ScannerView.isAvailable { Button("Scan") { scanning = true } }
                     }
                 } header: { Text("2. Then take its request") }
-                if let session = model.session, !session.requests.isEmpty {
-                    Section("3. Approve if the codes match") {
-                        ForEach(session.requests) { request in
-                            VStack(alignment: .leading) {
+                if !model.visibleRequests.isEmpty {
+                    Section {
+                        Text(TrustWords.approve).font(.footnote).foregroundStyle(.secondary)
+                        ForEach(model.visibleRequests) { request in
+                            let confirmed = model.confirmedCodes.contains(request.id)
+                            VStack(alignment: .leading, spacing: 6) {
                                 Text(request.pairingCode).font(.system(.title2, design: .monospaced)).accessibilityIdentifier("requestCode")
                                 Text("\(request.label) · \(request.id)").font(.caption)
-                                Button("Approve") { Task { await model.approve(request) } }.accessibilityIdentifier("approve")
+                                HStack {
+                                    Button(confirmed ? "Codes match ✓" : "The codes match") { model.confirmCodes(request) }
+                                        .disabled(confirmed).accessibilityIdentifier("codesMatch")
+                                    Spacer()
+                                    Button("Approve") { Task { await model.approve(request) } }
+                                        .disabled(!confirmed).accessibilityIdentifier("approve")
+                                    Spacer()
+                                    Button("Reject", role: .destructive) { model.reject(request) }.accessibilityIdentifier("reject")
+                                }.buttonStyle(.borderless)
                             }
                         }
-                    }
+                    } header: { Text("3. Compare the codes") }
                 }
             } else {
                 Section { Text("This device joined the account with a member key only: it cannot add, approve or revoke devices.").font(.footnote) }

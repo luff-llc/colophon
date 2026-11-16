@@ -22,7 +22,7 @@ final class HomeObserver: Sendable {
     func reset() { state.withLock { $0 = HomeSighting() } }
 
     fileprivate func record(method: String, path: String, answer: HttpAnswer) {
-        let detail = answer.status >= 400 ? Self.refusalDetail(answer.body) : ""
+        let detail = answer.status >= 400 ? (ResultCode.of(body: answer.body) ?? "no result") : ""
         let seen = HomeSighting.Answer(method: method, path: path, status: answer.status, detail: detail, at: .now)
         let head = (path.hasSuffix("/head") || path.contains("/records/heads/")) && answer.status == 200 ? Self.head(answer.body) : nil
         state.withLock { s in
@@ -34,10 +34,11 @@ final class HomeObserver: Sendable {
     }
     fileprivate func record(error: Error) { state.withLock { $0.transportError = "\(error)" } }
 
-    /// The `result` of a JSON refusal (`{"result":"refused:…"}`), or the first 200 bytes of the body as text.
-    private static func refusalDetail(_ body: Data) -> String {
-        if let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any], let result = object["result"] as? String { return result }
-        return String(decoding: body.prefix(200), as: UTF8.self)
+    /// A head's `issued` as a plain UTC date, or "-": nothing else from a response body is kept.
+    static func plainDate(_ value: Any?) -> String {
+        guard let text = value as? String, text.count <= 30,
+              text.range(of: #"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z$"#, options: .regularExpression) != nil else { return "-" }
+        return text
     }
     /// A signed head is an envelope whose `body` is base64 JSON with `seq` and `issued`.
     private static func head(_ data: Data) -> HomeSighting.Head? {
@@ -53,7 +54,7 @@ final class HomeObserver: Sendable {
             return nil
         }
         guard let seq = (find("seq", in: body) as? NSNumber)?.uint64Value else { return nil }
-        return .init(seq: seq, issued: (find("issued", in: body) as? String) ?? "-", at: .now)
+        return .init(seq: seq, issued: plainDate(find("issued", in: body)), at: .now)
     }
 }
 
@@ -65,13 +66,14 @@ struct MappedTransport: HomeTransport {
     let homePrefix: String
     let reachPrefix: String
     let observer: HomeObserver
-    private let inner: URLSessionHomeTransport
+    private let inner: any HomeTransport
 
-    init(homePrefix: String, reachPrefix: String, observer: HomeObserver) {
+    /// `inner` is for tests; by default `URLSessionHomeTransport`, allowing loopback `http` only when `reachPrefix` is set.
+    init(homePrefix: String, reachPrefix: String, observer: HomeObserver, inner: (any HomeTransport)? = nil) {
         self.homePrefix = homePrefix.hasSuffix("/") ? homePrefix : homePrefix + "/"
         self.reachPrefix = reachPrefix.isEmpty || reachPrefix.hasSuffix("/") ? reachPrefix : reachPrefix + "/"
         self.observer = observer
-        inner = URLSessionHomeTransport(allowingLoopbackHTTP: !reachPrefix.isEmpty)
+        self.inner = inner ?? URLSessionHomeTransport(allowingLoopbackHTTP: !reachPrefix.isEmpty)
     }
 
     func send(_ request: HttpRequest) async throws -> HttpAnswer {
@@ -98,21 +100,42 @@ struct MappedTransport: HomeTransport {
 enum Provisioner {
     struct Failure: LocalizedError { let text: String; var errorDescription: String? { text } }
 
-    static func memberRequest(service: String, slot: String, base: String, account: String) async throws -> Data {
+    static func memberRequest(service: String, token: String, slot: String, base: String, account: String) async throws -> Data {
         guard let url = URL(string: service), url.scheme == "https" || HomeLimits.isAllowed(url, allowingLoopbackHTTP: true) else {
             throw Failure(text: "The home service URL must be https, or http on this device's loopback: \(service)")
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !token.isEmpty { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         request.httpBody = try JSONSerialization.data(withJSONObject: ["slot": slot, "base": base, "account": account])
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
         let (data, response) = try await URLSession(configuration: configuration).data(for: request)
         guard let http = response as? HTTPURLResponse else { throw Failure(text: "The home service gave no HTTP answer") }
         guard http.statusCode == 200 else {
-            throw Failure(text: "The home service answered \(http.statusCode): \(String(decoding: data.prefix(300), as: UTF8.self))")
+            throw Failure(text: "The home service answered \(http.statusCode)")
         }
         return data
+    }
+}
+
+/// The one thing from a refusal body the app shows or logs: its `result`, and only when it is a result the spec's §1
+/// grammar allows (`ok`, `malformed`, `badSignature`, `newerFormat`, `unavailable`, `refused:<reason>` with a short
+/// alphanumeric reason). Anything else, and every other byte of the body, is dropped: a hostile home could put record
+/// or call bytes there.
+enum ResultCode {
+    static let named: Set<String> = ["ok", "malformed", "badSignature", "newerFormat", "unavailable"]
+    static func isValid(_ text: String) -> Bool {
+        if named.contains(text) { return true }
+        guard text.hasPrefix("refused:"), text.count <= 8 + 48 else { return false }
+        let reason = text.dropFirst(8)
+        guard let first = reason.first, first.isASCII, first.isLowercase else { return false }
+        return reason.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+    }
+    static func of(body: Data) -> String? {
+        guard body.count <= 64 * 1024, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let result = object["result"] as? String, isValid(result) else { return nil }
+        return result
     }
 }

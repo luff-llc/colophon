@@ -5,6 +5,9 @@ import android.app.Application
 import android.content.Context
 import com.luff.colophon.AccountMember
 import com.luff.colophon.AccountMemberKind
+import com.luff.colophon.AuthorityObjects
+import com.luff.colophon.ByteString
+import com.luff.colophon.accountVerifyHistory
 import com.luff.colophon.Pending
 import com.luff.colophon.PublicKeys
 import com.luff.colophon.session.AccessRequest
@@ -71,6 +74,7 @@ class AppModel(private val app: Context) {
         const val MEMBER_ALIAS = "$PREFIX.member"
         const val OWNER_ALIAS = "$PREFIX.owner"
         const val DEVICE_KEY_ALIAS = "$PREFIX.device-key"
+        const val ATTEMPT_LIMIT = 5
         fun message(e: Throwable): String = "${e.javaClass.simpleName}: ${e.message ?: ""}".trim()
         fun describe(f: HomeFault): String = with(f.fault) {
             "$kind" + (status?.let { " $it" } ?: "") + (code?.let { " $it" } ?: "") + (why?.let { " ($it)" } ?: "")
@@ -123,7 +127,7 @@ class AppModel(private val app: Context) {
         OwnerChoice.PASSKEY -> settings.passkeyDescriptor?.let {
             PasskeyController(PasskeyProvider.restore(it.toByteArray(), ActivityCredentials()), passkeyOrigins())
         } ?: NoOwner
-        OwnerChoice.DEVICE_KEY -> AndroidSession.memberKeys(app, OWNER_ALIAS)
+        OwnerChoice.DEVICE_KEY -> TestOwner.keys(app, OWNER_ALIAS) ?: NoOwner
         OwnerChoice.NONE, null -> NoOwner
     }
     private fun passkeyOrigins(): List<String> = runCatching { appPasskeyOrigins(app) }.getOrDefault(listOf()) + "https://${BuildDefaults.relyingParty}"
@@ -168,9 +172,9 @@ class AppModel(private val app: Context) {
         } finally { busy = null; bump() }
     }
 
-    fun updateHome(prefix: String, reach: String, provisioner: String) {
+    fun updateHome(prefix: String, reach: String, provisioner: String, token: String) {
         if (settings.slot != null) return
-        settings = settings.copy(homePrefix = prefix.trim(), reachPrefix = reach.trim(), provisioner = provisioner.trim())
+        settings = settings.copy(homePrefix = prefix.trim(), reachPrefix = reach.trim(), provisioner = provisioner.trim(), provisionerToken = token.trim())
         paths.save(settings)
     }
 
@@ -178,15 +182,17 @@ class AppModel(private val app: Context) {
 
     suspend fun create(owner: OwnerChoice) = perform("Create account") {
         if (settings.provisioner.isEmpty()) throw Provisioner.Failure("Set the home service URL first: it provisions the home for the new account.")
+        if (owner == OwnerChoice.DEVICE_KEY && !TestOwner.AVAILABLE) throw Provisioner.Failure("this build has no test owner key")
         var next = settings.copy(slot = Settings.newSlot(), owner = owner)
         if (owner == OwnerChoice.PASSKEY) next = next.copy(passkeyDescriptor = registerPasskey())
         val base = next.homeBase!!
         val service = next.provisioner
+        val token = next.provisionerToken
         val slot = next.slot!!
         settings = next
         withContext(Dispatchers.IO) { paths.save(next) }
         record("creating an account at $base (owner: ${owner.wire})")
-        openSession { account -> Provisioner.memberRequest(service, slot, base, account) }
+        openSession { account -> Provisioner.memberRequest(service, token, slot, base, account) }
         val session = session ?: return@perform
         session.create()
         if (session.phase != SessionPhase.Ready) {
@@ -202,22 +208,71 @@ class AppModel(private val app: Context) {
         return String(provider.descriptor())
     }
 
-    suspend fun join(text: String) = perform("Join account") {
-        val invite = PairingPayload.decodeInvite(text)
-        val next = settings.copy(homePrefix = invite.homePrefix, slot = invite.slot, owner = OwnerChoice.NONE)
-        // The history goes into this device's store before the session opens it; the engine verifies it.
-        withContext(Dispatchers.IO) {
-            paths.records.mkdirs()
-            FolderMedium(paths.records).write(invite.history.toSortedMap().map { MediumWrite(it.key, it.value) })
-            paths.save(next)
+    /** An invite that a link, a scan or a paste brought, waiting for the person to confirm. Nothing is stored until then. */
+    class PendingInvite(val text: String, val invite: PairingPayload.Invite) {
+        val host: String get() = try { java.net.URI(invite.homePrefix).host ?: invite.homePrefix } catch (_: Exception) { invite.homePrefix }
+        val accountShort: String get() = invite.account.take(8) + "…" + invite.account.takeLast(4)
+    }
+    var pendingInvite: PendingInvite? = null; private set
+    /** A request a link brought, shown in Devices for the person to import or ignore; never imported by the link. */
+    var pendingRequestText: String? = null
+    /** Requests whose code the person said matches on both screens, this run only. */
+    val confirmedCodes = HashSet<String>()
+
+    /** Decodes an invite (bounded) and shows it for confirmation. Stores nothing. */
+    suspend fun prepareJoin(text: String) = perform("Read invite") {
+        checkAttempts()
+        try {
+            val pending = PendingInvite(text, PairingPayload.decodeInvite(text))
+            pendingInvite = pending
+            record("invite read: home ${pending.host}, account ${pending.accountShort}; waiting for confirmation")
+        } catch (e: Exception) { countFailure(); throw e }
+    }
+    fun cancelJoin() { pendingInvite = null; record("invite dismissed") }
+
+    /**
+     * The person confirmed: verify the invite's history in memory first, and only when it verifies and names the account
+     * the invite claims, store it and the settings, open the session and show this device's request.
+     */
+    suspend fun confirmJoin() {
+        val pending = pendingInvite ?: return
+        perform("Join account") {
+            checkAttempts()
+            val invite = pending.invite
+            val now = System.currentTimeMillis()
+            val verified = withContext(Dispatchers.Default) {
+                val entries = invite.history.toSortedMap().values.map { ByteString(it) }
+                accountVerifyHistory(AuthorityObjects(entries, listOf(), listOf(), listOf()), now).account
+            }
+            if (verified != invite.account) {
+                countFailure()
+                throw Provisioner.Failure("the invite's history does not verify as account ${pending.accountShort}; nothing was stored")
+            }
+            val next = settings.copy(homePrefix = invite.homePrefix, slot = invite.slot, owner = OwnerChoice.NONE)
+            withContext(Dispatchers.IO) {
+                paths.records.mkdirs()
+                FolderMedium(paths.records).write(invite.history.toSortedMap().map { MediumWrite(it.key, it.value) })
+                paths.save(next)
+            }
+            settings = next
+            pendingInvite = null
+            record("joining account ${invite.account} at ${next.homeBase} with ${invite.history.size} verified history entries")
+            openSession(null)
+            val session = session ?: return@perform
+            session.restore()
+            if (session.libraryId != invite.account) throw Provisioner.Failure("the stored history is for account ${session.libraryId ?: "none"}, not ${invite.account}")
+            requestPayload()
         }
-        settings = next
-        record("joining account ${invite.account} at ${next.homeBase} with ${invite.history.size} history entries")
-        openSession(null)
-        val session = session ?: return@perform
-        session.restore()
-        if (session.libraryId != invite.account) throw Provisioner.Failure("the history in the invite is for account ${session.libraryId ?: "none"}, not ${invite.account}")
-        requestPayload()
+    }
+
+    // Attempts: spec §7.3 allows an existing side no more than 5 failed sessions an hour; the apps hold both sides to it.
+    private fun recentFailures(): List<Long> = settings.failures.filter { System.currentTimeMillis() - it < 3_600_000 }
+    private fun checkAttempts() {
+        if (recentFailures().size >= ATTEMPT_LIMIT) throw Provisioner.Failure("$ATTEMPT_LIMIT pairing attempts failed or were rejected in the last hour: wait before trying again")
+    }
+    private fun countFailure() {
+        settings = settings.copy(failures = recentFailures() + System.currentTimeMillis())
+        try { paths.save(settings) } catch (_: Exception) {}
     }
 
     suspend fun invitePayload(): String {
@@ -247,12 +302,30 @@ class AppModel(private val app: Context) {
 
     suspend fun importRequest(text: String) = perform("Import request") {
         val session = session ?: throw SessionError.NotReady()
-        session.importRequest(PairingPayload.decodeRequest(text))
+        checkAttempts()
+        pendingRequestText = null
+        val request = try { PairingPayload.decodeRequest(text) } catch (e: Exception) { countFailure(); throw e }
+        session.importRequest(request)
         record("imported a request; waiting: ${session.requests.joinToString { "${it.label} ${it.pairingCode}" }}")
     }
 
+    /** The person says the code on this screen and on the joining device are the same. */
+    fun confirmCodes(request: AccessRequest) { confirmedCodes.add(request.id); record("codes confirmed for ${request.label} ${request.pairingCode}") }
+
+    /** Discards a request: it is hidden from now on and counts as a failed attempt. */
+    fun reject(request: AccessRequest) {
+        confirmedCodes.remove(request.id)
+        settings = settings.copy(rejected = settings.rejected + request.id)
+        countFailure()
+        record("rejected the request ${request.label} ${request.pairingCode}")
+    }
+
+    /** The requests waiting, without the ones the person rejected. */
+    val visibleRequests: List<AccessRequest> get() = (session?.requests ?: listOf()).filter { it.id !in settings.rejected }
+
     suspend fun approve(request: AccessRequest) = perform("Approve ${request.pairingCode}") {
         val session = session ?: throw SessionError.NotReady()
+        if (request.id !in confirmedCodes) throw Provisioner.Failure("confirm that the codes match first")
         session.approve(request)
         record("approved ${request.label} ${request.id}")
         sync()
@@ -383,8 +456,9 @@ class AppModel(private val app: Context) {
         val p = uri.getQueryParameter("p") ?: return
         record("opened link ${uri.host}")
         when {
-            uri.host == "join" && settings.slot == null -> join(p)
-            uri.host == "request" && isOwner -> importRequest(p)
+            // A link only fills a screen the person must confirm: it never joins, imports or approves by itself.
+            uri.host == "join" && settings.slot == null -> prepareJoin(p)
+            uri.host == "request" && isOwner -> { pendingRequestText = p; record("a request arrived by link: shown in Devices, not imported") }
             else -> { actionError = "This link does not fit this device's state (${uri.host})."; bump() }
         }
     }

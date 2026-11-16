@@ -50,6 +50,7 @@ class TestAppUiTest {
 
     private fun create() {
         waitFor("the setup screen", 20) { view("createDeviceKey") != null }
+        args.getString("token")?.let { token -> type("provisionerToken", token) }
         click("createDeviceKey")
         waitFor("the account; is apps/test-home running and reversed?", 90) { view("addNote")?.isEnabled == true }
     }
@@ -119,9 +120,26 @@ class TestAppUiTest {
         start(reset = false)
         waitFor("the tabs", 30) { view("tabDevices") != null }
         click("tabDevices")
-        waitFor("a waiting request", 60) { view("approve") != null }
+        // The link only shows the request: import it, confirm the codes, then approve.
+        waitFor("the linked request", 30) { view("importLinked") != null }
+        click("importLinked")
+        waitFor("a waiting request", 60) { view("codesMatch") != null }
+        assertTrue("Approve waits for the codes", view("approve")?.isEnabled == false)
+        click("codesMatch")
+        waitFor("Approve enabled", 10) { view("approve")?.isEnabled == true }
         click("approve")
         waitFor("the approval", 60) { view("approve") == null && model.busy == null }
+        scenario.close()
+    }
+
+    /** Step: a join link was opened; confirm it on the confirmation screen and wait for the pairing code. */
+    @Test fun scriptConfirmJoin() {
+        assumeTrue(args.getString("step") == "confirmJoin")
+        start(reset = false)
+        waitFor("the confirmation screen", 30) { view("confirmJoin") != null }
+        assertTrue("the host is shown", textOf("confirmHost")?.isNotEmpty() == true)
+        click("confirmJoin")
+        waitFor("the pairing code", 60) { view("pairingCode") != null }
         scenario.close()
     }
 

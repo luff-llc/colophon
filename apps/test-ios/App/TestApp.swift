@@ -45,6 +45,9 @@ struct RootView: View {
                 Text(busy + "…").padding(8).background(.thinMaterial, in: Capsule()).padding().accessibilityIdentifier("busy")
             }
         }
+        .sheet(item: Binding(get: { model.pendingInvite.map(PendingSheet.init) }, set: { if $0 == nil { model.cancelJoin() } })) { sheet in
+            JoinConfirmView(pending: sheet.pending).environment(model)
+        }
         .alert("Error", isPresented: Binding(get: { model.actionError != nil }, set: { if !$0 { model.actionError = nil } })) {
             Button("OK") { model.actionError = nil }
         } message: {
@@ -61,4 +64,9 @@ struct MainTabs: View {
             NavigationStack { StatusView() }.tabItem { Label("Status", systemImage: "info.circle") }
         }
     }
+}
+
+struct PendingSheet: Identifiable {
+    let pending: AppModel.PendingInvite
+    var id: String { pending.text }
 }
