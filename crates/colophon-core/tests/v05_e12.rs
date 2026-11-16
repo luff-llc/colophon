@@ -94,7 +94,7 @@ fn a_format_5_checkpoint_is_refused_and_rebuilt_by_replay() {
     let now = now_of(&dir);
     let cp = Persisted::checkpoint(&objects, &Persisted::default(), now);
     let mut old: Value = serde_json::from_slice(&cp.to_bytes().unwrap()).unwrap();
-    assert_eq!(old["version"], 6);
+    assert_eq!(old["version"], 7);
     old["version"] = Value::from(5);
     let old = serde_json::to_vec(&old).unwrap();
     assert!(Persisted::from_bytes(&old).is_err());
