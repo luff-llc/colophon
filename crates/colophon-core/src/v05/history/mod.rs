@@ -392,8 +392,11 @@ pub struct Verdict {
     /// is judged again (§8.1, §17.2). A resumed verifier replays once the clock reaches it.
     pub held_until: Option<i64>,
     /// `Some(seq)` when the reader is **stopped** for the account (§1 "A stop"): its verdict on
-    /// the authority entry at `seq` is `newerFormat`, so its verified history ends before that
-    /// entry. A stopped reader trusts nothing new: every call it verifies is `unavailable`
+    /// the authority entry at `seq` is `newerFormat` (its verified history ends before it), or the
+    /// activation at `seq` raised the layout above 2 and is final on the verified branch (the
+    /// branch runs through the entry that made it final; nothing after is applied). A raise that
+    /// is still provisional stops nothing. A stopped reader trusts nothing new: every call it
+    /// verifies is `unavailable`
     /// whatever seq the call names (§12.3 step 4), it accepts no head (§13.3), admits no record
     /// or live candidate it had not admitted before the stop (each is held, §11.5), answers no
     /// question of currency, membership or access, and its host builds nothing. What it showed
@@ -579,6 +582,17 @@ pub fn verify_history(objects: &Objects, persisted: &Persisted, now_ms: i64) -> 
         if let Some(s) = &mut st {
             succession::finish(s, objects, now_ms);
         }
+    }
+    // A final layout raise on the verified branch stops the reader at the raising activation,
+    // whatever entry follows it (§1 "A stop", §20). The branch and the state run through the
+    // entry that made the raise final; the stop names the raise.
+    if let Some(r) = st.as_ref().and_then(State::stopped_at) {
+        verdict.stop = Some(Stop::Failed {
+            seq: r,
+            failure: Failure::NewerFormat(format!(
+                "the account raised its layout above 2 at seq {r}, and that is final"
+            )),
+        });
     }
     verdict.state = st;
     verdict.stopped = stopped_at(&verdict.stop);
@@ -819,6 +833,18 @@ fn by_seq_all(by_seq: &BTreeMap<u64, Vec<Result<Entry, Failure>>>) -> Vec<&Entry
         .collect()
 }
 
+/// The most namespaces a 0.5 genesis declares (§8.2). The verifier, account creation and
+/// genesis preparation share it, so the writer never creates an account its verifier refuses.
+pub const MAX_NAMESPACES: usize = 64;
+
+/// The diagnostic of a genesis that declares more than [`MAX_NAMESPACES`] namespaces.
+pub const TOO_MANY_NAMESPACES: &str = "too many namespaces: a genesis declares at most 64 (§8.2)";
+
+/// `malformed` with [`TOO_MANY_NAMESPACES`] when `count` exceeds [`MAX_NAMESPACES`].
+pub fn check_namespace_count(count: usize) -> Result<(), Failure> {
+    crate::v05::require(count <= MAX_NAMESPACES, TOO_MANY_NAMESPACES)
+}
+
 /// Unknown content found in an authority entry's kind fields by the pre-scan (§8.5 step 4).
 pub(crate) fn prescan(kind: &str, body: &serde_json::Value) -> Unknown {
     crate::v05::prescan::authority_fields(kind, body).unwrap_or_default()
@@ -826,6 +852,7 @@ pub(crate) fn prescan(kind: &str, body: &serde_json::Value) -> Unknown {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     /// The entries of a candidate vector's `rules/<name>/records/authority/`.

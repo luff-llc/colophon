@@ -140,12 +140,17 @@ fn plain() -> (Chain, Value) {
 /// An account of A (approve, control) and B (approve only), with one home H1 appointed and
 /// final at seq 2.
 fn with_home() -> (Chain, Key) {
+    with_home_b(&["approve"])
+}
+
+/// As [`with_home`], with B holding `b_roles`.
+fn with_home_b(b_roles: &[&str]) -> (Chain, Key) {
     let (a, b) = (A.clone(), B.clone());
     let (h1k, h1a) = (derived("w1a/home1/signing"), derived("w1a/home1/agreement"));
     let kr = keyring(
         vec![
             ctrl(&a, AC, Some("Mac"), json!({})),
-            ctrl(&b, &["approve"], Some("Passkey"), json!({})),
+            ctrl(&b, b_roles, Some("Passkey"), json!({})),
         ],
         Kr::default(),
     );
@@ -193,6 +198,122 @@ fn end_sessions(chain: &mut Chain, member: &Key, issued: &str, extra: Value) {
 pub fn part(o: &mut Out) {
     f2(o);
     f3(o);
+    f3_final(o);
+}
+
+fn head_of(chain: &Chain, home: &Key, at: i64, seq: usize) -> Value {
+    envelope(
+        &json!({"protocol": "colophon/head/5", "account": account_id(chain),
+                "authority": {"seq": seq, "digest": sha(&body_of(&chain.envs[seq - 1]))},
+                "issued": ts(at), "by": home.id}),
+        home,
+    )
+}
+
+/// §8.7 `final` of the activation at `act_seq`, with one head.
+fn final_of(chain: &mut Chain, act_seq: usize, head: &Value) {
+    let act = body_json(&chain.envs[act_seq - 1]);
+    let issued = ts(secs(&fstr(head, "issued")).max(prev_issued(chain)));
+    let digest = sha(&body_of(&chain.envs[act_seq - 1]));
+    append_unsigned(
+        chain,
+        "final",
+        act["by"].as_str().unwrap(),
+        &issued,
+        json!({"activation": {"seq": act_seq, "digest": digest}, "heads": [emb(head)]}),
+    );
+}
+
+fn veto_of(acct: &str, t: &Value, signer: &Key, issued: &str) -> Value {
+    envelope(
+        &json!({"protocol": "colophon/veto/5", "account": acct, "transition": sha(&body_of(t)),
+                "issued": issued, "by": signer.id, "signers": [signer.id]}),
+        signer,
+    )
+}
+
+/// The stop comes when the raise is final (§8.7 "Final"; owner's decision of 2026-11-16), so a
+/// raise that is vetoed or loses a fork never strands a 0.5 reader. Account: A and B (approve,
+/// control), threshold 1, home H1 (quorum 1); the raise is signed by A at R0 and receipted by H1.
+fn f3_final(o: &mut Out) {
+    let (a, b) = (A.clone(), B.clone());
+    let (base, h1k) = with_home_b(AC);
+    let acct = account_id(&base);
+    let t = transition(&base, json!({"layout": 3}), sg![a], &ts(R0));
+    let r = receipt_of(&acct, &t, &h1k, &ts(R0 + 1));
+    let mut provisional = base.clone();
+    activate(&mut provisional, &t, std::slice::from_ref(&r));
+    wc(
+        o,
+        "f3-raise-provisional",
+        &provisional,
+        ok_at(3),
+        "A layout raise activated but not final (its home has signed no head over it): it changes no rule this reader applies, so the reader is not stopped.",
+        &["8.7", "20"],
+    );
+    let head = head_of(&provisional, &h1k, DUE0 + 60, 3);
+    let mut fin = provisional.clone();
+    final_of(&mut fin, 3, &head);
+    wc(
+        o,
+        "f3-raise-final",
+        &fin,
+        bad("newerFormat", 3),
+        "A layout raise made final by its home's head: the reader is stopped at the raising activation.",
+        &["1", "8.7", "20"],
+    );
+    let mut after = fin.clone();
+    grant_agent(&mut after, &a, &ts(DUE0 + 120), &a);
+    wc(
+        o,
+        "f3-raise-final-then-entry",
+        &after,
+        bad("newerFormat", 3),
+        "An entry after a final layout raise is not applied: the reader is stopped at the raise.",
+        &["1", "20"],
+    );
+
+    // Vetoed in its window by B: the vetoed entry displaces the provisional activation (§8.6),
+    // nothing stops, and the history continues.
+    let v = veto_of(&acct, &t, &b, &ts(R0 + 10));
+    let vr = receipt_of(&acct, &v, &h1k, &ts(R0 + 11));
+    let mut vetoed = base.clone();
+    append_unsigned(
+        &mut vetoed,
+        "vetoed",
+        &b.id,
+        &ts(R0 + 11),
+        json!({"transition": emb(&t), "transitionReceipts": [emb(&r)], "veto": emb(&v), "receipts": [emb(&vr)]}),
+    );
+    grant_agent(&mut vetoed, &a, &ts(R0 + 20), &a);
+    write_case(
+        o,
+        "f3-raise-vetoed",
+        &vetoed,
+        ok_at(4),
+        "A layout raise vetoed in its window, with the provisional activation also held: the vetoed entry stands, the reader is not stopped, and a later grant applies.",
+        &["8.6", "8.7", "20"],
+        vec![],
+        None,
+        vec![("activate".into(), vec![(3, provisional.envs[2].clone())])],
+    );
+
+    // A fork at seq 3 between a grant covered by the primary home's head and the provisional
+    // raise: the grant stands (§8.6), so the raise is on the losing branch and stops nothing.
+    let mut granted = base.clone();
+    grant_agent(&mut granted, &a, &ts(R0 + 100), &a);
+    let gh = head_of(&granted, &h1k, R0 + 200, 3);
+    write_case(
+        o,
+        "f3-raise-losing-fork",
+        &granted,
+        ok_at(3),
+        "A provisional layout raise loses a conflict at its seq to a grant the primary home's head covers: the reader follows the grant and is not stopped.",
+        &["8.6", "20"],
+        vec![("objects/head.json".into(), gh)],
+        None,
+        vec![("raise".into(), vec![(3, provisional.envs[2].clone())])],
+    );
 }
 
 /// F3, the upgrade door (§8.2 "Layout", §20; design §3).
@@ -209,7 +330,7 @@ fn f3(o: &mut Out) {
         "f3-layout-3",
         &layout(json!(3), sg![a]),
         bad("newerFormat", 2),
-        "A transition raising the layout to 3 under the control rule (no recovery set): the upgrade door, newerFormat at its activate.",
+        "A transition raising the layout to 3 under the control rule (no recovery set). With no home its activation is final at once, so the reader is stopped there: newerFormat at the activate.",
         &["8.2", "8.7", "20"],
     );
     wc(
