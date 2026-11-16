@@ -31,7 +31,7 @@ where a newer one decides, but never decides differently.
 | F3 The upgrade door (`layout`) | `upgrade/then-v5-layout` (0.5: `ok` → `malformed`, regenerated as two cases) | S | Low |
 | S Stops at the door: a stopped reader, the stopped home | none | S | Medium: the stopped-home table must be built exactly |
 | R Text-only reservations | none | S | Low |
-| L Three Low findings, the owed home sentence, stated limits | none (a Swift predecessor with a readable seq-0 envelope goes `ok` → `malformed`; no vector has one) | S | Low |
+| L Two Low findings (L1, L2), the owed home sentence, stated limits; L3 withdrawn (a seq-0 Swift envelope is ignored, as today) | none | S | Low |
 | F1, F4, F5, F6, F7, F8 | withdrawn in revision 17 (deferred to 0.6) | — | — |
 
 **Existing vectors that change verdict:** one, `upgrade/then-v5-layout` (F3). The three that revision
@@ -56,7 +56,6 @@ colophon-core --all-targets -- -D warnings`.
 | --- | --- | --- | --- | --- | --- |
 | **W1-P Approval** | `crates/colophon-core/src/v05/pairing.rs`, `v05/account/action.rs`, `v05/write/authority.rs`, `crates/colophon-ffi/src/v05/api/{pairing,engine,action}.rs`, `crates/colophon-ffi/src/v05/surface-names.txt`, generated bindings (`swift/Sources/ColophonKit/Generated/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/colophon_ffi.kt`), `swift/Sources/ColophonSession/*`, `swift/Sources/ColophonSessionUI/*`, `swift/Tests/ColophonSessionTests/*`, `sdk/kotlin/src/main/kotlin/com/luff/colophon/session/*`, `js/src/session/*`, `js/src/index.ts`, `js/scripts/smoke.mjs`, `playground/src/*`, `examples/ColophonSample/*`, new `crates/colophon-core/tests/v05_freeze_approval.rs` | — | P, L2 | none in `conformance/`; tests: approve without a token refused; a token for another key refused; a token spent twice refused; the code path and the scan path each issue one | `cargo test -p colophon-core --test v05_freeze_approval`, `cargo test -p colophon-ffi`, `swift test`, `cd sdk/kotlin && ./gradlew test`, `cd js && npm test`, `cd playground && npm test` |
 | **W1-A Authority** | `crates/colophon-core/src/v05/history/state.rs`, `history/mod.rs`, `engine/checkpoint.rs`, `tests/v5_candidate/cases_freeze_authority.rs`, the `conformance/0.5/candidate/{rules,upgrade}/` cases it generates (and the regenerated `upgrade/then-v5-layout`) | — | F2 (current principal, first commit), F3 (stored layout, the door), S (the reader's stopped flag, `Verdict::stopped`), L1 | §2 vectors, §3.4 vectors | — |
-| **W1-C Swift** | `crates/colophon-core/src/v05/history/swift.rs`, `tests/v5_candidate/cases_freeze_swift.rs` | — | L3 | `succession/swift-seq-zero` | — |
 
 **Wave 2** (after W1-A: the stopped flag and the current-principal helper)
 
@@ -71,8 +70,8 @@ colophon-core --all-targets -- -D warnings`.
 | **W3-H Home** | `crates/colophon-home-wasm/src/*`, `crates/colophon-core/src/v05/history/home.rs`, `engine/paths.rs`, `engine/exchange.rs`, `relay/*`, `tests/v5_candidate/cases_freeze_home.rs`, new `crates/colophon-core/tests/v05_freeze_home.rs` | W2-C and PR 28 merged | S (the stopped home, §13.6), R (`layouts`, refusal names shown raw) | home tests: each row of §13.6; unknown `refused:` refuses one request | `cargo test -p colophon-home-wasm`, `cargo test -p colophon-core --test v05_freeze_home --test v05_home --test v05_engine_home`, `cd relay && npm test` |
 | **W3-G Write side, exports, SDK surfacing** | `crates/colophon-core/src/v05/account/{read,derived,mod}.rs`, `crates/colophon-ffi/src/v05/api/*` other than W1-P's (and those once W1-P is merged), the three session layers, `playground/src/*` | W1-P, W2-C, W3-H | the stopped status; "waiting for approval" wording for a member no grant names | none new | as W1-P |
 
-W1-P and W3-G both touch the FFI and the session layers, in different waves. At most three builders
-at once (wave 1).
+W1-P and W3-G both touch the FFI and the session layers, in different waves. At most two builders at once
+(wave 1).
 
 ## 1. F1: Unknown content, one rule
 
@@ -369,9 +368,11 @@ its own `endSessions`; and now only while each is a current principal, which nar
 
 ### Rule
 
-An authority stop (in 0.5, the `layout` raise of F3, or any other entry a 0.5 reader judges
-`newerFormat` under revision 15's rules) makes the reader **stopped** for the account at once (spec §1
-"A stop"): every call it verifies is `unavailable` whatever S is, it accepts no head, admits no
+A reader is stopped (spec §1 "A stop") at an entry it judges `newerFormat` under today's rules, or
+when an activation raising the layout becomes **final** (revision 17 fix round: a provisional raise
+is judged as any transition, and a `vetoed` that displaces it is applied, so a vetoed raise strands
+nobody; the companion rule in §20: a later-format implementation writes nothing of the later format
+until the raise is final). Once stopped: every call it verifies is `unavailable` whatever S is, it accepts no head, admits no
 record it had not admitted before, answers no question of currency, membership or access, and builds
 nothing. A home that stops follows the normative table of spec §13.6. Revision 17 removed only the
 parts that served deferred items (`ext/` files, location statements, the policy window W).
@@ -413,9 +414,11 @@ before stay shown).
 The transition component `layout` is an integer. A `/5` account is at layout 2 from genesis and an
 upgraded account at layout 2 from its `upgrade`; the verifier stores it. A `layout` component that
 does not raise it (2 or less) voids the transition (`malformed` at its `activate`). One that raises
-it above 2 is `newerFormat` once its transition passes every other check (control rule and the
-recovery set's consent, §8.4), and the reader applies nothing at or after that entry. Later
-versions opt an account in through this component and no other.
+it above 2 is judged and recorded as any transition (control rule and the recovery set's consent,
+§8.4); while its activation is provisional the reader applies nothing of the later layout and goes
+on, and a `vetoed` may displace it; once the activation is final the reader is stopped and applies
+nothing after the entry at which it became final. Later versions opt an account in through this
+component and no other, and write nothing of the later format until the raise is final.
 
 ### 3.1 Why, and the alternative rejected
 
@@ -446,7 +449,9 @@ other checks); `genesis` and the upgrade path set 2; `engine/checkpoint.rs` pers
 
 | Vector | Expected |
 | --- | --- |
-| `rules/f3-layout-3` | `newerFormat` at the `activate` |
+| `rules/f3-layout-3` | the reader stopped once the raise is final (`final` entry, or at once with no home) |
+| `rules/f3-layout-3-vetoed` | a `vetoed` displaces the provisional raise; nothing stops; later entries apply |
+| `rules/f3-layout-3-provisional` | the reader goes on past the provisional `activate`, applying nothing of layout 3 |
 | `rules/f3-layout-2` | `malformed` at the `activate` (void) |
 | `rules/f3-layout-3-no-consent` | `badSignature` |
 | `rules/f3-layout-not-integer` | `malformed` |
@@ -997,9 +1002,10 @@ an unknown `refused:` is surfaced raw.
 - **L2, prepare-time check of a composite change** (`Account::begin_transition`, `action.rs:1075`):
   members are checked against the old state plus the change's own added controllers, so a doomed
   composite asks for no signature. Text: §17.1. Unit test.
-- **L3, a readable Swift envelope at seq 0** (`history/swift.rs::read_envelope`, `:359`): a
-  readable `seq` of 0 makes the predecessor `malformed`. Text: §16.3. Vector
-  `succession/swift-seq-zero` (`malformed`).
+- **L3, withdrawn in the revision 17 fix round.** An independent check of the code showed anyone
+  can write a readable Swift envelope at seq 0 without a key, so making it fatal would let a hostile
+  home or folder fail a valid predecessor, against §2.2. §16.3 states today's behaviour: an envelope
+  at seq 0, readable or not, names no place in the chain and is ignored. No code change.
 - **The owed sentence** (home package): a successor's home holds the provisioned account's genesis
   and takes predecessor entries only as the hash chain that genesis claims, from its head down, and
   serves none of them before its first upload is verified. Text: §14.
@@ -1060,9 +1066,8 @@ Swift, Kotlin and JS surface `newerFormat` as `updateRequired`, as today. No oth
 None of the items touches keys he holds, data he holds or money, beyond these, each with the
 default this design uses so no work waits:
 
-1. **His real library (freeze condition 4).** The only change on the Swift path is L3 (a readable
-   seq-0 envelope is refused); shipped Swift never writes one. Default: no action; the dry run
-   would show it.
+1. **His real library (freeze condition 4).** Nothing in the package changes the Swift path.
+   Default: no action.
 2. **Names LUFF uses for its own new namespaces.** Default: `works.luff.<app>.<area>`, bare names
    only for the standard library.
 3. **A paid home's refusals.** Default: reserve the four codes; no tier names, prices or
@@ -1176,3 +1181,15 @@ item needs to come back for this reason. The one honest cost, stated in the limi
 opts in, a 0.5 device that meets something newer may refuse it rather than ask to be updated, which
 is why spec §20 also binds later implementations to write only what a 0.5 reader accepts into a
 layout-2 account.
+
+## 18. Revision 17 fix round (2026-11-16)
+
+The independent check of revision 17 (3 High, 2 Medium, 3 Low) confirmed the in-place-upgrade claim
+(§17). Changes: a layout raise stops a reader or home only once final, with the companion rule for
+later implementations (spec §1, §8.2, §8.7, §13.6, §20); §2.3 describes, case by case, what the 0.5
+verifier does with unknown content, and §20 states the unfortunate cases as limits; the quorum-2
+forwarding rule is a marked placeholder until PR 28's fix (spec §13.1, §13.3, changes row 211); the
+candidate README's "Required for freeze" gains the revision 17 cases; genesis namespaces at most 64
+for writers too; the scan path names the canonical request envelope; §20's preservation sentence is
+"including, without limitation"; L3 is withdrawn (seq 0 ignored, as today) and W1-C with it. The
+vectors that change verdict when the code lands are still only `upgrade/then-v5-layout`.
