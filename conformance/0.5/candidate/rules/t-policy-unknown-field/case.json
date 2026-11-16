@@ -1,0 +1,1 @@
+{"description":"A transition setting a policy field this version does not define: the field is unknown content inside a known protocol, reported `newerFormat` at the `activate` once the delta is otherwise valid.","expected":{"result":"newerFormat","seq":4},"sections":["1","2.3","8.7"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

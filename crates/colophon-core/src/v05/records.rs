@@ -1293,6 +1293,8 @@ pub(crate) struct Walk {
     pub author: String,
     pub namespace: String,
     pub previous: Option<String>,
+    /// Live-stamped: a retained copy, which a `heads` item never starts a walk from.
+    pub live: bool,
 }
 /// The §9.5 kept set of one revocation: the `kept` digests plus every header the walk reaches,
 /// and whether some walk met a header it does not hold.
@@ -1320,9 +1322,10 @@ pub(crate) fn kept_set(
             missing.insert(digest.clone());
             continue;
         };
-        // An item names a header of this member in that namespace; anything else starts no
-        // walk (the text does not say more; reported as a spec question).
-        if start.author != member || &start.namespace != namespace {
+        // An item names a header of this member in that namespace that is not live-stamped;
+        // anything else (another author's or namespace's header, or a retained live copy,
+        // which is outside the author chain) starts no walk and is not an error (§9.5).
+        if start.author != member || &start.namespace != namespace || start.live {
             continue;
         }
         let mut cur_digest = digest.clone();
@@ -1834,6 +1837,7 @@ fn kept_sets(auth: &RecordAuthority, cands: &[&Arc<Cand>]) -> BTreeMap<String, K
                     author: c.header.author.clone(),
                     namespace: c.header.namespace.clone(),
                     previous: c.header.previous.clone(),
+                    live: c.header.live.is_some(),
                 },
             )
         })
@@ -2805,6 +2809,7 @@ pub fn revocation_reach(
                     author: h.author.clone(),
                     namespace: h.namespace.clone(),
                     previous: h.previous.clone(),
+                    live: h.live,
                 },
             )
         })

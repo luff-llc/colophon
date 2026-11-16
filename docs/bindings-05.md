@@ -651,8 +651,9 @@ wasm heap (with the allocator-off build as the positive control). **Numbers on t
 (seq, clocks, times in ms, sizes, counters, entropy-independent ids) are `bigint` and cross exactly,
 including above 2^53 and `u64::MAX`; `u32` (an HTTP status) is a `number`; a `Number` passed for a
 `bigint` is a plain `TypeError`, and a negative `bigint` passed for a `u64` wraps (wasm-bindgen's own
-conversion). **Still not run on the web:** the checked `readBlob` and `translate` shims (the `read` shim is
-the same code), a browser (only Node and Bun), a bundler target, and the `FinalizationRegistry`'s timing.
+conversion). **In a browser:** the JavaScript session's tests run the exports in headless Chrome, bundled by Bun, with the
+`read` and `readBlob` shims over an IndexedDB-backed source ([js-session.md](js-session.md)). **Still not run on the web:**
+the `translate` shim, Safari and Firefox, and the `FinalizationRegistry`'s timing.
 Also not run: XCFramework builds, Kotlin on a JDK other than 17. (The AAR is built for `arm64-v8a` and `x86_64` and the Kotlin session runs from it on an API 36 arm64 emulator: [android.md](android.md).)
 
 **Known gaps** (named so an SDK does not assume them). Two are for the next round and each needs one
@@ -662,8 +663,7 @@ thing:
   assertion, then the unlock by a slot) and again for the successor genesis. It needs an engine constructor
   over a created `Account` (`Engine::from_account`, in `v05/engine/`, which another builder owns). Adding it
   later changes no existing signature.
-* **The web build is only run under Node and Bun** (see above); a browser run of the shims and a
-  bundler target are still to do.
+* **The web build is run under Node, Bun and Chrome** (see above); Safari and Firefox are still to do.
 
 And these, shippable: `BlobAvailability` for `Complete` reports `present: 0, total: 0` (the core gives no
 counts); `suggest_signers` has no `SignerNeed` for a pending transition's recovery-set consent;

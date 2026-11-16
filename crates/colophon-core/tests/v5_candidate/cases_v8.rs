@@ -1477,6 +1477,32 @@ pub fn part3(o: &mut Out) {
     );
     case_v(o, "t-vault-rotation", &rot, json!({"result": "ok", "seq": 4, "vault": "not retiring"}),
            "While retiring, one recovery key holding the seed rotates the vault with previousVault and its own slot.", &["8.3", "8.4"], Some(ver(DUE0 + 200)));
+    // §8.3: `previousVault` is an HPKE sealed key of §11.1 (`enc` a 65-byte point, `ciphertext`
+    // the 32-byte seed and its 16-byte tag), in the entry and in a transition's component.
+    let short_previous = |mut comp: Value| {
+        comp["previousVault"]["ciphertext"] = json!(b64(&[7u8; 47]));
+        comp
+    };
+    let mut rot_bad = c_k1.clone();
+    rot_bad.add(
+        "vault",
+        &k1,
+        &ts(DUE0 + 120),
+        &k1,
+        Opt::default(),
+        short_previous(vault_change("rot", slots![(k1, "Security key 1")])),
+    );
+    case_v(o, "t-vault-rotation-previous-short", &rot_bad, bad("malformed", 4),
+           "The rotation of `t-vault-rotation` with a 47-byte `previousVault.ciphertext`: the sealed seed is 48 bytes (§8.3, §11.1), so the entry is malformed.", &["8.3", "11.1"], Some(ver(DUE0 + 200)));
+    let t_vc_bad = p(
+        &cx,
+        json!({"keyring": {"remove": [ph.id]}, "vault": short_previous(vault_change("vc", slots![(a, "Mac")]))}),
+        sg![a],
+    );
+    let mut c = base.clone();
+    activate(&mut c, &t_vc_bad, &[rec(&cx, &t_vc_bad)]);
+    case_v(o, "t-vault-change-previous-short", &c, bad("malformed", 3),
+           "The vault change of `t-vault-change-previous` with a 47-byte `previousVault.ciphertext`: the component's sealed seed has the wrong shape, so the `activate` is malformed.", &["8.3", "8.7", "11.1"], Some(ver(DUE0 + 60)));
     let kr_rot = change(
         &kr5,
         &[
@@ -2359,6 +2385,179 @@ pub fn part3(o: &mut Out) {
         ok_at(4),
         "The grant of import to a device, write access, with an expiry later than `issued`: the transition activates and the member is added.",
         &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    // §9.3 "A grant inside a transition": the component is exactly `{request, terms}`, and its
+    // member points and key IDs are new to the account, whatever principal had them.
+    let in_transition =
+        |label: &str, k: &Key, ag: &Key, change: &dyn Fn(Value) -> Value| -> Chain {
+            let mut c = ig.clone();
+            let mut terms =
+                json!({"records": [{"namespace": "notes", "access": "write"}], "import": true});
+            terms["expires"] = json!(ts(R0 + 7 * 86_400));
+            let req = request(
+                &aig,
+                k,
+                ag,
+                "device",
+                json!({"records": [{"namespace": "notes", "access": "write"}]}),
+                label,
+                None,
+            );
+            let t = transition(
+                &c,
+                change(json!({"request": req, "terms": terms})),
+                sg![a],
+                &ts(R0),
+                TOpt::default(),
+            );
+            activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+            c
+        };
+    let imp = derived("e12/import/signing");
+    let imp_a = derived("e12/import/agreement");
+    case_v(
+        o,
+        "t-grant-component-shares",
+        &in_transition("Importer", &imp, &imp_a, &|mut g| {
+            g["shares"] = json!([]);
+            json!({"grant": g})
+        }),
+        bad("malformed", 4),
+        "The valid import grant of `t-grant-import-device`, with a `shares` member in the `grant` component: a grant inside a transition carries no `shares`, so the `activate` is malformed and the history stops before it.",
+        &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    case_v(
+        o,
+        "t-grant-component-extra-field",
+        &in_transition("Importer", &imp, &imp_a, &|mut g| {
+            g["note"] = json!("not a grant field");
+            json!({"grant": g})
+        }),
+        bad("malformed", 4),
+        "The same grant with another member beside `request` and `terms`: the component is exactly `{request, terms}`, so the `activate` is malformed.",
+        &["2.3", "8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    case_v(
+        o,
+        "t-grant-component-home-key",
+        &in_transition("Importer", &h1k, &imp_a, &|g| json!({"grant": g})),
+        bad("malformed", 4),
+        "The same grant to a member whose signing point is that of the home appointed by the transition at seq 3: the point (and its key ID) was a principal's, so the member is not new to the account (§3.3) and the `activate` is malformed.",
+        &["3.3", "8.7", "9.2", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    let h2_appoint = home_appointment(&aig, &h2k, &h2a, "Home two");
+    let mut c = ig.clone();
+    let mut item = h2_appoint.clone();
+    item["shares"] = json!([]);
+    let t = transition(
+        &c,
+        json!({"homes": {"appoint": [item]}}),
+        sg![a],
+        &ts(R0),
+        TOpt::default(),
+    );
+    activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+    case_v(
+        o,
+        "t-appoint-item-shares",
+        &c,
+        bad("malformed", 4),
+        "A transition appointing a second home whose `homes.appoint` item carries `shares`: each item is exactly `{request, terms}`, as a grant inside a transition, so the `activate` is malformed.",
+        &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    let mut c = ig.clone();
+    let t = transition(
+        &c,
+        json!({"homes": {"appoint": [h2_appoint]}}),
+        sg![a],
+        &ts(R0),
+        TOpt::default(),
+    );
+    activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+    case_v(
+        o,
+        "t-appoint-item-plain",
+        &c,
+        ok_at(4),
+        "The same appointment without `shares`: the transition activates and the second home is added.",
+        &["8.7", "9.3"],
+        Some(ver(DUE0 + 60)),
+    );
+    // §2.3: unknown content a transition's delta brings into the keyring is reported, never
+    // silently kept.
+    let mut c = ig.clone();
+    let t = transition(
+        &c,
+        json!({"policy": {"futureKnob": 1}}),
+        sg![a],
+        &ts(R0),
+        TOpt::default(),
+    );
+    activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+    case_v(
+        o,
+        "t-policy-unknown-field",
+        &c,
+        bad("newerFormat", 4),
+        "A transition setting a policy field this version does not define: the field is unknown content inside a known protocol, reported `newerFormat` at the `activate` once the delta is otherwise valid.",
+        &["1", "2.3", "8.7"],
+        Some(ver(DUE0 + 60)),
+    );
+    // §3.3 for controllers: a key that is or was another principal's (here the home appointed
+    // at seq 3) is never added as a controller, by a `keyring` entry or by a transition.
+    let tablet = derived("e12/tablet");
+    for (name, key, want, why) in [
+        (
+            "i-add-home-key-as-controller",
+            &h1k,
+            bad("malformed", 4),
+            "A `keyring` entry adding as an `approve` controller the signing key of the home appointed at seq 3: a key that is or was a member's is never a controller's (§3.3, §9.7), so the entry is malformed.",
+        ),
+        (
+            "i-add-fresh-key-as-controller",
+            &tablet,
+            ok_at(4),
+            "The same entry with a key no principal has used: the controller is added.",
+        ),
+    ] {
+        let mut c = ig.clone();
+        c.add(
+            "keyring",
+            &a,
+            &ts(DUE0),
+            &a,
+            Opt {
+                adds: sg![*key],
+                ..Opt::default()
+            },
+            json!({"keyring": kr_with_ctrls(&kr_ig, add_ctrl(&kr_ig, vec![ct(key, &["approve"], "Tablet")]))}),
+        );
+        case_v(o, name, &c, want, why, &["3.3", "8.4", "9.7"], Some(ver(DUE0 + 60)));
+    }
+    let mut c = ig.clone();
+    let t = transition(
+        &c,
+        json!({"keyring": {"add": [ct(&h1k, &["approve"], "Tablet")]}}),
+        sg![a],
+        &ts(R0),
+        TOpt {
+            adds: sg![h1k],
+            ..TOpt::default()
+        },
+    );
+    activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+    case_v(
+        o,
+        "t-add-home-key-as-controller",
+        &c,
+        bad("malformed", 4),
+        "A transition adding as a controller the signing key of the home appointed at seq 3: the delta would give a member's key to a controller (§3.3), so it is void and the `activate` is malformed.",
+        &["3.3", "8.7", "9.7"],
         Some(ver(DUE0 + 60)),
     );
     let mut many: Vec<Key> = vec![a.clone()];
@@ -3819,6 +4018,87 @@ pub fn part3(o: &mut Out) {
         60,
         vec![],
     );
+    // §16.3 "Envelopes": an envelope that cannot be read is ignored where something readable
+    // stands at its seq; it fails the predecessor only when nothing else is there.
+    let unreadable_issued = |rec: &Value| -> Vec<u8> {
+        let mut b = body_json(rec);
+        b["issued"] = json!("the first of November");
+        let mut d =
+            canonical(&json!({"body": b64(&canonical(&b)), "signature": rec["signature"]}));
+        d.push(b'\n');
+        d
+    };
+    for (name, why, extra, replace) in [
+        (
+            "swift-unreadable-issued-beside",
+            "The predecessor of `swift-keyring`, plus a second envelope at seq 2 whose body's `issued` cannot be read: it is ignored, because the readable entry at seq 2 stands, and the succession verifies as without it.",
+            Some(("00000002-unreadable.json", unreadable_issued(&recs[1]))),
+            false,
+        ),
+        (
+            "swift-body-unreadable-beside",
+            "The predecessor of `swift-keyring`, plus an envelope whose `body` is a number, not base64 bytes: no seq can be read from it, so it names no place in the predecessor and is ignored; the succession verifies as without it.",
+            Some((
+                "00000002-no-body.json",
+                [
+                    canonical(&json!({"body": 2, "signature": recs[1]["signature"]})),
+                    b"\n".to_vec(),
+                ]
+                .concat(),
+            )),
+            false,
+        ),
+        (
+            "swift-unreadable-issued-alone",
+            "The predecessor of `swift-keyring` with its entry at seq 2 replaced by the envelope whose `issued` cannot be read: nothing else stands at seq 2, so the predecessor is malformed and the succession is not verified.",
+            None,
+            true,
+        ),
+    ] {
+        let mut g = new_genesis(&recs, 2, sg![a], "Library");
+        let expected = if replace {
+            json!({"succession": "unverified"})
+        } else {
+            json!({"succession": "verified"})
+        };
+        swift_case(
+            o,
+            name,
+            &recs,
+            &mut g,
+            after,
+            expected.clone(),
+            why,
+            &a,
+            false,
+            60,
+            vec![],
+        );
+        let mut held = "00000002.json";
+        if let Some((file, bytes)) = extra {
+            held = file;
+            write_raw(
+                o,
+                &format!("succession/{name}/predecessor/authority/{file}"),
+                bytes,
+            );
+        }
+        if replace {
+            write_raw(
+                o,
+                &format!("succession/{name}/predecessor/authority/00000002.json"),
+                unreadable_issued(&recs[1]),
+            );
+        }
+        // The case names the predecessor envelope it holds that no builder writes, so a test
+        // that rebuilds the predecessor from its inputs knows to leave the case out.
+        write(
+            o,
+            &format!("succession/{name}/case.json"),
+            &json!({"description": why, "sections": ["2.2", "15.1", "16.3"], "expected": expected,
+                    "unreadable": [held]}),
+        );
+    }
     // §15.4: the `migration` entry of a Swift succession, as a transition the owner's control
     // keys sign and the successor home receipts; recorded once, after its due time. The counts
     // must add up (`copied` + `omitted` = `source`), the view is the digest of the sorted copied

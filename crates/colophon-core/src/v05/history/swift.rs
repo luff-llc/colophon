@@ -252,38 +252,76 @@ fn multiset_subset(a: &[Value], b: &[Value]) -> bool {
     }
     true
 }
+/// What [`verify`] reads from one envelope before it groups it by body: the outer JSON, the
+/// body bytes and JSON, `seq`, `issued` (ms) and `signer`.
+type ReadEnvelope = (Value, Vec<u8>, Value, u64, i64, String);
+
+/// Read one envelope, or say why it cannot be read and, when it can be read that far, the seq
+/// it names.
+fn read_envelope(bytes: &[u8]) -> std::result::Result<ReadEnvelope, (Option<u64>, Failure)> {
+    let no_seq = |f: Failure| (None, f);
+    require(bytes.len() <= 2_097_152, "Swift envelope bound").map_err(no_seq)?;
+    let outer = strict_parse(bytes).map_err(no_seq)?;
+    let body = text(&outer, "body")
+        .and_then(|b| decode_base64(b, 1_048_576))
+        .map_err(no_seq)?;
+    let value = strict_parse(&body).map_err(no_seq)?;
+    let seq = num(&value, "seq").map_err(no_seq)?;
+    let at = |f: Failure| (Some(seq), f);
+    let issued = text(&value, "issued").map_err(at)?;
+    require(
+        issued.len() == 20 && issued.ends_with('Z'),
+        "Swift date format",
+    )
+    .map_err(at)?;
+    let issued_ms = crate::v05::encoding::parse_date(issued)
+        .ok_or_else(|| malformed("Swift date"))
+        .map_err(at)?;
+    let signer = if value["by"] == "controller" {
+        text(&value, "signer").map_err(at)?.to_string()
+    } else {
+        String::new()
+    };
+    Ok((outer, body, value, seq, issued_ms, signer))
+}
+
 /// Replay a predecessor in any arrival order. Several envelopes over one body are one entry,
 /// valid when any of them is (the first in byte order that verifies, never the first to
 /// arrive); differing bodies at a sequence are rejected as a fork, never selected by arrival.
 ///
 /// An envelope is over a body when its outer JSON parses and its `body` decodes; those bytes
-/// are the body (§2.2: equality is equality of body bytes). What is wrong with the body itself
-/// (its JSON, `seq`, `issued`, `signer`) is wrong for every envelope over it, so it fails the
-/// predecessor whatever the order. What is wrong with one envelope's wrapper (`signature`,
-/// `assertion`, `cosignatures`) is that envelope not verifying: it is ignored where another
-/// envelope over the body verifies (§2.2), and reported only when none does, the first in byte
-/// order of the envelope bytes.
+/// are the body (§2.2: equality is equality of body bytes). What is wrong with one envelope's
+/// wrapper (`signature`, `assertion`, `cosignatures`) is that envelope not verifying: it is
+/// ignored where another envelope over the body verifies (§2.2), and reported only when none
+/// does, the first in byte order of the envelope bytes. An envelope that cannot be read (over
+/// 2 MiB, or its outer JSON, `body`, body JSON, `seq`, `issued` or `signer` unreadable) is
+/// ignored where anything readable stands at its seq, as the `/5` fold and the `/4` bootstrap
+/// treat theirs (§16.3 "Envelopes"); only when nothing readable is at that seq is its failure
+/// the predecessor's, that of the unreadable envelope there with the lowest envelope digest. One
+/// whose seq cannot be read names no seq and is ignored.
 pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
     // Envelope bytes to the record they carry, or why their wrapper is unusable.
     type Envelopes = BTreeMap<Vec<u8>, Result<Record>>;
     let mut parsed: BTreeMap<u64, BTreeMap<String, Envelopes>> = BTreeMap::new();
+    // Envelopes that cannot be read, by the seq read from them: the failure of the one with the
+    // lowest envelope digest, reported only when nothing readable stands at that seq (§16.3, as
+    // the `/5` fold keeps `parse_entry` failures).
+    let mut unreadable: BTreeMap<u64, (String, Failure)> = BTreeMap::new();
     for bytes in entries {
-        require(bytes.len() <= 2_097_152, "Swift envelope bound")?;
-        let outer = strict_parse(bytes)?;
-        let body = decode_base64(text(&outer, "body")?, 1_048_576)?;
-        let value = strict_parse(&body)?;
-        let seq = num(&value, "seq")?;
-        let issued = text(&value, "issued")?;
-        require(
-            issued.len() == 20 && issued.ends_with('Z'),
-            "Swift date format",
-        )?;
-        let issued_ms =
-            crate::v05::encoding::parse_date(issued).ok_or_else(|| malformed("Swift date"))?;
-        let signer = if value["by"] == "controller" {
-            text(&value, "signer")?.to_string()
-        } else {
-            String::new()
+        let (outer, body, value, seq, issued_ms, signer) = match read_envelope(bytes) {
+            Ok(r) => r,
+            Err((Some(seq), f)) => {
+                let d = digest(bytes);
+                if unreadable.get(&seq).is_none_or(|(old, _)| &d < old) {
+                    unreadable.insert(seq, (d, f));
+                }
+                continue;
+            }
+            // No seq can be read (over the bound, or the outer JSON, `body`, body JSON or `seq`
+            // itself unreadable): the envelope names no place in the history, so it is ignored,
+            // as the `/5` fold never reports a failure at seq 0. What stands is then decided by
+            // the other envelopes alone, whatever order they arrive in.
+            Err((None, _)) => continue,
         };
         let wrapper = || -> Result<Vec<SigItem>> {
             let mut signatures = vec![item(&outer, signer)?];
@@ -318,8 +356,21 @@ pub fn verify(entries: &[Vec<u8>]) -> Result<History> {
         entries: Vec::new(),
         states: Vec::new(),
     };
-    for (seq, candidates) in parsed {
-        require(seq == out.entries.len() as u64 + 1, "Swift sequence gap")?;
+    let last = parsed
+        .keys()
+        .chain(unreadable.keys())
+        .max()
+        .copied()
+        .unwrap_or(0);
+    for seq in 1..=last {
+        let Some(candidates) = parsed.remove(&seq) else {
+            // Nothing readable at this seq: an unreadable envelope there is the failure, else
+            // the predecessor has a gap.
+            return Err(unreadable
+                .remove(&seq)
+                .map(|(_, f)| f)
+                .unwrap_or_else(|| malformed("Swift sequence gap")));
+        };
         let mut valid = Vec::new();
         let mut first = None;
         for envelopes in candidates.into_values() {
