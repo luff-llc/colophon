@@ -1114,6 +1114,60 @@ fn drop_home(o: &mut Out) {
         &["8.7"],
     );
 
+    // Full set (a) whose signers also meet the control rule. A holds control and recover, B
+    // (control) is lost, K1 holds recover; threshold 1, recoverThreshold 2. A and K1 are every
+    // recovery controller in two units: a full set (a), whichever rule it is otherwise judged
+    // under, though not a full set (b) (B did not sign).
+    let acr: &[&str] = &["approve", "control", "recover"];
+    let dual = |extra: bool| {
+        let mut ctrls: Vec<(&Key, &[&str])> = vec![(&a, acr), (&b, AC), (&k1, &["recover"])];
+        if extra {
+            ctrls.push((&k2, &["recover"]));
+        }
+        account(&ctrls, 2, 1, &[("Home one", None)], sg![a, k1]).0
+    };
+    let base = dual(false);
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![a, k1], &ts(at));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[], at);
+    no_home_step(&mut c, a.clone(), at + 60);
+    wc(
+        o,
+        "f2-drop-home-full-set-a-dual-role",
+        &c,
+        ok_at(4),
+        "A (control and recover) and K1 (recover) are every recovery controller, two units; B (control) is lost and does not sign. A alone also meets the control rule, but the transition is still a full set (a): it drops the silent only home with no receipt, final at once, and the account then has no home.",
+        &["8.7"],
+    );
+    // The same signers when a second recovery key K2 exists and does not sign: not every
+    // recovery controller, so no full set, and the home's receipt is required.
+    let base = dual(true);
+    let t = transition(&base, json!({"homes": {"revoke": [h1_id]}}), sg![a, k1], &ts(at));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[], at + W + D);
+    wc(
+        o,
+        "f2-drop-home-dual-role-not-full",
+        &c,
+        bad("malformed", 3),
+        "As f2-drop-home-full-set-a-dual-role, but a second recovery key K2 exists and does not sign: A and K1 are not every recovery controller, so the transition is no full set and needs the only home's receipt: malformed.",
+        &["8.7"],
+    );
+    // Full set (a)'s signers on a transition the recovery rule may not make (a layout raise): it
+    // is judged under the control rule only, is no full set, and needs the home's receipt.
+    let base = dual(false);
+    let t = transition(&base, json!({"layout": 3}), sg![a, k1], &ts(at));
+    let mut c = base.clone();
+    activate_at(&mut c, &t, &[], at);
+    wc(
+        o,
+        "f2-dual-role-full-a-component-not-recovery",
+        &c,
+        bad("malformed", 3),
+        "A and K1, every recovery controller in two units, sign a layout raise, which the recovery rule may not make even as a full set. Being a full set (a) lets no component through that rule's own checks refuse: the raise is judged under the control rule, is no full set (B did not sign) and needs the only home's receipt, so an activate without it is malformed.",
+        &["8.7", "20"],
+    );
+
     // headQuorum 2, two homes; a full set revokes Home one. Only the remaining home's receipt is
     // required, and it alone witnesses: its head alone makes the activation final.
     let (base, keys) = account(
