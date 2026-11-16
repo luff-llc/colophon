@@ -1,0 +1,1 @@
+{"description":"Two grants conflict at seq 3 at headQuorum 1; the only head, covering one of them, was issued after its home expired, so it does not count toward headQuorum and the conflict stays a fork.","expected":{"result":"refused:fork","seq":3},"sections":["8.6","13.3"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

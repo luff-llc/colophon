@@ -1,0 +1,1 @@
+{"description":"A member's own endSessions issued after its expiry: the member rule needs a current principal (§8.5), so it is badSignature.","expected":{"result":"badSignature","seq":3},"sections":["8.5","9.6"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

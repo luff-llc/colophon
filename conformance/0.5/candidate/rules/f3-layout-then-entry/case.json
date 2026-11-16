@@ -1,0 +1,1 @@
+{"description":"A layout raise, then a grant: the reader stops at the raise and applies nothing after it.","expected":{"result":"newerFormat","seq":2},"sections":["1","8.2"],"verifier":{"now":"2026-11-20T00:00:00Z"}}
