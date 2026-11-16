@@ -249,6 +249,9 @@ pub struct HistoryVerifierOutput {
 #[derive(Clone, Debug)]
 pub struct AccountView {
     v: HistoryVerifierOutput,
+    /// `Some(seq)` when the reader is stopped for the account at `seq` (§1 "A stop",
+    /// [`crate::v05::history::Verdict::stopped`]).
+    stopped: Option<u64>,
 }
 /// Most head envelopes a view holds (more homes than §13.1's 8 can't be current).
 pub const MAX_VIEW_HEADS: usize = 64;
@@ -359,7 +362,7 @@ impl AccountView {
                 status,
             )?);
         }
-        Self::from_parts_unverified(HistoryVerifierOutput {
+        let mut view = Self::from_parts_unverified(HistoryVerifierOutput {
             account: st.account().clone(),
             history: st.history().to_vec(),
             policies: st.policies.clone(),
@@ -373,7 +376,9 @@ impl AccountView {
                 .filter(|p| p.len() == 65)
                 .cloned()
                 .collect(),
-        })
+        })?;
+        view.stopped = verdict.stopped;
+        Ok(view)
     }
     /// Assemble a view from parts the caller vouches for, checking every structural invariant.
     /// Production code builds views with [`AccountView::from_history_verifier`]; this is for
@@ -420,7 +425,13 @@ impl AccountView {
                 .all(|h| h.len() <= bounds::HEAD_BODY * 2 + 4_096),
             "head envelope exceeds its bound",
         )?;
-        Ok(Self { v })
+        Ok(Self { v, stopped: None })
+    }
+    /// `Some(seq)` when the reader is **stopped** for the account (§1 "A stop"): its verdict on
+    /// the authority entry at `seq` is `newerFormat`. A stopped view verifies no call, accepts
+    /// no head and builds no link or call: each is `unavailable`, whatever S would be.
+    pub fn stopped(&self) -> Option<u64> {
+        self.stopped
     }
     /// The account.
     pub fn account(&self) -> &AccountId {
@@ -446,8 +457,12 @@ impl AccountView {
             .find(|(s, _)| *s <= seq)
             .map(|(_, p)| p)
     }
-    /// Current homes at `now_ms`: `(member ID, signing point)`.
+    /// Current homes at `now_ms`: `(member ID, signing point)`. None for a stopped view: a
+    /// stopped reader answers no question of currency (§1 "A stop").
     pub fn current_homes(&self, now_ms: i64) -> Vec<(String, Vec<u8>)> {
+        if self.stopped.is_some() {
+            return Vec::new();
+        }
         self.v
             .members
             .iter()
@@ -749,6 +764,17 @@ fn require_sig(ok: bool, why: &str) -> Result<()> {
         Err(bad_signature(why))
     }
 }
+/// §1 "A stop", §12.3 step 4: a stopped reader verifies no call and builds no link or call,
+/// whatever S would be: `unavailable`. Every entry point that verifies or builds a call or link
+/// consults this before it reads any authority state.
+fn not_stopped(view: &AccountView) -> Result<()> {
+    match view.stopped {
+        Some(seq) => Err(Failure::Unavailable(format!(
+            "stopped for the account at seq {seq}: newer format, update to continue"
+        ))),
+        None => Ok(()),
+    }
+}
 fn index(seq: u64) -> Result<usize> {
     usize::try_from(seq.checked_sub(1).ok_or_else(|| malformed("seq 0"))?)
         .map_err(|_| malformed("seq"))
@@ -767,6 +793,8 @@ fn evaluate_at_s(view: &AccountView, now_ms: i64) -> Result<(u64, Policy)> {
 /// that the signer is behind a home (§13.3: such a head is not wrong, the history is fetched
 /// further). A verifier is never lenient: it fetches first (§12.3 step 4).
 fn evaluate(view: &AccountView, now_ms: i64, signer: bool) -> Result<(u64, Policy, bool)> {
+    // A stopped reader accepts no head (§1 "A stop").
+    not_stopped(view)?;
     let v = &view.v;
     let held = v.history.len() as u64;
     let latest_policy = view
@@ -913,6 +941,7 @@ pub(crate) fn chain_parent(
     member: &str,
     prior: &[Vec<u8>],
 ) -> Result<ChainParent> {
+    not_stopped(view)?;
     let m = view
         .v
         .members
@@ -945,6 +974,7 @@ pub(crate) fn check_link_chain(
     link: &[u8],
     now_ms: i64,
 ) -> Result<()> {
+    not_stopped(view)?;
     let (s, policy) = evaluate_at_s(view, now_ms)?;
     let m = member_at_s(view, member, s, now_ms)?;
     let mut unknown = Unknown::default();
@@ -1276,6 +1306,8 @@ fn verify(
         }));
     }
     // 4. History and heads.
+    // A stopped reader: `unavailable`, whatever S would be and whatever the call names.
+    not_stopped(view)?;
     if call.account != v.account.as_str() {
         return Err(Failure::Unavailable(
             "no verified history for this account".into(),

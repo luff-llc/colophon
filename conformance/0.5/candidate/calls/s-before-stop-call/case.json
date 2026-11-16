@@ -1,0 +1,1 @@
+{"description":"The same call over seqs 1 to 3 alone, the history before the raise: ok. Only the stop makes s-stopped-reader-call unavailable.","expected":"ok","sections":["1","8.7","12.3","13.6"],"verifier":{"audiences":["https://projects.example/scopes/7"],"now":"2026-11-14T08:09:00Z","replay":"empty"}}
