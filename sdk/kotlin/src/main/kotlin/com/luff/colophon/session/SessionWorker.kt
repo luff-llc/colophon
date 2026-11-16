@@ -238,7 +238,12 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val custody = memberCustody ?: return
         if (engine.run { it.me() }.kind != StandingKind.MEMBER) return
         val agreements = engine.run { it.beginUnlockEpochs() }
-        if (agreements.isEmpty()) return
+        if (agreements.isEmpty()) {
+            // Revoked/no-readable-namespace members have no finish-unlock step to load records.
+            // The core still requires load before notices/exchange, even when every read is denied.
+            if (!memberOpened) { engine.run { it.load() }; memberOpened = true }
+            return
+        }
         engine.finishUnlockEpochs(custody.answerEpochs(agreements))
         memberOpened = true
     }

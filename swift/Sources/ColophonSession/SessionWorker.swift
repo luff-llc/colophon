@@ -223,7 +223,12 @@ actor SessionWorker {
         guard let engine, let custody = memberCustody else { return }
         guard case .member = try await engine.run({ try $0.me() }).kind else { return }
         let agreements = try await engine.run { try $0.beginUnlockEpochs() }
-        guard !agreements.isEmpty else { return }
+        guard !agreements.isEmpty else {
+            // A revoked member (or a member with no readable namespaces) has no shares. The
+            // core still requires load before notices/exchange; no finish-unlock will do it.
+            if !memberOpened { _ = try await engine.run { try $0.load() }; memberOpened = true }
+            return
+        }
         let answers = try await custody.answer(epochs: agreements)
         _ = try await engine.finishUnlockEpochs(answers: answers)
         memberOpened = true
