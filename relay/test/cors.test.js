@@ -366,8 +366,10 @@ describe('the rate limit and preflights', { skip: ready ? false : 'module not bu
   test('preflights are not counted, and the 429 carries the headers and Retry-After', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'colophon-cors-home-'));
     const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    // A fixed clock: the per-minute window never resets, however slowly the requests arrive.
+    const now = Date.parse('2026-11-16T00:00:00Z');
     const running = await startRelay({
-      port: 0, dataDir: dir, tickMs: 0, cors: { origins: [ORIGIN] }, libraries: { home: { home: true, base: BASE, account: ACCOUNT } },
+      port: 0, dataDir: dir, tickMs: 0, clock: () => now, cors: { origins: [ORIGIN] }, libraries: { home: { home: true, base: BASE, account: ACCOUNT } },
       home: { wasm, key: await crypto.subtle.exportKey('jwk', pair.privateKey) }, limits: { requestsPerMinute: 3 },
     });
     const url = `http://127.0.0.1:${running.port}/v1/libraries/home/head`;

@@ -141,7 +141,8 @@ through a same-origin proxy. A deployed web client needs the home itself (device
 preflights without a call and to send, on every answer including refusals, CORS headers for its allowed origins: the
 methods GET, POST and PUT, the request headers `Authorization`, `Content-Type`, `If-Match` and `If-None-Match`, and the
 exposed headers `ETag`, `Retry-After` and `WWW-Authenticate`. A refusal without them reaches the page as a network
-failure, and the engine never sees its code.
+failure, and the engine never sees its code. Two answers the runtime writes before the relay sees the request, an
+automatic `100 Continue` and the HTTP parser's `431` for oversized headers, carry no CORS headers.
 
 ## The exchange
 
