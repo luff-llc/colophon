@@ -643,11 +643,15 @@ export class HomeSlot {
 
   /** Start a forwarding pass to every peer that has none running (§13.1). */
   async forwardAll() {
+    // One start at a time: a tick that comes while the last start still waits for the lock adds
+    // nothing to the lock's queue (a queue growing every tick would delay every request).
+    if (this.startingPasses) return;
+    this.startingPasses = true;
     let st;
     try { st = await this.lock(async () => this.status()); } catch (error) {
       this.note('forward', `forwarding could not start: ${error.message}`);
       return;
-    }
+    } finally { this.startingPasses = false; }
     const resolve = typeof this.resolve === 'function' ? this.resolve() : this.resolve;
     this.passes ??= new Map();
     for (const peer of st.peers ?? []) {
