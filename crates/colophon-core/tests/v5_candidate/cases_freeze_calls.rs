@@ -10,6 +10,7 @@
 //! - **provisional** (seq 4 activates it, no `final`): the reader is not stopped, the call is
 //!   judged as usual;
 //! - **vetoed** (seq 4 records B's veto): the reader is not stopped, the call is judged as usual.
+//!
 //! The same call over seqs 1–3 alone is `ok`.
 //!
 //! Every key is derived from a fixed label or is a published test key (synthetic, never real
