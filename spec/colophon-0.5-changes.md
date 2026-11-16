@@ -362,8 +362,8 @@ revision 15's text and behaviour there. Rows **code follows in the freeze packag
 | 215 | §8.2: at most 64 genesis namespaces for a writer as for a verifier (the writer's 256 is a code defect being fixed) | the revision 17 check, Medium 5 |
 | 216 | §9.1: the scan path of a confirmed pairing scans exactly the canonical request envelope, whose `member.signing` is the key | the revision 17 check, Low 6 |
 | 217 | §20: the preservation sentence reads "including, without limitation" and names every category a later verifier keeps | the revision 17 check, Low 8 |
-| 218 | §8.7 "Finality": a home's expiry is judged at the receipted object's `issued` for receipts and at the activation's `issued` for witnesses; heads in a `final` by the home's key alone. An account whose only home has expired needs no receipt and has no witness, so it can revoke or replace that home. Code: freeze package W1-A | the W1-A check, finding 1 (an expired home stuck finality) |
-| 219 | §8.6: a head counts, for covering an entry and toward `headQuorum`, only when its home is current and unexpired at the head's own `issued`; the primary home is not re-chosen by expiry. Code: freeze package W1-A | the W1-A check, follow-up to finding 1 (an expired home's head decided conflicts) |
+| 218 | §8.5, §8.7: a home's term bounds what it may serve and whether its head is accepted for a call or decides a conflict, never its witnessing: a home witnesses, and its receipts are required and accepted, from its final appointment until its revocation is final, whatever its grant's expiry says, so a date can never remove the veto window. Code: freeze package W1-A | the W1-A fix check, finding 1 (expiry removed the veto delay) |
+| 219 | §8.6: a head counts, for covering an entry and toward `headQuorum`, only when its home is current on the branch the head covers at the seq it covers (not finally revoked there) and unexpired at the head's own `issued`; the primary home is not re-chosen by expiry. Code: freeze package W1-A | the W1-A checks (an expired or revoked home's head decided conflicts) |
 
 ## B. Galley's requirements
 

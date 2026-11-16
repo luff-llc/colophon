@@ -36,7 +36,11 @@ class HomeProblemError extends Error {
   constructor(readonly problem: HomeProblem) { super(problem.kind); this.name = 'HomeProblemError'; }
 }
 
-export interface ExchangeResult { passes: number; faults: HomeFault[]; issues: HomeIssue[]; changed: boolean; unauthorized: boolean }
+export interface ExchangeResult {
+  passes: number; faults: HomeFault[]; issues: HomeIssue[]; changed: boolean; unauthorized: boolean;
+  /** A pass that did not finish (the engine still waited after its one recovery): the exchange failed. */
+  failed: boolean;
+}
 
 /**
  * Every engine call, key ceremony, store operation and HTTP request of a session. The gate serialises complete
@@ -801,11 +805,14 @@ export class SessionWorker {
    * `signal` aborted, the session locked), the request in flight is abandoned with `exchange_abort` before this
    * returns or throws, so the next pass never finds the engine waiting for an answer nobody will give.
    */
+  /** Tests only: answers `exchange_next` for a home instead of the engine when it returns a step. */
+  nextStepOverride?: (home: string) => ExchangeStep | undefined;
+
   async exchange(caller?: AbortSignal): Promise<ExchangeResult> {
     // Locking the session ends the pass in flight, as a cancelled caller does.
     const signal = this.waiting(caller);
     await this.gated(async () => { if (!this.engine) await this.reconcile(signal); });
-    const result: ExchangeResult = { passes: 0, faults: [], issues: [], changed: false, unauthorized: false };
+    const result: ExchangeResult = { passes: 0, faults: [], issues: [], changed: false, unauthorized: false, failed: false };
     const engine = this.engine;
     if (!engine) return result;
     const homes = plain<Home[]>(engine.run(e => e.exchange_homes()));
@@ -837,13 +844,15 @@ export class SessionWorker {
             throwIfAborted(signal);
             if (steps > HomeLimits.stepsPerPass) { stopped = { kind: 'tooManySteps', steps: HomeLimits.stepsPerPass }; break homeLoop; }
             if (elapsed() > this.exchangeTimeMs) { stopped = tooSlow(); break homeLoop; }
-            const step = await this.gated(async () => plain<ExchangeStep>(engine.run(e => e.exchange_next(home.id))));
+            const step = await this.gated(async () => this.nextStepOverride?.(home.id) ?? plain<ExchangeStep>(engine.run(e => e.exchange_next(home.id))));
             if (step.kind === glue.ExchangeStepKind.Done) break;
             if (step.kind === glue.ExchangeStepKind.Waiting) {
               // This loop answers every request it is given, so an outstanding one belongs to a pass that was
-              // interrupted: abandon it and run the pass again, once.
+              // interrupted: abandon it and run the pass again, once. A second `Waiting` after that recovery means the pass
+              // cannot finish: a failed exchange, never "done".
               await this.abortPass(engine, home.id);
-              if (!recovered) { recovered = true; progress = true; }
+              if (recovered) { stopped = { kind: 'stillWaiting' }; break homeLoop; }
+              recovered = true; progress = true;
               break;
             }
             if (step.kind === glue.ExchangeStepKind.NeedCall) {
@@ -909,7 +918,10 @@ export class SessionWorker {
         // Every exit that is not a completed pass abandons the request in flight, a cancelled caller included.
         if (!finished) await this.abortPass(engine, home.id);
       }
-      if (stopped) result.issues.push({ home: home.id, problem: stopped });
+      if (stopped) {
+        result.issues.push({ home: home.id, problem: stopped });
+        if (stopped.kind === 'stillWaiting') result.failed = true;
+      }
     }
     return result;
   }

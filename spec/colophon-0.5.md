@@ -832,7 +832,10 @@ rule names (for an entry, the state before it, and expiry at its `issued`):
   activation that is not final) and not expired at the entry's `issued` (for a call, at the
   verifier's clock, §12.3);
 - a **home** is current as §8.7 and §13.1 say (appointed by a final activation, its revocation not
-  final) and is a current member besides.
+  final) and is a current member besides. A home's term (its grant's `expires`) bounds what it may serve
+  and whether its head is accepted for a call or decides a conflict (§13.3, §8.6), never its
+  witnessing: for receipts and witnesses (§8.7) a home is current until its revocation is final, so
+  that a date can never remove an account's veto window.
 A signer that is not current makes an authority object `badSignature` (§8.5) and a call
 `refused:revoked` or `refused:expired` (§12.3). The member rule of `endSessions` uses it too: an
 expired or provisional member's `endSessions` is `badSignature`, whatever it contains (revision 15's
@@ -862,8 +865,9 @@ Y using only the objects it holds — entries, transitions, vetoes, receipts and
 verifier holding the same objects reaches the same verdict, in any order. What it held before
 never selects a branch (§13.3). Several envelopes over one body are one candidate (§2.2): it is
 valid when any of them is, and an envelope that does not verify is ignored. A head counts in these
-rules, for covering an entry and toward `headQuorum`, only when its home is current and unexpired
-at the head's own `issued` (§13.3); the primary home is not re-chosen by expiry, so an expired
+rules, for covering an entry and toward `headQuorum`, only when its home is current on the branch
+the head covers at the seq it covers (not finally revoked there) and unexpired at the head's own
+`issued` (§13.3); the primary home is not re-chosen by expiry, so an expired
 primary home's later heads count for nothing.
 
 With more than two valid candidates, apply the comparisons below to every pair. A candidate
@@ -1057,11 +1061,10 @@ from heads it has seen or the order it saw things in.
 - An activation's **witnesses** are the homes current in the state before it (which include homes
   whose revocation isn't final yet; a home is excused only once its revocation is final), less the
   homes it revokes itself under the stronger authority. For a
-  full set they are those of them that remain after it. A home's expiry is judged at fixed
-  instants: for a transition's or veto's receipts at that object's `issued` (a home expired then is
-  not current, §8.5, so its receipt is neither required nor accepted), and for an activation's
-  witnesses at the activation's `issued`; heads in a `final` are judged by the home's key alone
-  (below).
+  full set they are those of them that remain after it. A home witnesses, and its receipts are
+  required and accepted, from the final activation that appoints it until its revocation is final,
+  whatever its grant's expiry says (§8.5); a home that stops answering blocks finality until it is
+  revoked.
 - **Final.** An activation is **final** when its remaining witness set is empty, or a `final` entry for it is on the
   branch, or a later `final` on the branch carries a head from every one of its witnesses covering
   it, or a later full set's anchor is it or follows it.

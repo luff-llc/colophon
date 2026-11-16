@@ -1,0 +1,1 @@
+{"description":"The only home's grant has expired and it will not witness its removal: a full set revokes it (its receipt still required), leaving it out of the witnesses, so the revocation is final at once and the history continues.","expected":{"result":"ok","seq":4},"sections":["8.7"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

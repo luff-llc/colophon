@@ -1,0 +1,1 @@
+{"description":"The only home's grant has expired; it still witnesses (a home's term bounds what it serves, never its witnessing, §8.5): its receipt is accepted and the activation waits issued + 300 s + recoveryDelay.","expected":{"result":"ok","seq":3},"sections":["8.5","8.7","13.5"],"verifier":{"now":"2026-11-20T00:00:00Z"}}

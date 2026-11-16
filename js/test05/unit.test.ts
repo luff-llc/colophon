@@ -526,6 +526,21 @@ describe('a cancelled or broken pass never leaves the engine waiting', () => {
     }
   }, 120_000);
 
+  // An engine that answers `Waiting` again after the one recovery: the pass cannot finish. Before the fix the loop ended on
+  // the second `Waiting` with no fault and `syncNow()` returned true. The Swift and Kotlin sessions have the same test.
+  test('a pass that still waits after its recovery is a failed sync', async () => {
+    const { device } = await withHome();
+    expect(await settled(device)).toBe(true);
+    device.session.worker.nextStepOverride = () => ({ kind: glue.ExchangeStepKind.Waiting });
+    try {
+      expect(await device.session.syncNow()).toBe(false);
+      expect(device.session.homeIssues.map(i => i.problem.kind)).toEqual(['stillWaiting']);
+      expect(device.session.state.syncState.kind).toBe('error');
+    } finally { device.session.worker.nextStepOverride = undefined; }
+    expect(await settled(device)).toBe(true);
+    device.close();
+  }, 60_000);
+
   test('cancelled while the transport waits, cancelled after it answered, offline, and a home that never answers', async () => {
     const { device, mode, stop } = await withHome(1500);
     expect(await settled(device)).toBe(true);

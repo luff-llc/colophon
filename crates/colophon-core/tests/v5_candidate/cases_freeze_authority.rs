@@ -641,43 +641,72 @@ fn account(
     (c, keys)
 }
 
-/// The independent check's fix round (2026-11-16): homes that expire (§8.5, §8.7), a suspended
-/// key's `suspend` (§8.7), and the layout raise's remaining paths to finality and conflict.
+/// The independent checks' fix rounds (2026-11-16): a home's term never ends its witnessing
+/// (§8.5, §8.7), a suspended key's `suspend` (§8.7), a revoked home's later head (§8.6), and the
+/// layout raise's remaining paths to finality and conflict.
 fn fix_round(o: &mut Out) {
     let (a, b, k1) = (A.clone(), B.clone(), K1.clone());
     const E1: i64 = 2 * 86_400; // a home's expiry: 2026-11-13T08:00:00Z
     let after = E1 + 3_600;
 
-    // The only home expires; then a transition revokes it, and another appoints a new home.
-    // Neither needs a receipt (no current home at its `issued`) and each is final at once.
-    let (base, keys) = account(&[(&a, AC)], 0, 1, &[("Home one", Some(E1))], sg![a]);
+    // The only home's grant has expired. It still witnesses: a transition needs its receipt,
+    // which is accepted, and waits the recovery delay.
+    let (base, keys) = account(&[(&a, AC), (&b, AC)], 0, 1, &[("Home one", Some(E1))], sg![a]);
+    let acct = account_id(&base);
+    let h1 = keys[0].clone();
+    let t = transition(&base, json!({"policy": {"callWindow": 120}}), sg![a], &ts(after));
+    let r = receipt_of(&acct, &t, &h1, &ts(after + 1));
     let mut c = base.clone();
-    let t = transition(&c, json!({"homes": {"revoke": [keys[0].id]}}), sg![a], &ts(after));
-    activate(&mut c, &t, &[]);
+    activate(&mut c, &t, std::slice::from_ref(&r));
     wc(
         o,
-        "f2-home-expired-then-revoked",
+        "f2-home-expired-still-witnesses",
         &c,
         ok_at(3),
-        "The account's only home has expired: it is not current (§8.5), so the transition revoking it needs no receipt, is due when issued and has no witness.",
+        "The only home's grant has expired; it still witnesses (a home's term bounds what it serves, never its witnessing, §8.5): its receipt is accepted and the activation waits issued + 300 s + recoveryDelay.",
         &["8.5", "8.7", "13.5"],
     );
-    let acct = account_id(&base);
     let mut c = base.clone();
-    let (h2, _) = appointment(&acct, "Home two", None);
-    let t = transition(&c, json!({"homes": {"appoint": [h2]}}), sg![a], &ts(after));
-    activate(&mut c, &t, &[]);
+    append_unsigned(
+        &mut c,
+        "activate",
+        &a.id,
+        &ts(after),
+        json!({"transition": emb(&t), "receipts": []}),
+    );
     wc(
         o,
-        "f2-home-expired-then-replaced",
+        "f2-home-expired-receipt-required",
         &c,
-        ok_at(3),
-        "The account's only home has expired; a transition appointing a new home needs no receipt and is final at once.",
+        bad("malformed", 3),
+        "The same transition activated at once with no receipt, as if the expired home did not count: its receipt is still required, so the activate is malformed. A date never removes the veto window.",
         &["8.5", "8.7"],
     );
+    // The expired home will not witness its own removal: the stronger authority (a full set, A
+    // and B) revokes it, its receipt still taken, and the activation leaves it out of the
+    // witnesses, so it is final at once.
+    let t = transition(&base, json!({"homes": {"revoke": [h1.id]}}), sg![a, b], &ts(after));
+    let r = receipt_of(&acct, &t, &h1, &ts(after + 1));
+    let mut c = base.clone();
+    append_unsigned(
+        &mut c,
+        "activate",
+        &a.id,
+        &ts(after + 1),
+        json!({"transition": emb(&t), "receipts": [emb(&r)]}),
+    );
+    grant_agent(&mut c, &a, &ts(after + 60), &a);
+    wc(
+        o,
+        "f2-home-expired-revoked-by-full-set",
+        &c,
+        ok_at(4),
+        "The only home's grant has expired and it will not witness its removal: a full set revokes it (its receipt still required), leaving it out of the witnesses, so the revocation is final at once and the history continues.",
+        &["8.7"],
+    );
 
-    // Two homes at headQuorum 2; one expires. A later transition needs one receipt (the
-    // unexpired home's) and has that home alone as witness; its `final` carries one head.
+    // headQuorum 2 with two homes, one expired: both receipts are still required, both homes
+    // witness, and the final carries both heads.
     let (base, keys) = account(
         &[(&a, AC)],
         0,
@@ -686,25 +715,39 @@ fn fix_round(o: &mut Out) {
         sg![a],
     );
     let acct = account_id(&base);
-    let h2 = keys[1].clone();
     let mut c = base.clone();
     let t = transition(&c, json!({"policy": {"callWindow": 120}}), sg![a], &ts(after));
-    let r = receipt_of(&acct, &t, &h2, &ts(after + 1));
-    activate(&mut c, &t, &[r]);
-    let head = head_of(&c, &h2, after + W + D + 60, 3);
-    final_of(&mut c, 3, &head);
+    let mut rs: Vec<Value> = keys
+        .iter()
+        .map(|h| receipt_of(&acct, &t, h, &ts(after + 1)))
+        .collect();
+    rs.sort_by_key(|r| fstr(r, "by"));
+    activate(&mut c, &t, &rs);
+    let mut hs: Vec<Value> = keys
+        .iter()
+        .map(|h| head_of(&c, h, after + W + D + 60, 3))
+        .collect();
+    hs.sort_by_key(|h| fstr(h, "by"));
+    let issued = ts(secs(&fstr(&hs[0], "issued")).max(prev_issued(&c)));
+    let digest = sha(&body_of(&c.envs[2]));
+    append_unsigned(
+        &mut c,
+        "final",
+        &a.id,
+        &issued,
+        json!({"activation": {"seq": 3, "digest": digest}, "heads": hs.iter().map(emb).collect::<Vec<_>>()}),
+    );
     wc(
         o,
         "f2-home-one-of-two-expired",
         &c,
         ok_at(4),
-        "headQuorum 2 with two homes, one expired: the transition needs the receipt of the one current home (at most the current homes), which alone witnesses it, and its final carries that home's head.",
+        "headQuorum 2 with two homes, one of whose grants has expired: both still witness, so the transition carries both receipts and its final both heads.",
         &["8.5", "8.7", "13.5"],
     );
 
-    // A receipt from the only home, given before it expires; the home expires before the
-    // activation, so the activation has no witness and is final at once. The transition raises
-    // the layout, so finality shows as the stop.
+    // A receipt from the only home, which then expires before the activation: the home still
+    // witnesses, so a layout raise stays provisional and the reader is not stopped.
     let e2 = R0 + 86_400;
     let (base, keys) = account(&[(&a, AC)], 0, 1, &[("Home one", Some(e2))], sg![a]);
     let acct = account_id(&base);
@@ -716,9 +759,46 @@ fn fix_round(o: &mut Out) {
         o,
         "f2-home-expired-before-due",
         &c,
-        bad("newerFormat", 3),
-        "The only home receipts a layout raise and expires before its due time: the receipt counts (judged at the transition's issued), the home is no witness of the activation (judged at its issued), so the raise is final at once and the reader stops.",
+        ok_at(3),
+        "The only home receipts a layout raise and its grant expires before the due time: it still witnesses the activation, so the raise is provisional and the reader is not stopped.",
         &["8.5", "8.7", "20"],
+    );
+
+    // A revoked home's later head decides nothing (§8.6): on X's branch a full set finally
+    // revokes the primary home H1 at seq 4, and H1 then signs a head at seq 4 covering X. It
+    // does not count, so the recording entry Y stands at seq 3.
+    let (base, keys) = account(&[(&a, AC), (&b, AC)], 0, 1, &[("Home one", None)], sg![a]);
+    let acct = account_id(&base);
+    let h1 = keys[0].clone();
+    let ty = transition(&base, json!({"policy": {"callWindow": 120}}), sg![a], &ts(R0));
+    let ry = receipt_of(&acct, &ty, &h1, &ts(R0 + 1));
+    let mut y = base.clone();
+    activate(&mut y, &ty, &[ry]);
+    let mut x = base.clone();
+    grant_agent(&mut x, &a, &ts(R0 + 100), &a);
+    let tr = transition(&x, json!({"homes": {"revoke": [h1.id]}}), sg![a, b], &ts(R0 + 200));
+    let rr = receipt_of(&acct, &tr, &h1, &ts(R0 + 201));
+    append_unsigned(
+        &mut x,
+        "activate",
+        &a.id,
+        &ts(R0 + 201),
+        json!({"transition": emb(&tr), "receipts": [emb(&rr)]}),
+    );
+    let head = head_of(&x, &h1, R0 + 300, 4);
+    write_case(
+        o,
+        "f2-head-revoked-at-head-seq",
+        &y,
+        ok_at(3),
+        "The primary home is finally revoked at seq 4 on X's branch and then signs a head at seq 4 covering X: it is not a current home there, so the head counts for nothing and the activate at seq 3 stands.",
+        &["8.6", "8.7"],
+        vec![("objects/head.json".into(), head)],
+        None,
+        vec![(
+            "x".into(),
+            vec![(3, x.envs[2].clone()), (4, x.envs[3].clone())],
+        )],
     );
 
     // A suspends B; B, now suspended, signs a suspend of A: badSignature (§8.7).
@@ -902,11 +982,17 @@ fn head_expiry(o: &mut Out) {
     let mut granted = base.clone();
     grant_agent(&mut granted, &a, &ts(R0 + 100), &a);
     let late = head_of(&granted, &h1, e + 100, 3);
+    // Each winner gets an entry at seq 4, so the verdict's seq shows which branch stood.
+    let (z_k, z_a) = (derived("w1a/agent-z/signing"), derived("w1a/agent-z/agreement"));
+    let mut act4 = act.clone();
+    grant_agent_with(&mut act4, &a, &ts(DUE0 + 60), &a, &z_k, &z_a, EXPIRES);
+    let mut granted4 = granted.clone();
+    grant_agent_with(&mut granted4, &a, &ts(R0 + 300), &a, &z_k, &z_a, EXPIRES);
     write_case(
         o,
         "f2-head-expired-primary-no-displace",
-        &act,
-        ok_at(3),
+        &act4,
+        ok_at(4),
         "A grant conflicts with an activate at seq 3; the primary home's head covering the grant was issued after that home expired, so it counts for nothing and the activate stands.",
         &["8.6", "13.3"],
         vec![("objects/head.json".into(), late)],
@@ -917,8 +1003,8 @@ fn head_expiry(o: &mut Out) {
     write_case(
         o,
         "f2-head-before-expiry-counts",
-        &granted,
-        ok_at(3),
+        &granted4,
+        ok_at(4),
         "The same conflict with the primary home's head issued before the home expired: it counts, and the grant it covers stands against the activate.",
         &["8.6", "13.3"],
         vec![("objects/head.json".into(), early)],
