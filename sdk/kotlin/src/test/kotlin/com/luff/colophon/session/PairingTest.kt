@@ -131,9 +131,8 @@ class PairingTest {
                                 }
                             }
                             second.session.acceptSeedTransfer(key, joiner, sealed, "Paired owner")
-                            val raw = second.session.exportRequest()
-                            val info = accountRequestInfo(raw)
-                            second.session.approve(AccessRequest(info.member, info.label, info.kind, info.termsJson, AccessRequest.code(info.member), raw))
+                            // Its own request, read as the scan path does: the device that holds the owner key made it (§9.1).
+                            approveByScan(second.session, second.session)
                             assertEquals(SessionPhase.Ready, second.session.phase)
                         }
                     }

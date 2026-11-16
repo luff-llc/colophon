@@ -38,9 +38,8 @@ import ColophonSession
         #expect(second.medium.snapshot().count > first.medium.snapshot().count - 1, "the laptop stored its own slot entry")
         // It now unlocks alone: approve this device's own request with the laptop's owner key.
         await second.session.refresh()
-        let raw = try await second.session.exportRequest()
-        let info = try accountRequestInfo(raw: raw)
-        try await second.session.approve(AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson, record: raw))
+        // Its own request, read as the scan path does: the device that holds the owner key made it (§9.1).
+        try await approveByScan(joining: second.session, approving: second.session)
         await second.session.refresh()
         #expect(second.session.phase == .ready, "\(second.session.phase)")
     }
@@ -62,7 +61,8 @@ import ColophonSession
         }
         #expect(second.medium.snapshot().count == before, "nothing was stored")
         // A device that never got the seed cannot act as owner: the owner key has no slot to open.
-        await #expect(throws: (any Error).self) { try await second.session.approve(AccessRequest(id: "0", label: "x", kind: .app, termsJSON: "{}", record: Data())) }
+        let own = try await second.session.scanRequest(try await second.session.exportRequest())
+        await #expect(throws: (any Error).self) { try await second.session.approve(own.request, pairing: own.pairing) }
     }
 
     @Test func rejectingCodesPersistsTheFiveFailuresPerHourLimit() throws {

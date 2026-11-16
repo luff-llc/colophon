@@ -90,8 +90,8 @@ class RelayJourneyTest {
             second.session.restore()
             second.session.stopSync()
             assertTrue(second.session.phase is SessionPhase.WaitingForApproval, "expected waiting, got ${second.describe()}")
-            first.session.importRequest(second.session.exportRequest())
-            first.session.approve(first.session.requests.first())
+            // The two devices pair by the six-digit code (§7.3) and the owner approves what that pairing confirmed.
+            approveByCode(second.session, first.session)
             assertTrue(settle(first), first.describe())
             val secondPasses = untilApproved(second)
             assertEquals(SessionPhase.Ready, second.session.phase, "the phone learnt its approval through the home: ${second.describe()}")
@@ -114,8 +114,8 @@ class RelayJourneyTest {
                 homes = joining(relays, thirdRefusals), createWithoutHome = false).also { devices.add(it) }
             third.session.restore()
             third.session.stopSync()
-            first.session.importRequest(third.session.exportRequest())
-            first.session.approve(first.session.requests.first())
+            // The owner scans the third device's request from its screen (the scan path, §9.1).
+            approveByScan(third.session, first.session)
             assertTrue(settle(first), first.describe())
             val thirdPasses = untilApproved(third)
             assertEquals(SessionPhase.Ready, third.session.phase, third.describe())

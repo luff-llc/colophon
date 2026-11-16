@@ -5,9 +5,16 @@ public struct ApproveRequestView: View {
     let session: any LibrarySessionSource
     @State private var model: ApprovalModel
     @Environment(\.dismiss) private var dismiss
-    public init(request: AccessRequest, session: any LibrarySessionSource) {
+    /// A request scanned from the joining device's screen (its pairing is confirmed by the scan).
+    public init(scanned: ScannedRequest, session: any LibrarySessionSource) {
         self.session = session
-        _model = State(initialValue: ApprovalModel(request: request, session: session))
+        _model = State(initialValue: ApprovalModel(scanned: scanned, session: session))
+    }
+    /// A request the devices paired for by the six-digit code: `code` is this device's digits, which the person
+    /// compares with the joining device's before approving.
+    public init(request: AccessRequest, pairing: AccountPairing, code: String, session: any LibrarySessionSource) {
+        self.session = session
+        _model = State(initialValue: ApprovalModel(request: request, pairing: pairing, code: code, session: session))
     }
     public var body: some View {
         @Bindable var model = model
@@ -16,10 +23,21 @@ public struct ApproveRequestView: View {
                 Text(model.request.label).font(.title2.bold())
                 Text("\(LibraryWords.kind(model.request.kind)) · \(LibraryWords.access(model.request.access))")
                     .foregroundStyle(.secondary)
-                PairingCodeView(code: model.request.pairingCode)
-                Toggle("I compared both codes and they match", isOn: $model.codeMatches)
-                    .accessibilityIdentifier("library.approve.codeMatches")
-            } footer: { Text("A name alone does not identify a device. Compare the code with the person or device asking to join.") }
+                if let code = model.code {
+                    PairingCodeView(code: code)
+                    Toggle("The other device shows the same code", isOn: $model.codeMatches)
+                        .accessibilityIdentifier("library.approve.codeMatches")
+                    Button("The Codes Are Different", role: .destructive) {
+                        Task { if await model.codesDiffer(session: session) { dismiss() } }
+                    }
+                    .accessibilityIdentifier("library.approve.codesDiffer")
+                } else {
+                    Label("Scanned from the device asking to join", systemImage: "qrcode.viewfinder")
+                        .accessibilityIdentifier("library.approve.scanned")
+                }
+            } footer: { Text(model.code == nil
+                ? "This request was read from the other device's screen, so it is the one that device made."
+                : "A name alone does not identify a device. Approve only if the other device shows exactly these six digits.") }
             Section("Can Use") {
                 ForEach(model.request.namespaces, id: \.self) { namespace in
                     Toggle(LibraryWords.namespace(namespace), isOn: Binding(

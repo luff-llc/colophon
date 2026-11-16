@@ -21,3 +21,33 @@ import ColophonSession
     }
     isolated deinit { try? FileManager.default.removeItem(at: home) }
 }
+
+// MARK: Pairing before approval (§7.3, §9.1)
+
+/// The six-digit code between a joining device and an approving one, each through its own session, with the messages
+/// passed between them as an app would carry them: the request with the commitment, the nonce, the reveal. Both screens' digits are
+/// compared and both devices confirm. Returns the request the approving device sees and its confirmed pairing.
+@MainActor func pairByCode(joining: ColophonSession, approving: ColophonSession) async throws -> (AccessRequest, AccountPairing) {
+    let raw = try await joining.exportRequest()
+    let j = try await joining.beginJoinPairing()
+    let start = try await approving.beginApproval(commitment: try j.commitment())
+    let reveal = try #require(try j.receiveNonce(na: start.nonce))
+    let code = try await approving.approvalCode(pairing: start.pairing, e: reveal.e, nb: reveal.nb)
+    #expect(code == (try j.digits()), "both screens show the same six digits")
+    #expect(code.count == 6 && code.allSatisfy(\.isNumber))
+    try j.confirm(); try start.pairing.confirm()
+    let info = try accountRequestInfo(raw: raw)
+    return (AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson, record: info.raw), start.pairing)
+}
+
+/// Pairs by the code and approves.
+@MainActor func approveByCode(joining: ColophonSession, approving: ColophonSession, grant: GrantOptions? = nil) async throws {
+    let (request, pairing) = try await pairByCode(joining: joining, approving: approving)
+    try await approving.approve(request, pairing: pairing, grant: grant)
+}
+
+/// The scan path: the approving device scans the joining device's request (its canonical envelope) and approves it.
+@MainActor func approveByScan(joining: ColophonSession, approving: ColophonSession, grant: GrantOptions? = nil) async throws {
+    let scanned = try await approving.scanRequest(try await joining.exportRequest())
+    try await approving.approve(scanned.request, pairing: scanned.pairing, grant: grant)
+}

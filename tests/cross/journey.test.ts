@@ -39,6 +39,21 @@ async function ceremony(existing: Device, joining: Device, account: string, mode
   for (const d of [existing, joining]) expect(await d.call("pairingStage")).toBe(wrong ? "spent" : "confirmed");
 }
 
+/** Approval through the two sessions (§7.3, §9.1): the joining device sends its request with a commitment, the
+ * approving device answers with a nonce, the joiner reveals, both show the same six digits and confirm, and only then
+ * the approving device approves what that pairing confirmed. This process only carries the messages; each half runs
+ * on its own device, and the approving device cannot approve without the joiner's reveal. */
+async function approve(existing: Device, joining: Device) {
+  await expect(existing.call("approve")).rejects.toThrow();
+  const { request, commitment } = await joining.call("approvalJoin");
+  const nonce = await existing.call("approvalBegin", { request, commitment });
+  const reveal = await joining.call("approvalReveal", { nonce });
+  const digits = await existing.call("approvalCode", { e: reveal.e, nb: reveal.nb });
+  expect(digits).toMatch(/^\d{6}$/); expect(reveal.digits).toBe(digits);
+  for (const d of [existing, joining]) expect(await d.call("approvalConfirm", { digits })).toEqual({ accepted: true, stage: "confirmed" });
+  await existing.call("approve");
+}
+
 async function bootstrap(from: Device, to: Device) {
   // Only pre-approval authority (including the creator's sealed slot): no content, heads,
   // private state, or this joining device's slot/approval.
@@ -182,8 +197,7 @@ for (const creator of ["swift", "kotlin"] as const) {
         // Seed acceptance appends this controller's slot. Publish that authority entry before the
         // existing device appends approval, so both append to the same history tip.
         await second.call("sync"); await settle(first);
-        const request = await second.call("request");
-        await first.call("approve", { request }); await settle(first);
+        await approve(first, second); await settle(first);
         const secondReady = await settle(second);
         expect(secondReady.account).toBe(account);
         await assertItems(second, ["a"]); await readBlobs(firstBlobs);
@@ -206,7 +220,7 @@ for (const creator of ["swift", "kotlin"] as const) {
         }
         const third = world.device(creator, "third"); await third.start(); await bootstrap(second, third);
         await ceremony(second, third, account, "code");
-        await second.call("approve", { request: await third.call("request") }); await settle(second); await settle(first);
+        await approve(second, third); await settle(second); await settle(first);
         const thirdReady = await settle(third); await assertItems(third, ["a", "b"]);
         await third.call("checkpoint"); // Keep a pre-revocation saved state to test on cold reopen too.
         await first.call("revoke", { member: thirdReady.member }); await write(first, "c"); await settle(first);

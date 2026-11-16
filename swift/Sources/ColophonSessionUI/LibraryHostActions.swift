@@ -26,12 +26,17 @@ public struct LibraryContainerChoice: Identifiable, Sendable {
     public var rejoinKeys: (() async throws -> any AsyncKeyProvider)?
     public var exportRecoveryKit: (() async throws -> String)?
     public var importRecoveryKit: ((String) async throws -> Void)?
+    /// The host's camera: reads the request a joining device shows as a QR code and returns its bytes (the canonical
+    /// request envelope, spec §9.1). Without it, the settings screen offers no scan; a host that pairs by the six-digit
+    /// code opens `ApproveRequestView(request:pairing:code:session:)` itself.
+    public var scanRequest: (() async throws -> Data)?
     public init(containers: [LibraryContainerChoice] = [],
                 connect: ((LibraryConnectionPurpose, StorageLocation) async throws -> Void)? = nil,
                 rejoinKeys: (() async throws -> any AsyncKeyProvider)? = nil,
                 exportRecoveryKit: (() async throws -> String)? = nil,
-                importRecoveryKit: ((String) async throws -> Void)? = nil) {
+                importRecoveryKit: ((String) async throws -> Void)? = nil,
+                scanRequest: (() async throws -> Data)? = nil) {
         self.containers = containers; self.connect = connect; self.rejoinKeys = rejoinKeys
-        self.exportRecoveryKit = exportRecoveryKit; self.importRecoveryKit = importRecoveryKit
+        self.exportRecoveryKit = exportRecoveryKit; self.importRecoveryKit = importRecoveryKit; self.scanRequest = scanRequest
     }
 }

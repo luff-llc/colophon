@@ -30,7 +30,7 @@ export function gateContent(state: Pick<SessionState, 'phase'>, usable: boolean)
     case 'waitingForDownload': return screen('library.downloading', 'Updating your library', '', ['retry'], true);
     case 'retry': return screen('library.retry', "Couldn't open your library", 'Retry to try again.', ['retry']);
     case 'updateRequired': return screen('library.updateRequired', 'Update required', 'Your library was written by a newer version. Nothing is lost and nothing was changed. Update this app to open it.');
-    case 'waitingForApproval': return screen('library.waiting', 'Waiting for approval', `Approve this device on one you already use. Check that it shows the code ${phase.code}.`, ['checkAgain', 'cancelPairing']);
+    case 'waitingForApproval': return screen('library.waiting', 'Waiting for approval', 'On a device you already use, scan this device\'s request, or pair with the six-digit code. Approve only when both devices show the same code.', ['checkAgain', 'cancelPairing']);
     case 'denied': return screen('library.denied', 'Access ended', 'This device no longer has access to the library.', ['rejoin']);
     case 'unavailable': return screen('library.unavailable', 'Library unavailable', phase.reason, ['retry']);
     case 'failed': return screen('library.failed', "Couldn't open your library", failureMessage(phase.failure), ['retry']);

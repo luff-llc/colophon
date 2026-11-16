@@ -10,9 +10,9 @@ import type {
 import { closeAll, withEntropy } from './secrets.js';
 import { HomeLimits, type HomeAnswer, type HomeIssue, type HomeProblem, type HomeRequest } from './transport.js';
 import {
-  ConfiguredHome, emptyNotices, noDuties, noticesFrom, pairingCode, phaseUsable, samePhase, SessionRefusal,
-  type AccessRequest, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
-  type SessionConfiguration, type SessionNotices, type SessionPhase, type SessionSnapshot, type WriteReceipt,
+  ConfiguredHome, emptyNotices, noDuties, noticesFrom, phaseUsable, samePhase, SessionRefusal,
+  type AccessRequest, type ApprovalStart, type DeadTransition, type DomainCommand, type HomeFault, type HostDuties, type RemovalCard, type RouteState,
+  type SessionConfiguration, type SessionNotices, type ScannedRequest, type SessionPhase, type SessionSnapshot, type WriteReceipt,
 } from './types.js';
 import { glue, isAccountFault, makeFault, plain } from './wasm.js';
 
@@ -271,7 +271,7 @@ export class SessionWorker {
     }
     if (standing.kind === glue.StandingKind.Unknown) {
       await this.ensureOwnRequest();
-      return this.snapshot({ kind: 'waitingForApproval', code: pairingCode(this.memberId ?? '') }, { members, requests, homes });
+      return this.snapshot({ kind: 'waitingForApproval' }, { members, requests, homes });
     } else if (standing.kind === glue.StandingKind.Controller) {
       phase = { kind: 'failed', failure: { kind: 'other', detail: 'this identity is a controller, not a member' } };
     } else if (standing.member?.revokedAt !== undefined) {
@@ -479,13 +479,6 @@ export class SessionWorker {
       return this.storage.read(this.requestPath(id));
     });
   }
-  importRequest(data: Uint8Array): Promise<SessionSnapshot> {
-    return this.gated(async () => {
-      const info = plain<RequestInfo>(glue.account_request_info(data));
-      await this.storage.write([{ path: this.requestPath(info.member), bytes: info.raw }]);
-      return this.reconcile();
-    });
-  }
   private pendingRequests(members: readonly AccountMember[]): AccessRequest[] {
     const known = new Set(members.map(m => m.id));
     const out: AccessRequest[] = [];
@@ -494,11 +487,65 @@ export class SessionWorker {
       let info: RequestInfo;
       try { info = plain<RequestInfo>(glue.account_request_info(this.storage.read(entry.path))); } catch { continue; }
       if (known.has(info.member) || info.member === this.memberId) continue;
-      const records = requestedRecords(info.termsJson);
-      out.push({ id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, pairingCode: pairingCode(info.member), record: info.raw,
-        namespaces: records.map(r => r.namespace), access: records.some(r => r.access === 'write') ? ['read', 'write'] : ['read'] });
+      out.push(accessRequest(info));
     }
     return out;
+  }
+
+  // Pairing before approval (§7.3, §9.1)
+
+  /** The five-failures-an-hour ledger (§7.3), kept in the private store so the limit holds across launches. It records failed sessions only, never a request. */
+  private async withLimiter<T>(body: (limiter: glue.PairingFailureLimiter) => T): Promise<T> {
+    const saved = await this.configuration.privateStore.read('pairing-limiter.json');
+    const limiter = glue.PairingFailureLimiter.from_state(saved ? new TextDecoder().decode(saved) : '');
+    try { return body(limiter); }
+    finally {
+      try { await this.configuration.privateStore.write('pairing-limiter.json', new TextEncoder().encode(limiter.to_state())); } catch { /* the ledger is kept on the next call */ }
+      limiter.free();
+    }
+  }
+  /** The joining device: a code-path pairing for its own member key. Send `commitment()` with the request. */
+  beginJoinPairing(): Promise<glue.AccountPairing> {
+    return this.gated(async () => {
+      await this.loadJournal();
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      const e = (await this.memberKeys.publicKeys()).signing;
+      return withEntropy(32, nb => glue.AccountPairing.join(account, e, nb));
+    });
+  }
+  /** The approving device received the joining device's commitment: a session (counted by the limiter) and the nonce to send back. */
+  beginApproval(commitment: Uint8Array): Promise<ApprovalStart> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      return this.withLimiter(limiter => {
+        const pairing = glue.AccountPairing.existing_receive_commitment(account, commitment, limiter, BigInt(this.nowMs));
+        return { pairing, nonce: withEntropy(32, na => pairing.send_nonce(na)) };
+      });
+    });
+  }
+  /** The approving device received the reveal: the six digits both screens show. A reveal that does not open the commitment aborts and counts as a failure. */
+  approvalCode(pairing: glue.AccountPairing, e: Uint8Array, nb: Uint8Array): Promise<string> {
+    return this.gated(() => this.withLimiter(limiter => pairing.receive_reveal(e, nb, limiter, BigInt(this.nowMs))));
+  }
+  /** The codes did not match (or the person stopped): the session ends on this device and counts as a failure. */
+  rejectPairing(pairing: glue.AccountPairing): Promise<void> {
+    return this.gated(() => this.withLimiter(limiter => pairing.reject(limiter, BigInt(this.nowMs))));
+  }
+  /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored. */
+  scanRequest(data: Uint8Array): Promise<ScannedRequest> {
+    return this.gated(async () => {
+      if (!this.engine) await this.reconcile();
+      const account = this.accountId;
+      if (account === undefined) throw new SessionError('notReady');
+      return this.withLimiter(limiter => {
+        const pairing = glue.AccountPairing.scan_request(account, data, limiter, BigInt(this.nowMs));
+        return { request: accessRequest(plain<RequestInfo>(glue.account_request_info(data))), pairing };
+      });
+    });
   }
 
   // Owner operations
@@ -550,10 +597,11 @@ export class SessionWorker {
     });
   }
 
-  approve(request: AccessRequest, termsJson?: string, signal?: AbortSignal): Promise<SessionSnapshot> {
+  /** Approves `request`, spending `pairing`: confirmed on this device for exactly the request's key (§9.1). Any other pairing is refused; it is spent whatever the answer. */
+  approve(request: AccessRequest, pairing: glue.AccountPairing, termsJson?: string, signal?: AbortSignal): Promise<SessionSnapshot> {
     return this.ownerOperation(signal, async (owner, custody, ownerId, waiting) => {
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
-      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(request.record, termsJson ?? request.termsJson, signers, entropy)), this.persistOn(owner), waiting);
+      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(request.record, termsJson ?? request.termsJson, signers, pairing, entropy)), this.persistOn(owner), waiting);
     });
   }
   revoke(member: string, signal?: AbortSignal): Promise<SessionSnapshot> {
@@ -737,9 +785,14 @@ export class SessionWorker {
     this.accountId = account;
     if (!plain<AccountMember[]>(owner.run(e => e.members())).some(m => m.id === this.memberId)) {
       const memberRaw = await this.ownRequestBytes(waiting);
+      // This device made the request itself, with its own member key: there is no second device to pair with, so it reads
+      // its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
+      const fresh = glue.PairingFailureLimiter.from_state('');
+      const own = glue.AccountPairing.scan_request(account, memberRaw, fresh, BigInt(this.nowMs));
+      fresh.free();
       const memberTerms = terms(this.configuration.namespaces, this.access);
       const signers = this.signers(owner, ownerId, glue.SignerNeed.Member);
-      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(memberRaw, memberTerms, signers, entropy)), this.persistOn(owner), waiting);
+      await owner.execute(custody, e => withEntropy(32, entropy => e.begin_approve(memberRaw, memberTerms, signers, own, entropy)), this.persistOn(owner), waiting);
     }
     this.journal.setupPending = false;
     await this.saveJournal();
@@ -1065,4 +1118,11 @@ export function queryResult(text: string): string {
   if (o.ok === true && 'value' in o) return JSON.stringify(o.value);
   const reason = typeof o.reason === 'string' && knownReasons.has(o.reason) ? o.reason : 'unavailable';
   return JSON.stringify({ ok: false, reason });
+}
+
+/** A request as an approver sees it: no code (approving spends a confirmed pairing, §9.1). */
+function accessRequest(info: RequestInfo): AccessRequest {
+  const records = requestedRecords(info.termsJson);
+  return { id: info.member, label: info.label, kind: info.kind, termsJson: info.termsJson, record: info.raw,
+    namespaces: records.map(r => r.namespace), access: records.some(r => r.access === 'write') ? ['read', 'write'] : ['read'] };
 }

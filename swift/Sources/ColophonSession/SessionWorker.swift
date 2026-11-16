@@ -269,8 +269,7 @@ actor SessionWorker {
         switch standing.kind {
         case .unknown:
             try await ensureOwnRequest()
-            let id = memberID ?? ""
-            return snapshot(phase: .waitingForApproval(code: AccessRequest.code(for: id)), members: members, requests: pending, homes: homes)
+            return snapshot(phase: .waitingForApproval, members: members, requests: pending, homes: homes)
         case .controller:
             phase = .failed(error: .other(detail: "this identity is a controller, not a member"))
         case .member:
@@ -493,23 +492,83 @@ actor SessionWorker {
             return try storage().read(requestPath(id))
         }
     }
-    func importRequest(_ data: Data) async throws -> SessionSnapshot {
-        try await gated {
-            let info = try accountRequestInfo(raw: data)
-            try storage().write([MediumWrite(path: requestPath(info.member), bytes: info.raw)])
-            return try await reconcile()
-        }
-    }
     private func pendingRequests(members: [AccountMember]) async throws -> [AccessRequest] {
         let known = Set(members.map(\.id))
         var out: [AccessRequest] = []
         for entry in try storage().listing() where entry.path.hasPrefix("requests/") {
             guard let bytes = try? storage().read(entry.path), let info = try? accountRequestInfo(raw: bytes),
                   !known.contains(info.member), info.member != memberID else { continue }
-            out.append(AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson,
-                                     pairingCode: AccessRequest.code(for: info.member), record: info.raw))
+            out.append(Self.accessRequest(info))
         }
         return out
+    }
+    private static func accessRequest(_ info: RequestInfo) -> AccessRequest {
+        AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson, record: info.raw)
+    }
+
+    // MARK: Pairing before approval (§7.3, §9.1)
+
+    /// The five-failures-an-hour ledger (§7.3), kept in the private container so the limit holds across launches.
+    /// It records failed sessions only, never a request.
+    private var limiterURL: URL { configuration.privateContainer.appendingPathComponent("pairing-limiter.json") }
+    private func limiter() throws -> PairingFailureLimiter {
+        let state = (try? AtomicFile.read(limiterURL, maximumBytes: 1 << 16)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        return try PairingFailureLimiter.fromState(state: state)
+    }
+    private func keep(_ limiter: PairingFailureLimiter) throws {
+        try AtomicFile.write(Data(try limiter.toState().utf8), to: limiterURL)
+    }
+    /// The joining device: a code-path pairing for its own member key. Send `commitment()` with the request.
+    func beginJoinPairing() async throws -> AccountPairing {
+        try await gated {
+            try loadJournal()
+            if engine == nil { _ = try await reconcile() }
+            guard let account = accountID else { throw SessionError.notReady }
+            let e = try await memberKeys.publicKeys().signing
+            return try withEntropy(32) { try AccountPairing.join(account: account, e: e, nb: $0) }
+        }
+    }
+    /// The approving device received the joining device's commitment: a session (counted by the limiter) and
+    /// the nonce to send back.
+    func beginApproval(commitment: Data) async throws -> ApprovalStart {
+        try await gated {
+            if engine == nil { _ = try await reconcile() }
+            guard let account = accountID else { throw SessionError.notReady }
+            let limiter = try limiter()
+            defer { try? keep(limiter) }
+            let pairing = try AccountPairing.existingReceiveCommitment(account: account, commitment: commitment, limiter: limiter, nowMs: nowMs)
+            let nonce = try withEntropy(32) { try pairing.sendNonce(na: $0) }
+            return ApprovalStart(pairing: pairing, nonce: nonce)
+        }
+    }
+    /// The approving device received the joining device's reveal: the six digits both screens show. A reveal
+    /// that does not open the commitment aborts the session and counts as a failure.
+    func approvalCode(pairing: AccountPairing, e: Data, nb: Data) async throws -> String {
+        try await gated {
+            let limiter = try limiter()
+            defer { try? keep(limiter) }
+            return try pairing.receiveReveal(e: e, nb: nb, limiter: limiter, nowMs: nowMs)
+        }
+    }
+    /// The codes did not match (or the person stopped): the session ends on this device and counts as a failure.
+    func rejectPairing(_ pairing: AccountPairing) async throws {
+        try await gated {
+            let limiter = try limiter()
+            defer { try? keep(limiter) }
+            try pairing.reject(limiter: limiter, nowMs: nowMs)
+        }
+    }
+    /// The approving device scanned a request from the joining device's screen: its canonical envelope, the scan
+    /// path's one payload (§9.1). Nothing is stored; the result's pairing approves that request once.
+    func scanRequest(_ data: Data) async throws -> ScannedRequest {
+        try await gated {
+            if engine == nil { _ = try await reconcile() }
+            guard let account = accountID else { throw SessionError.notReady }
+            let limiter = try limiter()
+            defer { try? keep(limiter) }
+            let pairing = try AccountPairing.scanRequest(account: account, request: data, limiter: limiter, nowMs: nowMs)
+            return ScannedRequest(request: Self.accessRequest(try accountRequestInfo(raw: data)), pairing: pairing)
+        }
     }
 
     static func accountKind(_ kind: MemberKind) -> AccountMemberKind {
@@ -561,13 +620,15 @@ actor SessionWorker {
         return chosen.isEmpty ? [ownerID] : chosen
     }
 
-    func approve(_ request: AccessRequest, terms: String?) async throws -> SessionSnapshot {
+    /// Approves `request`, spending `pairing`: confirmed on this device for exactly the request's key (§9.1). The core
+    /// refuses any other pairing; it is spent whatever the answer.
+    func approve(_ request: AccessRequest, pairing: AccountPairing, terms: String?) async throws -> SessionSnapshot {
         try await gated {
             if engine == nil { _ = try await reconcile() }
             try await withOwner { owner, custody, ownerID in
                 let signers = try await signers(owner, ownerID: ownerID, need: .member)
                 let terms = terms ?? request.termsJSON
-                let written = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: request.record, termsJson: terms, signers: signers, entropy: $0) } }
+                let written = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: request.record, termsJson: terms, signers: signers, pairing: pairing, entropy: $0) } }
                 try await persist(written, on: owner)
             }
             return try await reconcile()
@@ -758,9 +819,13 @@ actor SessionWorker {
                 for due in try await owner.run({ try $0.recordDue() }) { try await persist(due, on: owner) }
             }
             let memberRaw = try await ownRequestBytesFor(account: account)
+            // This device made the request itself, with its own member key: there is no second device to pair with,
+            // so it reads its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
+            let own = try AccountPairing.scanRequest(account: account, request: memberRaw,
+                                                     limiter: try PairingFailureLimiter.fromState(state: ""), nowMs: nowMs)
             let terms = termsJSON(namespaces: configuration.namespaces, access: configuration.access, expires: nil, budget: nil)
             let signers = try await signers(owner, ownerID: ownerID, need: .member)
-            let approve = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: memberRaw, termsJson: terms, signers: signers, entropy: $0) } }
+            let approve = try await owner.execute(custody: custody) { engine in try withEntropy(32) { try engine.beginApprove(request: memberRaw, termsJson: terms, signers: signers, pairing: own, entropy: $0) } }
             try await persist(approve, on: owner)
             await owner.lock()
         } catch { await owner.lock(); throw error }

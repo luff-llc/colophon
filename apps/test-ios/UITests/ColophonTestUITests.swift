@@ -130,17 +130,14 @@ import XCTest
         wait(app.buttons["copyPayload"], 20)
     }
 
-    /// Step: approve the request that arrived by link (`colophontest://request?p=…`), after the codes are read.
+    /// Step: approve the request the harness read off the joining device's screen (`colophontest://request?p=…`, debug
+    /// builds only: the harness stands in for the camera). The scan confirms a pairing for that request's key; the person
+    /// still approves it.
     func testScriptApprove() {
         launch(reset: false, link: env("COLOPHON_REQUEST").map { "colophontest://request?p=\($0)" })
         wait(app.buttons.matching(NSPredicate(format: "label == %@", "Devices")).firstMatch, 30)
         tapTab("Devices")
-        // The link only shows the request: import it, confirm the codes, then approve.
-        wait(app.buttons["importLinked"], 30, "the linked request is not shown")
-        app.buttons["importLinked"].tap()
-        wait(app.buttons["codesMatch"], 60, "no request is waiting")
-        XCTAssertFalse(app.buttons["approve"].isEnabled, "Approve waits for the codes to be confirmed")
-        app.buttons["codesMatch"].tap()
+        wait(app.staticTexts["scannedRequest"], 60, "the scanned request is not shown")
         waitEnabled(app.buttons["approve"], 10)
         app.buttons["approve"].tap()
         let gone = NSPredicate(format: "exists == false")
@@ -148,14 +145,14 @@ import XCTest
         waitForExpectations(timeout: 60)
     }
 
-    /// Step: join with the invite in `TEST_RUNNER_COLOPHON_INVITE` and wait for the pairing code.
+    /// Step: join with the invite in `TEST_RUNNER_COLOPHON_INVITE` and wait for approval (the request is shown as a QR code).
     func testScriptJoin() {
         launch(reset: true, link: env("COLOPHON_INVITE").map { "colophontest://join?p=\($0)" })
         // The link only fills the confirmation screen; the person confirms.
         wait(app.buttons["confirmJoin"], 30, "the confirmation screen did not appear")
         XCTAssertTrue(app.staticTexts["confirmHost"].exists || app.descendants(matching: .any)["confirmHost"].exists)
         app.buttons["confirmJoin"].tap()
-        wait(app.staticTexts["pairingCode"], 60, "the device did not reach waiting for approval")
+        wait(app.staticTexts["waitingForApproval"], 60, "the device did not reach waiting for approval")
     }
 
     /// Step: write a note.

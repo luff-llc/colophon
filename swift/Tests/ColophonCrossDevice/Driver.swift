@@ -83,6 +83,10 @@ private struct Transport: HomeTransport {
     var owner: SoftwareKeys?
     var pairing: AccountPairing?
     var transferKey: PairingTransferKey?
+    /// The approval ceremony's session on this device (§7.3, §9.1), and on the approving device the request that came
+    /// with the commitment.
+    var approval: AccountPairing?
+    var approvalRequest: Data?
     let limiter = try! PairingFailureLimiter.fromState(state: "")
     let audit = Audit()
     func keys(_ directory: URL, _ name: String) throws -> SoftwareKeys {
@@ -178,10 +182,31 @@ private struct Transport: HomeTransport {
         case "refuseCalls": await audit.setRefusesCalls(c["enabled"] as! Bool)
         case "sync": await audit.clear(); _ = await s.syncNow(); await s.refresh()
         case "request": return try await s.exportRequest().base64EncodedString()
+        // Approval pairs the two devices by the six-digit code through their sessions (§7.3, §9.1). The orchestrator
+        // only carries the messages; each half runs in its own process.
+        case "approvalJoin":
+            let request = try await s.exportRequest()
+            approval = try await s.beginJoinPairing()
+            return ["request": request.base64EncodedString(), "commitment": try approval!.commitment().base64EncodedString()]
+        case "approvalBegin":
+            approvalRequest = data("request")
+            let start = try await s.beginApproval(commitment: data("commitment"))
+            approval = start.pairing
+            return start.nonce.base64EncodedString()
+        case "approvalReveal":
+            guard let r = try approval!.receiveNonce(na: data("nonce")) else { throw DriverError.invalid("not a code-path joiner") }
+            return ["e": r.e.base64EncodedString(), "nb": r.nb.base64EncodedString(), "digits": try approval!.digits()]
+        case "approvalCode": return try await s.approvalCode(pairing: approval!, e: data("e"), nb: data("nb"))
+        case "approvalConfirm":
+            let matches = try approval!.digits() == text("digits")
+            if matches { try approval!.confirm() } else { try await s.rejectPairing(approval!) }
+            return ["accepted": matches, "stage": String(describing: try approval!.stage())]
         case "approve":
-            try await s.importRequest(data("request"))
-            guard let request = s.requests.first else { throw DriverError.invalid("no request") }
-            try await s.approve(request)
+            guard let raw = approvalRequest, let pairing = approval else { throw DriverError.invalid("no paired request to approve") }
+            let info = try accountRequestInfo(raw: raw)
+            try await s.approve(AccessRequest(id: info.member, label: info.label, kind: info.kind, termsJSON: info.termsJson, record: info.raw),
+                                pairing: pairing)
+            approval = nil; approvalRequest = nil
         case "revoke": try await s.revoke(memberID: text("member"))
         case "write":
             try await s.perform(DomainCommand(namespace: "reading.saved", kind: "capture", payloadJSON: data("payload")), observed: s.observedRevision)

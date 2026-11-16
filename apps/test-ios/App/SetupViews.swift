@@ -82,18 +82,16 @@ struct SetupView: View {
     private func save() { model.updateHome(prefix: prefix, reach: reach, provisioner: provisioner, token: token) }
 }
 
-/// A joining device that is not approved yet: its request and code, for the owner device.
+/// A joining device that is not approved yet: its request as a QR code, for the owner device to scan.
 struct WaitingView: View {
     @Environment(AppModel.self) private var model
-    let code: String
     @State private var payload: String?
 
     var body: some View {
         List {
             Section("Waiting for approval") {
-                Text(code).font(.system(.largeTitle, design: .monospaced)).accessibilityIdentifier("pairingCode")
-                Text("On the owner device: Devices, Add a device, then scan this code or paste this request. Approve only if it shows the same code.")
-                    .font(.footnote)
+                Text("On the owner device: Devices, then scan this device's request below with its camera.")
+                    .font(.footnote).accessibilityIdentifier("waitingForApproval")
                 Text(TrustWords.waiting).font(.footnote).foregroundStyle(.secondary)
             }
             if let payload {
@@ -130,8 +128,8 @@ struct PayloadText: View {
 /// ceremony land in the SDKs, an invite is not authenticated.
 enum TrustWords {
     static let invite = "Join only with an invite you got in person or over a channel you trust. The invite is not signed: it does not prove who made it, or that the home and the account are theirs."
-    static let waiting = "The code lets the owner device check that the request it received is this device's, unchanged. It does not prove that the invite came from the person you think."
-    static let approve = "Compare this code with the one on the joining device. A matching code shows the request came from that device unchanged; it does not prove who holds the device. Confirm only after checking; reject if the codes differ."
+    static let waiting = "The owner device scans this request from this screen, so it approves this device's own key and no other. It does not prove that the invite came from the person you think."
+    static let approve = "This request was read from the new device's screen, so approving it admits that device's key and no other. It does not prove who holds the device. Reject it if you did not mean to add this device."
 }
 
 /// A link, a scan or a paste only fills this screen: nothing is stored and nothing is sent until the person confirms.

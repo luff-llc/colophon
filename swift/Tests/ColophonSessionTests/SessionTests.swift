@@ -70,17 +70,26 @@ import ColophonSession
         #expect(device.session.lastError?.contains("no home") == true)
     }
 
+    /// A failed `create()` stays published: a sync pass with no library does not refresh it away. Deterministic: the pass
+    /// is run explicitly after the failure (the Kotlin session showed the race as "noLibrary, no error").
+    @Test func aFailedCreationIsNotErasedByASyncPass() async throws {
+        let device = Device(homes: [HomeConfiguration(endpoint: URL(string: "http://home.example/v1/")!)], createWithoutHome: false)
+        await device.session.create()
+        guard case .failed = device.session.phase else { Issue.record("expected failed, got \(device.session.phase)"); return }
+        let failed = device.session.phase, error = try #require(device.session.lastError)
+        #expect(await device.session.syncNow() == false, "with no library there is nothing to exchange")
+        #expect(device.session.phase == failed)
+        #expect(device.session.lastError == error)
+    }
+
     @Test func aSecondDeviceInTheSameFolderRequestsAccessIsApprovedAndSeesWhatTheFirstWrote() async throws {
         let first = Device()
         await first.session.create()
         try await first.session.perform(try .saveLink(id: "a", url: URL(string: "https://example.org/a")!, title: "A"), observed: first.session.observedRevision)
         let second = Device(medium: first.medium, owner: SoftwareKeys())
         await second.session.restore()
-        guard case .waitingForApproval(let code) = second.session.phase else { Issue.record("expected waiting, got \(second.session.phase)"); return }
-        await first.session.refresh()
-        let request = try #require(first.session.requests.first)
-        #expect(request.pairingCode == code, "both devices show the same code")
-        try await first.session.approve(request)
+        guard case .waitingForApproval = second.session.phase else { Issue.record("expected waiting, got \(second.session.phase)"); return }
+        try await approveByCode(joining: second.session, approving: first.session)
         await second.session.refresh()
         #expect(second.session.phase == .ready)
         #expect(try await SavedStore(session: second.session).load(ItemsQuery(limit: 10)).get().total == 1)
@@ -94,8 +103,7 @@ import ColophonSession
         await first.session.create()
         let second = Device(medium: first.medium)
         await second.session.restore()
-        await first.session.refresh()
-        try await first.session.approve(try #require(first.session.requests.first))
+        try await approveByScan(joining: second.session, approving: first.session)
         await second.session.refresh()
         #expect(second.session.phase == .ready)
         try await first.session.revoke(memberID: try #require(second.session.memberID))
@@ -147,9 +155,8 @@ import ColophonSession
         await first.session.create()
         let second = Device(medium: first.medium)
         await second.session.restore()
-        await first.session.refresh()
-        try await first.session.approve(try #require(first.session.requests.first),
-                                        grant: GrantOptions(namespaces: ["reading.saved"], access: [.read], expires: nil, writeBudget: nil))
+        try await approveByCode(joining: second.session, approving: first.session,
+                                grant: GrantOptions(namespaces: ["reading.saved"], access: [.read], expires: nil, writeBudget: nil))
         await second.session.refresh()
         #expect(second.session.phase == .ready)
         let before = first.medium.snapshot().count

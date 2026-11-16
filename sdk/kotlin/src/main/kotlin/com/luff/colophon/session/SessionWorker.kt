@@ -280,7 +280,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         when (standing.kind) {
             StandingKind.UNKNOWN -> {
                 ensureOwnRequest()
-                return snapshot(SessionPhase.WaitingForApproval(AccessRequest.code(memberId ?: "")), members, pending, homes = homes)
+                return snapshot(SessionPhase.WaitingForApproval, members, pending, homes = homes)
             }
             StandingKind.CONTROLLER -> phase = SessionPhase.Failed(SessionFailure.Other("this identity is a controller, not a member"))
             StandingKind.MEMBER -> {
@@ -473,11 +473,6 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         ensureOwnRequest()
         storage().read(requestPath(id))
     }
-    suspend fun importRequest(data: ByteArray): SessionSnapshot = gated {
-        val info = accountRequestInfo(data)
-        storage().write(listOf(MediumWrite(requestPath(info.member), info.raw)))
-        reconcile()
-    }
     private fun pendingRequests(members: List<AccountMember>): List<AccessRequest> {
         val known = members.map { it.id }.toSet()
         val out = ArrayList<AccessRequest>()
@@ -485,9 +480,52 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             if (!entry.path.startsWith("requests/")) continue
             val info = try { accountRequestInfo(storage().read(entry.path)) } catch (_: Exception) { continue }
             if (info.member in known || info.member == memberId) continue
-            out.add(AccessRequest(info.member, info.label, info.kind, info.termsJson, AccessRequest.code(info.member), info.raw))
+            out.add(accessRequest(info))
         }
         return out
+    }
+    private fun accessRequest(info: RequestInfo) = AccessRequest(info.member, info.label, info.kind, info.termsJson, info.raw)
+
+    // Pairing before approval (§7.3, §9.1)
+
+    /** The five-failures-an-hour ledger (§7.3), kept in the private directory so the limit holds across launches. It records failed sessions only, never a request. */
+    private val limiterFile = File(configuration.privateDirectory, "pairing-limiter.json")
+    private fun <T> withLimiter(body: (PairingFailureLimiter) -> T): T {
+        val state = AtomicFile.read(limiterFile, 1 shl 16)?.toString(Charsets.UTF_8) ?: ""
+        val limiter = PairingFailureLimiter.fromState(state)
+        try { return body(limiter) } finally { runCatching { AtomicFile.write(limiterFile, limiter.toState().toByteArray(Charsets.UTF_8)) } }
+    }
+    /** The joining device: a code-path pairing for its own member key. Send `commitment()` with the request. */
+    suspend fun beginJoinPairing(): AccountPairing = gated {
+        loadJournal()
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        val e = memberKeys.publicKeys().signing
+        withEntropy(32) { AccountPairing.join(account, e, it) }
+    }
+    /** The approving device received the joining device's commitment: a session (counted by the limiter) and the nonce to send back. */
+    suspend fun beginApproval(commitment: ByteArray): ApprovalStart = gated {
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        withLimiter { limiter ->
+            val pairing = AccountPairing.existingReceiveCommitment(account, commitment, limiter, nowMs)
+            ApprovalStart(pairing, withEntropy(32) { pairing.sendNonce(it) })
+        }
+    }
+    /** The approving device received the reveal: the six digits both screens show. A reveal that does not open the commitment aborts and counts as a failure. */
+    suspend fun approvalCode(pairing: AccountPairing, e: ByteArray, nb: ByteArray): String = gated {
+        withLimiter { pairing.receiveReveal(e, nb, it, nowMs) }
+    }
+    /** The codes did not match (or the person stopped): the session ends on this device and counts as a failure. */
+    suspend fun rejectPairing(pairing: AccountPairing) = gated { withLimiter { pairing.reject(it, nowMs) } }
+    /** The approving device scanned a request from the joining device's screen: its canonical envelope, the scan path's one payload (§9.1). Nothing is stored. */
+    suspend fun scanRequest(data: ByteArray): ScannedRequest = gated {
+        if (engine == null) reconcile()
+        val account = accountId ?: throw SessionError.NotReady()
+        withLimiter { limiter ->
+            val pairing = AccountPairing.scanRequest(account, data, limiter, nowMs)
+            ScannedRequest(accessRequest(accountRequestInfo(data)), pairing)
+        }
     }
 
     // Owner operations
@@ -527,12 +565,13 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         return chosen.ifEmpty { listOf(ownerId) }
     }
 
-    suspend fun approve(request: AccessRequest, terms: String?): SessionSnapshot = gated {
+    /** Approves `request`, spending `pairing`: confirmed on this device for exactly the request's key (§9.1). Any other pairing is refused; it is spent whatever the answer. */
+    suspend fun approve(request: AccessRequest, pairing: AccountPairing, terms: String?): SessionSnapshot = gated {
         if (engine == null) reconcile()
         withOwner { owner, custody, ownerId ->
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
             val t = terms ?: request.termsJson
-            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, it) } }
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(request.record, t, signers, pairing, it) } }
         }
         reconcile()
     }
@@ -680,9 +719,12 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
             memberId = KeyCustody.keyId(memberKeys)
             accountId = account
             val memberRaw = ownRequestBytes()
+            // This device made the request itself, with its own member key: there is no second device to pair with, so it
+            // reads its own canonical request as the scan path does (§9.1). A fresh ledger: nothing failed.
+            val own = AccountPairing.scanRequest(account, memberRaw, PairingFailureLimiter.fromState(""), nowMs)
             val terms = terms(configuration.namespaces, configuration.access, null, null)
             val signers = signers(owner, ownerId, SignerNeed.MEMBER)
-            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, it) } }
+            owner.execute(custody, persistOn(owner)) { e -> withEntropy(32) { e.beginApprove(memberRaw, terms, signers, own, it) } }
         } finally {
             release(owner)
         }

@@ -9,7 +9,8 @@ import { glue } from './wasm.js';
 /** Where the session stands. The engine decides every verdict; the session only chooses what to show. */
 export type SessionPhase =
   | { kind: 'opening' } | { kind: 'noLibrary' } | { kind: 'creating' } | { kind: 'waitingForDownload' }
-  | { kind: 'waitingForApproval'; code: string }
+  /** This device asked to join and is not approved yet. It shows no code of its own: the six-digit code appears only while it pairs with the approving device (`ColophonSession.beginJoinPairing()`). */
+  | { kind: 'waitingForApproval' }
   /** A revoked member, or a grant that no longer allows reading. */
   | { kind: 'denied' }
   | { kind: 'unavailable'; reason: string }
@@ -122,18 +123,23 @@ export interface SessionConfiguration {
   exchangeTimeMs?: number;
 }
 
-/** A member's request for access, as an approver sees it. */
+/**
+ * A member's request for access, as an approver sees it. It carries no code: approving it spends a confirmed pairing for
+ * exactly its key (spec §9.1), from the six-digit code (`beginApproval`, `approvalCode`) or from scanning the request on the
+ * joining device's screen (`scanRequest`).
+ */
 export interface AccessRequest {
   /** The member's key ID. */
   id: string; label: string; kind: glue.AccountMemberKind; termsJson: string;
-  /** A short code both devices derive from the key ID: compare it before approving. */
-  pairingCode: string;
-  /** The request exactly as signed. */
+  /** The request exactly as signed (the canonical envelope); the joining device shows it as a QR code (`exportRequest()`). */
   record: Uint8Array;
   namespaces: string[];
   access: ('read' | 'write')[];
 }
-export function pairingCode(id: string): string { const head = id.slice(0, 8).toUpperCase(); return `${head.slice(0, 4)}-${head.slice(4, 8)}`; }
+/** The approving device's half of the six-digit code (§7.3): the session it opened when the commitment arrived, and the nonce to send back. */
+export interface ApprovalStart { pairing: glue.AccountPairing; nonce: Uint8Array }
+/** A request scanned from the joining device's screen, with the confirmed pairing that scan made (§7.3, §9.1). Nothing is stored for it. */
+export interface ScannedRequest { request: AccessRequest; pairing: glue.AccountPairing }
 
 /** What a person may be shown about this account that is not content (§17.5, §18). */
 export interface SessionNotices {

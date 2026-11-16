@@ -18,8 +18,10 @@ import Foundation
     func create() async
     func leave() async throws
     func rejoin(keys: any AsyncKeyProvider) async
-    func importRequest(from url: URL) async throws
-    func approve(_ request: AccessRequest, grant: GrantOptions?) async throws
+    /// Approving spends a confirmed pairing for exactly the request's key (spec §9.1).
+    func scanRequest(_ data: Data) async throws -> ScannedRequest
+    func rejectPairing(_ pairing: AccountPairing) async throws
+    func approve(_ request: AccessRequest, pairing: AccountPairing, grant: GrantOptions?) async throws
     func revoke(memberID: String) async throws
     /// New in 0.5: one call to veto a pending change; the session stores it and submits it to every home.
     func veto(_ transition: String) async throws

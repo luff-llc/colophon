@@ -87,12 +87,12 @@ import ColophonSession
         await model.resetDevice()
     }
 
-    /// A request link is shown, never imported or approved by itself; approval needs the codes confirmed first.
-    @Test func aRequestLinkIsOnlyShown() async throws {
+    /// A request link never approves: a device without an account takes none, and nothing is scanned or stored for it.
+    @Test func aRequestLinkNeverApproves() async throws {
         let model = AppModel()
         await model.resetDevice()
         await model.open(URL(string: "colophontest://request?p=CTR1.abc")!)
-        #expect(model.pendingRequestText == nil, "a device without an account takes no request link")
+        #expect(model.scanned == nil, "a device without an account takes no request")
         #expect(model.actionError != nil)
     }
 }

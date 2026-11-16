@@ -30,9 +30,10 @@ import SwiftUI
     func retry() async {}
     func create() async { phase = .ready }
     func leave() async throws { phase = .noLibrary; context = UUID() }
-    func rejoin(keys: any AsyncKeyProvider) async { phase = .waitingForApproval(code: "123456") }
-    func importRequest(from url: URL) async throws {}
-    func approve(_ request: AccessRequest, grant: GrantOptions?) async throws { requests.removeAll { $0.id == request.id }; revision += 1 }
+    func rejoin(keys: any AsyncKeyProvider) async { phase = .waitingForApproval }
+    func scanRequest(_ data: Data) async throws -> ScannedRequest { throw SessionError.notReady }
+    func rejectPairing(_ pairing: AccountPairing) async throws {}
+    func approve(_ request: AccessRequest, pairing: AccountPairing, grant: GrantOptions?) async throws { requests.removeAll { $0.id == request.id }; revision += 1 }
     func revoke(memberID: String) async throws { revision += 1 }
     func veto(_ transition: String) async throws { notices = .empty }
     func acknowledgeActivation(seq: UInt64) async {
@@ -70,7 +71,7 @@ private struct GatePreview: View {
 #Preview("Welcome · light") { GatePreview(.noLibrary).preferredColorScheme(.light) }
 #Preview("Welcome · dark · large text") { GatePreview(.noLibrary).preferredColorScheme(.dark).environment(\.dynamicTypeSize, .accessibility3) }
 #Preview("Creating") { GatePreview(.creating) }
-#Preview("Pairing") { GatePreview(.waitingForApproval(code: "123456")) }
+#Preview("Pairing") { GatePreview(.waitingForApproval) }
 #Preview("Access ended") { GatePreview(.denied) }
 #Preview("Unavailable") { GatePreview(.unavailable(reason: "The library folder is offline. Make it available on this device, then retry.")) }
 #Preview("Upgrading") { GatePreview(.migrating) }
@@ -78,7 +79,11 @@ private struct GatePreview: View {
 #Preview("Other failure") { GatePreview(.failed(error: .other(detail: "The library could not be opened."))) }
 #Preview("Ready · settings") { GatePreview(.ready) }
 #Preview("Approve · large text") {
-    NavigationStack { ApproveRequestView(request: PreviewLibrarySession.request, session: PreviewLibrarySession()) }
+    // A preview pairing on the code path (a joining device's session; the preview never approves).
+    let pairing = try! AccountPairing.join(account: String(repeating: "ab", count: 32),
+                                           e: try! PairingTransferKey.create(entropy: Data(repeating: 1, count: 32)).public(),
+                                           nb: Data(repeating: 2, count: 32))
+    NavigationStack { ApproveRequestView(request: PreviewLibrarySession.request, pairing: pairing, code: "123456", session: PreviewLibrarySession()) }
         .environment(\.dynamicTypeSize, .accessibility3)
 }
 #Preview("Member") { NavigationStack { MemberDetailView(member: PreviewLibrarySession().members[1], session: PreviewLibrarySession()) } }

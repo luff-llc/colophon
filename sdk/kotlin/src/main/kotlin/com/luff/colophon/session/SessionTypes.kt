@@ -3,6 +3,7 @@ package com.luff.colophon.session
 import com.luff.colophon.AccessKind
 import com.luff.colophon.AccountMember
 import com.luff.colophon.AccountMemberKind
+import com.luff.colophon.AccountPairing
 import com.luff.colophon.ControllerRole
 import com.luff.colophon.Home
 import com.luff.colophon.Notices
@@ -17,7 +18,8 @@ sealed class SessionPhase {
     object NoLibrary : SessionPhase() { override fun toString() = "NoLibrary" }
     object Creating : SessionPhase() { override fun toString() = "Creating" }
     object WaitingForDownload : SessionPhase() { override fun toString() = "WaitingForDownload" }
-    data class WaitingForApproval(val code: String) : SessionPhase()
+    /** This device asked to join and is not approved yet. It shows no code of its own: the six-digit code appears only while it pairs with the approving device (`ColophonSession.beginJoinPairing()`). */
+    object WaitingForApproval : SessionPhase() { override fun toString() = "WaitingForApproval" }
     /** A revoked member, or a grant that no longer allows reading. */
     object Denied : SessionPhase() { override fun toString() = "Denied" }
     data class Unavailable(val reason: String) : SessionPhase()
@@ -143,16 +145,18 @@ class SessionConfiguration(
     val libraryNamespaces: List<String> = libraryNamespaces ?: namespaces
 }
 
-/** A member's request for access, as an approver sees it. */
+/**
+ * A member's request for access, as an approver sees it. It carries no code: approving it spends a confirmed pairing for
+ * exactly its key (spec §9.1), from the six-digit code (`beginApproval`, `approvalCode`) or from scanning the request on
+ * the joining device's screen (`scanRequest`).
+ */
 data class AccessRequest(
     /** The member's key ID. */
     val id: String,
     val label: String,
     val kind: AccountMemberKind,
     val termsJson: String,
-    /** A short code both devices derive from the key ID: compare it before approving. */
-    val pairingCode: String,
-    /** The request exactly as signed. */
+    /** The request exactly as signed (the canonical envelope); the joining device shows it as a QR code (`exportRequest()`). */
     val record: ByteArray,
 ) {
     val namespaces: List<String> get() = records.map { it.first }
@@ -164,10 +168,13 @@ data class AccessRequest(
         } ?: listOf()
     override fun equals(other: Any?) = other is AccessRequest && other.id == id && other.record.contentEquals(record)
     override fun hashCode() = id.hashCode()
-    companion object {
-        fun code(id: String): String { val head = id.take(8).uppercase(); return head.take(4) + "-" + head.takeLast(4) }
-    }
 }
+
+/** The approving device's half of the six-digit code (§7.3): the session it opened when the commitment arrived, and the nonce to send back. */
+class ApprovalStart(val pairing: AccountPairing, val nonce: ByteArray)
+
+/** A request scanned from the joining device's screen, with the confirmed pairing that scan made (§7.3, §9.1). Nothing is stored for it. */
+class ScannedRequest(val request: AccessRequest, val pairing: AccountPairing)
 
 /** What a person may be shown about this account that is not content (§17.5, §18). */
 data class SessionNotices(val notices: Notices) {
