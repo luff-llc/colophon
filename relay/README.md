@@ -372,3 +372,24 @@ What is missing, and the smallest contract that would close it (a proposal, not 
   repository: APNs (a token-signing key and topic per app), FCM (a service account), e-mail (an
   SMTP or provider API key with a verified sender domain), webhooks (an allow-list, since an
   account would otherwise make the home call arbitrary addresses, finding L7 of the H1 check).
+
+## A stopped home
+
+An account that finalizes a raise above layout 2 stops a 0.5 home. An authenticated
+authority entry at N+1 on the home's head whose verifier verdict is `newerFormat` also
+stops it: the entry passes the header, signature and control-rule checks before its
+unknown content is judged. The home answers 422 `{"result":"newerFormat"}`, stores none
+of that entry, and durably saves the stop before answering. Its verified history ends at N.
+Both causes use the same stopped behavior. The home keeps its stored data.
+Public history and the base endpoint remain readable. The base answer lists
+the supported layouts in `"layouts":[2]`. Head reads return
+503 with `Retry-After`; requests needing a call return 503 `{"result":"unavailable"}`,
+even without a call. New authority and other pending objects return 422 `newerFormat`.
+The home can still receipt timely vetoes and removal-only transitions anchored at or
+before its last verified entry, but records no further entries and signs no heads.
+Restarting with an intact state file does not clear the stop. If `home-state.json` is missing
+from a slot that retains storage, or the file is damaged, the slot refuses to open; restore
+the state file from a backup. A configured home slot prevents relay startup. A provisioned
+slot opened at run time logs the failure and answers 503 `{"result":"unavailable"}`; it is
+retried on the next request. Only a genuinely empty slot can start without a state file.
+Update the home to support the account's new format.

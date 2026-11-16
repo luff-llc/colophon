@@ -233,6 +233,7 @@ fn identity(req: &Value) -> R<Value> {
 
 fn limits() -> Value {
     json!({
+        "layouts": [2],
         "retentionMs": RETENTION_MS,
         "firstUploadEntries": MAX_FIRST_UPLOAD,
         "replayRows": DEFAULT_REPLAY_ROWS,
@@ -251,17 +252,19 @@ struct View {
     state: State,
     /// The seq of the unresolved fork the history stops at (§8.6 rule 3), if any.
     fork: Option<u64>,
+    stopped: bool,
 }
 fn view(h: &HomeState, now_ms: i64) -> R<View> {
-    let persisted = h.persisted().map_err(|e| e.to_string())?;
-    let v = verify_history(&Objects::default(), &persisted, now_ms);
+    let (persisted, v) = h.verified_history(now_ms).map_err(|e| e.to_string())?;
+    let stopped = v.is_stopped();
     let fork = match &v.stop {
         None => None,
         Some(Stop::Fork { seq }) => Some(*seq),
+        Some(_) if stopped => None,
         Some(_) => return Err(format!("history: {}", v.code())),
     };
     let state = v.state.ok_or("no verified history")?;
-    Ok(View { persisted, state, fork })
+    Ok(View { persisted, state, fork, stopped })
 }
 
 fn status(req: &Value) -> R<Value> {
@@ -297,6 +300,7 @@ fn status(req: &Value) -> R<Value> {
         "headQuorum": policy.head_quorum(),
         "peers": peers,
         "fork": v.fork,
+        "stopped": v.stopped,
     }))
 }
 
@@ -484,6 +488,9 @@ fn access(req: &Value) -> R<Value> {
     let public = v.state.keyring().policy.history() == HistoryAccess::Public;
     if matches!(class, Class::History) && public {
         return Ok(json!({"allowed": true, "via": "public"}));
+    }
+    if v.stopped {
+        return Ok(json!({"allowed": false, "status": 503, "result": "unavailable"}));
     }
     let Some(call_text) = req.get("call").and_then(Value::as_str) else {
         return answer(401);
@@ -938,6 +945,8 @@ fn post_authority(req: &Value) -> R<Value> {
                 let later: Vec<Vec<u8>> =
                     entries[i + 1..].iter().filter_map(|e| canonical(e).ok()).collect();
                 let a = admit_with(&h, &b, &later, &now);
+                // A refused authenticated unknown-format entry carries the permanent stop
+                // in a.state, with no entry to store. Return it for commit before the 422.
                 l.home = Some(a.state);
                 sign.extend(signs(&a.receipts));
                 a.result
@@ -1263,6 +1272,9 @@ fn head_request(req: &Value) -> R<Value> {
         return Ok(json!({"sign": null, "due": false, "why": "not appointed", "state": req["state"]}));
     };
     let v = view(&h, now_ms)?;
+    if v.stopped {
+        return Ok(json!({"sign": null, "due": true, "why": "the home is stopped; update it", "state": req["state"]}));
+    }
     if v.fork.is_some() {
         // §8.6 rule 3: until a `resolve` activates, the home's verified history is the prefix
         // before the fork; it signs no head (a head over the prefix would be behind its own),
@@ -1685,6 +1697,11 @@ fn record_due(req: &Value) -> R<Value> {
     let Some(mut h) = l.home.take() else {
         return Ok(json!({"entries": [], "state": req["state"], "store": [], "sign": []}));
     };
+    let v = view(&h, now_ms)?;
+    if v.stopped {
+        return Ok(json!({"state": req["state"], "store": [], "sign": [],
+            "result": "newerFormat", "note": "the home is stopped; update it", "settled": true}));
+    }
     let objects = held(&h)?;
     let before = objects.clone();
     let mut note = Value::Null;
@@ -1696,6 +1713,32 @@ fn record_due(req: &Value) -> R<Value> {
     // a head; a head at `now` over a history missing one would leave the head over it unsignable
     // until the clock passes `now`, §13.3).
     let mut settled = true;
+    // A veto can displace a provisional activation. Build that competing recording at the
+    // activation's parent; appending it after the activation would hit replay's once-only
+    // check. Admission still authenticates the veto against the home's latest state.
+    for activation in v.state.activations().iter().filter(|a| !a.final_) {
+        for veto in objects.pending.iter().filter_map(|b| {
+            AuthEnvelope::parse(b, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false).ok()
+        }).filter(|e| e.value.get("protocol").and_then(Value::as_str) == Some("colophon/veto/5")
+            && e.value.get("transition").and_then(Value::as_str) == Some(activation.transition.as_str())) {
+            let prefix = Objects {
+                entries: objects.entries.iter().filter(|e| entry_seq(e).is_ok_and(|s| s < activation.seq)).cloned().collect(),
+                heads: Vec::new(),
+                pending: objects.pending.clone(),
+                predecessor: objects.predecessor.clone(),
+            };
+            let Ok(batch) = colophon_core::v05::write::authority::prepare_vetoed(&prefix, now_ms, &activation.transition, &veto.digest) else { continue };
+            let Ok(done) = batch.finish(Vec::new()) else { continue };
+            for (_, bytes) in done.entries {
+                let a = admit(&h, &bytes, &now);
+                if a.result.is_ok() {
+                    h = a.state;
+                    recorded += 1;
+                }
+            }
+        }
+    }
+    let objects = held(&h)?;
     match Account::open(
         objects.clone(),
         Vec::new(),
@@ -1773,6 +1816,9 @@ fn record_due(req: &Value) -> R<Value> {
 /// current at the window's entry receipts the genesis once, within the window), as a signing
 /// request the host answers through `finish_receipt` like any other.
 fn genesis_receipt_request(h: &HomeState, home: &str, now_ms: i64) -> R<Option<Value>> {
+    if h.is_stopped(now_ms).map_err(|e| e.to_string())? {
+        return Ok(None);
+    }
     let objects = held(h)?;
     Ok(prepare_genesis_receipt(&objects, home, now_ms)
         .ok()
@@ -1830,6 +1876,9 @@ fn check_record(req: &Value) -> R<Value> {
     let path = str_of(req, "path")?;
     let bytes = bytes_of(req, "bytes")?;
     let refuse = |code: &str| Ok(json!({"allowed": false, "code": code}));
+    if l.home.as_ref().map(|h| h.is_stopped(now_ms)).transpose().map_err(|e| e.to_string())?.unwrap_or(false) {
+        return refuse("unavailable");
+    }
     let Some(kind) = paths::classify(path) else {
         return refuse("malformed");
     };
