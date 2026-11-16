@@ -746,7 +746,7 @@ and its bound, is in [colophon-0.5-guide.md](colophon-0.5-guide.md) §1.
 | `grant`, `renew`, `revoke` (not homes, not `import`) | Single rule; control rule when `memberRule` is `control` |
 | `rekey` | Single rule, or one `control` or `recover` signer; control rule when `memberRule` is `control` |
 | `endSessions` | Single rule, or the member rule; control rule when `memberRule` is `control` |
-| `keyring` | `addThreshold` units holding `control`, with UV, plus possession. It may only: add at most four controllers, each with roles `["approve"]` or `["sign"]` (with slots for them in the same entry); add slots for existing non-`sign` controllers; change labels; and tighten the **signing controller's own** authentication or policy (§6.3 lowering only). **Self-slot:** an entry whose only change adds slots to the current vault naming only its signer may be signed by that one non-`sign` controller. |
+| `keyring` | `addThreshold` units holding `control`, with UV, plus possession. It may only: add at most four controllers, each with roles `["approve"]` or `["sign"]` (with slots for them in the same entry); add slots for existing non-`sign` controllers; change labels; and tighten the **signing controller's own** authentication or policy (§6.3: only lowering `headMaxAge`, `callWindow` or `linkMaxAge`, or setting `memberRule` to `control` or `history` to `members`). **Self-slot:** an entry whose only change adds slots to the current vault naming only its signer may be signed by that one non-`sign` controller. |
 | `vault` | One controller holding `control` or `recover`, current at the anchor of the removal that made the vault retire and still current, only while the vault is retiring (§8.3). An `approve`-only key never rotates a seed. |
 | `suspend` | One signer of the pending transition it carries (§8.7) |
 | Recording entries | §8.7, §15.1 |
@@ -1047,7 +1047,10 @@ holds every recovery key is treated as the owner.
 **Removal-only transitions.** A transition is **removal-only** when every component only
 removes or demotes controllers (including by `keep`), revokes homes, raises a threshold or tightens
 policy: it adds no controller, role, home, member or slot, lowers no threshold, loosens no policy
-and has no `vault`, `grant`, `layout`, `migration`, `successor` or `resolve` component. A
+and has no `vault`, `grant`, `layout`, `migration`, `successor` or `resolve` component. It
+tightens policy, which means only: lowers `headMaxAge`, `callWindow` or `linkMaxAge`, sets
+`memberRule` to `control`, or sets `history` to `members`. A component that changes
+`recoveryDelay`, `rate`, `headQuorum` or `primaryHome`, in either direction, is never removal-only. A
 transition that revokes a home and also adds anything is `malformed`.
 
 **Revoking a home.** A home's revocation is the one removal that does **not** apply at
@@ -2558,7 +2561,7 @@ ranges.
 | `policy.headQuorum` | 1 | 1–8, at most the homes | transition with consent |
 | `policy.history`, `memberRule` | `members`; `single` (person), `control` (company) | §6.3 | tightening immediate; loosening by transition |
 | `policy.primaryHome` | absent | a current home | transition with consent |
-| `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | lowering immediate; raising by transition with consent |
+| `policy.rate` | signer 64 entries / 4 MiB, account 256 / 16 MiB, per 24 h | §6.3 | transition with consent, in either direction |
 | Member `expires`, `depth` | 7 days and 1 for `agent`; none and 0 otherwise | §10.1 | approver; `renew` extends |
 | Homes | **one; two or three are optional and experimental in 0.5 and a host SHOULD NOT offer them as the default; a host MUST create every account with at least one and MUST warn when an account has none (§13.1: without a home there is no witness of time or order and no rollback protection for a new verifier)**; each home is provisioned for its one account (§13.1) | 0–8 | transition with consent |
 | Drain window | 7 days | 0–30 days | the copying host |
@@ -2730,7 +2733,9 @@ in 0.5.x without changing any format. What 0.5.0 does not do is listed in §21.1
    - mutual removal and the tie;
    - the rows of changes §H other than 2, 3, 4, 8 to 13, 17 and 28;
    - a stopped reader accepting no head;
-   - the Swift envelope at seq 0 (§16.3).
+   - the Swift envelope at seq 0 (§16.3);
+   - a tightening-only policy transition as removal-only, and a change to `recoveryDelay` or
+     `headQuorum` as not removal-only: no vector (0.5.x addition; changes no verdict).
 2. **Two implementations: open, deferred to v1.0 by the owner.** There is one implementation of the
    verifier, in Rust. The Swift, Kotlin and JavaScript layers all run that same Rust core through
    the FFI and WASM exports. No vector has been replayed by an independent implementation.
