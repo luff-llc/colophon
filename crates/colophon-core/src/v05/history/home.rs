@@ -1342,98 +1342,7 @@ fn admit_entry(
     }
     let mut full = false;
     if entry.kind == "activate" {
-        let t_bytes = embedded_bytes(
-            env.value.get("transition").unwrap_or(&Value::Null),
-            "transition",
-            bounds::TRANSITION_ENVELOPE,
-        )?;
-        let t_env = AuthEnvelope::parse(
-            &t_bytes,
-            bounds::TRANSITION_ENVELOPE,
-            bounds::TRANSITION_ENVELOPE,
-            true,
-        )?;
-        let rs: Vec<_> = env
-            .value
-            .get("receipts")
-            .and_then(Value::as_array)
-            .ok_or_else(|| malformed("receipts"))?
-            .iter()
-            .map(|r| embedded_bytes(r, "receipt", bounds::RECEIPT_ENVELOPE))
-            .collect::<Result<_>>()?;
-        let t = state::check_transition(st, &t_bytes, &rs, true, true)?;
-        full = t.full_set;
-        if t.due_ms > now_ms {
-            return Err(Refusal::Early);
-        }
-        // A held valid veto forbids storing the activation, even before its recording exists.
-        for v in next
-            .pending
-            .iter()
-            .filter(|p| p.kind == "veto" && p.target == t.digest)
-        {
-            let veto_env =
-                AuthEnvelope::parse(&v.envelope, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false)?;
-            let veto_receipts = chosen_receipts(next, st, &veto_env)?;
-            if state::receipted_veto(st, &t_bytes, &rs, &v.envelope, &veto_receipts).is_ok() {
-                return Err(malformed("home holds a valid veto").into());
-            }
-        }
-        let own_receipt = receipts_for(next, &t.digest).iter().any(|r| {
-            RawEnvelope::parse_bounded(r, bounds::RECEIPT_BODY, bounds::RECEIPT_ENVELOPE, false)
-                .is_ok_and(|r| r.value.get("by").and_then(Value::as_str) == Some(&next.home))
-        });
-        let at = date(
-            t_env
-                .value
-                .get("issued")
-                .and_then(Value::as_str)
-                .ok_or_else(|| malformed("issued"))?,
-            "issued",
-        )?;
-        let fact = next.facts.entry(t.digest.clone()).or_insert(Fact {
-            first_seen_ms: now_ms,
-            serving: next.serving.clone(),
-            refuse_activation: false,
-        });
-        let timely = fact.first_seen_ms >= at && fact.first_seen_ms <= at.saturating_add(WINDOW);
-        let served = next.serving.iter().any(|i| {
-            i.from_ms <= at.saturating_add(WINDOW) && i.through_ms.is_none_or(|end| end >= at)
-        });
-        if fact.refuse_activation || (!own_receipt && !timely && served) {
-            fact.refuse_activation = true;
-            fact.serving = next.serving.clone();
-            // Even a permanently refused activation must leave the transition available to veto.
-            if !next.pending.iter().any(|p| p.digest == t.digest) {
-                next.add(
-                    &t_env,
-                    &t_bytes,
-                    "transition",
-                    t.digest.clone(),
-                    BTreeSet::from([t.proposer.clone()]),
-                    Some(t.due_ms.saturating_add(WEEK)),
-                )?;
-            }
-            for bytes in &rs {
-                let receipt = AuthEnvelope::parse(
-                    bytes,
-                    bounds::RECEIPT_BODY,
-                    bounds::RECEIPT_ENVELOPE,
-                    true,
-                )?;
-                if !next.pending.iter().any(|p| p.digest == receipt.digest) {
-                    next.add(
-                        &receipt,
-                        bytes,
-                        "receipt",
-                        t.digest.clone(),
-                        BTreeSet::new(),
-                        Some(t.due_ms.saturating_add(WEEK)),
-                    )?;
-                }
-            }
-            return Err(Refusal::Late);
-        }
+        full = check_activation(next, st, env, now_ms)?;
     }
     // §13.1 Clock: an immediate entry or a full set more than 300 s behind the clock is
     // `refused:late`, except at a non-primary home for an immediate entry a primary head
@@ -1458,6 +1367,114 @@ fn endpoints_of(st: &State, home: &str) -> Vec<String> {
         .find(|m| m.request.member_id() == home)
         .and_then(|m| m.request.endpoints.clone())
         .unwrap_or_default()
+}
+
+/// The checks an `activate` passes before a home stores it, on whichever path it arrives (one
+/// extending the home's branch, or a candidate against another entry at that seq, §8.6): its
+/// transition is valid in `st`, the state before the entry on the entry's own branch, and due; no
+/// valid veto of it is held (§13.1); and the permanent late-activation rule (§13.1): a home that
+/// neither receipted the transition nor first saw it (or a forwarded receipt of it) within 300 s
+/// of its `issued`, while serving during that window, refuses that `activate` for ever, and still
+/// stores and serves the transition and its receipts. Returns whether it is a full set.
+fn check_activation(
+    next: &mut HomeState,
+    st: &State,
+    env: &AuthEnvelope,
+    now_ms: i64,
+) -> AdmitResult<bool> {
+    let t_bytes = embedded_bytes(
+        env.value.get("transition").unwrap_or(&Value::Null),
+        "transition",
+        bounds::TRANSITION_ENVELOPE,
+    )?;
+    let t_env = AuthEnvelope::parse(
+        &t_bytes,
+        bounds::TRANSITION_ENVELOPE,
+        bounds::TRANSITION_ENVELOPE,
+        true,
+    )?;
+    let rs: Vec<_> = env
+        .value
+        .get("receipts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed("receipts"))?
+        .iter()
+        .map(|r| embedded_bytes(r, "receipt", bounds::RECEIPT_ENVELOPE))
+        .collect::<Result<_>>()?;
+    let t = state::check_transition(st, &t_bytes, &rs, true, true)?;
+    let full = t.full_set;
+    if t.due_ms > now_ms {
+        return Err(Refusal::Early);
+    }
+    // A held valid veto forbids storing the activation, even before its recording exists.
+    for v in next
+        .pending
+        .iter()
+        .filter(|p| p.kind == "veto" && p.target == t.digest)
+    {
+        let veto_env =
+            AuthEnvelope::parse(&v.envelope, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false)?;
+        let veto_receipts = chosen_receipts(next, st, &veto_env)?;
+        if state::receipted_veto(st, &t_bytes, &rs, &v.envelope, &veto_receipts).is_ok() {
+            return Err(malformed("home holds a valid veto").into());
+        }
+    }
+    let own_receipt = receipts_for(next, &t.digest).iter().any(|r| {
+        RawEnvelope::parse_bounded(r, bounds::RECEIPT_BODY, bounds::RECEIPT_ENVELOPE, false)
+            .is_ok_and(|r| r.value.get("by").and_then(Value::as_str) == Some(&next.home))
+    });
+    let at = date(
+        t_env
+            .value
+            .get("issued")
+            .and_then(Value::as_str)
+            .ok_or_else(|| malformed("issued"))?,
+        "issued",
+    )?;
+    let fact = next.facts.entry(t.digest.clone()).or_insert(Fact {
+        first_seen_ms: now_ms,
+        serving: next.serving.clone(),
+        refuse_activation: false,
+    });
+    let timely = fact.first_seen_ms >= at && fact.first_seen_ms <= at.saturating_add(WINDOW);
+    let served = next.serving.iter().any(|i| {
+        i.from_ms <= at.saturating_add(WINDOW) && i.through_ms.is_none_or(|end| end >= at)
+    });
+    if fact.refuse_activation || (!own_receipt && !timely && served) {
+        fact.refuse_activation = true;
+        fact.serving = next.serving.clone();
+        // Even a permanently refused activation must leave the transition available to veto.
+        if !next.pending.iter().any(|p| p.digest == t.digest) {
+            next.add(
+                &t_env,
+                &t_bytes,
+                "transition",
+                t.digest.clone(),
+                BTreeSet::from([t.proposer.clone()]),
+                Some(t.due_ms.saturating_add(WEEK)),
+            )?;
+        }
+        for bytes in &rs {
+            let receipt = AuthEnvelope::parse(
+                bytes,
+                bounds::RECEIPT_BODY,
+                bounds::RECEIPT_ENVELOPE,
+                true,
+            )?;
+            if !next.pending.iter().any(|p| p.digest == receipt.digest) {
+                next.add(
+                    &receipt,
+                    bytes,
+                    "receipt",
+                    t.digest.clone(),
+                    BTreeSet::new(),
+                    Some(t.due_ms.saturating_add(WEEK)),
+                )?;
+            }
+        }
+        return Err(Refusal::Late);
+    }
+    Ok(full)
 }
 
 /// An entry that does not extend the home's branch: one at a seq the home holds with other
@@ -1508,19 +1525,13 @@ fn admit_candidate(
     if let Some(stop) = own.stop {
         return Err(stop_failure(stop).into());
     }
-    // A held veto of the transition forbids storing its `activate` (§13.1), here as on the
-    // branch.
+    // An `activate` passes the same checks as on the branch (§13.1), judged on its own branch:
+    // its transition valid and due there, no valid veto held, and the permanent late-activation
+    // rule, which a candidate against another entry at that seq must not bypass.
+    let mut full = false;
     if entry.kind == "activate" {
-        let t = entry
-            .env
-            .value
-            .get("transition")
-            .and_then(|t| embedded_bytes(t, "transition", bounds::TRANSITION_ENVELOPE).ok())
-            .and_then(|b| AuthEnvelope::parse(&b, bounds::TRANSITION_ENVELOPE, bounds::TRANSITION_ENVELOPE, true).ok())
-            .map(|e| e.digest);
-        if next.pending.iter().any(|p| p.kind == "veto" && Some(&p.target) == t.as_ref()) {
-            return Err(malformed("home holds a veto of the transition").into());
-        }
+        let before = branch_state(persisted, parent, now_ms)?;
+        full = check_activation(next, &before, &entry.env, now_ms)?;
     }
     let objects = Objects {
         entries: vec![incoming.to_vec()],
@@ -1535,7 +1546,7 @@ fn admit_candidate(
             == Some(&entry.env.digest);
     let forks = matches!(verdict.stop, Some(Stop::Fork { .. }));
     if stands || (forks && covered) {
-        if !recording && !covered && entry.issued < now_ms.saturating_sub(WINDOW) {
+        if (!recording || full) && !covered && entry.issued < now_ms.saturating_sub(WINDOW) {
             return Err(Refusal::Late);
         }
         next.checkpoint = Persisted::checkpoint(&objects, persisted, now_ms).to_bytes()?;

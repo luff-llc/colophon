@@ -274,3 +274,59 @@ fn settled_objects_do_not_count_toward_the_cap_and_are_dropped_after_seven_days(
     let r = admit(&a3, &receipt(&kb, &account, &digest(b"x"), later), &format_date(later));
     assert!(r.state.stored_objects() < 100, "{}", r.state.stored_objects());
 }
+
+// ---------------------------------------------------------------------------------------------
+// The check of the forwarding fix (2026-11-16), finding 1: an `activate` that arrives as a
+// candidate against another entry at its seq passes the same late-activation rule as one that
+// extends the branch.
+
+/// A (the primary, serving throughout) never saw transition T within 300 s of its `issued`, and
+/// did not receipt it; B did. After T's due time A holds an immediate entry X at seq n, and the
+/// `activate` of T at seq n arrives: a candidate against X. It is `refused:late` for ever, as it
+/// is when it extends A's branch, and A still lists T and B's receipt of it.
+#[test]
+fn a_late_activate_is_refused_when_it_arrives_as_a_candidate() {
+    use colophon_core::v05::account::{Account, Identity};
+    let (mut f, a, [_ka, kb, _kc]) = three_homes();
+    let account = f.account.id().as_str().to_string();
+    let t = f.account.now_ms() + 60_000;
+    f.account.advance(t).unwrap();
+    let action = f
+        .account
+        .begin_transition(&Change::policy(json!({"callWindow": 650})), &[f.d.clone()], TransitionRule::Control)
+        .unwrap();
+    let tr = run(&mut f.account, &f.host, action).pending[0].clone();
+    let d = body_digest(&tr);
+    merge(&mut f, vec![receipt(&kb, &account, &d, t + 1_000)], t + 1_000);
+    // A second copy of the account, before X: the activate comes from it.
+    let mut other = Account::open(f.account.objects().clone(), f.account.records().to_vec(), None,
+        Identity::Controller(f.d.clone()), t + 2_000).unwrap();
+    let due = t + 3_900_000;
+    other.advance(due + 1_000).unwrap();
+    let act = other.record_due().unwrap()[0].entries[0].1.clone();
+    f.account.advance(due + 500).unwrap();
+    let id = f.host.identity(44);
+    let req = request_for(&f, &f.host, &id, "Phone", "device", terms_for(&[(NS, "write")]), due + 500);
+    let seed = f.host.fresh();
+    let action = f.account.begin_approve(&req.raw, terms_for(&[(NS, "write")]), &[f.d.clone()], seed).unwrap();
+    let x = run(&mut f.account, &f.host, action).entries[0].1.clone();
+    assert_eq!(entry_seq(&x), entry_seq(&act), "X and the activate are at the same seq");
+    // Extending A's branch, the activate is refused late (the rule as it stood).
+    let at = format_date(due + 2_000);
+    assert_eq!(admit(&a, &act, &at).result, Err(Refusal::Late));
+    // As a candidate against X, the same.
+    let with_x = admit(&a, &x, &format_date(due + 1_000));
+    assert_eq!(with_x.result, Ok(()));
+    let cand = admit(&with_x.state, &act, &at);
+    assert_eq!(cand.result, Err(Refusal::Late), "a candidate must not bypass the late-activation rule");
+    // For ever: later, and again.
+    let again = admit(&cand.state, &act, &format_date(due + 60_000));
+    assert_eq!(again.result, Err(Refusal::Late));
+    // T and B's receipt are still listed, so a veto can still be judged.
+    let held = again.state.pending_object(&d, due + 60_000).unwrap().expect("T is held");
+    assert_eq!(held.receipts.len(), 1);
+    let x_seq = entry_seq(&x) as usize;
+    let entries = again.state.persisted().unwrap().objects().unwrap().entries.clone();
+    assert!(!entries.iter().any(|e| body_digest(e) == body_digest(&act)), "the activate is not stored");
+    assert!(entries.len() >= x_seq);
+}
