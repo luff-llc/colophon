@@ -437,6 +437,7 @@ export class HomeSlot {
       switch (r.status) {
         case 401: throw new HttpError(401, 'A Colophon call is required', { 'www-authenticate': 'Colophon' });
         case 403: throw new HttpError(403, 'Forbidden', {}, { result: r.result });
+        case 503: throw new HttpError(503, 'The home is unavailable', {}, { result: r.result });
         case 429: throw new HttpError(429, 'Too many requests', { 'retry-after': String(r.retryAfter ?? 60) }, { result: r.result });
         case 405: throw new HttpError(405, 'Method not allowed', { allow: r.allow });
         case 400: throw new HttpError(400, r.error ?? 'Bad request');

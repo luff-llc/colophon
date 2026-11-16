@@ -5,7 +5,7 @@
 //! verifies the host's signature before publishing it. No private keys or IO live here.
 use super::envelope::{embedded_bytes, AuthEnvelope};
 use super::state::{self, HeadSet};
-use super::{parse_entry, verify_history, Objects, Persisted, State, Stop};
+use super::{parse_entry, verify_history, Objects, Persisted, State, Stop, Verdict};
 use crate::v05::descriptor::Role;
 use crate::v05::encoding::{bounds, canonical, date, Obj};
 use crate::v05::signature::RawEnvelope;
@@ -284,6 +284,19 @@ impl HomeState {
     pub fn persisted(&self) -> Result<Persisted> {
         Persisted::from_bytes(&self.checkpoint)
     }
+    /// A permanent format stop, derived from the held history on every open (§13.6).
+    pub fn is_stopped(&self, now_ms: i64) -> Result<bool> {
+        Ok(self.verified_history(now_ms)?.1.is_stopped())
+    }
+    /// Replay the held history. Once stopped, a clock reset cannot make the verified stop
+    /// disappear: replay at least through the stored entries' timestamps, without admitting
+    /// anything new. Receipt windows still use the actual home clock.
+    /// Return the parsed checkpoint too, so a caller serving it does not decode it twice.
+    pub fn verified_history(&self, now_ms: i64) -> Result<(Persisted, Verdict)> {
+        let p = self.persisted()?;
+        let v = verify_history(&Objects::default(), &p, verification_clock(&p, now_ms));
+        Ok((p, v))
+    }
     /// Persist atomically alongside the caller's committed history.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(|e| malformed(e.to_string()))
@@ -400,22 +413,22 @@ impl HomeState {
         Ok((next, token()))
     }
     fn context(&self, now_ms: i64) -> Result<(Persisted, State)> {
-        let p = Persisted::from_bytes(&self.checkpoint)?;
-        let v = verify_history(&Objects::default(), &p, now_ms);
+        let (p, v) = self.verified_history(now_ms)?;
         if let Some(stop) = v.stop {
             return Err(stop_failure(stop));
         }
         Ok((p, v.state.ok_or_else(|| malformed("no home history"))?))
     }
     /// The verified state the home holds and, when its history stops at an unresolved fork
-    /// (§8.6 rule 3), the seq of the fork: the state is then the verified prefix before it. Any
-    /// other stop is an error, as in [`HomeState::context`].
+    /// (§8.6 rule 3), the seq of the fork: the state is then the verified prefix before it. A
+    /// format stop keeps the last verified state for §13.6; other failures are errors.
     fn context_any(&self, now_ms: i64) -> Result<(Persisted, State, Option<u64>)> {
-        let p = Persisted::from_bytes(&self.checkpoint)?;
-        let v = verify_history(&Objects::default(), &p, now_ms);
+        let (p, v) = self.verified_history(now_ms)?;
+        let stopped = v.is_stopped();
         let fork = match v.stop {
             None => None,
             Some(Stop::Fork { seq }) => Some(seq),
+            Some(_) if stopped => None,
             Some(stop) => return Err(stop_failure(stop)),
         };
         Ok((p, v.state.ok_or_else(|| malformed("no home history"))?, fork))
@@ -702,6 +715,60 @@ pub fn admit_with(home: &HomeState, incoming: &[u8], later: &[Vec<u8>], now: &st
     admit_full(home, incoming, later, &[], now)
 }
 
+/// The only new objects a stopped home can judge. Receipts of these objects are needed to
+/// finish its own signing requests; unrelated and unmatched receipts are refused (§13.6).
+fn stopped_object(
+    home: &HomeState,
+    st: &State,
+    env: &AuthEnvelope,
+    incoming: &[u8],
+    now_ms: i64,
+) -> Result<()> {
+    let newer = || Failure::NewerFormat("the home is stopped; update it".into());
+    let protocol = env.value.get("protocol").and_then(Value::as_str).unwrap_or_default();
+    let transition = match protocol {
+        "colophon/transition/5" => env.value.clone(),
+        "colophon/veto/5" => {
+            let target = env.value.get("transition").and_then(Value::as_str).ok_or_else(newer)?;
+            let held = home.pending.iter()
+                .find(|p| p.kind == "transition" && p.digest == target)
+                .ok_or_else(newer)?;
+            AuthEnvelope::parse(
+                &held.envelope, bounds::TRANSITION_ENVELOPE, bounds::TRANSITION_ENVELOPE, false,
+            )?.value
+        }
+        "colophon/receipt/5" => {
+            let target = env.value.get("object").and_then(Value::as_str).ok_or_else(newer)?;
+            let held = home.pending.iter()
+                .find(|p| p.kind != "receipt" && p.digest == target)
+                .ok_or_else(newer)?;
+            let object = AuthEnvelope::parse(
+                &held.envelope, bounds::TRANSITION_ENVELOPE, bounds::TRANSITION_ENVELOPE, false,
+            )?;
+            return stopped_object(home, st, &object, &held.envelope, now_ms);
+        }
+        _ => return Err(newer()),
+    };
+    let anchor = &transition["anchor"];
+    if !anchor["seq"].as_u64().zip(anchor["digest"].as_str())
+        .is_some_and(|(s, d)| st.on_branch_digest(s, d))
+    {
+        return Err(newer());
+    }
+    // Classification authenticates the original envelope, including its cosignatures.
+    if protocol == "colophon/transition/5"
+        && !state::admission_transition(st, incoming)?.removal_only
+    {
+        return Err(newer());
+    }
+    let issued = env.value.get("issued").and_then(Value::as_str)
+        .and_then(crate::v05::encoding::parse_date).ok_or_else(newer)?;
+    if now_ms < issued || now_ms > issued.saturating_add(WINDOW) {
+        return Err(newer());
+    }
+    Ok(())
+}
+
 /// [`admit_with`], with the receipts of the same `POST {base}/pending` batch (`batch`): a veto
 /// that is late at this home is judged with an in-window receipt in its own batch.
 fn admit_full(
@@ -717,13 +784,34 @@ fn admit_full(
     let result = (|| -> AdmitResult<()> {
         let now_ms = date(now, "home clock")?;
         let (persisted, prefix, fork) = home.context_any(now_ms)?;
+        let stopped = persisted.stopped().is_some() || prefix.stopped_at().is_some();
+        if stopped {
+            // Judge only §13.6's two receipt exceptions, before changing any stored facts.
+            let env = AuthEnvelope::parse(incoming, bounds::AUTHORITY_BODY, bounds::AUTHORITY_BODY * 2, false)?;
+            // §14 equality still acknowledges held bytes. A stopped home never revives an
+            // additive object's old signing draft or vouches for a head by re-uploading it.
+            if next.pending.iter().any(|p| p.digest == env.digest) {
+                if stopped_object(home, &prefix, &env, incoming, now_ms).is_ok() {
+                    if let Some(draft) = next.drafts.get(&env.digest) {
+                        receipts.push(draft.clone());
+                    }
+                }
+                return Ok(());
+            }
+            if env.value.get("protocol").and_then(Value::as_str) == Some("colophon/authority/5")
+                && prefix.history().contains(&env.digest)
+            {
+                return Ok(());
+            }
+            stopped_object(home, &prefix, &env, incoming, now_ms)?;
+        }
         // §14: a transition or veto, and its receipts, are listed until 7 days after the
         // transition's due time; then the home drops them (it MAY). Nothing can be recorded of
         // the transition after that (§8.7: 7 days after due); a recording entry already made
         // embeds them; the stored files stay where they are served.
         let before = next.pending.len();
         next.pending
-            .retain(|p| p.kind == "succession" || p.expires_ms.is_none_or(|e| now_ms <= e));
+            .retain(|p| stopped || p.kind == "succession" || p.expires_ms.is_none_or(|e| now_ms <= e));
         if next.pending.len() != before {
             let kept: BTreeSet<String> = next.pending.iter().map(|p| p.digest.clone()).collect();
             next.facts.retain(|d, _| kept.contains(d));
@@ -731,7 +819,7 @@ fn admit_full(
         }
         // Receipts of objects that never came expire (`unmatched_expiry`).
         next.unmatched_receipts
-            .retain(|r| r.received_ms == 0 || now_ms <= unmatched_expiry(r.received_ms, &prefix));
+            .retain(|r| stopped || r.received_ms == 0 || now_ms <= unmatched_expiry(r.received_ms, &prefix));
         let env = AuthEnvelope::parse(
             incoming,
             bounds::AUTHORITY_BODY,
@@ -890,7 +978,12 @@ fn admit_full(
                     )
                     .into());
                 }
-                state::check_pending_veto(&st, &stored.envelope, &rs, incoming)?;
+                // The once-only recording check belongs to replay, not receipt admission:
+                // a veto may displace a provisional activate (§13.6), or be evidence after
+                // finality. Authenticate its signers in the latest verified state.
+                let mut veto_state = st.clone();
+                veto_state.recorded.remove(target);
+                state::check_pending_veto(&veto_state, &stored.envelope, &rs, incoming)?;
                 let t = state::check_transition(&st, &stored.envelope, &rs, true, false)?;
                 let units: BTreeSet<_> = env
                     .signer_ids()
@@ -915,7 +1008,11 @@ fn admit_full(
                 // A veto that reaches the home after its own window is stored only when it comes
                 // with at least one in-window receipt from another current home, held already
                 // as for a forwarded transition (§13.1); the home signs no receipt of its own.
-                let late = now_ms > at.saturating_add(WINDOW) || now_ms > t.deadline_ms;
+                // §13.6 witnesses arrival within the veto's own window even after the
+                // transition's deadline. Such a receipt cannot make a late veto count:
+                // every reader still enforces that deadline at its recording entry.
+                let late = now_ms > at.saturating_add(WINDOW)
+                    || (!stopped && now_ms > t.deadline_ms);
                 // The receipt may be held already (forwarded before the veto), or come in the
                 // same batch as the veto: it is judged here either way, never through the
                 // buffer's capacity.
@@ -1231,8 +1328,19 @@ const OFF_BRANCH: usize = 4;
 /// [`kept_heads`] (plus `new_head`, when one was just admitted). The checkpoint is rebuilt from
 /// those objects, not merged with the old ones, so nothing dropped comes back; the head marks,
 /// the succession flag and the higher high-water mark are kept.
+fn verification_clock(p: &Persisted, now_ms: i64) -> i64 {
+    if p.stopped().is_some() {
+        p.objects().into_iter().flat_map(|o| &o.entries)
+            .filter_map(|b| parse_entry(b).ok().map(|e| e.issued))
+            .max().unwrap_or(now_ms).max(now_ms)
+    } else {
+        now_ms
+    }
+}
+
 fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64) -> Result<()> {
     let p = Persisted::from_bytes(&next.checkpoint)?;
+    let now_ms = verification_clock(&p, now_ms);
     let before = p.objects().cloned().unwrap_or_default();
     let mut heads = before.heads.clone();
     if let Some(h) = new_head {
@@ -1351,7 +1459,13 @@ fn admit_entry(
     // Verify authority and schema before home-side refusals; no invalid bytes enter storage.
     let verdict = verify_history(&objects, persisted, now_ms.max(entry.issued));
     if let Some(stop) = verdict.stop {
-        return Err(stop_failure(stop).into());
+        // The entry making a layout raise final is verified and retained. The next entry
+        // will be refused by the stopped-home gate, including in the same upload.
+        if !(verdict.stopped.is_some()
+            && verdict.state.as_ref().is_some_and(|s| s.history().last() == Some(&env.digest)))
+        {
+            return Err(stop_failure(stop).into());
+        }
     }
     if entry.issued > now_ms.saturating_add(60_000) {
         return Err(Refusal::Early);
@@ -1539,8 +1653,12 @@ fn admit_candidate(
         &Persisted::default(),
         now_ms.max(entry.issued),
     );
+    let stops_here = own.stopped.is_some()
+        && own.state.as_ref().is_some_and(|s| s.history().last() == Some(&entry.env.digest));
     if let Some(stop) = own.stop {
-        return Err(stop_failure(stop).into());
+        if !stops_here {
+            return Err(stop_failure(stop).into());
+        }
     }
     // An `activate` passes the same checks as on the branch (§13.1), judged on its own branch:
     // its transition valid and due there, no valid veto held, and the permanent late-activation
@@ -1556,7 +1674,10 @@ fn admit_candidate(
         ..Default::default()
     };
     let verdict = verify_history(&objects, persisted, now_ms.max(entry.issued));
-    let stands = verdict.stop.is_none()
+    let verified = verdict.stop.is_none()
+        || (verdict.stopped.is_some()
+            && verdict.state.as_ref().is_some_and(|s| s.on_branch_digest(entry.seq, &entry.env.digest)));
+    let stands = verified
         && usize::try_from(entry.seq - 1)
             .ok()
             .and_then(|i| verdict.branch.get(i))
@@ -1700,6 +1821,9 @@ pub fn admit_predecessor(
     now: &str,
 ) -> AdmitResult<HomeState> {
     let now_ms = date(now, "home clock")?;
+    if home.is_stopped(now_ms)? {
+        return Err(Failure::NewerFormat("the home is stopped; update it".into()).into());
+    }
     let (persisted, st, fork) = home.context_any(now_ms)?;
     if fork.is_some() {
         return Err(Failure::Refused(crate::v05::Reason::Fork).into());
@@ -2086,6 +2210,7 @@ pub fn admit_pending_batch(
     let mut next = home.clone();
     let mut results = Vec::new();
     let mut receipts = Vec::new();
+    let stopped = home.is_stopped(date(now, "home clock")?)?;
     // Transitions and vetoes first, in request order, each judged with the receipts of the
     // batch (a veto more than 300 s after its `issued` is stored with an in-window receipt of
     // it from another current home, §13.1, and that receipt may come in this very request);
@@ -2114,13 +2239,16 @@ pub fn admit_pending_batch(
             false,
         )
         .and_then(|env| {
-            require(
-                matches!(
+            if !matches!(
                     env.value.get("protocol").and_then(Value::as_str),
                     Some("colophon/transition/5" | "colophon/veto/5" | "colophon/receipt/5")
-                ),
-                "not a pending object",
-            )?;
+                ) {
+                return Err(if stopped {
+                    Failure::NewerFormat("the home is stopped; update it".into())
+                } else {
+                    malformed("not a pending object")
+                });
+            }
             Ok(env)
         });
         let result = match parsed {

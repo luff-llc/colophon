@@ -280,3 +280,13 @@ What is missing, and the smallest contract that would close it (a proposal, not 
   repository: APNs (a token-signing key and topic per app), FCM (a service account), e-mail (an
   SMTP or provider API key with a verified sender domain), webhooks (an allow-list, since an
   account would otherwise make the home call arbitrary addresses, finding L7 of the H1 check).
+
+## A stopped home
+
+An account that finalizes a raise above layout 2 stops a 0.5 home. The home keeps its
+stored data. Public history and the base endpoint remain readable. Head reads return
+503 with `Retry-After`; requests needing a call return 503 `{"result":"unavailable"}`,
+even without a call. New authority and other pending objects return 422 `newerFormat`.
+The home can still receipt timely vetoes and removal-only transitions anchored at or
+before its last verified entry, but records no further entries and signs no heads.
+Restarting does not clear the stop. Update the home to support the account's new layout.
