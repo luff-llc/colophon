@@ -1347,9 +1347,12 @@ pub(crate) fn check_transition(
         && control_met
         && every(&Role::Control)
         && (!cls.consent || every(&Role::Recover));
-    let rule = if control_met && cls.control_ok && consent_met {
+    let control_permits = control_met && cls.control_ok && consent_met;
+    let recovery_permits =
+        recovery_met && (cls.recovery_ok || (full_a && cls.recovery_ok_if_full));
+    let rule = if control_permits {
         Rule::Control
-    } else if recovery_met && (cls.recovery_ok || (full_a && cls.recovery_ok_if_full)) {
+    } else if recovery_permits {
         Rule::Recovery
     } else {
         return Err(bad_signature("the transition's rule or consent is not met"));
@@ -1368,10 +1371,10 @@ pub(crate) fn check_transition(
             }
         }
     }
-    let full_set = match rule {
-        Rule::Recovery => full_a,
-        Rule::Control => full_b,
-    };
+    // A full set when either definition holds and the rule it belongs to may make this
+    // transition (§8.7 "Full set"), whichever rule the transition is otherwise judged under: a
+    // full set (a) whose signers also meet the control rule is still a full set.
+    let full_set = (full_a && recovery_permits) || (full_b && control_permits);
     let max_v = all
         .iter()
         .map(|u| s.v.get(u).copied().unwrap_or(0))
