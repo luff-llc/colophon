@@ -68,7 +68,11 @@ function loadConfig(argv, env) {
     } : undefined,
     tracing: Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1',
     tickMs: Number(env.COLOPHON_RELAY_TICK_MS ?? config.tickMs ?? 2000),
-    resolve: config.resolve,
+    // Test builds only: another home's address read from a file at each use, so tests can start
+    // every relay on port 0 and tell each the others' ports afterwards (and after a restart).
+    resolve: clockFile && env.COLOPHON_RELAY_RESOLVE_FILE ? () => {
+      try { return JSON.parse(readFileSync(env.COLOPHON_RELAY_RESOLVE_FILE, 'utf8')); } catch { return config.resolve ?? {}; }
+    } : config.resolve,
     host: env.COLOPHON_RELAY_HOST ?? config.host ?? '127.0.0.1',
     port: Number(env.COLOPHON_RELAY_PORT ?? config.port ?? 8787),
     dataDir: env.COLOPHON_RELAY_DATA ?? config.dataDir ?? './relay-data',

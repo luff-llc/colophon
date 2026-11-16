@@ -227,10 +227,9 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     let scratch = Scratch::new("kill-loop");
     let dir = scratch.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
-    let port = free_port();
     let clock = |ms: i64| write_clock(&dir.join("clock"), ms);
     clock(T0 + 1_000);
-    let mut relay = start(&keys, &account, &dir, port);
+    let mut relay = start(&keys, &account, &dir, 0);
     // The first upload.
     let all = entries_json(&f);
     let values: Vec<&Value> = all.iter().map(|(_, e)| e).collect();
@@ -264,13 +263,13 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
         {
             inside += usize::from(relay.kill());
             kills += 1;
-            relay = start(&keys, &account, &dir, port);
+            relay = start(&keys, &account, &dir, 0);
             let _ = get_json(relay.port, "/head");
             inside += usize::from(relay.kill());
             kills += 1;
             startup_kills += 1;
-            relay = start(&keys, &account, &dir, port);
-            let serving = Relay::attached(port, BASE_A, &account, &dir).serving();
+            relay = start(&keys, &account, &dir, 0);
+            let serving = Relay::attached(relay.port, BASE_A, &account, &dir).serving();
             assert!(
                 serving.iter().any(|(from, through)| *from <= t && through.is_none_or(|e| e >= t)),
                 "round {k}: uptime at {t} is recorded after a kill before the first tick: {serving:?}"
@@ -281,7 +280,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
         let signers = if k % 3 == 2 { vec![d.clone(), p.clone()] } else { vec![d.clone()] };
         // The controller catches up with the home, then proposes a transition.
         let mut ctl = controller_engine(&f, &host, &src, &d, t);
-        let peer = Relay::attached(port, BASE_A, &account, &dir);
+        let peer = Relay::attached(relay.port, BASE_A, &account, &dir);
         let mut wire = RealRelay::new(&peer);
         let faults = relay_pass(&mut ctl, &src, &keys.id, &mut wire, &host, t);
         assert!(faults.is_empty(), "round {k}: {faults:?}");
@@ -307,17 +306,18 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             let delay = rnd(30_000);
             let sender = {
                 let body = post.clone();
+                let port = relay.port;
                 std::thread::spawn(move || try_http(port, "POST", "/pending", body.as_bytes()))
             };
             std::thread::sleep(std::time::Duration::from_micros(delay));
             inside += usize::from(relay.kill());
             kills += 1;
             let answered = sender.join().unwrap();
-            relay = start(&keys, &account, &dir, port);
+            relay = start(&keys, &account, &dir, 0);
             check(relay.port, &mut receipts, &admitted);
             // The client retries until it has the home's answer.
             if !answered.is_some_and(|(s, _)| s == 200) {
-                let retry = try_http(port, "POST", "/pending", post.as_bytes());
+                let retry = try_http(relay.port, "POST", "/pending", post.as_bytes());
                 assert_eq!(retry.map(|(s, _)| s), Some(200), "round {k}: the retry");
             }
             admitted.insert(digest.clone(), "transitions");
@@ -329,7 +329,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
         let vetoed = k % 3 == 1;
         if vetoed {
             clock(t + 2_000);
-            let peer = Relay::attached(port, BASE_A, &account, &dir);
+            let peer = Relay::attached(relay.port, BASE_A, &account, &dir);
             let mut wire = RealRelay::new(&peer);
             let faults = relay_pass(&mut ctl, &src, &keys.id, &mut wire, &host, t + 2_000);
             assert!(faults.is_empty(), "round {k}: {faults:?}");
@@ -350,16 +350,17 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             let delay = rnd(30_000);
             let sender = {
                 let body = post.clone();
+                let port = relay.port;
                 std::thread::spawn(move || try_http(port, "POST", "/pending", body.as_bytes()))
             };
             std::thread::sleep(std::time::Duration::from_micros(delay));
             inside += usize::from(relay.kill());
             kills += 1;
             let answered = sender.join().unwrap();
-            relay = start(&keys, &account, &dir, port);
+            relay = start(&keys, &account, &dir, 0);
             check(relay.port, &mut receipts, &admitted);
             if !answered.is_some_and(|(s, _)| s == 200) {
-                let retry = try_http(port, "POST", "/pending", post.as_bytes());
+                let retry = try_http(relay.port, "POST", "/pending", post.as_bytes());
                 assert_eq!(retry.map(|(s, _)| s), Some(200), "round {k}: the veto's retry");
             }
             admitted.insert(veto_digest, "vetoes");
@@ -371,7 +372,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             std::thread::sleep(std::time::Duration::from_micros(rnd(40_000)));
             inside += usize::from(relay.kill());
             kills += 1;
-            relay = start(&keys, &account, &dir, port);
+            relay = start(&keys, &account, &dir, 0);
             check(relay.port, &mut receipts, &admitted);
         }
         // Due: the home records `activate`, signs a head, then records `final` (or, vetoed, the
@@ -382,7 +383,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
             std::thread::sleep(std::time::Duration::from_micros(rnd(120_000)));
             inside += usize::from(relay.kill());
             kills += 1;
-            relay = start(&keys, &account, &dir, port);
+            relay = start(&keys, &account, &dir, 0);
             check(relay.port, &mut receipts, &admitted);
         }
         // A real clock moves on: a head over the `activate` needs an `issued` after the head
@@ -409,7 +410,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
         // the listing, across one more restart.
         inside += usize::from(relay.kill());
         kills += 1;
-        relay = start(&keys, &account, &dir, port);
+        relay = start(&keys, &account, &dir, 0);
         let entries = check(relay.port, &mut receipts, &admitted);
         assert!(settled_by(&entries).contains(&digest), "round {k}: settled");
         eprintln!("kill loop: round {k} done, {kills} kills so far ({inside} inside record_due), {:?}", started.elapsed());

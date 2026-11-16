@@ -33,8 +33,6 @@ struct World {
     kb: HomeKeys,
     ha: String,
     hb: String,
-    pa: u16,
-    pb: u16,
     src: MemSource,
     /// Removed when the world is dropped (declared last: the relays stop first).
     scratch: Vec<Scratch>,
@@ -51,23 +49,30 @@ fn world(name: &str, history: &str, quorum: u64, two: bool, run_b: bool) -> Opti
     } else {
         appoint_homes(&mut f, &[(&ka, BASE_A)]);
     }
-    let (pa, pb) = (free_port(), free_port());
     let account = f.account.id().as_str().to_string();
     let scratch = vec![Scratch::new(&format!("h2-{name}-a")), Scratch::new(&format!("h2-{name}-b"))];
-    let a = Relay::start_on(&ka, &account, BASE_A, scratch[0].path(), T0, &[(BASE_B, pb)], pa);
+    let a = Relay::start_on(&ka, &account, BASE_A, scratch[0].path(), T0, &[(BASE_B, CLOSED_PORT)], 0);
     first_upload(&a, &f, T0 + 1_000);
     let b = run_b.then(|| {
-        let b = Relay::start_on(&kb, &account, BASE_B, scratch[1].path(), T0, &[(BASE_A, pa)], pb);
+        let b = Relay::start_on(&kb, &account, BASE_B, scratch[1].path(), T0, &[(BASE_A, a.port)], 0);
+        a.set_resolve(&[(BASE_B, b.port)]);
         first_upload(&b, &f, T0 + 1_000);
         b
     });
     let src = MemSource::new();
     src.store_account(&f.account);
     let host = std::mem::replace(&mut f.host, Host::new());
-    Some(World { host, src, ha: ka.id.clone(), hb: kb.id.clone(), f, a, b, ka, kb, pa, pb, scratch })
+    Some(World { host, src, ha: ka.id.clone(), hb: kb.id.clone(), f, a, b, ka, kb, scratch })
 }
 
 impl World {
+    /// Tell each running home where the other now listens (after a start or a restart).
+    fn link(&self) {
+        if let Some(b) = &self.b {
+            self.a.set_resolve(&[(BASE_B, b.port)]);
+            b.set_resolve(&[(BASE_A, self.a.port)]);
+        }
+    }
     fn clocks(&self, ms: i64) {
         self.a.set_clock(ms);
         if let Some(b) = &self.b {
@@ -367,7 +372,8 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     assert_eq!(got, both);
     // The fork and its evidence are durable: B killed and started again still holds both.
     let rb = w.b.take().unwrap();
-    w.b = Some(rb.restart(&HomeKeys::new(0x78), t + 7_000, &[(BASE_A, w.pa)]));
+    w.b = Some(rb.restart(&HomeKeys::new(0x78), t + 7_000, &[(BASE_A, w.a.port)]));
+    w.link();
     let b = w.b.as_ref().unwrap();
     let mut got = at_seq(b, n);
     got.sort();
@@ -471,17 +477,25 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     pass_without_calls(&mut ctl_new, &src_new, &w.hb, &mut wire, &w.host, now + 1);
     assert_eq!(ctl_new.account().status().code, "ok");
     assert_eq!(ctl_new.account().head(), ctl_b.account().head());
-    // The device whose entry after X lost to the resolution sees the conflict at that seq: B's
-    // head names the `activate` there (the engine reports it; its host signs again, §8.6).
-    let faults = relay_pass(&mut ctl_x, &w.src, &w.hb, &mut wire, &w.host, now + 2);
-    // (Through the head, `refused:fork`; or, when B answers 503 for a head due at that instant or
-    // its head names a later entry the device cannot link to, through the push of its entry,
-    // which B, not the primary, does not take: 409, or 421 naming the primary.)
+    // The device whose entry after X lost to the resolution sees the conflict at that seq, at the
+    // primary (A), which takes immediate entries: through the head, `refused:fork` or a head
+    // naming the `activate` there, or through the push of its entry, 409 (the engine reports it;
+    // its host signs again, §8.6). The clock moves between passes, so a head due at one instant
+    // (503) is signed by the next.
     use colophon_core::v05::engine::exchange::Fault;
-    assert!(
-        faults.iter().any(|f| matches!(f, Fault::Fork { .. } | Fault::Conflict { .. } | Fault::Redirect { .. })),
-        "{faults:?}"
-    );
+    let mut seen = Vec::new();
+    for i in 0..20 {
+        let at = now + 2 + i * 1_000;
+        w.clocks(at);
+        let faults = relay_pass(&mut ctl_x, &w.src, &w.ha, &mut wire, &w.host, at);
+        if faults.iter().any(|f| matches!(f, Fault::Fork { .. } | Fault::Conflict { .. })) {
+            seen.clear();
+            break;
+        }
+        seen.push(faults);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(seen.is_empty(), "the device never saw the conflict: {seen:?}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -566,12 +580,13 @@ fn a_late_veto_is_stored_with_another_homes_in_window_receipt_and_signs_none() {
     // A comes back 400 s after the veto's `issued`: alone, the veto is late.
     let late = issued + 400_000;
     let a = std::mem::replace(&mut w.a, Relay::attached(0, BASE_A, "", w.scratch[0].path()));
-    w.a = restart_home(a, &ka, late, (BASE_B, w.pb));
+    w.a = restart_home(a, &ka, late, (BASE_B, CLOSED_PORT));
     let (s, out) = w.a.post("/pending", &json!({"objects": [veto.clone()]}));
     assert_eq!((s, out), (422, json!(["refused:late"])), "alone, the late veto is refused");
     assert_eq!(w.a.get(&format!("/pending/{dv}")).0, 404, "and not stored");
     // B comes back and forwards the veto with its receipt: A stores it, and signs nothing.
-    w.b = Some(restart_home(b, &kb, late, (BASE_A, w.pa)));
+    w.b = Some(restart_home(b, &kb, late, (BASE_A, w.a.port)));
+    w.link();
     eventually("A stores the late veto", 20, || w.a.get(&format!("/pending/{dv}")).0 == 200);
     let (s, file) = w.a.get(&format!("/records/vetoes/{dv}.json"));
     assert_eq!((s, digest_of(&serde_json::from_slice(&file).unwrap())), (200, dv.clone()), "stored and served");
@@ -635,7 +650,8 @@ fn an_offline_home_catches_up_from_a_device_and_signs_heads_again() {
     // B comes back 20 minutes later.
     let back = t + 1_200_000;
     w.a.set_clock(back);
-    w.b = Some(b.restart(&kb, back, &[(BASE_A, w.pa)]));
+    w.b = Some(b.restart(&kb, back, &[(BASE_A, w.a.port)]));
+    w.link();
     let b = w.b.as_ref().unwrap();
     watch_heads(&mut seen, b);
     eventually("A's head reaches B", 20, || {
@@ -693,7 +709,8 @@ fn a_home_that_was_down_during_a_window_stores_the_activate_it_never_saw() {
     assert_eq!(kinds_at(&w.a)[n], "activate");
     let back = t + HOUR + 500_000;
     w.a.set_clock(back);
-    w.b = Some(b.restart(&kb, back, &[(BASE_A, w.pa)]));
+    w.b = Some(b.restart(&kb, back, &[(BASE_A, w.a.port)]));
+    w.link();
     let b = w.b.as_ref().unwrap();
     let e = entries(&w.a);
     let (s, out) = b.post("/authority", &json!({"from": n + 1, "entries": [e[n]], "receipts": []}));
@@ -762,7 +779,8 @@ fn a_head_due_to_be_replaced_is_not_forwarded() {
     assert_eq!(s, 200, "{out}");
     assert_eq!(w.a.get("/head").0, 503, "due, and cannot be signed at T");
     // B comes up; A's scheduler forwards to it for a while.
-    let b = Relay::start_on(&kb, &account, BASE_B, w.scratch[1].path(), t, &[(BASE_A, w.pa)], w.pb);
+    let b = Relay::start_on(&kb, &account, BASE_B, w.scratch[1].path(), t, &[(BASE_A, w.a.port)], 0);
+    w.a.set_resolve(&[(BASE_B, b.port)]);
     first_upload(&b, &w.f, t);
     std::thread::sleep(std::time::Duration::from_millis(800));
     assert_eq!(b.get(&format!("/records/heads/{}.json", w.ha)).0, 404, "no stale head was forwarded");
@@ -837,9 +855,9 @@ fn a_home_that_recorded_final_first_gives_its_peer_the_entry() {
     }
     let n = kinds_at(&w.a).len();
     // A restarted unable to reach B (B's endpoint resolves to a closed port); B reaches A.
-    let dead = free_port();
     let a = std::mem::replace(&mut w.a, Relay::attached(0, BASE_A, "", w.scratch[0].path()));
-    w.a = a.restart(&ka, t + 2_000, &[(BASE_B, dead)]);
+    w.a = a.restart(&ka, t + 2_000, &[(BASE_B, CLOSED_PORT)]);
+    w.b.as_ref().unwrap().set_resolve(&[(BASE_A, w.a.port)]);
     let due = t + 1_000 + 300_000 + HOUR;
     w.clocks(due);
     eventually("activate and final at A", 30, || {
@@ -851,11 +869,155 @@ fn a_home_that_recorded_final_first_gives_its_peer_the_entry() {
     assert_eq!(kinds_at(b).len(), n + 1, "B holds the activate and no final: it lacks A's head over the activation");
     // A can reach B again; its clock moves on, so nothing here rests on a frozen clock.
     let a = std::mem::replace(&mut w.a, Relay::attached(0, BASE_A, "", w.scratch[0].path()));
-    w.a = a.restart(&ka, due + 5_000, &[(BASE_B, w.pb)]);
+    w.a = a.restart(&ka, due + 5_000, &[(BASE_B, w.b.as_ref().unwrap().port)]);
+    w.link();
     let b = w.b.as_ref().unwrap();
     eventually("B's final", 30, || {
         b.set_clock(due + 6_000);
         kinds_at(b).len() > n + 1
     });
     assert_eq!(entries(b)[..n + 2], entries(&w.a)[..n + 2], "the same history at both homes");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The check of the forwarding fix (2026-11-16), finding 2: homes on different branches exchange
+// candidates (§13.1) and reach the same verdict.
+
+/// A and B both receipt a transition T. B is down while the primary A takes an immediate entry X
+/// at seq n before T is due; then A records T's `activate` after X. B comes back unable to reach
+/// A and records its own `activate` R at seq n. Once they reach each other, each home's latest
+/// head of the other names an entry its own branch lacks at seq n. A forwards its branch from n
+/// with its head first; under §8.6 rule 1, X (covered by the primary's head, issued before T's due
+/// time) stands against R, so B takes X and follows A's history. Before the fix neither home sent
+/// anything: B stayed on R for ever.
+#[test]
+fn homes_on_different_branches_exchange_candidates_and_converge() {
+    let Some(mut w) = world("exchange", "public", 1, true, true) else {
+        return;
+    };
+    let kb = HomeKeys::new(0x78);
+    let t = NOW;
+    w.clocks(t);
+    let mut ctl = w.controller(t);
+    let tr = propose_by(&w, &mut ctl, 600, &[w.f.d.clone()]);
+    let env = pending_env(&ctl, &tr);
+    for r in [&w.a, w.b.as_ref().unwrap()] {
+        let (s, out) = r.post("/pending", &json!({"objects": [env.clone()]}));
+        assert_eq!(s, 200, "{out}");
+        assert!(out["receipts"][0].is_object(), "each home receipts T in its window: {out}");
+    }
+    // B goes down; A cannot reach it either way.
+    let mut b = w.b.take().unwrap();
+    b.stop();
+    w.a.set_resolve(&[(BASE_B, CLOSED_PORT)]);
+    // X at the primary, before T is due.
+    w.a.set_clock(t + 2_000);
+    let (n, x) = approve(&w.f, &mut w.host, &mut ctl, &w.src, 36, t + 2_000);
+    let dx = digest_of(&x);
+    let (s, out) = w.a.post("/authority", &json!({"from": n, "entries": [x], "receipts": []}));
+    assert_eq!(s, 200, "{out}");
+    // Due: A records the activate after X; B, back but unable to reach A, records its own at n.
+    let due = t + 300_000 + HOUR + 1_000;
+    w.a.set_clock(due);
+    eventually("A's activate after X", 30, || kinds_at(&w.a).get(n as usize) == Some(&"activate".to_string()));
+    w.b = Some(b.restart(&kb, due, &[(BASE_A, CLOSED_PORT)]));
+    let b = w.b.as_ref().unwrap();
+    eventually("B's own activate at n", 30, || kinds_at(b).get(n as usize - 1) == Some(&"activate".to_string()));
+    let r_at_b = digest_of(&entries(b)[n as usize - 1]);
+    assert_ne!(r_at_b, dx);
+    // They reach each other again: B comes to follow A's branch.
+    w.link();
+    eventually("B takes X and A's history", 30, || {
+        w.clocks(due + 5_000);
+        let (ea, eb) = (entries(&w.a), entries(b));
+        eb.len() >= n as usize && digest_of(&eb[n as usize - 1]) == dx && eb == ea
+    });
+    let tick = std::cell::Cell::new(due + 6_000);
+    eventually("B's head over A's history", 30, || {
+        tick.set(tick.get() + 1_000);
+        w.clocks(tick.get());
+        let last = entries(&w.a).len() as u64;
+        head_at(b).is_some_and(|(s, _, _)| s == last)
+    });
+    // A still serves its own branch, unchanged.
+    assert_eq!(digest_of(&entries(&w.a)[n as usize - 1]), dx);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The check of the forwarding fix, finding 3: one slow peer does not hold up forwarding to the
+// others.
+
+/// Three homes: A and B relays, C a peer that accepts connections and never answers. A holds a
+/// backlog of objects C has not taken (two transitions and their receipts), re-offered every
+/// pass. A new transition reaches A just as A starts an offer to C: B has it well inside its
+/// 300 s window (within 3 s here). Before the fix A forwarded to its peers one after another in
+/// one pass, every offer to C waiting out its 5 s time limit, so B waited for C's whole backlog.
+#[test]
+fn a_silent_peer_does_not_hold_up_forwarding_to_the_others() {
+    if prerequisites().is_none() {
+        return;
+    }
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let (ka, kb, kc) = (HomeKeys::new(0x77), HomeKeys::new(0x78), HomeKeys::new(0x7a));
+    let mut f = create_with(&[NS], "public", 1);
+    const BASE_C: &str = "https://home-c.example";
+    appoint_homes(&mut f, &[(&ka, BASE_A), (&kb, BASE_B), (&kc, BASE_C)]);
+    // C: connections are accepted (by the kernel, and here) and never answered. Only A reaches
+    // it (B's address for C is a closed port), so each connection here is one of A's offers.
+    let silent = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let pc = silent.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    {
+        let accepted = accepted.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for s in silent.incoming().flatten() {
+                held.push(s);
+                accepted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    }
+    let account = f.account.id().as_str().to_string();
+    let scratch = vec![Scratch::new("h2-silent-a"), Scratch::new("h2-silent-b")];
+    let a = Relay::start_on(&ka, &account, BASE_A, scratch[0].path(), T0, &[(BASE_C, pc)], 0);
+    let b = Relay::start_on(&kb, &account, BASE_B, scratch[1].path(), T0, &[(BASE_A, a.port), (BASE_C, CLOSED_PORT)], 0);
+    a.set_resolve(&[(BASE_B, b.port), (BASE_C, pc)]);
+    first_upload(&a, &f, T0 + 1_000);
+    first_upload(&b, &f, T0 + 1_000);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let host = std::mem::replace(&mut f.host, Host::new());
+    let t = NOW;
+    a.set_clock(t);
+    b.set_clock(t);
+    let mut ctl = controller_engine(&f, &host, &src, &f.d.clone(), t);
+    let propose = |ctl: &mut Engine<MemSource>, window: u64, by: &[String]| -> Value {
+        let had: Vec<String> = ctl.account().pending().iter().map(|t| t.digest.clone()).collect();
+        let action = ctl
+            .account()
+            .begin_transition(&Change::policy(json!({"callWindow": window})), by, TransitionRule::Control)
+            .unwrap();
+        engine_finish(ctl, &host, &src, action);
+        let d = ctl.account().pending().iter().map(|t| t.digest.clone()).find(|d| !had.contains(d)).unwrap();
+        pending_env(ctl, &d)
+    };
+    // The backlog: two transitions at A, which C never takes.
+    for (i, by) in [vec![f.d.clone()], vec![f.d.clone()]].iter().enumerate() {
+        let env = propose(&mut ctl, 600 + i as u64, by);
+        assert_eq!(a.post("/pending", &json!({"objects": [env]})).0, 200);
+    }
+    eventually("A has offered C its backlog", 30, || accepted.load(Ordering::SeqCst) >= 2);
+    // A new transition, from the other unit, posted just as A opens another connection to C.
+    let env = propose(&mut ctl, 700, &[f.p.clone()]);
+    let d3 = digest_of(&env);
+    let seen = accepted.load(Ordering::SeqCst);
+    eventually("A starts another offer to C", 30, || accepted.load(Ordering::SeqCst) > seen);
+    assert_eq!(a.post("/pending", &json!({"objects": [env]})).0, 200);
+    let posted = std::time::Instant::now();
+    eventually("B holds the new transition", 30, || b.get(&format!("/pending/{d3}")).0 == 200);
+    let took = posted.elapsed();
+    assert!(took < std::time::Duration::from_secs(3), "B waited {took:?} for a transition A held");
+    drop((a, b));
+    drop(scratch);
 }
