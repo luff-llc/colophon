@@ -1,0 +1,1 @@
+{"description":"The same appointment without `shares`: the transition activates and the second home is added.","expected":{"result":"ok","seq":4},"sections":["8.7","9.3"],"verifier":{"now":"2026-11-14T09:06:00Z"}}

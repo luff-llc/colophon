@@ -1162,7 +1162,10 @@ any other), never as not kept. A record that cites the
 revocation seq or later is refused `revoked` whatever the walk says (§11.5 step 3). The approver's host computes `kept` and `heads` from every record it holds, including
 every fork head (up to 16) so no branch is lost. A live-stamped header (a retained live copy
 under `ops/`, §11.2) is outside the author chain: the host never selects one as a maximal head,
-and a `heads` item that names a held live-stamped header makes the `revoke` `malformed`. To keep
+and a `heads` item that names a held live-stamped header starts no walk and is not an error, as
+one naming another author's header: a live copy is kept only by being listed in `kept` (or reached
+through `previous` from a header a walk follows), never by a verdict that depends on which records
+a verifier holds. To keep
 everything, the host lists in `kept` every `/3` header of the member and every live-stamped
 header of it that no walk from the selected heads reaches. `kept` is bounded only by the entry's
 body (§2.4), about 15,400 digests with room for the rest of the entry; a revocation that would
