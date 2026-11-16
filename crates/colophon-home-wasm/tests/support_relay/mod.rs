@@ -466,13 +466,22 @@ pub fn first_upload(relay: &Relay, f: &Fixture, now_ms: i64) {
     }
 }
 
-/// A free local port (bound and released: a short race, accepted in a test).
+/// A free local port for a relay whose port must be known before it starts (two homes name each
+/// other's). Taken from 20000–29999, below the systems' ephemeral ranges (Linux 32768–60999,
+/// macOS 49152–65535), where the relays started on port 0 by the other tests running in parallel
+/// get theirs: before, a port picked by binding port 0 and releasing it was sometimes taken by such
+/// a relay before this one started (EADDRINUSE). Each process walks its own stretch of the range.
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let base = 20_000 + (std::process::id() % 125) * 80;
+    loop {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let port = (base + n % 80) as u16;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+        assert!(n < 10_000, "no free port in this process's stretch");
+    }
 }
 
 /// Wait until `f` holds, polling; panics with `what` after `secs` seconds.
