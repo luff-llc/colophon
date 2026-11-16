@@ -26,7 +26,7 @@ struct BuildDefaults {
                              provisioner: value("ColophonProvisioner", ""),
                              relyingParty: value("ColophonRelyingParty", "id.toolsperson.com"),
                              stagingPrefix: value("ColophonStagingPrefix", "https://colophon.toolsperson.com/v1/libraries/"),
-                             stagingProvisioner: value("ColophonStagingProvisioner", ""))
+                             stagingProvisioner: value("ColophonStagingProvisioner", "https://colophon.toolsperson.com/v1/provision"))
     }()
 }
 

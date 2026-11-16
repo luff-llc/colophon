@@ -26,9 +26,9 @@ android {
         buildConfigField("String", "PROVISIONER", quoted(setting("COLOPHON_PROVISIONER", "http://127.0.0.1:8791/provision")))
         // The WebAuthn relying party of the person's passkey.
         buildConfigField("String", "RELYING_PARTY", quoted(setting("COLOPHON_RELYING_PARTY", "id.toolsperson.com")))
-        // The staging home, reached directly; its home service is not deployed yet.
+        // The staging home, reached directly, and its home service (provisioning).
         buildConfigField("String", "STAGING_PREFIX", quoted(setting("COLOPHON_STAGING_PREFIX", "https://colophon.toolsperson.com/v1/libraries/")))
-        buildConfigField("String", "STAGING_PROVISIONER", quoted(setting("COLOPHON_STAGING_PROVISIONER", "")))
+        buildConfigField("String", "STAGING_PROVISIONER", quoted(setting("COLOPHON_STAGING_PROVISIONER", "https://colophon.toolsperson.com/v1/provision")))
     }
     buildFeatures { buildConfig = true }
     compileOptions {

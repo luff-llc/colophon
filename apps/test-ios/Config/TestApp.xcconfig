@@ -11,6 +11,6 @@ COLOPHON_PROVISIONER = http:/$()/127.0.0.1:8791/provision
 // The WebAuthn relying party of the person's passkey (the staging identity host).
 COLOPHON_RELYING_PARTY = id.toolsperson.com
 // The staging home's prefix, offered by the setup screen's "Use staging" button (reached directly, no reach URL).
-// Its home service (provisioning) is not deployed; until it is, set the home service URL by hand.
+// Its home service provisions a slot with the same request as apps/test-home (POST {"slot","base","account"}).
 COLOPHON_STAGING_PREFIX = https:/$()/colophon.toolsperson.com/v1/libraries/
-COLOPHON_STAGING_PROVISIONER =
+COLOPHON_STAGING_PROVISIONER = https:/$()/colophon.toolsperson.com/v1/provision

@@ -45,9 +45,10 @@ line or with the `COLOPHON_*` environment variables the build script passes thro
 | Home service token | (none) | The token `colophon-test-home` prints at start-up; it refuses requests without it. |
 | Relying party (build only) | `id.toolsperson.com` | The passkey's WebAuthn relying party. |
 
-"Use staging" fills `https://colophon.toolsperson.com/v1/libraries/` (`COLOPHON_STAGING_PREFIX`) and empties "Reach
-over". The staging home and its home service are not deployed; until a home service exists there, an account cannot be
-created against staging (joining one would work).
+"Use staging" fills `https://colophon.toolsperson.com/v1/libraries/` (`COLOPHON_STAGING_PREFIX`), empties "Reach
+over" and sets "Home service" to `https://colophon.toolsperson.com/v1/provision` (`COLOPHON_STAGING_PROVISIONER`), which
+takes the same `{"slot","base","account"}` request as `apps/test-home` and gives the same answer. Requests carry
+`Content-Length` (the staging home refuses a chunked body with 411). These apps have not yet been run against staging.
 
 ## Use it
 
@@ -80,8 +81,10 @@ scripted runs.
 
 ## Passkeys on a real iPhone
 
-ASAuthorization only offers a passkey for a relying party whose domain lists the app. For `id.toolsperson.com` Mike must
-host `https://id.toolsperson.com/.well-known/apple-app-site-association` (served as `application/json`, no redirect):
+ASAuthorization only offers a passkey for a relying party whose domain lists the app. The association file for
+`works.luff.colophon.testapp` is now live on `id.toolsperson.com`
+(`https://id.toolsperson.com/.well-known/apple-app-site-association`, served as `application/json`, no redirect), in
+this form:
 
 ```json
 {"webcredentials": {"apps": ["<TEAMID>.works.luff.colophon.testapp"]}}
@@ -93,8 +96,8 @@ build. In the Simulator without them, "Create with a passkey" fails with the pla
 
 ## What is not implemented or not proven
 
-* Passkey creation has not run: there is no associated domain in this repository, and the Simulator cannot do it without
-  one. The software owner key path is what the UI test runs.
+* Passkey creation has not run: the association file is live, but the entitlement and a signing team are not in this
+  repository and no signed device build was made. The software owner key path is what the UI test runs.
 * The camera scanner (VisionKit) is not available in the Simulator; only paste and links were exercised.
 * A joined device is a member only: it cannot approve, revoke or veto (adding it as a second controller with the seed
   transfer is not built).

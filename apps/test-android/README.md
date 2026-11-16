@@ -44,7 +44,7 @@ environment variables the build script passes through):
 | Home service | `http://127.0.0.1:8791/provision` |
 | Home service token | none: the token `colophon-test-home` prints at start-up |
 | Relying party (build only) | `id.toolsperson.com` |
-| Staging ("Use staging") | `https://colophon.toolsperson.com/v1/libraries/`, reached directly; its home service is not deployed |
+| Staging ("Use staging") | `https://colophon.toolsperson.com/v1/libraries/`, reached directly, with the home service `https://colophon.toolsperson.com/v1/provision` (same request and answer as `apps/test-home`; requests carry `Content-Length`, a chunked body is refused 411). Not yet run against staging. |
 
 ## Use it
 
@@ -64,8 +64,8 @@ sync every 15 s while it is in front. Debug builds mirror the log and the last i
 
 ## Passkeys on a real phone
 
-Credential Manager offers a passkey for `id.toolsperson.com` only if that domain lists the app. Mike must host
-`https://id.toolsperson.com/.well-known/assetlinks.json`:
+Credential Manager offers a passkey for `id.toolsperson.com` only if that domain lists the app. The asset links file for
+`works.luff.colophon.testapp` is now live at `https://id.toolsperson.com/.well-known/assetlinks.json`, in this form:
 
 ```json
 [{"relation": ["delegate_permission/common.handle_all_urls", "delegate_permission/common.get_login_creds"],
@@ -79,7 +79,8 @@ signing key for test builds, kept outside the repository). The controller's `aut
 
 ## What is not implemented or not proven
 
-* Passkey creation has not run (no asset links for this app exist; the emulator has no passkey provider set up). The
+* Passkey creation has not run: the asset links file is live, but no APK signed with the listed key was built, and the
+  emulator has no passkey provider set up. The
   Keystore owner key path is what the UI test runs.
 * The camera scanner (camera2 and ZXing) was built but not exercised: the emulator's camera is a virtual scene. Paste
   and links were used.

@@ -422,7 +422,7 @@ class MainActivity : Activity() {
             d.row("Last synced", s.lastSyncedMs?.let { time.format(Date(it)) } ?: "never")
             d.row("Session error", s.lastError ?: "none")
             d.row("Home faults", s.homeFaults.joinToString("\n") { AppModel.describe(it) }.ifEmpty { "none" })
-            d.row("Home issues", s.homeIssues.joinToString("\n") { "${it.home.take(8)}: ${it.problem}" }.ifEmpty { "none" })
+            d.row("Home issues", s.homeIssues.joinToString("\n") { "${it.home.take(8)}: ${AppModel.describe(it.problem)}" }.ifEmpty { "none" })
             d.row("Held / refused notes", "${model.heldRefused.first} / ${model.heldRefused.second}")
             if (s.notices.noHome) d.text("This account has no home.", color = Color.RED)
             if (s.duties.soleDevice) d.text("This account has one control key: a stolen device could not be vetoed.", 12f)

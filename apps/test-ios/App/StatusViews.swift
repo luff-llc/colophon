@@ -145,7 +145,7 @@ struct StatusView: View {
             row("Last synced", session.lastSynced?.formatted(date: .abbreviated, time: .standard) ?? "never")
             row("Session error", session.lastError ?? "none")
             row("Home faults", session.homeFaults.map(AppModel.describe).joined(separator: "\n").ifEmpty("none"))
-            row("Home issues", session.homeIssues.map { "\($0.home.prefix(8)): \($0.problem)" }.joined(separator: "\n").ifEmpty("none"))
+            row("Home issues", session.homeIssues.map { "\($0.home.prefix(8)): \(AppModel.describe($0.problem))" }.joined(separator: "\n").ifEmpty("none"))
             row("Held / refused notes", "\(model.heldAndRefused.held) / \(model.heldAndRefused.refused)")
             if session.notices.noHome { Text("This account has no home.").foregroundStyle(.red) }
             if session.duties.soleDevice { Text("This account has one control key: a stolen device could not be vetoed.").font(.caption) }

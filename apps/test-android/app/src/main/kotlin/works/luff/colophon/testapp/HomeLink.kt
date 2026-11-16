@@ -107,6 +107,8 @@ object Provisioner {
             connection.setRequestProperty("Content-Type", "application/json")
             if (token.isNotEmpty()) connection.setRequestProperty("Authorization", "Bearer $token")
             val body = JSONObject().put("slot", slot).put("base", base).put("account", account).toString().toByteArray()
+            // A fixed length, never a chunked body: the staging home refuses chunked requests (411).
+            connection.setFixedLengthStreamingMode(body.size)
             connection.outputStream.use { it.write(body) }
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream

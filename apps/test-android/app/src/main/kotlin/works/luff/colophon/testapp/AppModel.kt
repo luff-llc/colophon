@@ -17,6 +17,7 @@ import com.luff.colophon.session.DomainCommand
 import com.luff.colophon.session.FolderMedium
 import com.luff.colophon.session.HomeConfiguration
 import com.luff.colophon.session.HomeFault
+import com.luff.colophon.session.HomeProblem
 import com.luff.colophon.session.MediumWrite
 import com.luff.colophon.session.ObservedRevision
 import com.luff.colophon.session.SecretBytes
@@ -76,6 +77,12 @@ class AppModel(private val app: Context) {
         const val DEVICE_KEY_ALIAS = "$PREFIX.device-key"
         const val ATTEMPT_LIMIT = 5
         fun message(e: Throwable): String = "${e.javaClass.simpleName}: ${e.message ?: ""}".trim()
+        /** A home problem in words: a home's refusal of this device's call is the home's claim, not a verified revocation. */
+        fun describe(p: HomeProblem): String = when (p) {
+            is HomeProblem.RemoteCallRefused -> "the home refused this device's call (${if (ResultCode.isValid(p.code)) p.code else "no result"}): the home's claim, not a verified revocation; local notes and keys are unchanged"
+            HomeProblem.StillWaiting -> "a pass could not finish: the engine was still waiting"
+            else -> p.toString()
+        }
         fun describe(f: HomeFault): String = with(f.fault) {
             "$kind" + (status?.let { " $it" } ?: "") + (code?.let { " $it" } ?: "") + (why?.let { " ($it)" } ?: "")
         }
@@ -154,7 +161,7 @@ class AppModel(private val app: Context) {
                 if (before?.lastError != now.lastError && now.lastError != null) record("session error: ${now.lastError}")
                 if (before?.syncState != now.syncState) record("sync state ${now.syncState}")
                 if (before?.homeFaults != now.homeFaults) record("home faults: ${now.homeFaults.joinToString("; ") { describe(it) }.ifEmpty { "none" }}")
-                if (before?.homeIssues != now.homeIssues) record("home issues: ${now.homeIssues.joinToString("; ") { "${it.problem}" }.ifEmpty { "none" }}")
+                if (before?.homeIssues != now.homeIssues) record("home issues: ${now.homeIssues.joinToString("; ") { describe(it.problem) }.ifEmpty { "none" }}")
                 if (before?.notices?.pending?.size != now.notices.pending.size) record("pending changes: ${now.notices.pending.size}")
                 if (before?.members?.size != now.members.size) record("members: ${now.members.size}")
                 if (before?.requests?.size != now.requests.size) record("requests waiting: ${now.requests.size}")
@@ -349,7 +356,7 @@ class AppModel(private val app: Context) {
         val session = session ?: return
         val ok = session.syncNow()
         val faults = session.homeFaults.map { describe(it) }
-        val issues = session.homeIssues.map { "${it.problem}" }
+        val issues = session.homeIssues.map { describe(it.problem) }
         val sighting = observer.snapshot()
         val parts = mutableListOf("phase ${session.phase}", "sync state ${session.state.value.syncState}")
         if (faults.isNotEmpty()) parts += "faults: " + faults.joinToString("; ")

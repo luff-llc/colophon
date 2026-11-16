@@ -101,10 +101,20 @@ struct SyncOutcome: Sendable {
         if before?.error != now.1, let error = now.1 { record("session error: \(error)") }
         if before?.sync != now.2 { record("sync state \(now.2)") }
         if before?.faults != now.3 { record("home faults: \(session.homeFaults.map(Self.describe).joined(separator: "; ").ifEmpty("none"))") }
-        if before?.issues != now.4 { record("home issues: \(session.homeIssues.map { "\($0.problem)" }.joined(separator: "; ").ifEmpty("none"))") }
+        if before?.issues != now.4 { record("home issues: \(session.homeIssues.map { Self.describe($0.problem) }.joined(separator: "; ").ifEmpty("none"))") }
         if before?.pending != now.5 { record("pending changes: \(now.5)") }
         if before?.members != now.6 { record("members: \(now.6)") }
         if before?.requests != now.7 { record("requests waiting: \(now.7)") }
+    }
+    /// A home problem in words. A home's refusal of this device's call is shown as what it is: the home's claim, not a
+    /// verified revocation.
+    static func describe(_ problem: HomeProblem) -> String {
+        switch problem {
+        case .remoteCallRefused(let code):
+            "the home refused this device's call (\(ResultCode.isValid(code) ? code : "no result")): the home's claim, not a verified revocation; local notes and keys are unchanged"
+        case .stillWaiting: "a pass could not finish: the engine was still waiting"
+        default: "\(problem)"
+        }
     }
     static func describe(_ fault: HomeFault) -> String {
         let f = fault.fault
@@ -397,7 +407,7 @@ struct SyncOutcome: Sendable {
         guard let session else { return }
         let ok = await session.syncNow()
         let faults = session.homeFaults.map(Self.describe)
-        let issues = session.homeIssues.map { "\($0.problem)" }
+        let issues = session.homeIssues.map { Self.describe($0.problem) }
         let sighting = observer.snapshot()
         var parts: [String] = ["phase \(session.phase)", "sync state \(session.syncState)"]
         if !faults.isEmpty { parts.append("faults: " + faults.joined(separator: "; ")) }
