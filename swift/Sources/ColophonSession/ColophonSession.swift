@@ -205,6 +205,13 @@ import Observation
             throw error
         }
     }
+    /// The namespace's fold as the engine reports it (`view_json`: `{"ok":…,"value":{"admitted":[…],…}}`), unchanged, for
+    /// screens and tests that read a kind no domain kit folds. The Kotlin session's `view(namespace)`.
+    public func view(namespace: String) async throws -> Data {
+        await restore()
+        guard hasUsableContent else { throw SessionError.notReady }
+        return try await worker.view(namespace: namespace)
+    }
     /// The verified history as the engine reports it (JSON). Explicit: normal screens use named queries.
     public func ledger() async throws -> Data { await restore(); return try await worker.ledger() }
 

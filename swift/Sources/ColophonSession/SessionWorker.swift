@@ -838,6 +838,11 @@ actor SessionWorker {
         let known = ["notFound", "deleted", "notGranted", "unavailable", "invalidArgument", "staleCursor", "contentTooLarge"]
         return Data("{\"ok\":false,\"reason\":\"\(known.contains(reason) ? reason : "unavailable")\"}".utf8)
     }
+    /// The namespace's whole fold as the engine reports it (`view_json`), unchanged.
+    func view(namespace: String) async throws -> Data {
+        guard let engine else { throw SessionError.notReady }
+        return Data(try await engine.run { try $0.viewJson(namespace: namespace) }.utf8)
+    }
     func ledger() async throws -> Data {
         guard let engine else { throw SessionError.notReady }
         return Data(try await engine.run { try $0.ledgerJson() }.utf8)
