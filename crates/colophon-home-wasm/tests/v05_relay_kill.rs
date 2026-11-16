@@ -228,7 +228,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     let dir = scratch.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     let port = free_port();
-    let clock = |ms: i64| std::fs::write(dir.join("clock"), ms.to_string()).unwrap();
+    let clock = |ms: i64| write_clock(&dir.join("clock"), ms);
     clock(T0 + 1_000);
     let mut relay = start(&keys, &account, &dir, port);
     // The first upload.

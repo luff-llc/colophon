@@ -182,7 +182,7 @@ impl Relay {
         let (relay, wasm) = prerequisites().expect("prerequisites");
         std::fs::create_dir_all(dir).unwrap();
         let clock = dir.join("clock");
-        std::fs::write(&clock, clock_ms.to_string()).unwrap();
+        write_clock(&clock, clock_ms);
         let config = dir.join("config.json");
         let resolve_map: serde_json::Map<String, Value> = resolve
             .iter()
@@ -229,7 +229,7 @@ impl Relay {
         }
     }
     pub fn set_clock(&self, ms: i64) {
-        std::fs::write(&self.clock, ms.to_string()).unwrap();
+        write_clock(&self.clock, ms);
     }
     pub fn url(&self, path: &str) -> String {
         format!("/v1/libraries/home{path}")
@@ -464,6 +464,14 @@ pub fn first_upload(relay: &Relay, f: &Fixture, now_ms: i64) {
         );
         assert_eq!(status, 200, "first upload at {from}: {body}");
     }
+}
+
+/// Set a test clock file atomically (a staged file renamed over it): the relay reads it on every
+/// call, and a reading taken mid-write would be empty.
+pub fn write_clock(path: &std::path::Path, ms: i64) {
+    let staged = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&staged, ms.to_string()).unwrap();
+    std::fs::rename(&staged, path).unwrap();
 }
 
 /// A free local port for a relay whose port must be known before it starts (two homes name each

@@ -57,7 +57,15 @@ function loadConfig(argv, env) {
   return {
     cors: { origins: origins ?? [] },
     home: keyText && wasm ? { key: JSON.parse(keyText), wasm } : undefined,
-    clock: clockFile ? () => Number(readFileSync(clockFile, 'utf8').trim()) : undefined,
+    // The test clock: a reading taken while a test rewrites the file can be empty; read again
+    // rather than take 0 (which would put every entry in the future).
+    clock: clockFile ? () => {
+      for (let i = 0; i < 1000; i += 1) {
+        const v = Number(readFileSync(clockFile, 'utf8').trim());
+        if (Number.isFinite(v) && v > 0) return v;
+      }
+      throw new Error('the test clock file holds no time');
+    } : undefined,
     tracing: Boolean(clockFile) && env.COLOPHON_RELAY_TRACE === '1',
     tickMs: Number(env.COLOPHON_RELAY_TICK_MS ?? config.tickMs ?? 2000),
     resolve: config.resolve,
