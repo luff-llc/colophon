@@ -80,7 +80,10 @@ error is `retry` or `waitingForDownload`, never an empty library.
     start counts toward five an hour until it confirms (`pairing:limit`). A ceremony starts only when the person starts it;
     traffic alone burns nothing. The session keeps the ledger sealed under the device key (`pairing-ledger.bin`, its
     generation in `pairing-ledger.generation`) and persists it before the nonce exists: if it cannot, no nonce is produced. A
-    missing, edited or older ledger opens as a spent budget. **Residual limit:** a host or backup that restores the whole
+    missing, edited or older ledger opens as a spent budget. Every session and process over the same private container takes one lock
+    (`flock` on `pairing-ledger.lock`) and reloads the ledger under it, so two instances never hold two live ceremonies.
+    A clock outside 1970 to 9999 starts nothing (`pairing:clock`); a forward clock mistake clears an hour after the
+    clock is corrected. **Residual limit:** a host or backup that restores the whole
     private container (the ledger and its recorded generation together) restores the budget; the device key in the Keychain
     is not a counter, so this cannot be detected.
 * **Adding a device by pairing and seed transfer** (a second controller): `addController(_:label:roles:immediate:)` names the new

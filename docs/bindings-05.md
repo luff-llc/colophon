@@ -131,6 +131,19 @@ device starts (`existing_receive_commitment`, `existing_scan_qr`, `scan_request`
   ledger, another device key, or a generation below the floor open as a spent budget.
   `PairingFailureLimiter.fresh()` is an in-memory ledger (tests; a device's own request). `is_live(now_ms)`
   and `may_start(now_ms)` answer without changing anything.
+- **Every instance over one store.** One limiter object coordinates only itself. The session layers take a lock that
+  every instance sharing the private store takes (Swift: `flock` on `pairing-ledger.lock`; Kotlin: `FileChannel.lock` on
+  it, behind a JVM-wide monitor; JavaScript: a Web Lock, or a process-wide lock where the platform has none), reload the
+  ledger under it whenever the stored generation is not the one they hold, and write before releasing it. A host that
+  uses the bindings directly must do the same: two limiters opened from one store must never start ceremonies apart.
+- **Clock.** A start on a clock outside 1970 to 9999 is refused (`pairing:clock`); nothing the ledger keeps can then
+  overflow its timeout or its hour. A clock moved back is floored (the ledger keeps the latest time it saw) until it has
+  stayed more than five minutes behind that floor for an hour of its own time; the ledger then re-anchors at it, dropping
+  what was stamped in the future. A forward mistake therefore clears an hour after the clock is corrected, and moving the
+  clock back gains nothing the hour would not have given.
+- `fresh()` is for a device that keeps no ledger (a test, a device's own request at creation): a host must never call
+  it for an account whose ledger exists, or the budget is gone. `seal` takes 32 bytes of fresh entropy on every call:
+  the GCM nonce comes from it, so entropy must never be reused under one device key.
 - **Residual limit:** a host or backup that restores the private store wholesale (the sealed ledger and its
   recorded generation together) restores the budget; the device key is not a counter, so the core cannot see
   it. Within one process the ledger never goes back.
@@ -237,7 +250,7 @@ logs and never carries key material. `Refused` carries the §19 reason; `Denied`
 | `BadSignature` | `badSignature`; from `account_webauthn_check` `badSignature:<check>`, with `check: SignatureCheck` | A signature, assertion, possession proof or key binding failed. Checks: `point rawLength scalar der verify clientData clientDataBound unknownForm type challenge origin crossOrigin relyingParty userPresence userVerification form callOrigin`. |
 | `NewerFormat` | `newerFormat` | Authenticated content of a newer format. |
 | `Unavailable` | `unavailable` | Something needed could not be obtained. |
-| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`), `pairing:busy` (`pairingBusy`: another ceremony is live), `pairing:unsealed` (`pairingUnsealed`: the ledger was not sealed since the start). |
+| `Refused` | `refused:<reason>`, `reason` | `audience window replay conflict fork revoked expired ended notNarrower outOfScope origin rollback notGranted wrongEpoch clockJump budgetSpent wrongFormat invalidPayload caveatedLive vaultLocked`; also `pairing:limit` (reason `pairingLimit`), `pairing:busy` (`pairingBusy`: another ceremony is live), `pairing:clock` (`pairingClock`: an implausible clock), `pairing:unsealed` (`pairingUnsealed`: the ledger was not sealed since the start). |
 | `Denied` | `denied:<reason>`, `reason` | `notGranted revoked expired budgetSpent notReadable unavailable`. |
 | `Host` | `host` | A host callback failed; `detail` is the host's own message (a foreign exception arrives here too). |
 | `Reentered` | `reentered` | A callback called back into the object that was calling it, on the same thread; or a call from another thread waited more than 30 s for an object whose holder was inside a host callback (see "Threads and callbacks"). |
