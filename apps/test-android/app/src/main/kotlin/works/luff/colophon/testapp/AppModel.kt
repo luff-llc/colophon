@@ -18,6 +18,7 @@ import com.luff.colophon.session.FolderMedium
 import com.luff.colophon.session.HomeConfiguration
 import com.luff.colophon.session.HomeFault
 import com.luff.colophon.session.HomeProblem
+import com.luff.colophon.session.HomeWords
 import com.luff.colophon.session.MediumWrite
 import com.luff.colophon.session.ObservedRevision
 import com.luff.colophon.session.SecretBytes
@@ -76,10 +77,16 @@ class AppModel(private val app: Context) {
         const val OWNER_ALIAS = "$PREFIX.owner"
         const val DEVICE_KEY_ALIAS = "$PREFIX.device-key"
         const val ATTEMPT_LIMIT = 5
+        /** The status screen's words for a stopped account and for a device waiting for approval: not faults. */
+        const val STOPPED_WORDS = "This account was moved to a newer format; update the app. What this device holds is still readable here."
+        const val WAITING_WORDS = "Waiting for approval: this device asked to join and is not approved yet (the home answers refused:revoked until then)."
         fun message(e: Throwable): String = "${e.javaClass.simpleName}: ${e.message ?: ""}".trim()
-        /** A home problem in words: a home's refusal of this device's call is the home's claim, not a verified revocation. */
+        /** A home problem in words: a home's refusal is the home's claim with the name it gave, never a verified state of the account. */
         fun describe(p: HomeProblem): String = when (p) {
-            is HomeProblem.RemoteCallRefused -> "the home refused this device's call (${if (ResultCode.isValid(p.code)) p.code else "no result"}): the home's claim, not a verified revocation; local notes and keys are unchanged"
+            is HomeProblem.RemoteCallRefused -> "the home refused a request (${if (ResultCode.isValid(p.code)) p.code else "no result"}): the home's claim, not a verified state of the account; local notes and keys are unchanged" +
+                (p.retryAfterSeconds?.let { "; it asked to wait $it s" } ?: "")
+            is HomeProblem.HomeUnavailable -> HomeWords.UNAVAILABLE
+            HomeProblem.WaitingForApproval -> WAITING_WORDS
             HomeProblem.StillWaiting -> "a pass could not finish: the engine was still waiting"
             else -> p.toString()
         }

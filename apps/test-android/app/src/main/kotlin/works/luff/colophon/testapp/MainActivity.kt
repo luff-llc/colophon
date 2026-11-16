@@ -297,10 +297,12 @@ class MainActivity : Activity() {
     }
     private fun notesList(d: LinearLayout) {
         val session = model.session ?: return
-        (content.findViewWithTag<View>("addNote") as? Button)?.isEnabled = session.hasUsableContent && model.busy == null
+        (content.findViewWithTag<View>("addNote") as? Button)?.isEnabled = session.hasUsableContent && !session.phase.isStopped && model.busy == null
         when (val phase = session.phase) {
             SessionPhase.Locked -> { d.text("Locked", 20f, bold = true); d.button("Unlock", "unlock") { launch { model.unlock() } }; return }
             SessionPhase.Ready, SessionPhase.Refreshing, SessionPhase.Retry, SessionPhase.WaitingForDownload -> {}
+            // A verified state, not a fault: what the device holds stays readable; nothing new can be written.
+            is SessionPhase.Stopped -> d.text(AppModel.STOPPED_WORDS, color = Color.rgb(200, 120, 0), tag = "stoppedNotice")
             else -> { d.text("Not ready. Phase: $phase\n${session.lastError ?: ""}", tag = "notReady"); return }
         }
         model.notesProblem?.let { d.text(it, color = Color.RED, tag = "notesProblem") }
@@ -405,6 +407,8 @@ class MainActivity : Activity() {
             val s = session.state.value
             d.header("Session")
             d.row("Phase", "${s.phase}", "phase")
+            if (s.phase.isStopped) d.text(AppModel.STOPPED_WORDS, color = Color.rgb(200, 120, 0), tag = "stoppedStatus")
+            if (s.phase is SessionPhase.WaitingForApproval) d.text(AppModel.WAITING_WORDS, tag = "waitingStatus")
             d.row("Account", s.libraryId ?: "-")
             d.row("This device's key", s.memberId ?: "-")
             d.row("Owner", model.settings.owner?.wire ?: "-")

@@ -11,6 +11,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -85,6 +86,8 @@ class TestAppUiTest {
 
         click("tabStatus")
         waitFor("phase Ready", 10) { textOf("phase") == "Ready" }
+        assertNull("a ready account shows no stopped notice", view("stoppedStatus"))
+        assertNull("an approved device is not waiting", view("waitingStatus"))
         click("syncNow")
         waitFor("a complete sync", 60) { textOf("syncOutcome")?.startsWith("Last sync: complete") == true }
         waitFor("the last head", 10) { textOf("lastHead")?.startsWith("seq ") == true }

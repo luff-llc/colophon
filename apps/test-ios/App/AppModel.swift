@@ -106,15 +106,23 @@ struct SyncOutcome: Sendable {
         if before?.members != now.6 { record("members: \(now.6)") }
         if before?.requests != now.7 { record("requests waiting: \(now.7)") }
     }
-    /// A home problem in words. A home's refusal of this device's call is shown as what it is: the home's claim, not a
-    /// verified revocation.
+    /// A home problem in words. A home's refusal is shown as what it is: the home's claim with the name it gave (validated
+    /// by the session, raw otherwise), never a verified state of the account.
     static func describe(_ problem: HomeProblem) -> String {
         switch problem {
-        case .remoteCallRefused(let code):
-            "the home refused this device's call (\(ResultCode.isValid(code) ? code : "no result")): the home's claim, not a verified revocation; local notes and keys are unchanged"
+        case .remoteCallRefused(let code, let retry):
+            "the home refused a request (\(ResultCode.isValid(code) ? code : "no result")): the home's claim, not a verified state of the account; local notes and keys are unchanged"
+                + (retry.map { "; it asked to wait \($0) s" } ?? "")
+        case .homeUnavailable: HomeWords.unavailable
+        case .waitingForApproval: Words.waitingForApproval
         case .stillWaiting: "a pass could not finish: the engine was still waiting"
         default: "\(problem)"
         }
+    }
+    /// The words the status screen shows for states that are not faults.
+    enum Words {
+        static let stopped = "This account was moved to a newer format; update the app. What this device holds is still readable here."
+        static let waitingForApproval = "Waiting for approval: this device asked to join and is not approved yet (the home answers refused:revoked until then)."
     }
     static func describe(_ fault: HomeFault) -> String {
         let f = fault.fault

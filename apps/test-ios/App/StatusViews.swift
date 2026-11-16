@@ -118,6 +118,12 @@ struct StatusView: View {
     @ViewBuilder private func sessionSections(_ session: ColophonSession) -> some View {
         Section("Session") {
             row("Phase", String(describing: session.phase)).accessibilityIdentifier("phase")
+            if session.phase.isStopped {
+                Text(AppModel.Words.stopped).foregroundStyle(.orange).accessibilityIdentifier("stoppedNotice")
+            }
+            if session.phase == .waitingForApproval {
+                Text(AppModel.Words.waitingForApproval).accessibilityIdentifier("waitingNotice")
+            }
             row("Account", session.libraryID ?? "-")
             row("This device's key", session.memberID ?? "-")
             row("Owner", model.settings.owner?.rawValue ?? "-")

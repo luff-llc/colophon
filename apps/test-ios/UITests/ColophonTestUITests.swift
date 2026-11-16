@@ -95,6 +95,8 @@ import XCTest
 
         tapTab("Status")
         wait(app.staticTexts["ready"], 10, "the status screen shows the phase ready")
+        XCTAssertFalse(app.staticTexts["stoppedNotice"].exists, "a ready account shows no stopped notice")
+        XCTAssertFalse(app.staticTexts["waitingNotice"].exists, "an approved device is not waiting")
         scrollTap(app.buttons["syncNow"])
         let outcome = app.staticTexts["syncOutcome"]
         wait(outcome, 60)

@@ -19,6 +19,12 @@ struct NotesView: View {
                     }
                 case .ready, .refreshing, .retry, .waitingForDownload:
                     list(session)
+                case .stopped:
+                    // A verified state, not a fault: what the device holds stays readable; nothing new can be written.
+                    VStack(spacing: 0) {
+                        Text(AppModel.Words.stopped).font(.footnote).padding(8).accessibilityIdentifier("stoppedNotice")
+                        list(session)
+                    }
                 default:
                     ContentUnavailableView("Not ready", systemImage: "exclamationmark.triangle",
                                            description: Text("Phase: \(String(describing: session.phase))\n\(session.lastError ?? "")"))
@@ -29,7 +35,7 @@ struct NotesView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { adding = true } label: { Label("Add", systemImage: "plus") }
-                    .accessibilityIdentifier("addNote").disabled(model.session?.hasUsableContent != true)
+                    .accessibilityIdentifier("addNote").disabled(model.session?.hasUsableContent != true || model.session?.phase.isStopped == true)
             }
         }
         .sheet(isPresented: $adding) { NoteEditor(note: nil) }

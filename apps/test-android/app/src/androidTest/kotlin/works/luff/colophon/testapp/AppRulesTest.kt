@@ -6,7 +6,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.luff.colophon.HttpAnswer
 import com.luff.colophon.HttpMethod
 import com.luff.colophon.HttpRequest
+import com.luff.colophon.session.HomeProblem
 import com.luff.colophon.session.HomeTransport
+import com.luff.colophon.session.HomeWords
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -38,6 +40,19 @@ class AppRulesTest {
         val plain = HomeTransport { HttpAnswer(403u, listOf(), "{\"result\":\"refused:revoked\",\"extra\":\"x\"}".toByteArray()) }
         MappedTransport("https://home.test/v1/libraries/", "", observer, plain).send(request("x"))
         assertEquals("refused:revoked", observer.snapshot().lastRefusal!!.detail)
+    }
+
+    /** The status screen's words: a home's refusal with the name it gave (an unknown or reserved one too), the home being
+     *  unavailable, waiting for approval, and a stopped account, none of them worded as a fault of the account. */
+    @Test fun theStatusWordsForRefusalsWaitingAndAStop() {
+        for (code in listOf("refused:overQuota", "refused:noEntitlement", "refused:closed", "refused:notProvisioned", "refused:somethingNew")) {
+            val words = AppModel.describe(HomeProblem.RemoteCallRefused(code))
+            assertTrue(words, code in words && "not a verified state" in words)
+        }
+        assertTrue("120 s" in AppModel.describe(HomeProblem.RemoteCallRefused("refused:window", 120)))
+        assertEquals(HomeWords.UNAVAILABLE, AppModel.describe(HomeProblem.HomeUnavailable(null)))
+        assertTrue(AppModel.describe(HomeProblem.WaitingForApproval).startsWith("Waiting for approval"))
+        assertTrue("moved to a newer format" in AppModel.STOPPED_WORDS && "update the app" in AppModel.STOPPED_WORDS)
     }
 
     @Test fun theResultGrammar() {
