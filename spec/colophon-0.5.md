@@ -2,7 +2,8 @@
 
 **Status: frozen, 0.5, 2026-11-16.** The text is revision 17, the final candidate of
 2026-11-15, with one edit at the freeze: §18's reference setup names one home, matching
-§13.1. §21 lists the freeze conditions. History of the revisions: revision 2 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
+§13.1. §21 records each freeze condition as met or not met, with its evidence: six of the seven
+are not met, and one awaits its evidence. History of the revisions: revision 2 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
 transitions with veto (§8.7); revision 5 answers two reviews of revision 4 (4032d44) by finishing
 that mechanism's state model; revision 6 answers two reviews of revision 5 (a1decc6) and the
@@ -2707,6 +2708,43 @@ deferred to 0.6 is in changes §A.12 and the design's "Deferred to 0.6".
 
 `conformance/0.5/` holds the vectors (built at `conformance/0.5/candidate/` and moved at the
 freeze, bytes unchanged); its README lists them and indexes what covers each required item.
+
+**The conditions at the freeze (2026-11-16).** Recorded as they stand, each with its evidence.
+Conditions 1, 2, 3, 4, 6 and 7 are **not met**; the freeze was made with them open.
+
+1. **Vectors: not met.** The vectors are published under `conformance/0.5/` with exact bytes and one
+   named outcome per case, and the Rust verifier replays every case
+   (`crates/colophon-core/tests/v05_candidate.rs`, `candidate_conformance`). But the index in
+   [conformance/0.5/README.md](../conformance/0.5/README.md) finds no vector or test for these
+   required items: every 0.4 key case as `/5`; tightening another key's authentication; `layout`
+   and `migration` as immediate entries; two epochs for one namespace in a `rekey`; headroom at 56
+   controllers and 224 slots; slot rebasing at activation; an anchor at a lower past delay; mutual
+   removal and the tie; the rows of changes §H other than 2, 3, 4, 8 to 13, 17 and 28; a stopped
+   reader accepting no head; and the Swift envelope at seq 0. The final runs:
+   EVIDENCE-PENDING: the final suite runs on two machines.
+2. **Two implementations: not met.** Only the Rust implementation replays the vectors. The Swift,
+   Kotlin and JavaScript SDKs call the Rust core through the FFI and WASM exports; no implementation
+   in a second language exists.
+3. **Swift corpus: not met.** There is no differential corpus. The Rust verifier replays the Swift
+   predecessor vectors (`conformance/0.5/succession/swift-*`). The released Swift verifier
+   (Marginalia `c8280332`) was run on the predecessors with no platform recorded, and the CryptoKit
+   DER probe (`conformance/0.5/probes/swift-der/`) ran on macOS 27.0.1 only; iOS and visionOS were
+   not run.
+4. **Dry run: not met.** No read-only preflight over a copy of the owner's real library on his
+   device is recorded. The Swift move is tested on synthetic libraries only
+   (`crates/colophon-core/tests/v05_swift_move.rs`, `crates/colophon-ffi/tests/v05_swift.rs`).
+5. **Security review:** EVIDENCE-PENDING: the whole-branch implementation security review of
+   16 November 2026. The packages had independent checks before they merged (changes §G and the
+   merged pull requests of luff-llc/colophon).
+6. **Galley: not met.** Nothing in this repository records that Galley's identity contract is
+   aligned with the frozen text. Changes §B maps the contract's requests as they stood at Galley
+   branch `one-identity-contract`, head 172fe8f.
+7. **Notices: not met.** No test runs the §17.5 host rules as a set against a simulated home, and
+   the delivery routes are not built (no push notices; apps poll). Parts are tested: notices of
+   pending transitions and of a retiring vault (`crates/colophon-core/tests/v05_account.rs`), the
+   removal follow-up (`crates/colophon-core/tests/v05_e11_account.rs`,
+   `a_removal_lists_what_the_removed_key_admitted_since_the_anchor`), and pending notices against
+   the reference relay (`js/test05/journey.ts`).
 
 **Open at freeze.** What 0.5 does not decide, stated so nothing is left implicit:
 1. Two successors of one predecessor can each verify, for different verifiers (§15.1, the
