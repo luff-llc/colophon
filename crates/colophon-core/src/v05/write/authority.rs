@@ -689,8 +689,9 @@ pub fn choose_receipts(
 }
 
 /// [`choose_receipts`] for the held transition `t_bytes` an entry records (`activate`,
-/// `suspend`): for a full set, from the homes that remain after the homes it revokes, none if no
-/// home remains (§8.7 validity 2), so a device whose only home is gone can still record it.
+/// `suspend`). From every current home as for any object when enough receipts are held; for a
+/// full set that are not, from the homes that remain after the homes it revokes, none if no home
+/// remains (§8.7 validity 2), so a device whose only home is gone can still record it.
 pub fn choose_transition_receipts(
     state: &State,
     held: &[Vec<u8>],
@@ -702,8 +703,15 @@ pub fn choose_transition_receipts(
         bounds::TRANSITION_ENVELOPE,
         true,
     )?;
+    let issued = issued_of(&env)?;
+    let every = choose_receipts_among(state, held, &env.digest, issued, None, &[]);
     let exempt = crate::v05::history::transition_receipt_exempt(state, t_bytes);
-    choose_receipts_among(state, held, &env.digest, issued_of(&env)?, None, &exempt)
+    match every {
+        Err(_) if !exempt.is_empty() => {
+            choose_receipts_among(state, held, &env.digest, issued, None, &exempt)
+        }
+        r => r,
+    }
 }
 
 fn choose_receipts_among(
