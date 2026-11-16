@@ -13,7 +13,7 @@ for iPhone share one library through it.
 | Engine | `ColophonEngine` | One `AccountEngine` on its own serial dispatcher; `execute(custody)` runs prepare, PRF, sign, finish. |
 | Keys | `AsyncKeyProvider`, `KeyCustody`, `SoftwareKeys`, `SecretBytes` | Custody answers the engine's signing steps, PRF requests, unlock inputs and epoch agreements; the core never calls a key provider. |
 | Storage | `RecordMedium`, `FolderMedium`, `MemoryMedium` | The record store the engine reads. `FolderMedium` writes each batch all or none across a kill (staged, a commit record, moved into place) and never follows a symbolic link. |
-| Homes | `HomeConfiguration`, `HomeTransport`, `HttpHomeTransport` | `HttpURLConnection`: no cookies, no cache, no redirects, `https` only (loopback `http` with the testing option), each response bounded. |
+| Homes | `HomeConfiguration`, `HomeTransport`, `HttpHomeTransport` | `HttpURLConnection`: no cookies, no cache, no redirects, `https` only (loopback `http` with the testing option), each response bounded. One home is the supported configuration in 0.5; more than one is experimental (spec §13.1). |
 | Android | `AndroidSession.medium`, `.privateDirectory`, `.memberKeys`, `.deviceSecrets`; `KeystoreDeviceSecrets`; `PasskeyController` | App-private storage in `noBackupFilesDir`; the member key in Android Keystore (the 0.4 `KeystoreKeys`, StrongBox first); the device key sealed by a Keystore AES key; the person's passkey through Credential Manager with PRF. |
 
 **A stopped account, a home's refusals, waiting for approval.** The Kotlin session has the same names and behaviour as the

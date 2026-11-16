@@ -182,18 +182,10 @@ impl Relay {
         let (relay, wasm) = prerequisites().expect("prerequisites");
         std::fs::create_dir_all(dir).unwrap();
         let clock = dir.join("clock");
-        std::fs::write(&clock, clock_ms.to_string()).unwrap();
+        write_clock(&clock, clock_ms);
         let config = dir.join("config.json");
-        let resolve_map: serde_json::Map<String, Value> = resolve
-            .iter()
-            .map(|(b, p)| {
-                (
-                    b.to_string(),
-                    json!(format!("http://127.0.0.1:{p}/v1/libraries/home")),
-                )
-            })
-            .collect();
-        std::fs::write(&config, json!({"resolve": resolve_map, "limits": limits}).to_string()).unwrap();
+        write_resolve(&dir.join("resolve.json"), resolve);
+        std::fs::write(&config, json!({"limits": limits}).to_string()).unwrap();
         let mut child = Command::new("bun")
             .arg(relay)
             .arg("--test-clock")
@@ -205,7 +197,11 @@ impl Relay {
             .env("COLOPHON_HOME_KEY", keys.jwk())
             .env("COLOPHON_HOME_WASM", wasm)
             .env("COLOPHON_RELAY_CLOCK_FILE", &clock)
-            .env("COLOPHON_RELAY_TICK_MS", "50")
+            .env("COLOPHON_RELAY_RESOLVE_FILE", dir.join("resolve.json"))
+            .env(
+                "COLOPHON_RELAY_TICK_MS",
+                limits.get("tickMs").and_then(Value::as_u64).map_or("50".to_string(), |t| t.to_string()),
+            )
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -226,7 +222,11 @@ impl Relay {
         }
     }
     pub fn set_clock(&self, ms: i64) {
-        std::fs::write(&self.clock, ms.to_string()).unwrap();
+        write_clock(&self.clock, ms);
+    }
+    /// Where this relay reaches other homes (base, port), read by the relay at each use.
+    pub fn set_resolve(&self, resolve: &[(&str, u16)]) {
+        write_resolve(&self.dir.join("resolve.json"), resolve);
     }
     pub fn url(&self, path: &str) -> String {
         format!("/v1/libraries/home{path}")
@@ -247,6 +247,22 @@ impl Relay {
             body.to_string().as_bytes(),
         );
         (s, serde_json::from_slice(&b).unwrap_or(Value::Null))
+    }
+/// The serving intervals a home slot's committed state holds (`[from, through]`, ms; `through`
+    /// `None` while open), read from `home-state.json`.
+    pub fn serving(&self) -> Vec<(i64, Option<i64>)> {
+        use base64::engine::general_purpose::STANDARD;
+        let text = std::fs::read_to_string(self.dir.join("data/home/home-state.json")).unwrap();
+        let outer: String = serde_json::from_str(&text).unwrap();
+        let slot: Value = serde_json::from_slice(&STANDARD.decode(outer).unwrap()).unwrap();
+        let home: Value =
+            serde_json::from_slice(&STANDARD.decode(slot["home_state"].as_str().unwrap()).unwrap()).unwrap();
+        home["serving"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| (i["from_ms"].as_i64().unwrap(), i["through_ms"].as_i64()))
+            .collect()
     }
     /// Stop the process and wait for it.
     pub fn stop(&mut self) {
@@ -269,8 +285,9 @@ impl Relay {
     pub fn restart(self, keys: &HomeKeys, clock_ms: i64, resolve: &[(&str, u16)]) -> Self {
         let mut me = self;
         me.stop();
-        let (dir, base, port, account) = (me.dir.clone(), me.base.clone(), me.port, me.account.clone());
-        Self::start_on(keys, &account, &base, &dir, clock_ms, resolve, port)
+        let (dir, base, account) = (me.dir.clone(), me.base.clone(), me.account.clone());
+        // A new port (port 0, the one the relay reports): the old one may be taken meanwhile.
+        Self::start_on(keys, &account, &base, &dir, clock_ms, resolve, 0)
     }
 }
 impl Drop for Relay {
@@ -447,14 +464,29 @@ pub fn first_upload(relay: &Relay, f: &Fixture, now_ms: i64) {
     }
 }
 
-/// A free local port (bound and released: a short race, accepted in a test).
-pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Set a test clock file atomically (a staged file renamed over it): the relay reads it on every
+/// call, and a reading taken mid-write would be empty.
+pub fn write_clock(path: &std::path::Path, ms: i64) {
+    let staged = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&staged, ms.to_string()).unwrap();
+    std::fs::rename(&staged, path).unwrap();
 }
+
+/// Write a test relay's resolve file atomically: another home's base -> its local URL.
+pub fn write_resolve(path: &std::path::Path, resolve: &[(&str, u16)]) {
+    let map: serde_json::Map<String, Value> = resolve
+        .iter()
+        .map(|(b, p)| (b.to_string(), json!(format!("http://127.0.0.1:{p}/v1/libraries/home"))))
+        .collect();
+    let staged = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&staged, Value::Object(map).to_string()).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
+/// A local port nothing listens on (a connection is refused at once): port 1 needs privileges
+/// to bind, so no test relay can take it. Every relay itself starts on port 0 and reports its
+/// port; homes learn one another's through `Relay::set_resolve`.
+pub const CLOSED_PORT: u16 = 1;
 
 /// Wait until `f` holds, polling; panics with `what` after `secs` seconds.
 pub fn eventually(what: &str, secs: u64, mut f: impl FnMut() -> bool) {

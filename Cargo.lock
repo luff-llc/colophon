@@ -252,8 +252,10 @@ dependencies = [
 name = "colophon-home-wasm"
 version = "0.4.0"
 dependencies = [
+ "aes-gcm",
  "base64",
  "colophon-core",
+ "hkdf",
  "p256",
  "serde",
  "serde_json",

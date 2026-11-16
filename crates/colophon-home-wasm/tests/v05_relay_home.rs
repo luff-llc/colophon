@@ -33,8 +33,6 @@ struct World {
     kb: HomeKeys,
     ha: String,
     hb: String,
-    pa: u16,
-    pb: u16,
     src: MemSource,
     /// Removed when the world is dropped (declared last: the relays stop first).
     scratch: Vec<Scratch>,
@@ -62,13 +60,13 @@ fn world_with(name: &str, history: &str, quorum: u64, two: bool, run_b: bool) ->
     } else {
         appoint_homes(&mut f, &[(&ka, BASE_A)]);
     }
-    let (pa, pb) = (free_port(), free_port());
     let account = f.account.id().as_str().to_string();
     let scratch = vec![Scratch::new(&format!("{name}-a")), Scratch::new(&format!("{name}-b")), Scratch::new(&format!("{name}-spare"))];
-    let a = Relay::start_on(&ka, &account, BASE_A, scratch[0].path(), T0, &[(BASE_B, pb)], pa);
+    let a = Relay::start_on(&ka, &account, BASE_A, scratch[0].path(), T0, &[(BASE_B, CLOSED_PORT)], 0);
     first_upload(&a, &f, T0 + 1_000);
     let b = run_b.then(|| {
-        let b = Relay::start_on(&kb, &account, BASE_B, scratch[1].path(), T0, &[(BASE_A, pa)], pb);
+        let b = Relay::start_on(&kb, &account, BASE_B, scratch[1].path(), T0, &[(BASE_A, a.port)], 0);
+        a.set_resolve(&[(BASE_B, b.port)]);
         first_upload(&b, &f, T0 + 1_000);
         b
     });
@@ -85,8 +83,6 @@ fn world_with(name: &str, history: &str, quorum: u64, two: bool, run_b: bool) ->
         b,
         ka,
         kb,
-        pa,
-        pb,
         scratch,
     })
 }
@@ -221,7 +217,7 @@ fn a_transition_is_receipted_due_activated_and_final_across_two_homes_at_quorum_
     assert_eq!(ctl.account().head().0 as usize, before + 2);
     // Once recorded the transition is no longer listed.
     assert_eq!(kinds_of(&pending_list(&w.a), "transition"), 0);
-    let _ = (w.pa, w.pb, &w.ka, &w.kb);
+    let _ = (&w.ka, &w.kb);
 }
 
 #[test]
@@ -268,7 +264,14 @@ fn a_non_primary_home_answers_421_until_the_primary_head_covers_the_entry() {
     // The primary stores it and signs a head; that head reaches the second home by forwarding.
     let (status, body) = w.a.post("/authority", &post);
     assert_eq!(status, 200, "{body}");
-    assert!(body["head"].is_object());
+    // Its answer carries the head over the entry; or, when the primary already signed a head at
+    // this very clock reading, none (§13.3: a head is due and `issued` must increase; the older
+    // head is not answered), and the head follows once the clock moves.
+    if body["head"].is_null() {
+        w.clocks(NOW + 6_000);
+    } else {
+        assert!(body["head"].is_object(), "{body}");
+    }
     eventually("the second home to hold the primary's head over it", 20, || {
         let r = b.post("/authority", &post);
         if r.0 != 421 {
@@ -461,8 +464,13 @@ fn a_head_the_guard_refuses_is_not_signed() {
     let (status, body) = w.a.post("/authority", &json!({"from": seq, "entries": [entry], "receipts": []}));
     assert_eq!(status, 200, "{body}");
     std::thread::sleep(std::time::Duration::from_millis(400)); // several ticks
-    let (seq1, issued1) = head_seq(&w.a);
-    assert_eq!((seq1, issued1), (seq0, issued0), "no head was signed for the new entry");
+    // No head was signed for the new entry, and the older one is not served in its place
+    // (§13.3, revision 15: a due head that cannot be produced fails the read, retryably).
+    let (s, hs, _) = http(w.a.port, "GET", &w.a.url("/head"), &[], &[]);
+    assert_eq!(s, 503, "the due head cannot be produced yet");
+    assert!(hs.iter().any(|(k, v)| k == "retry-after" && v == "1"));
+    assert_eq!(w.a.get(&format!("/records/heads/{}.json", w.ha)).0, 503, "nor at its record path");
+    let _ = (seq0, issued0);
     // The clock moves on: the next head is signed for it.
     w.a.set_clock(NOW + 5_000);
     eventually("the head to move on", 20, || head_seq(&w.a).0 == seq);
@@ -485,7 +493,7 @@ fn a_restart_in_the_middle_loses_nothing_receipts_nothing_twice_and_the_feed_res
     assert_eq!(kinds_of(&before, "receipt"), 1);
     let ka = HomeKeys::new(0x77);
     drop(wire);
-    // The process is killed and started again on the same data directory and port.
+    // The process is killed and started again on the same data directory (on a new port).
     let account = w.f.account.id().as_str().to_string();
     let a = std::mem::replace(&mut w.a, Relay::start(&ka, &account, BASE_A, w.scratch[2].path(), NOW, &[]));
     w.a = a.restart(&ka, NOW + 2_000, &[]);
@@ -764,7 +772,8 @@ fn a10_an_object_a_peer_refused_for_now_is_forwarded_again() {
     let mut ctl = w.controller(x);
     w.clocks(x);
     // B runs but does not hold the history yet: it answers `unavailable`.
-    let b = Relay::start_on(&kb, w.f.account.id().as_str(), BASE_B, w.scratch[1].path(), x, &[(BASE_A, w.pa)], w.pb);
+    let b = Relay::start_on(&kb, w.f.account.id().as_str(), BASE_B, w.scratch[1].path(), x, &[(BASE_A, w.a.port)], 0);
+    w.a.set_resolve(&[(BASE_B, b.port)]);
     let d = w.f.d.clone();
     propose_by(&mut w, &mut ctl, 600, &[d]);
     let mut wire = w.wire();

@@ -39,6 +39,7 @@ let session = ColophonSession(configuration: .init(
   Enclave key). `ownerController` is a controller of the account (the person's passkey or an owner key). It is asked only for
   owner operations: creation, approving a member, revoking, adding a controller, veto, seed transfer.
 * **Homes (spec §18).** A host MUST create every account with at least one home and MUST warn when there is none.
+  One home is the supported configuration in 0.5; more than one is experimental (spec §13.1).
   `create()` therefore refuses with `SessionError.noHome` unless `homes` is non-empty or `createWithoutHome` is set. A home's
   signed member request names the account, which does not exist before creation, so `HomeConfiguration.request` is a closure
   the session calls with the new account ID; the home service answers with its request. The session appoints the home in a
