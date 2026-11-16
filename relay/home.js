@@ -273,6 +273,14 @@ export class HomeSlot {
     send(res, 200, head);
   }
 
+  /** The stored head, only when no other head is due (§13.3); null otherwise. Under the lock. */
+  async headIfFresh() {
+    let outcome;
+    try { outcome = this.status().appointed ? await this.ensureHead() : 'fresh'; }
+    catch (error) { if (!(error instanceof ModuleError)) throw error; outcome = 'due'; }
+    return outcome === 'due' ? null : this.headEnvelope();
+  }
+
   async headEnvelope() {
     const p = `heads/${this.key.memberId}.json`;
     if (!this.slot.current.has(p)) return null;
@@ -541,7 +549,7 @@ export class HomeSlot {
 
   async answerOutcome(res, r) {
     const { send } = this.deps;
-    if (r.outcome === 'conflict') return send(res, 409, (await this.headEnvelope()) ?? null);
+    if (r.outcome === 'conflict') return send(res, 409, (await this.headIfFresh()) ?? null);
     if (r.outcome === 'primary') return send(res, 421, { endpoints: r.endpoints });
     return send(res, 422, { result: r.result });
   }
@@ -669,7 +677,8 @@ export class HomeSlot {
       }
       if (!page.more) break;
     }
-    const head = await this.headEnvelope();
+    // §13.3: a head the home is due to replace never leaves it, to a peer either.
+    const head = await this.lock(async () => this.headIfFresh());
     if (head) {
       const text = JSON.stringify(head);
       if (sha(text) !== row.head) {

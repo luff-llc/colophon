@@ -718,3 +718,39 @@ fn a_kill_before_the_first_tick_does_not_erase_uptime() {
         "the interval served in is recorded: {serving:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The H2 check, finding 6: a head the home is due to replace never leaves it.
+
+/// Home A signed a head over seq m at T; an entry arrives while its clock still reads T, so a
+/// head over it is due and cannot be signed yet. Peer B comes up then: A's forwarding sends B no
+/// head (the head over m would hide the new entry). Once A's clock moves, the new head reaches B.
+#[test]
+fn a_head_due_to_be_replaced_is_not_forwarded() {
+    let Some(mut w) = world("dueforward", "public", 1, true, false) else {
+        return;
+    };
+    let kb = HomeKeys::new(0x78);
+    let account = w.f.account.id().as_str().to_string();
+    let t = NOW;
+    w.a.set_clock(t);
+    eventually("a head at T", 20, || head_at(&w.a).is_some_and(|(_, _, i)| i == colophon_core::v05::write::format_date(t)));
+    let mut ctl = w.controller(t);
+    let src = w.src.clone();
+    let (seq, e) = approve(&w.f, &mut w.host, &mut ctl, &src, 35, t);
+    let (s, out) = w.a.post("/authority", &json!({"from": seq, "entries": [e], "receipts": []}));
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(w.a.get("/head").0, 503, "due, and cannot be signed at T");
+    // B comes up; A's scheduler forwards to it for a while.
+    let b = Relay::start_on(&kb, &account, BASE_B, w.scratch[1].path(), t, &[(BASE_A, w.pa)], w.pb);
+    first_upload(&b, &w.f, t);
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    assert_eq!(b.get(&format!("/records/heads/{}.json", w.ha)).0, 404, "no stale head was forwarded");
+    // The clock moves: A signs the head over the new entry and forwards it.
+    w.a.set_clock(t + 1_000);
+    eventually("A's new head at B", 20, || {
+        let (s, body) = b.get(&format!("/records/heads/{}.json", w.ha));
+        s == 200 && body_of(&serde_json::from_slice(&body).unwrap())["authority"]["seq"].as_u64() == Some(seq)
+    });
+    w.b = Some(b);
+}
