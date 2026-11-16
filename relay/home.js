@@ -689,6 +689,23 @@ export class HomeSlot {
       }
       if (!page.more) break;
     }
+    // §13.1: the entries of this home's history after the peer's latest head (a recording entry
+    // the peer has not appended, above all), ahead of the head, so the peer can sign a head over
+    // them. The same suffix is offered again at most every 2 s (wall time) while the peer's head
+    // lags; an immediate entry a non-primary peer refused (421) for want of this home's head is
+    // offered again right after the head.
+    const sendEntries = async () => {
+      const fwd = await this.lock(async () => this.wasm.call({ op: 'forward_entries', state: this.state, now: this.clock(), peer: peerId }));
+      if (!fwd.entries.length) return 0;
+      const mark = `${fwd.from}:${fwd.entries.length}:${sha(fwd.entries[fwd.entries.length - 1])}`;
+      if (mark === row.entries && Date.now() - (row.entriesAt ?? 0) < 2000) return 0;
+      row.entries = mark; row.entriesAt = Date.now();
+      const body = JSON.stringify({ from: fwd.from, entries: fwd.entries.map((e) => JSON.parse(unb64(e))), receipts: [] });
+      const r = await fetch(`${base}/authority`, { signal: AbortSignal.timeout(5000), method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      return r.status;
+    };
+    const entriesStatus = await sendEntries();
     // §13.3: a head the home is due to replace never leaves it, to a peer either.
     const head = await this.lock(async () => this.headIfFresh());
     if (head) {
@@ -699,17 +716,6 @@ export class HomeSlot {
         else this.note(`head ${peerId}`, `home ${peerId} refused this home's head: ${r.status} ${(await r.text()).slice(0, 200)}`);
       }
     }
-    // §13.1: the entries of this home's history after the peer's latest head (a recording entry
-    // the peer has not appended, above all), so the peer can sign a head over them.
-    const fwd = await this.lock(async () => this.wasm.call({ op: 'forward_entries', state: this.state, now: this.clock(), peer: peerId }));
-    // The same suffix is offered again at most every 2 s (wall time), while the peer's head lags.
-    const mark = fwd.entries.length ? `${fwd.from}:${fwd.entries.length}:${sha(fwd.entries[fwd.entries.length - 1])}` : '';
-    const again = mark !== row.entries || Date.now() - (row.entriesAt ?? 0) >= 2000;
-    if (fwd.entries.length && again) {
-      row.entries = mark; row.entriesAt = Date.now();
-      const body = JSON.stringify({ from: fwd.from, entries: fwd.entries.map((e) => JSON.parse(unb64(e))), receipts: [] });
-      const r = await fetch(`${base}/authority`, { signal: AbortSignal.timeout(5000), method: 'POST', headers: { 'content-type': 'application/json' }, body });
-      this.note(`entries ${peerId}`, r.status === 200 ? '' : `home ${peerId} did not take this home's entries from ${fwd.from}: ${r.status} ${(await r.text()).slice(0, 200)}`);
-    }
+    if (entriesStatus === 421) { row.entries = ''; await sendEntries(); }
   }
 }
