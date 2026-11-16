@@ -1,3 +1,4 @@
+import Darwin
 import CryptoKit
 import Foundation
 import ColophonSession
@@ -37,6 +38,8 @@ private struct FileSecrets: DeviceSecretStore {
 }
 private actor Audit {
     var refused: [String] = []
+    var refusesCalls = false
+    func setRefusesCalls(_ value: Bool) { refusesCalls = value }
     func add(_ code: String) { refused.append(code) }
     func clear() { refused = [] }
 }
@@ -47,6 +50,9 @@ private struct Transport: HomeTransport {
     let inner = URLSessionHomeTransport(allowingLoopbackHTTP: true)
     func send(_ request: HttpRequest) async throws -> HttpAnswer {
         guard request.url.hasPrefix(base + "/") else { throw DriverError.invalid("wrong home") }
+        if await audit.refusesCalls, request.headers.contains(where: { $0.name.lowercased() == "authorization" && $0.value.hasPrefix("Colophon ") }) {
+            return HttpAnswer(status: 403, headers: [], body: Data("{\"result\":\"refused:revoked\"}".utf8))
+        }
         let answer = try await inner.send(HttpRequest(ticket: request.ticket, home: request.home, method: request.method,
             url: local + request.url.dropFirst(base.count), headers: request.headers, body: request.body))
         if answer.status == 403 {
@@ -59,6 +65,7 @@ private struct Transport: HomeTransport {
 @main
 @MainActor struct CrossDevice {
     static func main() async {
+        umask(0o077)
         let driver = Driver()
         while let line = readLine() {
             do {
@@ -92,8 +99,12 @@ private struct Transport: HomeTransport {
         let phase: String = switch s.phase { case .ready: "ready"; case .locked: "locked"; case .denied: "denied"; case .waitingForApproval: "waiting"; default: String(describing: s.phase) }
         return ["phase": phase, "account": s.libraryID ?? "", "member": s.memberID ?? "", "homes": s.homes.count,
                 "error": s.lastError ?? "", "issues": s.homeIssues.map { issue in
-                    if case .callRefused(let code) = issue.problem { return code }; return String(describing: issue.problem)
+                    switch issue.problem {
+                    case .callRefused(let code), .remoteCallRefused(let code): return code
+                    default: return String(describing: issue.problem)
+                    }
                 }, "faults": s.homeFaults.map { String(describing: $0.fault) }, "refusals": await audit.refused,
+                "remoteRefusals": s.homeIssues.compactMap { if case .remoteCallRefused(let code) = $0.problem { return code }; return nil },
                 "pending": s.notices.pending.map { ["digest": $0.digest, "vetoable": $0.vetoable] as [String: Any] }]
     }
     func run(_ c: [String: Any]) async throws -> Any {
@@ -164,6 +175,7 @@ private struct Transport: HomeTransport {
         case "create": await s.create()
         case "restore": await s.restore()
         case "refresh": await s.refresh()
+        case "refuseCalls": await audit.setRefusesCalls(c["enabled"] as! Bool)
         case "sync": await audit.clear(); _ = await s.syncNow(); await s.refresh()
         case "request": return try await s.exportRequest().base64EncodedString()
         case "approve":
@@ -173,6 +185,7 @@ private struct Transport: HomeTransport {
         case "revoke": try await s.revoke(memberID: text("member"))
         case "write":
             try await s.perform(DomainCommand(namespace: "reading.saved", kind: "capture", payloadJSON: data("payload")), observed: s.observedRevision)
+        case "ledger": return try JSONSerialization.jsonObject(with: await s.ledger())
         case "read": return try await s.query(namespace: "reading.saved", name: "read", arguments: Data("{}".utf8)).base64EncodedString()
         case "putBlob":
             let b = try await s.putBlob(data("bytes"), namespace: "reading.saved", mediaType: "application/octet-stream", reference: text("reference"), required: c["required"] as! Bool)

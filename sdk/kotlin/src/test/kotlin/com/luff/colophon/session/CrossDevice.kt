@@ -9,6 +9,9 @@ import java.security.interfaces.ECPublicKey
 import java.security.spec.ECPrivateKeySpec
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Base64
 import java.util.Collections
 
@@ -22,13 +25,17 @@ private fun event(v: Any?): Map<String, Any?> {
     check(reply["error"] == null) { "event failed" }
     return reply
 }
+private fun writePrivate(file: File, bytes: ByteArray) {
+    Files.createFile(file.toPath(), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
+    file.writeBytes(bytes)
+}
 private class StoredKeys(private val directory: File, private val name: String) : AsyncKeyProvider {
     private fun pair(suffix: String): java.security.KeyPair {
         val privateFile = File(directory, "$name-$suffix-private")
         val publicFile = File(directory, "$name-$suffix-public")
         if (!privateFile.exists()) {
             val key = P256.generate()
-            privateFile.writeBytes(key.private.encoded); publicFile.writeBytes(key.public.encoded)
+            writePrivate(privateFile, key.private.encoded); writePrivate(publicFile, key.public.encoded)
         }
         val factory = KeyFactory.getInstance("EC")
         return java.security.KeyPair(factory.generatePublic(X509EncodedKeySpec(publicFile.readBytes())),
@@ -48,13 +55,14 @@ private class RemoteOwner(private val keys: PublicKeys) : AsyncKeyProvider {
 private class FileSecrets(private val directory: File) : DeviceSecretStore {
     override fun key(account: String): SecretBytes {
         val file = File(directory, "device-secret-$account")
-        if (!file.exists()) withEntropy(32) { file.writeBytes(it) }
+        if (!file.exists()) withEntropy(32) { writePrivate(file, it) }
         return SecretBytes.adopt(file.readBytes())
     }
     override fun remove(account: String) { File(directory, "device-secret-$account").delete() }
 }
 private class CrossDriver {
     var session: ColophonSession? = null
+    private val refusesCalls = AtomicBoolean(false)
     private lateinit var owner: StoredKeys
     private var pairing: AccountPairing? = null
     private var transferKey: PairingTransferKey? = null
@@ -67,8 +75,9 @@ private class CrossDriver {
             is SessionPhase.WaitingForApproval -> "waiting"; else -> s.phase.toString()
         }
         return mapOf("phase" to phase, "account" to s.libraryId, "member" to s.memberId, "homes" to s.homes.size,
-            "error" to s.lastError, "issues" to s.homeIssues.map { (it.problem as? HomeProblem.CallRefused)?.code ?: it.problem.toString() },
+            "error" to s.lastError, "issues" to s.homeIssues.map { when (val p = it.problem) { is HomeProblem.CallRefused -> p.code; is HomeProblem.RemoteCallRefused -> p.code; else -> p.toString() } },
             "faults" to s.homeFaults.map { it.fault.toString() }, "refusals" to synchronized(refused) { refused.toList() },
+            "remoteRefusals" to s.homeIssues.mapNotNull { (it.problem as? HomeProblem.RemoteCallRefused)?.code },
             "pending" to s.notices.pending.map { mapOf("digest" to it.digest, "vetoable" to it.vetoable) })
     }
     @Suppress("UNCHECKED_CAST")
@@ -90,6 +99,9 @@ private class CrossDriver {
                     }
                 }, transport = HomeTransport { request ->
                     check(request.url.startsWith("$base/")) { "wrong home" }
+                    if (refusesCalls.get() && request.headers.any { it.name.equals("authorization", ignoreCase = true) && it.value.startsWith("Colophon ") }) {
+                        return@HomeTransport HttpAnswer(403u, listOf(), "{\"result\":\"refused:revoked\"}".toByteArray())
+                    }
                     val answer = transport.send(HttpRequest(request.ticket, request.home, request.method,
                         h.getValue("local") + request.url.substring(base.length), request.headers, request.body))
                     if (answer.status == 403u) refused.add(Json.obj(answer.body.toString(Charsets.UTF_8))?.string("result") ?: "missing-result")
@@ -143,11 +155,13 @@ private class CrossDriver {
             "create" -> s.create()
             "restore" -> s.restore()
             "refresh" -> s.refresh()
+            "refuseCalls" -> refusesCalls.set(c["enabled"] as Boolean)
             "sync" -> { refused.clear(); s.syncNow(); s.refresh() }
             "request" -> return encode(s.exportRequest())
             "approve" -> { s.importRequest(data("request")); s.approve(s.requests.first()) }
             "revoke" -> s.revoke(text("member"))
             "write" -> s.perform(DomainCommand("reading.saved", "capture", data("payload").toString(Charsets.UTF_8)), s.observedRevision)
+            "ledger" -> return Json.parse(s.ledger())
             "read" -> return encode(s.query("reading.saved", "read").toByteArray(Charsets.UTF_8))
             "putBlob" -> return s.putBlob(data("bytes"), "reading.saved", "application/octet-stream", text("reference"), c["required"] as Boolean).digest
             "availability" -> return if (s.blobAvailability("reading.saved", text("digest")) == BlobAvailabilityState.Available) "available" else "missing"

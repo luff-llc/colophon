@@ -816,6 +816,15 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                             if (report.store.isNotEmpty() || report.changes.authorityToSeq != report.changes.authorityFromSeq || report.changes.namespaces.isNotEmpty()) {
                                 result.changed = true; progress = true
                             }
+                            // The core's Unauthorized fault discards the result code. A home's claim about our
+                            // signed call is shown, but only verified records can deny local access or alter keys.
+                            if (answer.status == 403u && request.home == home.id &&
+                                request.headers.any { it.name.equals("authorization", ignoreCase = true) && it.value.startsWith("Colophon ") } &&
+                                Json.obj(answer.body.toString(Charsets.UTF_8))?.string("result") == "refused:revoked") {
+                                stopped = HomeProblem.RemoteCallRefused("refused:revoked")
+                                result.unauthorized = true
+                                break@homeLoop
+                            }
                         }
                     }
                 }

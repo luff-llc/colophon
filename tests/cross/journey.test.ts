@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { cp, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import { b64, unb64, delay, Device, World, type Platform } from "./device";
+import { b64, unb64, delay, Device, World, settle, type Platform } from "./device";
 
 const entropy = b64(Uint8Array.from({ length: 32 }, (_, n) => n + 1));
 const nb = b64(Uint8Array.from({ length: 32 }, (_, n) => n + 33));
@@ -39,15 +39,6 @@ async function ceremony(existing: Device, joining: Device, account: string, mode
   for (const d of [existing, joining]) expect(await d.call("pairingStage")).toBe(wrong ? "spent" : "confirmed");
 }
 
-async function settle(device: Device, ready = true) {
-  let state: any;
-  for (let n = 1; n <= 50; n++) {
-    state = await device.call("sync");
-    if ((!ready || state.phase === "ready") && !state.issues.length && !state.faults.length) return { ...state, passes: n };
-    await delay(100);
-  }
-  throw new Error(`${device.platform} did not settle: ${JSON.stringify(state)}`);
-}
 async function bootstrap(from: Device, to: Device) {
   // Only pre-approval authority (including the creator's sealed slot): no content, heads,
   // private state, or this joining device's slot/approval.
@@ -108,13 +99,19 @@ async function readBlobs(b: Awaited<ReturnType<typeof blobs>>) {
   expect(unb64(await b.reader.call("blob", { digest: b.b }))).toEqual(b.optional);
 }
 async function veto(proposer: Device, vetoer: Device, change: number) {
+  const vetoesBefore = (await proposer.call("ledger")).filter((e: any) => e.event === "vetoed").length;
   const digest = await proposer.call("propose", { change: JSON.stringify({ policy: { headMaxAge: change } }) });
   await settle(proposer); const shown = await settle(vetoer);
   expect(shown.pending.find((p: any) => p.digest === digest)?.vetoable).toBe(true);
   await vetoer.call("veto", { digest }); await settle(vetoer);
   for (let n = 0; n < 60; n++) {
     const state = await proposer.call("sync");
-    if (!state.pending.some((p: any) => p.digest === digest)) return;
+    if (!state.pending.some((p: any) => p.digest === digest)) {
+      // The verified ledger must record vetoed; disappearance alone could mean activation.
+      const recorded = await proposer.call("ledger");
+      expect(recorded.filter((e: any) => e.event === "vetoed").length).toBeGreaterThan(vetoesBefore);
+      return;
+    }
     await delay(100);
   }
   throw new Error("veto did not reach proposer");
@@ -135,17 +132,17 @@ for (const creator of ["swift", "kotlin"] as const) {
       }
       await ceremony(existing, joining, account, "code");
       await ceremony(existing, joining, account, "code", true);
-      await expect(existing.call("confirm", { digits: "000000" })).rejects.toThrow();
+      await expect(existing.call("confirm", { digits: "000000" })).rejects.toThrow("consumed");
       await ceremony(existing, joining, account, "qr");
       const offered = await joining.call("join", { mode: "qr", account, entropy, nb });
       await expect(existing.call("scan", { mode: "qr", account: "cd".repeat(32), ...offered })).rejects.toThrow("pairing:wrongAccount");
-      await expect(existing.call("scan", { mode: "qr", account, qr: b64(unb64(offered.qr).toString() + "\n") })).rejects.toThrow();
+      await expect(existing.call("scan", { mode: "qr", account, qr: b64(unb64(offered.qr).toString() + "\n") })).rejects.toThrow("body is not canonical JSON");
       const code = await joining.call("join", { mode: "code", account, entropy, nb });
       await existing.call("scan", { mode: "code", account, ...code }); await existing.call("nonce", { na });
       const reveal = await joining.call("receiveNonce", { na });
       await expect(existing.call("reveal", { ...reveal, nb: b64(Buffer.alloc(32)) })).rejects.toThrow("pairing:commitmentMismatch");
       expect(await existing.call("pairingStage")).toBe("spent");
-      await expect(existing.call("reveal", reveal)).rejects.toThrow();
+      await expect(existing.call("reveal", reveal)).rejects.toThrow("consumed");
     } finally { await world.close(); }
   }, 120_000);
 
@@ -167,15 +164,20 @@ for (const creator of ["swift", "kotlin"] as const) {
           expect((await fetch(`${home.local}/authority?after=0&limit=64`)).status).toBe(history === "members" ? 401 : 200);
         }
         await bootstrap(first, second);
+        const wrongPoint = (await first.call("join", { mode: "qr", account, entropy, nb })).e;
         // A mismatched comparison cannot seal or accept the seed, and writes no slot.
         await ceremony(first, second, account, "code", true);
-        await expect(first.call("transfer")).rejects.toThrow();
+        await expect(first.call("transfer")).rejects.toThrow("consumed");
         const before = await files(join(second.root, "records"));
-        await expect(second.call("accept", { enc: b64(Buffer.alloc(65)), ciphertext: b64(Buffer.alloc(16)) })).rejects.toThrow();
+        await expect(second.call("accept", { enc: wrongPoint, ciphertext: b64(Buffer.alloc(48)) })).rejects.toThrow("consumed");
         expect(await files(join(second.root, "records"))).toEqual(before);
         // Alternate successful path so both QR and compared-code transfers run in each creation direction.
         await ceremony(first, second, account, count === 1 ? "qr" : "code");
         const sealed = await first.call("transfer");
+        // Correct pairing, but a different valid P-256 encapsulation point: reach HPKE authentication,
+        // rather than failing point/length validation or the unconfirmed-pairing guard.
+        await expect(second.call("accept", { enc: wrongPoint, ciphertext: sealed.ciphertext })).rejects.toThrow("refused:vaultLocked");
+        expect(await files(join(second.root, "records"))).toEqual(before);
         expect((await second.call("accept", sealed)).phase).toBe("waiting");
         // Seed acceptance appends this controller's slot. Publish that authority entry before the
         // existing device appends approval, so both append to the same history tip.
@@ -190,6 +192,18 @@ for (const creator of ["swift", "kotlin"] as const) {
         expect(await assertItems(first, ["a", "b"])).toEqual(await assertItems(second, ["a", "b"]));
         await operationBytes(first, second, 6);
 
+        // A dishonest home says revoked while verified records still authorize these devices.
+        // Both SDKs must tell the person without denying or erasing their local data.
+        for (const device of [first, second]) {
+          await device.call("refuseCalls", { enabled: true });
+          const liedTo = await device.call("sync");
+          expect(liedTo.phase).toBe("ready");
+          expect([...new Set(liedTo.issues)]).toEqual(["refused:revoked"]);
+          expect([...new Set(liedTo.remoteRefusals)]).toEqual(["refused:revoked"]);
+          await assertItems(device, ["a", "b"]);
+          await device.call("refuseCalls", { enabled: false });
+          await settle(device);
+        }
         const third = world.device(creator, "third"); await third.start(); await bootstrap(second, third);
         await ceremony(second, third, account, "code");
         await second.call("approve", { request: await third.call("request") }); await settle(second); await settle(first);
@@ -204,16 +218,23 @@ for (const creator of ["swift", "kotlin"] as const) {
         }
         const codes = [...refused.refusals, ...refused.issues];
         expect(codes.length).toBeGreaterThan(0); expect([...new Set(codes)]).toEqual(["refused:revoked"]);
-        if (history === "members") expect(refused.refusals.length).toBeGreaterThan(0);
-        if (refused.phase === "denied") await expect(third.call("read")).rejects.toThrow();
-        else await assertItems(third, ["a", "b"]);
+        if (history === "members") {
+          expect(refused.phase).toBe("ready");
+          expect([...new Set(refused.remoteRefusals)]).toEqual(["refused:revoked"]);
+          expect([...new Set(refused.issues)]).toEqual(["refused:revoked"]);
+          await assertItems(third, ["a", "b"]);
+        } else {
+          expect(refused.phase).toBe("denied");
+          expect(refused.remoteRefusals).toEqual([]);
+          await expect(third.call("read")).rejects.toThrow(creator === "swift" ? "notReady" : "NotReady");
+        }
         await settle(second); await assertItems(second, ["a", "b", "c"]);
         await veto(first, second, 600); await veto(second, first, 900);
 
         for (const device of [first, second, third]) {
           const identity = await device.call("state");
           expect((await device.call("lock")).phase).toBe("locked");
-          await expect(device.call("read")).rejects.toThrow();
+          await expect(device.call("read")).rejects.toThrow(device.platform === "swift" ? "notReady" : "NotReady");
           const saved = (await files(join(device.root, "private"))).filter(f => f.endsWith(".checkpoint") || (f.startsWith("saved-") && f.endsWith(".bin")));
           expect(saved.length).toBe(1); expect((await stat(join(device.root, "private", saved[0]))).size).toBeGreaterThan(0);
           const reopened = await device.reopen();
@@ -227,8 +248,11 @@ for (const creator of ["swift", "kotlin"] as const) {
           expect(unb64(await d.call("blob", { digest }))).toEqual(value);
         }
         const reopenedThird = await third.call("sync");
-        if (reopenedThird.phase === "denied") await expect(third.call("read")).rejects.toThrow();
-        else { expect([...new Set([...reopenedThird.refusals, ...reopenedThird.issues])], JSON.stringify(reopenedThird)).toEqual(["refused:revoked"]); await assertItems(third, ["a", "b"]); }
+        expect(reopenedThird.phase).toBe(history === "members" ? "ready" : "denied");
+        expect([...new Set(reopenedThird.remoteRefusals)]).toEqual(history === "members" ? ["refused:revoked"] : []);
+        expect([...new Set(reopenedThird.issues)], JSON.stringify(reopenedThird)).toEqual(["refused:revoked"]);
+        if (history === "members") await assertItems(third, ["a", "b"]);
+        else await expect(third.call("read")).rejects.toThrow(creator === "swift" ? "notReady" : "NotReady");
         console.log(`cross ${creator}->${other(creator)} ${history}/${count}: 7 identical record files; 220000 blob bytes; 2 cross vetoes; revoked=${codes.join(",")}; 3 cold reopens; approval passes=${secondReady.passes}`);
       } finally { await world.close(); }
     }, 240_000);

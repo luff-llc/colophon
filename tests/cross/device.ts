@@ -1,7 +1,21 @@
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Subprocess } from "bun";
+
+// Own process handles, never PID searches: even exceptional process exit can only kill our children.
+const activeWorlds = new Set<World>();
+let stopping = false;
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) process.on(signal, () => {
+  if (stopping) return;
+  stopping = true;
+  const deadline = setTimeout(() => process.exit(code), 10_000);
+  void Promise.allSettled([...activeWorlds].map(w => w.close())).then(() => {
+    clearTimeout(deadline); process.exit(code);
+  });
+});
+process.on("exit", () => { for (const world of activeWorlds) world.killOwned(); });
 
 export const repo = resolve(import.meta.dir, "../..");
 export type Platform = "swift" | "kotlin";
@@ -48,7 +62,8 @@ export class Device {
     const classpath = (await readFile(join(repo, "sdk/kotlin/build/cross-device-classpath.txt"), "utf8")).trim();
     const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin/java") : "java";
     const cmd = this.platform === "swift" ? [swift] : [java, `-Djna.library.path=${target}/release`, "-cp", classpath, "com.luff.colophon.session.CrossDeviceKt"];
-    this.child = Bun.spawn(cmd, { cwd: repo, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    // A normal permissive umask makes the native drivers prove their own key-file permissions.
+    this.child = Bun.spawn(["bash", "-c", 'umask 022; exec "$@"', "cross-device", ...cmd], { cwd: repo, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     this.stderr = "";
     this.errors = (async () => {
       for await (const chunk of this.child!.stderr) this.stderr = (this.stderr + Buffer.from(chunk).toString()).slice(-12000);
@@ -91,6 +106,7 @@ export class Device {
       throw new Error(`${e}\nstderr: ${this.stderr}`);
     });
   }
+  killOwned() { this.child?.kill(9); }
   async close() {
     if (!this.child) return;
     const child = this.child; child.stdin.end();
@@ -114,9 +130,11 @@ export class World {
   private account?: string;
   private provisioning?: Promise<void>;
   private root = "";
+  private closing?: Promise<void>;
   constructor(readonly history: "members" | "public", readonly count: number) {}
   async init() {
-    this.root = await mkdtemp(join(tmpdir(), `colophon-cross-relay-${process.env.COLOPHON_CROSS_TAG ?? process.pid}-`));
+    this.root = await mkdtemp(join(process.env.COLOPHON_CROSS_RUN_DIR ?? tmpdir(), `colophon-cross-relay-${process.env.COLOPHON_CROSS_TAG ?? process.pid}-`));
+    activeWorlds.add(this);
     for (let n = 0; n < this.count; n++) {
       const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
       const port = server.port!; await server.stop(true);
@@ -149,8 +167,6 @@ export class World {
           COLOPHON_RELAY_HOME_SLOTS: `home=${account}@${home.base}`, COLOPHON_HOME_KEY_FILE: join(this.root, `key-${n}.json`),
           COLOPHON_RELAY_TICK_MS: "50", COLOPHON_RELAY_OPEN: "", COLOPHON_RELAY_TOKENS: "" }, stdout: "pipe", stderr: "pipe" });
       this.relays.push(child);
-      // Parent script checks every PID even when the test runner dies before its finally block.
-      if (process.env.COLOPHON_CROSS_PID_FILE) await appendFile(process.env.COLOPHON_CROSS_PID_FILE, `${child.pid}\n`);
       const reader = lines(child.stdout as ReadableStream<Uint8Array>);
       let stderr = "";
       this.drains.push((async () => { for await (const b of child.stderr as ReadableStream<Uint8Array>) stderr = (stderr + Buffer.from(b).toString()).slice(-12000); })());
@@ -159,16 +175,37 @@ export class World {
       this.drains.push((async () => { for await (const _ of reader) { /* drain relay logs */ } })());
     }
   }
-  async close() {
+  killOwned() {
+    for (const device of this.devices) device.killOwned();
+    for (const relay of this.relays) relay.kill(9);
+    if (this.root) rmSync(this.root, { recursive: true, force: true });
+  }
+  close(): Promise<void> { return this.closing ??= this.closeAll(); }
+  private async closeAll() {
     try { await Promise.all(this.devices.map(device => device.close())); }
     finally {
-      for (const relay of this.relays) relay.kill();
-      for (const relay of this.relays) {
-        try { await within(relay.exited, 5000, "relay exit"); }
-        catch { relay.kill(9); await relay.exited; }
+      try {
+        for (const relay of this.relays) relay.kill();
+        for (const relay of this.relays) {
+          try { await within(relay.exited, 5000, "relay exit"); }
+          catch { relay.kill(9); await relay.exited; }
+        }
+        await Promise.all(this.drains);
+      } finally {
+        await rm(this.root, { recursive: true, force: true });
+        activeWorlds.delete(this);
       }
-      await Promise.all(this.drains);
-      await rm(this.root, { recursive: true, force: true });
     }
   }
+}
+
+export async function settle(device: Device, ready = true) {
+  let state: any;
+  for (let n = 1; n <= 50; n++) {
+    state = await device.call("sync");
+    if (state.error) throw new Error(`${device.platform} sync lastError: ${state.error}`);
+    if ((!ready || state.phase === "ready") && !state.issues.length && !state.faults.length) return { ...state, passes: n };
+    await delay(100);
+  }
+  throw new Error(`${device.platform} did not settle: ${JSON.stringify(state)}`);
 }

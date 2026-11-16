@@ -942,6 +942,17 @@ actor SessionWorker {
                         if fault.kind == .unauthorized { result.unauthorized = true }
                     }
                     if !report.store.isEmpty || report.changes.authorityToSeq != report.changes.authorityFromSeq || !report.changes.namespaces.isEmpty { result.changed = true; progress = true }
+                    // Rust reports 401/403 as Unauthorized without retaining the response's result code.
+                    // Surface this home's claim only for our own signed call. It cannot establish revocation:
+                    // only verified authority records may deny local reads or change custody.
+                    if answer.status == 403, request.home == home.id,
+                       request.headers.contains(where: { $0.name.lowercased() == "authorization" && $0.value.hasPrefix("Colophon ") }),
+                       let body = try? JSONSerialization.jsonObject(with: answer.body) as? [String: Any],
+                       body["result"] as? String == "refused:revoked" {
+                        stopped = .remoteCallRefused(code: "refused:revoked")
+                        result.unauthorized = true
+                        break homeLoop
+                    }
                 }
             }
             result.passes += 1
