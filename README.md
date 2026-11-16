@@ -69,7 +69,7 @@ makes access explicit instead:
 - **Honest.** Missing history, keys or files remain visible, retryable states. Nothing
   is reported as an empty library because a member lacks permission.
 
-## Rust core and JavaScript package (0.4)
+## Rust core and JavaScript package (the 0.4 engine)
 
 The pure Rust core implements records, raw and WebAuthn key steps, the controller keyring and
 vault slots, HPKE, grants, admission, epoch rotation, recovery, four domain folds, the ledger and generated agent tools. It performs no
@@ -180,7 +180,7 @@ they don't interpret. Conflicts are recorded, never silently resolved (spec §9)
 ## Tests and conformance
 
 ```sh
-COLOPHON_SOFTWARE_KEYS=1 swift test        # root 0.4 SDK
+COLOPHON_SOFTWARE_KEYS=1 swift test        # root SDK (0.5.0)
 COLOPHON_SOFTWARE_KEYS=1 swift test --package-path reference/swift  # 0.1, migration adapter, clean copy
 COLOPHON_SOFTWARE_KEYS=1 COLOPHON_WRITE_VECTORS=1 swift test --package-path reference/swift --filter writeVectors
 ```

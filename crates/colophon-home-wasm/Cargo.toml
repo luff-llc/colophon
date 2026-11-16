@@ -10,7 +10,7 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-colophon-core = { path = "../colophon-core", version = "=0.4.0" }
+colophon-core = { path = "../colophon-core", version = "=0.5.0" }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
