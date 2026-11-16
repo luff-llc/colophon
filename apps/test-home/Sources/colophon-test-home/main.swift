@@ -2,6 +2,7 @@ import ColophonKit
 import CryptoKit
 import Foundation
 import Network
+import Security
 
 // colophon-test-home: the home service the Colophon test apps talk to on this Mac.
 //
@@ -65,10 +66,33 @@ final class Service: @unchecked Sendable {
     private var relay: Process?
     private var slotsURL: URL { options.data.appendingPathComponent("slots.json") }
     private var keyURL: URL { options.data.appendingPathComponent("home-key.jwk") }
+    /// A fresh random token each start, printed once on stdout: every request must carry it (`Authorization: Bearer …`).
+    let token: String = {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else { fail("no randomness for the token") }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }()
+
+    /// Refuses what a web page or a rebinding name could send: no token, another `Host`, any `Origin`, a POST that is
+    /// not `application/json`. Returns the status to answer with, or nil when the request may go on.
+    func refusal(method: String, headers: [String: String]) -> (Int, String)? {
+        if headers["origin"] != nil { return (403, "requests from a web page are refused") }
+        guard headers["host"] == "127.0.0.1:\(options.port)" else { return (403, "the Host must be 127.0.0.1:\(options.port)") }
+        let presented = Data((headers["authorization"] ?? "").utf8), expected = Data("Bearer \(token)".utf8)
+        guard presented.count == expected.count, zip(presented, expected).reduce(UInt8(0), { $0 | ($1.0 ^ $1.1) }) == 0 else {
+            return (401, "the token printed at start-up is required")
+        }
+        if method == "POST" {
+            let type = (headers["content-type"] ?? "").split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            guard type == "application/json" else { return (415, "Content-Type must be application/json") }
+        }
+        return nil
+    }
 
     init(options: Options) throws {
         self.options = options
         try FileManager.default.createDirectory(at: options.data, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try Self.secureDirectory(options.data)
         key = try Self.loadOrCreateKey(at: options.data.appendingPathComponent("home-key.jwk"))
         slots = (try? JSONDecoder().decode([String: Slot].self, from: Data(contentsOf: options.data.appendingPathComponent("slots.json")))) ?? [:]
     }
@@ -84,7 +108,29 @@ final class Service: @unchecked Sendable {
         while s.count % 4 != 0 { s += "=" }
         return Data(base64Encoded: s)
     }
+    /// On every start: the data directory is ours and mode 0700 (repaired if it is not), never a symbolic link.
+    private static func secureDirectory(_ url: URL) throws {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { fail("cannot inspect \(url.path)") }
+        guard (info.st_mode & S_IFMT) == S_IFDIR else { fail("\(url.path) is not a directory") }
+        guard info.st_uid == getuid() else { fail("\(url.path) belongs to another user") }
+        if info.st_mode & 0o077 != 0 {
+            guard chmod(url.path, 0o700) == 0 else { fail("cannot make \(url.path) private") }
+            log("made \(url.path) private (mode 0700)")
+        }
+    }
+    /// A key file must be ours, a plain file, and readable by nobody else: one that is group- or world-readable is refused.
+    private static func checkKeyFile(_ url: URL) {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { fail("cannot inspect \(url.path)") }
+        guard (info.st_mode & S_IFMT) == S_IFREG else { fail("\(url.path) is not a plain file") }
+        guard info.st_uid == getuid() else { fail("\(url.path) belongs to another user") }
+        guard info.st_mode & 0o077 == 0 else {
+            fail("\(url.path) is readable by others (mode \(String(info.st_mode & 0o777, radix: 8))): refused. Remove it, or chmod 600 it if it was never exposed")
+        }
+    }
     private static func loadOrCreateKey(at url: URL) throws -> P256.Signing.PrivateKey {
+        if FileManager.default.fileExists(atPath: url.path) { checkKeyFile(url) }
         if let data = try? Data(contentsOf: url) {
             guard let jwk = try JSONSerialization.jsonObject(with: data) as? [String: String], let d = jwk["d"].flatMap(unb64url) else {
                 fail("\(url.path) is not a private P-256 JWK")
@@ -245,29 +291,35 @@ final class Connection: @unchecked Sendable {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] data, _, complete, error in
             if let data { buffer.append(data) }
             if buffer.count > 128 * 1024 { return respond(413, Data()) }
-            if let request = parse() { return respond(service.handle(method: request.method, path: request.path, body: request.body)) }
+            if let request = parse() {
+                if let (status, why) = service.refusal(method: request.method, headers: request.headers) {
+                    return respond(status, (try? JSONSerialization.data(withJSONObject: ["error": why])) ?? Data())
+                }
+                return respond(service.handle(method: request.method, path: request.path, body: request.body))
+            }
             if complete || error != nil { connection.cancel(); return }
             receive()
         }
     }
-    private func parse() -> (method: String, path: String, body: Data)? {
+    private func parse() -> (method: String, path: String, headers: [String: String], body: Data)? {
         guard let end = buffer.range(of: Data("\r\n\r\n".utf8)) else { return nil }
         let head = String(decoding: buffer[..<end.lowerBound], as: UTF8.self).split(separator: "\r\n")
         let first = head.first?.split(separator: " ") ?? []
-        guard first.count >= 2 else { return ("BAD", "", Data()) }
-        var length = 0
+        guard first.count >= 2 else { return ("BAD", "", [:], Data()) }
+        var headers: [String: String] = [:]
         for line in head.dropFirst() {
             let parts = line.split(separator: ":", maxSplits: 1)
-            if parts.count == 2, parts[0].lowercased() == "content-length" { length = Int(parts[1].trimmingCharacters(in: .whitespaces)) ?? 0 }
+            if parts.count == 2 { headers[parts[0].trimmingCharacters(in: .whitespaces).lowercased()] = parts[1].trimmingCharacters(in: .whitespaces) }
         }
-        guard length <= 65_536 else { return ("BAD", "", Data()) }
+        let length = Int(headers["content-length"] ?? "0") ?? 0
+        guard (0...65_536).contains(length) else { return ("BAD", "", headers, Data()) }
         let body = buffer[end.upperBound...]
         guard body.count >= length else { return nil }
-        return (String(first[0]), String(first[1]), Data(body.prefix(length)))
+        return (String(first[0]), String(first[1]), headers, Data(body.prefix(length)))
     }
     private func respond(_ answer: (Int, Data)) { respond(answer.0, answer.1) }
     private func respond(_ status: Int, _ body: Data) {
-        let reason = [200: "OK", 400: "Bad Request", 404: "Not Found", 409: "Conflict", 413: "Content Too Large"][status] ?? "Error"
+        let reason = [200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 409: "Conflict", 413: "Content Too Large", 415: "Unsupported Media Type"][status] ?? "Error"
         var head = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         if status == 413 { head = "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" }
         connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { [connection] _ in connection.cancel() })
@@ -286,7 +338,7 @@ do { listener = try NWListener(using: parameters) } catch { fail("cannot listen 
 listener.newConnectionHandler = { @Sendable connection in Connection(connection, service: service).start() }
 listener.stateUpdateHandler = { @Sendable state in
     switch state {
-    case .ready: print("{\"listening\":{\"host\":\"127.0.0.1\",\"port\":\(options.port)},\"relay\":\"http://127.0.0.1:\(options.relayPort)/v1/libraries/\"}"); fflush(stdout)
+    case .ready: print("{\"listening\":{\"host\":\"127.0.0.1\",\"port\":\(options.port)},\"relay\":\"http://127.0.0.1:\(options.relayPort)/v1/libraries/\",\"token\":\"\(service.token)\"}"); fflush(stdout)
     case .failed(let error): fail("listener failed: \(error)")
     default: break
     }
