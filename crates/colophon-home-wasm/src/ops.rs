@@ -80,6 +80,7 @@ fn run(input: &[u8]) -> R<Value> {
         "init" => init(&req),
         "status" => status(&req),
         "resume" => resume(&req),
+        "lease" => lease(&req),
         "classify" => classify(&req),
         "access" => access(&req),
         "call_key" => call_key(&req),
@@ -299,11 +300,32 @@ fn status(req: &Value) -> R<Value> {
     }))
 }
 
+/// How long a home may serve after it last recorded that it would (a lease, `lease`): a host
+/// writes `until` durably before it serves past the previous one, so a home killed at any
+/// instant was serving at most until the last `until` it wrote.
+const LEASE_MS: i64 = 30_000;
+/// A lease is renewed once less than this is left of it.
+const LEASE_RENEW_MS: i64 = 10_000;
+
+/// The serving lease to record now: `{"until","renewAt"}`. The host writes `until` durably
+/// before it serves past the previous `until` (at start-up before it listens, and whenever its
+/// clock reaches `renewAt`), so it never serves beyond what it recorded.
+fn lease(req: &Value) -> R<Value> {
+    let now_ms = i64_of(req, "now")?;
+    let until = now_ms.saturating_add(LEASE_MS);
+    Ok(json!({"until": until, "renewAt": until - LEASE_RENEW_MS}))
+}
+
 /// A home started again (§13.1: a home persists its own serving intervals, and a home that was
-/// not serving for any part of a transition's window may store an `activate` it never saw the
-/// transition of). `alive` is the last instant the host recorded the home serving before it
-/// stopped (the host writes it every scheduler tick); the open interval closes there and a new
-/// one opens `now`. Without `alive`, or with nothing open, the state is unchanged.
+/// not serving for any part of a transition's window may store an `activate` of a transition it
+/// never saw). `alive` is the last lease the host recorded (`lease`): the home may have served
+/// until then, never after. Uptime is never under-recorded, so whatever is uncertain counts as
+/// serving, the direction that grants no exemption:
+/// - no lease recorded: the open interval stays open (the home is taken to have been serving
+///   throughout);
+/// - a lease that reaches now or later (a restart inside it, or a clock that went backwards):
+///   the open interval stays open;
+/// - otherwise the open interval closes at the lease's end and a new one opens now.
 fn resume(req: &Value) -> R<Value> {
     let mut l = load(req)?;
     let now_ms = i64_of(req, "now")?;

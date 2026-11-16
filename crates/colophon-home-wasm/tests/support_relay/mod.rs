@@ -205,7 +205,10 @@ impl Relay {
             .env("COLOPHON_HOME_KEY", keys.jwk())
             .env("COLOPHON_HOME_WASM", wasm)
             .env("COLOPHON_RELAY_CLOCK_FILE", &clock)
-            .env("COLOPHON_RELAY_TICK_MS", "50")
+            .env(
+                "COLOPHON_RELAY_TICK_MS",
+                limits.get("tickMs").and_then(Value::as_u64).map_or("50".to_string(), |t| t.to_string()),
+            )
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -247,6 +250,22 @@ impl Relay {
             body.to_string().as_bytes(),
         );
         (s, serde_json::from_slice(&b).unwrap_or(Value::Null))
+    }
+/// The serving intervals a home slot's committed state holds (`[from, through]`, ms; `through`
+    /// `None` while open), read from `home-state.json`.
+    pub fn serving(&self) -> Vec<(i64, Option<i64>)> {
+        use base64::engine::general_purpose::STANDARD;
+        let text = std::fs::read_to_string(self.dir.join("data/home/home-state.json")).unwrap();
+        let outer: String = serde_json::from_str(&text).unwrap();
+        let slot: Value = serde_json::from_slice(&STANDARD.decode(outer).unwrap()).unwrap();
+        let home: Value =
+            serde_json::from_slice(&STANDARD.decode(slot["home_state"].as_str().unwrap()).unwrap()).unwrap();
+        home["serving"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| (i["from_ms"].as_i64().unwrap(), i["through_ms"].as_i64()))
+            .collect()
     }
     /// Stop the process and wait for it.
     pub fn stop(&mut self) {

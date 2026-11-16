@@ -119,8 +119,9 @@ rules apply from the appointment on. `receipts` in the request holds receipt env
 `vetoed` and `final` entries when they are due (the exact bytes come from the Rust code that a
 host's own account uses), and for a successor home `successionVetoed` and its receipt of the
 successor genesis inside the succession window; signs a head when one is due (at least every
-`headMaxAge / 2`, and for every new entry); records that it is serving (`alive.json`, read back at
-start-up to close its serving interval, §13.1); and forwards what it stores to the account's other
+`headMaxAge / 2`, and for every new entry); keeps a serving lease (`alive.json`: it may serve until the lease's end and renews it
+before then, writing it durably at start-up before it listens; at start-up the module closes the
+serving interval at the last lease's end, never earlier, §13.1); and forwards what it stores to the account's other
 current homes: each listed transition, veto and receipt to `{peer}/pending`, a transition or veto
 together with the receipts it holds of it (so a peer judging a late veto holds the in-window
 receipt), their receipts of what it sent come back and are admitted; its heads to
@@ -139,8 +140,9 @@ entry file whose seq another candidate comes to stand at is replaced.
 
 **A home that was offline.** At a non-primary home, an immediate entry a primary head covers is
 stored however far its `issued` is behind the home's clock (the primary applied the clock rule);
-the head may name a later entry of the same upload. A home's serving interval closes at its last
-recorded tick, so an `activate` of a transition whose window fell while it was down is stored.
+the head may name a later entry of the same upload. A home's serving interval closes at the end
+of the last lease it recorded (uptime is never under-recorded; whatever is uncertain counts as
+serving), so an `activate` of a transition whose window fell wholly while it was down is stored.
 
 **Predecessor entries** (§14, §15.1). A successor's home serves its Swift predecessor's entries
 under `{base}/predecessor/` and `records/predecessor/`. It takes one by `PUT` only under a
@@ -162,7 +164,7 @@ the entry's `seq` is its path's and at most F's, and the history verifier with i
 <dataDir>/<slot>/replay.log       home slots: the call replay store, append-only (a reservation line,
                                   fsynced before any effect; a completion line after it)
 <dataDir>/<slot>/forward.json     home slots: what each other home has been sent
-<dataDir>/<slot>/alive.json       home slots: the last tick's clock reading (serving intervals)
+<dataDir>/<slot>/alive.json       home slots: the serving lease's end (serving intervals, §13.1)
 ```
 
 Home slots add `authority/<8 digits>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`,

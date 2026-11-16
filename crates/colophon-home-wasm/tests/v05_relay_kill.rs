@@ -244,6 +244,7 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     let mut admitted: BTreeMap<String, &str> = BTreeMap::new();
     let mut want = 3usize;
     let mut vetoes = 0usize;
+    let mut startup_kills = 0usize;
     let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut rnd = |n: u64| {
         seed ^= seed << 13;
@@ -258,6 +259,23 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     for k in 0..rounds {
         let t = T0 + HOUR_MS + k * 3 * HOUR_MS;
         clock(t);
+        // A kill right after start-up, before any scheduler tick: the home was serving at the
+        // round's clock reading (the relay answered), and the next start still records it.
+        {
+            inside += usize::from(relay.kill());
+            kills += 1;
+            relay = start(&keys, &account, &dir, port);
+            let _ = get_json(relay.port, "/head");
+            inside += usize::from(relay.kill());
+            kills += 1;
+            startup_kills += 1;
+            relay = start(&keys, &account, &dir, port);
+            let serving = Relay::attached(port, BASE_A, &account, &dir).serving();
+            assert!(
+                serving.iter().any(|(from, through)| *from <= t && through.is_none_or(|e| e >= t)),
+                "round {k}: uptime at {t} is recorded after a kill before the first tick: {serving:?}"
+            );
+        }
         // After a `vetoed`, a transition its signer's unit signs alone fails escalation (§8.7):
         // the next one is signed by both units.
         let signers = if k % 3 == 2 { vec![d.clone(), p.clone()] } else { vec![d.clone()] };
@@ -398,9 +416,10 @@ fn the_relay_killed_at_random_points_loses_nothing_and_receipts_nothing_twice() 
     }
     let _ = relay.kill();
     eprintln!(
-        "kill loop: {kills} kills, {inside} of them inside record_due, {} transitions activated and final, {vetoes} vetoed, {} transitions and vetoes kept",
+        "kill loop: {kills} kills, {inside} of them inside record_due, {startup_kills} right after start-up, {} transitions activated and final, {vetoes} vetoed, {} transitions and vetoes kept, {:?}",
         rounds as usize - vetoes,
-        admitted.len()
+        admitted.len(),
+        started.elapsed()
     );
     assert!(kills >= 200, "{kills}");
     assert!(inside > 0, "some kills landed inside record_due");

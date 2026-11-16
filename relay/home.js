@@ -159,13 +159,33 @@ export class HomeSlot {
     await this.materialize(this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files);
     await this.openReplay();
     this.forward = await this.readJson('forward.json', { peers: {} });
-    // The home was not serving between its last recorded tick and now (§13.1 serving
-    // intervals): the module closes the interval it had open.
+    // Serving intervals (§13.1). The module decides from the last lease recorded (the home may
+    // have served until its end, never after) whether the interval it had open closes. Then a
+    // new lease is written durably before the reopened interval is committed and before the
+    // relay listens: a kill at any later instant leaves a lease that covers all real uptime.
     const alive = await this.readJson('alive.json', null);
-    if (alive && typeof alive.at === 'number') {
-      const r = this.wasm.call({ op: 'resume', state: this.state, now: this.clock(), alive: alive.at });
-      if (r.changed) await this.commit(r.state);
-    }
+    const until = alive && typeof alive.until === 'number' ? alive.until : null;
+    const now = this.clock();
+    const r = this.wasm.call({ op: 'resume', state: this.state, now, alive: until });
+    await this.renewLease(now);
+    if (r.changed) await this.commit(r.state);
+  }
+
+  /** Record that this home may serve until the module's lease end, durably, before serving
+   * past the previous one. */
+  async renewLease(now) {
+    const l = this.wasm.call({ op: 'lease', now });
+    await this.writeJson('alive.json', { until: l.until });
+    this.lease = l;
+  }
+
+  /** Before any work at a clock reading: renew the lease when the module says it is due. */
+  async keepLease() {
+    const now = this.clock();
+    if (this.lease && now < this.lease.renewAt) return;
+    await (this.leaseLock ??= chain())(async () => {
+      if (!this.lease || this.clock() >= this.lease.renewAt) await this.renewLease(this.clock());
+    });
   }
 
   async readJson(name, fallback) {
@@ -393,6 +413,7 @@ export class HomeSlot {
 
   async handle(req, res, url, section, rest) {
     const { HttpError, send, readBody, clampInt } = this.deps;
+    await this.keepLease();
     if (!this.rate.take(req.socket.remoteAddress ?? '', this.clock())) {
       throw new HttpError(429, 'Too many requests', { 'retry-after': '60' });
     }
@@ -563,9 +584,8 @@ export class HomeSlot {
 
   async tickOnce() {
     await this.lock(async () => {
+      await this.keepLease();
       const now = this.clock();
-      // The last instant this home is known to have been serving (read back at start-up).
-      if (this.aliveAt !== now) { await this.writeJson('alive.json', { at: now }); this.aliveAt = now; }
       // record_due is a pure function of (state, now): an unchanged pair would give the same
       // answer, so it is not asked again (it verifies the whole history each time).
       if (this.lastDue && this.lastDue.state === this.state && this.lastDue.now === now) { await this.ensureHead(); return; }

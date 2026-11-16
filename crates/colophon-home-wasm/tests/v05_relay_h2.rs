@@ -660,8 +660,10 @@ fn a_home_that_was_down_during_a_window_stores_the_activate_it_never_saw() {
     std::thread::sleep(std::time::Duration::from_millis(300)); // B ticks at T
     let mut b = w.b.take().unwrap();
     b.stop();
-    let mut ctl = w.controller(t + 10_000);
-    w.a.set_clock(t + 10_000);
+    // B may have served until its last lease (30 s after its last tick): the transition comes
+    // after that.
+    let mut ctl = w.controller(t + 60_000);
+    w.a.set_clock(t + 60_000);
     let tr = propose_by(&w, &mut ctl, 600, &[w.f.d.clone()]);
     let (s, out) = w.a.post("/pending", &json!({"objects": [pending_env(&ctl, &tr)]}));
     assert_eq!(s, 200, "{out}");
@@ -677,4 +679,42 @@ fn a_home_that_was_down_during_a_window_stores_the_activate_it_never_saw() {
     let (s, out) = b.post("/authority", &json!({"from": n + 1, "entries": [e[n]], "receipts": []}));
     assert_eq!(s, 200, "B stores the activate: {out}");
     assert_eq!(kinds_at(b)[n], "activate");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The H2 check, finding 4: uptime is never under-recorded.
+
+/// A home restarted, serving a request a minute later, and killed before any scheduler tick (the
+/// tick is disabled here): on the next start the interval it served in is still recorded. Before
+/// the fix, its liveness was written only by a tick, so the next start closed the interval at its
+/// own start and erased that minute; a transition withheld from the home over that minute could
+/// then get the offline exemption (§13.1).
+#[test]
+fn a_kill_before_the_first_tick_does_not_erase_uptime() {
+    let Some(mut w) = world("lease", "public", 1, false, false) else {
+        return;
+    };
+    let ka = HomeKeys::new(0x77);
+    let account = w.f.account.id().as_str().to_string();
+    let t = NOW;
+    w.a.set_clock(t);
+    std::thread::sleep(std::time::Duration::from_millis(300)); // ticks at T
+    let a = std::mem::replace(&mut w.a, Relay::attached(0, BASE_A, "", w.scratch[0].path()));
+    let (port, dir) = (a.port, a.dir.clone());
+    let mut a = a;
+    a.stop();
+    // Started again an hour later with no tick; a request a minute after that; killed.
+    let t2 = t + HOUR;
+    let mut quiet = Relay::start_with(&ka, &account, BASE_A, &dir, t2, &[], port, json!({"tickMs": 600_000}));
+    quiet.set_clock(t2 + 60_000);
+    assert_eq!(quiet.get("/authority?after=0&limit=1").0, 200, "served at T2 + 60 s");
+    quiet.stop();
+    // The next start: the home was serving at T2 + 60 s.
+    w.a = Relay::start_on(&ka, &account, BASE_A, &dir, t2 + HOUR, &[], port);
+    let serving = w.a.serving();
+    let at = t2 + 60_000;
+    assert!(
+        serving.iter().any(|(from, through)| *from <= at && through.is_none_or(|e| e >= at)),
+        "the interval served in is recorded: {serving:?}"
+    );
 }
