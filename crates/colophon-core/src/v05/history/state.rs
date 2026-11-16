@@ -183,10 +183,15 @@ pub struct State {
     pub(super) rule_at: Vec<(u64, bool)>,
     /// The account's layout (§8.2 "Layout"): 2 for a `/5` account from genesis and for an
     /// upgraded account from its `upgrade`. A `layout` component that does not raise it voids
-    /// its transition; one that raises it above 2 is `newerFormat` (the upgrade door, §20), so
-    /// a 0.5 reader never holds another value.
+    /// its transition. One that raises it above 2 is the upgrade door (§20): it changes no rule
+    /// this reader applies, so the value stays 2, and its activation is kept in `raises`.
     #[serde(default = "layout_5")]
     pub(crate) layout: u64,
+    /// Seqs of the activations on this branch that raise the layout above 2 (§20). The reader
+    /// is stopped once one of them is final ([`State::stopped_at`]); while provisional, a
+    /// `vetoed` or a resolved fork can still displace it.
+    #[serde(default)]
+    pub(crate) raises: Vec<u64>,
 }
 
 /// The layout a 0.5 reader understands (§8.2, §20).
@@ -362,6 +367,18 @@ impl State {
     }
     fn on_branch(&self, seq: u64, d: &str) -> bool {
         seq >= 1 && self.digests.get((seq - 1) as usize).is_some_and(|x| x == d)
+    }
+
+    /// The seq of the activation that stopped this reader (§1 "A stop", §20): the first
+    /// activation on this branch that raises the layout above 2 and is final (§8.7 "Final",
+    /// which with no home is at once). A raise that is still provisional stops nothing, so a
+    /// `vetoed` or a resolved fork that displaces it is applied as usual. Once stopped, the
+    /// reader applies no further entry.
+    pub fn stopped_at(&self) -> Option<u64> {
+        self.raises
+            .iter()
+            .copied()
+            .find(|r| self.activations.iter().any(|a| a.seq == *r && a.final_))
     }
 
     /// The one **current principal** check of §8.5, used wherever a principal's signature is
@@ -787,6 +804,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         migration: None,
         resolved: Vec::new(),
         layout: LAYOUT_5,
+        raises: Vec::new(),
     })
 }
 
@@ -1695,8 +1713,8 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
         changed = true;
     }
     // §8.2 "Layout": a component that does not raise the layout voids the transition; one that
-    // raises it above 2 is the upgrade door, `newerFormat` once every other check has passed
-    // (reported at the end of this function).
+    // raises it above 2 is the upgrade door: recorded once every other check has passed (at the
+    // end of this function), and a stop once its activation is final.
     let raises_layout = match t.change.get("layout") {
         Some(v) => {
             let to = v
@@ -1780,10 +1798,10 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     // Unknown content inside the delta is reported only once the delta is otherwise valid, as
     // an immediate entry reports it after its checks (§1, §2.3).
     unknown.check()?;
-    if let Some(to) = raises_layout.filter(|to| *to > LAYOUT_5) {
-        return Err(Failure::NewerFormat(format!(
-            "the transition raises the layout to {to}; this reader knows layout {LAYOUT_5}"
-        )));
+    // A raise above 2 changes no rule this reader applies: it is recorded, and the reader stops
+    // once its activation is final ([`State::stopped_at`]).
+    if raises_layout.is_some_and(|to| to > LAYOUT_5) {
+        n.raises.push(act_seq);
     }
     record_points(&mut n);
     Ok(n)
@@ -2095,6 +2113,13 @@ pub(crate) fn apply(
     now_ms: i64,
 ) -> Step<State> {
     let _ = (pending, heads);
+    // A final layout raise stops the reader: nothing after it is applied (§1 "A stop", §20).
+    if let Some(r) = s.stopped_at() {
+        return Err(Failure::NewerFormat(format!(
+            "the account raised its layout above {LAYOUT_5} at seq {r}, and that is final"
+        ))
+        .into());
+    }
     // After a `successor` activation F the account admits only the entries that settle it
     // (§8.7, §15.1): a `final`, or, as a conflicting candidate at F's seq, a `vetoed` that
     // displaces F while it is provisional. Once F is final the account is closed.
@@ -3897,11 +3922,13 @@ pub(super) fn from_upgrade(
         migration: None,
         resolved: Vec::new(),
         layout: LAYOUT_5,
+        raises: Vec::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     /// L1 (§3.3 rule 2): a member and a keyring key with one key ID in one transition are
