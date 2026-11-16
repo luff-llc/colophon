@@ -343,6 +343,86 @@ fn a_broken_envelope_over_a_valid_body_never_stands_in_for_it() {
     });
 }
 
+/// Envelopes that cannot be read (§16.3 "Envelopes"), beside the entry over `envelope`'s body
+/// at its seq: its body's `issued`, then `signer` unreadable (seq still readable); the body not
+/// JSON, `body` not a string, the outer JSON unreadable, and over 2 MiB (no seq readable).
+fn unreadable_copies(envelope: &[u8]) -> Vec<Vec<u8>> {
+    let v: Value = serde_json::from_slice(envelope).unwrap();
+    let body: Value =
+        serde_json::from_slice(&STANDARD.decode(v["body"].as_str().unwrap()).unwrap()).unwrap();
+    let with_body = |b: &Value| {
+        let mut w = v.clone();
+        w["body"] = Value::String(STANDARD.encode(canonical(b).unwrap()));
+        serde_json::to_vec(&w).unwrap()
+    };
+    let mut issued = body.clone();
+    issued["issued"] = Value::from("soon");
+    let mut signer = body.clone();
+    signer["by"] = Value::from("controller");
+    signer["signer"] = Value::from(7);
+    let mut not_json = v.clone();
+    not_json["body"] = Value::String(STANDARD.encode(b"not json"));
+    let mut not_string = v.clone();
+    not_string["body"] = Value::from(2);
+    let mut big = v.clone();
+    big["padding"] = Value::String("x".repeat(2_097_152));
+    vec![
+        with_body(&issued),
+        with_body(&signer),
+        serde_json::to_vec(&not_json).unwrap(),
+        serde_json::to_vec(&not_string).unwrap(),
+        b"{\"body\":".to_vec(),
+        serde_json::to_vec(&big).unwrap(),
+    ]
+}
+
+/// §16.3 "Envelopes", as §2.2 for `/5` and `/4` entries: an envelope that cannot be read is
+/// ignored where a readable entry stands at its seq, first or last, in the history verifier and
+/// in `swift::verify` called directly (as the library reader and the move paths call it); where
+/// nothing readable is at that seq the predecessor fails, with the same failure in every order.
+#[test]
+fn an_unreadable_swift_envelope_is_ignored_where_another_stands() {
+    use colophon_core::v05::history::swift;
+    let (_, base, now) = other_cases()
+        .into_iter()
+        .find(|(d, _, _)| d.ends_with("succession/swift-keyring"))
+        .unwrap();
+    let want = full(&verify_history(&base, &Persisted::default(), now));
+    let direct = format!("{:?}", swift::verify(&base.predecessor).map(|h| h.entries.len()));
+    assert!(direct.starts_with("Ok("), "{direct}");
+    for i in 0..base.predecessor.len() {
+        for (k, bad) in unreadable_copies(&base.predecessor[i]).into_iter().enumerate() {
+            for first in [true, false] {
+                let mut o = base.clone();
+                if first {
+                    o.predecessor.insert(0, bad.clone());
+                } else {
+                    o.predecessor.push(bad.clone());
+                }
+                let v = verify_history(&o, &Persisted::default(), now);
+                assert_eq!(full(&v), want, "entry {} copy {k} first={first}", i + 1);
+                let got = format!("{:?}", swift::verify(&o.predecessor).map(|h| h.entries.len()));
+                assert_eq!(got, direct, "direct: entry {} copy {k} first={first}", i + 1);
+            }
+        }
+    }
+    // Entry 2 replaced by two unreadable envelopes at seq 2: nothing readable stands there, so
+    // the predecessor fails, the same way whichever arrives first.
+    let copies = unreadable_copies(&base.predecessor[1]);
+    let mut o = base.clone();
+    o.predecessor[1] = copies[0].clone();
+    o.predecessor.push(copies[1].clone());
+    let a = swift::verify(&o.predecessor).map(|h| h.entries.len());
+    assert!(a.is_err(), "{a:?}");
+    let va = full(&verify_history(&o, &Persisted::default(), now));
+    o.predecessor.reverse();
+    assert_eq!(
+        format!("{:?}", swift::verify(&o.predecessor).map(|h| h.entries.len())),
+        format!("{a:?}")
+    );
+    assert_eq!(full(&verify_history(&o, &Persisted::default(), now)), va);
+}
+
 #[test]
 fn high_water_detects_rollback_and_never_selects_a_branch() {
     let dir = cand().join("rules/t-conflict-no-evidence");

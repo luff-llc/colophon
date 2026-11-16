@@ -798,6 +798,72 @@ fn check_keep_everything_revocation_loses_retained_live_copies() {
     );
 }
 
+/// §9.5 (E12): a `revoke` `heads` item that names a retained live copy starts no walk and is not
+/// an error, as an item naming another author's header: the copy is kept only when `kept` lists
+/// it. Revoking with exactly that item as a head keeps nothing of it; listing it in `kept` keeps it.
+#[test]
+fn a_live_copy_named_as_a_revoke_head_is_kept_only_by_kept() {
+    for by_kept in [false, true] {
+        let mut s = shared(&[LISTEN]);
+        let id = s.admit(31, terms_for(&[(LISTEN, "write")]));
+        let ctl_id = s.f.d.clone();
+        let mut e = s.engine(&id);
+        engine_write(&mut e, &mut s.host, &s.src, LISTEN, "follow", follow());
+        engine_live(&mut e, &mut s.host, &s.src, position("e1", 10.0));
+        let prior = e.account().live_heads()[0].id.clone();
+        let third = engine_live(
+            &mut e,
+            &mut s.host,
+            &s.src,
+            json!({"id": "e1", "show": "show", "seconds": 30.0, "expect": prior}),
+        );
+        let (retained, bytes) = third.stores[0].clone();
+        assert!(retained.starts_with("ops/"));
+        let env: Value = serde_json::from_slice(&bytes).unwrap();
+        let body = base64::Engine::decode(&STANDARD, env["body"].as_str().unwrap()).unwrap();
+        let digest: String = Sha256::digest(&body)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let reader_id = s.admit(34, terms_for(&[(LISTEN, "read")]));
+        let mut r = s.engine(&reader_id);
+        r.refresh(s.src.listing()).unwrap();
+        assert_eq!(
+            r.account().record_verdict(&retained).as_deref(),
+            Some("admitted")
+        );
+        let keep = if by_kept {
+            RevokeKeep::Explicit {
+                kept: vec![digest.clone()],
+                heads: vec![],
+            }
+        } else {
+            RevokeKeep::Explicit {
+                kept: vec![],
+                heads: vec![(LISTEN.to_string(), digest.clone())],
+            }
+        };
+        let mut ctl = controller_engine(&s.f, &s.host, &s.src, &ctl_id, NOW);
+        let seed = s.host.fresh();
+        let action = ctl
+            .account()
+            .begin_revoke(&id, &keep, &[ctl_id.clone()], seed)
+            .unwrap();
+        engine_finish(&mut ctl, &s.host, &s.src, action);
+        r.refresh(s.src.listing()).unwrap();
+        let after = r.account().record_verdict(&retained);
+        if by_kept {
+            assert_eq!(after.as_deref(), Some("admitted"), "kept by name");
+        } else {
+            assert_ne!(
+                after.as_deref(),
+                Some("admitted"),
+                "a live copy named only as a head is not kept: {after:?}"
+            );
+        }
+    }
+}
+
 /// Q2 (live): a `kinds` on another `records` entry does not make the writer caveated in the
 /// engine's reading. Under "terms have no ... kinds" it would.
 #[test]

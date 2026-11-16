@@ -72,6 +72,17 @@ pub fn check_admissible_transition(s: &State, transition: &[u8]) -> Result<(), F
     state::admission_transition(s, transition).map(|_| ())
 }
 
+/// The members a transition's `change` would add, judged as at activation in `s` with
+/// `issued_ms` (§9.3 "A grant inside a transition"): the same function the verifier applies, so
+/// the write side refuses at prepare what a verifier would find void.
+pub(crate) fn check_transition_members(
+    s: &State,
+    change: &serde_json::Map<String, serde_json::Value>,
+    issued_ms: i64,
+) -> Result<(), Failure> {
+    state::transition_members(s, change, s.seq() + 1, issued_ms).map(|_| ())
+}
+
 impl State {
     /// The `issued` of the last verified entry, in ms.
     pub fn last_issued_ms(&self) -> i64 {
@@ -108,9 +119,10 @@ pub struct Persisted {
 }
 
 /// Checkpoint format. 2 added `held_until`; 3 added the successor fields; 4 added the per-home
-/// head high-water marks and the fork a `resolve` names. A checkpoint of another format is
-/// refused, and the caller rebuilds it from its retained objects.
-const CHECKPOINT_VERSION: u32 = 5;
+/// head high-water marks and the fork a `resolve` names; 6 (E12) holds in the state's `points`
+/// every key a transition or vault rotation added, which a format-5 state lacks. A checkpoint of
+/// another format is refused, and the caller rebuilds it from its retained objects.
+const CHECKPOINT_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Checkpoint {
