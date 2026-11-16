@@ -200,6 +200,7 @@ pub fn part(o: &mut Out) {
     f3(o);
     f3_final(o);
     fix_round(o);
+    head_expiry(o);
 }
 
 fn head_of(chain: &Chain, home: &Key, at: i64, seq: usize) -> Value {
@@ -881,4 +882,73 @@ fn fix_round(o: &mut Out) {
             vec![(2, lost.envs[1].clone()), (3, lost.envs[2].clone())],
         )],
     );
+}
+
+/// §8.6: a head counts only when its home is current and unexpired at the head's own `issued`
+/// (the spec owner's decision of 2026-11-16). The only home H1, also the primary home, expires
+/// at `e`; the primary is never re-chosen by expiry.
+fn head_expiry(o: &mut Out) {
+    let a = A.clone();
+    // After the activate's due time, so the home witnesses it and it is not final at once.
+    let e = DUE0 + 86_400;
+    let (base, keys) = account(&[(&a, AC)], 0, 1, &[("Home one", Some(e))], sg![a]);
+    let acct = account_id(&base);
+    let h1 = keys[0].clone();
+    // A recording entry (an `activate` of a policy transition) against a grant at seq 3.
+    let t = transition(&base, json!({"policy": {"callWindow": 120}}), sg![a], &ts(R0));
+    let r = receipt_of(&acct, &t, &h1, &ts(R0 + 1));
+    let mut act = base.clone();
+    activate(&mut act, &t, &[r]);
+    let mut granted = base.clone();
+    grant_agent(&mut granted, &a, &ts(R0 + 100), &a);
+    let late = head_of(&granted, &h1, e + 100, 3);
+    // Each winner gets an entry at seq 4, so the verdict's seq shows which branch stood.
+    let (z_k, z_a) = (derived("w1a/agent-z/signing"), derived("w1a/agent-z/agreement"));
+    let mut act4 = act.clone();
+    grant_agent_with(&mut act4, &a, &ts(DUE0 + 60), &a, &z_k, &z_a, EXPIRES);
+    let mut granted4 = granted.clone();
+    grant_agent_with(&mut granted4, &a, &ts(R0 + 300), &a, &z_k, &z_a, EXPIRES);
+    write_case(
+        o,
+        "f2-head-expired-primary-no-displace",
+        &act4,
+        ok_at(4),
+        "A grant conflicts with an activate at seq 3; the primary home's head covering the grant was issued after that home expired, so it counts for nothing and the activate stands.",
+        &["8.6", "13.3"],
+        vec![("objects/head.json".into(), late)],
+        None,
+        vec![("grant".into(), vec![(3, granted.envs[2].clone())])],
+    );
+    let early = head_of(&granted, &h1, R0 + 200, 3);
+    write_case(
+        o,
+        "f2-head-before-expiry-counts",
+        &granted4,
+        ok_at(4),
+        "The same conflict with the primary home's head issued before the home expired: it counts, and the grant it covers stands against the activate.",
+        &["8.6", "13.3"],
+        vec![("objects/head.json".into(), early)],
+        None,
+        vec![("activate".into(), vec![(3, act.envs[2].clone())])],
+    );
+    // Two grants at seq 3; headQuorum 1; the only head covering one of them was issued after its
+    // home expired, so neither is covered by headQuorum current homes: a fork.
+    let (y_k, y_a) = (derived("w1a/agent-y/signing"), derived("w1a/agent-y/agreement"));
+    let mut other = base.clone();
+    grant_agent_with(&mut other, &a, &ts(R0 + 101), &a, &y_k, &y_a, EXPIRES);
+    write_case(
+        o,
+        "f2-head-expired-not-quorum",
+        &granted,
+        bad("refused:fork", 3),
+        "Two grants conflict at seq 3 at headQuorum 1; the only head, covering one of them, was issued after its home expired, so it does not count toward headQuorum and the conflict stays a fork.",
+        &["8.6", "13.3"],
+        vec![("objects/head.json".into(), late_head(&granted, &h1, e))],
+        None,
+        vec![("other".into(), vec![(3, other.envs[2].clone())])],
+    );
+}
+
+fn late_head(chain: &Chain, home: &Key, expiry: i64) -> Value {
+    head_of(chain, home, expiry + 100, 3)
 }

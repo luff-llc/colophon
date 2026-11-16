@@ -3593,12 +3593,22 @@ pub(super) fn covered_by_home_head(
     y: &Entry,
     home: &str,
 ) -> bool {
-    let Some(key) = s.home_key(home) else {
+    // A head counts only when its home is current and unexpired at the head's own `issued`
+    // (§8.6, §13.3): an expired home's later heads decide nothing.
+    let Some(m) = s
+        .current_homes()
+        .into_iter()
+        .find(|m| m.request.member_id() == home)
+    else {
         return false;
     };
     let branch = descendants(all, &y.env.digest);
     heads.heads.iter().any(|h| {
-        h.by == home && h.seq >= y.seq && branch.contains(&h.digest) && h.env.verify(&key).is_ok()
+        h.by == home
+            && h.seq >= y.seq
+            && m.expires_ms.is_none_or(|e| h.issued <= e)
+            && branch.contains(&h.digest)
+            && h.env.verify(&m.request.signing).is_ok()
     })
 }
 

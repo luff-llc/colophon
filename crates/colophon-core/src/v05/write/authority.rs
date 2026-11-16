@@ -672,17 +672,21 @@ pub fn choose_receipts(
     object_issued_ms: i64,
     not_after_ms: Option<i64>,
 ) -> Result<Vec<Vec<u8>>> {
-    let homes = state.current_homes();
+    // Homes current and unexpired at the object's `issued` (§8.7), as the verifier judges.
+    let homes = state.current_homes_at(object_issued_ms);
     if homes.is_empty() {
         return Ok(Vec::new());
     }
+    let ids: std::collections::BTreeSet<String> =
+        homes.iter().map(|m| m.request.member_id()).collect();
     let quorum = (state.keyring().policy.head_quorum() as usize).min(homes.len());
     let mut best: BTreeMap<String, Receipt> = BTreeMap::new();
     for bytes in held {
         let Some(r) = parse_receipt(state, bytes) else {
             continue;
         };
-        if r.object != object_digest
+        if !ids.contains(&r.by)
+            || r.object != object_digest
             || r.received_ms < object_issued_ms
             || r.received_ms > object_issued_ms.saturating_add(RECEIPT_WINDOW_MS)
             || not_after_ms.is_some_and(|d| r.received_ms > d)
