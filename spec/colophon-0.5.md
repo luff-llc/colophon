@@ -1,6 +1,6 @@
 # Colophon 0.5
 
-**Status: final candidate, revision 15, for review, 2026-11-15.** Not frozen, not
+**Status: final candidate, revision 17, for review, 2026-11-15.** Not frozen, not
 implemented, not released, and no version number has been changed anywhere. Revision 2
 answered two reviews of revision 1 (152d991); revision 3 answered two reviews of revision 2
 (9e90470); revision 4 replaced every recovery special case with one mechanism, pending
@@ -30,7 +30,13 @@ do: the store layout, a call bound to its request at a home and the signer's own
 needs no call, a home that holds nothing, the caveated live writer per namespace, live copies in
 `kept`, the blob AAD, a grant inside a transition, a broken Swift wrapper, and the host's trust;
 its fix round answers the check of revision 15 and the owner's decisions, and states some rules
-ahead of the code (the verifier, E12; the home, H2; changes §A.11).
+ahead of the code (the verifier, E12; the home, H2; changes §A.11); revision 16 was the freeze
+package; revision 17 cuts it to what shipping 0.5 and a later in-place upgrade need: approval only
+through a confirmed pairing (§9.1), one current-principal check (§8.5), the upgrade door (`layout`,
+§8.2, §20) with what a reader and a home do at a stop (§1, §13.6), text-only reservations, three
+small fixes, the home rules the merged and pending home code follows (§13.1, §13.3, §14), the limits
+of 0.5 and what is open at the freeze (§20, §21). The rest of revision 16 is deferred to 0.6, behind the door (changes §A.12,
+[the design](../docs/design-freeze-package.md) "Deferred to 0.6"); the code follows.
 The mappings are in [colophon-0.5-changes.md](colophon-0.5-changes.md) §G. It becomes normative only under §21.
 The work to implement it is [colophon-0.5-implementation.md](colophon-0.5-implementation.md).
 Rationale, host wording and the review log are in the non-normative
@@ -83,6 +89,23 @@ descriptor reached the reader only in an entry that was itself authenticated, or
 anyone could have made. For calls,
 links, requests, heads and receipts, every known field is read by a later step, so step 5 is empty;
 for authority entries, step 1 is §8.5's header and kind-specific fields are step 5.
+
+**A stop.** A reader is **stopped** for an account at the first of these: its verdict on an
+authority entry is `newerFormat` (its verified history then ends before that entry); or an
+activation raising the layout above 2 (§8.2) becomes **final** (§8.7) on its branch (its verified
+history then ends with the entry at which that happened: the `activate` itself in an account with no
+home, a `final` entry, or the entry after which the raise's witnesses are all excused or a later
+full set's anchor follows it). A provisional raise stops nothing: the reader verifies on as before,
+applies nothing of the later layout, and if a `vetoed` displaces the raise (§8.6 rule 1) it rolls
+it back as any provisional activation and goes on; since a final activation is never displaced, no
+order of arrival makes a reader stop on a raise that is not final or continue past one that is. A
+stopped reader trusts nothing new and says so. At once, whatever seq a call or
+head names: every call it verifies is `unavailable` (§12.3), it accepts no head (§13.3), it admits
+no record or live candidate it had not admitted before the stop (each is held), it answers no
+question of currency, membership or access for anyone, and its host builds no entry, transition,
+veto or call and asks to be updated. What it showed before the stop it may keep showing, marked as
+from a stopped account. The reason is the entry after the stop: it may revoke a key, and a stopped
+reader cannot see it. A home that is stopped follows §13.6.
 
 ## 2. Encoding and parsing
 
@@ -137,9 +160,36 @@ verified as their own version required.
 - Every object this document defines has exactly the fields it lists. Optional fields MUST be
   omitted when absent. `null` appears only where a rule allows it. Arrays called non-empty MUST
   NOT be empty. A field of the wrong type is `malformed`.
-- An unknown field, kind, form, role, slot kind, term or value inside a known protocol is
-  handled by §1: `newerFormat` only after everything that authenticates and authorizes the
-  object has passed.
+- **Content a 0.5 reader does not know** is handled case by case, as below and nowhere more
+  generously. Where `newerFormat` applies, it is reported only after everything that authenticates
+  and authorizes the object has passed (§1).
+
+  | Unknown content | Result |
+  | --- | --- |
+  | A protocol marker (including `colophon/operation/<N>` for N ≠ 5) | `malformed` |
+  | An entry kind (under the control rule, §8.5), a transition component (under the control rule, §8.7) | `newerFormat` |
+  | A field of the kind-specific body of `genesis`, `grant`, `renew`, `revoke` or `endSessions`, of their epoch objects, seals and `heads` items, of a request (`member`, `service` and top-level), of terms or links; a request `kind` or `custody`, an `access`, `serves` or `countBy` value, a controller role or field, a descriptor field, a policy field or value, a keyring field (other than in `vault` and slots) | `newerFormat` |
+  | A descriptor `form` | `newerFormat`, reported after every other check of the object |
+  | A condition operator: in a grant's terms | `newerFormat` for the history at that entry (§11.5) |
+  | A condition operator: in a link, or deciding a record's or call's check | three-valued (§10.4): `newerFormat` for that record or call only when it decides |
+  | A field of a transition's top level, its `keyring`, `policy`, `vault`, `homes`, `resolve` or `successor` component, a veto, or `previousVault` | `newerFormat` |
+  | A field of a transition's `anchor`, of a `grant` component or `homes.appoint` item, of `migration` or its objects, or an unknown member `kind` or `outcome` there | `malformed` |
+  | A field of the keyring's `vault`; a slot `kind`, a slot or part field | `malformed` |
+  | A field of genesis `predecessor` or its `head`; of `successionVetoed` or the veto it carries | `malformed` |
+  | A field of a receipt (checked before its signature) or of a head's `authority` | `malformed` |
+  | A field of a head's top level | `newerFormat`, after its signature |
+  | A top-level field of a `rekey`, `keyring`, `vault` or `suspend` entry beyond the kind's own (the `keyring` object, `previousVault` and an embedded transition are scanned as above); a field of a `rekey`'s epoch objects; a field of `activate`, `vetoed`, `final` or its `activation`; a field of a head embedded in `final` | **accepted and ignored** |
+  | A field of a `/5` operation header or its `live` stamp | **accepted and ignored** |
+  | An operation `level` | `malformed`, before the signature |
+  | A top-level field of an operation plaintext | refused `invalidPayload` |
+  | A record `kind` no module defines; a payload `v` other than 1 | admitted, not folded (0.3 §5, §6) |
+  | A live candidate outside 0.3 §5.1's podcast `position` rule | refused `invalidPayload` |
+  | A call `signer` variant; a field of a call, link or authority envelope, signature item or `assertion` | `malformed` |
+  | A field of a call body, link or link terms | `newerFormat` at §12.3 step 8 |
+  | The pairing QR payload; a `/3` header; the `/4` prefix; the Swift format | as §7.3, §11.5, §16.1 and §16.3 say |
+
+  The places that ignore unknown content, and the places that call newer content `malformed` or
+  `invalidPayload`, are stated as limits (§20).
 - Unknown `clientData` members are ignored. Operation payloads, import evidence and module
   values follow their own schemas and MAY contain `null`.
 
@@ -241,7 +291,8 @@ one account's whole history:
 
 1. Within a principal, `signing` and `agreement` MUST be different points.
 2. Every P-256 point used for signing or agreement, and every key ID, belongs to exactly one
-   principal and one usage, for ever. In particular an entry that adds as a controller any key
+   principal and one usage, for ever, including between two keys that one entry or transition
+   introduces (two distinct points with one key ID are refused). In particular an entry that adds as a controller any key
    that is or ever was a member key, member agreement key or vault key of this account, and a
    grant to any key that is or ever was a controller, member or vault key, are `malformed`.
 3. A principal repeats its own keys only by remaining the same principal: a retained
@@ -616,8 +667,16 @@ has `colophon/authority/4` entries up to and including its `upgrade` entry and `
 `activate`, `vetoed`, `final` and `successionVetoed`.
 
 `namespaces` is 0–64 distinct sorted names of lowercase ASCII letters, digits, `.` and `_`, at
-most 128 bytes. A `/5` account is at layout 2 from genesis (§11.8). Raising the layout and
-writing `migration` are transitions (§8.4).
+most 128 bytes, for a writer creating a genesis as for a verifier (more is `malformed`).
+
+**Layout.** A `/5` account is at layout 2 from genesis, and an upgraded account from its `upgrade`
+(§11.8); the verifier stores the layout. The transition component `layout` is an integer: one that
+does not raise the layout voids the transition (§8.7), and one that raises it above 2 is the
+upgrade door (§20). A raise is judged and recorded as any transition is (its rule, consent,
+receipts, veto and finality, §8.7): while its activation is provisional the reader applies nothing
+of the later layout and goes on, and a `vetoed` can displace it; when the activation becomes final
+the reader is stopped (§1 "A stop") and applies nothing after the entry at which it became final. Raising the layout and writing
+`migration` are transitions (§8.4).
 
 ### 8.3 Keyring changes and the vault
 
@@ -755,11 +814,29 @@ For seq > 1 the verifier MUST, in this order (the pipeline of §1):
 2. Verify every attached signature (§4) against the prior keyring, member table or added
    controllers.
 3. Decide the rule (§8.4; unknown kinds use the control rule), and for `suspend` and recording
-   entries the checks of §8.7's state table.
+   entries the checks of §8.7's state table. Every signer must be a **current principal** (below)
+   for the rule it signs under, checked here, before any unknown content is looked at. A later
+   kind signed under another rule (by a member, a home or recovery keys alone) is reached only
+   through the upgrade door (§20): one opt-in per later format version, not one per kind.
 4. Only now look for unknown content anywhere in the body (`newerFormat`).
 5. Apply the typed schema, bounds and the rules of §6, §7.2 (every slot's shape, kind fields and sizes), §8.2, §8.3, §9, §13, §15 and §16, and the
    rate limit (§13.1).
 
+**Current principal.** One check, used wherever this document accepts a principal's signature on
+an authority entry, transition, veto, `suspend`, receipt, head or call, judged in the state the
+rule names (for an entry, the state before it, and expiry at its `issued`):
+- a **controller** is current when it is in the keyring, was not added by an activation that is not
+  final (§8.7), is not suspended (§8.7) unless signing what a suspended key may sign, and holds a
+  role the rule allows (a `sign`-only controller signs calls only, §6.1);
+- a **member** is current when it is in the member table, not revoked, not provisional (added by an
+  activation that is not final) and not expired at the entry's `issued` (for a call, at the
+  verifier's clock, §12.3);
+- a **home** is current as §8.7 and §13.1 say (appointed by a final activation, its revocation not
+  final) and is a current member besides.
+A signer that is not current makes an authority object `badSignature` (§8.5) and a call
+`refused:revoked` or `refused:expired` (§12.3). The member rule of `endSessions` uses it too: an
+expired or provisional member's `endSessions` is `badSignature`, whatever it contains (revision 15's
+code checked only revocation).
 Genesis follows the same order with its own keyring. No verifier may be stricter or more
 lenient than this section for authority entries. **Every failure has exactly one result:**
 
@@ -771,7 +848,8 @@ lenient than this section for authority entries. **Every failure has exactly one
 | An embedded receipt, head or veto signature that fails | `badSignature` |
 | A transition or veto whose `signers` doesn't match its envelope (checked before its rule) | `malformed` |
 | Every other failure of an embedded object: receipts (missing, wrong homes, wrong count or choice, outside their window), anchor, veto unit count, disjointness, vetoer role or currency, deadline, determined fields, once only, the 7-day bound, heads in `final`, one suspension per unit, a void delta | `malformed` |
-| Unknown content after steps 1–3 pass | `newerFormat` |
+| Unknown content after steps 1–3 pass, where §2.3 says `newerFormat` | `newerFormat` |
+| A raise of the layout above 2 once its activation is final (§8.2); before then it is judged as any transition | the reader is stopped (§1) |
 | A transition that revokes a home and adds anything; a `final` with no heads | `malformed` |
 | Schema, §6, §7.2 (slot shape) and §8.3 violations, the rate limit | `malformed` |
 | `issued` ahead; an `activate` whose objects are all valid and whose due time is after the clock | *held* |
@@ -882,7 +960,7 @@ serve the losing entry.
   `keep`, `update` with whole replacement controllers, `threshold`, `recoverThreshold`,
   `addThreshold`, `countBy`), `policy` (fields to set; `primaryHome: null` unsets it), `vault`
   (§8.3), `homes` (`appoint: [{request, terms}]`, `revoke`), `grant` (`{request, terms}` with
-  `import`), `layout`, `migration` (§15.4), `successor` (`{account}`), `resolve`
+  `import`), `layout` (an integer, §8.2), `migration` (§15.4), `successor` (`{account}`), `resolve`
   (`{kept: {seq, digest}}`, `seq` at least 2; §8.6 "Resolving a fork").
 - **Composite rule.** One signer set meets, for every component, a rule that component allows,
   using the same rule (control or recovery) for all; consent if any component needs it;
@@ -1079,8 +1157,17 @@ with the result shown, and an entry that fails changes nothing. Every recording 
 
 Signed `raw` by `member.signing`, stored at `requests/<memberID>.json`, immutable. Before
 approval, the requesting device and the approving device MUST pair under §7.3 with `E` =
-`member.signing` (or the approver scans the requester's QR code); approval of a request whose
-key did not pair is a host failure the person cannot see, so hosts MUST NOT offer it.
+`member.signing` (or the approver scans the requester's canonical request envelope from its
+screen); approval of a request whose
+key did not pair is a host failure the person cannot see, so hosts MUST NOT offer it. **The core
+enforces it:** it refuses to prepare or finish a `grant`, or a transition's `grant` component, unless
+the call consumes a **confirmed pairing**: an opaque token the core issues once when §7.3 completes
+(the code confirmed; or, on the scan path, exactly one payload: the canonical request envelope
+scanned from the requester's screen, whose `member.signing` is the key), bound to this account and
+to the exact `member.signing` of the request, and spent by that one approval. No interface approves a
+member from a member ID, a prefix of one or any other code. (A home's request reaches the approver
+from the home's own base, `GET {base}`, which names the member; appointing a home is outside this
+rule, a stated limit.)
 
 ### 9.2 Grant
 
@@ -1186,7 +1273,7 @@ earlier number stop passing §12.3. Nothing already done or read is taken back.
 ### 9.7 What a member is never
 
 A member is never a controller, and no later entry can make its key one (§3.3). Its key signs no
-authority entry except its own `endSessions`.
+authority entry except its own `endSessions`, and only while it is a current principal (§8.5).
 
 ## 10. Terms
 
@@ -1476,7 +1563,8 @@ A verifier MUST, in order (the pipeline of §1):
    `refused:audience`. `created` within 3,600 s of the clock, else `refused:window`. A read-only
    look-up in the replay store (§12.4) refuses a recorded key: `refused:replay` or
    `refused:conflict`. It writes nothing.
-4. **History.** The verifier holds a verified history of the account (none: `unavailable`)
+4. **History.** The verifier is not stopped for the account (§1; stopped: `unavailable`, whatever
+   S would be) and holds a verified history of the account (none: `unavailable`)
    containing `asOf` (a different digest there is `refused:fork`) and fresh heads from at least
    `headQuorum` distinct current homes, and has fetched up to the highest of them. No homes, or
    too few fresh heads: `unavailable`. Freshness and `headQuorum` are read from the latest held
@@ -1581,9 +1669,18 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
 
 - **Ordering.** Immediate entries go first to the primary home (`policy.primaryHome`, else the
   earliest-appointed current home), which stores the first valid entry per seq. Other homes store
-  them once a primary head covers them.
+  them once a primary head covers them, and such an entry is exempt from the 300 s clock rule below
+  at a non-primary home, however far its `issued` is behind that home's clock: the primary applied
+  the rule.
 - **Transitions.** Every home receipts and forwards transitions, vetoes, receipts and its heads
-  to every other current home, and appends recording entries (§8.7), whatever the primary does:
+  to every other current home. A home also forwards to every other current home the entries of its
+  history after the latest head of that home it holds, by `POST {peer}/authority` as a host publishes
+  them (no call: §13.4 lets anyone post there, and the peer admits them as it admits any upload), so
+  that every home holds each recording entry another home appended and can sign a head over it; a
+  home's `final` never waits for a head that covers only an entry it does not hold. Before producing
+  any head, a home appends the recording entries that are due, so the head it forwards covers them
+  and the entries go ahead of it. Every home appends recording entries (§8.7), whatever the
+  primary does:
   `activate` once due, `vetoed` once a veto is valid, and `final` as soon as it holds the witness
   heads, before storing anything signed or receipted by what the activation added. A home that
   holds a valid veto MUST NOT store that transition's `activate`. A home stores an `activate` for a
@@ -1597,7 +1694,16 @@ sequence conflicts and malformed entries keep their ordinary results (409, §8.5
   already holds, as a forwarded transition is; the home signs no receipt of its own for it.
   Without such a receipt it is `refused:late` and not stored. A home
   persists, per object, when it first saw it, its own serving intervals over the object's window,
-  and its decision, and reuses that decision after a restart.
+  and its decision, and reuses that decision after a restart. **Serving intervals are never
+  under-recorded:** a home records ahead of time, durably and before it serves, until when it may
+  serve, and after a restart closes its last interval at the end of what it recorded, never earlier;
+  whatever is uncertain counts as serving (so an `activate` of a transition whose whole window fell
+  while the home was down is stored).
+- **Receipts without their object.** A forwarded receipt may arrive before the object it receipts.
+  A home keeps such receipts, a bounded number per signing home, and drops each once nothing could
+  be recorded of its object any more (its `received` plus 300 s plus `recoveryDelay` plus 7 days).
+  Receipts delivered in one request with their object are taken first, so the object is judged with
+  them.
 - **Clock.** A home refuses an entry more than 60 s ahead of its clock (`refused:early`), and an
   immediate entry or a full set whose `issued` is more than 300 s behind it (`refused:late`). So at
   an honest primary an immediate entry's `issued` is its admission time to within 300 s. The
@@ -1726,8 +1832,11 @@ verified as §8.7 says (the home's key in the state before the activation, fresh
   an entry it hasn't verified. A head is **due** when the home has none, when its latest head
   does not name the home's latest entry, or when `headMaxAge` / 2 has passed since its `issued`;
   before answering `GET {base}/head` the home MUST produce and store the due head; if it cannot
-  (its guard refuses, or `issued` cannot yet increase), it fails the request and MUST NOT serve
-  the older head. It MUST give its heads strictly increasing `issued`, and MUST NOT
+  (its guard refuses, `issued` cannot yet increase, or its history stops at a fork), it answers 503
+  with `Retry-After` and MUST NOT serve the older head, at `records/heads/<its ID>.json` too, and it
+  forwards no head to its peers while one is due. It sends a peer the entries a forwarded head
+  covers before the head (§13.1 "Transitions"), so a peer can always verify it, and at `headQuorum` 2
+  two homes never wait on each other for `final`. It MUST give its heads strictly increasing `issued`, and MUST NOT
   sign a head for a second digest at a seq unless its own verdict shows the first displaced under
   §8.6 rule 1 (the entries' branches first differ at a seq that rule decides, in favour of the
   second head's side; the Equivocation rule above). The guard belongs to home admission, which holds the history: the host
@@ -1755,9 +1864,11 @@ records, live values or blob chunks, which need `colophon.home.read` (§14).
 and the `PUT` of another home's head (§14); and, under `public`, `GET` of the history paths. So a
 device with nothing yet fetches, under `public`, the head, the history and the pending feed, and
 under `members` only the head and `GET {base}`. Everything else needs a call. In 0.5 a home
-serves nothing more to a key it does not know: under `members` the history reaches a new device
-from the approving device, over the pairing channel (§7.3, §9.1), and once approved the device
-calls the home.
+serves nothing more to a key it does not know: under `members` the approving device hands the new
+device the authority history out of band (the reference SDKs carry it in the join invite, over the
+pairing channel, §7.3, §9.1), the new device verifies it from seq 1 against the account ID, and once
+approved it calls the home. The history of a new account is about 10 KB, more than one QR code
+holds, so joining by camera alone does not carry it in 0.5 (a limit, §20).
 
 ### 13.5 Receipt
 
@@ -1775,9 +1886,33 @@ only while its clock is between the object's `issued` and 300 s after it. It is 
 - `received` is not earlier than that body's `issued` and not more than 300 s after it. For a
   successor genesis, the window is the succession window instead (§15.1).
 
+### 13.6 A stopped home
+
+A home is **stopped** as §1 says: let N be the last entry it applied (the entry before a
+`newerFormat` one, or the entry at which a layout raise became final). **Before a raise is final a
+0.5 home is not stopped:** it treats the raise as any pending or provisional transition, receipting
+it, recording its `activate`, signing heads over it, and receipting and recording a veto of it and
+the `vetoed` that displaces it. After N it cannot judge anything, and an entry after N may remove a
+key or revoke a member, so it makes no security decision; it keeps what it holds available, so newer
+devices and homes are not blocked.
+
+| A stopped home | |
+| --- | --- |
+| **Keeps and serves** | everything it holds: entries through N, transitions, vetoes, receipts, records, live values, blobs. Whatever §13.4 serves without a call it still serves (the history under `public`, `GET {base}`). |
+| **Forwards** | every transition, veto and receipt it holds, to every other current home, as §14 says (forwarding decides nothing; the peer judges). |
+| **Receipts** | a veto whose transition's anchor is at or before N, and a removal-only transition (§8.7) anchored at or before N, each judged at its last verified state, within 300 s of the object's `issued` (§13.5): a receipt only witnesses when the object reached the home, and every reader judges the veto's or transition's signers itself at the entry that records it, so a receipt can never make an invalid object count. Refusing them would let a hostile stop suppress a veto or a revocation for readers that understand the newer format. |
+| **Must not** | sign any head after the stop, not even a fresh one for N (a fresh old head would let an old reader trust state the entry after N may have changed; `GET {base}/head` then fails as §13.3 says); store, vouch for or record any authority entry after N; receipt anything else (an additive transition, a successor genesis); admit a new pending object other than the receipts above (422 `newerFormat`); verify a call (every request that needs one is answered 503 `{"result":"unavailable"}`), so it serves nothing under `members` and stores no new record or live value; take any other security decision. |
+
+A newer device reads and writes through the account's other homes meanwhile; a host told by a home
+that it is stopped (422 `newerFormat` at `POST {base}/authority`, 503 `unavailable` to a call) offers
+to update it or, if the operator does not, to revoke it (§8.7 "Revoking a home": a home that cannot
+witness its own removal needs the stronger authority). A stopped home that is the primary blocks
+immediate entries until then, as any home that refuses them does.
+
 ## 14. Exchange
 
-A home is a relay (0.3 §8) whose `GET {base}` response adds `"home":{"member":"<ID>"}`. At
+A home is a relay (0.3 §8) whose `GET {base}` response adds `"home":{"member":"<ID>"}` and
+`"layouts":[…]`, the authority layouts it verifies (a 0.5 home: `[2]`; §20). At
 `{base}`:
 
 | Request | Response |
@@ -1794,12 +1929,23 @@ on its branch, and every receipt of them, until 7 days after the transition's du
 MAY drop them. One object appears once in a listing; a listing from cursor 0 until `more` is false
 is complete for the moment it ends. The admission caps (§13.1) bound a listing at 128 transitions
 (2 for each of at most 64 units), 8 vetoes each and one receipt per home per object: at most
-10,368 objects. Hosts poll with `after` set to the last cursor they saw (§17.5). Reading
+10,368 objects. Only what is still listed counts toward that bound: a settled object (one with a
+recording entry on the branch) or an expired one does not. Hosts poll with `after` set to the last cursor they saw (§17.5). Reading
 follows §13.4, which includes recover-only and suspended controllers.
 
 A home that is a successor's home also serves `GET {base}/predecessor/authority/<8 digits>.json`
 (and its receipts) for the predecessor's history through its final entry (§15.1); a host
-publishes those entries to it by `PUT {base}/predecessor/authority/<8 digits>.json`. A `PUT` or
+publishes those entries to it by `PUT {base}/predecessor/authority/<8 digits>.json`. Such a home
+holds the provisioned account's genesis and takes predecessor entries only as the hash chain that
+genesis claims, from its `head` down, and serves none of them before its first upload is verified:
+before the appointment a Swift successor's first upload cannot verify without its predecessor, so
+the home keeps that genesis (its digest is the account ID), takes the predecessor entries with no
+call, each only if it is the one the chain names (the claimed `head.digest`, then each entry's
+`previous`), bounded per account, and the first upload is sent again. After the appointment it takes
+a predecessor entry by `PUT` only under a `colophon.home.write` call by a controller with `approve`
+or `control`, not suspended, or a `sign` controller listing `{base}`, never a member's, and only
+when the account claims a Swift predecessor and the entry's `seq` is at most F's.
+A `PUT` or
 `POST` of an envelope whose body equals a stored one answers 200. The home keeps the envelope it
 stored and MAY keep the new one too (§2.2); which envelopes it keeps never changes a verdict.
 
@@ -1843,6 +1989,12 @@ token authorizes nothing at a home.
 Colophon`. A call refused under §12.3 is answered 403 `{"result":"<§1 result>"}`. A home whose
 replay store or rate limit refuses (§12.4) answers 429 `{"result":"refused:window"}` with
 `Retry-After`. `limit` outside 1–64 is clamped; `after` beyond the head returns no entries.
+
+**Refusals a paid home may give** (reserved; no behaviour is defined in 0.5): `refused:overQuota`
+(507), `refused:noEntitlement` (402), `refused:closed` (410) and `refused:notProvisioned` (403), in a
+JSON body `{"result":"refused:<reason>"}`. Any `refused:` result a client does not know refuses only
+that request and is shown to the person as received. `refused:closed` is not evidence that anything
+was deleted.
 
 **Forwarding** (§13.1). A home forwards each transition, veto and receipt by its own `POST
 {peer}/pending`, and its heads by `PUT {peer}/records/heads/<home member ID>.json`. An object
@@ -2114,6 +2266,10 @@ does. An envelope of more than 2,097,152 bytes, or whose outer JSON, `body`, bod
 body, or another candidate at that seq, stands; it makes the predecessor `malformed` only when
 nothing else stands there. This is §2.2's rule, the same as for `/5` and `/4` entries.
 
+**Sequence zero.** An envelope at seq 0, readable or not, names no place in the chain and is
+ignored: the sequence is contiguous from entry 1, and anyone can write such an envelope without a
+key, so it must never fail a valid predecessor (§2.2).
+
 **Body fields.** `seq`, `previous` (absent at 1), `issued`, `kind`, `by`, and by kind: `genesis`
 (`label`, `root`, `recovery` as `{signing, agreement}`, optional `controller`, `stewards`,
 `threshold`, `layout`); `grant` (`member`, `role`, `custody`, `namespaces`, `write`, `expires`,
@@ -2188,7 +2344,12 @@ append F to a shipped library.
 
 The core prepares every body the host signs (entries, transitions, vetoes, `suspend`, links,
 calls, heads, receipts) as exact bytes, and verifies §4 and §8 before returning a record; nothing
-is written on failure. New PRF slots need PRF before the body (§7.2).
+is written on failure. New PRF slots need PRF before the body (§7.2). Before it asks for any
+signature, the core refuses a transition whose delta it can already see is void, judging each
+component against the state the change's other components produce (a member granted with a key
+the same change adds as a controller is refused at preparation, not after signing). It writes no
+`layout` component and nothing after a stop (§1). It prepares or finishes a `grant`, or a `grant`
+component, only by consuming a confirmed pairing for the request's exact key (§9.1).
 
 **The seed.** The core never returns seed bytes or a raw ECDH output through its interface. An
 opened seed can be sealed only to controllers of its own account's verified keyring (slots), to
@@ -2373,7 +2534,8 @@ homes at `headQuorum` 2, the company reference; hosts SHOULD offer it to people 
 | Records (§11.5) | `newerFormat` (an unknown condition result); refused `notGranted`, `expired`, `revoked`, `wrongEpoch`, `clockJump`, `budgetSpent`, `outOfScope`, `invalidPayload`, `duplicateID`, `wrongFormat`, `budgetScopeUnavailable`; held `revokedBackdated`, `authorityBehind`, `unavailable` |
 | Evidence (§8.6, §15.1) | equivocation evidence; `malformed` entries after a final entry |
 | Transitions (§8.7) | pending, due, vetoed, activated (provisional or final), void |
-| Calls (§12.3) | `refused:audience`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`, `refused:revoked`, `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:outOfScope`, `refused:origin`; `unavailable` |
+| Calls (§12.3) | `refused:audience`, `refused:window`, `refused:replay`, `refused:conflict`, `refused:fork`, `refused:revoked` (also for a member no grant names, §20), `refused:expired`, `refused:ended`, `refused:notNarrower`, `refused:outOfScope`, `refused:origin`; `unavailable` (no history, too few fresh heads, or a stopped reader) |
+| Homes, reserved (§14) | `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned`; any other `refused:` from a home refuses that request only and is shown raw |
 | Heads (§13.3) | `refused:fork`, `refused:rollback`; `unavailable` |
 | Succession (§15) | `refused:fork`; unverified claim |
 
@@ -2387,10 +2549,83 @@ check as an optional diagnostic.
 `/operation/5`, `colophon/pair-qr/5` (the QR payload, §7.3), the legacy markers of an upgraded account (`colophon/authority/4` through its `upgrade`, `/3` records citing before it),
 `colophon/relay/3`, and `colophon/swift-keyring/2` for predecessors. A verifier MUST NOT read a
 0.5 account under 0.4 rules, and MUST NOT accept a `/3` or `/4` object where §11.5 or §16.1 fences
-it out. A later version that adds markers will say which 0.5 markers it retires and how an account
-opts in by an authority entry; until an account does, 0.5 markers stay valid for it.
+it out. A later version that adds markers will say which 0.5 markers it retires; until an account
+opts in, 0.5 markers stay valid for it.
 
-What is not in this version is listed in the guide §6.
+**The upgrade door.** An account opts in to a later version's rules only by a transition whose
+`layout` component raises its layout above 2 (§8.2), under the control rule with the recovery
+set's consent (§8.4). That is the one door: a 0.5 reader judges it as any transition, and once its
+activation is final it is stopped and applies nothing after that point (§1 "A stop"); a raise that
+is vetoed while provisional changes nothing. One opt-in covers a whole later format
+version, every kind, component, rule and limit it defines, not one opt-in per change. A host MUST
+NOT propose a raise until every current home lists the target layout in `GET {base}`'s `layouts`
+(§14); a 0.5 home that is not updated witnesses the raise as any transition and is stopped once it
+is final (§13.6). **A later-format implementation writes nothing of the later format to an account
+until the account's raise is final**: until then, everything it writes is 0.5, so a vetoed raise
+leaves nothing behind that a 0.5 reader cannot read.
+
+**Later versions and layout-2 accounts.** A later version changes the rules for an account only after
+that account's layout is raised. Until then, a later implementation writing to a layout-2 account
+writes only what a 0.5 reader accepts: 0.5 markers, kinds, fields, values and limits, under 0.5's
+rules. After the raise, a later version still reads everything the account wrote under 0.5 as 0.5
+defines it, including, without limitation: the account ID and the legacy library ID; the authority
+chain before the raise, an upgraded account's `/4` prefix and a Swift predecessor; transitions,
+vetoes, receipts, heads and the finality evidence they give; key IDs and the 0.5 cryptographic suite
+(P-256 signatures, the HPKE and AES seals, vaults and slots); namespaces and epochs; member requests,
+home endpoints and call audiences; links and calls; `/3` and `/5` operation headers at their paths,
+their AAD, operation IDs, plaintexts and fold rules; live slots and their derivation; blob manifests
+and chunks; and the 0.5 caps and windows when judging those objects. It admits `/5` records that cite
+authority before the raise.
+
+**Reserved names** (text only; they confer nothing in 0.5, and 0.5 writers MUST NOT use them):
+
+| Name | Where | When met in 0.5 |
+| --- | --- | --- |
+| `account`, `organisation` | a call's `signer` (§12.2); a descriptor's `form` (§3.1); a request's `kind` (§9.1) | refused as any unknown value is today: a call signer `malformed`; a form or kind `newerFormat` |
+| `colophon.home.export`, `colophon.home.close` | purposes (§12.2) | a 0.5 home refuses them, `refused:outOfScope` |
+| `refused:overQuota`, `refused:noEntitlement`, `refused:closed`, `refused:notProvisioned` | home answers (§14) | refuse that request only |
+| kinds and namespaces beginning `colophon.` | records and namespaces | reserved for this protocol; only this document defines them; met in 0.5, judged as today |
+| `layouts` | `GET {base}` (§14) | as §14 says |
+| `refused:notGranted` for a call | §12.3 step 5 | reserved for "not yet a member"; in 0.5 a call by a member ID that no grant names is `refused:revoked`, and hosts word it as waiting for approval |
+
+**Limits of 0.5** (stated, not rules):
+- **Before an account opts in, a 0.5 device that meets something newer may refuse it rather than ask
+  to be updated** (some unknown content is `malformed`, `invalidPayload` or ignored where a later
+  version could have wanted `newerFormat`). **Nothing in an account's own data requires a move to a
+  new account:** every later change comes in place, through the door.
+- **Unknown content today** (§2.3): some of it is accepted and ignored (operation header and
+  live-stamp fields, the top-level fields of `rekey`, `keyring`, `vault`, `suspend` and the recording
+  entries, heads inside `final`), and some newer content is `malformed` or `invalidPayload` (an
+  operation `level`, receipt, anchor, vault, slot, predecessor and `migration` fields, a call signer
+  variant, a plaintext field, a live kind outside the podcast rule). A stop on any `newerFormat` entry
+  other than a layout raise happens at that entry, even an `activate` a veto could later displace;
+  the reader then needs updating.
+- **Namespaces** are fixed at genesis (at most 64) and never removed.
+- **Live state** is the 0.3 §5.1 podcast `position` rule, as §11.8 incorporates it; any other live
+  candidate is refused `invalidPayload`.
+- **Counts and ranges** are the maxima this document states; exceeding one is `malformed`.
+- **The witness window** is a constant 300 s.
+- **A home's address** is the endpoint in its immutable request; a home that changes hostname is
+  revoked and a new home appointed (uploading again).
+- **No compaction.** A new device replays the authority history from genesis, and records are kept
+  as written; pruning records 0.5 readers expect comes after the door, and persisted verifier state
+  is already a local checkpoint (§17.2).
+- **`kept`** is bounded by one authority body (about 15,400 digests), with no continuation entry.
+- **A blob** is at most 512 MiB (64 KiB chunks, 8,192 per manifest); a larger blob is a later
+  manifest kind.
+- **Live slots** keep what a replica holds, which depends on arrival (§11.8 "Limit").
+- **Constants:** the clock jump of 1,024 (§11.4), the 60 s future-clock tolerance, the 7-day bound
+  on recording entries (§8.7) and the pending admission caps (§13.1).
+- **Homes:** a home's key changes only by appointing a new home; one home serves one account
+  (§13.1); an account uses newer authority content only once its homes read it; appointing a home
+  is outside the confirmed-pairing rule (§9.1).
+- **Successions:** two successors of one predecessor can each verify (§15.1).
+- **No home:** no witness of time or order (§13.1).
+- **Joining:** under `members` a new device gets the authority history only from the approving
+  device, out of band (§13.4); it does not fit one QR code.
+
+What is not in this version is listed in the guide §6; what revision 16 designed and revision 17
+deferred to 0.6 is in changes §A.12 and the design's "Deferred to 0.6".
 
 ## 21. Conformance and freeze
 
@@ -2409,6 +2644,14 @@ What is not in this version is listed in the guide §6.
 
 `conformance/0.5/candidate/` holds the vectors built before any implementation; its README lists
 them. The rest are plan step V1.
+
+**Open at freeze.** What 0.5 does not decide, stated so nothing is left implicit:
+1. Two successors of one predecessor can each verify, for different verifiers (§15.1, the
+   implementation notes' open item 2); the host rule keeps honest hosts from making it.
+2. The removal follow-up (§17.5) lists only what the removed key added since the transition's
+   anchor; a wider list is a question for after 0.5.
+3. Everything revision 16 designed and revision 17 deferred to 0.6 (changes §A.12, the design's
+   "Deferred to 0.6"), including invites for a device that holds nothing (§13.4).
 
 **Required vectors.** The list in [conformance/0.5/candidate/README.md](../conformance/0.5/candidate/README.md)
 "Required for freeze" is normative for condition 1.

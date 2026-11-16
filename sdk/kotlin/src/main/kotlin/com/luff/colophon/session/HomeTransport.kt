@@ -144,6 +144,8 @@ sealed class HomeProblem {
     data class CallRefused(val code: String) : HomeProblem()
     /** The engine still had a request outstanding after the pass was abandoned and run again once: the pass could not finish, and the exchange failed. */
     object StillWaiting : HomeProblem() { override fun toString() = "StillWaiting" }
+    /** Unverified refusal of this device's signed call by a home. Stops its pass; never denies local data or wipes keys. */
+    data class RemoteCallRefused(val code: String) : HomeProblem()
 }
 
 internal class HomeProblemException(val problem: HomeProblem) : Exception(problem.toString())

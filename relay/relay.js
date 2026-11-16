@@ -26,6 +26,95 @@ const HEX64 = /^[0-9a-f]{64}$/;
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 
+// Cross-origin answers (operator behaviour, not protocol). CORS is not access control: no
+// decision about a request reads `Origin`; it only chooses which headers decorate the answer.
+const CORS_EXPOSE = 'ETag, Retry-After, WWW-Authenticate';
+const CORS_METHODS = 'GET, POST, PUT, OPTIONS';
+const CORS_HEADERS = 'Authorization, Content-Type, If-Match, If-None-Match';
+const CORS_MAX_AGE = '600';
+const OPTIONS_ALLOW = 'GET, HEAD, POST, PUT, DELETE, OPTIONS';
+const CACHE_CONTROL = 'no-store, no-transform';
+// scheme://host[:port], lower case: a DNS name of letter-digit-hyphen labels, an IPv4 literal,
+// or a bracketed IPv6 literal. No path, no trailing slash, no wildcard, no user info.
+const ORIGIN = /^https?:\/\/(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::[1-9][0-9]{0,4})?$/;
+
+/** Checks the configured CORS origins and returns them as a Set. Throws on any entry that is
+ * not exactly `scheme://host[:port]` as a browser serializes an origin (so `*`, `null`, an
+ * upper-case letter, a path, a trailing slash or dot, or an explicit default port are refused:
+ * a browser never sends them, and a wildcard is never wanted). */
+export function corsOrigins(list) {
+  if (list === undefined || list === null) return new Set();
+  if (!Array.isArray(list)) throw new Error('cors.origins must be an array of origins (scheme://host[:port])');
+  const out = new Set();
+  for (const entry of list) {
+    let canonical = null;
+    if (typeof entry === 'string' && ORIGIN.test(entry)) {
+      try { canonical = new URL(entry).origin; } catch { canonical = null; }
+    }
+    if (typeof entry !== 'string' || canonical !== entry) throw new Error(`Invalid CORS origin ${JSON.stringify(entry)}: each entry must be exactly scheme://host[:port], lower case, http or https, no path, no wildcard, no default port`);
+    out.add(entry);
+  }
+  return out;
+}
+
+/** The single enforcement point for headers every answer carries. It is applied before any
+ * handler runs, and `res.writeHead` (which every answer passes through, an implicit one from a
+ * bare `res.end()` included) is wrapped so that the headers a call site passes are merged first
+ * and these are set last: no later call site can drop or override them. */
+function enforceAnswerHeaders(req, res, origins) {
+  const origin = req.headers.origin;
+  const listed = typeof origin === 'string' && origins.has(origin);
+  const apply = () => {
+    res.setHeader('cache-control', CACHE_CONTROL);
+    res.removeHeader('content-encoding');
+    res.removeHeader('access-control-allow-credentials');
+    if (origins.size > 0) {
+      const vary = res.getHeader('vary');
+      const parts = (vary === undefined ? [] : String(vary).split(',')).map((v) => v.trim()).filter(Boolean);
+      if (!parts.some((v) => v.toLowerCase() === 'origin')) parts.push('Origin');
+      res.setHeader('vary', parts.join(', '));
+    }
+    if (listed) {
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('access-control-expose-headers', CORS_EXPOSE);
+    } else {
+      for (const name of res.getHeaderNames()) if (name.startsWith('access-control-')) res.removeHeader(name);
+    }
+  };
+  const writeHead = res.writeHead;
+  res.writeHead = function (status, ...rest) {
+    const last = rest[rest.length - 1];
+    const headers = last !== null && typeof last === 'object' ? rest.pop() : undefined;
+    if (Array.isArray(headers)) {
+      const pairs = Array.isArray(headers[0]) ? headers : headers.flatMap((v, i) => (i % 2 ? [] : [[v, headers[i + 1]]]));
+      for (const [name, value] of pairs) this.setHeader(name, value);
+    } else if (headers) {
+      for (const [name, value] of Object.entries(headers)) this.setHeader(name, value);
+    }
+    apply();
+    return writeHead.call(this, status, ...rest);
+  };
+  apply();
+  return listed;
+}
+
+/** `OPTIONS` on any path: answered before slot lookup, authorization, call checks and rate
+ * counting. It opens no slot and touches no disk. */
+function answerOptions(req, res, listed) {
+  req.resume();
+  const preflight = typeof req.headers.origin === 'string' && req.headers['access-control-request-method'] !== undefined;
+  const headers = {}; // a 204 carries no Content-Length (RFC 9110 §8.6)
+  if (preflight) {
+    if (listed) {
+      headers['access-control-allow-methods'] = CORS_METHODS;
+      headers['access-control-allow-headers'] = CORS_HEADERS;
+      headers['access-control-max-age'] = CORS_MAX_AGE;
+    }
+  } else headers.allow = OPTIONS_ALLOW;
+  res.writeHead(204, headers);
+  res.end();
+}
+
 /** Path grammar shared with the SDK adapters (RecordPath/BlobPath). Returns the kind or null. */
 export function classifyPath(p) {
   if (typeof p !== 'string' || Buffer.byteLength(p) >= 512) return null;
@@ -342,8 +431,10 @@ function readBody(req, max) {
  * Creates the relay. `libraries` maps slot names to `{ tokenSha256 }`, `{ token }` or
  * `{ open: true }` (no bearer token; local testing only).
  */
-export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false }) {
+export async function createRelay({ dataDir, libraries, limits = {}, home, clock = Date.now, resolve, tickMs = 0, tracing = false, cors }) {
   if (!dataDir) throw new Error('dataDir is required');
+  if (cors !== undefined && cors !== null && (typeof cors !== 'object' || Array.isArray(cors))) throw new Error('cors must be an object with origins, an array of origins');
+  const origins = corsOrigins(cors?.origins);
   const effective = { ...DEFAULT_LIMITS, ...limits };
   await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
   await ensureRealDir(path.resolve(dataDir));
@@ -477,6 +568,8 @@ export async function createRelay({ dataDir, libraries, limits = {}, home, clock
   }
 
   function listener(req, res) {
+    const listed = enforceAnswerHeaders(req, res, origins);
+    if (req.method === 'OPTIONS') { answerOptions(req, res, listed); return; }
     handle(req, res).catch((error) => {
       if (res.headersSent || res.destroyed) { res.destroy(); return; }
       if (error instanceof HttpError) send(res, error.status, error.body !== undefined ? error.body : { error: error.message }, error.headers);

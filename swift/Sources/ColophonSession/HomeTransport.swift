@@ -122,6 +122,9 @@ public enum HomeProblem: Error, Equatable, Sendable {
     /// The engine still had a request outstanding after the pass was abandoned and run again once: the pass could not
     /// finish, and the exchange failed.
     case stillWaiting
+    /// A home refused this device's signed call. This is an unverified remote claim, not proof of revocation;
+    /// the pass stops, but local access and keys remain governed by verified account records.
+    case remoteCallRefused(code: String)
 }
 
 public struct HomeIssue: Equatable, Sendable {
