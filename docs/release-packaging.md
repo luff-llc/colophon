@@ -56,10 +56,13 @@ How a run works:
   and every ambient `npm_config_*` are gone, and npm gets an empty user and global config.
   Gradle runs with `--no-daemon` and an empty `GRADLE_USER_HOME`, so no init script or signing
   configuration from `~/.gradle` can act.
-* Only the Cargo registry (`$CARGO_HOME/registry`, with Cargo's lock files) is shared with the
-  machine: `Cargo.lock` pins every crate with its checksum and every build uses `--locked`. The
-  second pass runs Cargo offline (`CARGO_NET_OFFLINE=true`). Gradle and npm download again in
-  each pass into their fresh homes.
+* Nothing is shared with the machine's Cargo home, so its `config.toml` never applies. Pass a
+  fills its own registry with `cargo fetch --locked` (`Cargo.lock` pins every crate with its
+  checksum; every build uses `--locked`). Pass b starts from a clone of pass a's registry
+  (`cp -Rc` on macOS, `cp -a --reflink=auto` elsewhere) and runs Cargo offline
+  (`CARGO_NET_OFFLINE=true`). The registry is a real directory: a symlink in a crate's source
+  path breaks proc macros that resolve files relative to it (askama in `uniffi_bindgen`). Gradle
+  and npm download again in each pass into their fresh homes.
 * `scripts/build-apple.sh` and `scripts/build-android.sh` get `RELEASE_NO_INSTALL=1`: a missing
   Rust target, toolchain or `rust-src` fails the run instead of being installed. A missing tool
   (rustup, the pinned toolchain, wasm-bindgen 0.2.130, node, cargo-ndk, rg, xcodebuild) fails
