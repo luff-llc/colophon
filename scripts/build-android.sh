@@ -32,7 +32,14 @@ command -v cargo-ndk >/dev/null || { echo 'Install cargo-ndk: cargo install carg
 : "${GRADLE_USER_HOME:=$PWD/.gradle-home}"
 export GRADLE_USER_HOME
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
-rustup target add aarch64-linux-android x86_64-linux-android
+if [[ "${RELEASE_NO_INSTALL:-0}" == 1 ]]; then
+  # scripts/package-release.sh: a missing target is a failure, never an install.
+  for t in aarch64-linux-android x86_64-linux-android; do
+    rustup target list --installed | grep -qx "$t" || { echo "build-android: Rust target $t is not installed" >&2; exit 1; }
+  done
+else
+  rustup target add aarch64-linux-android x86_64-linux-android
+fi
 # The host generator and generated sources must match the native library exactly.
 bash scripts/generate-bindings.sh
 # Staged outside Gradle build/ so clean cannot package an AAR with no JNI libraries.
