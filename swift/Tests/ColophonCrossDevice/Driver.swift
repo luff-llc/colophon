@@ -105,11 +105,11 @@ private struct Transport: HomeTransport {
         return ["phase": phase, "account": s.libraryID ?? "", "member": s.memberID ?? "", "homes": s.homes.count,
                 "error": s.lastError ?? "", "issues": s.homeIssues.map { issue in
                     switch issue.problem {
-                    case .callRefused(let code), .remoteCallRefused(let code): return code
+                    case .callRefused(let code), .remoteCallRefused(let code, _): return code
                     default: return String(describing: issue.problem)
                     }
                 }, "faults": s.homeFaults.map { String(describing: $0.fault) }, "refusals": await audit.refused,
-                "remoteRefusals": s.homeIssues.compactMap { if case .remoteCallRefused(let code) = $0.problem { return code }; return nil },
+                "remoteRefusals": s.homeIssues.compactMap { if case .remoteCallRefused(let code, _) = $0.problem { return code }; return nil },
                 "pending": s.notices.pending.map { ["digest": $0.digest, "vetoable": $0.vetoable] as [String: Any] }]
     }
     func run(_ c: [String: Any]) async throws -> Any {

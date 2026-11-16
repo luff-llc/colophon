@@ -369,9 +369,18 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         // With no library there is nothing to exchange. A pass here would refresh to `NoLibrary` and erase what a failed
         // `create()` just published (its `Failed` phase and error), which an app would see as a missing error.
         if (_state.value.libraryId == null) return false
+        // A stopped account runs no exchange (spec §1 "A stop"): not a failure, and nothing to retry.
+        if (phase.isStopped) { set { copy(syncState = HomeSyncState.Disabled) }; return true }
         set { copy(syncState = HomeSyncState.Syncing) }
         return try {
             val result = worker.exchange()
+            if (result.stopped) { set { copy(syncState = HomeSyncState.Disabled) }; refresh(true); return true }
+            // A home that answered `503 {"result":"unavailable"}` is not available: shown so, retried with backoff (never as this
+            // device being stopped, which only its own verified history decides).
+            if (result.homeUnavailable && !result.changed) {
+                set { copy(homeFaults = result.faults.toList(), homeIssues = result.issues.toList(), syncState = HomeSyncState.Offline(HomeWords.UNAVAILABLE)) }
+                return false
+            }
             set { copy(homeFaults = result.faults.toList(), homeIssues = result.issues.toList(), lastSyncedMs = System.currentTimeMillis(),
                 syncState = if (result.unauthorized) HomeSyncState.Unauthorized
                     else if (result.failed) HomeSyncState.Error("a pass could not finish: the engine was still waiting") else HomeSyncState.Idle) }
@@ -398,6 +407,9 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
             var failures = 0
             while (isActive) {
                 val ok = syncNow()
+                // Stopped: no timer and no backoff. Only an event wakes the loop, and each pass returns at once without
+                // contacting a home.
+                if (phase.isStopped) { syncSignal.receive(); continue }
                 failures = if (ok) 0 else failures + 1
                 // Success: poll after duties.pollIntervalMs or when a local change arrives. Failure: capped, jittered backoff.
                 val wait = if (ok) duties.pollIntervalMs else (minOf(60.0, Math.pow(2.0, maxOf(0, failures - 1).toDouble())) * Random.nextDouble(0.5, 1.0) * 1000).toLong()
@@ -462,6 +474,9 @@ class ColophonSession(configuration: SessionConfiguration) : AutoCloseable {
         }
     }
     private fun fail(e: Exception) {
+        // A stopped account refuses every write (`newerFormat`) and every call (`unavailable`): that is the stopped phase the
+        // person already sees, not a new fault, so the phase and the readable content stay.
+        if (phase.isStopped && (e is AccountException.NewerFormat || e is AccountException.Unavailable)) return
         set { copy(lastError = e.message ?: e.javaClass.simpleName) }
         when (e) {
             is AccountException.NewerFormat -> { set { copy(phase = SessionPhase.UpdateRequired) }; usable = false; return }

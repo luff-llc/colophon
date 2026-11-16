@@ -51,9 +51,38 @@ let session = ColophonSession(configuration: .init(
 ## Phases
 
 `opening`, `noLibrary`, `creating`, `waitingForApproval`, `ready`, `refreshing`, `waitingForDownload`, `retry`,
-`denied`, `unavailable(reason:)`, `updateRequired`, `failed`, `migrating` (kept for apps), and **`locked`** (new).
+`denied`, `unavailable(reason:)`, `updateRequired`, `stopped(seq:layout:)`, `failed`, `migrating` (kept for apps), and **`locked`** (new).
 `updateRequired` is the engine's `newerFormat`: nothing is lost and nothing is changed. A revoked member is `denied`. A storage
 error is `retry` or `waitingForDownload`, never an empty library.
+
+### A stopped account, a home's refusals, waiting for approval (freeze package)
+
+**Stopped.** When a layout raise (spec §20) becomes final in the history this device verified, or it judges an authority
+entry `newerFormat`, the engine's status carries `stopped` and the session's phase is **stopped** (Swift
+`.stopped(seq:layout:)`, Kotlin `SessionPhase.Stopped(seq, layout)`, JS `{ kind: 'stopped', seq, layout? }`): this app must
+be updated to continue with this account. It comes only from the verified status, never from a home's answer or a
+refusal. What the device holds stays readable (`hasUsableContent` is true, as of the stop); every write is refused by the
+core (`newerFormat`) and the phase stays, with no fault shown; no exchange runs (`syncState` is disabled, the loop waits
+for an event with no timer or backoff, and no home is contacted); it persists across relaunch; lock, unlock and sign-out
+work. The gate shows the content with a status line, or the screen `library.stopped` ("Update to continue"), with no retry.
+The existing `updateRequired` remains for an account the engine cannot open at all.
+
+**A home's refusals.** A home's error answer is read for its `result` only, validated against the §1 grammar (a named
+result, or `refused:` and a reason of a lower-case letter then letters and digits, at most 48 characters) from a JSON body
+of at most 64 KiB; no other byte of the body is kept (`HomeRefusal`, JS `homeRefusal`). A `refused:<name>` the session does
+not know, the reserved `refused:overQuota`, `refused:noEntitlement`, `refused:closed` and `refused:notProvisioned`
+included, is the existing home issue `remoteCallRefused`, now with the name as given and the home's `Retry-After`: it
+refuses only that request (the pass goes on), except a refusal of this device's signed call (403), which ends the pass as
+before. It is never a state of the account. A `Retry-After` (whole seconds, 1 to 86,400) is honoured: the home is not
+contacted again before then, and its refusal stays shown meanwhile. `503 {"result":"unavailable"}`, which a stopped home
+answers (§13.6), is the issue `homeUnavailable`: the sync state is offline with "The home is not available right now"
+(`HomeWords`), the loop backs off, and the device is not stopped. The retry signal of a refusal body is deferred (§16 of
+the design), so `Retry-After` is the only signal honoured.
+
+**Waiting for approval.** 0.5 keeps `refused:revoked` for a call by a member no grant names (`refused:notGranted` is
+reserved). A device that asked to join and holds no grant for itself (its standing is unknown) shows a home's or its own
+check's `refused:revoked` as the issue `waitingForApproval`, not as revoked; its phase is `waitingForApproval`. A device
+that holds its own verified revocation is `denied`, as before.
 
 ## Creating, opening, joining
 

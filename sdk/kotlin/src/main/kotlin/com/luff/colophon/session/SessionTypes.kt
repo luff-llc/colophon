@@ -25,6 +25,14 @@ sealed class SessionPhase {
     data class Unavailable(val reason: String) : SessionPhase()
     /** Authenticated content of a newer format than this client evaluates. Nothing is changed or lost. */
     object UpdateRequired : SessionPhase() { override fun toString() = "UpdateRequired" }
+    /**
+     * New in 0.5 (freeze package): this account was moved to a newer format. A layout raise (spec §20) became final in
+     * the history this device verified, so this app must be updated to continue with the account. A verified state, never
+     * a home's word or a refusal. What the device holds stays readable ([ColophonSession.hasUsableContent]), as of the stop;
+     * nothing is written and no exchange runs; it persists across relaunch; lock and sign-out still work. [seq] is the
+     * raising activation's, [layout] the one it names (null: an entry of a newer format, not a raise).
+     */
+    data class Stopped(val seq: Long, val layout: Long?) : SessionPhase()
     object Ready : SessionPhase() { override fun toString() = "Ready" }
     /** A refresh is in flight; previously verified content is still usable. */
     object Refreshing : SessionPhase() { override fun toString() = "Refreshing" }
@@ -33,7 +41,9 @@ sealed class SessionPhase {
     object Locked : SessionPhase() { override fun toString() = "Locked" }
     data class Failed(val error: SessionFailure) : SessionPhase()
 
-    internal val usable: Boolean get() = this == Ready || this == Refreshing || this == WaitingForDownload || this == Retry
+    internal val usable: Boolean get() = this == Ready || this == Refreshing || this == WaitingForDownload || this == Retry || this is Stopped
+    /** True in the stopped phase: this app must be updated to continue with this account. */
+    val isStopped: Boolean get() = this is Stopped
 }
 
 sealed class SessionFailure {

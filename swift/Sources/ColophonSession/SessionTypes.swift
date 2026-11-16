@@ -13,6 +13,12 @@ public enum SessionPhase: Equatable, Sendable {
     case unavailable(reason: String)
     /// Authenticated content of a newer format than this client evaluates. Nothing is changed or lost.
     case updateRequired
+    /// New in 0.5 (freeze package): this account was moved to a newer format. A layout raise (spec §20) became final in
+    /// the history this device verified, so this app must be updated to continue with the account. It is a verified
+    /// state, never a home's word or a refusal. What the device holds stays readable (`hasUsableContent`), as of the
+    /// stop; nothing is written and no exchange runs; it persists across relaunch; `lock()` and `leave()` still work.
+    /// `seq` is the raising activation's, `layout` the one it names (nil: an entry of a newer format, not a raise).
+    case stopped(seq: UInt64, layout: UInt64?)
     case ready
     /// A refresh is in flight; previously verified content from this connection is still usable.
     case refreshing
@@ -21,6 +27,11 @@ public enum SessionPhase: Equatable, Sendable {
     /// hidden and no secret is held; `restore()`, `refresh()` or `unlock()` opens it again.
     case locked
     case failed(error: SessionFailure)
+}
+
+extension SessionPhase {
+    /// True in the stopped phase (`stopped(seq:layout:)`): this app must be updated to continue with this account.
+    public var isStopped: Bool { if case .stopped = self { true } else { false } }
 }
 
 public enum SessionFailure: Equatable, Sendable {

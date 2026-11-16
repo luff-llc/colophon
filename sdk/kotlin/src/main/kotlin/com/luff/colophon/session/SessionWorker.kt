@@ -9,6 +9,7 @@ import com.luff.colophon.AccountRequest
 import com.luff.colophon.AccountDenialReason
 import com.luff.colophon.AccountCreation
 import com.luff.colophon.AccountPairing
+import com.luff.colophon.AccountStop
 import com.luff.colophon.AddMode
 import com.luff.colophon.AuthorityObjects
 import com.luff.colophon.ByteString
@@ -41,6 +42,7 @@ import com.luff.colophon.SignForm
 import com.luff.colophon.Signature
 import com.luff.colophon.SignerNeed
 import com.luff.colophon.SlotPlan
+import com.luff.colophon.Standing
 import com.luff.colophon.StandingKind
 import com.luff.colophon.StatusKind
 import com.luff.colophon.Store
@@ -106,6 +108,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     private var memberOpened = false
     private val journalFile = File(configuration.privateDirectory, "session.json")
     private val cache = SavedStateCache(configuration.privateDirectory)
+    /** Per home, the clock time (ms) before which it is not contacted again (a `Retry-After` it sent with a result). */
+    private val notBefore = HashMap<String, Long>()
+    /** Per home, the refusal that came with its `Retry-After`, shown again while the home is not contacted. */
+    private val waitingIssue = HashMap<String, HomeIssue>()
+    private suspend fun isStopped(engine: ColophonEngine): Boolean = engine.run { it.status() }.stopped != null
 
     // Gate
 
@@ -202,7 +209,8 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         fun objects(prefix: String) = entries.filter { it.path.startsWith(prefix) }.map { ByteString(medium.read(it.path)) }
         val pending = objects("transitions/") + objects("vetoes/") + objects("receipts/")
         val report = accountVerifyHistory(AuthorityObjects(objects("authority/"), pending, objects("heads/"), objects("predecessor/")), nowMs)
-        if (report.kind == StatusKind.NEWER_FORMAT) throw AccountException.NewerFormat(report.code, report.detail ?: "")
+        // A history that stops at a final layout raise still names its account: the engine opens it, stopped (spec §1).
+        if (report.kind == StatusKind.NEWER_FORMAT && report.account == null) throw AccountException.NewerFormat(report.code, report.detail ?: "")
         return report.account ?: throw AccountException.Malformed(report.code, report.detail ?: "the library's history does not verify")
     }
 
@@ -271,10 +279,29 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         return SessionSnapshot(phase, revision, revisions, accountId, memberId, members, requests, notices, homes, duties)
     }
 
+    /**
+     * The stopped phase (spec §1 "A stop"): only from the verified status. What the device holds stays readable as of the
+     * stop (revisions are published for the namespaces this member may read); no notices or duties are computed: a
+     * stopped reader answers no question of currency, and the host builds nothing.
+     */
+    private suspend fun stoppedSnapshot(engine: ColophonEngine, stop: AccountStop, standing: Standing): SessionSnapshot {
+        val members = engine.run { it.members() }
+        val homes = engine.run { it.homes() }
+        val revisions = LinkedHashMap<String, ULong>()
+        if (standing.kind == StandingKind.MEMBER && standing.member?.revokedAt == null) {
+            for (r in engine.run { it.revisions() }) {
+                if (r.namespace in configuration.libraryNamespaces && engine.run { it.access(r.namespace) } == null) revisions[r.namespace] = r.revision
+            }
+            if (revisions.isNotEmpty()) revisions["colophon.authority"] = engine.run { it.headSeq() }
+        }
+        return snapshot(SessionPhase.Stopped(stop.seq.toLong(), stop.layout?.toLong()), members, revisions = revisions, homes = homes)
+    }
+
     private suspend fun build(): SessionSnapshot {
         val engine = engine ?: return snapshot(SessionPhase.NoLibrary)
         val standing = engine.run { it.me() }
         val status = engine.run { it.status() }
+        status.stopped?.let { return stoppedSnapshot(engine, it, standing) }
         if (status.kind == StatusKind.NEWER_FORMAT) return snapshot(SessionPhase.UpdateRequired)
         val members = engine.run { it.members() }
         val pending = pendingRequests(members)
@@ -859,7 +886,11 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
     class ExchangeResult(var passes: Int = 0, val faults: MutableList<HomeFault> = ArrayList(), val issues: MutableList<HomeIssue> = ArrayList(),
                          var changed: Boolean = false, var unauthorized: Boolean = false,
                          /** A pass that did not finish (the engine still waited after its one recovery): the exchange failed. */
-                         var failed: Boolean = false)
+                         var failed: Boolean = false,
+                         /** The account is stopped (a final layout raise this device verified, spec §1 "A stop"): no pass runs, and a pass that brought the stop in ended there. Not a failure. */
+                         var stopped: Boolean = false,
+                         /** A home answered `503 {"result":"unavailable"}`: the home is not available. Retried with backoff; not about this device. */
+                         var homeUnavailable: Boolean = false)
 
     /** Tests only: answers `exchange_next` for a home instead of the engine when it returns a step. */
     @Volatile internal var nextStepOverride: ((String) -> ExchangeStep?)? = null
@@ -873,8 +904,18 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
         val result = ExchangeResult()
         val engine = engine ?: return@onLane result
         val homes = engine.run { it.exchangeHomes() }
+        // This device asked to join and holds no grant for itself: a `refused:revoked` for its own call means "not approved yet".
+        val awaitingApproval = runCatching { engine.run { it.me() }.kind == StandingKind.UNKNOWN }.getOrDefault(false)
         for (home in homes) {
             val configured = transportFor(home) ?: continue
+            // The home asked for time (`Retry-After`): it is not contacted again before then.
+            // What it said stays shown until then.
+            val until = notBefore[home.id]
+            if (until != null && nowMs < until) {
+                waitingIssue[home.id]?.let { said -> result.issues.add(said); if (said.problem is HomeProblem.HomeUnavailable) result.homeUnavailable = true }
+                continue
+            }
+            waitingIssue.remove(home.id)
             if (!configured.isAllowed) { result.issues.add(HomeIssue(home.id, HomeProblem.InsecureEndpoint(configured.endpoint))); continue }
             configured.bearerToken?.let { token -> engine.run { it.exchangeSetBearer(home.id, token) } }
             // The pass starts from fresh local state.
@@ -884,11 +925,15 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                 engine.run { it.refresh(list) }
                 unlockIfPossible()
             }
+            // A stopped account runs no exchange pass (spec §1 "A stop": it accepts no head and asks no call).
+            if (isStopped(engine)) { result.stopped = true; break }
             val started = System.nanoTime()
             var progress = true
             var passIndex = 0
             var stopped: HomeProblem? = null
             var recovered = false
+            // The pass was left for a `Retry-After`: the answer was not given to the engine, so its request is abandoned.
+            var abandon = false
             try {
             // A pass can end before everything moved (the engine plans the next stage from what the home just said):
             // run passes until one moves nothing, at most HomeLimits.PASSES.
@@ -913,7 +958,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                         }
                         ExchangeStepKind.NEED_CALL -> {
                             val need = step.need ?: break
-                            try { provideCall(need, home, configured) } catch (e: HomeProblemException) { stopped = e.problem; break@homeLoop }
+                            try { provideCall(need, home, configured) } catch (e: HomeProblemException) { stopped = if (e.problem == HomeProblem.CallRefused("refused:revoked") && awaitingApproval) HomeProblem.WaitingForApproval else e.problem; break@homeLoop }
                         }
                         ExchangeStepKind.REQUEST -> {
                             val request = step.request ?: break
@@ -935,6 +980,43 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                             val answer: HttpAnswer = sent ?: run { stopped = HomeProblem.TooSlow((exchangeTimeMs / 1000).toInt()); break@homeLoop }
                             val limit = HomeLimits.responseBytes(request.url)
                             if (answer.body.size > limit) { stopped = HomeProblem.ResponseTooLarge(limit); break@homeLoop }
+                            // A home's answer that carries a §1 result (spec §14, §19): read only the `result`, validated
+                            // against the result grammar and bounded ([HomeRefusal]), never any other byte of the body. It is
+                            // the home's word about one request, not a verified state of the account.
+                            var refusedCall: HomeProblem? = null
+                            val refusal = if (request.home == home.id) HomeRefusal.of(answer.status.toInt(), answer.headers, answer.body) else null
+                            if (refusal != null) {
+                                refusal.retryAfterSeconds?.let { notBefore[home.id] = nowMs + it * 1000L }
+                                if (refusal.isHomeUnavailable) {
+                                    // `503 {"result":"unavailable"}` (a stopped or overloaded home, §13.6): the home is not
+                                    // available. The pass stops and the session retries with backoff.
+                                    stopped = HomeProblem.HomeUnavailable(refusal.retryAfterSeconds)
+                                    if (refusal.retryAfterSeconds != null) waitingIssue[home.id] = HomeIssue(home.id, stopped!!)
+                                    result.homeUnavailable = true
+                                    break@homeLoop
+                                }
+                                val code = refusal.code
+                                if (code != null && code.startsWith("refused:")) {
+                                    // A device that asked to join and holds no grant for itself sees `refused:revoked` for its
+                                    // own call (0.5 keeps that result; `refused:notGranted` is reserved): waiting for approval.
+                                    val problem = if (code == "refused:revoked" && awaitingApproval) HomeProblem.WaitingForApproval
+                                        else HomeProblem.RemoteCallRefused(code, refusal.retryAfterSeconds)
+                                    val signed = request.headers.any { it.name.equals("authorization", ignoreCase = true) && it.value.startsWith("Colophon ") }
+                                    if (answer.status == 401u) {
+                                        // The challenge for a call: the engine asks for one.
+                                    } else if (answer.status == 403u && signed) {
+                                        // This device's signed call was refused: the engine is told, then the pass ends with the
+                                        // home's word, as for any refused call.
+                                        refusedCall = problem
+                                    } else {
+                                        // Any other refusal refuses only that request (an unknown or reserved name included) and
+                                        // the pass goes on, unless the home asked for time (`Retry-After`).
+                                        val issue = HomeIssue(home.id, problem)
+                                        if (issue !in result.issues) result.issues.add(issue)
+                                        if (refusal.retryAfterSeconds != null) { waitingIssue[home.id] = issue; abandon = true; break@homeLoop }
+                                    }
+                                } else if (refusal.retryAfterSeconds != null) { abandon = true; break@homeLoop }
+                            }
                             // The answer and the persistence of its stores are one step: never abandoned half way.
                             val report: Report = gated {
                                 withContext(NonCancellable) {
@@ -950,15 +1032,7 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                             if (report.store.isNotEmpty() || report.changes.authorityToSeq != report.changes.authorityFromSeq || report.changes.namespaces.isNotEmpty()) {
                                 result.changed = true; progress = true
                             }
-                            // The core's Unauthorized fault discards the result code. A home's claim about our
-                            // signed call is shown, but only verified records can deny local access or alter keys.
-                            if (answer.status == 403u && request.home == home.id &&
-                                request.headers.any { it.name.equals("authorization", ignoreCase = true) && it.value.startsWith("Colophon ") } &&
-                                Json.obj(answer.body.toString(Charsets.UTF_8))?.string("result") == "refused:revoked") {
-                                stopped = HomeProblem.RemoteCallRefused("refused:revoked")
-                                result.unauthorized = true
-                                break@homeLoop
-                            }
+                            if (refusedCall != null) { stopped = refusedCall; result.unauthorized = true; break@homeLoop }
                         }
                     }
                 }
@@ -968,13 +1042,19 @@ internal class SessionWorker(val configuration: SessionConfiguration) {
                 // A transport failure, an engine error or a cancelled caller: the request in flight is forgotten, what was
                 // pulled and verified is kept, and the next pass starts clean. This runs even when the caller was cancelled.
                 abortPass(engine, home.id)
+                // The pass brought in the final raise that stops this account: the engine then refuses the next step
+                // (`unavailable`). That is the stop, not a fault of the exchange.
+                if (e !is kotlinx.coroutines.CancellationException && runCatching { isStopped(engine) }.getOrDefault(false)) {
+                    result.stopped = true; result.changed = true; break
+                }
                 throw e
             }
-            stopped?.let { problem ->
+            val problem = stopped
+            if (problem != null) {
                 result.issues.add(HomeIssue(home.id, problem))
                 if (problem == HomeProblem.StillWaiting) result.failed = true
                 abortPass(engine, home.id)
-            }
+            } else if (abandon) abortPass(engine, home.id)
         }
         result
     }

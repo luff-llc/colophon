@@ -16,6 +16,13 @@ for iPhone share one library through it.
 | Homes | `HomeConfiguration`, `HomeTransport`, `HttpHomeTransport` | `HttpURLConnection`: no cookies, no cache, no redirects, `https` only (loopback `http` with the testing option), each response bounded. |
 | Android | `AndroidSession.medium`, `.privateDirectory`, `.memberKeys`, `.deviceSecrets`; `KeystoreDeviceSecrets`; `PasskeyController` | App-private storage in `noBackupFilesDir`; the member key in Android Keystore (the 0.4 `KeystoreKeys`, StrongBox first); the device key sealed by a Keystore AES key; the person's passkey through Credential Manager with PRF. |
 
+**A stopped account, a home's refusals, waiting for approval.** The Kotlin session has the same names and behaviour as the
+Apple session (`docs/session.md`, "A stopped account, a home's refusals, waiting for approval"): `SessionPhase.Stopped(seq,
+layout)` from the verified status only, readable and with no exchange; `HomeProblem.RemoteCallRefused(code,
+retryAfterSeconds)` for any `refused:` name a home gives, validated by `HomeRefusal`; `HomeProblem.HomeUnavailable` for a
+home's `503 {"result":"unavailable"}`; `HomeProblem.WaitingForApproval` for a joining device's `refused:revoked`. Tests:
+`StoppedAndRefusalTest` (`sdk/kotlin`, JVM, against the real relay).
+
 ## Adopting it in an Android app
 
 Build the AAR (`bash scripts/build-android.sh`: the release library for `arm64-v8a` and `x86_64` with cargo-ndk, the
