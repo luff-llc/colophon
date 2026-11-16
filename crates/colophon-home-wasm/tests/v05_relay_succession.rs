@@ -526,3 +526,39 @@ fn a_successor_home_records_successionvetoed_for_a_valid_veto() {
                 .is_some_and(|e| body_of(e)["kind"] == "successionVetoed")
     });
 }
+
+/// Staging survives kills: the relay is killed (SIGKILL) and started again after the genesis is
+/// held and after every predecessor entry is staged; each entry sent again is acknowledged as held
+/// (200), and the first upload then appoints the home and receipts the genesis.
+#[test]
+fn predecessor_staging_survives_kills() {
+    if prerequisites().is_none() {
+        return;
+    }
+    let keys = HomeKeys::new(0x79);
+    let mut host = Host::new();
+    let (acct, _f, _ctl) = successor(&mut host, &keys);
+    let account = acct.id().as_str().to_string();
+    let t = acct.swift_succession().unwrap().status.timing.clone().unwrap();
+    let scratch = Scratch::new("succession-kills");
+    let at = t.window_start_ms + 30 * SEC;
+    let port = free_port();
+    let mut relay = Relay::start_on(&keys, &account, BASE_A, scratch.path(), at, &[], port);
+    let mut entries: Vec<(u64, Value)> = acct.objects().entries.iter()
+        .map(|e| (support::entry_seq(e), serde_json::from_slice(e).unwrap())).collect();
+    entries.sort_by_key(|(s, _)| *s);
+    let entries: Vec<Value> = entries.into_iter().map(|(_, e)| e).collect();
+    assert_eq!(relay.post("/authority", &json!({"from": 1, "entries": entries, "receipts": []})).0, 422);
+    relay = relay.restart(&keys, at, &[]);
+    let mut by_seq: Vec<(u64, Vec<u8>)> = acct.objects().predecessor.iter()
+        .map(|e| (body_of(&serde_json::from_slice(e).unwrap())["seq"].as_u64().unwrap(), e.clone())).collect();
+    by_seq.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+    for (seq, e) in &by_seq {
+        assert_eq!(put_pred(&relay, *seq, e).0, 201, "seq {seq}");
+        relay = relay.restart(&keys, at, &[]);
+        assert_eq!(put_pred(&relay, *seq, e).0, 200, "seq {seq} is still held after a kill");
+    }
+    let (s, out) = relay.post("/authority", &json!({"from": 1, "entries": entries, "receipts": []}));
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(out["receipts"].as_array().map(Vec::len), Some(1));
+}

@@ -365,6 +365,14 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     let mut got = at_seq(b, n);
     got.sort();
     assert_eq!(got, both);
+    // The fork and its evidence are durable: B killed and started again still holds both.
+    let rb = w.b.take().unwrap();
+    w.b = Some(rb.restart(&HomeKeys::new(0x78), t + 7_000, &[(BASE_A, w.pa)]));
+    let b = w.b.as_ref().unwrap();
+    let mut got = at_seq(b, n);
+    got.sort();
+    assert_eq!(got, both, "after a kill");
+    assert_eq!(b.get(&format!("/records/heads/{}.json", w.ha)).0, 200);
     // It signs no head while forked, and serves no older one (§13.3: the head is due and cannot
     // be produced): a retryable 503.
     std::thread::sleep(std::time::Duration::from_millis(300));
