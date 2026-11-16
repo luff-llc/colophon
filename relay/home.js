@@ -159,6 +159,13 @@ export class HomeSlot {
     await this.materialize(this.wasm.call({ op: 'objects', state: this.state, now: this.clock() }).files);
     await this.openReplay();
     this.forward = await this.readJson('forward.json', { peers: {} });
+    // The home was not serving between its last recorded tick and now (§13.1 serving
+    // intervals): the module closes the interval it had open.
+    const alive = await this.readJson('alive.json', null);
+    if (alive && typeof alive.at === 'number') {
+      const r = this.wasm.call({ op: 'resume', state: this.state, now: this.clock(), alive: alive.at });
+      if (r.changed) await this.commit(r.state);
+    }
   }
 
   async readJson(name, fallback) {
@@ -213,17 +220,37 @@ export class HomeSlot {
     return envelopes;
   }
 
-  /** A fresh head when the module says one is due (§13.3): guard, sign, verify, store. */
+  /** A fresh head when the module says one is due (§13.3): guard, sign, verify, store. Returns
+   * `signed`, `fresh` (nothing was due), or `due` (a head is due and the module could not
+   * produce one now: the guard refused, the clock has not passed the latest head's `issued`, or
+   * the history stops at a fork). */
   async ensureHead() {
     const now = this.clock();
     const r = this.wasm.call({ op: 'head_request', state: this.state, now });
     await this.commit(r.state);
-    if (!r.sign) return false;
+    if (!r.sign) return r.due ? 'due' : 'fresh';
     const signature = b64(await this.key.sign(unb64(r.sign.body)));
     const f = this.wasm.call({ op: 'finish_head', state: this.state, now, seq: r.sign.seq, digest: r.sign.digest, issued: r.sign.issued, signature });
     await this.commit(f.state);
     await this.materialize(f.store);
-    return true;
+    return 'signed';
+  }
+
+  /** Serve this home's own head (`GET {base}/head`, `records/heads/<this home>.json`). §13.3:
+   * the due head is produced and stored first; a due head that cannot be produced fails the
+   * request (503, retryable) and the older head is never served. */
+  async serveOwnHead(res) {
+    const { HttpError, send } = this.deps;
+    let outcome;
+    try { outcome = await this.lock(async () => (this.status().appointed ? this.ensureHead() : 'fresh')); }
+    catch (error) {
+      if (!(error instanceof ModuleError)) throw error;
+      outcome = 'due';
+    }
+    if (outcome === 'due') throw new HttpError(503, 'The head is due and cannot be signed yet', { 'retry-after': '1' });
+    const head = await this.headEnvelope();
+    if (!head) throw new HttpError(404, 'No head');
+    send(res, 200, head);
   }
 
   async headEnvelope() {
@@ -371,23 +398,18 @@ export class HomeSlot {
     }
     const method = req.method;
     const writing = section === 'records' && method === 'PUT';
-    const effect = writing ? { path: rest, prior: this.slot.current.get(rest)?.sha256 ?? null } : null;
+    const effectPath = writing ? rest : (section === 'predecessor' && method === 'PUT' ? `predecessor/${rest}` : null);
+    const effect = effectPath ? { path: effectPath, prior: this.slot.current.get(effectPath)?.sha256 ?? null } : null;
     // A write's body is read (bounded) before its call is judged: the call is bound to its digest.
     const recordWrite = writing && typeof rest === 'string' && !rest.startsWith('heads/');
-    const body = recordWrite ? await readBody(req, rest.startsWith('blobs/') ? this.limits.blobBytes : this.limits.recordBytes) : null;
+    const predecessorPut = section === 'predecessor' && method === 'PUT';
+    const body = recordWrite || predecessorPut
+      ? await readBody(req, rest?.startsWith('blobs/') ? this.limits.blobBytes : this.limits.recordBytes)
+      : null;
     const allowed = await this.access(req, section ?? '', rest ?? null, effect, body);
     const key = allowed.reserve?.key;
     if (!section || section === 'changes') return false;
-    if (section === 'head') {
-      // A head due a refresh (§13.3: at least every headMaxAge / 2, the module decides) is signed
-      // before it is served, so a caller never waits a scheduler tick for a fresh head.
-      try { await this.lock(async () => { if (this.status().appointed) await this.ensureHead(); }); }
-      catch (error) { if (!(error instanceof ModuleError)) throw error; }
-      const head = await this.headEnvelope();
-      if (!head) throw new HttpError(404, 'No head');
-      send(res, 200, head);
-      return true;
-    }
+    if (section === 'head') { await this.serveOwnHead(res); return true; }
     if (section === 'authority') {
       if (method === 'GET') {
         const after = clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER);
@@ -396,7 +418,7 @@ export class HomeSlot {
         // Under the lock: a reader never sees a committed entry before its file is stored.
         try { page = await this.lock(async () => this.wasm.call({ op: 'authority_page', state: this.state, now: this.clock(), after, limit })); }
         catch (error) { if (error instanceof ModuleError) throw new HttpError(503, 'The home cannot serve its history now'); throw error; }
-        send(res, 200, { entries: page.entries.map((e) => JSON.parse(unb64(e))), receipts: [], more: page.more });
+        send(res, 200, { entries: page.entries.map((e) => JSON.parse(unb64(e))), receipts: (page.receipts ?? []).map((r) => JSON.parse(unb64(r))), more: page.more });
         return true;
       }
       const body = await readBody(req, this.limits.authorityBodyBytes);
@@ -426,7 +448,33 @@ export class HomeSlot {
       send(res, 200, { envelope: JSON.parse(unb64(r.envelope)), receipts: r.receipts.map((x) => JSON.parse(unb64(x))) });
       return true;
     }
+    if (section === 'predecessor') {
+      const file = `predecessor/${rest}`;
+      if (method === 'PUT') {
+        await this.lock(async () => {
+          const r = this.wasm.call({ op: 'put_predecessor', state: this.state, now: this.clock(), path: rest, bytes: b64(body) });
+          await this.commit(r.state);
+          await this.materialize(r.store);
+          if (r.outcome !== 'ok') {
+            if (r.outcome === 'conflict') { send(res, 412, { result: 'conflict' }); return; }
+            await this.answerOutcome(res, r);
+            return;
+          }
+          res.writeHead(r.created ? 201 : 200, { etag: `"${sha(body)}"`, 'content-length': 0 });
+          res.end();
+        });
+        if (key) await this.complete(key, 'completed');
+        return true;
+      }
+      const entry = this.slot.current.get(file);
+      if (!entry) throw new HttpError(404, 'Not found');
+      const bytes = await this.slot.readFile(file);
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': bytes.length, etag: `"${entry.sha256}"`, 'cache-control': 'no-store' });
+      res.end(method === 'HEAD' ? undefined : bytes);
+      return true;
+    }
     if (section === 'records') {
+      if (!writing && rest === `heads/${this.key.memberId}.json` && (method === 'GET' || method === 'HEAD')) { await this.serveOwnHead(res); return true; }
       if (!writing) return false; // a read the module allowed: the relay serves the file
       if (url.search) throw new HttpError(400, 'Record URLs take no query');
       if (rest.startsWith('heads/')) { await this.putHead(req, res, rest); return true; }
@@ -483,9 +531,10 @@ export class HomeSlot {
     await this.commit(r.state); // even a refusal changes state (§13.1)
     await this.materialize(r.store);
     const receipts = await this.signReceipts(r.sign);
-    if (r.appointed) await this.ensureHead();
+    const head = r.appointed ? await this.ensureHead() : 'fresh';
     if (r.outcome !== 'ok') return this.answerOutcome(res, r);
-    return send(res, 200, { head: await this.headEnvelope(), receipts });
+    // A due head that could not be produced yet is not answered with the older one (§13.3).
+    return send(res, 200, { head: head === 'due' ? null : await this.headEnvelope(), receipts });
   }
 
   async postPending(res, body) {
@@ -515,6 +564,8 @@ export class HomeSlot {
   async tickOnce() {
     await this.lock(async () => {
       const now = this.clock();
+      // The last instant this home is known to have been serving (read back at start-up).
+      if (this.aliveAt !== now) { await this.writeJson('alive.json', { at: now }); this.aliveAt = now; }
       // record_due is a pure function of (state, now): an unchanged pair would give the same
       // answer, so it is not asked again (it verifies the whole history each time).
       if (this.lastDue && this.lastDue.state === this.state && this.lastDue.now === now) { await this.ensureHead(); return; }
@@ -549,10 +600,11 @@ export class HomeSlot {
     }
   }
 
-  /** Offer one pending object to a peer. Returns whether it was delivered (the module reads the
-   * peer's answer); receipts the peer returns are admitted like any forwarded receipt. */
-  async offer(base, object, peerId) {
-    const r = await fetch(`${base}/pending`, { signal: AbortSignal.timeout(5000), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects: [object] }) });
+  /** Offer one listed object to a peer, with what the module sends with it (its receipts).
+   * Returns whether it was delivered (the module reads the peer's answer); receipts the peer
+   * returns are admitted like any forwarded receipt. */
+  async offer(base, objects, peerId) {
+    const r = await fetch(`${base}/pending`, { signal: AbortSignal.timeout(5000), method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ objects }) });
     const body = Buffer.from(await r.arrayBuffer());
     const a = this.wasm.call({ op: 'peer_answer', status: r.status, body: b64(body) });
     if (a.receipts?.length) {
@@ -566,11 +618,11 @@ export class HomeSlot {
     return a.delivered;
   }
 
-  /** The object this home still lists at exactly `seq`, or null. */
+  /** What to forward for the object this home still lists at exactly `seq` (the module says:
+   * the object and its receipts), or null when it lists nothing there. */
   async listed(seq) {
-    const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: seq - 1, limit: 1 }));
-    const o = page.objects[0];
-    return o && o.seq === seq ? JSON.parse(unb64(o.envelope)) : null;
+    const r = await this.lock(async () => this.wasm.call({ op: 'forward_objects', state: this.state, now: this.clock(), seq }));
+    return r.objects.length ? r.objects.map((o) => JSON.parse(unb64(o))) : null;
   }
 
   /** Forward to one peer (§13.1: a home MUST forward). The cursor moves past an object once it
@@ -590,7 +642,8 @@ export class HomeSlot {
       const page = await this.lock(async () => this.wasm.call({ op: 'pending_page', state: this.state, now: this.clock(), after: row.after, limit: 16 }));
       if (page.objects.length === 0) break;
       for (const o of page.objects) {
-        if (!await this.offer(base, JSON.parse(unb64(o.envelope)), peerId)) row.retry.push(o.seq);
+        const objects = await this.listed(o.seq);
+        if (objects && !await this.offer(base, objects, peerId)) row.retry.push(o.seq);
         row.after = o.seq;
         await save();
       }

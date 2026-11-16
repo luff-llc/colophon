@@ -19,7 +19,7 @@ use colophon_core::v05::engine::paths::{self, Kind};
 use colophon_core::v05::heads::HeadContext;
 use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
-    admit, admit_first, admit_pending_batch, admit_with, FirstUpload, HomeState, ReceiptToSign, Refusal,
+    admit, admit_first_with, admit_pending_batch, admit_predecessor, admit_with, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
 use colophon_core::v05::history::{verify_history, Objects, Persisted, State, Stop};
 use colophon_core::v05::ids::{key_id, AccountId};
@@ -28,9 +28,12 @@ use colophon_core::v05::replay::{
     retained, ReplayKey, ReplayState, ReplayStore, Reservation, RETENTION_MS,
 };
 use colophon_core::v05::signature::RawEnvelope;
+use colophon_core::v05::history::succession_status;
 use colophon_core::v05::write::calls::{
-    finish_head, finish_receipt, prepare_head, prepare_receipt, HeadSpec,
+    finish_genesis_receipt, finish_head, finish_receipt, prepare_genesis_receipt, prepare_head,
+    prepare_receipt, HeadSpec,
 };
+use colophon_core::v05::write::succession::prepare_succession_vetoed;
 use colophon_core::v05::write::{format_date, SignatureResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -45,6 +48,10 @@ const MAX_REQUEST: usize = 24 * 1024 * 1024;
 /// Entries a first upload may hold before this home is appointed in them (a bound on what an
 /// unappointed home keeps for its one account).
 const MAX_FIRST_UPLOAD: usize = 512;
+/// Candidates per seq of a predecessor's entries held before the first upload.
+const PREDECESSOR_CANDIDATES: usize = 4;
+/// The bytes (base64) of a predecessor's entries held before the first upload.
+const BOOTING_PREDECESSOR_BYTES: usize = 8 * 1024 * 1024;
 /// Replay rows one principal may always hold, however many principals share the table.
 const MIN_SHARE: usize = 64;
 /// Replay rows of a slot when the host names no capacity.
@@ -72,6 +79,7 @@ fn run(input: &[u8]) -> R<Value> {
         "identity" => identity(&req),
         "init" => init(&req),
         "status" => status(&req),
+        "resume" => resume(&req),
         "classify" => classify(&req),
         "access" => access(&req),
         "call_key" => call_key(&req),
@@ -80,12 +88,14 @@ fn run(input: &[u8]) -> R<Value> {
         "post_authority" => post_authority(&req),
         "post_pending" => post_pending(&req),
         "admit_one" => admit_one(&req),
+        "put_predecessor" => put_predecessor(&req),
         "finish_receipt" => op_finish_receipt(&req),
         "head_request" => head_request(&req),
         "finish_head" => op_finish_head(&req),
         "authority_page" => authority_page(&req),
         "pending_page" => pending_page(&req),
         "pending_object" => pending_object(&req),
+        "forward_objects" => forward_objects(&req),
         "record_due" => record_due(&req),
         "check_record" => check_record(&req),
         "peer_answer" => peer_answer(&req),
@@ -131,6 +141,10 @@ struct Slot {
     account: String,
     /// Entries of a first upload held until the history appoints this home (§13.1).
     booting: Vec<String>,
+    /// A Swift predecessor's entries published before the first upload (§14, §15.1), held
+    /// until the history appoints this home: the successor's genesis is verified with them.
+    #[serde(default)]
+    booting_predecessor: Vec<String>,
     /// `HomeState::to_bytes`, base64, once appointed.
     home_state: Option<String>,
 }
@@ -152,11 +166,13 @@ impl Loaded {
             home: self.slot.home.clone(),
             account: self.slot.account.clone(),
             booting: self.slot.booting.clone(),
+            booting_predecessor: self.slot.booting_predecessor.clone(),
             home_state: None,
         };
         if let Some(h) = &self.home {
             slot.home_state = Some(b64(&h.to_bytes().map_err(|e| e.to_string())?));
             slot.booting = Vec::new();
+            slot.booting_predecessor = Vec::new();
         }
         Ok(b64(&serde_json::to_vec(&slot).map_err(|e| e.to_string())?))
     }
@@ -198,6 +214,7 @@ fn init(req: &Value) -> R<Value> {
             home: home.to_string(),
             account: account.as_str().to_string(),
             booting: Vec::new(),
+            booting_predecessor: Vec::new(),
             home_state: None,
         },
         home: None,
@@ -282,6 +299,30 @@ fn status(req: &Value) -> R<Value> {
     }))
 }
 
+/// A home started again (§13.1: a home persists its own serving intervals, and a home that was
+/// not serving for any part of a transition's window may store an `activate` it never saw the
+/// transition of). `alive` is the last instant the host recorded the home serving before it
+/// stopped (the host writes it every scheduler tick); the open interval closes there and a new
+/// one opens `now`. Without `alive`, or with nothing open, the state is unchanged.
+fn resume(req: &Value) -> R<Value> {
+    let mut l = load(req)?;
+    let now_ms = i64_of(req, "now")?;
+    let alive = req.get("alive").and_then(Value::as_i64);
+    let (Some(h), Some(alive)) = (l.home.take(), alive) else {
+        return Ok(json!({"state": req["state"], "changed": false}));
+    };
+    let mut serving = h.serving().to_vec();
+    let open = serving.last().is_some_and(|i| i.through_ms.is_none());
+    if !open || alive >= now_ms {
+        return Ok(json!({"state": req["state"], "changed": false}));
+    }
+    let last = serving.last_mut().ok_or("no serving interval")?;
+    last.through_ms = Some(alive.max(last.from_ms));
+    serving.push(colophon_core::v05::history::home::ServingInterval { from_ms: now_ms, through_ms: None });
+    l.home = Some(h.with_serving(serving).map_err(|e| e.to_string())?);
+    Ok(json!({"state": l.dump()?, "changed": true}))
+}
+
 // ---------------------------------------------------------------------------------------------
 // Paths and who may do what (§13.4, §14). The host asks; it holds no rule.
 
@@ -318,6 +359,12 @@ enum Class {
     RecordsRead,
     /// Writes, with what they write.
     Write(Vec<HomeWrite>),
+    /// `PUT {base}/predecessor/authority/<8 digits>.json` (§14): a predecessor entry published.
+    /// Nothing in 0.5 says who may make it; this home takes it under `colophon.home.write` from a
+    /// controller holding `approve` or `control`, not suspended, or a `sign` controller listing
+    /// `{base}` (the controllers §14 allows `colophon.home.write`), never from a member, and only
+    /// an entry the history verifier takes as part of the predecessor the genesis claims.
+    PredecessorPut,
 }
 
 fn answer(status: u16) -> R<Value> {
@@ -364,7 +411,14 @@ fn access(req: &Value) -> R<Value> {
             "GET" => Class::RecordsRead,
             _ => return not_allowed("GET"),
         },
-        ("predecessor", _) => return answer(404),
+        // §14: a successor's home serves its Swift predecessor's history (a history path,
+        // §13.4) and takes it by `PUT`, with a call (below).
+        ("predecessor", Some(p)) => match (method, paths::classify(&format!("predecessor/{p}"))) {
+            ("GET" | "HEAD", Some(Kind::Predecessor(_))) => Class::History,
+            ("PUT", Some(Kind::Predecessor(_))) => Class::PredecessorPut,
+            (_, Some(Kind::Predecessor(_))) => return not_allowed("GET, PUT"),
+            _ => return answer(404),
+        },
         ("records", Some(p)) => {
             let Some(kind) = paths::classify(p).filter(|k| !matches!(k, Kind::Request)) else {
                 return Ok(json!({"allowed": false, "status": 400, "error": "Invalid record path"}));
@@ -372,8 +426,7 @@ fn access(req: &Value) -> R<Value> {
             match (read, method, kind) {
                 (true, _, Kind::Head) => Class::Head,
                 (true, _, Kind::Authority(_) | Kind::Pending | Kind::Receipt) => Class::History,
-                // This home serves no predecessor (§15.1; not in this round).
-                (true, _, Kind::Predecessor(_)) => return answer(404),
+                (true, _, Kind::Predecessor(_)) => Class::History,
                 (true, _, _) => Class::RecordsRead,
                 (false, "PUT", Kind::Head) => Class::Admit,
                 // What a write writes is the core's rule, the one a signer builds its call by.
@@ -392,6 +445,11 @@ fn access(req: &Value) -> R<Value> {
         _ => return answer(404),
     };
     if matches!(class, Class::Identity | Class::Admit) {
+        return Ok(json!({"allowed": true, "via": "open"}));
+    }
+    // Before the first upload nobody can make a call this home could verify, and a successor's
+    // genesis needs its predecessor first: the `PUT` is taken, held, and judged with the upload.
+    if matches!(class, Class::PredecessorPut) && l.home.is_none() {
         return Ok(json!({"allowed": true, "via": "open"}));
     }
     let Some(h) = l.home.as_ref() else {
@@ -458,6 +516,9 @@ fn access(req: &Value) -> R<Value> {
         Ok(vc) => vc,
         Err(f) => return refuse(f.code()),
     };
+    if matches!(class, Class::PredecessorPut) && !matches!(vc.call.signer, CallSigner::Controller(_)) {
+        return refuse("refused:notGranted".into());
+    }
     // The replay table (§12.4): this principal's live rows, against its share of the table.
     let signer = signer_text(&vc.call.signer);
     let mut live = 0usize;
@@ -633,6 +694,12 @@ fn entry_seq(bytes: &[u8]) -> R<u64> {
         .and_then(Value::as_u64)
         .ok_or_else(|| "entry without seq".into())
 }
+/// The `seq` in a predecessor entry's body (a Swift or `/5` envelope: `{"body": <base64>, …}`).
+fn predecessor_seq(bytes: &[u8]) -> Option<u64> {
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    let body = B64.decode(v.get("body")?.as_str()?).ok()?;
+    serde_json::from_slice::<Value>(&body).ok()?.get("seq")?.as_u64()
+}
 fn entry_path(seq: u64) -> String {
     format!("authority/{seq:08}.json")
 }
@@ -723,6 +790,11 @@ fn files_of(objects: &Objects, now_ms: i64) -> R<BTreeMap<String, Vec<u8>>> {
         };
         // The first stored envelope of an object stays (§14).
         out.entry(path).or_insert_with(|| p.clone());
+    }
+    for e in &objects.predecessor {
+        if let Some(seq) = predecessor_seq(e) {
+            out.entry(format!("predecessor/authority/{seq:08}.json")).or_insert_with(|| e.clone());
+        }
     }
     out.extend(served_heads(objects));
     Ok(out)
@@ -853,7 +925,13 @@ fn post_authority(req: &Value) -> R<Value> {
                         colophon_core::v05::Failure::Unavailable("first upload is too long".into()),
                     ))
                 } else {
-                    match admit_first(&l.slot.home, &l.slot.account, &held, &b, &now) {
+                    let predecessor: Vec<Vec<u8>> = l
+                        .slot
+                        .booting_predecessor
+                        .iter()
+                        .map(|e| B64.decode(e).map_err(|e| e.to_string()))
+                        .collect::<R<_>>()?;
+                    match admit_first_with(&l.slot.home, &l.slot.account, &held, &predecessor, &b, &now) {
                         Ok(FirstUpload::Held(entries)) => {
                             l.slot.booting = entries.iter().map(|e| b64(e)).collect();
                             Ok(())
@@ -885,6 +963,9 @@ fn post_authority(req: &Value) -> R<Value> {
                 l.home = Some(a.state);
             }
         }
+    }
+    if let Some(h) = &l.home {
+        sign.extend(genesis_receipt_request(h, &l.slot.home, now_ms)?);
     }
     let after = files_before(&l)?;
     let mut out = outcome;
@@ -939,6 +1020,7 @@ fn post_pending(req: &Value) -> R<Value> {
             home: l.slot.home.clone(),
             account: l.slot.account.clone(),
             booting: vec![],
+            booting_predecessor: vec![],
             home_state: None,
         },
         home: Some(next),
@@ -1002,6 +1084,68 @@ fn admit_one(req: &Value) -> R<Value> {
     Ok(out)
 }
 
+/// A predecessor entry published by `PUT {base}/predecessor/authority/<8 digits>.json` (the
+/// call was judged by `access`): `{"outcome":"ok","created"}` with the state and files, or a
+/// refusal (`conflict` for another entry at that seq).
+fn put_predecessor(req: &Value) -> R<Value> {
+    let mut l = load(req)?;
+    let now_ms = i64_of(req, "now")?;
+    let unchanged = req.get("state").cloned().unwrap_or(Value::Null);
+    let path = str_of(req, "path")?;
+    let Some(Kind::Predecessor(seq)) = paths::classify(&format!("predecessor/{path}")) else {
+        return Ok(json!({"outcome": "refused", "result": "malformed", "state": unchanged, "store": []}));
+    };
+    let bytes = bytes_of(req, "bytes")?;
+    let Some(h) = l.home.take() else {
+        // Before the first upload appoints this home, a Swift successor's genesis cannot be
+        // verified without its predecessor (§15.1), and the history is uploaded after it: the
+        // entries are held with the first upload, at most `PREDECESSOR_CANDIDATES` per seq
+        // (the verifier ignores what is not the chain the genesis claims), never served.
+        let canon = strict_parse(&bytes).and_then(|v| canonical(&v));
+        let Ok(canon) = canon.map_err(|e| e.to_string()) else {
+            return Ok(json!({"outcome": "refused", "result": "malformed", "state": unchanged, "store": []}));
+        };
+        if predecessor_seq(&canon) != Some(seq) || canon.len() > bounds::AUTHORITY_BODY * 2 {
+            return Ok(json!({"outcome": "refused", "result": "malformed", "state": unchanged, "store": []}));
+        }
+        let text = b64(&canon);
+        if l.slot.booting_predecessor.contains(&text) {
+            return Ok(json!({"outcome": "ok", "created": false, "state": unchanged, "store": []}));
+        }
+        let at_seq = l
+            .slot
+            .booting_predecessor
+            .iter()
+            .filter(|e| B64.decode(e).ok().and_then(|b| predecessor_seq(&b)) == Some(seq))
+            .count();
+        let bytes_held: usize = l.slot.booting_predecessor.iter().map(String::len).sum();
+        if at_seq >= PREDECESSOR_CANDIDATES
+            || l.slot.booting_predecessor.len() >= MAX_FIRST_UPLOAD
+            || bytes_held + text.len() > BOOTING_PREDECESSOR_BYTES
+        {
+            return Ok(json!({"outcome": "refused", "result": "unavailable", "state": unchanged, "store": []}));
+        }
+        l.slot.booting_predecessor.push(text);
+        return Ok(json!({"outcome": "ok", "created": true, "state": l.dump()?, "store": []}));
+    };
+    let before = held(&h)?;
+    match admit_predecessor(&h, seq, &bytes, &format_date(now_ms)) {
+        Ok(next) => {
+            let after = held(&next)?;
+            let created = after.predecessor.len() > before.predecessor.len();
+            l.home = Some(next);
+            Ok(json!({"outcome": "ok", "created": created, "state": l.dump()?,
+                      "store": new_files(&before, &after, now_ms)?}))
+        }
+        Err(r) => {
+            let mut out = refusal(&r);
+            out["state"] = unchanged;
+            out["store"] = json!([]);
+            Ok(out)
+        }
+    }
+}
+
 fn op_finish_receipt(req: &Value) -> R<Value> {
     let mut l = load(req)?;
     let now_ms = i64_of(req, "now")?;
@@ -1018,7 +1162,26 @@ fn op_finish_receipt(req: &Value) -> R<Value> {
         assertion: None,
     };
     let before = held(&h)?;
-    let (env, next) = finish_receipt(&h, &prepared, &sig, &now).map_err(|e| e.to_string())?;
+    let genesis = view(&h, now_ms)
+        .ok()
+        .and_then(|v| succession_status(&v.state))
+        .is_some_and(|s| s.genesis_digest == object);
+    let (env, next) = if genesis {
+        // The genesis receipt: rebuilt at its own `received` (the body is determined by it),
+        // assembled and checked by the succession verifier, then admitted like a forwarded one.
+        let body: Value = serde_json::from_slice(&sign.body).map_err(|e| e.to_string())?;
+        let received = body["received"].as_str().and_then(parse_date).ok_or("received")?;
+        let p = prepare_genesis_receipt(&before, &l.slot.home, received).map_err(|e| e.to_string())?;
+        if p.step().body() != sign.body.as_slice() {
+            return Err("the genesis receipt differs from its signing request".into());
+        }
+        let env = finish_genesis_receipt(&p, &sig).map_err(|e| e.to_string())?;
+        let a = admit(&h, &env, &now);
+        a.result.map_err(|r| r.code())?;
+        (env, a.state)
+    } else {
+        finish_receipt(&h, &prepared, &sig, &now).map_err(|e| e.to_string())?
+    };
     let after = held(&next)?;
     l.home = Some(next);
     Ok(json!({
@@ -1054,13 +1217,14 @@ fn head_request(req: &Value) -> R<Value> {
     let mut l = load(req)?;
     let now_ms = i64_of(req, "now")?;
     let Some(h) = l.home.take() else {
-        return Ok(json!({"sign": null, "why": "not appointed", "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": false, "why": "not appointed", "state": req["state"]}));
     };
     let v = view(&h, now_ms)?;
     if v.fork.is_some() {
         // §8.6 rule 3: until a `resolve` activates, the home's verified history is the prefix
-        // before the fork; it signs no head (a head over the prefix would be behind its own).
-        return Ok(json!({"sign": null, "why": "the history stops at an unresolved fork", "state": req["state"]}));
+        // before the fork; it signs no head (a head over the prefix would be behind its own),
+        // and so has no head it may serve (§13.3: a due head it cannot produce fails the read).
+        return Ok(json!({"sign": null, "due": true, "why": "the history stops at an unresolved fork", "state": req["state"]}));
     }
     let st = &v.state;
     let seq = st.history().len() as u64;
@@ -1080,8 +1244,12 @@ fn head_request(req: &Value) -> R<Value> {
     };
     if !is_home || !due {
         let why = if is_home { "fresh" } else { "not a current home" };
-        return Ok(json!({"sign": null, "why": why, "state": req["state"]}));
+        return Ok(json!({"sign": null, "due": false, "why": why, "state": req["state"]}));
     }
+    // §13.3: heads have strictly increasing `issued`, and `issued` is the home's clock. A clock
+    // that has not passed this home's latest head (an entry in the same millisecond, a clock
+    // stepped back) gives no head yet: the head is due and cannot be produced, so the host fails
+    // a read of it (retryable) until the clock moves. Never a later time than the clock.
     let issued = format_date(now_ms);
     let now = issued.clone();
     match h.guard_head(seq, &digest, &issued, &now) {
@@ -1098,12 +1266,13 @@ fn head_request(req: &Value) -> R<Value> {
             l.home = Some(next);
             Ok(json!({
                 "sign": {"body": b64(&body), "seq": seq, "digest": digest, "issued": issued},
+                "due": true,
                 "state": l.dump()?,
             }))
         }
-        // The guard says no (an older `issued`, a second digest at a seq): not an error, the
-        // home signs nothing and says why.
-        Err(e) => Ok(json!({"sign": null, "why": e.to_string(), "state": req["state"]})),
+        // The guard says no (an `issued` that would not increase, a second digest at a seq): not
+        // an error; the home signs nothing, says why, and the head stays due.
+        Err(e) => Ok(json!({"sign": null, "due": true, "why": e.to_string(), "state": req["state"]})),
     }
 }
 
@@ -1229,7 +1398,9 @@ fn authority_page(req: &Value) -> R<Value> {
             }
         }
     }
-    Ok(json!({"entries": entries, "more": more, "fork": v.fork}))
+    // §14: `receipts` holds the receipts embedded in no entry, those of a successor genesis.
+    let receipts: Vec<String> = h.succession_receipts().iter().map(|r| b64(r)).collect();
+    Ok(json!({"entries": entries, "receipts": receipts, "more": more, "fork": v.fork}))
 }
 
 fn pending_page(req: &Value) -> R<Value> {
@@ -1268,7 +1439,33 @@ fn pending_object(req: &Value) -> R<Value> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Forwarding (§13.1): what a peer's answer to one forwarded object means.
+// Forwarding (§13.1): what to send for one listed object, and what a peer's answer means.
+
+/// What this home forwards for the object it lists at cursor `seq` (§13.1, §14 "Forwarding"),
+/// in one `POST {peer}/pending`: the object, and for a transition or a veto every receipt of it
+/// the home holds (at most 15). A veto that reaches a peer more than 300 s after its `issued` is
+/// stored there only with an in-window receipt from another current home (§13.1); sent together,
+/// the peer holds the receipt when it judges the veto. `{"objects": []}` when nothing is listed
+/// at `seq` (recorded or expired: nothing left to forward).
+fn forward_objects(req: &Value) -> R<Value> {
+    let l = load(req)?;
+    let now_ms = i64_of(req, "now")?;
+    let h = l.home.as_ref().ok_or("no home state")?;
+    let seq = u64_of(req, "seq")?;
+    let page = h
+        .pending_page(seq.saturating_sub(1), 1, now_ms)
+        .map_err(|e| e.to_string())?;
+    let Some(o) = page.objects.into_iter().find(|o| o.seq == seq) else {
+        return Ok(json!({"objects": []}));
+    };
+    let mut out = vec![b64(&o.envelope)];
+    if o.kind != "receipt" {
+        if let Some(d) = h.pending_object(&o.digest, now_ms).map_err(|e| e.to_string())? {
+            out.extend(d.receipts.iter().take(15).map(|r| b64(r)));
+        }
+    }
+    Ok(json!({"objects": out}))
+}
 
 /// Whether a peer's answer to `POST {peer}/pending` with one object delivered it: a 200, or a
 /// 422 whose result is a permanent refusal with a stated reason (a §8.5 failure of the object
@@ -1364,6 +1561,30 @@ fn record_due(req: &Value) -> R<Value> {
             }
         },
     }
+    // A successor home (§15.1): a held valid veto of the succession is recorded as the one
+    // `successionVetoed` (step 4), and the genesis is receipted inside the succession window.
+    if let Ok(v) = view(&h, now_ms) {
+        if let Some(status) = succession_status(&v.state) {
+            if !status.vetoed && result == "ok" {
+                for veto in h.succession_vetoes(&status.genesis_digest) {
+                    let Ok(batch) = prepare_succession_vetoed(&held(&h)?, now_ms, &veto) else {
+                        continue;
+                    };
+                    let Ok(rec) = batch.finish(Vec::new()) else { continue };
+                    for (_, bytes) in rec.entries {
+                        let a = admit(&h, &bytes, &now);
+                        h = a.state;
+                        match a.result {
+                            Ok(()) => recorded += 1,
+                            Err(r) => result = r.code(),
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    sign.extend(genesis_receipt_request(&h, &l.slot.home, now_ms)?);
     if recorded == 0 && note.is_null() {
         note = waiting(&h, &objects, now_ms);
     }
@@ -1376,6 +1597,16 @@ fn record_due(req: &Value) -> R<Value> {
         "result": result,
         "note": note,
     }))
+}
+
+/// The receipt this home owes the successor genesis now, if any (§13.5, §15.1 step 2: a home
+/// current at the window's entry receipts the genesis once, within the window), as a signing
+/// request the host answers through `finish_receipt` like any other.
+fn genesis_receipt_request(h: &HomeState, home: &str, now_ms: i64) -> R<Option<Value>> {
+    let objects = held(h)?;
+    Ok(prepare_genesis_receipt(&objects, home, now_ms)
+        .ok()
+        .map(|p| json!({"object": p.object(), "body": b64(p.step().body())})))
 }
 
 /// Why nothing was recorded: what each held transition, veto and activation is waiting for.

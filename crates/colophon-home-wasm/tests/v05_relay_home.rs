@@ -461,8 +461,13 @@ fn a_head_the_guard_refuses_is_not_signed() {
     let (status, body) = w.a.post("/authority", &json!({"from": seq, "entries": [entry], "receipts": []}));
     assert_eq!(status, 200, "{body}");
     std::thread::sleep(std::time::Duration::from_millis(400)); // several ticks
-    let (seq1, issued1) = head_seq(&w.a);
-    assert_eq!((seq1, issued1), (seq0, issued0), "no head was signed for the new entry");
+    // No head was signed for the new entry, and the older one is not served in its place
+    // (§13.3, revision 15: a due head that cannot be produced fails the read, retryably).
+    let (s, hs, _) = http(w.a.port, "GET", &w.a.url("/head"), &[], &[]);
+    assert_eq!(s, 503, "the due head cannot be produced yet");
+    assert!(hs.iter().any(|(k, v)| k == "retry-after" && v == "1"));
+    assert_eq!(w.a.get(&format!("/records/heads/{}.json", w.ha)).0, 503, "nor at its record path");
+    let _ = (seq0, issued0);
     // The clock moves on: the next head is signed for it.
     w.a.set_clock(NOW + 5_000);
     eventually("the head to move on", 20, || head_seq(&w.a).0 == seq);

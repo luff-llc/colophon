@@ -18,6 +18,10 @@ base64.workspace = true
 [dev-dependencies]
 p256.workspace = true
 sha2.workspace = true
+# The core's Swift test fixture (v05_swift_support), for the succession journey: both are
+# workspace dependencies of colophon-core already (allowlist in docs/architecture.md).
+aes-gcm.workspace = true
+hkdf.workspace = true
 
 [lints]
 workspace = true

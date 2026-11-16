@@ -17,7 +17,7 @@ use colophon_core::v05::account::Change;
 use colophon_core::v05::engine::Engine;
 use colophon_core::v05::write::authority::TransitionRule;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use support::*;
 use support_relay::*;
 
@@ -349,6 +349,7 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     assert_eq!(w.a.post("/authority", &post_x).0, 200);
     eventually("B stores X", 20, || b.post("/authority", &post_x).0 == 200);
     eventually("B's head over X", 20, || head_at(b).is_some_and(|(s, d, _)| s == n && d == dx));
+    let hb_x = b.get("/head").1;
     // A (equivocating) signs a head over Y; it reaches B, and so does Y.
     let hy = head_by(&w.ka, &account, n, &dy, t + 6_000);
     w.clocks(t + 7_000);
@@ -364,11 +365,12 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     let mut got = at_seq(b, n);
     got.sort();
     assert_eq!(got, both);
-    // It signs no head while forked: the head it serves is still its head over X.
+    // It signs no head while forked, and serves no older one (§13.3: the head is due and cannot
+    // be produced): a retryable 503.
     std::thread::sleep(std::time::Duration::from_millis(300));
     w.clocks(t + 100_000);
     std::thread::sleep(std::time::Duration::from_millis(300));
-    assert_eq!(head_at(b).map(|(s, d, _)| (s, d)), Some((n, dx.clone())));
+    assert_eq!(b.get("/head").0, 503);
     // It refuses what depends on either branch: an entry after X, and an ordinary transition.
     let (_, after_x) = approve(&w.f, &mut w.host, &mut ctl_x, &w.src, 33, t + 100_000);
     let (s, out) = b.post("/authority", &json!({"from": n + 1, "entries": [after_x], "receipts": []}));
@@ -389,6 +391,8 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     let at = t + 110_000;
     w.clocks(at);
     src_both.put(&format!("heads/{}.json", w.ha), colophon_core::v05::encoding::canonical(&hy).unwrap());
+    // And B's head over X, which B served before it held Y (it serves no head while forked).
+    src_both.put(&format!("heads/{}.json", w.hb), hb_x.clone());
     let mut ctl_b = controller_engine(&w.f, &w.host, &src_both, &w.f.d.clone(), at);
     let mut wire = w.wire();
     pass_without_calls(&mut ctl_b, &src_both, &w.hb, &mut wire, &w.host, at);
@@ -456,4 +460,218 @@ fn a_home_holding_a_fork_serves_it_refuses_what_depends_on_it_and_admits_a_resol
     // head names the `activate` there (the engine reports it; its host signs again, §8.6).
     let faults = relay_pass(&mut ctl_x, &w.src, &w.hb, &mut wire, &w.host, now + 2);
     assert!(faults.iter().any(|f| matches!(f, colophon_core::v05::engine::exchange::Fault::Fork { .. })), "{faults:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Due heads (§13.3, revision 15).
+
+/// The home signed a head over seq m at clock T. A new entry arrives while the clock still reads
+/// T: a head over it is due, and `issued` cannot increase yet. `GET {base}/head` (and the head's
+/// record path) fails retryably instead of serving the head over m, which would hide the new
+/// entry; once the clock moves the head over it is signed and served. No two heads for one seq,
+/// and `issued` never goes back.
+#[test]
+fn a_due_head_that_cannot_be_signed_yet_is_never_replaced_by_the_older_one() {
+    let Some(mut w) = world("due", "public", 1, false, false) else {
+        return;
+    };
+    let t = NOW;
+    w.clocks(t);
+    eventually("a head at T", 20, || head_at(&w.a).is_some_and(|(_, _, i)| i == colophon_core::v05::write::format_date(t)));
+    let (m, dm, _) = head_at(&w.a).unwrap();
+    let mut ctl = w.controller(t);
+    let src = w.src.clone();
+    let (seq, e) = approve(&w.f, &mut w.host, &mut ctl, &src, 34, t);
+    assert_eq!(seq, m + 1);
+    let (s, out) = w.a.post("/authority", &json!({"from": seq, "entries": [e], "receipts": []}));
+    assert_eq!(s, 200, "{out}");
+    assert!(out["head"].is_null(), "the older head is not the answer either: {out}");
+    for path in ["/head".to_string(), format!("/records/heads/{}.json", w.ha)] {
+        let (s, hs, _) = http(w.a.port, "GET", &w.a.url(&path), &[], &[]);
+        assert_eq!(s, 503, "{path}: the head over seq {m} is not served for a history at {seq}");
+        assert!(hs.iter().any(|(k, v)| k == "retry-after" && v == "1"));
+    }
+    // The clock moves on by one millisecond: the head over the new entry.
+    w.a.set_clock(t + 1);
+    let (s2, d2, i2) = head_at(&w.a).expect("served once it can be signed");
+    assert_eq!(s2, seq);
+    assert_ne!(d2, dm);
+    assert!(colophon_core::v05::encoding::parse_date(&i2).unwrap() > t);
+    let (s, b) = w.a.get(&format!("/records/heads/{}.json", w.ha));
+    assert_eq!(s, 200);
+    assert_eq!(body_of(&serde_json::from_slice(&b).unwrap())["authority"]["seq"].as_u64(), Some(seq));
+}
+
+// ---------------------------------------------------------------------------------------------
+// 3. A late veto.
+
+/// A restarted home on the same data directory and port, reaching the other home.
+fn restart_home(r: Relay, keys: &HomeKeys, at: i64, peer: (&str, u16)) -> Relay {
+    r.restart(keys, at, &[peer])
+}
+
+/// Two homes at `headQuorum` 2 receipt a transition. Home A is down when the owner vetoes it:
+/// B receipts the veto (it cannot record a `vetoed` alone: a veto needs `headQuorum` receipts),
+/// and keeps listing it. A comes back more than 300 s after the veto's `issued`. The veto alone is
+/// `refused:late` at A and not stored (§13.1). B's forwarding sends it with B's in-window receipt
+/// of it: A stores and serves the veto and signs no receipt of its own.
+#[test]
+fn a_late_veto_is_stored_with_another_homes_in_window_receipt_and_signs_none() {
+    let Some(mut w) = world("lateveto", "public", 2, true, true) else {
+        return;
+    };
+    let (ka, kb) = (HomeKeys::new(0x77), HomeKeys::new(0x78));
+    let t = NOW;
+    w.clocks(t);
+    let mut ctl = w.controller(t);
+    let tr = propose_by(&w, &mut ctl, 600, &[w.f.d.clone()]);
+    w.pass_all(&mut ctl, t + 1_000);
+    for r in [&w.a, w.b.as_ref().unwrap()] {
+        eventually("both receipts at each home", 20, || listed(r, "receipt").len() == 2);
+    }
+    // A goes down, and so does B's way to it; the owner vetoes, and B receipts the veto.
+    w.a.stop();
+    let veto = veto_of(&w, &mut ctl, &tr);
+    let dv = digest_of(&veto);
+    let issued = colophon_core::v05::encoding::parse_date(body_of(&veto)["issued"].as_str().unwrap()).unwrap();
+    let mut b = w.b.take().unwrap();
+    b.set_clock(issued + 1_000);
+    let (s, out) = b.post("/pending", &json!({"objects": [veto.clone()]}));
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(body_of(&out["receipts"][0])["by"], w.hb.as_str());
+    b.stop();
+    // A comes back 400 s after the veto's `issued`: alone, the veto is late.
+    let late = issued + 400_000;
+    let a = std::mem::replace(&mut w.a, Relay::attached(0, BASE_A, "", w.scratch[0].path()));
+    w.a = restart_home(a, &ka, late, (BASE_B, w.pb));
+    let (s, out) = w.a.post("/pending", &json!({"objects": [veto.clone()]}));
+    assert_eq!((s, out), (422, json!(["refused:late"])), "alone, the late veto is refused");
+    assert_eq!(w.a.get(&format!("/pending/{dv}")).0, 404, "and not stored");
+    // B comes back and forwards the veto with its receipt: A stores it, and signs nothing.
+    w.b = Some(restart_home(b, &kb, late, (BASE_A, w.pa)));
+    eventually("A stores the late veto", 20, || w.a.get(&format!("/pending/{dv}")).0 == 200);
+    let (s, file) = w.a.get(&format!("/records/vetoes/{dv}.json"));
+    assert_eq!((s, digest_of(&serde_json::from_slice(&file).unwrap())), (200, dv.clone()), "stored and served");
+    let (_, d) = w.a.get(&format!("/pending/{dv}"));
+    let by: Vec<String> = serde_json::from_slice::<Value>(&d).unwrap()["receipts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| body_of(r)["by"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(by, vec![w.hb.clone()], "A holds B's receipt and signed none of its own");
+    assert_eq!(w.a.get(&format!("/records/receipts/{dv}/{}.receipt.json", w.ha)).0, 404);
+    assert_eq!(w.a.get(&format!("/records/receipts/{dv}/{}.receipt.json", w.hb)).0, 200);
+    let _ = kb;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4. Offline home catch-up.
+
+/// Every head a home is seen serving: seq -> digests.
+fn watch_heads(seen: &mut BTreeMap<u64, BTreeSet<String>>, r: &Relay) {
+    if let Some((s, d, _)) = head_at(r) {
+        seen.entry(s).or_default().insert(d);
+    }
+}
+
+/// Two homes at `headQuorum` 2. The second home B is down while the account advances at the
+/// primary A (two devices approved, A signing heads). B comes back long after (more than 300 s
+/// after those entries' `issued`): A's forwarded head reaches it, and a device's pass pushes the
+/// entries, which B stores because the primary's head covers them (the clock rule is the
+/// primary's to apply; a home that was offline catches up). B then signs heads again, never two
+/// for one seq.
+#[test]
+fn an_offline_home_catches_up_from_a_device_and_signs_heads_again() {
+    let Some(mut w) = world("catchup", "public", 2, true, true) else {
+        return;
+    };
+    let kb = HomeKeys::new(0x78);
+    let t = NOW;
+    w.clocks(t);
+    let mut seen: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    eventually("B's head at T", 20, || head_at(w.b.as_ref().unwrap()).is_some_and(|(_, _, i)| i == colophon_core::v05::write::format_date(t)));
+    watch_heads(&mut seen, w.b.as_ref().unwrap());
+    let m = head_at(w.b.as_ref().unwrap()).unwrap().0;
+    let mut b = w.b.take().unwrap();
+    b.stop();
+    // The account advances at the primary while B is down.
+    let mut ctl = w.controller(t);
+    let src = w.src.clone();
+    let mut last = 0;
+    for (i, n) in [41u8, 42].into_iter().enumerate() {
+        let at = t + 10_000 * (i as i64 + 1);
+        w.a.set_clock(at);
+        let (seq, e) = approve(&w.f, &mut w.host, &mut ctl, &src, n, at);
+        let (s, out) = w.a.post("/authority", &json!({"from": seq, "entries": [e], "receipts": []}));
+        assert_eq!(s, 200, "{out}");
+        last = seq;
+    }
+    w.a.set_clock(t + 30_000);
+    eventually("A's head over the new entries", 20, || head_at(&w.a).is_some_and(|(s, _, _)| s == last));
+    // B comes back 20 minutes later.
+    let back = t + 1_200_000;
+    w.a.set_clock(back);
+    w.b = Some(b.restart(&kb, back, &[(BASE_A, w.pa)]));
+    let b = w.b.as_ref().unwrap();
+    watch_heads(&mut seen, b);
+    eventually("A's head reaches B", 20, || {
+        b.get(&format!("/records/heads/{}.json", w.ha)).0 == 200
+            && body_of(&serde_json::from_slice(&b.get(&format!("/records/heads/{}.json", w.ha)).1).unwrap())["authority"]["seq"].as_u64() == Some(last)
+    });
+    // A device's pass brings B up to date.
+    let mut ctl = w.controller(back);
+    let mut wire = w.wire();
+    let _ = relay_pass(&mut ctl, &w.src, &w.hb, &mut wire, &w.host, back + 1_000);
+    assert_eq!(kinds_at(b).len() as u64, last, "B holds the whole history");
+    assert_eq!(entries(b), entries(&w.a), "the same entries as the primary");
+    b.set_clock(back + 2_000);
+    eventually("B's head over the latest entry", 20, || {
+        watch_heads(&mut seen, b);
+        head_at(b).is_some_and(|(s, _, _)| s == last)
+    });
+    // With both homes' fresh heads, the device's calls work again everywhere.
+    w.clocks(back + 3_000);
+    let mut wire = w.wire();
+    let faults = relay_pass(&mut ctl, &w.src, &w.hb, &mut wire, &w.host, back + 3_000);
+    assert!(faults.is_empty(), "{faults:?}");
+    watch_heads(&mut seen, b);
+    assert!(seen.keys().any(|s| *s == m) && seen.keys().any(|s| *s == last));
+    for (s, ds) in &seen {
+        assert_eq!(ds.len(), 1, "B signed one head digest at seq {s}: {ds:?}");
+    }
+}
+
+/// At `headQuorum` 1, B is down while a transition is proposed, receipted by A alone, comes due
+/// and is activated at A. B was not serving during the transition's window (its serving interval
+/// closed at its last tick, §13.1), so when a device brings it the `activate`, B stores it
+/// instead of refusing it for ever as an activation it should have seen.
+#[test]
+fn a_home_that_was_down_during_a_window_stores_the_activate_it_never_saw() {
+    let Some(mut w) = world("downwindow", "public", 1, true, true) else {
+        return;
+    };
+    let kb = HomeKeys::new(0x78);
+    let t = NOW;
+    w.clocks(t);
+    std::thread::sleep(std::time::Duration::from_millis(300)); // B ticks at T
+    let mut b = w.b.take().unwrap();
+    b.stop();
+    let mut ctl = w.controller(t + 10_000);
+    w.a.set_clock(t + 10_000);
+    let tr = propose_by(&w, &mut ctl, 600, &[w.f.d.clone()]);
+    let (s, out) = w.a.post("/pending", &json!({"objects": [pending_env(&ctl, &tr)]}));
+    assert_eq!(s, 200, "{out}");
+    let n = kinds_at(&w.a).len();
+    w.a.set_clock(t + HOUR + 400_000);
+    eventually("A activates it", 30, || kinds_at(&w.a).len() > n);
+    assert_eq!(kinds_at(&w.a)[n], "activate");
+    let back = t + HOUR + 500_000;
+    w.a.set_clock(back);
+    w.b = Some(b.restart(&kb, back, &[(BASE_A, w.pa)]));
+    let b = w.b.as_ref().unwrap();
+    let e = entries(&w.a);
+    let (s, out) = b.post("/authority", &json!({"from": n + 1, "entries": [e[n]], "receipts": []}));
+    assert_eq!(s, 200, "B stores the activate: {out}");
+    assert_eq!(kinds_at(b)[n], "activate");
 }

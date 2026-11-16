@@ -61,7 +61,12 @@ fn start(keys: &HomeKeys, account: &str, dir: &std::path::Path, port: u16) -> Tr
     });
     let mut line = String::new();
     BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
-    let v: Value = serde_json::from_str(&line).unwrap_or_else(|_| panic!("the listening line: {line:?}"));
+    let v: Value = serde_json::from_str(&line).unwrap_or_else(|_| {
+        let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let said = lines.lock().unwrap().iter().filter(|l| !l.starts_with("trace ")).cloned().collect::<Vec<_>>().join("\n");
+        panic!("the listening line: {line:?}; the relay said: {said}")
+    });
     Traced { child, port: v["listening"]["port"].as_u64().unwrap() as u16, lines }
 }
 impl Traced {
@@ -155,8 +160,16 @@ fn check(port: u16, receipts: &mut BTreeMap<String, Value>, admitted: &BTreeMap<
         let seq = h["authority"]["seq"].as_u64().unwrap() as usize;
         assert!(seq >= 1 && seq <= entries.len(), "the head (seq {seq}) is over a served entry ({} served)", entries.len());
         assert_eq!(h["authority"]["digest"].as_str().unwrap(), digest_of(&entries[seq - 1]));
-        let (s2, _) = get_json(port, &format!("/records/heads/{}.json", h["by"].as_str().unwrap()));
-        assert_eq!(s2, 200, "the head is stored where it is served");
+        // Served again at its record path, or, when a head fell due in between (an entry
+        // recorded at the same clock reading), refused rather than served stale (§13.3).
+        let (s2, again) = get_json(port, &format!("/records/heads/{}.json", h["by"].as_str().unwrap()));
+        assert!(s2 == 200 || s2 == 503, "the head is stored where it is served: {s2}");
+        if s2 == 200 {
+            let a = body_of(&again);
+            assert!(a["issued"].as_str() >= h["issued"].as_str(), "never an older head");
+        }
+    } else {
+        assert_eq!(head_status, 503, "a head is served, or a due one is refused retryably");
     }
     let (s, pending) = get_json(port, "/pending?after=0&limit=64");
     assert_eq!(s, 200);

@@ -82,12 +82,14 @@ At `{base}` (`/v1/libraries/<slot>`), in addition to the 0.3 endpoints (`changes
 | Request | Answer |
 | --- | --- |
 | `GET {base}` | 200 as 0.3 plus `"home":{"member":"<ID>"}` |
-| `GET {base}/head` | 200 the latest head this home signed; 404 if none. Public. |
-| `GET {base}/authority?after=&limit=` | 200 `{"entries","receipts":[],"more"}`, 1–64 from `after + 1`, under 13.4 |
+| `GET {base}/head` | 200 the latest head this home signed, after producing the due one (§13.3); 503 with `Retry-After: 1` when a head is due and cannot be signed yet (the clock has not passed the latest head's `issued`, or the history stops at a fork): the older head is never served in its place; 404 if none. Public. The same at `records/heads/<this home>.json`. |
+| `GET {base}/authority?after=&limit=` | 200 `{"entries","receipts","more"}`, 1–64 from `after + 1`, under 13.4; `receipts` holds the receipts of a successor genesis. At a fork: the prefix, then every candidate held from the fork's seq, in seq then digest order |
+| `GET {base}/predecessor/authority/<8 digits>.json` | 200 a Swift predecessor's entry; 404. A history path (§13.4) |
+| `PUT {base}/predecessor/authority/<8 digits>.json` | a predecessor entry: 201 stored, 200 held already, 412 another entry at that seq, 422 `{"result"}`. Needs a `colophon.home.write` call by a controller (see "Predecessor entries") |
 | `POST {base}/authority` | `{"from","entries","receipts"}`: 200 `{"head","receipts"}`; 409 with the current head; 421 `{"endpoints"}` from a non-primary home; 422 `{"result"}`. No credential needed. |
 | `GET {base}/pending?after=&limit=` | 200 `{"objects":[{"seq","digest","kind","envelope"}],"more"}` under 13.4 |
 | `GET {base}/pending/{digest}` | 200 `{"envelope","receipts"}`; 404 |
-| `POST {base}/pending` | `{"objects":[…]}`, 1–16: 200 `{"receipts"}`; 422 a JSON array with the result string of each refused object, in request order. No credential needed. |
+| `POST {base}/pending` | `{"objects":[…]}`, 1–16: 200 `{"receipts"}`; 422 a JSON array with the result string of each refused object, in request order. Receipts in a batch are taken first, so an object later in it finds them. No credential needed. |
 
 **Before it is appointed** a home serves nothing it holds: every path but `GET {base}` and the two
 `POST`s answers 404. **Once appointed**, every access decision is the Rust module's (§13.4, §14):
@@ -115,13 +117,39 @@ rules apply from the appointment on. `receipts` in the request holds receipt env
 
 **What the home does by itself**, on its own clock, every tick: it appends the determined `activate`,
 `vetoed` and `final` entries when they are due (the exact bytes come from the Rust code that a
-host's own account uses), signs a head when one is due (at least every `headMaxAge / 2`, and for
-every new entry), and forwards what it stores to the account's other current homes: transitions,
-vetoes and receipts to `{peer}/pending`, one object per request (their receipts of what it sent
-come back and are admitted), its heads to `PUT {peer}/records/heads/<its ID>.json`. An object a
+host's own account uses), and for a successor home `successionVetoed` and its receipt of the
+successor genesis inside the succession window; signs a head when one is due (at least every
+`headMaxAge / 2`, and for every new entry); records that it is serving (`alive.json`, read back at
+start-up to close its serving interval, §13.1); and forwards what it stores to the account's other
+current homes: each listed transition, veto and receipt to `{peer}/pending`, a transition or veto
+together with the receipts it holds of it (so a peer judging a late veto holds the in-window
+receipt), their receipts of what it sent come back and are admitted; its heads to
+`PUT {peer}/records/heads/<its ID>.json`. An object a
 peer did not take (a transient refusal such as `unavailable`, or any status or result the module
 does not read as delivered or permanently refused) is offered again every pass while this home
 still lists it.
+
+**Forks** (§8.6). A non-primary home stores a valid entry at a seq it holds when a primary head
+covers it, and keeps a current home's head over another digest at a held seq as fork evidence (at
+most four per home); holding two candidates it stops at the fork: it serves both, signs no head,
+answers `refused:fork` (422) to entries and transitions that depend on either branch, and takes a
+`resolve` (judged on the branch it is anchored on), its vetoes and receipts, and the `activate`
+that settles the fork. The primary stores the first valid entry per seq (409 for another). An
+entry file whose seq another candidate comes to stand at is replaced.
+
+**A home that was offline.** At a non-primary home, an immediate entry a primary head covers is
+stored however far its `issued` is behind the home's clock (the primary applied the clock rule);
+the head may name a later entry of the same upload. A home's serving interval closes at its last
+recorded tick, so an `activate` of a transition whose window fell while it was down is stored.
+
+**Predecessor entries** (§14, §15.1). A successor's home serves its Swift predecessor's entries
+under `{base}/predecessor/` and `records/predecessor/`. It takes one by `PUT` only under a
+`colophon.home.write` call by a controller with `approve` or `control` (not suspended) or a `sign`
+controller listing `{base}`, never a member's (nothing in 0.5 says who may; this is the strictest
+rule that lets the moving device publish), and only when the account claims a Swift predecessor,
+the entry's `seq` is its path's and at most F's, and the history verifier with it does not stop.
+
+**Notices are not built** (§13.1, §17.5): see "Notices" below.
 
 ## Storage layout
 
@@ -134,6 +162,7 @@ still lists it.
 <dataDir>/<slot>/replay.log       home slots: the call replay store, append-only (a reservation line,
                                   fsynced before any effect; a completion line after it)
 <dataDir>/<slot>/forward.json     home slots: what each other home has been sent
+<dataDir>/<slot>/alive.json       home slots: the last tick's clock reading (serving intervals)
 ```
 
 Home slots add `authority/<8 digits>.json`, `transitions/<digest>.json`, `vetoes/<digest>.json`,
@@ -200,3 +229,36 @@ restart) and the attacks of the 2026-11-15 check.
 this relay as a process (`crates/colophon-home-wasm/tests`, including the kill loop) and `bun test`
 here. **CI runs that script.** With `CI` or `COLOPHON_REQUIRE_RELAY=1` set, a missing Bun or module
 fails those tests; otherwise they are skipped with a printed `SKIPPED:` line naming what is missing.
+
+## Notices (not built: the contract is missing)
+
+§13.1 says a home MUST push a notice to every delivery route registered with it on receipting a
+transition, a veto or a `suspend`, and §17.5 that hosts MUST register at least two routes with
+every home at setup. 0.5 gives a notice no signed body and no wire format, and nothing defines how
+a host registers a route with a home. The Swift and Kotlin sessions expect one: a
+`DeliveryRoute {kind: push|email|sms|webhook|other, address, reaches}` and a host-supplied
+`registerRoutes(account, routes) -> Bool` closure (`swift/Sources/ColophonSession/HostDuties.swift`,
+`SessionTypes.swift`; `sdk/kotlin/.../SessionTypes.kt`), with the HTTP call left to the host. So
+this home builds no route store, queue or sender: there is nothing for a session to call that a
+second implementation would also implement.
+
+What is missing, and the smallest contract that would close it (a proposal, not built):
+
+- **Register.** `PUT {base}/routes/<route ID>` with body `{"kind","address","reaches"}`, under a
+  `colophon.home.write` call by a controller (any role, suspended or not: a recover-only key must
+  be able to keep a route) or a current member; the route ID is the lowercase hex SHA-256 of
+  `kind ‖ 0x00 ‖ address`. 200 or 201. `DELETE` the same path removes it. `GET {base}/routes`
+  (same call, `colophon.home.read`) lists `{"routes":[{"id","kind","reaches","by"}]}`, never the
+  addresses. The `Bool` the sessions expect is "201 or 200".
+- **What triggers a notice.** The module returns, with every admission that receipted a
+  transition, a veto or a `suspend`, a `notify` list: `{"object","kind","issued","deadline"}`.
+  The relay appends one queue line per route (`notices.jsonl`, fsynced before the receipt is
+  returned), and a sender drains it with retries; the queue survives restarts like the replay log.
+- **The text.** Fixed by the home, carrying only public facts: the account ID, the object's kind
+  and digest, its veto deadline, and the §17.5 sentence about what the delay protects. Nothing
+  from a private record.
+- **The sender.** Pluggable (`deliver(route, notice) -> ok | retry | drop`), a test sender that
+  writes to a file, and production senders that each need operator credentials outside this
+  repository: APNs (a token-signing key and topic per app), FCM (a service account), e-mail (an
+  SMTP or provider API key with a verified sender domain), webhooks (an allow-list, since an
+  account would otherwise make the home call arbitrary addresses, finding L7 of the H1 check).

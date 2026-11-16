@@ -215,6 +215,10 @@ impl HomeState {
         next.serving = serving;
         Ok(next)
     }
+    /// The home's serving intervals (§13.1: a home persists its own serving intervals).
+    pub fn serving(&self) -> &[ServingInterval] {
+        &self.serving
+    }
     /// The home's member ID.
     pub fn home_id(&self) -> &str {
         &self.home
@@ -410,7 +414,7 @@ impl HomeState {
         let mut iter = self
             .pending
             .iter()
-            .filter(|p| p.seq > after && self.visible(p, &state, now_ms));
+            .filter(|p| p.seq > after && p.kind != "succession" && self.visible(p, &state, now_ms));
         let objects = iter.by_ref().take(limit).cloned().collect();
         Ok(PendingPage {
             objects,
@@ -794,6 +798,12 @@ pub fn admit_with(home: &HomeState, incoming: &[u8], later: &[Vec<u8>], now: &st
                     .get("transition")
                     .and_then(Value::as_str)
                     .ok_or_else(|| malformed("transition"))?;
+                // A veto of a Swift succession names the successor's genesis (§15.1 step 4).
+                if let Some(status) = super::succession_status(&st)
+                    .filter(|s| s.genesis_digest == target && s.timing.is_some())
+                {
+                    return admit_succession_veto(&mut next, &st, &env, incoming, &status, now_ms, &mut receipts);
+                }
                 let stored = next
                     .pending
                     .iter()
@@ -897,6 +907,34 @@ pub fn admit_with(home: &HomeState, incoming: &[u8], later: &[Vec<u8>], now: &st
                     .home_key(&by)
                     .ok_or_else(|| bad_signature("receipt home is not current"))?;
                 raw.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
+                // A receipt of a successor genesis (§13.5, §15.1 step 2): judged by the
+                // succession verifier's own check (a window home, its key, `received` in the
+                // succession window) and kept with the history, served in `GET {base}/authority`
+                // `receipts`, never in the pending feed.
+                if let Some(status) =
+                    super::succession_status(&st).filter(|s| s.genesis_digest == target)
+                {
+                    let w0 = status
+                        .timing
+                        .as_ref()
+                        .map(|t| t.window_start_ms)
+                        .ok_or_else(|| Failure::Unavailable("the succession window has not opened".into()))?;
+                    let canon = canonical(&crate::v05::encoding::strict_parse(incoming)?)?;
+                    require(
+                        super::succession::receipt_is_valid(&st, &canon, &target, w0, i64::MAX),
+                        "not a valid receipt of the successor genesis",
+                    )?;
+                    let one_per_home = next.pending.iter().any(|p| {
+                        p.kind == "succession"
+                            && RawEnvelope::parse(&p.envelope, bounds::RECEIPT_BODY, false)
+                                .is_ok_and(|r| r.value.get("by").and_then(Value::as_str) == Some(&by))
+                    });
+                    if !one_per_home {
+                        next.add(&env, incoming, "succession", target, BTreeSet::new(), None)?;
+                    }
+                    let _ = received;
+                    return Ok(());
+                }
                 // Keep authenticated forwarded receipts even if their object has not arrived.
                 // Its time window is checked against the object before it can count.
                 let stored = next
@@ -1116,6 +1154,7 @@ fn refresh_checkpoint(next: &mut HomeState, new_head: Option<&[u8]>, now_ms: i64
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn admit_entry(
     next: &mut HomeState,
     persisted: &Persisted,
@@ -1402,6 +1441,140 @@ fn admit_candidate(
     Err(Refusal::Conflict)
 }
 
+/// A veto of a Swift succession (§15.1 step 4): stored when the succession verifier finds it
+/// valid (eligible predecessor keys, as many as `handover` has, inside the window and before
+/// the veto deadline) and receipted by a window home within 300 s of its `issued` and before the
+/// deadline. A successor home that holds a valid veto records `successionVetoed` (`record_due`).
+#[allow(clippy::too_many_arguments)]
+fn admit_succession_veto(
+    next: &mut HomeState,
+    st: &State,
+    env: &AuthEnvelope,
+    incoming: &[u8],
+    status: &super::SuccessionStatus,
+    now_ms: i64,
+    receipts: &mut Vec<ReceiptToSign>,
+) -> AdmitResult<()> {
+    let t = status.timing.as_ref().ok_or_else(|| malformed("no window"))?;
+    if !super::succession::veto_is_valid(st, incoming) {
+        return Err(malformed("not a valid veto of the succession").into());
+    }
+    let at = date(
+        env.value.get("issued").and_then(Value::as_str).ok_or_else(|| malformed("issued"))?,
+        "issued",
+    )?;
+    if now_ms < at {
+        return Err(Refusal::Early);
+    }
+    let in_window = now_ms <= at.saturating_add(WINDOW) && now_ms <= t.veto_deadline_ms;
+    if !in_window && !next.unmatched_receipts.iter().any(|r| {
+        check_receipt(st, &r.envelope, &env.digest, at).is_ok_and(|(by, received)| by != next.home && received <= t.veto_deadline_ms)
+    }) {
+        return Err(Refusal::Late);
+    }
+    next.add(env, incoming, "veto", status.genesis_digest.clone(), BTreeSet::new(), None)?;
+    promote_receipts(next, st, env, at, None)?;
+    if in_window && t.homes.contains(&next.home) {
+        let draft = ReceiptToSign {
+            object: env.digest.clone(),
+            body: canonical(&json!({"protocol":"colophon/receipt/5", "account": st.account.as_str(),
+                "object": env.digest, "received": crate::v05::write::format_date(now_ms), "by": next.home}))?,
+        };
+        next.drafts.insert(env.digest.clone(), draft.clone());
+        receipts.push(draft);
+    }
+    Ok(())
+}
+
+/// A predecessor entry published to this home (§14 `PUT {base}/predecessor/authority/<8
+/// digits>.json`, §15.1 "Published ... at the successor's homes under `{base}/predecessor/`"):
+/// the account must claim a Swift predecessor, the entry's `seq` must be the path's and at most
+/// F's (`head.seq + 1`), the home must hold no other entry at that seq, and the history verifier
+/// with it added must not stop (a forged or foreign entry stops it, or is not part of the chain
+/// the genesis claims). Returns the state to persist; an entry held already changes nothing.
+pub fn admit_predecessor(
+    home: &HomeState,
+    seq: u64,
+    incoming: &[u8],
+    now: &str,
+) -> AdmitResult<HomeState> {
+    let now_ms = date(now, "home clock")?;
+    let (persisted, st, fork) = home.context_any(now_ms)?;
+    if fork.is_some() {
+        return Err(Failure::Refused(crate::v05::Reason::Fork).into());
+    }
+    let status = super::succession_status(&st)
+        .filter(|s| s.format == "colophon/swift-keyring/2")
+        .ok_or(Failure::Refused(crate::v05::Reason::OutOfScope))?;
+    let canon = canonical(&crate::v05::encoding::strict_parse(incoming)?)?;
+    require(canon.len() <= bounds::AUTHORITY_BODY * 2, "predecessor entry too large")?;
+    let raw: Value = serde_json::from_slice(&canon).map_err(|e| malformed(e.to_string()))?;
+    let body = crate::v05::encoding::decode_base64(
+        raw.get("body").and_then(Value::as_str).ok_or_else(|| malformed("body"))?,
+        bounds::AUTHORITY_BODY * 2,
+    )?;
+    let b: Value = serde_json::from_slice(&body).map_err(|e| malformed(e.to_string()))?;
+    require(
+        b.get("seq").and_then(Value::as_u64) == Some(seq),
+        "the entry's seq is not its path's",
+    )?;
+    require(
+        seq >= 1 && seq <= status.head_seq.saturating_add(1),
+        "a predecessor entry after F",
+    )?;
+    let held = persisted.objects().map(|o| o.predecessor.clone()).unwrap_or_default();
+    let digest = crate::v05::encoding::digest(&body);
+    for h in &held {
+        let Ok(v) = serde_json::from_slice::<Value>(h) else { continue };
+        let Some(hb) = v
+            .get("body")
+            .and_then(Value::as_str)
+            .and_then(|t| crate::v05::encoding::decode_base64(t, bounds::AUTHORITY_BODY * 2).ok())
+        else {
+            continue;
+        };
+        if crate::v05::encoding::digest(&hb) == digest {
+            return Ok(home.clone());
+        }
+        let hv: Value = serde_json::from_slice(&hb).unwrap_or(Value::Null);
+        if hv.get("seq").and_then(Value::as_u64) == Some(seq) {
+            return Err(Refusal::Conflict);
+        }
+    }
+    let objects = Objects {
+        predecessor: vec![canon],
+        ..Default::default()
+    };
+    let verdict = verify_history(&objects, &persisted, now_ms);
+    if let Some(stop) = verdict.stop {
+        return Err(stop_failure(stop).into());
+    }
+    let mut next = home.clone();
+    next.checkpoint = Persisted::checkpoint(&objects, &persisted, now_ms).to_bytes()?;
+    Ok(next)
+}
+
+impl HomeState {
+    /// The receipts of a successor genesis this home holds (its own and other window homes'),
+    /// served in `GET {base}/authority` `receipts` (§14).
+    pub fn succession_receipts(&self) -> Vec<Vec<u8>> {
+        self.pending
+            .iter()
+            .filter(|p| p.kind == "succession")
+            .map(|p| p.envelope.clone())
+            .collect()
+    }
+    /// The vetoes of a succession this home holds: the digests of held vetoes naming the
+    /// successor's genesis, for the recorder (`write::succession::prepare_succession_vetoed`).
+    pub fn succession_vetoes(&self, genesis: &str) -> Vec<String> {
+        self.pending
+            .iter()
+            .filter(|p| p.kind == "veto" && p.target == genesis)
+            .map(|p| p.digest.clone())
+            .collect()
+    }
+}
+
 /// The held entries from the genesis to `tip`, following `previous` (seq order).
 fn ancestry(held: &[super::Entry], tip: &str) -> Vec<Vec<u8>> {
     let by: BTreeMap<&str, &super::Entry> = held.iter().map(|e| (e.env.digest.as_str(), e)).collect();
@@ -1559,6 +1732,22 @@ pub fn admit_first(
     incoming: &[u8],
     now: &str,
 ) -> AdmitResult<FirstUpload> {
+    admit_first_with(home, account, held, &[], incoming, now)
+}
+
+/// [`admit_first`] for a successor of a Swift library (§15.1): `predecessor` is the predecessor
+/// history published to this home before its first upload (§14 `PUT
+/// {base}/predecessor/authority/<8 digits>.json`), without which the genesis cannot be verified
+/// (`unavailable`: "predecessor history required"). Entries in it that are not the chain the
+/// genesis claims are ignored by the verifier (§15.1 "Envelopes", "Chain bound").
+pub fn admit_first_with(
+    home: &str,
+    account: &str,
+    held: &[Vec<u8>],
+    predecessor: &[Vec<u8>],
+    incoming: &[u8],
+    now: &str,
+) -> AdmitResult<FirstUpload> {
     let now_ms = date(now, "home clock")?;
     let entry = parse_entry(incoming)?;
     let have = held.len() as u64;
@@ -1580,6 +1769,7 @@ pub fn admit_first(
     entries.push(incoming.to_vec());
     let objects = Objects {
         entries,
+        predecessor: predecessor.to_vec(),
         ..Default::default()
     };
     let verdict = verify_history(&objects, &Persisted::default(), now_ms.max(entry.issued));
@@ -1622,6 +1812,24 @@ pub fn admit_pending_batch(
     let mut next = home.clone();
     let mut results = Vec::new();
     let mut receipts = Vec::new();
+    // Receipts first, their results set aside: a receipt whose object is not held yet is kept
+    // (§13.1, forwarded receipts), so that an object later in the same batch finds it. A veto
+    // more than 300 s after its `issued` is stored only with an in-window receipt of it from
+    // another current home that the home already holds (§13.1), and a host or a home sending
+    // the veto with that receipt in one request must not depend on their order. Each object,
+    // receipts included, then gets its result in request order.
+    for object in objects {
+        let is_receipt = AuthEnvelope::parse(
+            object,
+            bounds::RECEIPT_BODY,
+            bounds::RECEIPT_ENVELOPE,
+            false,
+        )
+        .is_ok_and(|e| e.value.get("protocol").and_then(Value::as_str) == Some("colophon/receipt/5"));
+        if is_receipt {
+            next = admit(&next, object, now).state;
+        }
+    }
     for object in objects {
         let parsed = AuthEnvelope::parse(
             object,
