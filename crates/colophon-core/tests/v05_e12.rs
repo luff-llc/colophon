@@ -79,3 +79,28 @@ fn a_home_refuses_a_bad_grant_inside_a_transition_at_admission() {
         }
     }
 }
+
+/// A checkpoint folded by a build before E12 (format 5) may lack, in its state's `points`, keys
+/// a transition or vault rotation added: it is refused, and the rebuild from the retained
+/// objects (what `Account::open` does with a saved state it cannot read) gives the replay's
+/// verdict, so no old checkpoint lets a key through that a replay would refuse.
+#[test]
+fn a_format_5_checkpoint_is_refused_and_rebuilt_by_replay() {
+    let dir = cand().join("rules").join("t-grant-component-home-key");
+    let objects = Objects {
+        entries: files(&dir.join("records/authority")),
+        ..Default::default()
+    };
+    let now = now_of(&dir);
+    let cp = Persisted::checkpoint(&objects, &Persisted::default(), now);
+    let mut old: Value = serde_json::from_slice(&cp.to_bytes().unwrap()).unwrap();
+    assert_eq!(old["version"], 6);
+    old["version"] = Value::from(5);
+    let old = serde_json::to_vec(&old).unwrap();
+    assert!(Persisted::from_bytes(&old).is_err());
+    let rebuilt = Persisted::rebuild(&objects, &old, now);
+    let replay = verify_history(&objects, &Persisted::default(), now);
+    let resumed = verify_history(&objects, &rebuilt, now);
+    assert_eq!((resumed.code(), resumed.seq()), ("malformed".to_string(), 4));
+    assert_eq!(format!("{:?}", resumed.stop), format!("{:?}", replay.stop));
+}
