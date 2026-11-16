@@ -833,6 +833,18 @@ fn by_seq_all(by_seq: &BTreeMap<u64, Vec<Result<Entry, Failure>>>) -> Vec<&Entry
         .collect()
 }
 
+/// The most namespaces a 0.5 genesis declares (§8.2). The verifier, account creation and
+/// genesis preparation share it, so the writer never creates an account its verifier refuses.
+pub const MAX_NAMESPACES: usize = 64;
+
+/// The diagnostic of a genesis that declares more than [`MAX_NAMESPACES`] namespaces.
+pub const TOO_MANY_NAMESPACES: &str = "too many namespaces: a genesis declares at most 64 (§8.2)";
+
+/// `malformed` with [`TOO_MANY_NAMESPACES`] when `count` exceeds [`MAX_NAMESPACES`].
+pub fn check_namespace_count(count: usize) -> Result<(), Failure> {
+    crate::v05::require(count <= MAX_NAMESPACES, TOO_MANY_NAMESPACES)
+}
+
 /// Unknown content found in an authority entry's kind fields by the pre-scan (§8.5 step 4).
 pub(crate) fn prescan(kind: &str, body: &serde_json::Value) -> Unknown {
     crate::v05::prescan::authority_fields(kind, body).unwrap_or_default()

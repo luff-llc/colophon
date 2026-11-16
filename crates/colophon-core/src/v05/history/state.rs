@@ -724,7 +724,7 @@ pub(crate) fn genesis(e: &Entry, now_ms: i64, predecessor: &[Vec<u8>]) -> Step<S
         )?;
         namespaces.push(n);
     }
-    crate::v05::require(namespaces.len() <= 64, "at most 64 namespaces")?;
+    super::check_namespace_count(namespaces.len())?;
     keyring.policy.check_homes(&[])?;
     let mut points = BTreeSet::new();
     let mut uses = Vec::new();
