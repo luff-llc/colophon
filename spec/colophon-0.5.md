@@ -2522,8 +2522,9 @@ knowledge of pending transitions, so:
 - **What to tell people.** Hosts MUST say, when an account is set up with one device, that a
   stolen sole device can't veto, and in every notice that the delay protects who controls the
   account, not data a stolen key could already read (wording: guide §5).
-- **Quorum 2.** At `headQuorum` ≥ 2, a transition that fewer than `headQuorum` homes receipt within
-  300 s of its `issued` is dead; hosts MUST say so and offer to sign it again.
+- **Quorum 2.** At `headQuorum` ≥ 2, a transition that gets fewer receipts than §8.7's validity
+  rule 2 requires of it (`headQuorum`, or for a full set the smaller number its remaining homes
+  allow) within 300 s of its `issued` is dead; hosts MUST say so and offer to sign it again.
 - **Testability.** These are host requirements with observable behaviour, tested with a simulated
   home (§21).
 
