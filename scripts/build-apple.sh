@@ -10,6 +10,8 @@
 #                      the rustup default.
 #   VISIONOS_TOOLCHAIN nightly toolchain with rust-src for -Zbuild-std (default: nightly).
 #   SKIP_VISIONOS=1    an explicit fallback for machines without nightly/rust-src or the SDK.
+#   RELEASE_NO_INSTALL=1  fail on a missing target, toolchain or rust-src instead of installing it
+#                      (scripts/package-release.sh sets it).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
@@ -33,6 +35,7 @@ cp swift/Sources/ColophonKit/Generated/ColophonFFI.modulemap "$staging/module.mo
 args=()
 for target in aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim; do
   if ! rustup target list --installed ${tc[@]+"${tc[@]}"} | grep -qx "$target"; then
+    [[ "${RELEASE_NO_INSTALL:-0}" != 1 ]] || { echo "build-apple: Rust target $target is not installed" >&2; exit 1; }
     rustup target add "$target" ${tc[@]+"${tc[@]}"}
   fi
   # One target directory per slice, and no MACOSX_/IPHONEOS_DEPLOYMENT_TARGET: on macOS 27
@@ -47,6 +50,7 @@ if [[ "${SKIP_VISIONOS:-0}" != 1 ]]; then
   nightly="${VISIONOS_TOOLCHAIN:-nightly}"
   if ! rustup run "$nightly" rustc --version >/dev/null 2>&1 || \
      [[ ! -d "$(rustup run "$nightly" rustc --print sysroot)/lib/rustlib/src/rust/library" ]]; then
+    [[ "${RELEASE_NO_INSTALL:-0}" != 1 ]] || { echo "build-apple: $nightly with rust-src is not installed" >&2; exit 1; }
     rustup toolchain install "$nightly" --component rust-src
   fi
   for target in aarch64-apple-visionos aarch64-apple-visionos-sim; do

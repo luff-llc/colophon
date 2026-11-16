@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.cargo/tools/wasm-bindgen-0.2.130/bin:/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 expected=0.2.130
 actual="$(wasm-bindgen --version)"
 if [[ "$actual" != "wasm-bindgen $expected" ]]; then
