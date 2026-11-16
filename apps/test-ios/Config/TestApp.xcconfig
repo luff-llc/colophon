@@ -1,0 +1,16 @@
+// Build defaults of the Colophon test app. Override any of them on the xcodebuild command line
+// (scripts/build-test-ios.sh passes the COLOPHON_* environment variables through). `/$()/` keeps `//`
+// from starting a comment.
+//
+// The home URL prefix a new account's home is named under (an https name; the slot is appended).
+COLOPHON_HOME_PREFIX = https:/$()/home.test/v1/libraries/
+// Where the home's requests go instead (a relay on this Mac's loopback). Empty: sent as named.
+COLOPHON_HOME_REACH = http:/$()/127.0.0.1:8790/v1/libraries/
+// The home service that provisions a new account's slot (apps/test-home).
+COLOPHON_PROVISIONER = http:/$()/127.0.0.1:8791/provision
+// The WebAuthn relying party of the person's passkey (the staging identity host).
+COLOPHON_RELYING_PARTY = id.toolsperson.com
+// The staging home's prefix, offered by the setup screen's "Use staging" button (reached directly, no reach URL).
+// Its home service (provisioning) is not deployed; until it is, set the home service URL by hand.
+COLOPHON_STAGING_PREFIX = https:/$()/colophon.toolsperson.com/v1/libraries/
+COLOPHON_STAGING_PROVISIONER =
