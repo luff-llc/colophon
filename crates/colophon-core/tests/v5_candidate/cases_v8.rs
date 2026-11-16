@@ -1477,6 +1477,32 @@ pub fn part3(o: &mut Out) {
     );
     case_v(o, "t-vault-rotation", &rot, json!({"result": "ok", "seq": 4, "vault": "not retiring"}),
            "While retiring, one recovery key holding the seed rotates the vault with previousVault and its own slot.", &["8.3", "8.4"], Some(ver(DUE0 + 200)));
+    // §8.3: `previousVault` is an HPKE sealed key of §11.1 (`enc` a 65-byte point, `ciphertext`
+    // the 32-byte seed and its 16-byte tag), in the entry and in a transition's component.
+    let short_previous = |mut comp: Value| {
+        comp["previousVault"]["ciphertext"] = json!(b64(&[7u8; 47]));
+        comp
+    };
+    let mut rot_bad = c_k1.clone();
+    rot_bad.add(
+        "vault",
+        &k1,
+        &ts(DUE0 + 120),
+        &k1,
+        Opt::default(),
+        short_previous(vault_change("rot", slots![(k1, "Security key 1")])),
+    );
+    case_v(o, "t-vault-rotation-previous-short", &rot_bad, bad("malformed", 4),
+           "The rotation of `t-vault-rotation` with a 47-byte `previousVault.ciphertext`: the sealed seed is 48 bytes (§8.3, §11.1), so the entry is malformed.", &["8.3", "11.1"], Some(ver(DUE0 + 200)));
+    let t_vc_bad = p(
+        &cx,
+        json!({"keyring": {"remove": [ph.id]}, "vault": short_previous(vault_change("vc", slots![(a, "Mac")]))}),
+        sg![a],
+    );
+    let mut c = base.clone();
+    activate(&mut c, &t_vc_bad, &[rec(&cx, &t_vc_bad)]);
+    case_v(o, "t-vault-change-previous-short", &c, bad("malformed", 3),
+           "The vault change of `t-vault-change-previous` with a 47-byte `previousVault.ciphertext`: the component's sealed seed has the wrong shape, so the `activate` is malformed.", &["8.3", "8.7", "11.1"], Some(ver(DUE0 + 60)));
     let kr_rot = change(
         &kr5,
         &[
@@ -2480,6 +2506,58 @@ pub fn part3(o: &mut Out) {
         bad("newerFormat", 4),
         "A transition setting a policy field this version does not define: the field is unknown content inside a known protocol, reported `newerFormat` at the `activate` once the delta is otherwise valid.",
         &["1", "2.3", "8.7"],
+        Some(ver(DUE0 + 60)),
+    );
+    // §3.3 for controllers: a key that is or was another principal's (here the home appointed
+    // at seq 3) is never added as a controller, by a `keyring` entry or by a transition.
+    let tablet = derived("e12/tablet");
+    for (name, key, want, why) in [
+        (
+            "i-add-home-key-as-controller",
+            &h1k,
+            bad("malformed", 4),
+            "A `keyring` entry adding as an `approve` controller the signing key of the home appointed at seq 3: a key that is or was a member's is never a controller's (§3.3, §9.7), so the entry is malformed.",
+        ),
+        (
+            "i-add-fresh-key-as-controller",
+            &tablet,
+            ok_at(4),
+            "The same entry with a key no principal has used: the controller is added.",
+        ),
+    ] {
+        let mut c = ig.clone();
+        c.add(
+            "keyring",
+            &a,
+            &ts(DUE0),
+            &a,
+            Opt {
+                adds: sg![*key],
+                ..Opt::default()
+            },
+            json!({"keyring": kr_with_ctrls(&kr_ig, add_ctrl(&kr_ig, vec![ct(key, &["approve"], "Tablet")]))}),
+        );
+        case_v(o, name, &c, want, why, &["3.3", "8.4", "9.7"], Some(ver(DUE0 + 60)));
+    }
+    let mut c = ig.clone();
+    let t = transition(
+        &c,
+        json!({"keyring": {"add": [ct(&h1k, &["approve"], "Tablet")]}}),
+        sg![a],
+        &ts(R0),
+        TOpt {
+            adds: sg![h1k],
+            ..TOpt::default()
+        },
+    );
+    activate(&mut c, &t, &[receipt_of(&aig, &t, &h1k, &ts(R0 + 1))]);
+    case_v(
+        o,
+        "t-add-home-key-as-controller",
+        &c,
+        bad("malformed", 4),
+        "A transition adding as a controller the signing key of the home appointed at seq 3: the delta would give a member's key to a controller (§3.3), so it is void and the `activate` is malformed.",
+        &["3.3", "8.7", "9.7"],
         Some(ver(DUE0 + 60)),
     );
     let mut many: Vec<Key> = vec![a.clone()];

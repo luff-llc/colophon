@@ -895,6 +895,10 @@ fn classify(s: &State, change: &Map<String, Value>) -> Result<Classified> {
                         c.unknown.push(format!("change.vault.{f}"));
                     }
                 }
+                // Optional in a transition (§8.3), and of the one shape where present.
+                if let Some(previous) = m.get("previousVault") {
+                    previous_vault_shape(previous, &mut c.unknown)?;
+                }
                 c.removal_only = false;
                 c.adds_anything = true;
                 let has_removal = change
@@ -1576,6 +1580,22 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     }
     let new_k = Keyring::parse(raw_keyring, 0)
         .map_err(|e| malformed(format!("void: the result breaks §6: {}", e.detail())))?;
+    check_keyring_keys(s, &new_k).map_err(|e| malformed(format!("void: {}", e.detail())))?;
+    // A member this delta adds uses no key of the keyring it puts in place (§3.3).
+    let mut keyring_points: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for c in new_k.controllers.values() {
+        keyring_points.insert(c.key().signing().to_vec());
+        keyring_points.extend(c.key().agreement().map(<[u8]>::to_vec));
+    }
+    keyring_points.insert(new_k.vault.0.clone());
+    keyring_points.insert(new_k.vault.1.clone());
+    for m in &new_members {
+        crate::v05::require(
+            !keyring_points.contains(&m.request.signing)
+                && !keyring_points.contains(&m.request.agreement),
+            "void: a member key is a key of the keyring (§3.3)",
+        )?;
+    }
     // Unknown content the delta brought into the keyring (a policy field, a slot or vault
     // member this reader does not know): the keyring before had none (§2.3).
     unknown.0.extend(new_k.unknown.0.iter().cloned());
@@ -1612,10 +1632,72 @@ pub(super) fn apply_delta(s: &State, t: &TCheck, act_seq: u64) -> Result<State> 
     Ok(n)
 }
 
+/// `previousVault` (§8.3): the current vault seed (32 bytes) sealed to the new vault, an HPKE
+/// sealed key of §11.1, `{enc, ciphertext}` with `enc` a valid 65-byte point and `ciphertext`
+/// the 32-byte seed and the 16-byte tag. A wrong shape is `malformed`; another member is unknown
+/// content, as in a seal of `shares` or `epochs`.
+fn previous_vault_shape(v: &Value, unknown: &mut crate::v05::Unknown) -> Result<()> {
+    let mut o = Obj::new(v.clone(), "previousVault")?;
+    let enc = o.bytes("enc", 65)?;
+    crate::v05::require(
+        crate::v05::descriptor::valid_point(&enc),
+        "previousVault.enc is not a valid point",
+    )?;
+    crate::v05::require(
+        o.bytes("ciphertext", 48)?.len() == 48,
+        "previousVault.ciphertext must be 48 bytes",
+    )?;
+    o.finish(unknown);
+    Ok(())
+}
+
+/// §3.3 for a keyring an entry would put in place (a `keyring` entry, a transition's delta, a
+/// vault rotation): within it, every point and key ID belongs to one principal and one usage;
+/// and a point it uses that a principal of the history ever used (in `s.points`) is allowed
+/// only where rule 3 allows it: the same controller (by ID) in the same usage, now or at any
+/// earlier seq (a retained, updated or re-added controller), or the unchanged current vault.
+/// A grant's keys are judged by [`crate::v05::members::check_granted`] against the same set.
+fn check_keyring_keys(s: &State, k: &Keyring) -> Result<()> {
+    use crate::v05::members::{check_principals, Principal, Usage};
+    let mut uses = Vec::new();
+    for c in k.controllers.values() {
+        uses.push((
+            Principal::Controller(c.id()),
+            Usage::Signing,
+            c.key().signing().to_vec(),
+        ));
+        if let Some(a) = c.key().agreement() {
+            uses.push((Principal::Controller(c.id()), Usage::Agreement, a.to_vec()));
+        }
+    }
+    uses.push((Principal::Vault(0), Usage::Signing, k.vault.0.clone()));
+    uses.push((Principal::Vault(0), Usage::Agreement, k.vault.1.clone()));
+    check_principals(&uses)?;
+    let known = |p: &[u8]| s.points.contains(p) || s.points.contains(key_id(p).as_bytes());
+    for (principal, usage, p) in &uses {
+        let own = match principal {
+            Principal::Controller(id) => s.ever.get(id).is_some_and(|list| {
+                list.iter()
+                    .filter_map(|(_, c)| c.as_ref())
+                    .any(|c| match usage {
+                        Usage::Signing => c.key().signing() == p.as_slice(),
+                        Usage::Agreement => c.key().agreement() == Some(p.as_slice()),
+                    })
+            }),
+            _ => k.vault == s.keyring.vault,
+        };
+        crate::v05::require(
+            own || !known(p),
+            "a key that is or was another principal's (§3.3)",
+        )?;
+    }
+    Ok(())
+}
+
 /// §3.3: every point and key ID any principal of the state uses (controllers, the vault,
-/// members) joins the set no later grant may reuse. Called after every entry, so whatever path
-/// added a principal (an immediate entry, a transition's delta, a vault rotation) the set holds
-/// it; nothing is ever removed.
+/// members) joins the set no later key may reuse. Called after every entry that can add a
+/// principal by a path other than an immediate `grant` or `keyring` entry (which add their own
+/// keys): a transition's delta and a vault rotation. Nothing is ever removed.
 fn record_points(n: &mut State) {
     let mut keys: Vec<Vec<u8>> = Vec::new();
     for c in n.keyring.controllers.values() {
@@ -2438,9 +2520,11 @@ fn vault_entry(s: &State, e: &Entry) -> Step<State> {
     if !slots.iter().any(|sl| Keyring::slot_ids(sl).contains(&e.by)) {
         return Err(malformed("vault: no slot names its signer").into());
     }
-    if v.get("previousVault").is_none() {
+    let Some(previous) = v.get("previousVault") else {
         return Err(malformed("vault: previousVault missing").into());
-    }
+    };
+    let mut unknown = crate::v05::Unknown::default();
+    previous_vault_shape(previous, &mut unknown)?;
     let mut raw = s.keyring.raw.clone();
     if let Some(m) = raw.as_object_mut() {
         m.insert(
@@ -2451,10 +2535,13 @@ fn vault_entry(s: &State, e: &Entry) -> Step<State> {
     }
     let mut n = s.clone();
     n.keyring = Keyring::parse(raw, 1)?;
+    check_keyring_keys(s, &n.keyring)?;
     n.retiring = None;
     charge_rate(&mut n, e, false)?;
-    // Unknown content in the new vault or slots (§2.3), as for a `keyring` entry.
-    n.keyring.unknown.check()?;
+    // Unknown content in `previousVault`, the new vault or slots (§2.3), as for a `keyring`
+    // entry.
+    unknown.0.extend(n.keyring.unknown.0.iter().cloned());
+    unknown.check()?;
     record_points(&mut n);
     Ok(n)
 }
@@ -2926,6 +3013,7 @@ fn keyring_entry(
         .ok_or_else(|| malformed("keyring: keyring"))?;
     let old = &s.keyring;
     let new = Keyring::parse(new_raw, 0)?;
+    check_keyring_keys(s, &new)?;
     let mut unknown = new.unknown.clone();
     unknown.0.extend(super::prescan("keyring", v).0);
     let by = &e.by;
