@@ -372,7 +372,8 @@ run_pass() {
   local p="$1" dir="$run/$1" v l envs
   mkdir -p "$dir/out/.parts" "$dir/home" "$dir/tmp" "$dir/bin" "$dir/cargo-home" "$dir/gradle-home" \
            "$dir/npm-cache" "$dir/target" "$real_cargo_home/registry" "$real_cargo_home/git"
-  : >"$dir/npmrc"
+  : >"$dir/npmrc-user"
+  : >"$dir/npmrc-global"
   for l in registry git; do ln -s "$real_cargo_home/$l" "$dir/cargo-home/$l"; done
   for l in .package-cache .package-cache-mutate; do
     [[ -e "$real_cargo_home/$l" ]] || : >"$real_cargo_home/$l"
@@ -389,7 +390,7 @@ run_pass() {
     RUSTUP_HOME="$real_rustup_home" RUSTUP_TOOLCHAIN="$toolchain" APPLE_TOOLCHAIN="$toolchain"
     VISIONOS_TOOLCHAIN="$visionos_tc" SKIP_VISIONOS="${SKIP_VISIONOS:-0}" RELEASE_NO_INSTALL=1
     CARGO_TARGET_DIR="$dir/target" GRADLE_USER_HOME="$dir/gradle-home"
-    npm_config_cache="$dir/npm-cache" npm_config_userconfig="$dir/npmrc" npm_config_globalconfig="$dir/npmrc"
+    npm_config_cache="$dir/npm-cache" npm_config_userconfig="$dir/npmrc-user" npm_config_globalconfig="$dir/npmrc-global"
     npm_config_update_notifier=false RELEASE_VERSION="$version" RELEASE_PASS="$p" RELEASE_DIRTY="$dirty"
   )
   if [[ "$p" == b ]]; then envs+=(CARGO_NET_OFFLINE=true); fi
