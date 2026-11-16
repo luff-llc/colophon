@@ -836,7 +836,7 @@ fn admit_full(
                 if let Some(status) = super::succession_status(&st)
                     .filter(|s| s.genesis_digest == target && s.timing.is_some())
                 {
-                    return admit_succession_veto(&mut next, &st, &env, incoming, &status, now_ms, &mut receipts);
+                    return admit_succession_veto(&mut next, &st, &env, incoming, &status, now_ms, &mut receipts, batch);
                 }
                 let stored = next
                     .pending
@@ -945,10 +945,15 @@ fn admit_full(
                 let (_, received) = o.date("received")?;
                 let by = o.key_id("by")?;
                 o.finish_closed()?;
+                // The signing home: a current home, or a home current at a succession window's
+                // entry (§15.1 fixes the homes that receipt the genesis and a veto of the
+                // succession at that entry; a later revocation does not unmake their receipts).
                 let key = st
                     .home_key(&by)
+                    .or_else(|| window_home_key(&st, &by))
                     .ok_or_else(|| bad_signature("receipt home is not current"))?;
                 raw.verify(&key).map_err(|e| bad_signature(e.to_string()))?;
+                let window_only = st.home_key(&by).is_none();
                 // A receipt of a successor genesis (§13.5, §15.1 step 2): judged by the
                 // succession verifier's own check (a window home, its key, `received` in the
                 // succession window) and kept with the history, served in `GET {base}/authority`
@@ -1009,7 +1014,29 @@ fn admit_full(
                     }
                     return Err(Failure::Unavailable("receipt's object is not held".into()).into());
                 }
-                if let Some(object) = stored {
+                let succession_veto = stored.is_some_and(|p| {
+                    p.kind == "veto"
+                        && super::succession_status(&st).is_some_and(|s| s.genesis_digest == p.target)
+                });
+                if succession_veto {
+                    // A receipt of a veto of the succession: by a home current at the window's
+                    // entry, within 300 s of the veto's `issued` and before the veto deadline
+                    // (§15.1 step 4), judged by the succession verifier's own check.
+                    let object = stored.ok_or_else(|| malformed("veto"))?;
+                    let v = AuthEnvelope::parse(&object.envelope, bounds::VETO_BODY, bounds::VETO_ENVELOPE, false)?;
+                    let at = date(v.value.get("issued").and_then(Value::as_str).ok_or_else(|| malformed("issued"))?, "issued")?;
+                    let deadline = super::succession_status(&st)
+                        .and_then(|s| s.timing)
+                        .map(|t| t.veto_deadline_ms)
+                        .ok_or_else(|| malformed("no succession window"))?;
+                    let canon = canonical(&crate::v05::encoding::strict_parse(incoming)?)?;
+                    require(
+                        super::succession::receipt_is_valid(&st, &canon, &target, at, deadline),
+                        "not a valid receipt of the succession veto",
+                    )?;
+                } else if window_only {
+                    return Err(bad_signature("receipt home is not current").into());
+                } else if let Some(object) = stored {
                     let object = AuthEnvelope::parse(
                         &object.envelope,
                         bounds::TRANSITION_ENVELOPE,
@@ -1502,6 +1529,7 @@ fn admit_succession_veto(
     status: &super::SuccessionStatus,
     now_ms: i64,
     receipts: &mut Vec<ReceiptToSign>,
+    batch: &[Vec<u8>],
 ) -> AdmitResult<()> {
     let t = status.timing.as_ref().ok_or_else(|| malformed("no window"))?;
     if !super::succession::veto_is_valid(st, incoming) {
@@ -1515,13 +1543,33 @@ fn admit_succession_veto(
         return Err(Refusal::Early);
     }
     let in_window = now_ms <= at.saturating_add(WINDOW) && now_ms <= t.veto_deadline_ms;
-    if !in_window && !next.unmatched_receipts.iter().any(|r| {
-        check_receipt(st, &r.envelope, &env.digest, at).is_ok_and(|(by, received)| by != next.home && received <= t.veto_deadline_ms)
-    }) {
+    // Receipts of it by the homes of the window's entry (§15.1 step 4), held already or in the
+    // same batch, judged by the succession verifier against that fixed set.
+    let home = next.home.clone();
+    let valid = |r: &Vec<u8>| {
+        super::succession::receipt_is_valid(st, r, &env.digest, at, t.veto_deadline_ms)
+            && RawEnvelope::parse(r, bounds::RECEIPT_BODY, false)
+                .is_ok_and(|e| e.value.get("by").and_then(Value::as_str) != Some(home.as_str()))
+    };
+    let held: Vec<Vec<u8>> = next
+        .unmatched_receipts
+        .iter()
+        .map(|r| r.envelope.clone())
+        .chain(batch.iter().cloned())
+        .filter_map(|r| crate::v05::encoding::strict_parse(&r).and_then(|v| canonical(&v)).ok())
+        .filter(|r| valid(r))
+        .collect();
+    if !in_window && held.is_empty() {
         return Err(Refusal::Late);
     }
     next.add(env, incoming, "veto", status.genesis_digest.clone(), BTreeSet::new(), None)?;
-    promote_receipts(next, st, env, at, None)?;
+    for r in held {
+        let renv = AuthEnvelope::parse(&r, bounds::RECEIPT_BODY, bounds::RECEIPT_ENVELOPE, false)?;
+        if !next.pending.iter().any(|p| p.digest == renv.digest) {
+            next.add(&renv, &r, "receipt", env.digest.clone(), BTreeSet::new(), None)?;
+        }
+        next.unmatched_receipts.retain(|u| canonical(&crate::v05::encoding::strict_parse(&u.envelope).unwrap_or(Value::Null)).ok().as_ref() != Some(&r));
+    }
     if in_window && t.homes.contains(&next.home) {
         let draft = ReceiptToSign {
             object: env.digest.clone(),
@@ -1621,6 +1669,11 @@ impl HomeState {
             .map(|p| p.digest.clone())
             .collect()
     }
+}
+
+/// The signing key of a home that was current at the succession window's entry (§15.1).
+fn window_home_key(st: &State, by: &str) -> Option<Vec<u8>> {
+    st.succession.as_ref()?.window.as_ref()?.homes.get(by).cloned()
 }
 
 /// The held entries from the genesis to `tip`, following `previous` (seq order).
