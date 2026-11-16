@@ -838,7 +838,7 @@ impl Account {
                 c.namespaces.insert(name.clone(), rev);
             }
         }
-        c.status = Some(Status::of(&self.d.verdict, &self.d.effective));
+        c.status = Some(self.status());
         c
     }
 
@@ -922,7 +922,7 @@ impl Account {
         self.note_pending();
         let now = self.pending_digests();
         changes.pending.gone.retain(|g| !now.contains(g));
-        changes.status = Some(Status::of(&self.d.verdict, &self.d.effective));
+        changes.status = Some(self.status());
         changes
     }
 
@@ -1065,7 +1065,11 @@ impl Account {
     }
     /// Where the verifier stands.
     pub fn status(&self) -> Status {
-        Status::of(&self.d.verdict, &self.d.effective)
+        let mut s = Status::of(&self.d.verdict, &self.d.effective);
+        if s.stopped.is_none() {
+            s.stopped = self.floor();
+        }
+        s
     }
     /// `Some` when this reader is **stopped** for the account (§1 "A stop"): a final layout
     /// raise on the verified branch, or an entry it judged `newerFormat`. A stable state, not an
@@ -1077,12 +1081,26 @@ impl Account {
     /// (§12.3 step 4), each before any signature is asked for. A raise that is provisional or
     /// vetoed stops nothing.
     pub fn stopped(&self) -> Option<Stopped> {
-        stopped_of(&self.d.verdict, &self.d.effective)
+        stopped_of(&self.d.verdict, &self.d.effective).or_else(|| self.floor())
+    }
+    /// The stop this device once verified and persisted (the sealed saved state), when the held
+    /// evidence no longer shows it: a floor that evidence going missing never undoes.
+    fn floor(&self) -> Option<Stopped> {
+        self.persisted
+            .stop_floor()
+            .map(|(seq, layout)| Stopped { seq, layout })
+    }
+    /// The seq of the stop, from the verdict or the persisted floor (cheap: no entry is parsed).
+    pub(crate) fn stop_seq(&self) -> Option<u64> {
+        self.d
+            .verdict
+            .stopped
+            .or_else(|| self.persisted.stop_floor().map(|(s, _)| s))
     }
     /// §1 "A stop": a stopped reader's host builds no entry, transition, veto, record or move
     /// step and asks to be updated: `newerFormat`.
     pub(crate) fn refuse_if_stopped(&self) -> Result<()> {
-        match self.d.verdict.stopped {
+        match self.stop_seq() {
             Some(seq) => Err(crate::v05::Failure::NewerFormat(format!(
                 "stopped for the account at seq {seq}: update to continue"
             ))),
@@ -1092,7 +1110,7 @@ impl Account {
     /// §1 "A stop", §12.3 step 4: a stopped reader builds no link or call and runs no exchange
     /// pass, whatever S would be: `unavailable`.
     pub(crate) fn refuse_call_if_stopped(&self) -> Result<()> {
-        match self.d.verdict.stopped {
+        match self.stop_seq() {
             Some(seq) => Err(crate::v05::Failure::Unavailable(format!(
                 "stopped for the account at seq {seq}: newer format, update to continue"
             ))),
@@ -1267,7 +1285,19 @@ impl Account {
     /// path and 16,384 in all; a merge past either bound is refused whole. Nothing changes on
     /// failure.
     pub fn merge_live(&mut self, candidates: Vec<HeldRecord>, now_ms: i64) -> Result<Changes> {
+        self.merge_live_inner(candidates, now_ms, false)
+    }
+    /// [`Account::merge_live`] for what the device already held (the engine's first read of its
+    /// store): taken even when stopped.
+    pub(crate) fn merge_live_held(&mut self, candidates: Vec<HeldRecord>, now_ms: i64) -> Result<Changes> {
+        self.merge_live_inner(candidates, now_ms, true)
+    }
+    fn merge_live_inner(&mut self, candidates: Vec<HeldRecord>, now_ms: i64, held: bool) -> Result<Changes> {
         crate::v05::write::check_issued(now_ms)?;
+        // A stopped reader admits no live candidate (§1 "A stop"): what arrives now is ignored, not held.
+        if !held && self.stop_seq().is_some() {
+            return Ok(Changes::default());
+        }
         let candidates: Vec<HeldRecord> = candidates
             .into_iter()
             .filter(|c| path_in_scope(&self.scope, &c.path))
@@ -1403,7 +1433,7 @@ impl Account {
                 c.namespaces.insert(name.clone(), rev);
             }
         }
-        c.status = Some(Status::of(&self.d.verdict, &self.d.effective));
+        c.status = Some(self.status());
         Ok(c)
     }
 
@@ -1875,7 +1905,7 @@ impl Account {
         self.note_pending();
         let now = self.pending_digests();
         changes.pending.gone.retain(|g| !now.contains(g));
-        changes.status = Some(Status::of(&self.d.verdict, &self.d.effective));
+        changes.status = Some(self.status());
         Ok(Some(changes))
     }
 
@@ -1891,6 +1921,14 @@ impl Account {
     /// Heads are also checked against the held history and this account's high-water marks
     /// (§13.3); a refused head is reported in [`Changes::heads`].
     pub fn merge(&mut self, incoming: Incoming, now_ms: i64) -> Result<Changes> {
+        self.merge_inner(incoming, now_ms, false)
+    }
+    /// [`Account::merge`] for records the device already held (the engine's first read of its
+    /// store, filtered by the engine to what its saved state covered): taken even when stopped.
+    pub(crate) fn merge_held(&mut self, incoming: Incoming, now_ms: i64) -> Result<Changes> {
+        self.merge_inner(incoming, now_ms, true)
+    }
+    fn merge_inner(&mut self, incoming: Incoming, now_ms: i64, held: bool) -> Result<Changes> {
         crate::v05::write::check_issued(now_ms)?;
         check_bounds(&self.objects, &self.records, &incoming)?;
         let now = now_ms.max(self.now_ms);
@@ -1900,6 +1938,14 @@ impl Account {
         incoming
             .records
             .retain(|r| path_in_scope(&self.scope, &r.path));
+        // A stopped reader admits no record that arrives after the stop (§1 "A stop"): the fold as it
+        // stood when the stop was verified is what stays readable. Later arrivals are ignored (not
+        // held, not deleted from any store). Authority objects are still taken: they can only show
+        // the stop again, since the verifier applies nothing after it.
+        let was_stopped = !held && self.stop_seq().is_some();
+        if was_stopped {
+            incoming.records.clear();
+        }
         let ours = self.d.verdict.branch.first().cloned();
         let before = incoming.objects.entries.len();
         incoming.objects.entries.retain(|b| {
@@ -1933,6 +1979,12 @@ impl Account {
         union(&mut objects, &incoming.objects);
         union_records(&mut records, &incoming.records);
         let mut d = self.candidate(&objects, &records, &self.persisted, now)?;
+        // The authority in this merge stops the reader: the records that came with it arrived after
+        // the stop was learnt, so they are not admitted either.
+        if !held && !was_stopped && d.verdict.stopped.is_some() && !incoming.records.is_empty() {
+            records = self.records.clone();
+            d = self.candidate(&objects, &records, &self.persisted, now)?;
+        }
         if let Some(keep) = without_junk(&records, &d) {
             records = keep;
             d = self.candidate(&objects, &records, &self.persisted, now)?;
@@ -1980,7 +2032,12 @@ impl Account {
     /// and the head marks; they are a cache, and [`Account::open`] replays without the key.
     /// The account resumes from the checkpoint it made from now on.
     pub fn export_persisted(&mut self, key: &[u8; 32], nonce_seed: [u8; 32]) -> Result<Vec<u8>> {
-        let p = Persisted::checkpoint(&self.objects, &self.persisted, self.now_ms);
+        let mut p = Persisted::checkpoint(&self.objects, &self.persisted, self.now_ms);
+        // A verified stop is persisted as a floor (§1 "A stop"): a relaunch whose store no longer
+        // holds the raise stays stopped.
+        if let Some(s) = self.stopped() {
+            p = p.with_stop_floor(s.seq, s.layout);
+        }
         let bytes = stored::protect(
             &p,
             self.d.auth.account().as_str(),

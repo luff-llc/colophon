@@ -560,6 +560,7 @@ impl Account {
         pending: PendingMove,
         signatures: Vec<SignatureResult>,
     ) -> Result<Moved> {
+        self.refuse_if_stopped()?;
         match pending {
             PendingMove::Freeze(f) => {
                 self.stage_is(

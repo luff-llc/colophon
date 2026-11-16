@@ -573,6 +573,8 @@ impl<S: RecordSource> Engine<S> {
     /// Give the engine the call the host built for the request `NeedCall` named. It is bound to
     /// that ticket, consumed by it, and attached to nothing else (§12.4: calls are not reused).
     pub fn exchange_provide_call(&mut self, home: &str, ticket: u64, call: &[u8]) -> Result<()> {
+        // A call is not attached to anything once the account is stopped (§1 "A stop").
+        self.account.refuse_call_if_stopped()?;
         require(call.len() <= 16_384, "a call is small")?;
         let h = self.home_mut(home);
         require(
@@ -1557,6 +1559,7 @@ impl<S: RecordSource> Engine<S> {
         digest: &str,
     ) -> Result<usize> {
         self.check_ready()?;
+        self.account.refuse_call_if_stopped()?;
         let manifest = match self.blob_manifest(namespace, digest)? {
             crate::model::Outcome::Success { value, .. } => value,
             crate::model::Outcome::Failure { detail, .. } => {
@@ -1598,6 +1601,17 @@ impl<S: RecordSource> Engine<S> {
         response: Response,
     ) -> Result<Report> {
         self.check_ready()?;
+        // An answer to a request made before the account stopped is discarded, its ticket with it:
+        // nothing it carries is merged (§1 "A stop"). `exchange_abort` stays allowed.
+        if self.account.stop_seq().is_some() {
+            if let Some(h) = self.exchange.homes.get_mut(home) {
+                if h.inflight.as_ref().is_some_and(|(t, _)| *t == ticket) {
+                    h.inflight = None;
+                    h.last_item = None;
+                }
+            }
+            self.account.refuse_call_if_stopped()?;
+        }
         let tag = {
             let h = self
                 .exchange
@@ -1625,6 +1639,20 @@ impl<S: RecordSource> Engine<S> {
         if matches!(response.status, 401 | 403) {
             let item = self.home_mut(home).last_item.take();
             let carried = self.home_mut(home).carried_call;
+            // 401 asks for a call (§14: "a request that needs a call and carries none is answered 401").
+            // A 403 to a request that carried no call and names a `refused:` result refuses that
+            // request: a call would not change it, so it is not asked again with one. A 403 with no
+            // result is still taken as asking for a call, as before.
+            if response.status == 403 && !carried {
+                if let Some(code) = refusal_result(&response.body) {
+                    report.faults.push(Fault::Refused {
+                        home: home.into(),
+                        what: item.as_ref().map(|i| format!("{} {}", i.1.as_str(), i.2)).unwrap_or_default(),
+                        code,
+                    });
+                    return Ok(report);
+                }
+            }
             if let (Some(item), false, false) = (item.clone(), carried, is_public(&tag)) {
                 let h = self.home_mut(home);
                 if item.1 == Method::Get {
@@ -2971,4 +2999,22 @@ fn verified_pending_path(env: &[u8]) -> Option<String> {
         )),
         _ => None,
     }
+}
+
+/// The `refused:<reason>` result of a home's answer body, when it is one the §1 grammar allows (a
+/// lower-case letter, then letters and digits, at most 48), from a JSON object of at most 64 KiB.
+/// Nothing else of the body is read.
+fn refusal_result(body: &[u8]) -> Option<String> {
+    if body.len() > 64 * 1024 {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(body).ok()?;
+    let r = v.as_object()?.get("result")?.as_str()?;
+    let reason = r.strip_prefix("refused:")?;
+    let mut chars = reason.chars();
+    let first = chars.next()?;
+    (reason.len() <= 48
+        && first.is_ascii_lowercase()
+        && chars.all(|c| c.is_ascii_alphanumeric()))
+    .then(|| r.to_string())
 }

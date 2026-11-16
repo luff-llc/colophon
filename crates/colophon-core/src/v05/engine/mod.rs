@@ -379,6 +379,10 @@ pub struct Engine<S: RecordSource> {
     missing: BTreeSet<String>,
     /// The restored checkpoint's index, until the records it covers are read.
     restored: BTreeMap<String, checkpoint::IndexEntry>,
+    /// True during [`Engine::load`], the first read of what the device already holds: a stopped
+    /// account takes those records (what the saved state covered, or everything on a cold open with
+    /// no saved state); later arrivals are ignored (§1 "A stop").
+    loading: bool,
     restored_revisions: Option<BTreeMap<String, u64>>,
     /// Per live path `(generation, body digest)`: the highest seen.
     pub(crate) live_witness: BTreeMap<String, (u64, String)>,
@@ -565,6 +569,7 @@ impl<S: RecordSource> Engine<S> {
             missing,
             restored,
             restored_revisions,
+            loading: false,
             live_witness,
             stale_live: Vec::new(),
             stats,
@@ -674,7 +679,12 @@ impl<S: RecordSource> Engine<S> {
         self.check_usable()?;
         require(!self.locked, "the engine is locked: open a new one")?;
         let paths: Vec<String> = self.ix.unread.iter().cloned().collect();
-        let c = self.ingest(paths)?;
+        let c = {
+            self.loading = true;
+            let c = self.ingest(paths);
+            self.loading = false;
+            c?
+        };
         self.ready = true;
         if let Some(was) = self.restored_revisions.take() {
             // A resume must agree with a cold open: when the records read are exactly the
@@ -940,7 +950,7 @@ impl<S: RecordSource> Engine<S> {
                 && incoming.objects.predecessor.is_empty()
                 && incoming.records.is_empty();
             if !empty {
-                let c = self.account.merge(incoming, now)?;
+                let c = self.merge_read(incoming, now)?;
                 absorb(&mut total, c);
             }
             if chunk.is_none() {
@@ -953,6 +963,33 @@ impl<S: RecordSource> Engine<S> {
         }
         self.refresh_stats();
         Ok(total)
+    }
+
+    /// Merge what was read from the source. A stopped account ignores records that arrive after the
+    /// stop (§1 "A stop"); during [`Engine::load`] it takes what the device already held: the
+    /// records its saved state covered (exact bytes), or, with no saved state, what is on disk.
+    fn merge_read(&mut self, mut incoming: Incoming, now: i64) -> Result<Changes> {
+        if self.loading && self.account.stop_seq().is_some() {
+            if !self.restored.is_empty() {
+                let restored = &self.restored;
+                incoming
+                    .records
+                    .retain(|r| restored.get(&r.path).is_some_and(|e| sha_of(e) == sha(&r.bytes)));
+            }
+            return self.account.merge_held(incoming, now);
+        }
+        self.account.merge(incoming, now)
+    }
+    /// [`Engine::merge_read`] for live candidates.
+    pub(crate) fn merge_live_read(&mut self, mut cands: Vec<HeldRecord>, now: i64) -> Result<Changes> {
+        if self.loading && self.account.stop_seq().is_some() {
+            if !self.restored.is_empty() {
+                let restored = &self.restored;
+                cands.retain(|r| restored.get(&r.path).is_some_and(|e| sha_of(e) == sha(&r.bytes)));
+            }
+            return self.account.merge_live_held(cands, now);
+        }
+        self.account.merge_live(cands, now)
     }
 
     /// Advance the account's clock (the host passes the time).

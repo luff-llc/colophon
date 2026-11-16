@@ -209,6 +209,32 @@ blobs, `slots` and the unlock calls. It builds nothing new, and refuses before a
 4). `record_due` records the activate that makes a raise final (before that a 0.5 reader records it as any
 activation, §13.6) and nothing after it. The sessions show this as their stopped phase.
 
+**What "held as of the stop" means.** The fold as it stood when the stop was first verified is what stays readable.
+Records and live values that arrive afterwards are ignored (not admitted, not deleted from any store), and that includes
+those that come in the same merge as the authority that stops the account and those that were on disk but not yet read
+when the stop was learnt. Authority objects are still taken: the verifier applies nothing after the raise, so they can
+only show the stop again.
+
+**The stop is checked at every step, not only at begin.** An action prepared before the stop is refused at its next step
+(`provide_prf`, `finish`, `finish_live_write`, `finish_move`) with the result its begin would give now, and its prepared
+state is dropped: nothing is signed into an envelope, returned or stored. The one exception is the recording, by
+`record_due`, of the entry that makes a raise final, which happens while the account is not yet stopped. An exchange
+ticket from before the stop is discarded: `exchange_answer` returns `Unavailable` and merges nothing, and
+`exchange_provide_call` and `exchange_want_blob` are refused. `exchange_abort` stays allowed. A blob writer that was
+already open (`AccountBlobWriter`) is a standalone sealer and cannot take this check. The chunks it seals are not records,
+and the manifest still needs a write that is refused.
+
+**The stop is a floor.** `save` persists a verified stop in the sealed saved state, with its seq and layout. An engine
+opened from that state reports `stopped` and builds nothing, even when its store no longer holds the raise: evidence that
+goes missing never undoes a stop on that device. (A final activation is never displaced, so the floor is never cleared.)
+`Status.code` is then the verdict's own; `Status.stopped` comes from the floor. The sessions save the moment they first
+see the stop, and they save in the stopped phase as well as in ready.
+
+**A 403 that names a refusal.** A home's `403 {"result":"refused:<name>"}` to a request that carried no call refuses that
+request (`ExchangeFault` `Refused` with the code). It is not asked again with a call. Only a 401 means "sign and retry"
+(§14: a request that needs a call and carries none is answered 401). A 403 with no valid result is still taken as asking
+for a call, as before. A 403 to a request that carried a call ends the pass, as before.
+
 ### Key descriptors and controllers
 
 One encoding on the whole surface, input and output: `KeyDescriptorView` is the protocol descriptor of §3.1

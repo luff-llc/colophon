@@ -451,3 +451,480 @@ fn only_a_final_raise_stops_an_account_and_it_names_its_layout() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fix round: prepared work, ingestion, the persisted floor, outstanding exchange tickets, and a
+// stop that arrives from a home in the middle of a pass.
+
+/// Prepared before the stop, finished after it: refused with the result its begin would now give,
+/// and dropped. Covers an authority transition, a record, a link, a call and a home call.
+#[test]
+fn work_prepared_before_the_stop_is_refused_at_its_next_step() {
+    let mut f = fixture();
+    let mut m = member_session(&f, None);
+    let d = f.d.clone();
+    // Prepared on the controller: a transition and a home call.
+    let transition = f
+        .account
+        .begin_transition(
+            &Change::policy(json!({"callWindow": 120})),
+            std::slice::from_ref(&d),
+            TransitionRule::Control,
+        )
+        .unwrap();
+    let key = f.host.ids[&d].public().signing;
+    let home_call = f
+        .account
+        .begin_home_call(
+            &key,
+            &HomeCall {
+                audience: "https://home.example/v1/accounts/x".into(),
+                method: "GET".into(),
+                path: "/authority".into(),
+                body_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+                as_of: None,
+            },
+            [8; 32],
+        )
+        .unwrap();
+    // Prepared on the member: a record, a link and a call.
+    let seed = f.host.fresh();
+    let write = m
+        .begin_write("notes", "createNotebook", json!({"id": "late", "title": "Late"}), Level::Write, seed)
+        .unwrap()
+        .unwrap();
+    let mkey = f.host.ids[&f.member].public().signing;
+    let to = f.host.ids[&d].public().signing;
+    let link = m.begin_link(&[], &to, json!({}), T0, T0 + 60_000);
+    let call = m.begin_call(
+        &mkey,
+        &[],
+        "https://projects.example/scopes/7",
+        "task.read",
+        json!({}),
+        [7; 32],
+        CallTarget::default(),
+    );
+    // The stop arrives at both.
+    let recorded = stop(&mut f);
+    let objects = f.account.objects().clone();
+    m.merge(
+        Incoming {
+            objects,
+            records: Vec::new(),
+        },
+        f.account.now_ms(),
+    )
+    .unwrap();
+    assert!(m.stopped().is_some());
+    assert_eq!(recorded.len(), 1);
+    let finish = |a: &mut Account, action: PendingAction| {
+        let sigs = f.host.sign(action.steps());
+        a.finish(action, sigs).map(|_| ()).unwrap_err().code()
+    };
+    let held = f.account.objects().pending.len();
+    assert_eq!(finish(&mut f.account, transition), "newerFormat");
+    assert_eq!(f.account.objects().pending.len(), held, "nothing is held for it");
+    assert_eq!(finish(&mut f.account, home_call), "unavailable");
+    let records = m.records().len();
+    assert_eq!(finish(&mut m, write), "newerFormat");
+    assert_eq!(m.records().len(), records, "nothing is stored for it");
+    // The member is depth 0 with no links: `begin_link` may refuse for its own reason before the
+    // stop; when it was prepared, its finish is refused by the stop.
+    if let Ok(link) = link {
+        assert_eq!(finish(&mut m, link), "unavailable");
+    }
+    assert_eq!(finish(&mut m, call.unwrap()), "unavailable");
+}
+
+/// After the stop nothing that arrives is admitted, in a later merge or in the merge that brings
+/// the stop: the fold as it stood when the stop was verified is what stays readable.
+#[test]
+fn records_that_arrive_after_the_stop_are_not_admitted() {
+    let mut f = fixture();
+    // Two notes written by the member and not yet delivered to the controller.
+    let mut m = member_session(&f, None);
+    let mut late = Vec::new();
+    for (id, title) in [("nb-a", "Arrives with the stop"), ("nb-b", "Arrives after the stop")] {
+        let seed = f.host.fresh();
+        let action = m
+            .begin_write("notes", "createNotebook", json!({"id": id, "title": title}), Level::Write, seed)
+            .unwrap()
+            .unwrap();
+        late.push(run(&mut m, &f.host, action).records);
+    }
+    // A second session of the member, to see the stop and the records arrive together.
+    let mut together = member_session(&f, None);
+    let admitted_before = |a: &Account| match a.view("notes").unwrap() {
+        colophon_core::model::Outcome::Success { value, .. } => value.admitted.len(),
+        _ => panic!("readable"),
+    };
+    let base = admitted_before(&together);
+    stop(&mut f);
+    // The stop and the first note in one merge.
+    together
+        .merge(
+            Incoming {
+                objects: f.account.objects().clone(),
+                records: late[0].clone(),
+            },
+            f.account.now_ms(),
+        )
+        .unwrap();
+    assert!(together.stopped().is_some());
+    assert_eq!(admitted_before(&together), base, "a record that came with the stop is not admitted");
+    // The second note after the stop.
+    together
+        .merge(
+            Incoming {
+                objects: Objects::default(),
+                records: late[1].clone(),
+            },
+            f.account.now_ms(),
+        )
+        .unwrap();
+    assert_eq!(admitted_before(&together), base, "a record that came after the stop is not admitted");
+    // The controller, stopped, ignores the member's notes too.
+    let held = f.account.records().len();
+    f.account
+        .merge(
+            Incoming {
+                objects: Objects::default(),
+                records: late.concat(),
+            },
+            f.account.now_ms(),
+        )
+        .unwrap();
+    assert_eq!(f.account.records().len(), held);
+}
+
+/// The persisted floor: a stop once verified survives evidence that goes missing.
+#[test]
+fn a_verified_stop_is_persisted_as_a_floor() {
+    let mut f = fixture();
+    let before: Objects = f.account.objects().clone();
+    stop(&mut f);
+    let seq = f.account.stopped().unwrap().seq;
+    // Saved state carries it, and a reopen whose store no longer holds the raise stays stopped.
+    let saved = f.account.export_persisted(&KEY, [9; 32]).unwrap();
+    let again = Account::open(
+        before.clone(),
+        f.account.records().to_vec(),
+        Some((&saved, &KEY)),
+        Identity::Controller(f.d.clone()),
+        f.account.now_ms(),
+    )
+    .unwrap();
+    assert_eq!(again.stopped().map(|s| s.seq), Some(seq));
+    assert_eq!(again.status().stopped.map(|s| (s.seq, s.layout)), Some((seq, Some(3))));
+    let edit = KeyringEdit {
+        policy: Some(json!({"callWindow": 120})),
+        ..Default::default()
+    };
+    assert_eq!(
+        again.begin_keyring(&edit, std::slice::from_ref(&f.d)).unwrap_err().code(),
+        "newerFormat"
+    );
+    // The floor itself, with no evidence held at all: through a checkpoint's bytes and through a
+    // rebuild after a format change, whose retained objects are dropped.
+    let floor = Persisted::default().with_stop_floor(seq, Some(3));
+    let cp = Persisted::checkpoint(&before, &floor, f.account.now_ms());
+    let bytes = cp.to_bytes().unwrap();
+    assert_eq!(Persisted::from_bytes(&bytes).unwrap().stop_floor(), Some((seq, Some(3))));
+    let rebuilt = Persisted::rebuild(&before, &bytes, f.account.now_ms());
+    assert_eq!(rebuilt.stopped(), None, "the objects alone do not show the stop");
+    assert_eq!(rebuilt.stop_floor(), Some((seq, Some(3))), "the floor is kept");
+    // Monotone: a later floor does not replace the first.
+    assert_eq!(floor.with_stop_floor(99, None).stop_floor(), Some((seq, Some(3))));
+}
+
+/// A home world: the support fixture (device key, passkey, kit) with a home. Device A raises the
+/// layout (a transition under the control rule with the recovery set's consent, signed below the
+/// builders), the home receipts it, A records the provisional `activate`, pushes it, takes the
+/// home's head over it and records the `final`: A is stopped. A 0.5 device cannot push what stops
+/// it, so the `activate` and `final` reach the home as a later-format device would bring them
+/// (put into the simulated home's served history). Device B has seen none of it.
+struct HomeWorld {
+    s: support::Setup,
+    host: Host,
+    b: AccountEngine<MemSource>,
+    b_src: MemSource,
+    stop_entries: Vec<(String, Vec<u8>)>,
+    now: i64,
+}
+
+fn home_world() -> HomeWorld {
+    use colophon_core::v05::engine::exchange::Step;
+    let (mut s, _) = support::setup("notes", &[]);
+    let host = std::mem::replace(&mut s.f.host, Host::new());
+    let (d, k) = (s.f.d.clone(), s.f.k.clone());
+    let home = s.home.clone();
+    let now = s.f.account.now_ms();
+    let a_src = support::device_source(&s);
+    let b_src = support::device_source(&s);
+    let mut a = support::controller_engine(&s.f, &host, &a_src, &d, now);
+    let b = support::controller_engine(&s.f, &host, &b_src, &d, now);
+    assert!(support::sync_pass(&mut a, &a_src, &home, &mut s.sim, &host, now).is_empty());
+    // The raise, below the builders: a builder's transition body with its change replaced.
+    let action = a
+        .account()
+        .begin_transition(
+            &Change::policy(json!({"callWindow": 120})),
+            &[d.clone(), k.clone()],
+            TransitionRule::Control,
+        )
+        .unwrap();
+    let mut body: Value = serde_json::from_slice(action.steps()[0].body()).unwrap();
+    body["change"] = json!({"layout": 3});
+    let bytes = canonical(&body).unwrap();
+    let sign = |id: &str| STANDARD.encode(host.ids[id].sign(&bytes));
+    let env = canonical(&json!({
+        "body": STANDARD.encode(&bytes),
+        "signature": sign(&d),
+        "cosignatures": [{"signer": k, "signature": sign(&k)}],
+    }))
+    .unwrap();
+    let digest = colophon_core::v05::encoding::digest(&bytes);
+    a_src.put(&format!("transitions/{digest}.json"), env);
+    let t1 = now + 1_000;
+    assert!(support::sync_pass(&mut a, &a_src, &home, &mut s.sim, &host, t1).is_empty());
+    assert_eq!(a.receipted_by(&digest), vec![home.clone()], "the home receipted the raise");
+    // Due after the witness window and the recovery delay: the provisional activate.
+    let t2 = t1 + (300 + 3_600 + 60) * 1_000;
+    a.advance(t2).unwrap();
+    let mut stop_entries = Vec::new();
+    for w in a.record_due().unwrap() {
+        for (p, b) in w.stores {
+            a_src.put(&p, b.clone());
+            stop_entries.push((p, b));
+        }
+    }
+    assert_eq!(stop_entries.len(), 1, "the activate");
+    assert!(a.stopped().is_none(), "a provisional raise stops nothing");
+    // Push it; the home signs a head over it; A takes the head and records the final.
+    assert!(support::sync_pass(&mut a, &a_src, &home, &mut s.sim, &host, t2).is_empty());
+    let t3 = t2 + 1_000;
+    a.advance(t3).unwrap();
+    a.refresh(a_src.listing()).unwrap();
+    let mut steps = 0;
+    loop {
+        steps += 1;
+        assert!(steps < 10_000);
+        match a.exchange_next(&home).unwrap() {
+            Step::Done => break,
+            Step::NeedCall(n) => a
+                .exchange_provide_call(&home, n.ticket, format!("call-{}", n.ticket).as_bytes())
+                .unwrap(),
+            Step::Request(r) => {
+                let ans = support::Wire::call(&mut s.sim, &host, &r, t3);
+                for (p, b) in a.exchange_answer(&home, r.ticket, ans).unwrap().store {
+                    a_src.put(&p, b);
+                }
+            }
+            Step::Waiting => panic!("waiting"),
+        }
+    }
+    for w in a.record_due().unwrap() {
+        for (p, b) in w.stores {
+            a_src.put(&p, b.clone());
+            stop_entries.push((p, b));
+        }
+    }
+    assert!(a.stopped().is_some(), "A is stopped: {:?}", a.status());
+    // The home serves the activate and the final (as a later-format device would bring them).
+    for (p, b) in &stop_entries {
+        if let Some(seq) = p.strip_prefix("authority/").and_then(|s| s.strip_suffix(".json")) {
+            let seq: u64 = seq.parse().unwrap();
+            s.sim.entries.insert(seq, b.clone());
+            s.sim.files.insert(p.clone(), b.clone());
+            s.sim.log.push(p.clone());
+        }
+    }
+    HomeWorld {
+        s,
+        host,
+        b,
+        b_src,
+        stop_entries,
+        now: t3 + 1_000,
+    }
+}
+
+/// The stop arrives from the home in the middle of B's pass (its pull of the authority history):
+/// the pass ends there, with `unavailable`, and no further request is made.
+#[test]
+fn a_stop_that_arrives_from_a_home_in_the_middle_of_a_pass_ends_the_pass() {
+    use colophon_core::v05::engine::exchange::Step;
+    let mut w = home_world();
+    let home = w.s.home.clone();
+    assert!(w.b.stopped().is_none());
+    w.b.advance(w.now).unwrap();
+    w.b.refresh(w.b_src.listing()).unwrap();
+    let mut stopped_at = None;
+    for n in 0..10_000 {
+        match w.b.exchange_next(&home) {
+            Err(e) => {
+                assert_eq!(e.code(), "unavailable");
+                stopped_at = Some(n);
+                break;
+            }
+            Ok(Step::Done) => break,
+            Ok(Step::NeedCall(c)) => w
+                .b
+                .exchange_provide_call(&home, c.ticket, format!("call-{}", c.ticket).as_bytes())
+                .unwrap(),
+            Ok(Step::Request(r)) => {
+                let ans = support::Wire::call(&mut w.s.sim, &w.host, &r, w.now);
+                for (p, b) in w.b.exchange_answer(&home, r.ticket, ans).unwrap().store {
+                    w.b_src.put(&p, b);
+                }
+            }
+            Ok(Step::Waiting) => panic!("waiting"),
+        }
+    }
+    assert!(stopped_at.is_some(), "the pass ended at the stop, not at Done");
+    assert_eq!(w.b.stopped().map(|s| s.layout), Some(Some(3)), "{:?}", w.b.status());
+    let sent = w.s.sim.requests.len();
+    assert_eq!(w.b.exchange_next(&home).unwrap_err().code(), "unavailable");
+    assert_eq!(w.s.sim.requests.len(), sent, "no request after the stop");
+    w.b.exchange_abort(&home).unwrap();
+}
+
+/// A ticket obtained before the stop: its answer is discarded and nothing it carries is merged; a
+/// call is not attached; a blob is not queued; abort still works.
+#[test]
+fn an_exchange_ticket_from_before_the_stop_is_discarded() {
+    use colophon_core::v05::engine::exchange::Step;
+    let mut w = home_world();
+    let home = w.s.home.clone();
+    w.b.advance(w.now).unwrap();
+    w.b.refresh(w.b_src.listing()).unwrap();
+    let request = loop {
+        match w.b.exchange_next(&home).unwrap() {
+            Step::Request(r) => break r,
+            Step::NeedCall(c) => w
+                .b
+                .exchange_provide_call(&home, c.ticket, format!("call-{}", c.ticket).as_bytes())
+                .unwrap(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let answer = support::Wire::call(&mut w.s.sim, &w.host, &request, w.now);
+    // The stop reaches B through its own store before the answer is given.
+    for (p, b) in &w.stop_entries {
+        w.b_src.put(p, b.clone());
+    }
+    w.b.refresh(w.b_src.listing()).unwrap();
+    assert!(w.b.stopped().is_some());
+    let head = w.b.status().seq;
+    assert_eq!(w.b.exchange_answer(&home, request.ticket, answer).unwrap_err().code(), "unavailable");
+    assert_eq!(w.b.status().seq, head, "nothing was merged");
+    assert_eq!(
+        w.b.exchange_provide_call(&home, request.ticket, b"call").unwrap_err().code(),
+        "unavailable"
+    );
+    assert_eq!(
+        w.b.exchange_want_blob(&home, "notes", &"0".repeat(64)).unwrap_err().code(),
+        "unavailable"
+    );
+    w.b.exchange_abort(&home).unwrap();
+}
+
+/// A home's `403 {"result":"refused:<name>"}` to a request that carried no call refuses that
+/// request: it is not asked again with a call.
+#[test]
+fn an_unsigned_request_refused_by_name_is_not_retried_with_a_call() {
+    use colophon_core::v05::engine::exchange::{Fault, Response, Step};
+    let (s, _) = support::setup("notes", &[]);
+    let host = &s.f.host;
+    let src = support::device_source(&s);
+    let now = s.f.account.now_ms();
+    let mut e = support::controller_engine(&s.f, host, &src, &s.f.d, now);
+    let home = s.home.clone();
+    let r = match e.exchange_next(&home).unwrap() {
+        Step::Request(r) => r,
+        other => panic!("{other:?}"),
+    };
+    assert!(!r.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("authorization")));
+    let report = e
+        .exchange_answer(
+            &home,
+            r.ticket,
+            Response {
+                status: 403,
+                headers: vec![],
+                body: br#"{"result":"refused:notProvisioned","detail":"x"}"#.to_vec(),
+            },
+        )
+        .unwrap();
+    assert!(
+        report.faults.iter().any(|f| matches!(f, Fault::Refused { code, .. } if code == "refused:notProvisioned")),
+        "{:?}",
+        report.faults
+    );
+    // The same request is not asked again with a call.
+    for _ in 0..100 {
+        match e.exchange_next(&home).unwrap() {
+            Step::NeedCall(n) => assert_ne!(n.path, r.url.trim_start_matches("https://home.example"), "asked for a call"),
+            Step::Request(next) => {
+                assert_ne!(next.url, r.url, "the refused request was sent again");
+                e.exchange_answer(&home, next.ticket, Response { status: 404, headers: vec![], body: b"{}".to_vec() })
+                    .unwrap();
+            }
+            Step::Done | Step::Waiting => break,
+        }
+    }
+}
+
+/// What the device held as of the stop, through the engine: a reopen from the saved state made
+/// while stopped reads the records that state covered, and a record put into the store afterwards
+/// (while the app was closed) is not admitted.
+#[test]
+fn a_reopened_stopped_engine_reads_what_it_held_and_nothing_added_later() {
+    let mut f = fixture();
+    // A note the controller has not seen yet.
+    let mut m = member_session(&f, None);
+    let seed = f.host.fresh();
+    let action = m
+        .begin_write("notes", "createNotebook", json!({"id": "nb-late", "title": "Late"}), Level::Write, seed)
+        .unwrap()
+        .unwrap();
+    let late = run(&mut m, &f.host, action).records;
+    stop(&mut f);
+    let src = MemSource::new();
+    src.store_account(&f.account);
+    let open = |saved: Option<&colophon_core::v05::engine::Saved>| {
+        let mut e = AccountEngine::open(
+            src.clone(),
+            src.listing(),
+            Identity::Controller(f.d.clone()),
+            EngineOptions::new(f.account.id().as_str(), support::DEVICE_KEY),
+            saved,
+            f.account.now_ms(),
+        )
+        .unwrap();
+        let idx = e.slots().unwrap()[0].index;
+        let inputs = e.begin_unlock_slot(idx).unwrap();
+        e.finish_unlock_slot(idx, &f.host.answer_unlock(&inputs)).unwrap();
+        e
+    };
+    let admitted = |e: &AccountEngine<MemSource>| match e.view("notes").unwrap() {
+        colophon_core::model::Outcome::Success { value, .. } => value.admitted.len(),
+        _ => panic!("readable"),
+    };
+    let mut first = open(None);
+    assert!(first.stopped().is_some());
+    let held = admitted(&first);
+    assert!(held > 0, "the note written before the stop is readable");
+    let saved = first.save([4; 32]).unwrap();
+    // While closed, the store gains the late note.
+    for r in &late {
+        src.put(&r.path, r.bytes.clone());
+    }
+    let again = open(Some(&saved));
+    assert!(again.stopped().is_some());
+    assert_eq!(admitted(&again), held, "a record added after the stop is not admitted on reopen");
+    // And a running stopped engine ignores it on refresh.
+    first.refresh(src.listing()).unwrap();
+    assert_eq!(admitted(&first), held);
+}

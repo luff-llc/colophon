@@ -100,7 +100,7 @@ impl<S: RecordSource> Engine<S> {
             return Ok(Changes::default());
         }
         let now = self.account.now_ms();
-        let c = self.account.merge_live(cands, now)?;
+        let c = self.merge_live_read(cands, now)?;
         // The witnesses move only on what the verifier accepted as a current head.
         for h in self.account.live_heads() {
             let w = self.live_witness.entry(h.path.clone()).or_default();
@@ -363,6 +363,8 @@ impl<S: RecordSource> Engine<S> {
         signature: SignatureResult,
     ) -> Result<LiveWritten> {
         self.check_ready()?;
+        // A live write prepared before the stop is not finished (§1 "A stop").
+        self.account.refuse_if_stopped()?;
         require(
             signature.assertion.is_none() && signature.signature.len() == 64,
             "a live header is signed raw",

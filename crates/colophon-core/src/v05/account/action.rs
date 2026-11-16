@@ -393,6 +393,20 @@ impl Account {
     // -----------------------------------------------------------------------------------------
     // Shared helpers.
 
+    /// §1 "A stop": an action prepared before the stop is refused at its next step with the result
+    /// its begin would give now: `unavailable` for a link or call, `newerFormat` for the rest.
+    fn refuse_stale(&self, action: &PendingAction) -> Result<()> {
+        let call = matches!(
+            &action.stage,
+            Stage::Sign(s) if matches!(s.work, Work::Link(_) | Work::Call(..) | Work::HomeCall(..))
+        );
+        if call {
+            self.refuse_call_if_stopped()
+        } else {
+            self.refuse_if_stopped()
+        }
+    }
+
     /// Writes need a clean history and no rollback (§13.3).
     fn require_writable(&self) -> Result<()> {
         self.refuse_if_stopped()?;
@@ -971,6 +985,7 @@ impl Account {
             &action.account == self.d.auth.account(),
             "the action is for another account",
         )?;
+        self.refuse_stale(&action)?;
         let Stage::Prf(stage) = action.stage else {
             return Err(malformed("this action needs no PRF assertions"));
         };
@@ -1863,6 +1878,12 @@ impl Account {
             &action.account == self.d.auth.account(),
             "the action is for another account",
         )?;
+        // An action prepared before the account stopped is refused here with the result its begin
+        // would now give, and dropped (§1 "A stop"): nothing is signed into an envelope, returned or
+        // stored after the stop. Every finish of a prepared action passes here (`record_due` too:
+        // it records nothing once stopped; the entry that makes a raise final is recorded while the
+        // account is not yet stopped).
+        self.refuse_stale(&action)?;
         let info = action.info;
         let Stage::Sign(stage) = action.stage else {
             return Err(malformed("the PRF assertions have not been provided"));
