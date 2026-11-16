@@ -1686,6 +1686,63 @@ pub fn admit_predecessor(
     Ok(next)
 }
 
+/// A predecessor entry published to a home before its first upload is verified (§14, §15.1):
+/// taken only as part of the hash chain the held genesis claims. `genesis` is the provisioned
+/// account's genesis the home holds; `staged` what it took so far. The entry at the claim's
+/// `head.seq` must have the claim's `head.digest`; an entry below it, the digest the staged entry
+/// above it names as `previous`. So the chain is published from the head down, exactly one entry
+/// fits each seq, and nothing else is kept: whoever sends other bytes is refused, and cannot
+/// occupy a place the genuine entry needs. Returns the canonical bytes to stage.
+pub fn stage_predecessor(
+    genesis: &[u8],
+    staged: &[Vec<u8>],
+    seq: u64,
+    incoming: &[u8],
+) -> AdmitResult<Vec<u8>> {
+    let g = parse_entry(genesis)?;
+    let claim = g
+        .env
+        .value
+        .get("predecessor")
+        .ok_or(Failure::Refused(crate::v05::Reason::OutOfScope))?;
+    let head_seq = claim["head"]["seq"].as_u64().ok_or_else(|| malformed("predecessor head"))?;
+    let head_digest = claim["head"]["digest"].as_str().ok_or_else(|| malformed("predecessor head"))?;
+    let canon = canonical(&crate::v05::encoding::strict_parse(incoming)?)?;
+    require(canon.len() <= bounds::AUTHORITY_BODY * 2, "predecessor entry too large")?;
+    let body_of = |b: &[u8]| -> Option<(u64, String, Option<String>)> {
+        let v: Value = serde_json::from_slice(b).ok()?;
+        let body = crate::v05::encoding::decode_base64(v.get("body")?.as_str()?, bounds::AUTHORITY_BODY * 2).ok()?;
+        let bv: Value = serde_json::from_slice(&body).ok()?;
+        Some((
+            bv.get("seq")?.as_u64()?,
+            crate::v05::encoding::digest(&body),
+            bv.get("previous").and_then(Value::as_str).map(str::to_string),
+        ))
+    };
+    let (s, d, _) = body_of(&canon).ok_or_else(|| malformed("predecessor entry"))?;
+    require(s == seq && seq >= 1 && seq <= head_seq, "a predecessor entry at its seq, up to the claimed head")?;
+    if staged.iter().any(|b| body_of(b).is_some_and(|(_, sd, _)| sd == d)) {
+        return Ok(canon);
+    }
+    let want = if seq == head_seq {
+        Some(head_digest.to_string())
+    } else {
+        staged
+            .iter()
+            .filter_map(|b| body_of(b))
+            .find(|(ss, _, _)| *ss == seq + 1)
+            .and_then(|(_, _, previous)| previous)
+    };
+    match want {
+        Some(w) if w == d => Ok(canon),
+        Some(_) => Err(malformed("not the entry the claimed chain names at this seq").into()),
+        None => Err(Failure::Unavailable(
+            "publish the predecessor from its head down: the entry above is not held".into(),
+        )
+        .into()),
+    }
+}
+
 impl HomeState {
     /// The receipts of a successor genesis this home holds (its own and other window homes'),
     /// served in `GET {base}/authority` `receipts` (§14).
@@ -1911,6 +1968,17 @@ pub fn admit_first_with(
     };
     let verdict = verify_history(&objects, &Persisted::default(), now_ms.max(entry.issued));
     if let Some(stop) = verdict.stop {
+        // A successor's genesis cannot be verified before its predecessor's history is held
+        // (§15.1), and that history is published to the home only after the genesis tells it
+        // which chain to take (`admit_predecessor_staged`). The genesis of the provisioned
+        // account (its body digest is the account ID, so nobody else can make one) is held, never
+        // served; anything else unverifiable is refused as before.
+        if have == 0
+            && matches!(&stop, Stop::Failed { seq: 1, failure: Failure::Unavailable(_) })
+            && entry.env.value.get("predecessor").is_some()
+        {
+            return Ok(FirstUpload::Held(objects.entries));
+        }
         return Err(stop_failure(stop).into());
     }
     if entry.issued > now_ms.saturating_add(60_000) {

@@ -19,7 +19,7 @@ use colophon_core::v05::engine::paths::{self, Kind};
 use colophon_core::v05::heads::HeadContext;
 use colophon_core::v05::history::envelope::AuthEnvelope;
 use colophon_core::v05::history::home::{
-    admit, admit_first_with, admit_pending_batch, admit_predecessor, admit_with, FirstUpload, HomeState, ReceiptToSign, Refusal,
+    admit, admit_first_with, admit_pending_batch, admit_predecessor, admit_with, stage_predecessor, FirstUpload, HomeState, ReceiptToSign, Refusal,
 };
 use colophon_core::v05::history::{verify_history, Objects, Persisted, State, Stop};
 use colophon_core::v05::ids::{key_id, AccountId};
@@ -48,8 +48,6 @@ const MAX_REQUEST: usize = 24 * 1024 * 1024;
 /// Entries a first upload may hold before this home is appointed in them (a bound on what an
 /// unappointed home keeps for its one account).
 const MAX_FIRST_UPLOAD: usize = 512;
-/// Candidates per seq of a predecessor's entries held before the first upload.
-const PREDECESSOR_CANDIDATES: usize = 4;
 /// The bytes (base64) of a predecessor's entries held before the first upload.
 const BOOTING_PREDECESSOR_BYTES: usize = 8 * 1024 * 1024;
 /// Replay rows one principal may always hold, however many principals share the table.
@@ -1119,30 +1117,38 @@ fn put_predecessor(req: &Value) -> R<Value> {
     };
     let bytes = bytes_of(req, "bytes")?;
     let Some(h) = l.home.take() else {
-        // Before the first upload appoints this home, a Swift successor's genesis cannot be
-        // verified without its predecessor (§15.1), and the history is uploaded after it: the
-        // entries are held with the first upload, at most `PREDECESSOR_CANDIDATES` per seq
-        // (the verifier ignores what is not the chain the genesis claims), never served.
-        let canon = strict_parse(&bytes).and_then(|v| canonical(&v));
-        let Ok(canon) = canon.map_err(|e| e.to_string()) else {
-            return Ok(json!({"outcome": "refused", "result": "malformed", "state": unchanged, "store": []}));
+        // Before the first upload appoints this home a successor's genesis cannot be verified
+        // without its predecessor (§15.1): the provisioned account's genesis is held, and the
+        // predecessor is taken only as the hash chain that genesis claims, from its head down
+        // (`stage_predecessor`): one entry per seq, at most the claimed head's seq (and 512, and
+        // 8 MiB). Bytes that do not fit the chain are refused and nothing of them is kept; nothing
+        // staged is served.
+        let held = l.booting_entries()?;
+        let Some(genesis) = held.first() else {
+            return Ok(json!({"outcome": "refused", "result": "unavailable",
+                             "why": "upload the genesis first", "state": unchanged, "store": []}));
         };
-        if predecessor_seq(&canon) != Some(seq) || canon.len() > bounds::AUTHORITY_BODY * 2 {
-            return Ok(json!({"outcome": "refused", "result": "malformed", "state": unchanged, "store": []}));
-        }
+        let staged: Vec<Vec<u8>> = l
+            .slot
+            .booting_predecessor
+            .iter()
+            .map(|e| B64.decode(e).map_err(|e| e.to_string()))
+            .collect::<R<_>>()?;
+        let canon = match stage_predecessor(genesis, &staged, seq, &bytes) {
+            Ok(c) => c,
+            Err(r) => {
+                let mut out = refusal(&r);
+                out["state"] = unchanged;
+                out["store"] = json!([]);
+                return Ok(out);
+            }
+        };
         let text = b64(&canon);
         if l.slot.booting_predecessor.contains(&text) {
             return Ok(json!({"outcome": "ok", "created": false, "state": unchanged, "store": []}));
         }
-        let at_seq = l
-            .slot
-            .booting_predecessor
-            .iter()
-            .filter(|e| B64.decode(e).ok().and_then(|b| predecessor_seq(&b)) == Some(seq))
-            .count();
         let bytes_held: usize = l.slot.booting_predecessor.iter().map(String::len).sum();
-        if at_seq >= PREDECESSOR_CANDIDATES
-            || l.slot.booting_predecessor.len() >= MAX_FIRST_UPLOAD
+        if l.slot.booting_predecessor.len() >= MAX_FIRST_UPLOAD
             || bytes_held + text.len() > BOOTING_PREDECESSOR_BYTES
         {
             return Ok(json!({"outcome": "refused", "result": "unavailable", "state": unchanged, "store": []}));

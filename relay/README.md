@@ -150,6 +150,14 @@ under `{base}/predecessor/` and `records/predecessor/`. It takes one by `PUT` on
 controller listing `{base}`, never a member's (nothing in 0.5 says who may; this is the strictest
 rule that lets the moving device publish), and only when the account claims a Swift predecessor,
 the entry's `seq` is its path's and at most F's, and the history verifier with it does not stop.
+Before the first upload appoints the home, a Swift successor's genesis cannot be verified without
+its predecessor, so: the first upload is refused (`unavailable`) but the provisioned account's
+genesis is held (its digest is the account ID: nobody else can make it); the predecessor is then
+published with no call, from the head the genesis claims down, each entry taken only if it is the
+one the chain names (the claimed `head.digest`, then each staged entry's `previous`); and the
+first upload is sent again. One entry per seq, at most the claimed head's seq, 512 entries and
+8 MiB per slot; bytes that do not fit the chain are refused and nothing of them is kept, so
+flooding cannot take a place the genuine entry needs. Nothing staged is served.
 
 **Notices are not built** (§13.1, §17.5): see "Notices" below.
 

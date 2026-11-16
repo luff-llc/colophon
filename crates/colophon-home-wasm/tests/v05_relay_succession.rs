@@ -258,6 +258,46 @@ fn fetch_all(relay: &Relay, src: &MemSource, through: u64) {
     }
 }
 
+fn put_pred(relay: &Relay, seq: u64, e: &[u8]) -> (u16, String) {
+    let (s, _, b) = http(relay.port, "PUT", &relay.url(&format!("/predecessor/authority/{seq:08}.json")),
+        &[("Content-Type".into(), "application/json".into())], e);
+    (s, String::from_utf8_lossy(&b).to_string())
+}
+/// Publish the predecessor to a home before its first upload: from the claimed head down.
+fn stage(relay: &Relay, acct: &Account) {
+    let mut by_seq: Vec<(u64, Vec<u8>)> = acct
+        .objects()
+        .predecessor
+        .iter()
+        .map(|e| (body_of(&serde_json::from_slice(e).unwrap())["seq"].as_u64().unwrap(), e.clone()))
+        .collect();
+    by_seq.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+    for (seq, e) in by_seq {
+        let (s, b) = put_pred(relay, seq, &e);
+        assert_eq!(s, 201, "seq {seq}: {b}");
+        let (s, _, _) = http(relay.port, "GET", &relay.url(&format!("/predecessor/authority/{seq:08}.json")), &[], &[]);
+        assert_eq!(s, 404, "held, not served, before the home is appointed");
+    }
+}
+/// Fake predecessor entries: the genuine one at a seq with its `issued` changed, the signature
+/// kept. Four at seq 1, one at the claimed head.
+fn fakes_of(acct: &Account, head_seq: u64) -> Vec<(u64, Vec<u8>)> {
+    let mut out = Vec::new();
+    for e in &acct.objects().predecessor {
+        let v: Value = serde_json::from_slice(e).unwrap();
+        let mut b = body_of(&v);
+        let seq = b["seq"].as_u64().unwrap();
+        let n = if seq == 1 { 4 } else if seq == head_seq { 1 } else { 0 };
+        for i in 0..n {
+            b["issued"] = json!(format!("2026-10-0{}T00:00:00Z", i + 1));
+            let mut f = v.clone();
+            f["body"] = json!(b64(&canonical(&b).unwrap()));
+            out.push((seq, canonical(&f).unwrap()));
+        }
+    }
+    out
+}
+
 fn open_device(src: &MemSource, a: &Account, ctl: &str, host: &Host, now: i64) -> Engine<MemSource> {
     let mut e = Engine::open(
         src.clone(),
@@ -298,18 +338,24 @@ fn a_swift_library_moved_is_published_to_and_fetched_from_a_real_home() {
         v.sort_by_key(|(s, _)| *s);
         v.into_iter().map(|(_, e)| e).collect()
     };
-    // Without its predecessor the genesis cannot be verified (§15.1): the first upload alone is
-    // refused and nothing is held. The predecessor's entries are published first (no call: the
-    // home knows nobody yet), then the upload.
+    // An attacker with HTTP access stages fake predecessor entries before anyone uploads: four
+    // at seq 1 and one at the claimed head (the genuine entries with a field changed).
+    let fakes: Vec<(u64, Vec<u8>)> = fakes_of(&acct, status.head_seq);
+    for (seq, fake) in &fakes {
+        assert_ne!(put_pred(&relay, *seq, fake).0 / 100, 2, "nothing unverifiable is staged before the genesis");
+    }
+    // Without its predecessor the genesis cannot be verified (§15.1): the first upload is refused
+    // (422 `unavailable`) and only the provisioned account's genesis is held. The predecessor is
+    // then published from its head down (no call: the home knows nobody yet), every fake refused
+    // because it is not the entry the claimed chain names; then the upload.
     let (s, out) = relay.post("/authority", &json!({"from": 1, "entries": entries, "receipts": []}));
     assert_eq!((s, out["result"].as_str()), (422, Some("unavailable")), "{out}");
-    for e in &acct.objects().predecessor {
-        let seq = body_of(&serde_json::from_slice(e).unwrap())["seq"].as_u64().unwrap();
-        let (s, _, b) = http(relay.port, "PUT", &relay.url(&format!("/predecessor/authority/{seq:08}.json")),
-            &[("Content-Type".into(), "application/json".into())], e);
-        assert_eq!(s, 201, "{}", String::from_utf8_lossy(&b));
-        let (s, _, _) = http(relay.port, "GET", &relay.url(&format!("/predecessor/authority/{seq:08}.json")), &[], &[]);
-        assert_eq!(s, 404, "held, not served, before the home is appointed");
+    for (seq, fake) in &fakes {
+        assert_ne!(put_pred(&relay, *seq, fake).0 / 100, 2, "a fake does not fit the claimed chain");
+    }
+    stage(&relay, &acct);
+    for (seq, fake) in &fakes {
+        assert_ne!(put_pred(&relay, *seq, fake).0 / 100, 2, "nor once the genuine entry is there");
     }
     let (s, out) = relay.post("/authority", &json!({"from": 1, "entries": entries, "receipts": []}));
     assert_eq!(s, 200, "{out}");
@@ -431,12 +477,9 @@ fn a_successor_home_records_successionvetoed_for_a_valid_veto() {
     let t = acct.swift_succession().unwrap().status.timing.clone().unwrap();
     let scratch = Scratch::new("succession-veto");
     let relay = Relay::start(&keys, &account, BASE_A, scratch.path(), t.window_start_ms + 30 * SEC, &[]);
-    for e in &acct.objects().predecessor {
-        let seq = body_of(&serde_json::from_slice(e).unwrap())["seq"].as_u64().unwrap();
-        let (s, _, _) = http(relay.port, "PUT", &relay.url(&format!("/predecessor/authority/{seq:08}.json")),
-            &[("Content-Type".into(), "application/json".into())], e);
-        assert_eq!(s, 201);
-    }
+    // The first upload holds the genesis; the predecessor follows from its head down.
+    let _ = relay.post("/authority", &json!({"from": 1, "entries": [serde_json::from_slice::<Value>(&acct.objects().entries.iter().find(|e| support::entry_seq(e) == 1).unwrap().clone()).unwrap()], "receipts": []}));
+    stage(&relay, &acct);
     let mut entries: Vec<(u64, Value)> = acct
         .objects()
         .entries
