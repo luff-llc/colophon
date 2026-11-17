@@ -2721,7 +2721,7 @@ in 0.5.x without changing any format. What 0.5.0 does not do is listed in §21.1
    named outcome per case (built at `conformance/0.5/candidate/` and moved at the freeze, bytes
    unchanged), and the Rust verifier replays every case
    (`crates/colophon-core/tests/v05_candidate.rs`, `candidate_conformance`). Its README lists them
-   and indexes what covers each required item. The final runs: EVIDENCE-PENDING: the final suite runs on two machines.
+   and indexes what covers each required item. The final runs, 16 November 2026, at commit `b4bc915` (every later commit of the freeze changes text only), all with exit 0: on a Mac (macOS 27.2, Xcode 27.1, arm64) the home suite with its kill loop, the workspace (935 passed, 0 failed, the relay tests required) and the Swift suite (129 tests) on a framework built from that commit; on a second Mac (macOS 27, arm64) the Kotlin suite, the cross-platform journeys (16 tests, with 19 Swift tests and the Kotlin side) and the JS suite (55 tests and 8 in a browser); on a Linux x86-64 machine the home suite, the workspace (935 passed, 0 failed) and the JS suite. One stopped-home relay test that uses two homes failed once on the Linux machine on the commit before, under load, and passed on every other run including twelve repeats; it is listed as timing-sensitive.
 
    **Required items with no vector or test (open).** The index in
    [conformance/0.5/README.md](../conformance/0.5/README.md) finds none for:
